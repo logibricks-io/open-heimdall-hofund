@@ -295,8 +295,10 @@ stays an input item.
   whole item, with `type: "reasoning"` put back, on
   `ThinkingPart.extensions["sealed_item"]`. Encode writes that object back.
   Readable text prefers `reasoning_text`, then concatenated summary text. An
-  empty unsealed reasoning item is skipped. A stream carries the reasoning
-  text; `encrypted_content` on a streamed item is not copied onto the IR event.
+  empty unsealed reasoning item is skipped. A stream copies non-empty
+  `encrypted_content` onto `sealed_item` on the thinking block's open and
+  close events. Assemble keeps that object on the thinking part, and the
+  stream encoder writes it back. An empty seal is ignored.
 - Any other item type becomes a user message with one unknown part. Encode
   nests that part inside a message content array, so the wire form changes and
   the IR stays stable.

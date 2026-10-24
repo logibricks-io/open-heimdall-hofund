@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local HTTP server on `127.0.0.1:3425`, TOML configuration, a bearer token
   file, SQLite usage rows, and the `serve`, `config check`, `token show`,
   `token rotate`, and `usage` commands.
+- Coding-agent adapters for Claude Code, Codex CLI, Gemini CLI, and OpenCode.
+  `hofund agent list`, `hofund agent connect`, `hofund agent disconnect`, and
+  `hofund agent status` point an agent at the local gateway. Each edit is
+  backed up once, written by rename, and restored byte for byte.
+- Streamed Responses `encrypted_content` is kept on the thinking part and
+  written back on encode.
 - Initial Cargo workspace scaffold for the hofund local LLM gateway, with
   library and binary crates, architecture checks, CI, and repository
   hygiene files.

@@ -440,6 +440,9 @@ name = "hofund-agent"
 version = "0.0.1"
 dependencies = [
  "hofund-config",
+ "serde_json",
+ "thiserror",
+ "toml_edit",
 ]
 
 [[package]]

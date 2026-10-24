@@ -35,11 +35,13 @@ Present:
 - an axum HTTP server (`gateway`), TOML configuration (`config`), a bearer
   token file (`secrets`), SQLite usage rows (`usage`), and the `hofund`
   commands `serve`, `config check`, `token show`, `token rotate`, and `usage`
+- coding-agent config adapters (`agent`) for Claude Code, Codex CLI, Gemini
+  CLI, and OpenCode, with `hofund agent list`, `hofund agent connect`,
+  `hofund agent disconnect`, and `hofund agent status`
 
 Planned behavior, not present yet:
 
 - Gemini codec
-- coding-agent config adapters that plan and apply edits (`agent`)
 - a future Tauri v2 menu-bar app at `apps/desktop` (do not create it until a
   task asks for it)
 

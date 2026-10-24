@@ -125,7 +125,7 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | `provider` | `Provider` trait and upstream adapters. |
 | `router` | Routing groups, strategies, and failover. |
 | `gateway` | axum HTTP server and middleware pipeline. |
-| `agent` | Coding-agent config adapters. Plan an edit, then apply it. |
+| `agent` | Coding-agent config adapters. A declarative description per agent; plan an edit, then apply it. The daemon passes the gateway URL and token in. |
 | `config` | Typed configuration for listeners, routes, accounts, and agents. |
 | `secrets` | Credential storage and resolution. |
 | `usage` | Request and token usage records. |
@@ -136,8 +136,7 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 ## What is intentionally absent
 
 - Routing strategies other than ordered failover.
-- A running process does not reload configuration. Agent config rewriting is
-  not implemented.
+- A running process does not reload configuration.
 - There is no rest timer and no process-global route counter.
 - Gemini codec.
 - `apps/desktop`.

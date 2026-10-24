@@ -14,9 +14,9 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 
 ## 状态
 
-**Pre-alpha。** 规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions 与 OpenAI Responses 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，以及本地 HTTP 服务已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。Gemini、配置改写和桌面应用都还没有实现。
+**Pre-alpha。** 规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions 与 OpenAI Responses 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，本地 HTTP 服务，以及 Claude Code、Codex CLI、Gemini CLI、OpenCode 的配置适配器已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。Gemini 编解码和桌面应用都还没有实现。
 
-`hofund serve` 默认监听 `127.0.0.1:3425`，除非配置文件另有指定。所有 `/v1` 请求都需要 `hofund token show` 打印的 bearer token。命令有 `serve`、`config check`、`token show`、`token rotate` 和 `usage`。
+`hofund serve` 默认监听 `127.0.0.1:3425`，除非配置文件另有指定。所有 `/v1` 请求都需要 `hofund token show` 打印的 bearer token。命令有 `serve`、`config check`、`token show`、`token rotate`、`usage`，以及 `agent list`、`agent connect`、`agent disconnect`、`agent status`。
 
 ## 计划中的能力
 

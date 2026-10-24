@@ -70,6 +70,35 @@ pub fn token_rotate(path: &Path) -> Result<String, DaemonError> {
     token_file(path)?.rotate().map_err(show)
 }
 
+/// The listen URL and bearer token an agent adapter should write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalGateway {
+    /// `http://` plus the configured listen address. IPv6 addresses keep their
+    /// brackets, as in `http://[::1]:3425`.
+    pub base_url: String,
+    /// Bearer token from the token file. The file is created on first use.
+    pub token: String,
+}
+
+/// Resolves the gateway URL and token for `path`'s config.
+///
+/// Agent adapters never read this file themselves. The CLI calls this and
+/// passes the result down.
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] when the config or the token file fails.
+pub fn local_gateway(path: &Path) -> Result<LocalGateway, DaemonError> {
+    let config = load_path(path).map_err(show)?;
+    let token = TokenFile::new(beside(path, &config.token_file))
+        .load_or_create()
+        .map_err(show)?;
+    Ok(LocalGateway {
+        base_url: format!("http://{}", config.listen),
+        token,
+    })
+}
+
 /// The usage table for the database named by `path`'s config.
 ///
 /// # Errors
