@@ -11,7 +11,16 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hofund-ir = { workspace = true }
 hofund-provider = { workspace = true }
+futures-util = "0.3.32"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+hofund-ir = { workspace = true }
+async-trait = "0.1.89"
+futures-util = "0.3.32"
+tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

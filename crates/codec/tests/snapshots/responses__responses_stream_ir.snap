@@ -1,0 +1,68 @@
+---
+source: crates/codec/tests/responses.rs
+expression: pretty_value!(&first)
+---
+[
+  {
+    "type": "message_start",
+    "id": "resp_s",
+    "model": "gpt-4.1"
+  },
+  {
+    "type": "content_block_start",
+    "index": 0,
+    "block": {
+      "type": "text"
+    }
+  },
+  {
+    "type": "text_delta",
+    "index": 0,
+    "text": "Hello"
+  },
+  {
+    "type": "text_delta",
+    "index": 0,
+    "text": " there"
+  },
+  {
+    "type": "content_block_stop",
+    "index": 0
+  },
+  {
+    "type": "content_block_start",
+    "index": 1,
+    "block": {
+      "type": "tool_call",
+      "id": "call_1",
+      "name": "get_weather"
+    }
+  },
+  {
+    "type": "tool_arguments_delta",
+    "index": 1,
+    "partial_json": "{\"city\":"
+  },
+  {
+    "type": "tool_arguments_delta",
+    "index": 1,
+    "partial_json": "\"Paris\"}"
+  },
+  {
+    "type": "content_block_stop",
+    "index": 1
+  },
+  {
+    "type": "message_delta",
+    "stop": {
+      "reason": "tool_use"
+    },
+    "usage": {
+      "input_tokens": 3,
+      "output_tokens": 2
+    }
+  },
+  {
+    "type": "message_stop"
+  }
+]

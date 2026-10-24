@@ -60,6 +60,10 @@ impl Codec for OpenAiChat {
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
         Box::new(Decoder::default())
     }
+
+    fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
+        encode_error(status, message)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1502,4 +1506,26 @@ fn write_data(out: &mut Vec<u8>, value: &Value) -> Result<(), CodecError> {
     let data = serde_json::to_string(value)?;
     sse::write_event(out, None, &data);
     Ok(())
+}
+
+fn encode_error(status: u16, message: &str) -> Vec<u8> {
+    openai_error_body(status, message)
+}
+
+pub(crate) fn openai_error_body(status: u16, message: &str) -> Vec<u8> {
+    let kind = match status {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        429 => "rate_limit_error",
+        500..=599 => "server_error",
+        _ => "api_error",
+    };
+    serde_json::to_vec(&serde_json::json!({
+        "error": { "message": message, "type": kind, "param": null, "code": null }
+    }))
+    .unwrap_or_else(|_| {
+        b"{\"error\":{\"message\":\"request failed\",\"type\":\"api_error\"}}".to_vec()
+    })
 }

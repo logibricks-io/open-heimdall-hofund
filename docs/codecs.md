@@ -9,9 +9,10 @@ Implemented:
 
 - `AnthropicMessages` (`anthropic-messages`)
 - `OpenAiChat` (`openai-chat`)
+- `OpenAiResponses` (`openai-responses`)
 
-Not implemented: OpenAI Responses, Gemini. There is no HTTP server here. The
-codec crate does not open sockets, and its tests do not use the network.
+Not implemented: Gemini. There is no HTTP server here. The codec crate does
+not open sockets, and its tests do not use the network.
 
 ## Trait
 
@@ -20,7 +21,15 @@ Codec::decode_request / encode_request
 Codec::decode_response / encode_response
 Codec::decode_stream / encode_stream
 Codec::stream_decoder -> StreamDecoder::{push, finish}
+Codec::encode_error(status, message) -> JSON body
 ```
+
+`encode_error` writes the protocol's error object. Anthropic uses
+`error.type` (`invalid_request_error`, `authentication_error`,
+`permission_error`, `not_found_error`, `request_too_large`, `rate_limit_error`,
+`overloaded_error`, otherwise `api_error`). Chat Completions and Responses
+share one shape: `error.message`, `error.type`, `error.param`, `error.code`.
+Statuses 500 through 599 are `server_error`.
 
 `decode_stream` feeds one buffer to a fresh decoder and then finishes it.
 `StreamDecoder::push` accepts any chunk boundary, including a split in the
@@ -96,12 +105,17 @@ stays raw. `assemble` does not return an error.
 
 ## Tool choice
 
-| IR | Anthropic Messages | Chat Completions |
-| --- | --- | --- |
-| `Auto` | `{"type":"auto"}` | `"auto"` |
-| `None` | `{"type":"none"}` | `"none"` |
-| `Required` | `{"type":"any"}` | `"required"` |
-| `Named { name }` | `{"type":"tool","name"}` | `{"type":"function","function":{"name"}}` |
+| IR | Anthropic Messages | Chat Completions | Responses |
+| --- | --- | --- | --- |
+| `Auto` | `{"type":"auto"}` | `"auto"` | `"auto"` |
+| `None` | `{"type":"none"}` | `"none"` | `"none"` |
+| `Required` | `{"type":"any"}` | `"required"` | `"required"` |
+| `Named { name }` | `{"type":"tool","name"}` | `{"type":"function","function":{"name"}}` | `{"type":"function","name"}` |
+
+Responses `tool_choice` of type `allowed_tools` filters the tool list down to
+the named functions and keeps the mode (`auto` or `required`). The wrapper
+object is not written back. Any other tool type, and any other `tool_choice`
+type, is `CodecError::Unsupported`.
 
 Each codec writes its own spelling, so a same-protocol round trip does not
 have to remember whether the wire said `any` or `required`. Extra fields such
@@ -111,15 +125,15 @@ objects when it is not, so those fields survive.
 
 ## Generation parameters
 
-| IR | Anthropic Messages | Chat Completions |
-| --- | --- | --- |
-| `max_tokens` | `max_tokens` (required on encode) | `max_completion_tokens` |
-| `temperature`, `top_p` | same names | same names |
-| `top_k` | `top_k` | omitted |
-| `stop` | `stop_sequences` | `stop` (always an array) |
-| `seed`, penalties | omitted | same names |
-| `stream: true` | `stream: true` | `stream: true` |
-| `stream: false` | omitted | omitted |
+| IR | Anthropic Messages | Chat Completions | Responses |
+| --- | --- | --- | --- |
+| `max_tokens` | `max_tokens` (required on encode) | `max_completion_tokens` | `max_output_tokens` |
+| `temperature`, `top_p` | same names | same names | same names |
+| `top_k` | `top_k` | omitted | omitted |
+| `stop` | `stop_sequences` | `stop` (always an array) | omitted |
+| `seed`, penalties | omitted | same names | omitted |
+| `stream: true` | `stream: true` | `stream: true` | `stream: true` |
+| `stream: false` | omitted | omitted | omitted |
 
 Anthropic encode returns `MissingField("max_tokens")` when the IR has no cap.
 It does not invent one. Decode of a request may omit the cap.
@@ -157,15 +171,16 @@ plus their bag.
 
 ## Stop reasons
 
-| IR | Anthropic `stop_reason` | Chat `finish_reason` |
-| --- | --- | --- |
-| `EndTurn` | `end_turn` | `stop` |
-| `MaxTokens` | `max_tokens` | `length` |
-| `StopSequence` | `stop_sequence` | `stop` (sequence text is dropped) |
-| `ToolUse` | `tool_use` | `tool_calls` |
-| `ContentFilter` | `content_filter` | `content_filter` |
-| `Refusal` | `refusal` | `refusal` |
-| `Other(token)` | `token` | `token` |
+| IR | Anthropic `stop_reason` | Chat `finish_reason` | Responses `status` |
+| --- | --- | --- | --- |
+| `EndTurn` | `end_turn` | `stop` | `completed` |
+| `MaxTokens` | `max_tokens` | `length` | `incomplete`, reason `max_output_tokens` |
+| `StopSequence` | `stop_sequence` | `stop` (sequence text is dropped) | `incomplete`, reason `stop_sequence` (sequence text is dropped) |
+| `ToolUse` | `tool_use` | `tool_calls` | `completed` when the turn contains a tool call |
+| `ContentFilter` | `content_filter` | `content_filter` | `incomplete`, reason `content_filter` |
+| `Refusal` | `refusal` | `refusal` | `incomplete`, reason `refusal` |
+| `Other("failed")`, `Other("cancelled")`, `Other("incomplete")`, `Other("in_progress")`, `Other("queued")` | that token | that token | that status |
+| `Other(token)` | `token` | `token` | `incomplete`, reason `token` |
 
 `pause_turn` is `Other("pause_turn")` and is written back on Anthropic.
 `function_call` as a finish reason decodes as `ToolUse` and is written back as
@@ -182,14 +197,18 @@ The `object` field is structural and is not stored. `created` and
 Counters are optional so a stream event can carry a subset.
 `Usage::merge_from` overwrites counters the patch sets.
 
-| IR | Anthropic | Chat Completions |
-| --- | --- | --- |
-| `input_tokens` | `input_tokens` | `prompt_tokens` |
-| `output_tokens` | `output_tokens` | `completion_tokens` |
-| `total_tokens` | omitted | `total_tokens` |
-| `cache_read_tokens` | `cache_read_input_tokens` | `prompt_tokens_details.cached_tokens` |
-| `cache_write_tokens` | `cache_creation_input_tokens` | omitted |
-| `reasoning_tokens` | omitted | `completion_tokens_details.reasoning_tokens` |
+| IR | Anthropic | Chat Completions | Responses |
+| --- | --- | --- | --- |
+| `input_tokens` | `input_tokens` | `prompt_tokens` | `input_tokens` |
+| `output_tokens` | `output_tokens` | `completion_tokens` | `output_tokens` |
+| `total_tokens` | omitted | `total_tokens` | `total_tokens` |
+| `cache_read_tokens` | `cache_read_input_tokens` | `prompt_tokens_details.cached_tokens` | `input_tokens_details.cached_tokens` |
+| `cache_write_tokens` | `cache_creation_input_tokens` | omitted | `input_tokens_details.cache_write_tokens` |
+| `reasoning_tokens` | omitted | `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` |
+
+Responses keeps protocol totals beside the cache counters. It does not subtract
+cached tokens from `input_tokens`. A null `error` is dropped. A non-null
+`error` stays in the response bag. The `object` field is discarded.
 
 ## Streams
 
@@ -229,3 +248,70 @@ Stream indexes are not shared across protocols. Translate a finished turn with
 `assemble`, or translate the request and the response. Do not feed Anthropic
 block indexes to the Chat Completions encoder: text must be 0, thinking must
 be 1, and tool indexes must be at least 2.
+
+Responses frames are `event: <name>` plus `data: <json>`. The decoder's index
+is `output_index` (missing means 0). `response.created` and
+`response.in_progress` open the turn once. A `function_call` item opens a tool
+block. A `reasoning` item opens a thinking block. `output_text` opens a text
+block. Empty deltas are skipped. `function_call_arguments.done` emits only the
+suffix that extends arguments already streamed. When the finished arguments
+diverge from that prefix, the streamed text is kept and nothing is appended.
+`output_item.done` expands the item only when that index has not already
+produced deltas. A terminal `response.completed`, `response.incomplete`, or
+`response.failed` expands `response.output` only when no deltas have arrived;
+otherwise the output array is ignored. Then open blocks close, a message delta
+carries the stop reason and usage, and `message_stop` follows.
+
+A `response.failed` frame that arrives before the turn has started, with empty
+or absent output, is an unknown event named `response.failed`. The same frame
+after `response.created` is the stop reason `Other("failed")`. A lone `error`
+event is an unknown event and does not synthesize `message_stop`. Signature
+deltas are skipped on encode.
+
+The Responses encoder writes `response.created`, then one item per block, then
+`response.completed`, `response.incomplete`, or `response.failed` from the stop
+reason. A same-protocol round trip of decoder output is stable. Hand-built
+events are not required to round-trip byte for byte.
+
+## Responses items
+
+`instructions` becomes a leading system message. Encode hoists that message
+back to `instructions` only when it is the sole system message, its body is
+one plain text part, and both bags are empty. Otherwise the system message
+stays an input item.
+
+`input` may be a string (one user text message) or an array. Item types:
+
+- `message` keeps `user`, `system`, `developer`, and `assistant`. A missing
+  role becomes `user`.
+- `function_call` is an assistant tool call.
+- `function_call_output` is a `Role::Tool` result. The output is a string or
+  an array of parts. Any other JSON type is `CodecError::WrongType`.
+- `reasoning` is assistant thinking. Non-empty `encrypted_content` stores the
+  whole item, with `type: "reasoning"` put back, on
+  `ThinkingPart.extensions["sealed_item"]`. Encode writes that object back.
+  Readable text prefers `reasoning_text`, then concatenated summary text. An
+  empty unsealed reasoning item is skipped. A stream carries the reasoning
+  text; `encrypted_content` on a streamed item is not copied onto the IR event.
+- Any other item type becomes a user message with one unknown part. Encode
+  nests that part inside a message content array, so the wire form changes and
+  the IR stays stable.
+
+Consecutive assistant messages are merged. Tool results are not.
+
+Images use `image_url` as a string or as `{url, detail}`. A `data:` URL
+becomes `ImageSource::Base64`. Encode writes a string URL, and base64 as
+`data:<media>;base64,<data>`. `detail` is kept.
+
+Only `type: "function"` tools are canonical. `name`, `description`, and
+`parameters` are flattened. `strict` and extra keys stay on the tool bag.
+
+Leftover request keys (`metadata`, `store`, `previous_response_id`,
+`reasoning`, `parallel_tool_calls`, and anything else unrecognized) stay in
+the request bag and are written back. `top_k`, `seed`, `stop`, and the penalty
+fields are canonical parameters and are omitted on encode, not stored in that
+bag.
+
+`OpenAiResponses::prepare_upstream_body` is adapter policy, not a codec round
+trip. It sets `store` to false when the field is absent, and it appends an
+empty `function_call_output` for each `function_call` id that has no output.

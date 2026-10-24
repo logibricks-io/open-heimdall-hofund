@@ -56,6 +56,10 @@ impl Codec for AnthropicMessages {
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
         Box::new(Decoder::default())
     }
+
+    fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
+        encode_error(status, message)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1215,4 +1219,25 @@ fn write_json(out: &mut Vec<u8>, event: &str, value: &Value) -> Result<(), Codec
     let data = serde_json::to_string(value)?;
     sse::write_event(out, Some(event), &data);
     Ok(())
+}
+
+fn encode_error(status: u16, message: &str) -> Vec<u8> {
+    let kind = match status {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        529 => "overloaded_error",
+        _ => "api_error",
+    };
+    serde_json::to_vec(&serde_json::json!({
+        "type": "error",
+        "error": { "type": kind, "message": message }
+    }))
+    .unwrap_or_else(|_| {
+        b"{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"request failed\"}}"
+            .to_vec()
+    })
 }

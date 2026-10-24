@@ -3,8 +3,8 @@
 //! so N client protocols and M upstream protocols compose without a direct N-by-M
 //! translator matrix.
 //!
-//! [`AnthropicMessages`] and [`OpenAiChat`] are implemented. OpenAI Responses and
-//! Gemini are not. Field mappings and lossy conversions are documented in
+//! [`AnthropicMessages`], [`OpenAiChat`], and [`OpenAiResponses`] are implemented.
+//! Gemini is not. Field mappings and lossy conversions are documented in
 //! `docs/codecs.md`. Protocol names belong in this crate; vendor capability gaps
 //! belong in `quirks`.
 
@@ -12,11 +12,13 @@ mod anthropic;
 mod error;
 mod jsonutil;
 mod openai_chat;
+mod openai_responses;
 mod sse;
 
 pub use anthropic::AnthropicMessages;
 pub use error::CodecError;
 pub use openai_chat::OpenAiChat;
+pub use openai_responses::OpenAiResponses;
 
 use hofund_ir::{Request, Response, StreamEvent};
 
@@ -80,6 +82,20 @@ pub trait Codec: Send + Sync {
 
     /// A decoder that accepts arbitrary chunk boundaries.
     fn stream_decoder(&self) -> Box<dyn StreamDecoder>;
+
+    /// Encodes an error body in this protocol's JSON shape.
+    ///
+    /// `status` is the HTTP status the caller will send. The returned bytes are
+    /// the body only.
+    fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
+        let _ = status;
+        serde_json::to_vec(&serde_json::json!({
+            "error": { "type": "api_error", "message": message }
+        }))
+        .unwrap_or_else(|_| {
+            b"{\"error\":{\"type\":\"api_error\",\"message\":\"request failed\"}}".to_vec()
+        })
+    }
 }
 
 /// Incremental SSE decode for one response stream.

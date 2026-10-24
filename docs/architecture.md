@@ -9,10 +9,12 @@ Hofund is an independent reimplementation inspired by magpie. The credit and
 license notice live in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Do
 not use that project's name or logo as hofund branding.
 
-`ir` and the Anthropic Messages and OpenAI Chat Completions codecs are
-implemented, including streaming. The other crates compile and state their
-responsibility, and they do not yet implement it. The codec field mapping is
-in [codecs.md](codecs.md).
+`ir`, the Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
+codecs, quirk profiles, the provider adapters, and ordered pre-stream failover
+are implemented. The HTTP server, configuration, secrets, usage records, and
+the daemon commands are not. The codec field mapping is in
+[codecs.md](codecs.md). The adopt-or-redesign record is in
+[magpie-comparison.md](magpie-comparison.md).
 
 Sibling repositories:
 
@@ -44,9 +46,12 @@ flowchart BT
   cli["cli<br/>hofund binary"]
 
   codec --> ir
+  quirks --> ir
   provider --> codec
+  provider --> ir
   provider --> quirks
   router --> provider
+  router --> ir
   gateway --> router
   daemon --> gateway
   daemon --> config
@@ -64,9 +69,9 @@ each arrow as "depends on". `agent` is a side branch that depends only on
 | --- | --- |
 | `hofund-ir` | — |
 | `hofund-codec` | `hofund-ir` |
-| `hofund-quirks` | — |
-| `hofund-provider` | `hofund-codec`, `hofund-quirks` |
-| `hofund-router` | `hofund-provider` |
+| `hofund-quirks` | `hofund-ir` |
+| `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-quirks` |
+| `hofund-router` | `hofund-ir`, `hofund-provider` |
 | `hofund-gateway` | `hofund-router` |
 | `hofund-config` | — |
 | `hofund-secrets` | — |
@@ -124,9 +129,13 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 
 ## What is intentionally absent
 
-- The `Provider` trait, routing strategies, the HTTP server, and config
-  rewriting are not implemented.
-- OpenAI Responses and Gemini codecs.
+- The HTTP server, configuration loading, secret storage, usage records, and
+  the daemon commands. Ordered failover exists; the other routing strategies
+  do not.
+- A running process does not reload configuration. Agent config rewriting is
+  not implemented.
+- There is no rest timer and no process-global route counter.
+- Gemini codec.
 - `apps/desktop`.
 - Language packs. A future i18n pack is the other place, besides
   `README.<lang>.md`, where a language other than English may appear.

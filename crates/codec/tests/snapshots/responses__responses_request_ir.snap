@@ -1,0 +1,124 @@
+---
+source: crates/codec/tests/responses.rs
+expression: pretty_value!(&request)
+---
+{
+  "model": "gpt-4.1",
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "Be brief."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Weather?"
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "url",
+            "url": "https://example.com/a.png"
+          },
+          "detail": "low"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "text": "look up",
+          "extensions": {
+            "sealed_item": {
+              "content": [
+                {
+                  "type": "reasoning_text",
+                  "text": "look up"
+                }
+              ],
+              "encrypted_content": "seal",
+              "type": "reasoning"
+            }
+          }
+        },
+        {
+          "type": "text",
+          "text": "Checking."
+        },
+        {
+          "type": "tool_call",
+          "id": "call_1",
+          "name": "get_weather",
+          "arguments": {
+            "form": "json",
+            "value": {
+              "city": "Paris"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "id": "call_1",
+          "content": [
+            {
+              "type": "text",
+              "text": "rain"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "developer",
+      "content": [
+        {
+          "type": "text",
+          "text": "Use metric."
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Weather",
+      "input_schema": {
+        "type": "object"
+      },
+      "extensions": {
+        "strict": true
+      }
+    }
+  ],
+  "tool_choice": {
+    "mode": {
+      "mode": "named",
+      "name": "get_weather"
+    }
+  },
+  "params": {
+    "max_tokens": 128,
+    "temperature": 0.2,
+    "top_p": 0.9
+  },
+  "extensions": {
+    "store": true,
+    "metadata": {
+      "user": "u1"
+    }
+  }
+}

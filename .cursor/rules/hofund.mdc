@@ -38,6 +38,16 @@ The dependency table in `docs/architecture.md` and `expected_deps` in
 `xtask/tests/workspace_invariants.rs` are normative. Update both, plus the
 manifest, when an edge changes.
 
+## Learning from the upstream project
+
+Before building a subsystem, study how yetone/magpie does that part. Adopt
+behavior that is sound, stable, and efficient, reimplemented in idiomatic
+Rust. Do not copy its source; keep the MIT notice in `THIRD_PARTY_NOTICES.md`.
+Redesign what is unsound: small types, trait boundaries, explicit constructor
+state, no globals, testable units. Record each choice in
+`docs/magpie-comparison.md` and update that table when the subsystem changes.
+Do not use that project's name as hofund branding.
+
 ## Verify
 
 Pinned toolchain: Rust 1.99.1, edition 2024. `unsafe` is forbidden.
