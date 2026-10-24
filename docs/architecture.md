@@ -9,11 +9,10 @@ Hofund is an independent reimplementation inspired by magpie. The credit and
 license notice live in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Do
 not use that project's name or logo as hofund branding.
 
-`ir`, the Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
-codecs, quirk profiles, the provider adapters, and ordered pre-stream failover
-are implemented. The HTTP server, configuration, secrets, usage records, and
-the daemon commands are not. The codec field mapping is in
-[codecs.md](codecs.md). The adopt-or-redesign record is in
+The local gateway is implemented: codecs, quirk profiles, provider adapters,
+ordered failover, configuration, a bearer token, usage rows, and the `hofund`
+commands. Agent config rewriting and the desktop app are not. The codec field
+mapping is in [codecs.md](codecs.md). The adopt-or-redesign record is in
 [magpie-comparison.md](magpie-comparison.md).
 
 Sibling repositories:
@@ -53,9 +52,17 @@ flowchart BT
   router --> provider
   router --> ir
   gateway --> router
+  gateway --> codec
+  gateway --> ir
+  gateway --> usage
   daemon --> gateway
   daemon --> config
   daemon --> secrets
+  daemon --> provider
+  daemon --> codec
+  daemon --> quirks
+  daemon --> router
+  daemon --> usage
   agent --> config
   cli --> daemon
   cli --> agent
@@ -72,12 +79,12 @@ each arrow as "depends on". `agent` is a side branch that depends only on
 | `hofund-quirks` | `hofund-ir` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-quirks` |
 | `hofund-router` | `hofund-ir`, `hofund-provider` |
-| `hofund-gateway` | `hofund-router` |
+| `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-router`, `hofund-usage` |
 | `hofund-config` | — |
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config` |
-| `hofund-daemon` | `hofund-gateway`, `hofund-config`, `hofund-secrets` |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
 
@@ -101,11 +108,10 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 - Protocol names (Anthropic Messages, OpenAI Chat Completions, OpenAI Responses,
   and later Gemini) belong in `codec`. Naming a protocol there is not permission
   to mention that vendor from `gateway` or `router`.
-- The HTTP stack is axum, and only `gateway` may depend on axum, tower, or
-  hyper. Those crates are not dependencies yet.
-- `usage` is a leaf until the gateway records consumption. The expected future
-  edges are `gateway` → `usage` and, if usage types need canonical token
-  counts, `usage` → `ir`. Add them explicitly; do not let `router` own usage.
+- The HTTP stack is axum. Only `gateway` may depend on axum, tower, or hyper.
+- `usage` stays a leaf. `gateway` records one row per request. `usage` does
+  not depend on `ir`; cache counters stay on the canonical usage object.
+  `router` must not own usage.
 - Secret material is resolved by `daemon` (via `secrets`) and passed downward.
   `provider` must not read the secret store itself.
 
@@ -129,9 +135,7 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 
 ## What is intentionally absent
 
-- The HTTP server, configuration loading, secret storage, usage records, and
-  the daemon commands. Ordered failover exists; the other routing strategies
-  do not.
+- Routing strategies other than ordered failover.
 - A running process does not reload configuration. Agent config rewriting is
   not implemented.
 - There is no rest timer and no process-global route counter.

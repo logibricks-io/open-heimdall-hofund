@@ -32,13 +32,14 @@ Present:
 - named quirk profiles (`quirks`) and the `Provider` trait with Chat,
   Responses, and Messages adapters (`provider`)
 - ordered model routes and failover before the first stream event (`router`)
+- an axum HTTP server (`gateway`), TOML configuration (`config`), a bearer
+  token file (`secrets`), SQLite usage rows (`usage`), and the `hofund`
+  commands `serve`, `config check`, `token show`, `token rotate`, and `usage`
 
 Planned behavior, not present yet:
 
 - Gemini codec
-- an axum HTTP server and middleware pipeline (`gateway`)
 - coding-agent config adapters that plan and apply edits (`agent`)
-- configuration, secrets, usage records, a daemon, and the `hofund` CLI
 - a future Tauri v2 menu-bar app at `apps/desktop` (do not create it until a
   task asks for it)
 

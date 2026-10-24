@@ -61,6 +61,10 @@ impl Codec for OpenAiChat {
         Box::new(Decoder::default())
     }
 
+    fn stream_encoder(&self) -> Box<dyn crate::StreamEncoder> {
+        Box::new(Encoder)
+    }
+
     fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
         encode_error(status, message)
     }
@@ -1303,6 +1307,17 @@ fn encode_stream(events: &[StreamEvent]) -> Result<Vec<u8>, CodecError> {
         encode_stream_event(&mut out, event)?;
     }
     Ok(out)
+}
+
+#[derive(Default)]
+struct Encoder;
+
+impl crate::StreamEncoder for Encoder {
+    fn push(&mut self, event: &StreamEvent) -> Result<Vec<u8>, CodecError> {
+        let mut out = Vec::new();
+        encode_stream_event(&mut out, event)?;
+        Ok(out)
+    }
 }
 
 fn encode_stream_event(out: &mut Vec<u8>, event: &StreamEvent) -> Result<(), CodecError> {

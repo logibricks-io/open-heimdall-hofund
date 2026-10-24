@@ -83,6 +83,12 @@ pub trait Codec: Send + Sync {
     /// A decoder that accepts arbitrary chunk boundaries.
     fn stream_decoder(&self) -> Box<dyn StreamDecoder>;
 
+    /// An encoder that accepts one event at a time.
+    ///
+    /// The bytes from each [`StreamEncoder::push`] are the SSE for that event
+    /// only. State such as an open block stays on the encoder.
+    fn stream_encoder(&self) -> Box<dyn StreamEncoder>;
+
     /// Encodes an error body in this protocol's JSON shape.
     ///
     /// `status` is the HTTP status the caller will send. The returned bytes are
@@ -113,4 +119,16 @@ pub trait StreamDecoder: Send {
     ///
     /// Returns [`CodecError`] when the trailing frame is not usable.
     fn finish(&mut self) -> Result<Vec<StreamEvent>, CodecError>;
+}
+
+/// Incremental SSE encode for one response stream.
+pub trait StreamEncoder: Send {
+    /// Writes the SSE produced by `event`.
+    ///
+    /// An empty buffer means the event has no wire form in this protocol.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError`] when the event cannot be represented.
+    fn push(&mut self, event: &StreamEvent) -> Result<Vec<u8>, CodecError>;
 }

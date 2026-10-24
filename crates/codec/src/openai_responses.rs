@@ -80,6 +80,10 @@ impl Codec for OpenAiResponses {
         Box::new(Decoder::default())
     }
 
+    fn stream_encoder(&self) -> Box<dyn crate::StreamEncoder> {
+        Box::new(Encoder::default())
+    }
+
     fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
         openai_error_body(status, message)
     }
@@ -960,6 +964,19 @@ fn encode_stream(events: &[StreamEvent]) -> Result<Vec<u8>, CodecError> {
         encoder.push(event)?;
     }
     Ok(encoder.out)
+}
+
+#[derive(Default)]
+struct Encoder {
+    inner: StreamEncoder,
+}
+
+impl crate::StreamEncoder for Encoder {
+    fn push(&mut self, event: &StreamEvent) -> Result<Vec<u8>, CodecError> {
+        let before = self.inner.out.len();
+        self.inner.push(event)?;
+        Ok(self.inner.out.split_off(before))
+    }
 }
 
 #[derive(Default)]
