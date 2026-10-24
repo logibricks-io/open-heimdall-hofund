@@ -12,6 +12,12 @@ rust-version.workspace = true
 
 [dependencies]
 hofund-ir = { workspace = true }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+thiserror = "2.0.21"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+insta = { version = "1.49.0", default-features = false }
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
