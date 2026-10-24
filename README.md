@@ -16,11 +16,12 @@ Heimdall is the gate. Hofund is the sword that guards it.
 
 ## Status
 
-**Pre-alpha.** The canonical IR and the Anthropic Messages and OpenAI Chat
-Completions codecs are implemented, including streaming. See
-[docs/codecs.md](docs/codecs.md). Routing, upstream adapters, the HTTP server,
-OpenAI Responses, Gemini, config rewriting, and the desktop app are not
-implemented. The `hofund` binary prints its version and exits.
+**Pre-alpha.** The canonical IR, the Anthropic Messages, OpenAI Chat
+Completions, and OpenAI Responses codecs, quirk profiles, upstream adapters,
+and ordered failover are implemented. See [docs/codecs.md](docs/codecs.md).
+The HTTP server, configuration, usage records, Gemini, config rewriting, and
+the desktop app are not implemented. The `hofund` binary prints its version
+and exits.
 
 ## Planned features
 

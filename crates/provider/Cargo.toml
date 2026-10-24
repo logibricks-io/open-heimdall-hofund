@@ -12,7 +12,22 @@ rust-version.workspace = true
 
 [dependencies]
 hofund-codec = { workspace = true }
+hofund-ir = { workspace = true }
 hofund-quirks = { workspace = true }
+async-trait = "0.1.89"
+bytes = "1.12.0"
+futures-util = "0.3.32"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+hofund-ir = { workspace = true }
+hofund-quirks = { workspace = true }
+futures-util = "0.3.32"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6.5"
 
 [lints]
 workspace = true

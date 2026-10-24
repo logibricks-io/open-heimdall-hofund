@@ -13,8 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool call, tool result, thinking), tool definitions and tool choice,
   generation parameters, usage, stop reasons, typed stream events, and an
   extension bag that preserves unknown JSON fields.
-- `hofund-codec` implementations for Anthropic Messages and OpenAI Chat
-  Completions, including SSE streaming. See [docs/codecs.md](docs/codecs.md).
+- `hofund-codec` implementations for Anthropic Messages, OpenAI Chat
+  Completions, and OpenAI Responses, including SSE streaming. See
+  [docs/codecs.md](docs/codecs.md).
+- `hofund-quirks` profiles, `hofund-provider` adapters for Chat, Responses,
+  and Messages, and `hofund-router` ordered failover before the first stream
+  event.
 - Initial Cargo workspace scaffold for the hofund local LLM gateway, with
   library and binary crates, architecture checks, CI, and repository
   hygiene files.

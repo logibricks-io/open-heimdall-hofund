@@ -26,15 +26,16 @@ Crates must not grow product behavior unless the task asks for it.
 Present:
 
 - canonical IR for requests, responses, and stream events (`ir`)
-- hub-and-spoke codecs for Anthropic Messages and OpenAI Chat Completions,
-  including streaming (`codec`). The field mapping and lossy conversions are
-  in [docs/codecs.md](docs/codecs.md).
+- hub-and-spoke codecs for Anthropic Messages, OpenAI Chat Completions, and
+  OpenAI Responses, including streaming (`codec`). The field mapping and lossy
+  conversions are in [docs/codecs.md](docs/codecs.md).
+- named quirk profiles (`quirks`) and the `Provider` trait with Chat,
+  Responses, and Messages adapters (`provider`)
+- ordered model routes and failover before the first stream event (`router`)
 
 Planned behavior, not present yet:
 
-- OpenAI Responses and, later, Gemini codecs
-- data-driven vendor quirks (`quirks`) and upstream adapters (`provider`)
-- routing groups, strategies, and failover (`router`)
+- Gemini codec
 - an axum HTTP server and middleware pipeline (`gateway`)
 - coding-agent config adapters that plan and apply edits (`agent`)
 - configuration, secrets, usage records, a daemon, and the `hofund` CLI
@@ -66,6 +67,22 @@ Spine, each crate depending only downward:
 When you add a workspace dependency edge, update all three of: the crate
 manifest, the table in `docs/architecture.md`, and `expected_deps` in
 `xtask/tests/workspace_invariants.rs`.
+
+## Learning from the upstream project
+
+Before building a subsystem, read how yetone/magpie implements that part.
+Where that design is sound, stable, and efficient, reimplement the behavior
+in idiomatic Rust. Do not copy its source. The MIT notice in
+`THIRD_PARTY_NOTICES.md` stays. Where that design is unsound, redesign it:
+small types, trait boundaries, explicit state passed into constructors, no
+process-global mutability, and units that can be tested without the rest of
+the process.
+
+Record the choice in `docs/magpie-comparison.md` (magpie approach, adopt or
+redesign, hofund approach, rationale). Update that table in the same change
+that adds or changes the subsystem. The name of the upstream project belongs
+in that document and in the acknowledgement files, not in gateway or router
+code, and not as hofund branding.
 
 ## Build and verify
 

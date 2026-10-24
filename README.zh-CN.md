@@ -14,7 +14,7 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 
 ## 状态
 
-**Pre-alpha。** 规范中间表示（IR），以及 Anthropic Messages 与 OpenAI Chat Completions 两种协议的编解码（含流式）已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。路由、上游适配器、HTTP 服务、OpenAI Responses、Gemini、配置改写和桌面应用都还没有实现。`hofund` 可执行文件会打印版本号然后退出。
+**Pre-alpha。** 规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions 与 OpenAI Responses 的编解码（含流式），quirk 配置，上游适配器，以及按顺序的故障转移已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。HTTP 服务、配置加载、用量记录、Gemini、配置改写和桌面应用都还没有实现。`hofund` 可执行文件会打印版本号然后退出。
 
 ## 计划中的能力
 

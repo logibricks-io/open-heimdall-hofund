@@ -35,9 +35,9 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-daemon" => &["hofund-config", "hofund-gateway", "hofund-secrets"],
         "hofund-gateway" => &["hofund-router"],
         "hofund-ir" => &[],
-        "hofund-provider" => &["hofund-codec", "hofund-quirks"],
-        "hofund-quirks" => &[],
-        "hofund-router" => &["hofund-provider"],
+        "hofund-provider" => &["hofund-codec", "hofund-ir", "hofund-quirks"],
+        "hofund-quirks" => &["hofund-ir"],
+        "hofund-router" => &["hofund-ir", "hofund-provider"],
         "hofund-secrets" => &[],
         "hofund-usage" => &[],
         "xtask" => &[],
@@ -85,6 +85,7 @@ const INSPIRATION_ALLOWLIST: &[&str] = &[
     "README.zh-CN.md",
     "THIRD_PARTY_NOTICES.md",
     "docs/architecture.md",
+    "docs/magpie-comparison.md",
     "xtask/tests/workspace_invariants.rs",
 ];
 

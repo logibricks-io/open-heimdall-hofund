@@ -51,3 +51,6 @@ all = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
 nursery = { level = "allow", priority = -1 }
 pedantic = { level = "allow", priority = -1 }
+# Transitive duplicates from the HTTP stack (base64, getrandom, windows-sys)
+# cannot be unified from this workspace. `deny.toml` names the skipped crates.
+multiple_crate_versions = "allow"

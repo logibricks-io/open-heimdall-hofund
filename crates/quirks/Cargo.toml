@@ -11,6 +11,10 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hofund-ir = { workspace = true }
+
+[dev-dependencies]
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 
 [lints]
 workspace = true

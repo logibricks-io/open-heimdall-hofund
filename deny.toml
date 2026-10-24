@@ -32,6 +32,12 @@ multiple-versions = "deny"
 wildcards = "deny"
 workspace-default-features = "allow"
 external-default-features = "allow"
+# The HTTP stack does not agree on these crates. Skipping the older copy keeps
+# the ban in force for every other duplicate.
+skip = [
+    { crate = "base64@0.22.1", reason = "reqwest 0.12 depends on base64 0.22 while hyper-util depends on 0.23" },
+    { crate = "windows-sys@0.52.0", reason = "ring 0.17 depends on windows-sys 0.52 while tokio depends on 0.61" },
+]
 
 [sources]
 unknown-registry = "deny"
