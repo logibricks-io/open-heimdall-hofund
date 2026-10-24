@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest a capability for hofund.
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Write this issue in English.
+        hofund is pre-alpha; describe the behavior you want, not a patch.
+  - type: checkboxes
+    id: language
+    attributes:
+      label: Language
+      options:
+        - label: I wrote this issue in English.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should hofund do, and which crate should own it?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Other approaches you considered.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Protocols, agents, or providers involved. Do not paste secrets.

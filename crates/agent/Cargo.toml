@@ -1,0 +1,17 @@
+[package]
+name = "hofund-agent"
+description = "Coding-agent configuration adapters that plan and apply config edits."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-config = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,89 @@
+# AGENTS.md
+
+Instructions for AI coding agents working in this repository. Humans should
+follow [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/architecture.md](docs/architecture.md).
+This file restates the rules that are easy to violate in a generated change.
+
+## Language
+
+Write standard English only. This covers code, identifiers, comments,
+documentation, commit messages, pull request titles and descriptions, issue
+templates, CI job names, and error messages.
+
+Do not write Chinese, or any language other than English, except:
+
+- future i18n language-pack files
+- translated READMEs named `README.<lang>.md` (for example `README.zh-CN.md`)
+
+`README.md` stays English and is the default. Never add a translation beside
+the English text inside a source file.
+
+## What this repository is
+
+hofund is a pre-alpha local LLM gateway in the LogiBricks Heimdall series.
+The crates in this workspace are an empty scaffold. They must compile, and
+they must not grow product behavior unless the task asks for it.
+
+Planned behavior, not present yet:
+
+- canonical IR for requests, responses, and stream events (`ir`)
+- hub-and-spoke protocol codecs (`codec`): Anthropic Messages, OpenAI Chat
+  Completions, OpenAI Responses, later Gemini
+- data-driven vendor quirks (`quirks`) and upstream adapters (`provider`)
+- routing groups, strategies, and failover (`router`)
+- an axum HTTP server and middleware pipeline (`gateway`)
+- coding-agent config adapters that plan and apply edits (`agent`)
+- configuration, secrets, usage records, a daemon, and the `hofund` CLI
+- a future Tauri v2 menu-bar app at `apps/desktop` (do not create it until a
+  task asks for it)
+
+## Architecture rules
+
+The normative dependency table is in [docs/architecture.md](docs/architecture.md)
+and is enforced by `xtask/tests/workspace_invariants.rs`.
+
+Spine, each crate depending only downward:
+
+`ir ← codec ← provider ← router ← gateway ← daemon ← cli`
+
+- `agent` depends only on `config`. Never on `gateway`, `router`, `provider`,
+  `codec`, `ir`, or `daemon`.
+- Vendor names must never appear in `crates/gateway` or `crates/router`.
+  Quirks live in `quirks` data and in provider adapters. Protocol names belong
+  in `codec`.
+- Only `gateway` may depend on axum, tower, or hyper, and only when a task
+  adds the HTTP server.
+- `provider` must not read the secret store. `daemon` resolves secrets and
+  passes material downward.
+- No runtime crate depends on `xtask`.
+- Do not use the magpie name or logo as hofund branding. Credit belongs in
+  `README.md`, `README.zh-CN.md`, and `THIRD_PARTY_NOTICES.md`.
+
+When you add a workspace dependency edge, update all three of: the crate
+manifest, the table in `docs/architecture.md`, and `expected_deps` in
+`xtask/tests/workspace_invariants.rs`.
+
+## Build and verify
+
+Toolchain pin: `rust-toolchain.toml` (Rust 1.99.1). Workspace edition: 2024.
+Resolver: 3. `unsafe_code` is forbidden. Clippy warnings are errors.
+
+```sh
+cargo build --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+`cargo xtask help` lists local tasks. Architecture checks run as part of
+`cargo test --workspace`.
+
+## Change discipline
+
+- Match the existing scaffold. Do not add a framework, a trait hierarchy, or a
+  dependency for a feature that has no caller.
+- Shared package metadata and internal path dependencies go through
+  `[workspace.package]` and `[workspace.dependencies]`.
+- Crates stay `publish = false` until a task says otherwise.
+- Commit messages, pull request text, and review comments on code are English.
+- Do not merge pull requests unless the task explicitly says to merge.

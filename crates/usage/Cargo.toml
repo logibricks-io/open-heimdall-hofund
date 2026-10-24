@@ -1,0 +1,16 @@
+[package]
+name = "hofund-usage"
+description = "Request and token usage records for gateway traffic."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

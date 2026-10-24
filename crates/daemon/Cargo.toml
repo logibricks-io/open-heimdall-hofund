@@ -1,0 +1,19 @@
+[package]
+name = "hofund-daemon"
+description = "Long-running process that wires configuration, secrets, and the gateway."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-config = { workspace = true }
+hofund-gateway = { workspace = true }
+hofund-secrets = { workspace = true }
+
+[lints]
+workspace = true
