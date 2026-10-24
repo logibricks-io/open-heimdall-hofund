@@ -106,8 +106,8 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
   vendor or branch on vendor-specific behavior. Capability gaps and protocol
   deviations live in `quirks` data and in provider adapters.
 - Protocol names (Anthropic Messages, OpenAI Chat Completions, OpenAI Responses,
-  and later Gemini) belong in `codec`. Naming a protocol there is not permission
-  to mention that vendor from `gateway` or `router`.
+  and the Generative Language API) belong in `codec`. Naming a protocol there
+  is not permission to mention that vendor from `gateway` or `router`.
 - The HTTP stack is axum. Only `gateway` may depend on axum, tower, or hyper.
 - `usage` stays a leaf. `gateway` records one row per request. `usage` does
   not depend on `ir`; cache counters stay on the canonical usage object.
@@ -138,7 +138,6 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 - Routing strategies other than ordered failover.
 - A running process does not reload configuration.
 - There is no rest timer and no process-global route counter.
-- Gemini codec.
 - `apps/desktop`.
 - Language packs. A future i18n pack is the other place, besides
   `README.<lang>.md`, where a language other than English may appear.

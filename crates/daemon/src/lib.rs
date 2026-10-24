@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hofund_codec::{AnthropicMessages, Codec, OpenAiChat, OpenAiResponses};
+use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
 use hofund_config::{Config, Kind, Protocol, load_path};
-use hofund_gateway::Gateway;
+use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 
 pub use hofund_gateway::Running;
 use hofund_provider::{Anthropic, Endpoint, OpenAiCompat, OpenAiProtocol, Provider};
@@ -226,6 +226,8 @@ fn inbound_codecs() -> HashMap<String, Arc<dyn Codec>> {
     );
     codecs.insert("/v1/chat/completions".to_owned(), Arc::new(OpenAiChat));
     codecs.insert("/v1/responses".to_owned(), Arc::new(OpenAiResponses));
+    codecs.insert(GENERATIVE_UNARY.to_owned(), Arc::new(GenerativeLanguage));
+    codecs.insert(GENERATIVE_STREAM.to_owned(), Arc::new(GenerativeLanguage));
     codecs
 }
 

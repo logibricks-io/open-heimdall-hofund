@@ -10,9 +10,11 @@ Implemented:
 - `AnthropicMessages` (`anthropic-messages`)
 - `OpenAiChat` (`openai-chat`)
 - `OpenAiResponses` (`openai-responses`)
+- `GenerativeLanguage` (`generative-language`)
 
-Not implemented: Gemini. There is no HTTP server here. The codec crate does
-not open sockets, and its tests do not use the network.
+There is no HTTP server here. The codec crate does not open sockets, and its
+tests do not use the network. `GenerativeLanguage` is an inbound client
+protocol. This version has no upstream adapter that posts it.
 
 ## Trait
 
@@ -33,7 +35,11 @@ calls. `encode_stream` is that encoder over a whole slice.
 `permission_error`, `not_found_error`, `request_too_large`, `rate_limit_error`,
 `overloaded_error`, otherwise `api_error`). Chat Completions and Responses
 share one shape: `error.message`, `error.type`, `error.param`, `error.code`.
-Statuses 500 through 599 are `server_error`.
+Statuses 500 through 599 are `server_error`. Generative Language uses
+`error.code` (the HTTP status), `error.message`, and `error.status`
+(`INVALID_ARGUMENT` for 400 and 413, `UNAUTHENTICATED`, `PERMISSION_DENIED`,
+`NOT_FOUND`, `RESOURCE_EXHAUSTED`, `UNAVAILABLE` for 503, otherwise
+`INTERNAL`).
 
 `decode_stream` feeds one buffer to a fresh decoder and then finishes it.
 `StreamDecoder::push` accepts any chunk boundary, including a split in the
@@ -54,7 +60,9 @@ Top-level request fields this version does not model (`metadata`,
 `stream_options`, a thinking budget, and anything else unrecognized) live on
 `Request.extensions`. `GenerationParams.extensions` is written on encode and
 read back onto the request bag. After a protocol round trip the parameter bag
-is empty.
+is empty. Generative Language is the exception: unknown `generationConfig`
+keys stay on `GenerationParams.extensions` and are written back inside
+`generationConfig`.
 
 Callers that encode with a different protocol should call
 `Request::strip_extensions` (and the response and event equivalents) first.
@@ -109,12 +117,12 @@ stays raw. `assemble` does not return an error.
 
 ## Tool choice
 
-| IR | Anthropic Messages | Chat Completions | Responses |
-| --- | --- | --- | --- |
-| `Auto` | `{"type":"auto"}` | `"auto"` | `"auto"` |
-| `None` | `{"type":"none"}` | `"none"` | `"none"` |
-| `Required` | `{"type":"any"}` | `"required"` | `"required"` |
-| `Named { name }` | `{"type":"tool","name"}` | `{"type":"function","function":{"name"}}` | `{"type":"function","name"}` |
+| IR | Anthropic Messages | Chat Completions | Responses | Generative Language |
+| --- | --- | --- | --- | --- |
+| `Auto` | `{"type":"auto"}` | `"auto"` | `"auto"` | `functionCallingConfig.mode = "AUTO"` |
+| `None` | `{"type":"none"}` | `"none"` | `"none"` | `"NONE"` |
+| `Required` | `{"type":"any"}` | `"required"` | `"required"` | `"ANY"` |
+| `Named { name }` | `{"type":"tool","name"}` | `{"type":"function","function":{"name"}}` | `{"type":"function","name"}` | `"ANY"` and `allowedFunctionNames: [name]` |
 
 Responses `tool_choice` of type `allowed_tools` filters the tool list down to
 the named functions and keeps the mode (`auto` or `required`). The wrapper
@@ -127,17 +135,24 @@ as `disable_parallel_tool_use` live on the choice bag. Chat Completions writes
 `auto`, `none`, and `required` as strings when the bag is empty, and as
 objects when it is not, so those fields survive.
 
+Generative Language `ANY` with exactly one `allowedFunctionNames` entry is
+`Named`. `ANY` with any other list is `Required`, and the list stays on the
+choice bag. `VALIDATED`, and any other mode token, is `Required` plus
+`extensions.mode` set to that token, so encode writes the token back. `AUTO`
+and `NONE` do not store the mode string.
+
 ## Generation parameters
 
-| IR | Anthropic Messages | Chat Completions | Responses |
-| --- | --- | --- | --- |
-| `max_tokens` | `max_tokens` (required on encode) | `max_completion_tokens` | `max_output_tokens` |
-| `temperature`, `top_p` | same names | same names | same names |
-| `top_k` | `top_k` | omitted | omitted |
-| `stop` | `stop_sequences` | `stop` (always an array) | omitted |
-| `seed`, penalties | omitted | same names | omitted |
-| `stream: true` | `stream: true` | `stream: true` | `stream: true` |
-| `stream: false` | omitted | omitted | omitted |
+| IR | Anthropic Messages | Chat Completions | Responses | Generative Language |
+| --- | --- | --- | --- | --- |
+| `max_tokens` | `max_tokens` (required on encode) | `max_completion_tokens` | `max_output_tokens` | `generationConfig.maxOutputTokens` |
+| `temperature`, `top_p` | same names | same names | same names | `temperature`, `topP` |
+| `top_k` | `top_k` | omitted | omitted | `topK` |
+| `stop` | `stop_sequences` | `stop` (always an array) | omitted | `stopSequences` (always an array) |
+| `seed` | omitted | `seed` | omitted | `seed` |
+| penalties | omitted | same names | omitted | omitted |
+| `stream: true` | `stream: true` | `stream: true` | `stream: true` | `stream: true` on the body |
+| `stream: false` | omitted | omitted | omitted | omitted |
 
 Anthropic encode returns `MissingField("max_tokens")` when the IR has no cap.
 It does not invent one. Decode of a request may omit the cap.
@@ -175,16 +190,16 @@ plus their bag.
 
 ## Stop reasons
 
-| IR | Anthropic `stop_reason` | Chat `finish_reason` | Responses `status` |
-| --- | --- | --- | --- |
-| `EndTurn` | `end_turn` | `stop` | `completed` |
-| `MaxTokens` | `max_tokens` | `length` | `incomplete`, reason `max_output_tokens` |
-| `StopSequence` | `stop_sequence` | `stop` (sequence text is dropped) | `incomplete`, reason `stop_sequence` (sequence text is dropped) |
-| `ToolUse` | `tool_use` | `tool_calls` | `completed` when the turn contains a tool call |
-| `ContentFilter` | `content_filter` | `content_filter` | `incomplete`, reason `content_filter` |
-| `Refusal` | `refusal` | `refusal` | `incomplete`, reason `refusal` |
-| `Other("failed")`, `Other("cancelled")`, `Other("incomplete")`, `Other("in_progress")`, `Other("queued")` | that token | that token | that status |
-| `Other(token)` | `token` | `token` | `incomplete`, reason `token` |
+| IR | Anthropic `stop_reason` | Chat `finish_reason` | Responses `status` | Generative Language `finishReason` |
+| --- | --- | --- | --- | --- |
+| `EndTurn` | `end_turn` | `stop` | `completed` | `STOP` |
+| `MaxTokens` | `max_tokens` | `length` | `incomplete`, reason `max_output_tokens` | `MAX_TOKENS` |
+| `StopSequence` | `stop_sequence` | `stop` (sequence text is dropped) | `incomplete`, reason `stop_sequence` (sequence text is dropped) | `STOP` (sequence text is dropped) |
+| `ToolUse` | `tool_use` | `tool_calls` | `completed` when the turn contains a tool call | `STOP` |
+| `ContentFilter` | `content_filter` | `content_filter` | `incomplete`, reason `content_filter` | `SAFETY` |
+| `Refusal` | `refusal` | `refusal` | `incomplete`, reason `refusal` | `REFUSAL` (decodes as `Other("REFUSAL")`) |
+| `Other("failed")`, `Other("cancelled")`, `Other("incomplete")`, `Other("in_progress")`, `Other("queued")` | that token | that token | that status | that token |
+| `Other(token)` | `token` | `token` | `incomplete`, reason `token` | `token` |
 
 `pause_turn` is `Other("pause_turn")` and is written back on Anthropic.
 `function_call` as a finish reason decodes as `ToolUse` and is written back as
@@ -201,14 +216,14 @@ The `object` field is structural and is not stored. `created` and
 Counters are optional so a stream event can carry a subset.
 `Usage::merge_from` overwrites counters the patch sets.
 
-| IR | Anthropic | Chat Completions | Responses |
-| --- | --- | --- | --- |
-| `input_tokens` | `input_tokens` | `prompt_tokens` | `input_tokens` |
-| `output_tokens` | `output_tokens` | `completion_tokens` | `output_tokens` |
-| `total_tokens` | omitted | `total_tokens` | `total_tokens` |
-| `cache_read_tokens` | `cache_read_input_tokens` | `prompt_tokens_details.cached_tokens` | `input_tokens_details.cached_tokens` |
-| `cache_write_tokens` | `cache_creation_input_tokens` | omitted | `input_tokens_details.cache_write_tokens` |
-| `reasoning_tokens` | omitted | `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` |
+| IR | Anthropic | Chat Completions | Responses | Generative Language |
+| --- | --- | --- | --- | --- |
+| `input_tokens` | `input_tokens` | `prompt_tokens` | `input_tokens` | `promptTokenCount` |
+| `output_tokens` | `output_tokens` | `completion_tokens` | `output_tokens` | `candidatesTokenCount` |
+| `total_tokens` | omitted | `total_tokens` | `total_tokens` | `totalTokenCount` |
+| `cache_read_tokens` | `cache_read_input_tokens` | `prompt_tokens_details.cached_tokens` | `input_tokens_details.cached_tokens` | `cachedContentTokenCount` |
+| `cache_write_tokens` | `cache_creation_input_tokens` | omitted | `input_tokens_details.cache_write_tokens` | omitted |
+| `reasoning_tokens` | omitted | `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` | `thoughtsTokenCount` |
 
 Responses keeps protocol totals beside the cache counters. It does not subtract
 cached tokens from `input_tokens`. A null `error` is dropped. A non-null
@@ -321,3 +336,91 @@ bag.
 `OpenAiResponses::prepare_upstream_body` is adapter policy, not a codec round
 trip. It sets `store` to false when the field is absent, and it appends an
 empty `function_call_output` for each `function_call` id that has no output.
+
+## Generative Language
+
+The public REST methods put the model in the URL:
+`POST /v1beta/models/{model}:generateContent` and
+`POST /v1beta/models/{model}:streamGenerateContent`. This codec also reads
+and writes `model` and `stream` on the JSON body. The gateway copies the path
+model onto the body (the path wins) and sets `stream` from the method name
+before decode. `streamGenerateContent` is a stream even when the query has
+no `alt=sse`. An empty model is omitted on encode. There is no upstream
+adapter for this protocol in this version, so encode of `model` and `stream`
+exists for the gateway injection and for a same-protocol round trip.
+
+`systemInstruction` becomes a leading `Role::System` message. A string is one
+text part and is written back as `{parts: [...]}`. Encode hoists every
+`Role::System` and `Role::Developer` message into that one channel, in
+encounter order, and removes them from `contents`. Developer and system share
+the channel.
+
+`contents[].role` is `user` or `model` (`Role::Assistant`). `Role::Tool`
+encodes as a `user` content of `functionResponse` parts, and consecutive tool
+messages merge into one content. Decode always comes back as `Role::User`.
+
+Parts, in priority order: `functionCall`, `functionResponse`, `inlineData`,
+`fileData`, then `thought: true` or a lone `thoughtSignature`, then `text`,
+then an unknown part whose bag is the leftover object. `functionCall.args`
+must be a JSON object. A missing object becomes `{}`. Any other JSON type is
+`CodecError::Unsupported`. An empty call id is omitted on encode.
+
+`functionResponse.response` is a JSON object. Decode stores that object as
+compact JSON text on the tool-result part. Encode uses a single text part
+when it parses as a JSON object, and wraps other text as `{"result": text}`.
+The function name lives on the tool-result bag (`name`). `is_error` has no
+wire field and comes back `false`. Non-text tool-result content is
+`CodecError::Unsupported`.
+
+`inlineData` is `ImageSource::Base64`. `fileData.fileUri` is
+`ImageSource::Url`, and `mimeType` stays on the image bag so encode can put
+it back inside `fileData`. `ImageDetail` is dropped. A redacted thinking blob
+has no wire field. Encode writes readable thinking text and a non-empty
+signature, and drops `redacted` and `data`.
+
+`thought: true` is a thinking part. `thoughtSignature` on that part is
+`ThinkingPart.signature`. `thoughtSignature` on a function call or on plain
+text has no IR field, so it stays on that part's extension bag and is written
+back beside `functionCall` or `text`. `thought: true` beside a function call
+is kept on the call bag. It is not a second thinking part.
+
+Function declarations live under `tools[].functionDeclarations` (`name`,
+`description`, `parameters`). Other keys on a declaration stay on the tool
+bag. A tool object that has no declarations is kept as `toolExtras` and
+written back as another tools entry. Extra keys on the first declarations
+wrapper stay in `declarationWrapper` and merge back onto that object. Further
+mixed wrappers are split into `toolExtras` (the declarations are still kept).
+
+Only candidate index 0 is canonical. When no candidate has index 0, the first
+candidate is used and its index is written back as 0. Further candidates are
+stored on `extensions.extraCandidates` and written back after the canonical
+one. `STOP` with a function call in the message is `ToolUse`. `STOP` without
+one is `EndTurn`. An `EndTurn` that also contains a function call therefore
+comes back as `ToolUse`. `responseId` is the response id. `modelVersion` is
+the model. A body that only has `model` is accepted and written back as
+`modelVersion`. Usage counters are not subtracted from each other.
+`cache_write_tokens` is omitted. `promptFeedback` and other leftover response
+fields stay on the response bag. Candidate fields other than `content`,
+`finishReason`, and `index` stay on the message bag and are written back on
+the candidate. Unknown fields inside `content` move up onto that candidate.
+
+Stream frames are `data: <json>` and a blank line. There is no event name.
+`data: [DONE]` closes open text and thinking blocks and ends the turn. A
+later `[DONE]` does not emit a second stop. The decoder's index space is
+fixed, and it is not shared with other protocols:
+
+- text is index 0
+- thinking is index 1
+- each function call takes the next index from 2 upward, in encounter order
+
+A function call in one chunk emits a start, one arguments delta with the
+compact JSON object, and a stop. The encoder writes that call when the block
+stops, or flushes any call that is still open before a message delta. A
+thinking part with both text and a signature becomes a thinking delta and
+then a signature delta, so a round trip of decoder output splits them into
+two frames. Empty text is skipped. `Ping` is omitted. A JSON value that is
+not a generate chunk is an unknown event named `data` and is written back.
+Images, function responses, and unknown parts in a stream are unknown events
+named `part`. Same-protocol equality is `decode(encode(decode(bytes)))`.
+Hand-built events that delay a function-call stop past a later text delta are
+not required to round-trip, because the encoder holds the call until the stop.

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backed up once, written by rename, and restored byte for byte.
 - Streamed Responses `encrypted_content` is kept on the thinking part and
   written back on encode.
+- `GenerativeLanguage` codec for `generateContent` and
+  `streamGenerateContent`, including function calls, system instructions,
+  thinking parts, thought signatures, and usage metadata. The gateway serves
+  `POST /v1beta/models/{model}:generateContent`,
+  `POST /v1beta/models/{model}:streamGenerateContent`, and
+  `GET /v1beta/models`. Authentication accepts the bearer token,
+  `x-goog-api-key`, or a `key` query value, compared in constant time.
 - Initial Cargo workspace scaffold for the hofund local LLM gateway, with
   library and binary crates, architecture checks, CI, and repository
   hygiene files.

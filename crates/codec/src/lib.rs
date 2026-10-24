@@ -3,13 +3,14 @@
 //! so N client protocols and M upstream protocols compose without a direct N-by-M
 //! translator matrix.
 //!
-//! [`AnthropicMessages`], [`OpenAiChat`], and [`OpenAiResponses`] are implemented.
-//! Gemini is not. Field mappings and lossy conversions are documented in
-//! `docs/codecs.md`. Protocol names belong in this crate; vendor capability gaps
-//! belong in `quirks`.
+//! [`AnthropicMessages`], [`OpenAiChat`], [`OpenAiResponses`], and
+//! [`GenerativeLanguage`] are implemented. Field mappings and lossy conversions
+//! are documented in `docs/codecs.md`. Protocol names belong in this crate;
+//! vendor capability gaps belong in `quirks`.
 
 mod anthropic;
 mod error;
+mod generative;
 mod jsonutil;
 mod openai_chat;
 mod openai_responses;
@@ -17,6 +18,7 @@ mod sse;
 
 pub use anthropic::AnthropicMessages;
 pub use error::CodecError;
+pub use generative::GenerativeLanguage;
 pub use openai_chat::OpenAiChat;
 pub use openai_responses::OpenAiResponses;
 

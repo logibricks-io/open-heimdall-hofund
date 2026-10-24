@@ -120,15 +120,30 @@ const CODEX: Description = Description {
 ///
 /// `.env` sets `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` (the origin; HTTP
 /// to localhost is allowed), and `GEMINI_API_KEY_AUTH_MECHANISM=bearer`.
-/// The bearer mechanism is what adds `Authorization: Bearer` for the API-key
-/// auth type. Selecting `gateway` instead would not attach that header, and
-/// env detection can force `gateway` when `GOOGLE_GEMINI_BASE_URL` is set
-/// before the settings value is considered. Hofund still has no Gemini codec,
-/// so native Gemini paths are not translated.
+///
+/// `GEMINI_API_KEY_AUTH_MECHANISM` is real. It is not listed on the public
+/// configuration page. In `contentGenerator.ts` the default is
+/// `x-goog-api-key`. The value `bearer` adds `Authorization: Bearer ${apiKey}`
+/// only when the auth type is `gemini-api-key` or `vertex-ai` and an API key
+/// is set. The `gateway` auth type does not get that header.
+/// `contentGenerator.test.ts` covers it ("should pass api key as Authorization
+/// Header when GEMINI_API_KEY_AUTH_MECHANISM is set to bearer").
+///
+/// `getAuthTypeFromEnv` returns `gateway` when `GOOGLE_GEMINI_BASE_URL` is
+/// set, before it considers `GEMINI_API_KEY`. Non-interactive startup uses
+/// the settings value first (`configuredAuthType || getAuthTypeFromEnv()` in
+/// `packages/cli/src/validateNonInterActiveAuth.ts`), so `gemini-api-key`
+/// wins. `createContentGenerator` still uses `GOOGLE_GEMINI_BASE_URL` as the
+/// SDK base URL for that auth type. The SDK sends `x-goog-api-key` when an
+/// API key is passed. The gateway accepts either header, compared in constant
+/// time, and serves `POST /v1beta/models/{model}:generateContent` and
+/// `:streamGenerateContent`.
 ///
 /// Sources: <https://geminicli.com/docs/reference/configuration/>,
 /// <https://geminicli.com/docs/get-started/authentication/>,
-/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.ts>.
+/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.ts>,
+/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.test.ts>,
+/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/cli/src/validateNonInterActiveAuth.ts>.
 const GEMINI: Description = Description {
     id: "gemini-cli",
     display_name: "Gemini CLI",

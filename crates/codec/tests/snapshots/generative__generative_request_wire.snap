@@ -1,0 +1,104 @@
+---
+source: crates/codec/tests/generative.rs
+expression: pretty_json(&encoded)
+---
+{
+  "model": "demo",
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "be brief"
+      }
+    ]
+  },
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "hi"
+        },
+        {
+          "inlineData": {
+            "mimeType": "image/png",
+            "data": "aaaa"
+          }
+        },
+        {
+          "fileData": {
+            "fileUri": "https://example.com/a.jpg",
+            "mimeType": "image/jpeg"
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "get_weather",
+            "id": "call_1",
+            "response": {
+              "result": "sunny"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "thought": true,
+          "text": "checking",
+          "thoughtSignature": "sig-think"
+        },
+        {
+          "functionCall": {
+            "name": "get_weather",
+            "args": {
+              "city": "Paris"
+            },
+            "id": "call_1"
+          },
+          "thoughtSignature": "sig-call"
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "Weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          },
+          "behavior": "BLOCKING"
+        }
+      ]
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "ANY",
+      "allowedFunctionNames": [
+        "get_weather"
+      ]
+    }
+  },
+  "generationConfig": {
+    "temperature": 0.2,
+    "topP": 0.9,
+    "topK": 40,
+    "maxOutputTokens": 100,
+    "stopSequences": [
+      "END"
+    ],
+    "seed": 1,
+    "candidateCount": 1
+  },
+  "stream": true
+}

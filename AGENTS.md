@@ -26,9 +26,10 @@ Crates must not grow product behavior unless the task asks for it.
 Present:
 
 - canonical IR for requests, responses, and stream events (`ir`)
-- hub-and-spoke codecs for Anthropic Messages, OpenAI Chat Completions, and
-  OpenAI Responses, including streaming (`codec`). The field mapping and lossy
-  conversions are in [docs/codecs.md](docs/codecs.md).
+- hub-and-spoke codecs for Anthropic Messages, OpenAI Chat Completions,
+  OpenAI Responses, and the Generative Language API (`generateContent` and
+  `streamGenerateContent`), including streaming (`codec`). The field mapping
+  and lossy conversions are in [docs/codecs.md](docs/codecs.md).
 - named quirk profiles (`quirks`) and the `Provider` trait with Chat,
   Responses, and Messages adapters (`provider`)
 - ordered model routes and failover before the first stream event (`router`)
@@ -41,7 +42,6 @@ Present:
 
 Planned behavior, not present yet:
 
-- Gemini codec
 - a future Tauri v2 menu-bar app at `apps/desktop` (do not create it until a
   task asks for it)
 

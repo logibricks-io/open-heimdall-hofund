@@ -17,11 +17,10 @@ Heimdall is the gate. Hofund is the sword that guards it.
 ## Status
 
 **Pre-alpha.** The canonical IR, the Anthropic Messages, OpenAI Chat
-Completions, and OpenAI Responses codecs, quirk profiles, upstream adapters,
-ordered failover, the local HTTP server, and config adapters for Claude Code,
-Codex CLI, Gemini CLI, and OpenCode are implemented. See
-[docs/codecs.md](docs/codecs.md). The Gemini codec and the desktop app are
-not implemented.
+Completions, OpenAI Responses, and Generative Language codecs, quirk profiles,
+upstream adapters, ordered failover, the local HTTP server, and config
+adapters for Claude Code, Codex CLI, Gemini CLI, and OpenCode are implemented.
+See [docs/codecs.md](docs/codecs.md). The desktop app is not implemented.
 
 `hofund serve` listens on `127.0.0.1:3425` unless the config says otherwise.
 Every `/v1` request needs the bearer token from `hofund token show`. The
@@ -31,9 +30,9 @@ commands are `serve`, `config check`, `token show`, `token rotate`, `usage`,
 ## Planned features
 
 - Hub-and-spoke translation between LLM API protocols: Anthropic Messages,
-  OpenAI Chat Completions, OpenAI Responses, and later Gemini. Each protocol is
-  implemented once against a canonical IR, not as an N-by-M matrix of direct
-  translators.
+  OpenAI Chat Completions, OpenAI Responses, and the Generative Language API.
+  Each protocol is implemented once against a canonical IR, not as an N-by-M
+  matrix of direct translators.
 - Coding-agent config adapters (Claude Code, Codex, Gemini CLI, OpenCode, and
   others) that plan and apply edits so any agent can call any model.
 - Routing groups, selection strategies, and failover across providers and
