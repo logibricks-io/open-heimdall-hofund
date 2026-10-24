@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/agent",
+    "crates/cli",
+    "crates/codec",
+    "crates/config",
+    "crates/daemon",
+    "crates/gateway",
+    "crates/ir",
+    "crates/provider",
+    "crates/quirks",
+    "crates/router",
+    "crates/secrets",
+    "crates/usage",
+    "xtask",
+]
+default-members = ["crates/cli"]
+
+[workspace.package]
+version = "0.0.1"
+authors = ["LogiBricks"]
+edition = "2024"
+license = "MIT"
+publish = false
+repository = "https://github.com/logibricks-io/open-heimdall-hofund"
+homepage = "https://github.com/logibricks-io/open-heimdall-hofund"
+rust-version = "1.99.1"
+
+# Repeat the package version on each path dependency. `workspace = true` without
+# a version is a wildcard, which `cargo deny` rejects.
+[workspace.dependencies]
+hofund-agent = { version = "0.0.1", path = "crates/agent" }
+hofund-codec = { version = "0.0.1", path = "crates/codec" }
+hofund-config = { version = "0.0.1", path = "crates/config" }
+hofund-daemon = { version = "0.0.1", path = "crates/daemon" }
+hofund-gateway = { version = "0.0.1", path = "crates/gateway" }
+hofund-ir = { version = "0.0.1", path = "crates/ir" }
+hofund-provider = { version = "0.0.1", path = "crates/provider" }
+hofund-quirks = { version = "0.0.1", path = "crates/quirks" }
+hofund-router = { version = "0.0.1", path = "crates/router" }
+hofund-secrets = { version = "0.0.1", path = "crates/secrets" }
+hofund-usage = { version = "0.0.1", path = "crates/usage" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+pedantic = { level = "allow", priority = -1 }

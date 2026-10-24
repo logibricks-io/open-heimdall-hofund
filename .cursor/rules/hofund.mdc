@@ -1,0 +1,52 @@
+---
+description: Hofund language, architecture, and scaffold conventions for every change
+alwaysApply: true
+---
+
+# Hofund conventions
+
+This rule restates [AGENTS.md](../../AGENTS.md). Follow it on every change.
+
+## Language
+
+Write standard English only: code, identifiers, comments, docs, commit
+messages, pull request titles and descriptions, issue text, CI names, and
+error messages.
+
+The only exceptions are future i18n language-pack files and translated
+READMEs named `README.<lang>.md`. `README.md` is always English. Do not mix
+languages inside a source file.
+
+## Architecture
+
+Spine, dependencies point downward only:
+
+`ir ← codec ← provider ← router ← gateway ← daemon ← cli`
+
+- `agent` depends only on `config`, never on `gateway`.
+- Vendor names must never appear in `crates/gateway` or `crates/router`.
+  Quirks live in `quirks` data and provider adapters. Protocol names belong
+  in `codec`.
+- Only `gateway` may depend on axum, tower, or hyper.
+- No runtime crate depends on `xtask`.
+- Do not create `apps/desktop` unless the task asks. It is reserved for a
+  future Tauri v2 menu-bar app.
+- Do not use the magpie name or logo as hofund branding. Credit stays in
+  `README.md`, `README.zh-CN.md`, and `THIRD_PARTY_NOTICES.md`.
+
+The dependency table in `docs/architecture.md` and `expected_deps` in
+`xtask/tests/workspace_invariants.rs` are normative. Update both, plus the
+manifest, when an edge changes.
+
+## Verify
+
+Pinned toolchain: Rust 1.99.1, edition 2024. `unsafe` is forbidden.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+This tree is a pre-alpha scaffold. Do not add product behavior unless the
+task asks for it.

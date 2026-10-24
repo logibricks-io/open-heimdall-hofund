@@ -1,0 +1,16 @@
+[package]
+name = "hofund-quirks"
+description = "Data-driven vendor capability and protocol-quirk descriptions."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

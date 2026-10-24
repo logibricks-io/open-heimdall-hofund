@@ -1,0 +1,6 @@
+# Local builds and CI use this compiler. Keep the full major.minor.patch
+# triple: a bare minor version is rewritten by some toolchain installers.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

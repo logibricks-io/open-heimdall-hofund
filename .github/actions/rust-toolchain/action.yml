@@ -1,0 +1,24 @@
+name: rust-toolchain
+description: Install the Rust toolchain pinned in rust-toolchain.toml
+
+runs:
+  using: composite
+  steps:
+    - name: Read pinned toolchain
+      id: pinned
+      shell: bash
+      run: |
+        channel="$(awk -F'"' '/^channel *=/ { print $2; exit }' rust-toolchain.toml)"
+        case "$channel" in
+          *.*.*) ;;
+          *)
+            echo "rust-toolchain.toml channel must be a full major.minor.patch triple" >&2
+            exit 1
+            ;;
+        esac
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@v1
+      with:
+        toolchain: ${{ steps.pinned.outputs.channel }}
+        components: rustfmt, clippy
