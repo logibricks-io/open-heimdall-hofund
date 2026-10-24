@@ -1,0 +1,137 @@
+---
+source: crates/codec/tests/protocol.rs
+expression: pretty_value!(&request)
+---
+{
+  "model": "gpt-4o",
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "You are a careful assistant."
+        }
+      ]
+    },
+    {
+      "role": "developer",
+      "content": [
+        {
+          "type": "text",
+          "text": "Prefer metric units."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What's the weather?"
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "url",
+            "url": "https://example.com/paris.png"
+          },
+          "detail": "high"
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "aGVsbG8="
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "text": "Check the tool."
+        },
+        {
+          "type": "text",
+          "text": "I'll look that up."
+        },
+        {
+          "type": "tool_call",
+          "id": "call_1",
+          "name": "get_weather",
+          "arguments": {
+            "form": "json",
+            "value": {
+              "city": "Paris",
+              "units": "c"
+            }
+          }
+        }
+      ],
+      "extensions": {
+        "function_call": null
+      }
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "id": "call_1",
+          "content": [
+            {
+              "type": "text",
+              "text": "service down"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Look up the weather.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ]
+      }
+    }
+  ],
+  "tool_choice": {
+    "mode": {
+      "mode": "required"
+    }
+  },
+  "params": {
+    "max_tokens": 256,
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "stop": [
+      "END"
+    ],
+    "seed": 7,
+    "presence_penalty": 0.1,
+    "frequency_penalty": 0.2
+  },
+  "stream": true,
+  "extensions": {
+    "stream_options": {
+      "include_usage": true
+    },
+    "metadata": {
+      "user_id": "user_1"
+    }
+  }
+}

@@ -21,14 +21,18 @@ the English text inside a source file.
 ## What this repository is
 
 hofund is a pre-alpha local LLM gateway in the LogiBricks Heimdall series.
-The crates in this workspace are an empty scaffold. They must compile, and
-they must not grow product behavior unless the task asks for it.
+Crates must not grow product behavior unless the task asks for it.
+
+Present:
+
+- canonical IR for requests, responses, and stream events (`ir`)
+- hub-and-spoke codecs for Anthropic Messages and OpenAI Chat Completions,
+  including streaming (`codec`). The field mapping and lossy conversions are
+  in [docs/codecs.md](docs/codecs.md).
 
 Planned behavior, not present yet:
 
-- canonical IR for requests, responses, and stream events (`ir`)
-- hub-and-spoke protocol codecs (`codec`): Anthropic Messages, OpenAI Chat
-  Completions, OpenAI Responses, later Gemini
+- OpenAI Responses and, later, Gemini codecs
 - data-driven vendor quirks (`quirks`) and upstream adapters (`provider`)
 - routing groups, strategies, and failover (`router`)
 - an axum HTTP server and middleware pipeline (`gateway`)

@@ -9,8 +9,10 @@ Hofund is an independent reimplementation inspired by magpie. The credit and
 license notice live in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Do
 not use that project's name or logo as hofund branding.
 
-The workspace is a scaffold. Crates compile and state their responsibility, and
-they do not yet implement that responsibility.
+`ir` and the Anthropic Messages and OpenAI Chat Completions codecs are
+implemented, including streaming. The other crates compile and state their
+responsibility, and they do not yet implement it. The codec field mapping is
+in [codecs.md](codecs.md).
 
 Sibling repositories:
 
@@ -122,8 +124,9 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 
 ## What is intentionally absent
 
-- Business logic: codecs, the `Provider` trait, routing strategies, the HTTP
-  server, and config rewriting are not implemented.
+- The `Provider` trait, routing strategies, the HTTP server, and config
+  rewriting are not implemented.
+- OpenAI Responses and Gemini codecs.
 - `apps/desktop`.
 - Language packs. A future i18n pack is the other place, besides
   `README.<lang>.md`, where a language other than English may appear.
