@@ -21,8 +21,12 @@ Codec::decode_request / encode_request
 Codec::decode_response / encode_response
 Codec::decode_stream / encode_stream
 Codec::stream_decoder -> StreamDecoder::{push, finish}
+Codec::stream_encoder -> StreamEncoder::push
 Codec::encode_error(status, message) -> JSON body
 ```
+
+`stream_encoder` writes one event at a time and keeps block state between
+calls. `encode_stream` is that encoder over a whole slice.
 
 `encode_error` writes the protocol's error object. Anthropic uses
 `error.type` (`invalid_request_error`, `authentication_error`,

@@ -11,6 +11,10 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# `cache` (the default) pulls an older hashbrown through hashlink. The ledger
+# does not use the statement cache, so only the bundled SQLite build is enabled.
+rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }
+thiserror = "2.0.21"
 
 [lints]
 workspace = true

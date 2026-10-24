@@ -1,6 +1,17 @@
 # Advisories, licenses, bans, and sources for `cargo deny check`.
 # Vulnerability advisories always fail the check. Yanked crates fail below.
 
+[graph]
+# CI builds these three targets. The wasm32 SQLite backend is not shipped and
+# pulls a second hashbrown, so it stays outside this graph.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    # ring 0.17 still depends on windows-sys 0.52 here. The skip below names it.
+    "aarch64-pc-windows-msvc",
+]
+
 [advisories]
 version = 2
 yanked = "deny"
