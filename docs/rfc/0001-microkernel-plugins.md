@@ -905,6 +905,18 @@ D2 follows the review answers on D1. Shared protocol helpers stay in the SDK and
 - The gateway fallback authenticates, then calls `InboundSurface::handle` inside an `inbound` span and a 60 second timeout. `echo` is mounted, including a path under its prefix. Codec routes stay on their own axum paths.
 - The daemon config supplies `connect_timeout_ms` and `read_timeout_ms` to `HttpLimits`. Omitted keys use the 10 second connect and 60 second idle-read defaults. These are the socket budgets. The kernel idle deadline stays the endpoint timeout.
 
+### PR B2 notes
+
+B2 is the config shape from section 2.1. It does not add a plugin.
+
+- `protocol` is a string. The daemon converts it with `ProtocolId::try_from`. Config does not name that type. A string that is not a codec id and not a legacy short name still loads and fails when the factory is resolved. That error names the provider and lists the codec ids.
+- For this release, `kind` and the short names `chat`, `responses`, `messages`, `generative`, and `converse` still load. They are rewritten to `openai-chat`, `openai-responses`, `anthropic-messages`, `generative-language`, or `bedrock-converse`, and the load records a warning that names the replacement. `kind = "openai_compat"` with `protocol = "responses"` stays Responses. A `kind` that disagrees with `protocol` is an error. The next release rejects `kind` and the short names.
+- `project`, `location`, `credentials`, `impersonate`, `access_key_id`, `secret_access_key`, `session_token`, and `region` load from `[providers.options]`. The same keys at the top of a provider still parse for this release: a non-empty value is copied into `options` and the load records a warning. The next release rejects them. Config does not check which preset they belong to.
+- A string that is empty or only whitespace is absent. That applies to those legacy keys and to string values in `[providers.options]` and `[subscriptions.options]`, including a string nested in a table. The key is omitted. There is no error and no warning. A blank string inside an array is kept. `0`, `false`, an empty array, and an empty table are values and are kept.
+- `[providers.options]` and `[subscriptions.options]` hold a string, an integer, a boolean, an array, or a table. Config does not name `RawTable`. Until E, the daemon's Vertex and Bedrock readers require a string and name the provider and the key when the type is wrong. `Debug` shows option keys and header names, and redacts every option value, every header value, and `api_key`. The table is opaque and may hold secrets, so there is no allowlist of safe keys.
+- Until E, the daemon still reads those option keys to construct `Vertex` and `Bedrock`. E deletes that read when the plugins validate `options`. Options are not forwarded to plugin factories in this pull request.
+- `[[subscriptions]]` has `id`, `accounts` (`*` or one account id), and `[subscriptions.options]`. The daemon stores the table and does not build members. That is H. An id that no plugin knows still loads until H.
+
 ### Parallel work plan
 
 B is alone. After B, B2 and C can proceed together. D starts after C, because both edit `providers` and C lands the snapshot those calls publish. K waits for C and must merge before H. L waits for D. H does not wait for L: until L, subscription commands stay on the in-process CLI path. H does wait for encrypted account storage. `PlaintextFileAccountStore` is not the store those plugins persist to.

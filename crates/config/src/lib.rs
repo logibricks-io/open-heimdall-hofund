@@ -5,6 +5,7 @@
 //! running process.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,7 +14,12 @@ use serde::Deserialize;
 use thiserror::Error;
 
 /// A validated configuration file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// [`Debug`] redacts `api_key`, every header value, and every options value.
+/// Option keys and header names stay visible. The options table is opaque and
+/// may hold secrets, so values are redacted rather than matched against an
+/// allowlist of safe keys.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     /// Address the gateway binds.
     pub listen: SocketAddr,
@@ -33,6 +39,10 @@ pub struct Config {
     pub providers: Vec<Provider>,
     /// Model routes, in file order.
     pub routes: Vec<Route>,
+    /// Account subscriptions, in file order.
+    pub subscriptions: Vec<Subscription>,
+    /// Deprecated keys that still loaded. The next release rejects them.
+    pub warnings: Vec<String>,
 }
 
 /// Failover thresholds.
@@ -53,19 +63,71 @@ impl Default for Failover {
     }
 }
 
+/// One value in an opaque options table.
+///
+/// The shapes match the plugin table: string, integer, boolean, array, and
+/// table. A float or a datetime is a syntax error. Numbers are integers.
+///
+/// A string that is empty or only whitespace is absent. The key is omitted,
+/// including a string nested in a table. That is not an error and not a
+/// warning. A blank string inside an array is kept, because an array element
+/// is not a key. `0`, `false`, an empty array, and an empty table are values
+/// and are kept.
+///
+/// [`Debug`] prints `<redacted>` for every leaf. Keys of a nested table stay
+/// visible.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum Value {
+    /// A string.
+    String(String),
+    /// An integer.
+    Integer(i64),
+    /// A boolean.
+    Boolean(bool),
+    /// An ordered list.
+    Array(Vec<Value>),
+    /// A nested table.
+    Table(BTreeMap<String, Value>),
+}
+
+impl Value {
+    /// The string, when this value is a string.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::String(_) | Self::Integer(_) | Self::Boolean(_) => {
+                formatter.write_str("\"<redacted>\"")
+            }
+            Self::Array(items) => formatter.debug_list().entries(items).finish(),
+            Self::Table(table) => formatter.debug_map().entries(table).finish(),
+        }
+    }
+}
+
 /// One upstream endpoint.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Vendor settings live in [`Self::options`]. This struct does not name them.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Provider {
     /// Stable id used by routes.
     pub id: String,
-    /// How an explicit endpoint speaks. Absent when [`Self::preset`] is set.
-    pub kind: Option<Kind>,
     /// Preset id. The daemon fills the endpoint from the preset catalog.
     pub preset: Option<String>,
-    /// Preset region. Absent uses the preset's own endpoints.
-    pub region: Option<String>,
-    /// Protocol selected inside a preset. Absent lets the preset pick.
-    pub preset_wire: Option<PresetWire>,
+    /// Codec id, such as `openai-chat`. Absent when the preset has one protocol.
+    ///
+    /// The daemon converts this with `ProtocolId::try_from`. This crate stores
+    /// the string and does not name that type.
+    pub protocol: Option<String>,
     /// API root. The adapter appends its protocol path.
     ///
     /// Empty when a preset supplies the URL.
@@ -81,77 +143,32 @@ pub struct Provider {
     /// A route member can override this. Absent leaves the cap to a quirk
     /// profile, or to the Messages codec's fallback.
     pub max_output_tokens: Option<u64>,
-    /// Google Cloud project id. Used by `preset = "google-vertex"`.
+    /// Plugin settings. The plugin validates the keys.
     ///
-    /// Empty for every other provider. The value is trimmed and lowercased.
-    pub project: String,
-    /// Vertex AI location (`global`, `us`, `eu`, or a region). Empty means
-    /// `global` when the preset is `google-vertex`.
-    pub location: String,
-    /// Path of a Google credentials file. Empty uses Application Default
-    /// Credentials. The file is not read into this config.
-    pub credentials: String,
-    /// Service account email the Vertex token is traded for. Empty keeps the
-    /// account in the credentials file.
-    pub impersonate: String,
-    /// AWS access key id for Bedrock Converse. `env:NAME` reads that variable.
-    ///
-    /// Empty unless `protocol = "converse"` on preset `bedrock`, or
-    /// `kind = "converse"`.
-    pub access_key_id: String,
-    /// AWS secret access key for Bedrock Converse. `env:NAME` reads that
-    /// variable. The value is not written to logs.
-    pub secret_access_key: String,
-    /// AWS session token for Bedrock Converse. Empty for a long-lived key.
-    /// `env:NAME` reads that variable.
-    pub session_token: String,
+    /// See [`Value`] for which TOML shapes load and for the empty-string rule.
+    pub options: BTreeMap<String, Value>,
 }
 
-/// Protocol family of one provider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// Chat Completions or the Responses API.
-    OpenAiCompat {
-        /// Which of the two protocols the endpoint expects.
-        protocol: Protocol,
-    },
-    /// The Messages API.
-    Anthropic,
-    /// The Generative Language API (`generateContent`).
-    ///
-    /// `base_url` is the root `models/{model}:generateContent` is appended to.
-    /// A bare host is completed with `/v1beta`. A pasted method URL is cut
-    /// back to that root. The API key is sent as `x-goog-api-key`.
-    Generative,
-    /// Amazon Bedrock Converse.
-    ///
-    /// `base_url` is the runtime root. `region` is the signing region.
-    /// `access_key_id` and `secret_access_key` sign the call. No API key.
-    Converse,
+/// Which accounts of one subscription become router members.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Accounts {
+    /// Every account stored for this subscription's plugin.
+    All,
+    /// One account id.
+    One(String),
 }
 
-/// Protocol selected for [`Kind::OpenAiCompat`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Protocol {
-    /// `POST {base}/chat/completions`.
-    Chat,
-    /// `POST {base}/responses`.
-    Responses,
-}
-
-/// Protocol selected inside a preset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PresetWire {
-    /// Chat Completions.
-    Chat,
-    /// The Responses API.
-    Responses,
-    /// The Messages API.
-    Messages,
-    /// The Generative Language API.
-    Generative,
-    /// Amazon Bedrock Converse.
-    Converse,
+/// One subscription. The plugin validates [`Self::options`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct Subscription {
+    /// Subscription plugin id.
+    pub id: String,
+    /// Which accounts to serve.
+    pub accounts: Accounts,
+    /// Vendor host, client id, and any other plugin setting.
+    ///
+    /// The empty-string rule is the same as [`Provider::options`].
+    pub options: BTreeMap<String, Value>,
 }
 
 /// One model route.
@@ -177,6 +194,64 @@ pub struct Upstream {
     ///
     /// Absent uses the provider's `max_output_tokens`.
     pub max_output_tokens: Option<u64>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("listen", &self.listen)
+            .field("token_file", &self.token_file)
+            .field("usage_file", &self.usage_file)
+            .field("failover", &self.failover)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("read_timeout", &self.read_timeout)
+            .field("providers", &self.providers)
+            .field("routes", &self.routes)
+            .field("subscriptions", &self.subscriptions)
+            .field("warnings", &self.warnings)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Provider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Provider")
+            .field("id", &self.id)
+            .field("preset", &self.preset)
+            .field("protocol", &self.protocol)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("quirks", &self.quirks)
+            .field("headers", &RedactedPairs(&self.headers))
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Subscription {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Subscription")
+            .field("id", &self.id)
+            .field("accounts", &self.accounts)
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+struct RedactedPairs<'a>(&'a BTreeMap<String, String>);
+
+impl fmt::Debug for RedactedPairs<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = formatter.debug_map();
+        for key in self.0.keys() {
+            map.entry(key, &"<redacted>");
+        }
+        map.finish()
+    }
 }
 
 /// The first structural problem in a configuration file.
@@ -301,6 +376,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     if raw.usage_file.is_empty() {
         return Err(ConfigError::Invalid("usage_file is empty".to_owned()));
     }
+    let mut warnings = Vec::new();
     let mut seen = BTreeSet::new();
     let mut providers = Vec::new();
     for provider in raw.providers {
@@ -313,33 +389,42 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
                 provider.id
             )));
         }
-        let source = source_of(&provider)?;
+        if provider.preset.as_ref().is_some_and(String::is_empty) {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{}` has an empty preset",
+                provider.id
+            )));
+        }
+        let protocol = resolve_protocol(&provider, &mut warnings)?;
+        if provider.preset.is_none() && protocol.is_none() {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{}` needs a protocol or a preset",
+                provider.id
+            )));
+        }
+        if provider.preset.is_none() && provider.base_url.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{}` has an empty base_url",
+                provider.id
+            )));
+        }
         if provider.max_output_tokens == Some(0) {
             return Err(ConfigError::Invalid(format!(
                 "provider `{}` has max_output_tokens 0",
                 provider.id
             )));
         }
-        let vertex = vertex_of(&provider)?;
-        let aws = aws_of(&provider)?;
+        let options = options_of(&provider, &mut warnings)?;
         providers.push(Provider {
             id: provider.id,
-            kind: source.kind,
-            preset: source.preset,
-            region: source.region,
-            preset_wire: source.preset_wire,
-            base_url: source.base_url,
+            preset: provider.preset,
+            protocol,
+            base_url: provider.base_url,
             api_key: provider.api_key,
             quirks: provider.quirks,
             headers: provider.headers,
             max_output_tokens: provider.max_output_tokens,
-            project: vertex.project,
-            location: vertex.location,
-            credentials: vertex.credentials,
-            impersonate: vertex.impersonate,
-            access_key_id: aws.access_key_id,
-            secret_access_key: aws.secret_access_key,
-            session_token: aws.session_token,
+            options,
         });
     }
     let mut models = BTreeSet::new();
@@ -370,6 +455,45 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             upstreams,
         });
     }
+    let mut subscriptions = Vec::new();
+    let mut subscription_ids = BTreeSet::new();
+    for subscription in raw.subscriptions {
+        if !kebab(&subscription.id) {
+            return Err(ConfigError::Invalid(format!(
+                "subscription id `{}` is not kebab-case",
+                subscription.id
+            )));
+        }
+        if !subscription_ids.insert(subscription.id.clone()) {
+            return Err(ConfigError::Invalid(format!(
+                "subscription id `{}` is repeated",
+                subscription.id
+            )));
+        }
+        let accounts = match subscription.accounts.as_str() {
+            "*" => Accounts::All,
+            id if kebab(id) => Accounts::One(id.to_owned()),
+            _ => {
+                return Err(ConfigError::Invalid(format!(
+                    "subscription `{}` accounts must be `*` or an account id",
+                    subscription.id
+                )));
+            }
+        };
+        for key in subscription.options.keys() {
+            if key.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "subscription `{}` has an empty option key",
+                    subscription.id
+                )));
+            }
+        }
+        subscriptions.push(Subscription {
+            id: subscription.id,
+            accounts,
+            options: prune_table(subscription.options),
+        });
+    }
     Ok(Config {
         listen,
         token_file: raw.token_file,
@@ -382,7 +506,171 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         read_timeout: duration_ms("read_timeout_ms", raw.read_timeout_ms)?,
         providers,
         routes,
+        subscriptions,
+        warnings,
     })
+}
+
+fn options_of(
+    provider: &RawProvider,
+    warnings: &mut Vec<String>,
+) -> Result<BTreeMap<String, Value>, ConfigError> {
+    let mut options = BTreeMap::new();
+    for (key, value) in &provider.options {
+        if key.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{}` has an empty option key",
+                provider.id
+            )));
+        }
+        if let Some(value) = prune_value(value.clone()) {
+            options.insert(key.clone(), value);
+        }
+    }
+    for (key, value) in legacy_options(provider) {
+        let Some(value) = value else {
+            continue;
+        };
+        if value.trim().is_empty() {
+            continue;
+        }
+        if let Some(existing) = options.get(key)
+            && !matches!(existing, Value::String(stored) if stored == value)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{}` sets `{key}` and options.{key} to different values",
+                provider.id
+            )));
+        }
+        options.insert((*key).to_owned(), Value::String((*value).to_owned()));
+        warnings.push(format!(
+            "provider `{id}`: `{key}` moved to [providers.options]. The old key still loads and is removed next release.",
+            id = provider.id
+        ));
+    }
+    Ok(options)
+}
+
+/// `kind` and the five short protocol names still load for this release.
+///
+/// A non-empty value is rewritten to a codec id and the load records a warning
+/// that names the replacement. The next release rejects both. `kind` selects
+/// the family: `openai_compat` may be Chat or Responses. A `kind` that
+/// disagrees with `protocol` is an error. `protocol` is trimmed first. A blank
+/// value is absent, the same as a blank `kind`. A string that is neither a
+/// short name nor a codec id is kept, and the daemon rejects it.
+fn resolve_protocol(
+    provider: &RawProvider,
+    warnings: &mut Vec<String>,
+) -> Result<Option<String>, ConfigError> {
+    let kind = match provider.kind.as_deref() {
+        Some(kind) if kind.trim().is_empty() => None,
+        Some(kind) => Some(kind),
+        None => None,
+    };
+    let raw_protocol = provider
+        .protocol
+        .as_deref()
+        .map(str::trim)
+        .filter(|protocol| !protocol.is_empty());
+    let family = match kind {
+        None => None,
+        Some("openai_compat" | "anthropic" | "generative" | "converse") => kind,
+        Some(other) => {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{}` has unknown kind `{other}`; expected openai_compat, anthropic, generative, or converse",
+                provider.id
+            )));
+        }
+    };
+    let (canonical, short_name) = match raw_protocol {
+        None => (None, None),
+        Some("chat") => (Some("openai-chat"), Some("chat")),
+        Some("responses") => (Some("openai-responses"), Some("responses")),
+        Some("messages") => (Some("anthropic-messages"), Some("messages")),
+        Some("generative") => (Some("generative-language"), Some("generative")),
+        Some("converse") => (Some("bedrock-converse"), Some("converse")),
+        Some(protocol) => (Some(protocol), None),
+    };
+    let chosen = match (family, canonical) {
+        (None, protocol) => protocol,
+        (Some("openai_compat"), None | Some("openai-chat")) => Some("openai-chat"),
+        (Some("openai_compat"), Some("openai-responses")) => Some("openai-responses"),
+        (Some("anthropic"), None | Some("anthropic-messages")) => Some("anthropic-messages"),
+        (Some("generative"), None | Some("generative-language")) => Some("generative-language"),
+        (Some("converse"), None | Some("bedrock-converse")) => Some("bedrock-converse"),
+        (Some(kind_name), _) => {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{}` sets kind `{kind_name}` and protocol `{}` to different protocols",
+                provider.id,
+                raw_protocol.unwrap_or_default()
+            )));
+        }
+    };
+    if family.is_some() {
+        let replacement = chosen.expect("kind selects a protocol");
+        warnings.push(format!(
+            "provider `{id}`: `kind` was removed; set `protocol = \"{replacement}\"`. The old key still loads and is removed next release.",
+            id = provider.id
+        ));
+    }
+    if let Some(short_name) = short_name {
+        let replacement = chosen.expect("short name selects a protocol");
+        warnings.push(format!(
+            "provider `{id}`: protocol `{short_name}` was renamed to `{replacement}`. The old name still loads and is removed next release.",
+            id = provider.id
+        ));
+    }
+    Ok(chosen.map(str::to_owned))
+}
+
+fn prune_table(table: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    table
+        .into_iter()
+        .filter_map(|(key, value)| prune_value(value).map(|value| (key, value)))
+        .collect()
+}
+
+fn prune_value(value: Value) -> Option<Value> {
+    match value {
+        Value::String(text) if text.trim().is_empty() => None,
+        Value::Table(table) => Some(Value::Table(prune_table(table))),
+        other => Some(other),
+    }
+}
+
+fn legacy_options(provider: &RawProvider) -> [(&str, &Option<String>); 8] {
+    [
+        ("project", &provider.project),
+        ("location", &provider.location),
+        ("credentials", &provider.credentials),
+        ("impersonate", &provider.impersonate),
+        ("access_key_id", &provider.access_key_id),
+        ("secret_access_key", &provider.secret_access_key),
+        ("session_token", &provider.session_token),
+        ("region", &provider.region),
+    ]
+}
+
+fn kebab(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut prev_hyphen = true;
+    for byte in bytes {
+        if *byte == b'-' {
+            if prev_hyphen {
+                return false;
+            }
+            prev_hyphen = true;
+        } else if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            prev_hyphen = false;
+        } else {
+            return false;
+        }
+    }
+    !prev_hyphen
 }
 
 fn duration_ms(name: &str, millis: u64) -> Result<Duration, ConfigError> {
@@ -431,241 +719,6 @@ fn upstream_of(
     })
 }
 
-struct Source {
-    kind: Option<Kind>,
-    preset: Option<String>,
-    region: Option<String>,
-    preset_wire: Option<PresetWire>,
-    base_url: String,
-}
-
-fn source_of(provider: &RawProvider) -> Result<Source, ConfigError> {
-    match (&provider.preset, &provider.kind) {
-        (Some(_), Some(_)) => Err(ConfigError::Invalid(format!(
-            "provider `{}` sets both preset and kind",
-            provider.id
-        ))),
-        (None, None) => Err(ConfigError::Invalid(format!(
-            "provider `{}` needs a kind or a preset",
-            provider.id
-        ))),
-        (None, Some(kind)) => {
-            let converse = kind == "converse";
-            if provider.region.is_some() && !converse {
-                return Err(ConfigError::Invalid(format!(
-                    "provider `{}` sets region without a preset",
-                    provider.id
-                )));
-            }
-            if converse && provider.region.as_deref().unwrap_or("").is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "provider `{}` is Converse and needs a region",
-                    provider.id
-                )));
-            }
-            if provider.base_url.is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "provider `{}` has an empty base_url",
-                    provider.id
-                )));
-            }
-            Ok(Source {
-                kind: Some(kind_of(provider, kind)?),
-                preset: None,
-                region: if converse {
-                    provider.region.clone()
-                } else {
-                    None
-                },
-                preset_wire: None,
-                base_url: provider.base_url.clone(),
-            })
-        }
-        (Some(preset), None) => {
-            if preset.is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "provider `{}` has an empty preset",
-                    provider.id
-                )));
-            }
-            if provider.region.as_ref().is_some_and(String::is_empty) {
-                return Err(ConfigError::Invalid(format!(
-                    "provider `{}` has an empty region",
-                    provider.id
-                )));
-            }
-            Ok(Source {
-                kind: None,
-                preset: Some(preset.clone()),
-                region: provider.region.clone(),
-                preset_wire: preset_wire_of(provider)?,
-                base_url: provider.base_url.clone(),
-            })
-        }
-    }
-}
-
-struct VertexFields {
-    project: String,
-    location: String,
-    credentials: String,
-    impersonate: String,
-}
-
-fn vertex_of(provider: &RawProvider) -> Result<VertexFields, ConfigError> {
-    let project = provider.project.trim().to_ascii_lowercase();
-    let location = provider.location.trim().to_ascii_lowercase();
-    let credentials = provider.credentials.trim().to_owned();
-    let impersonate = provider.impersonate.trim().to_ascii_lowercase();
-    let set = !project.is_empty()
-        || !location.is_empty()
-        || !credentials.is_empty()
-        || !impersonate.is_empty();
-    let is_vertex = provider.preset.as_deref() == Some("google-vertex");
-    if set && !is_vertex {
-        return Err(ConfigError::Invalid(format!(
-            "provider `{}` sets project, location, credentials, or impersonate, which only preset `google-vertex` uses",
-            provider.id
-        )));
-    }
-    if is_vertex && !provider.api_key.is_empty() {
-        return Err(ConfigError::Invalid(format!(
-            "provider `{}` is Google Vertex AI and does not take an API key",
-            provider.id
-        )));
-    }
-    if is_vertex && provider.protocol.is_some() {
-        return Err(ConfigError::Invalid(format!(
-            "provider `{}` is Google Vertex AI and has no protocol choice",
-            provider.id
-        )));
-    }
-    Ok(VertexFields {
-        project,
-        location,
-        credentials,
-        impersonate,
-    })
-}
-
-struct AwsFields {
-    access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
-}
-
-fn aws_of(provider: &RawProvider) -> Result<AwsFields, ConfigError> {
-    let access_key_id = provider.access_key_id.trim().to_owned();
-    let secret_access_key = provider.secret_access_key.trim().to_owned();
-    let session_token = provider.session_token.trim().to_owned();
-    let set =
-        !access_key_id.is_empty() || !secret_access_key.is_empty() || !session_token.is_empty();
-    let converse = (provider.preset.as_deref() == Some("bedrock")
-        && provider.protocol.as_deref() == Some("converse"))
-        || provider.kind.as_deref() == Some("converse");
-    if set && !converse {
-        return Err(ConfigError::Invalid(format!(
-            "provider `{}` sets access_key_id, secret_access_key, or session_token, which only Bedrock Converse uses",
-            provider.id
-        )));
-    }
-    if converse && access_key_id.is_empty() {
-        return Err(ConfigError::Invalid(format!(
-            "provider `{}` is Converse and needs access_key_id",
-            provider.id
-        )));
-    }
-    if converse && secret_access_key.is_empty() {
-        return Err(ConfigError::Invalid(format!(
-            "provider `{}` is Converse and needs secret_access_key",
-            provider.id
-        )));
-    }
-    if converse && !provider.api_key.is_empty() {
-        return Err(ConfigError::Invalid(format!(
-            "provider `{}` is Converse and does not take an API key",
-            provider.id
-        )));
-    }
-    Ok(AwsFields {
-        access_key_id,
-        secret_access_key,
-        session_token,
-    })
-}
-
-fn preset_wire_of(provider: &RawProvider) -> Result<Option<PresetWire>, ConfigError> {
-    match provider.protocol.as_deref() {
-        None => Ok(None),
-        Some("chat") => Ok(Some(PresetWire::Chat)),
-        Some("responses") => Ok(Some(PresetWire::Responses)),
-        Some("messages") => Ok(Some(PresetWire::Messages)),
-        Some("generative") => Ok(Some(PresetWire::Generative)),
-        Some("converse") => {
-            if provider.preset.as_deref() != Some("bedrock") {
-                return Err(ConfigError::Invalid(format!(
-                    "provider `{}` uses protocol `converse`, which only preset `bedrock` has",
-                    provider.id
-                )));
-            }
-            Ok(Some(PresetWire::Converse))
-        }
-        Some(other) => Err(ConfigError::Invalid(format!(
-            "provider `{}` has unknown protocol `{other}`",
-            provider.id
-        ))),
-    }
-}
-
-fn kind_of(provider: &RawProvider, kind: &str) -> Result<Kind, ConfigError> {
-    match kind {
-        "openai_compat" => {
-            let protocol = match provider.protocol.as_deref() {
-                None | Some("chat") => Protocol::Chat,
-                Some("responses") => Protocol::Responses,
-                Some(other) => {
-                    return Err(ConfigError::Invalid(format!(
-                        "provider `{}` has unknown protocol `{other}`",
-                        provider.id
-                    )));
-                }
-            };
-            Ok(Kind::OpenAiCompat { protocol })
-        }
-        "anthropic" => {
-            if provider.protocol.is_some() {
-                return Err(ConfigError::Invalid(format!(
-                    "provider `{}` does not take a protocol",
-                    provider.id
-                )));
-            }
-            Ok(Kind::Anthropic)
-        }
-        "generative" => {
-            if provider.protocol.is_some() {
-                return Err(ConfigError::Invalid(format!(
-                    "provider `{}` does not take a protocol",
-                    provider.id
-                )));
-            }
-            Ok(Kind::Generative)
-        }
-        "converse" => {
-            if provider.protocol.is_some() {
-                return Err(ConfigError::Invalid(format!(
-                    "provider `{}` does not take a protocol",
-                    provider.id
-                )));
-            }
-            Ok(Kind::Converse)
-        }
-        other => Err(ConfigError::Invalid(format!(
-            "provider `{}` has unknown kind `{other}`",
-            provider.id
-        ))),
-    }
-}
-
 fn default_listen() -> String {
     "127.0.0.1:3425".to_owned()
 }
@@ -690,7 +743,7 @@ fn default_read_timeout_ms() -> u64 {
     60_000
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFile {
     #[serde(default = "default_listen")]
@@ -709,6 +762,8 @@ struct RawFile {
     providers: Vec<RawProvider>,
     #[serde(default)]
     routes: Vec<RawRoute>,
+    #[serde(default)]
+    subscriptions: Vec<RawSubscription>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -733,22 +788,21 @@ fn default_statuses() -> BTreeSet<u16> {
     [429, 500, 502, 503, 504].into_iter().collect()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawProvider {
     id: String,
     #[serde(default)]
+    preset: Option<String>,
+    /// Accepted for one release, then rewritten to a codec id.
+    #[serde(default)]
     kind: Option<String>,
     #[serde(default)]
-    preset: Option<String>,
-    #[serde(default)]
-    region: Option<String>,
+    protocol: Option<String>,
     #[serde(default)]
     base_url: String,
     #[serde(default)]
     api_key: String,
-    #[serde(default)]
-    protocol: Option<String>,
     #[serde(default)]
     quirks: Option<String>,
     #[serde(default)]
@@ -756,19 +810,91 @@ struct RawProvider {
     #[serde(default)]
     max_output_tokens: Option<u64>,
     #[serde(default)]
-    project: String,
+    options: BTreeMap<String, Value>,
+    /// Accepted for one release, then copied into [`Self::options`].
     #[serde(default)]
-    location: String,
+    project: Option<String>,
     #[serde(default)]
-    credentials: String,
+    location: Option<String>,
     #[serde(default)]
-    impersonate: String,
+    credentials: Option<String>,
     #[serde(default)]
-    access_key_id: String,
+    impersonate: Option<String>,
     #[serde(default)]
-    secret_access_key: String,
+    access_key_id: Option<String>,
     #[serde(default)]
-    session_token: String,
+    secret_access_key: Option<String>,
+    #[serde(default)]
+    session_token: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSubscription {
+    id: String,
+    accounts: String,
+    #[serde(default)]
+    options: BTreeMap<String, Value>,
+}
+
+impl fmt::Debug for RawFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RawFile")
+            .field("listen", &self.listen)
+            .field("token_file", &self.token_file)
+            .field("usage_file", &self.usage_file)
+            .field("failover", &self.failover)
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("read_timeout_ms", &self.read_timeout_ms)
+            .field("providers", &self.providers)
+            .field("routes", &self.routes)
+            .field("subscriptions", &self.subscriptions)
+            .finish()
+    }
+}
+
+impl fmt::Debug for RawProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RawProvider")
+            .field("id", &self.id)
+            .field("preset", &self.preset)
+            .field("kind", &self.kind)
+            .field("protocol", &self.protocol)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("quirks", &self.quirks)
+            .field("headers", &RedactedPairs(&self.headers))
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("options", &self.options)
+            .field("project", &redacted_opt(&self.project))
+            .field("location", &redacted_opt(&self.location))
+            .field("credentials", &redacted_opt(&self.credentials))
+            .field("impersonate", &redacted_opt(&self.impersonate))
+            .field("access_key_id", &redacted_opt(&self.access_key_id))
+            .field("secret_access_key", &redacted_opt(&self.secret_access_key))
+            .field("session_token", &redacted_opt(&self.session_token))
+            .field("region", &redacted_opt(&self.region))
+            .finish()
+    }
+}
+
+impl fmt::Debug for RawSubscription {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RawSubscription")
+            .field("id", &self.id)
+            .field("accounts", &self.accounts)
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+fn redacted_opt(value: &Option<String>) -> Option<&'static str> {
+    value.as_ref().map(|_| "<redacted>")
 }
 
 #[derive(Debug, Deserialize)]
@@ -800,7 +926,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{Kind, Protocol, load};
+    use super::{Accounts, load};
 
     #[test]
     fn defaults_and_a_route_parse() {
@@ -808,9 +934,8 @@ mod tests {
             r#"
             [[providers]]
             id = "primary"
-            kind = "openai_compat"
+            protocol = "openai-responses"
             base_url = "http://127.0.0.1:9/v1"
-            protocol = "responses"
             [[routes]]
             model = "demo"
             upstreams = ["primary"]
@@ -819,13 +944,13 @@ mod tests {
         .expect("config");
         assert_eq!(config.listen.to_string(), "127.0.0.1:3425");
         assert_eq!(config.failover.statuses, [429, 500, 502, 503, 504].into());
-        assert!(matches!(
-            config.providers[0].kind,
-            Some(Kind::OpenAiCompat {
-                protocol: Protocol::Responses
-            })
-        ));
+        assert_eq!(
+            config.providers[0].protocol.as_deref(),
+            Some("openai-responses")
+        );
         assert!(config.providers[0].preset.is_none());
+        assert!(config.warnings.is_empty());
+        assert!(config.subscriptions.is_empty());
         assert_eq!(config.routes[0].upstreams[0].provider, "primary");
         assert_eq!(config.routes[0].upstreams[0].model, None);
         assert_eq!(config.providers[0].max_output_tokens, None);
@@ -857,11 +982,11 @@ mod tests {
             r#"
             [[providers]]
             id = "primary"
-            kind = "anthropic"
+            protocol = "anthropic-messages"
             base_url = "https://example.test"
             [[providers]]
             id = "backup"
-            kind = "openai_compat"
+            protocol = "openai-chat"
             base_url = "http://127.0.0.1:9/v1"
             [[routes]]
             model = "demo"
@@ -885,7 +1010,7 @@ mod tests {
             r#"
             [[providers]]
             id = "primary"
-            kind = "anthropic"
+            protocol = "anthropic-messages"
             base_url = "https://example.test"
             max_output_tokens = 8192
             [[routes]]
@@ -900,7 +1025,7 @@ mod tests {
             r#"
             [[providers]]
             id = "primary"
-            kind = "anthropic"
+            protocol = "anthropic-messages"
             base_url = "https://example.test"
             max_output_tokens = 0
             "#,
@@ -911,7 +1036,7 @@ mod tests {
             r#"
             [[providers]]
             id = "primary"
-            kind = "anthropic"
+            protocol = "anthropic-messages"
             base_url = "https://example.test"
             [[routes]]
             model = "demo"
@@ -923,29 +1048,32 @@ mod tests {
     }
 
     #[test]
-    fn a_generative_provider_parses_without_a_protocol() {
+    fn a_protocol_string_is_not_checked_against_the_codec_ids() {
         let config = load(
             r#"
             [[providers]]
             id = "studio"
-            kind = "generative"
+            protocol = "generative-language"
             base_url = "https://generativelanguage.googleapis.com"
             api_key = "env:GEMINI_API_KEY"
             "#,
         )
         .expect("config");
-        assert!(matches!(config.providers[0].kind, Some(Kind::Generative)));
-        let error = load(
+        assert_eq!(
+            config.providers[0].protocol.as_deref(),
+            Some("generative-language")
+        );
+        let stored = load(
             r#"
             [[providers]]
             id = "studio"
-            kind = "generative"
-            protocol = "chat"
+            protocol = "not-a-codec"
             base_url = "https://example.test"
             "#,
         )
-        .expect_err("protocol");
-        assert!(error.to_string().contains("does not take a protocol"));
+        .expect("unknown id is still a string");
+        assert_eq!(stored.providers[0].protocol.as_deref(), Some("not-a-codec"));
+        assert!(stored.warnings.is_empty());
     }
 
     #[test]
@@ -954,26 +1082,26 @@ mod tests {
             r#"
             [[providers]]
             id = "primary"
-            kind = "nope"
+            colour = "blue"
             base_url = "http://127.0.0.1:9"
             "#,
         )
-        .expect_err("kind");
-        assert!(error.to_string().contains("unknown kind"));
+        .expect_err("unknown field");
+        assert!(error.to_string().contains("colour"));
 
         let error = load("listen = \"not-an-address\"\n").expect_err("listen");
         assert!(error.to_string().contains("listen"));
     }
 
     #[test]
-    fn converse_keeps_the_signing_keys_and_refuses_an_api_key() {
+    fn old_vendor_keys_move_into_options_and_warn() {
         let config = load(
             r#"
             [[providers]]
             id = "bedrock"
             preset = "bedrock"
+            protocol = "bedrock-converse"
             region = "us-east-1"
-            protocol = "converse"
             access_key_id = "AKIAIOSFODNN7EXAMPLE"
             secret_access_key = "secret"
             session_token = "token"
@@ -981,85 +1109,112 @@ mod tests {
         )
         .expect("converse");
         let provider = &config.providers[0];
-        assert_eq!(provider.preset_wire, Some(super::PresetWire::Converse));
-        assert_eq!(provider.access_key_id, "AKIAIOSFODNN7EXAMPLE");
-        assert_eq!(provider.secret_access_key, "secret");
-        assert_eq!(provider.session_token, "token");
+        assert_eq!(provider.protocol.as_deref(), Some("bedrock-converse"));
+        assert_eq!(
+            provider
+                .options
+                .get("access_key_id")
+                .and_then(super::Value::as_str),
+            Some("AKIAIOSFODNN7EXAMPLE")
+        );
+        assert_eq!(
+            provider
+                .options
+                .get("secret_access_key")
+                .and_then(super::Value::as_str),
+            Some("secret")
+        );
+        assert_eq!(
+            provider
+                .options
+                .get("region")
+                .and_then(super::Value::as_str),
+            Some("us-east-1")
+        );
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`region` moved"))
+        );
+        let same = load(
+            r#"
+            [[providers]]
+            id = "bedrock"
+            preset = "bedrock"
+            protocol = "bedrock-converse"
+            region = "us-east-1"
+            [providers.options]
+            region = "us-east-1"
+            "#,
+        )
+        .expect("same value");
+        assert_eq!(
+            same.providers[0]
+                .options
+                .get("region")
+                .and_then(super::Value::as_str),
+            Some("us-east-1")
+        );
         let error = load(
             r#"
             [[providers]]
             id = "bedrock"
             preset = "bedrock"
-            protocol = "converse"
-            api_key = "ABSK"
-            access_key_id = "AKIA"
-            secret_access_key = "secret"
+            region = "us-east-1"
+            [providers.options]
+            region = "eu-west-1"
             "#,
         )
-        .expect_err("api key");
-        assert!(error.to_string().contains("does not take an API key"));
-        let error = load(
-            r#"
-            [[providers]]
-            id = "openai"
-            preset = "openai"
-            access_key_id = "AKIA"
-            "#,
-        )
-        .expect_err("openai key");
-        assert!(error.to_string().contains("only Bedrock Converse"));
+        .expect_err("conflict");
+        assert!(error.to_string().contains("different values"));
     }
 
     #[test]
-    fn a_preset_does_not_require_a_kind_or_a_base_url() {
+    fn a_preset_does_not_require_a_protocol_or_a_base_url() {
         let config = load(
             r#"
             [[providers]]
             id = "openai"
             preset = "openai"
-            protocol = "responses"
+            protocol = "openai-responses"
             "#,
         )
         .expect("preset");
-        assert!(config.providers[0].kind.is_none());
         assert_eq!(config.providers[0].preset.as_deref(), Some("openai"));
         assert_eq!(
-            config.providers[0].preset_wire,
-            Some(super::PresetWire::Responses)
+            config.providers[0].protocol.as_deref(),
+            Some("openai-responses")
         );
         let google = load(
             r#"
             [[providers]]
             id = "gemini"
             preset = "google"
-            protocol = "generative"
             "#,
         )
         .expect("google");
-        assert_eq!(
-            google.providers[0].preset_wire,
-            Some(super::PresetWire::Generative)
-        );
+        assert!(google.providers[0].protocol.is_none());
         let error = load(
             r#"
             [[providers]]
-            id = "both"
-            kind = "anthropic"
-            preset = "anthropic"
+            id = "bare"
             base_url = "https://example.test"
             "#,
         )
-        .expect_err("both");
-        assert!(error.to_string().contains("both preset and kind"));
+        .expect_err("neither");
+        assert!(error.to_string().contains("protocol or a preset"));
     }
 
     #[test]
-    fn a_vertex_preset_keeps_the_project_and_refuses_a_key() {
+    fn options_keep_the_vertex_settings_the_plugin_validates() {
         let config = load(
             r#"
             [[providers]]
             id = "vertex"
             preset = "google-vertex"
+            api_key = "secret"
+            [providers.options]
             project = "My-Project"
             location = "US"
             credentials = "/tmp/adc.json"
@@ -1068,31 +1223,410 @@ mod tests {
         )
         .expect("vertex");
         let provider = &config.providers[0];
-        assert_eq!(provider.project, "my-project");
-        assert_eq!(provider.location, "us");
-        assert_eq!(provider.credentials, "/tmp/adc.json");
-        assert_eq!(provider.impersonate, "worker@example.com");
-        let error = load(
-            r#"
-            [[providers]]
-            id = "openai"
-            preset = "openai"
-            project = "my-project"
-            "#,
-        )
-        .expect_err("project on openai");
-        assert!(error.to_string().contains("google-vertex"));
-        let error = load(
+        assert_eq!(
+            provider
+                .options
+                .get("project")
+                .and_then(super::Value::as_str),
+            Some("My-Project")
+        );
+        assert_eq!(
+            provider
+                .options
+                .get("location")
+                .and_then(super::Value::as_str),
+            Some("US")
+        );
+        assert!(config.warnings.is_empty());
+        let legacy = load(
             r#"
             [[providers]]
             id = "vertex"
             preset = "google-vertex"
             project = "my-project"
-            api_key = "secret"
             "#,
         )
-        .expect_err("key");
-        assert!(error.to_string().contains("does not take an API key"));
+        .expect("legacy project");
+        assert_eq!(
+            legacy.providers[0]
+                .options
+                .get("project")
+                .and_then(super::Value::as_str),
+            Some("my-project")
+        );
+        assert!(
+            legacy
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("project"))
+        );
+    }
+
+    #[test]
+    fn a_subscription_names_accounts_and_opaque_options() {
+        let config = load(
+            r#"
+            [[subscriptions]]
+            id = "copilot"
+            accounts = "*"
+            [subscriptions.options]
+            host = "example.ghe.com"
+            client_id = "Iv1.example"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "work"
+            "#,
+        )
+        .expect("subscriptions");
+        assert_eq!(config.subscriptions[0].accounts, Accounts::All);
+        assert_eq!(
+            config.subscriptions[0]
+                .options
+                .get("host")
+                .and_then(super::Value::as_str),
+            Some("example.ghe.com")
+        );
+        assert_eq!(
+            config.subscriptions[1].accounts,
+            Accounts::One("work".to_owned())
+        );
+        let error = load(
+            r#"
+            [[subscriptions]]
+            id = "Copilot"
+            accounts = "*"
+            "#,
+        )
+        .expect_err("id");
+        assert!(error.to_string().contains("kebab-case"));
+        let error = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "Work"
+            "#,
+        )
+        .expect_err("account");
+        assert!(error.to_string().contains("account id"));
+    }
+
+    #[test]
+    fn kind_and_short_protocol_names_rewrite_and_warn() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "openai_compat"
+            protocol = "responses"
+            base_url = "http://127.0.0.1:9"
+            [[providers]]
+            id = "studio"
+            kind = "generative"
+            base_url = "https://example.test"
+            [[providers]]
+            id = "aws"
+            protocol = "converse"
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect("legacy names");
+        assert_eq!(
+            config.providers[0].protocol.as_deref(),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            config.providers[1].protocol.as_deref(),
+            Some("generative-language")
+        );
+        assert_eq!(
+            config.providers[2].protocol.as_deref(),
+            Some("bedrock-converse")
+        );
+        let warnings = config.warnings.join("\n");
+        assert!(warnings.contains("protocol = \"openai-responses\""));
+        assert!(warnings.contains("protocol = \"generative-language\""));
+        assert!(warnings.contains("renamed to `bedrock-converse`"));
+        assert!(warnings.contains("removed next release"));
+        let conflict = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "anthropic"
+            protocol = "chat"
+            base_url = "http://127.0.0.1:9"
+            "#,
+        )
+        .expect_err("conflict");
+        assert!(conflict.to_string().contains("different protocols"));
+        assert!(!conflict.to_string().contains("replace-me"));
+        let unknown = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "vertex"
+            base_url = "http://127.0.0.1:9"
+            "#,
+        )
+        .expect_err("kind");
+        assert!(unknown.to_string().contains("unknown kind `vertex`"));
+    }
+
+    #[test]
+    fn a_blank_protocol_is_absent_and_surrounding_space_is_trimmed() {
+        let blank = load(
+            r#"
+            [[providers]]
+            id = "bare"
+            protocol = "   "
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect_err("blank");
+        assert!(blank.to_string().contains("needs a protocol or a preset"));
+        let empty = load(
+            r#"
+            [[providers]]
+            id = "gemini"
+            preset = "google"
+            protocol = ""
+            "#,
+        )
+        .expect("empty with a preset");
+        assert!(empty.providers[0].protocol.is_none());
+        assert!(empty.warnings.is_empty());
+        let padded = load(
+            r#"
+            [[providers]]
+            id = "studio"
+            protocol = " chat "
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect("padded short name");
+        assert_eq!(padded.providers[0].protocol.as_deref(), Some("openai-chat"));
+        assert!(
+            padded
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("renamed to `openai-chat`"))
+        );
+        let canonical = load(
+            r#"
+            [[providers]]
+            id = "studio"
+            protocol = " openai-chat "
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect("padded codec id");
+        assert_eq!(
+            canonical.providers[0].protocol.as_deref(),
+            Some("openai-chat")
+        );
+        assert!(canonical.warnings.is_empty());
+        let with_kind = load(
+            r#"
+            [[providers]]
+            id = "backup"
+            kind = "anthropic"
+            protocol = "  "
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect("blank protocol with kind");
+        assert_eq!(
+            with_kind.providers[0].protocol.as_deref(),
+            Some("anthropic-messages")
+        );
+        assert!(
+            with_kind
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("renamed"))
+        );
+    }
+
+    #[test]
+    fn the_v0_1_0_example_rewrites_kind_and_chat() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/v0.1.0-hofund.toml");
+        let text = std::fs::read_to_string(&path).expect("fixture");
+        let config = load(&text).expect("v0.1.0");
+        assert_eq!(config.providers[0].protocol.as_deref(), Some("openai-chat"));
+        assert_eq!(
+            config.providers[1].protocol.as_deref(),
+            Some("anthropic-messages")
+        );
+        let warnings = config.warnings.join("\n");
+        assert!(warnings.contains("protocol = \"openai-chat\""));
+        assert!(warnings.contains("protocol = \"anthropic-messages\""));
+        assert!(warnings.contains("renamed to `openai-chat`"));
+        assert!(!warnings.contains("replace-me"));
+    }
+
+    #[test]
+    fn empty_strings_are_absent_in_legacy_keys_and_options() {
+        let legacy = load(
+            r#"
+            [[providers]]
+            id = "vertex"
+            preset = "google-vertex"
+            credentials = ""
+            impersonate = "   "
+            session_token = ""
+            project = ""
+            "#,
+        )
+        .expect("empty legacy");
+        assert!(legacy.providers[0].options.is_empty());
+        assert!(legacy.warnings.is_empty());
+        let options = load(
+            r#"
+            [[providers]]
+            id = "vertex"
+            preset = "google-vertex"
+            [providers.options]
+            credentials = ""
+            location = "   "
+            port = 0
+            enterprise = false
+            tags = ["", "kept"]
+            [providers.options.extra]
+            note = ""
+            name = "kept"
+            "#,
+        )
+        .expect("empty options");
+        let table = &options.providers[0].options;
+        assert!(table.get("credentials").is_none());
+        assert!(table.get("location").is_none());
+        assert_eq!(table.get("port"), Some(&super::Value::Integer(0)));
+        assert_eq!(table.get("enterprise"), Some(&super::Value::Boolean(false)));
+        assert_eq!(
+            table.get("tags"),
+            Some(&super::Value::Array(vec![
+                super::Value::String(String::new()),
+                super::Value::String("kept".to_owned()),
+            ]))
+        );
+        match table.get("extra") {
+            Some(super::Value::Table(extra)) => {
+                assert!(extra.get("note").is_none());
+                assert_eq!(
+                    extra.get("name").and_then(super::Value::as_str),
+                    Some("kept")
+                );
+            }
+            other => panic!("nested table, got {other:?}"),
+        }
+        assert!(options.warnings.is_empty());
+        let typed = load(
+            r#"
+            [[providers]]
+            id = "vertex"
+            preset = "google-vertex"
+            region = "us-east-1"
+            [providers.options]
+            region = 1
+            "#,
+        )
+        .expect_err("type conflict");
+        assert!(typed.to_string().contains("different values"));
+        assert!(!typed.to_string().contains("us-east-1"));
+    }
+
+    #[test]
+    fn duplicate_subscriptions_and_empty_option_keys_are_rejected() {
+        let error = load(
+            r#"
+            [[subscriptions]]
+            id = "copilot"
+            accounts = "*"
+            [[subscriptions]]
+            id = "copilot"
+            accounts = "work"
+            "#,
+        )
+        .expect_err("duplicate");
+        assert!(error.to_string().contains("repeated"));
+        let error = load(
+            r#"
+            [[subscriptions]]
+            id = "copilot"
+            "#,
+        )
+        .expect_err("missing accounts");
+        assert!(error.to_string().contains("accounts"));
+        let error = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            protocol = "openai-chat"
+            base_url = "https://example.test"
+            [providers.options]
+            "" = "x"
+            "#,
+        )
+        .expect_err("empty provider key");
+        assert!(error.to_string().contains("empty option key"));
+        let error = load(
+            r#"
+            [[subscriptions]]
+            id = "copilot"
+            accounts = "*"
+            [subscriptions.options]
+            "" = "x"
+            "#,
+        )
+        .expect_err("empty subscription key");
+        assert!(error.to_string().contains("empty option key"));
+    }
+
+    #[test]
+    fn debug_and_warnings_omit_secret_values() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "bedrock"
+            protocol = "bedrock-converse"
+            base_url = "https://example.test"
+            api_key = "APIKEYSECRET"
+            access_key_id = "LEGACYKEY"
+            headers = { Authorization = "HEADERSECRET" }
+            [providers.options]
+            secret_access_key = "SECRETVALUE"
+            [[subscriptions]]
+            id = "copilot"
+            accounts = "*"
+            [subscriptions.options]
+            client_secret = "SUBSECRET"
+            "#,
+        )
+        .expect("secrets");
+        let text = format!("{config:?}");
+        for secret in [
+            "APIKEYSECRET",
+            "HEADERSECRET",
+            "SECRETVALUE",
+            "LEGACYKEY",
+            "SUBSECRET",
+        ] {
+            assert!(!text.contains(secret), "{secret} leaked in {text}");
+            assert!(
+                config
+                    .warnings
+                    .iter()
+                    .all(|warning| !warning.contains(secret)),
+                "{secret} leaked in {:?}",
+                config.warnings
+            );
+        }
+        assert!(text.contains("secret_access_key"));
+        assert!(text.contains("access_key_id"));
+        assert!(text.contains("client_secret"));
+        assert!(text.contains("<redacted>"));
+        let raw = format!("{:?}", config.providers[0]);
+        assert!(!raw.contains("LEGACYKEY"), "{raw}");
+        assert!(!raw.contains("APIKEYSECRET"), "{raw}");
     }
 
     #[test]

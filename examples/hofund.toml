@@ -13,8 +13,7 @@ listen = "127.0.0.1:3425"
 
 [[providers]]
 id = "primary"
-kind = "openai_compat"
-protocol = "chat"
+protocol = "openai-chat"
 base_url = "http://127.0.0.1:4000/v1"
 api_key = "replace-me"
 
@@ -23,19 +22,19 @@ api_key = "replace-me"
 # max_output_tokens is optional. It fills max_tokens when the client omits
 # one. A route member can set a smaller cap. Messages still sends 16384 when
 # neither is set. Zero is rejected.
-# A preset fills the endpoint from crates/provider/presets.toml.
-# Omit kind. protocol is chat, responses, messages, or generative.
-# preset = "google" speaks generateContent. protocol = "chat" on that
+# protocol is a codec id: openai-chat, openai-responses, anthropic-messages,
+# generative-language, or bedrock-converse. A preset may omit it.
+# preset = "google" speaks generateContent. protocol = "openai-chat" on that
 # preset keeps the OpenAI-compatible root.
 # [[providers]]
 # id = "openai"
 # preset = "openai"
-# protocol = "responses"
+# protocol = "openai-responses"
 # api_key = "env:OPENAI_API_KEY"
 
 [[providers]]
 id = "backup"
-kind = "anthropic"
+protocol = "anthropic-messages"
 base_url = "http://127.0.0.1:4001"
 api_key = "replace-me-too"
 
@@ -45,35 +44,46 @@ api_key = "replace-me-too"
 # The model is a path segment, so it is not a field of the JSON body.
 # [[providers]]
 # id = "studio"
-# kind = "generative"
+# protocol = "generative-language"
 # base_url = "https://generativelanguage.googleapis.com"
 # api_key = "env:GEMINI_API_KEY"
 # [[providers]]
 # id = "gemini"
 # preset = "google"
 # api_key = "env:GEMINI_API_KEY"
-# Google Vertex AI. No API key. `project` is the Cloud project that is billed.
-# `location` defaults to global. `credentials` is an optional absolute path,
-# or `~/...`, of an Application Default Credentials file. Leave it empty to
-# use GOOGLE_APPLICATION_CREDENTIALS, then gcloud's application-default file.
-# `impersonate` is an optional service-account email. Do not paste a key here.
+# Google Vertex AI. No API key. The plugin reads project, location,
+# credentials, and impersonate from [providers.options]. The old top-level
+# keys still load for one release and are copied into that table.
+# A credentials path may start with `~/`. Leave it empty, or omit it, to use
+# Application Default Credentials. impersonate is the service-account email.
+# Do not paste a key or a service-account JSON here.
 # [[providers]]
 # id = "vertex"
 # preset = "google-vertex"
+# [providers.options]
 # project = "my-project"
 # location = "global"
 # credentials = "~/adc.json"
-# Bedrock Converse. SigV4, not a Bedrock API key. `region` selects the runtime
+# impersonate = "worker@example.iam.gserviceaccount.com"
+# Bedrock Converse. SigV4, not a Bedrock API key. region selects the runtime
 # host and is the signing region. Chat and Messages on this preset still use
-# `api_key` and do not set these fields.
+# api_key and do not set these options.
 # [[providers]]
 # id = "bedrock"
 # preset = "bedrock"
+# protocol = "bedrock-converse"
+# [providers.options]
 # region = "us-east-1"
-# protocol = "converse"
 # access_key_id = "env:AWS_ACCESS_KEY_ID"
 # secret_access_key = "env:AWS_SECRET_ACCESS_KEY"
 # session_token = "env:AWS_SESSION_TOKEN"
+# A subscription names which accounts to serve. `*` is every account stored
+# for that plugin. Vendor host and client id sit in [subscriptions.options].
+# [[subscriptions]]
+# id = "copilot"
+# accounts = "*"
+# [subscriptions.options]
+# host = "example.ghe.com"
 # Azure OpenAI. `base_url` may be the resource name, the resource URL, or a
 # pasted deployment URL. Chat and Responses use `https://<host>/openai/v1`.
 # The key is sent as `api-key`. A deployment's name is the model id.

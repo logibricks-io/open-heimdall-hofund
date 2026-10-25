@@ -63,8 +63,8 @@ stage 1 has merged.
 
 Model mapping is pull request #12. Preset endpoints for Chat, Responses, and
 Messages, including Azure's v1 root and Bedrock's API-key headers, are on
-`main`. `kind = "generative"` and `preset = "google"` post `generateContent`
-(row 2.3). `protocol = "chat"` on that preset keeps the OpenAI-compatible
+`main`. `protocol = "generative-language"` and `preset = "google"` post `generateContent`
+(row 2.3). `protocol = "openai-chat"` on that preset keeps the OpenAI-compatible
 root. Vertex credentials (row 2.4) are in. Bedrock Converse is signed with SigV4,
 and Mantle chat and Responses pick `/openai/v1` or `/v1` from the model id
 (row 2.5). Azure deployment names are read from the resource
