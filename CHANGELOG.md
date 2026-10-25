@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Coverage inventories for the 65 coding agents, the 58 provider presets,
+  and the 33 subscription rows are in `docs/coverage/`. The preset catalog
+  pin is commit `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`.
+  `internal/provider/presets.go` is unchanged since
+  `5b2b3d3f50959735403dff6b77a85eec65772218`.
 - A release dry-run builds local cargo-dist artifacts and the desktop
   bundles, then writes checksums, without creating a GitHub release. Pull
   requests that change the release config build the Linux x86_64 CLI.

@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(catalog.preset.len(), 58);
         assert_eq!(
             super::catalog_commit(),
-            "5b2b3d3f50959735403dff6b77a85eec65772218"
+            "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
         );
         let mut ids = std::collections::BTreeSet::new();
         for preset in &catalog.preset {
