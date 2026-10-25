@@ -1711,6 +1711,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-fixture"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+]
+
+[[package]]
 name = "hofund-plugin-host"
 version = "0.1.0"
 dependencies = [

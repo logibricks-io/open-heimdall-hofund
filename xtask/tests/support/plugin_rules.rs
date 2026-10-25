@@ -1,13 +1,14 @@
 //! Syn and cargo-metadata checks for the plugin seam.
 //!
 //! The scan follows crate aliases, globs, type aliases, angle-bracket calls,
-//! and paths inside macros. Plugin manifests are parsed as TOML, including a
-//! renamed dependency, a `[dependencies.name]` table, a multi-line `features`
-//! array, and `[features]` that forwards `hofund-plugin-api/kernel`.
+//! and paths inside macros, including a `use` inside a function and a
+//! statement-form macro. Plugin manifests are parsed as TOML. A renamed
+//! `hofund-plugin-api` is rejected, and a feature forward enables `kernel`
+//! under the dependency's package name, including `api/kernel` and `?/kernel`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use syn::visit::Visit;
@@ -101,8 +102,7 @@ fn plugin_seam_matches_the_contract() {
         if in_host_stack {
             continue;
         }
-        let text = read_to_string(&path);
-        for hit in seam_hits(&text) {
+        for hit in seam_hits_file(&path, &mut BTreeSet::new()) {
             violations.push(format!("{rel} {hit}"));
         }
     }
@@ -390,6 +390,209 @@ extra = ["hofund-plugin-api/kernel"]
     let _ = fs::remove_dir_all(&root);
 }
 
+#[test]
+fn plugin_rules_reject_each_bypass() {
+    let local_kernel = seam_hits(
+        "fn sneak() { use hofund_plugin_api::kernel::HttpBackend; let _x: HttpBackend; }\n",
+    );
+    assert!(
+        local_kernel.iter().any(|hit| hit.contains("kernel")),
+        "function-local kernel import: {local_kernel:?}"
+    );
+    let self_as = seam_hits(
+        "use hofund_plugin_api::{self as api};\nfn sneak(value: api::kernel::HttpBackend) {}\n",
+    );
+    assert!(
+        self_as.iter().any(|hit| hit.contains("kernel")),
+        "{{self as api}}: {self_as:?}"
+    );
+    let alias_of_alias = seam_hits(
+        "use hofund_plugin_api as a;\nuse a as b;\nfn sneak(value: b::kernel::HttpBackend) {}\n",
+    );
+    assert!(
+        alias_of_alias.iter().any(|hit| hit.contains("kernel")),
+        "alias of an alias: {alias_of_alias:?}"
+    );
+    let crate_path = seam_hits(
+        "use hofund_plugin_api as api;\nfn sneak(value: crate::api::kernel::HttpBackend) {}\n",
+    );
+    assert!(
+        crate_path.iter().any(|hit| hit.contains("kernel")),
+        "crate:: re-export: {crate_path:?}"
+    );
+    let raw = seam_hits("fn sneak(value: hofund_plugin_api::r#kernel::HttpBackend) {}\n");
+    assert!(
+        raw.iter().any(|hit| hit.contains("kernel")),
+        "raw identifier: {raw:?}"
+    );
+    let statement_macro =
+        seam_hits("fn sneak() { m!{ hofund_plugin_api::AuthResult::new(true); } }\n");
+    assert!(
+        statement_macro
+            .iter()
+            .any(|hit| hit.contains("AuthResult::new")),
+        "statement-form macro: {statement_macro:?}"
+    );
+    let let_macro =
+        seam_hits("fn sneak() { m!(let _x: hofund_plugin_api::kernel::HttpBackend); }\n");
+    assert!(
+        let_macro.iter().any(|hit| hit.contains("kernel")),
+        "let inside a macro: {let_macro:?}"
+    );
+    let attribute = seam_hits("#[probe(hofund_plugin_api::kernel::HttpBackend)]\nfn sneak() {}\n");
+    assert!(
+        attribute.iter().any(|hit| hit.contains("kernel")),
+        "attribute argument: {attribute:?}"
+    );
+
+    let root = std::env::temp_dir().join(format!("hofund-plugin-include-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("dir");
+    fs::write(
+        root.join("lib.rs"),
+        "include!(\"hidden.inc\");\nfn clean() {}\n",
+    )
+    .expect("source");
+    fs::write(
+        root.join("hidden.inc"),
+        "fn sneak() { let _ = hofund_plugin_api::AuthResult::new(true); }\n",
+    )
+    .expect("include");
+    let included = seam_hits_file(&root.join("lib.rs"), &mut BTreeSet::new());
+    assert!(
+        included.iter().any(|hit| hit.contains("AuthResult::new")),
+        "include! of a non-rs file: {included:?}"
+    );
+    let _ = fs::remove_dir_all(&root);
+
+    let local_process =
+        runtime_hits("fn sneak() { use std::process::Command; let _ = Command::new(\"true\"); }\n");
+    assert!(
+        local_process.iter().any(|hit| hit.contains("std::process")),
+        "function-local use: {local_process:?}"
+    );
+    let self_std = runtime_hits(
+        "use std::{self as s};\nfn sneak() { let _ = s::process::Command::new(\"true\"); }\n",
+    );
+    assert!(
+        self_std.iter().any(|hit| hit.contains("std::process")),
+        "{{self as s}}: {self_std:?}"
+    );
+    let glob_std = runtime_hits(
+        "use std::*;\nfn sneak() { let _ = process::Command::new(\"true\"); let _ = net::TcpStream::connect(\"127.0.0.1:1\"); }\n",
+    );
+    assert!(
+        glob_std.iter().any(|hit| hit.contains("std::process")),
+        "std::* process: {glob_std:?}"
+    );
+    assert!(
+        glob_std.iter().any(|hit| hit.contains("std::net")),
+        "std::* net: {glob_std:?}"
+    );
+    let self_tokio = runtime_hits(
+        "use tokio::{self as t};\nfn sneak() { let _ = t::net::TcpListener::bind(\"127.0.0.1:1\"); }\n",
+    );
+    assert!(
+        self_tokio.iter().any(|hit| hit.contains("tokio::net")),
+        "{{self as t}}: {self_tokio:?}"
+    );
+    assert!(
+        runtime_hits("fn sneak() { let _ = std::net::TcpStream::connect(\"127.0.0.1:1\"); }\n")
+            .iter()
+            .any(|hit| hit.contains("std::net"))
+    );
+    assert!(
+        runtime_hits("fn sneak() { let _ = libc::fork(); }\n")
+            .iter()
+            .any(|hit| hit.contains("libc"))
+    );
+    assert!(
+        runtime_hits("fn sneak() { let _ = nix::unistd::fork(); }\n")
+            .iter()
+            .any(|hit| hit.contains("nix"))
+    );
+    assert!(
+        runtime_hits("fn sneak() { let _ = std::os::unix::process::CommandExt::pre_exec; }\n")
+            .iter()
+            .any(|hit| hit.contains("std::os::unix::process"))
+    );
+
+    let renamed_forward = r#"
+[dependencies]
+api = { package = "hofund-plugin-api" }
+[features]
+default = ["fast"]
+fast = ["api/kernel"]
+"#;
+    assert!(
+        manifest_enables_kernel(renamed_forward),
+        "api/kernel must count as the kernel feature"
+    );
+    let weak = r#"
+[dependencies]
+hofund-plugin-api = { optional = true }
+[features]
+default = ["fast", "dep:hofund-plugin-api"]
+fast = ["hofund-plugin-api?/kernel"]
+"#;
+    assert!(
+        manifest_enables_kernel(weak),
+        "hofund-plugin-api?/kernel must count"
+    );
+    let weak_renamed = r#"
+[dependencies]
+api = { package = "hofund-plugin-api", optional = true }
+[features]
+fast = ["api?/kernel"]
+"#;
+    assert!(
+        manifest_enables_kernel(weak_renamed),
+        "api?/kernel must count"
+    );
+    let dep_prefix = r#"
+[dependencies]
+api = { package = "hofund-plugin-api" }
+[features]
+fast = ["dep:api/kernel"]
+"#;
+    assert!(
+        manifest_enables_kernel(dep_prefix),
+        "dep:api/kernel must count"
+    );
+
+    let tree = std::env::temp_dir().join(format!("hofund-plugin-bypass-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tree);
+    let renamed = tree.join("plugins/providers/renamed");
+    fs::create_dir_all(renamed.join("src")).expect("dir");
+    fs::write(
+        renamed.join("Cargo.toml"),
+        "[package]\nname = \"renamed\"\n[dependencies]\napi = { package = \"hofund-plugin-api\" }\ntk = { package = \"tokio\" }\nlibc = \"0.2\"\n[lints]\nworkspace = true\n",
+    )
+    .expect("manifest");
+    fs::write(renamed.join("src/lib.rs"), "fn clean() {}\n").expect("source");
+    let unknown = tree.join("plugins/unknownkind/x");
+    fs::create_dir_all(&unknown).expect("unknown");
+    fs::write(
+        unknown.join("Cargo.toml"),
+        "[package]\nname = \"x\"\n[lints]\nworkspace = true\n",
+    )
+    .expect("unknown manifest");
+    let broken = tree.join("plugins/providers/broken");
+    fs::create_dir_all(&broken).expect("broken");
+    fs::write(broken.join("Cargo.toml"), "this is not toml [\n").expect("broken");
+    let found = plugin_tree_violations(&tree.join("plugins")).join("\n");
+    for needle in [
+        "renames hofund-plugin-api",
+        "renames tokio",
+        "depends on libc",
+        "unknown plugin kind unknownkind",
+        "not valid toml",
+    ] {
+        assert!(found.contains(needle), "missing {needle} in:\n{found}");
+    }
+    let _ = fs::remove_dir_all(&tree);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DepKind {
     Normal,
@@ -399,6 +602,9 @@ enum DepKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DeclaredDep {
+    /// Manifest key. A rename keeps this different from [`Self::name`].
+    key: String,
+    /// Package name after `package =`.
     name: String,
     kind: DepKind,
     features: Vec<String>,
@@ -431,29 +637,160 @@ fn seam_hits(source: &str) -> Vec<String> {
     let Ok(file) = syn::parse_file(source) else {
         return vec!["does not parse".to_owned()];
     };
-    let mut aliases = Aliases::default();
-    let mut hits = Vec::new();
-    collect_uses(&file.items, &mut aliases, &mut hits);
-    let mut finder = Finder { aliases, hits };
+    let (aliases, mut hits) = collect_seam(&file);
+    let mut finder = Finder {
+        aliases,
+        hits: Vec::new(),
+    };
     finder.visit_file(&file);
-    finder.hits.sort();
-    finder.hits.dedup();
-    finder.hits
+    hits.append(&mut finder.hits);
+    hits.sort();
+    hits.dedup();
+    hits
+}
+
+fn seam_hits_file(path: &Path, seen: &mut BTreeSet<PathBuf>) -> Vec<String> {
+    if !seen.insert(path.to_path_buf()) {
+        return Vec::new();
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return vec![format!("unreadable {}", path.display())];
+    };
+    let mut hits = seam_hits(&text);
+    let Some(dir) = path.parent() else {
+        return hits;
+    };
+    for included in include_literals(&text) {
+        hits.extend(seam_hits_file(&dir.join(included), seen));
+    }
+    hits
 }
 
 fn runtime_hits(source: &str) -> Vec<String> {
     let Ok(file) = syn::parse_file(source) else {
         return vec!["does not parse".to_owned()];
     };
-    let mut aliases = RuntimeAliases::default();
-    collect_runtime_aliases(&file.items, &mut aliases);
-    let mut hits = Vec::new();
-    collect_runtime(&file.items, &aliases, &mut hits);
-    let mut finder = RuntimeFinder { aliases, hits };
+    let aliases = collect_runtime_aliases_in(&file);
+    let mut finder = RuntimeFinder {
+        aliases,
+        hits: Vec::new(),
+    };
     finder.visit_file(&file);
     finder.hits.sort();
     finder.hits.dedup();
     finder.hits
+}
+
+fn runtime_hits_file(path: &Path, seen: &mut BTreeSet<PathBuf>) -> Vec<String> {
+    if !seen.insert(path.to_path_buf()) {
+        return Vec::new();
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return vec![format!("unreadable {}", path.display())];
+    };
+    let mut hits = runtime_hits(&text);
+    let Some(dir) = path.parent() else {
+        return hits;
+    };
+    for included in include_literals(&text) {
+        hits.extend(runtime_hits_file(&dir.join(included), seen));
+    }
+    hits
+}
+
+fn include_literals(source: &str) -> Vec<String> {
+    let Ok(file) = syn::parse_file(source) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    IncludeFinder { found: &mut found }.visit_file(&file);
+    found
+}
+
+struct IncludeFinder<'a> {
+    found: &'a mut Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for IncludeFinder<'_> {
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if mac.path.is_ident("include")
+            && let Ok(literal) = syn::parse2::<syn::LitStr>(mac.tokens.clone())
+        {
+            self.found.push(literal.value());
+        }
+        syn::visit::visit_macro(self, mac);
+    }
+}
+
+fn collect_seam(file: &syn::File) -> (Aliases, Vec<String>) {
+    let mut aliases = Aliases::default();
+    let mut hits = Vec::new();
+    UseCollector {
+        aliases: &mut aliases,
+        hits: &mut hits,
+    }
+    .visit_file(file);
+    TypeCollector {
+        aliases: &mut aliases,
+    }
+    .visit_file(file);
+    (aliases, hits)
+}
+
+struct UseCollector<'a> {
+    aliases: &'a mut Aliases,
+    hits: &'a mut Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for UseCollector<'_> {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        walk_use(&[], &item.tree, self.aliases, self.hits);
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        note_extern_crate(item, self.aliases);
+    }
+}
+
+struct TypeCollector<'a> {
+    aliases: &'a mut Aliases,
+}
+
+impl<'ast> Visit<'ast> for TypeCollector<'_> {
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        note_type_alias(item, self.aliases);
+    }
+}
+
+fn collect_runtime_aliases_in(file: &syn::File) -> RuntimeAliases {
+    let mut aliases = RuntimeAliases::default();
+    RuntimeAliasCollector {
+        aliases: &mut aliases,
+    }
+    .visit_file(file);
+    aliases
+}
+
+struct RuntimeAliasCollector<'a> {
+    aliases: &'a mut RuntimeAliases,
+}
+
+impl<'ast> Visit<'ast> for RuntimeAliasCollector<'_> {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        note_runtime_crate(&[], &item.tree, self.aliases);
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        let original = ident_str(&item.ident);
+        if matches!(original.as_str(), "std" | "tokio" | "libc" | "nix") {
+            let local = item
+                .rename
+                .as_ref()
+                .map(|(_, name)| ident_str(name))
+                .unwrap_or_else(|| original.clone());
+            self.aliases.crates.insert(local, original);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -492,9 +829,18 @@ impl<'ast> Visit<'ast> for Finder {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        for expr in macro_exprs(mac.tokens.clone()) {
-            self.visit_expr(&expr);
+        for stmt in parsed_macro_stmts(mac.tokens.clone()) {
+            self.visit_stmt(&stmt);
         }
+    }
+
+    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+        if let syn::Meta::List(list) = &attr.meta {
+            for stmt in parsed_macro_stmts(list.tokens.clone()) {
+                self.visit_stmt(&stmt);
+            }
+        }
+        syn::visit::visit_attribute(self, attr);
     }
 }
 
@@ -544,6 +890,7 @@ impl Finder {
 #[derive(Default)]
 struct RuntimeAliases {
     crates: BTreeMap<String, String>,
+    globs: BTreeSet<String>,
 }
 
 struct RuntimeFinder {
@@ -552,8 +899,12 @@ struct RuntimeFinder {
 }
 
 impl<'ast> Visit<'ast> for RuntimeFinder {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        walk_runtime(&[], &item.tree, &self.aliases, &mut self.hits);
+    }
+
     fn visit_path(&mut self, path: &'ast syn::Path) {
-        let segs = canonical_segments(&segments(path), &self.aliases.crates);
+        let segs = expand_runtime(&segments(path), &self.aliases);
         if let Some(hit) = forbidden_runtime(&segs) {
             self.hits.push(hit.to_owned());
         }
@@ -561,9 +912,18 @@ impl<'ast> Visit<'ast> for RuntimeFinder {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        for expr in macro_exprs(mac.tokens.clone()) {
-            self.visit_expr(&expr);
+        for stmt in parsed_macro_stmts(mac.tokens.clone()) {
+            self.visit_stmt(&stmt);
         }
+    }
+
+    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+        if let syn::Meta::List(list) = &attr.meta {
+            for stmt in parsed_macro_stmts(list.tokens.clone()) {
+                self.visit_stmt(&stmt);
+            }
+        }
+        syn::visit::visit_attribute(self, attr);
     }
 }
 
@@ -582,29 +942,87 @@ impl syn::parse::Parse for CommaExprs {
     }
 }
 
-fn macro_exprs(tokens: proc_macro2::TokenStream) -> Vec<syn::Expr> {
-    if let Ok(parsed) = syn::parse2::<CommaExprs>(tokens.clone()) {
-        return parsed.0;
+fn parsed_macro_stmts(tokens: proc_macro2::TokenStream) -> Vec<syn::Stmt> {
+    if let Some(stmts) = block_stmts(tokens.clone()) {
+        return stmts;
     }
-    let mut exprs = Vec::new();
+    let mut with_semi = tokens.clone();
+    with_semi.extend(std::iter::once(proc_macro2::TokenTree::Punct(
+        proc_macro2::Punct::new(';', proc_macro2::Spacing::Alone),
+    )));
+    if let Some(stmts) = block_stmts(with_semi) {
+        return stmts;
+    }
+    if let Ok(parsed) = syn::parse2::<CommaExprs>(tokens.clone()) {
+        return parsed
+            .0
+            .into_iter()
+            .map(|expr| syn::Stmt::Expr(expr, None))
+            .collect();
+    }
+    let mut stmts = Vec::new();
     for tree in tokens {
         if let proc_macro2::TokenTree::Group(group) = tree {
-            exprs.extend(macro_exprs(group.stream()));
+            stmts.extend(parsed_macro_stmts(group.stream()));
         }
     }
-    exprs
+    stmts
+}
+
+fn block_stmts(tokens: proc_macro2::TokenStream) -> Option<Vec<syn::Stmt>> {
+    let wrapped = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(
+        proc_macro2::Group::new(proc_macro2::Delimiter::Brace, tokens),
+    ));
+    syn::parse2::<syn::Block>(wrapped)
+        .ok()
+        .map(|block| block.stmts)
+}
+
+fn expand_runtime(segs: &[String], aliases: &RuntimeAliases) -> Vec<String> {
+    let segs = canonical_segments(segs, &aliases.crates);
+    if matches!(
+        segs.first().map(String::as_str),
+        Some("std" | "tokio" | "libc" | "nix")
+    ) {
+        return segs;
+    }
+    let Some(first) = segs.first() else {
+        return segs;
+    };
+    if aliases.globs.contains("std") && matches!(first.as_str(), "process" | "net" | "os") {
+        let mut out = vec!["std".to_owned()];
+        out.extend(segs);
+        return out;
+    }
+    if aliases.globs.contains("tokio") && matches!(first.as_str(), "process" | "net") {
+        let mut out = vec!["tokio".to_owned()];
+        out.extend(segs);
+        return out;
+    }
+    segs
+}
+
+fn ident_str(ident: &syn::Ident) -> String {
+    let text = ident.to_string();
+    text.strip_prefix("r#").unwrap_or(&text).to_owned()
 }
 
 fn segments(path: &syn::Path) -> Vec<String> {
     path.segments
         .iter()
-        .map(|segment| segment.ident.to_string())
+        .map(|segment| ident_str(&segment.ident))
         .collect()
 }
 
 fn canonical_segments(segs: &[String], crates: &BTreeMap<String, String>) -> Vec<String> {
     let mut out = segs.to_vec();
-    for _ in 0..4 {
+    while matches!(
+        out.first().map(String::as_str),
+        Some("crate" | "self" | "super")
+    ) {
+        out.remove(0);
+    }
+    for _ in 0..8 {
         let Some(first) = out.first().cloned() else {
             break;
         };
@@ -619,56 +1037,16 @@ fn canonical_segments(segs: &[String], crates: &BTreeMap<String, String>) -> Vec
     out
 }
 
-fn collect_uses(items: &[syn::Item], aliases: &mut Aliases, hits: &mut Vec<String>) {
-    for item in items {
-        match item {
-            syn::Item::Use(item) => walk_use(&[], &item.tree, aliases, hits),
-            syn::Item::ExternCrate(item) => note_extern_crate(item, aliases),
-            syn::Item::Mod(module) => {
-                if let Some((_, nested)) = &module.content {
-                    collect_uses(nested, aliases, hits);
-                }
-            }
-            _ => {}
-        }
-    }
-    for item in items {
-        match item {
-            syn::Item::Type(item) => note_type_alias(item, aliases),
-            syn::Item::Mod(module) => {
-                if let Some((_, nested)) = &module.content {
-                    note_type_aliases(nested, aliases);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn note_type_aliases(items: &[syn::Item], aliases: &mut Aliases) {
-    for item in items {
-        match item {
-            syn::Item::Type(item) => note_type_alias(item, aliases),
-            syn::Item::Mod(module) => {
-                if let Some((_, nested)) = &module.content {
-                    note_type_aliases(nested, aliases);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 fn note_extern_crate(item: &syn::ItemExternCrate, aliases: &mut Aliases) {
-    let original = item.ident.to_string();
+    let original = ident_str(&item.ident);
     if original != "hofund_plugin_api" {
         return;
     }
     let local = item
         .rename
         .as_ref()
-        .map(|(_, name)| name.to_string())
-        .unwrap_or(original.clone());
+        .map(|(_, name)| ident_str(name))
+        .unwrap_or_else(|| original.clone());
     aliases.crates.insert(local, original);
 }
 
@@ -697,23 +1075,18 @@ fn walk_use(prefix: &[String], tree: &syn::UseTree, aliases: &mut Aliases, hits:
     match tree {
         syn::UseTree::Path(path) => {
             let mut next = prefix.to_vec();
-            next.push(path.ident.to_string());
+            next.push(ident_str(&path.ident));
             walk_use(&next, &path.tree, aliases, hits);
         }
         syn::UseTree::Name(name) => {
-            note_import(
-                prefix,
-                &name.ident.to_string(),
-                &name.ident.to_string(),
-                aliases,
-                hits,
-            );
+            let ident = ident_str(&name.ident);
+            note_import(prefix, &ident, &ident, aliases, hits);
         }
         syn::UseTree::Rename(name) => {
             note_import(
                 prefix,
-                &name.ident.to_string(),
-                &name.rename.to_string(),
+                &ident_str(&name.ident),
+                &ident_str(&name.rename),
                 aliases,
                 hits,
             );
@@ -743,62 +1116,50 @@ fn note_import(
     aliases: &mut Aliases,
     hits: &mut Vec<String>,
 ) {
-    if prefix.is_empty() && name == "hofund_plugin_api" {
+    let imported = if name == "self" {
+        prefix.to_vec()
+    } else {
+        let mut full = prefix.to_vec();
+        full.push(name.to_owned());
+        full
+    };
+    let full = canonical_segments(&imported, &aliases.crates);
+    if full == ["hofund_plugin_api"] {
         aliases
             .crates
             .insert(local.to_owned(), "hofund_plugin_api".to_owned());
     }
-    let mut full = prefix.to_vec();
-    full.push(name.to_owned());
-    let full = canonical_segments(&full, &aliases.crates);
     if kernel_under_plugin_api(&full) {
         hits.push(format!("imports kernel as {local}"));
     }
-    if name == "from_backends" {
+    let item = full.last().map(String::as_str);
+    let parent = full
+        .len()
+        .checked_sub(2)
+        .and_then(|index| full.get(index))
+        .map(String::as_str);
+    if item == Some("from_backends") {
         hits.push(format!("imports from_backends as {local}"));
         aliases
             .functions
             .insert(local.to_owned(), "from_backends".to_owned());
     }
-    if prefix.last().map(String::as_str) == Some("SurfaceHost") && name == "from_parts" {
+    if parent == Some("SurfaceHost") && item == Some("from_parts") {
         hits.push(format!("imports SurfaceHost::from_parts as {local}"));
         aliases
             .functions
             .insert(local.to_owned(), "SurfaceHost::from_parts".to_owned());
     }
-    if prefix.last().map(String::as_str) == Some("AuthResult") && name == "new" {
+    if parent == Some("AuthResult") && item == Some("new") {
         hits.push(format!("imports AuthResult::new as {local}"));
         aliases
             .functions
             .insert(local.to_owned(), "AuthResult::new".to_owned());
     }
-    if matches!(name, "SurfaceHost" | "AuthResult" | "HostContext") {
-        aliases.types.insert(local.to_owned(), name.to_owned());
-    }
-}
-
-fn collect_runtime_aliases(items: &[syn::Item], aliases: &mut RuntimeAliases) {
-    for item in items {
-        match item {
-            syn::Item::Use(item) => note_runtime_crate(&[], &item.tree, aliases),
-            syn::Item::ExternCrate(item) => {
-                let original = item.ident.to_string();
-                if matches!(original.as_str(), "std" | "tokio") {
-                    let local = item
-                        .rename
-                        .as_ref()
-                        .map(|(_, name)| name.to_string())
-                        .unwrap_or(original.clone());
-                    aliases.crates.insert(local, original);
-                }
-            }
-            syn::Item::Mod(module) => {
-                if let Some((_, nested)) = &module.content {
-                    collect_runtime_aliases(nested, aliases);
-                }
-            }
-            _ => {}
-        }
+    if matches!(item, Some("SurfaceHost" | "AuthResult" | "HostContext")) {
+        aliases
+            .types
+            .insert(local.to_owned(), item.unwrap_or(name).to_owned());
     }
 }
 
@@ -806,13 +1167,31 @@ fn note_runtime_crate(prefix: &[String], tree: &syn::UseTree, aliases: &mut Runt
     match tree {
         syn::UseTree::Path(path) => {
             let mut next = prefix.to_vec();
-            next.push(path.ident.to_string());
+            next.push(ident_str(&path.ident));
             note_runtime_crate(&next, &path.tree, aliases);
         }
-        syn::UseTree::Rename(name) if prefix.is_empty() => {
-            let original = name.ident.to_string();
-            if matches!(original.as_str(), "std" | "tokio") {
-                aliases.crates.insert(name.rename.to_string(), original);
+        syn::UseTree::Rename(name) => {
+            let original = ident_str(&name.ident);
+            let crate_name = if original == "self" {
+                prefix.first().cloned()
+            } else if prefix.is_empty() {
+                Some(original)
+            } else {
+                None
+            };
+            if let Some(crate_name) = crate_name.filter(|name| {
+                matches!(name.as_str(), "std" | "tokio" | "libc" | "nix") && prefix.len() <= 1
+            }) {
+                aliases.crates.insert(ident_str(&name.rename), crate_name);
+            }
+        }
+        syn::UseTree::Glob(_) => {
+            let resolved = canonical_segments(prefix, &aliases.crates);
+            if resolved.len() == 1
+                && let Some(name) = resolved.first().cloned()
+                && matches!(name.as_str(), "std" | "tokio" | "libc" | "nix")
+            {
+                aliases.globs.insert(name);
             }
         }
         syn::UseTree::Group(group) => {
@@ -820,21 +1199,7 @@ fn note_runtime_crate(prefix: &[String], tree: &syn::UseTree, aliases: &mut Runt
                 note_runtime_crate(prefix, item, aliases);
             }
         }
-        syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => {}
-    }
-}
-
-fn collect_runtime(items: &[syn::Item], aliases: &RuntimeAliases, hits: &mut Vec<String>) {
-    for item in items {
-        match item {
-            syn::Item::Use(item) => walk_runtime(&[], &item.tree, aliases, hits),
-            syn::Item::Mod(module) => {
-                if let Some((_, nested)) = &module.content {
-                    collect_runtime(nested, aliases, hits);
-                }
-            }
-            _ => {}
-        }
+        syn::UseTree::Name(_) => {}
     }
 }
 
@@ -847,27 +1212,27 @@ fn walk_runtime(
     match tree {
         syn::UseTree::Path(path) => {
             let mut next = prefix.to_vec();
-            next.push(path.ident.to_string());
+            next.push(ident_str(&path.ident));
             walk_runtime(&next, &path.tree, aliases, hits);
         }
         syn::UseTree::Name(name) => {
             let mut full = prefix.to_vec();
-            full.push(name.ident.to_string());
-            let full = canonical_segments(&full, &aliases.crates);
+            full.push(ident_str(&name.ident));
+            let full = expand_runtime(&full, aliases);
             if let Some(hit) = forbidden_runtime(&full) {
                 hits.push(hit.to_owned());
             }
         }
         syn::UseTree::Rename(name) => {
             let mut full = prefix.to_vec();
-            full.push(name.ident.to_string());
-            let full = canonical_segments(&full, &aliases.crates);
+            full.push(ident_str(&name.ident));
+            let full = expand_runtime(&full, aliases);
             if let Some(hit) = forbidden_runtime(&full) {
                 hits.push(hit.to_owned());
             }
         }
         syn::UseTree::Glob(_) => {
-            let resolved = canonical_segments(prefix, &aliases.crates);
+            let resolved = expand_runtime(prefix, aliases);
             if let Some(hit) = forbidden_runtime(&resolved) {
                 hits.push(hit.to_owned());
             }
@@ -890,6 +1255,17 @@ fn forbidden_runtime(segments: &[String]) -> Option<&'static str> {
     if segments.len() >= 2 && segments[0] == "std" && segments[1] == "process" {
         return Some("std::process");
     }
+    if segments.len() >= 2 && segments[0] == "std" && segments[1] == "net" {
+        return Some("std::net");
+    }
+    if segments.len() >= 4
+        && segments[0] == "std"
+        && segments[1] == "os"
+        && segments[2] == "unix"
+        && segments[3] == "process"
+    {
+        return Some("std::os::unix::process");
+    }
     if segments.len() >= 2 && segments[0] == "tokio" && segments[1] == "process" {
         return Some("tokio::process");
     }
@@ -900,6 +1276,8 @@ fn forbidden_runtime(segments: &[String]) -> Option<&'static str> {
         Some("reqwest") => Some("reqwest"),
         Some("hyper") => Some("hyper"),
         Some("axum") => Some("axum"),
+        Some("libc") => Some("libc"),
+        Some("nix") => Some("nix"),
         _ => None,
     }
 }
@@ -917,10 +1295,15 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
         }
         let kind = entry.file_name();
         let kind = kind.to_string_lossy();
-        if kind == "registry" || !kinds.contains(&kind.as_ref()) {
+        if kind.starts_with('.') || kind == "registry" {
+            continue;
+        }
+        if !kinds.contains(&kind.as_ref()) {
+            violations.push(format!("unknown plugin kind {kind}"));
             continue;
         }
         let Ok(plugins_in_kind) = fs::read_dir(&kind_path) else {
+            violations.push(format!("unreadable plugin kind {kind}"));
             continue;
         };
         for plugin in plugins_in_kind.flatten() {
@@ -931,9 +1314,13 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
             }
             let manifest_path = path.join("Cargo.toml");
             if !manifest_path.is_file() {
+                violations.push(format!("{kind}/{id} manifest is missing"));
                 continue;
             }
-            let manifest = read_to_string(&manifest_path);
+            let Ok(manifest) = fs::read_to_string(&manifest_path) else {
+                violations.push(format!("{kind}/{id} manifest is unreadable"));
+                continue;
+            };
             if toml::from_str::<toml::Value>(&manifest).is_err() {
                 violations.push(format!("{kind}/{id} manifest is not valid toml"));
             }
@@ -944,6 +1331,15 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                 violations.push(format!("{kind}/{id} enables the kernel feature"));
             }
             for dep in manifest_dependencies(&manifest) {
+                if dep.name == "hofund-plugin-api" && dep.key != "hofund-plugin-api" {
+                    violations.push(format!("{kind}/{id} renames hofund-plugin-api"));
+                }
+                if dep.name == "tokio" && dep.key != "tokio" {
+                    violations.push(format!("{kind}/{id} renames tokio"));
+                }
+                if dep.key == "std" || dep.name == "std" {
+                    violations.push(format!("{kind}/{id} depends on a std shim"));
+                }
                 if dep.kind == DepKind::Dev {
                     let own_kit = match kind.as_ref() {
                         "providers" => "hofund-kit-upstream",
@@ -962,9 +1358,8 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
             }
             if path.join("src").is_dir() {
                 for source in rust_files(&path.join("src")) {
-                    let text = read_to_string(&source);
                     let file = source.file_name().unwrap_or_default().to_string_lossy();
-                    for hit in runtime_hits(&text) {
+                    for hit in runtime_hits_file(&source, &mut BTreeSet::new()) {
                         violations.push(format!("{kind}/{id} uses {hit} in {file}"));
                     }
                 }
@@ -986,17 +1381,28 @@ fn forbidden_dep(dep: &str) -> bool {
         || (dep.starts_with("hofund-plugin-")
             && dep != "hofund-plugin-api"
             && dep != "hofund-plugin-sdk")
-        || matches!(dep, "reqwest" | "hyper" | "axum" | "tracing")
+        || matches!(
+            dep,
+            "reqwest" | "hyper" | "axum" | "tracing" | "libc" | "nix"
+        )
 }
 
 fn manifest_enables_kernel(manifest: &str) -> bool {
-    let dependency = manifest_dependencies(manifest).iter().any(|dep| {
+    let deps = manifest_dependencies(manifest);
+    let keys = dep_keys(&deps);
+    let dependency = deps.iter().any(|dep| {
         dep.name == "hofund-plugin-api" && dep.features.iter().any(|feature| feature == "kernel")
     });
-    dependency || feature_forwards_kernel(manifest)
+    dependency || feature_forwards_kernel(manifest, &keys)
 }
 
-fn feature_forwards_kernel(manifest: &str) -> bool {
+fn dep_keys(deps: &[DeclaredDep]) -> BTreeMap<String, String> {
+    deps.iter()
+        .map(|dep| (dep.key.clone(), dep.name.clone()))
+        .collect()
+}
+
+fn feature_forwards_kernel(manifest: &str, keys: &BTreeMap<String, String>) -> bool {
     let Ok(value) = toml::from_str::<toml::Value>(manifest) else {
         return false;
     };
@@ -1005,12 +1411,13 @@ fn feature_forwards_kernel(manifest: &str) -> bool {
     };
     features
         .keys()
-        .any(|name| feature_list_enables_kernel(name, features, &mut BTreeSet::new()))
+        .any(|name| feature_list_enables_kernel(name, features, keys, &mut BTreeSet::new()))
 }
 
 fn feature_list_enables_kernel(
     name: &str,
     features: &toml::map::Map<String, toml::Value>,
+    keys: &BTreeMap<String, String>,
     seen: &mut BTreeSet<String>,
 ) -> bool {
     if !seen.insert(name.to_owned()) {
@@ -1023,8 +1430,8 @@ fn feature_list_enables_kernel(
         let Some(text) = item.as_str() else {
             continue;
         };
-        if is_kernel_forward(text)
-            || (!text.contains('/') && feature_list_enables_kernel(text, features, seen))
+        if is_kernel_forward(text, keys)
+            || (!text.contains('/') && feature_list_enables_kernel(text, features, keys, seen))
         {
             return true;
         }
@@ -1032,8 +1439,14 @@ fn feature_list_enables_kernel(
     false
 }
 
-fn is_kernel_forward(text: &str) -> bool {
-    text == "hofund-plugin-api/kernel" || text == "dep:hofund-plugin-api/kernel"
+fn is_kernel_forward(text: &str, keys: &BTreeMap<String, String>) -> bool {
+    let text = text.strip_prefix("dep:").unwrap_or(text);
+    let Some((dep, feature)) = text.split_once('/') else {
+        return false;
+    };
+    let dep = dep.strip_suffix('?').unwrap_or(dep);
+    let package = keys.get(dep).map(String::as_str).unwrap_or(dep);
+    package == "hofund-plugin-api" && feature == "kernel"
 }
 
 fn manifest_dependencies(manifest: &str) -> Vec<DeclaredDep> {
@@ -1065,6 +1478,7 @@ fn push_dep_table(value: &toml::Value, kind: DepKind, deps: &mut Vec<DeclaredDep
     for (key, spec) in table {
         match spec {
             toml::Value::String(_) => deps.push(DeclaredDep {
+                key: key.clone(),
                 name: key.clone(),
                 kind,
                 features: Vec::new(),
@@ -1087,6 +1501,7 @@ fn push_dep_table(value: &toml::Value, kind: DepKind, deps: &mut Vec<DeclaredDep
                     })
                     .unwrap_or_default();
                 deps.push(DeclaredDep {
+                    key: key.clone(),
                     name,
                     kind,
                     features,
@@ -1163,13 +1578,19 @@ fn cargo_packages() -> BTreeMap<String, WorkspacePackage> {
                             .collect()
                     })
                     .unwrap_or_default();
+                let key = dep
+                    .get("rename")
+                    .and_then(|rename| rename.as_str())
+                    .unwrap_or(dep_name);
                 dependencies.push(DeclaredDep {
+                    key: key.to_owned(),
                     name: dep_name.to_owned(),
                     kind,
                     features,
                 });
             }
         }
+        let keys = dep_keys(&dependencies);
         let direct = dependencies.iter().any(|dep| {
             dep.name == "hofund-plugin-api"
                 && dep.features.iter().any(|feature| feature == "kernel")
@@ -1177,7 +1598,7 @@ fn cargo_packages() -> BTreeMap<String, WorkspacePackage> {
         let forwarded = package
             .get("features")
             .and_then(|features| features.as_object())
-            .is_some_and(json_features_enable_kernel);
+            .is_some_and(|features| json_features_enable_kernel(features, &keys));
         packages.insert(
             name.to_owned(),
             WorkspacePackage {
@@ -1189,10 +1610,14 @@ fn cargo_packages() -> BTreeMap<String, WorkspacePackage> {
     packages
 }
 
-fn json_features_enable_kernel(features: &serde_json::Map<String, serde_json::Value>) -> bool {
+fn json_features_enable_kernel(
+    features: &serde_json::Map<String, serde_json::Value>,
+    keys: &BTreeMap<String, String>,
+) -> bool {
     fn enables(
         name: &str,
         features: &serde_json::Map<String, serde_json::Value>,
+        keys: &BTreeMap<String, String>,
         seen: &mut BTreeSet<String>,
     ) -> bool {
         if !seen.insert(name.to_owned()) {
@@ -1205,7 +1630,9 @@ fn json_features_enable_kernel(features: &serde_json::Map<String, serde_json::Va
             let Some(text) = item.as_str() else {
                 continue;
             };
-            if is_kernel_forward(text) || (!text.contains('/') && enables(text, features, seen)) {
+            if is_kernel_forward(text, keys)
+                || (!text.contains('/') && enables(text, features, keys, seen))
+            {
                 return true;
             }
         }
@@ -1213,5 +1640,5 @@ fn json_features_enable_kernel(features: &serde_json::Map<String, serde_json::Va
     }
     features
         .keys()
-        .any(|name| enables(name, features, &mut BTreeSet::new()))
+        .any(|name| enables(name, features, keys, &mut BTreeSet::new()))
 }

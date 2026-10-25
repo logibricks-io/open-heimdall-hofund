@@ -104,6 +104,7 @@ only on `plugin-host` and are not on the diagram.
 | `hofund-quirks` | `hofund-ir` |
 | `hofund-plugin-api` | `hofund-ir` |
 | `hofund-plugin-sdk` | `hofund-plugin-api`, `hofund-quirks` |
+| `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-host` | `hofund-plugin-api` |
 | `hofund-kit-upstream` | `hofund-plugin-host` |
 | `hofund-kit-subscription` | `hofund-plugin-host` |

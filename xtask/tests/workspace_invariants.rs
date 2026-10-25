@@ -25,6 +25,7 @@ const MEMBERS: &[&str] = &[
     "crates/plugin-api",
     "crates/plugin-host",
     "crates/plugin-sdk",
+    "plugins/providers/fixture",
     "crates/provider",
     "kits/agent",
     "kits/subscription",
@@ -69,6 +70,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-kit-upstream" => &["hofund-plugin-host"],
         "hofund-plugin-api" => &["hofund-ir"],
         "hofund-plugin-host" => &["hofund-plugin-api"],
+        "hofund-plugin-fixture" => &["hofund-plugin-api"],
         "hofund-plugin-sdk" => &["hofund-plugin-api", "hofund-quirks"],
         "hofund-provider" => &[
             "hofund-codec",
@@ -209,6 +211,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-kit-subscription",
         "hofund-kit-upstream",
         "hofund-plugin-api",
+        "hofund-plugin-fixture",
         "hofund-plugin-host",
         "hofund-plugin-sdk",
         "hofund-provider",

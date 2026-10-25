@@ -4,7 +4,7 @@
 //! runtime, and no workspace crate may depend on it. Architecture checks live in
 //! this crate's integration tests.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 fn main() -> ExitCode {
@@ -35,55 +35,264 @@ Dependency direction and the vendor-name rule are enforced by
     );
 }
 
+const PLUGIN_KINDS: &[&str] = &["providers", "subscriptions", "agents", "inbound"];
+
+/// Directory of the workspace that contains `xtask`, independent of the
+/// process working directory.
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask lives one directory below the workspace root")
+        .to_path_buf()
+}
+
 /// Package names under `plugins/<kind>/<id>/Cargo.toml`.
 ///
-/// Kinds are the directories the seam allows: providers, subscriptions, agents,
-/// and inbound. An empty or missing directory is an empty list.
-fn plugin_packages(plugins: &Path) -> Vec<String> {
+/// A missing `plugins/` directory is an empty list. A directory that exists
+/// and contains no package, an unknown kind, or a manifest that cannot be
+/// read is an error: the check fails closed.
+fn load_plugin_packages(plugins: &Path) -> Result<Vec<String>, String> {
+    if !plugins.exists() {
+        return Ok(Vec::new());
+    }
+    if !plugins.is_dir() {
+        return Err(format!("{} is not a directory", plugins.display()));
+    }
     let mut names = Vec::new();
-    let kinds = ["providers", "subscriptions", "agents", "inbound"];
-    let Ok(entries) = std::fs::read_dir(plugins) else {
-        return names;
-    };
-    for entry in entries.flatten() {
-        if !kinds.contains(&entry.file_name().to_string_lossy().as_ref()) {
+    let entries = std::fs::read_dir(plugins)
+        .map_err(|error| format!("read {}: {error}", plugins.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read {}: {error}", plugins.display()))?;
+        let kind = entry.file_name();
+        let kind = kind.to_string_lossy();
+        if kind.starts_with('.') || kind == "registry" {
             continue;
         }
-        let Ok(children) = std::fs::read_dir(entry.path()) else {
-            continue;
-        };
-        for child in children.flatten() {
-            let manifest = child.path().join("Cargo.toml");
-            let Ok(text) = std::fs::read_to_string(&manifest) else {
+        let kind_path = entry.path();
+        if !kind_path.is_dir() {
+            return Err(format!("plugins/{kind} is not a plugin kind directory"));
+        }
+        if !PLUGIN_KINDS.contains(&kind.as_ref()) {
+            return Err(format!("unknown plugin kind {kind}"));
+        }
+        let children = std::fs::read_dir(&kind_path)
+            .map_err(|error| format!("read {}: {error}", kind_path.display()))?;
+        for child in children {
+            let child = child.map_err(|error| format!("read {}: {error}", kind_path.display()))?;
+            if !child.path().is_dir() {
                 continue;
-            };
-            let Ok(value) = toml::from_str::<toml::Value>(&text) else {
-                continue;
-            };
-            if let Some(name) = value
+            }
+            let id = child.file_name().to_string_lossy().into_owned();
+            let manifest_path = child.path().join("Cargo.toml");
+            if !manifest_path.is_file() {
+                return Err(format!("{kind}/{id} manifest is missing"));
+            }
+            let text = std::fs::read_to_string(&manifest_path)
+                .map_err(|error| format!("read {}: {error}", manifest_path.display()))?;
+            let value = toml::from_str::<toml::Value>(&text)
+                .map_err(|error| format!("{kind}/{id} manifest is not valid toml: {error}"))?;
+            let Some(name) = value
                 .get("package")
                 .and_then(|package| package.get("name"))
                 .and_then(toml::Value::as_str)
-            {
-                names.push(name.to_owned());
-            }
+            else {
+                return Err(format!("{kind}/{id} manifest has no package name"));
+            };
+            audit_manifest(name, &text)?;
+            names.push(name.to_owned());
         }
     }
+    if names.is_empty() {
+        return Err(format!(
+            "{} exists but contains no plugin packages",
+            plugins.display()
+        ));
+    }
     names.sort();
-    names
+    names.dedup();
+    Ok(names)
+}
+
+fn audit_manifest(package: &str, text: &str) -> Result<(), String> {
+    let value: toml::Value = toml::from_str(text)
+        .map_err(|error| format!("{package} manifest is not valid toml: {error}"))?;
+    let mut keys = std::collections::BTreeMap::new();
+    collect_dep_keys(&value, &mut keys);
+    for (key, name) in &keys {
+        if name == "hofund-plugin-api" && key != "hofund-plugin-api" {
+            return Err(format!("{package} renames hofund-plugin-api to {key}"));
+        }
+        if name == "tokio" && key != "tokio" {
+            return Err(format!("{package} renames tokio to {key}"));
+        }
+        if key == "std" || name == "std" {
+            return Err(format!("{package} depends on a std shim"));
+        }
+        if matches!(name.as_str(), "libc" | "nix") {
+            return Err(format!("{package} depends on {name}"));
+        }
+    }
+    if feature_forwards_kernel(&value, &keys) {
+        return Err(format!(
+            "{package} enables the hofund-plugin-api kernel feature"
+        ));
+    }
+    Ok(())
+}
+
+fn collect_dep_keys(value: &toml::Value, keys: &mut std::collections::BTreeMap<String, String>) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for (section, child) in table {
+        if matches!(
+            section.as_str(),
+            "dependencies" | "dev-dependencies" | "build-dependencies"
+        ) {
+            push_dep_keys(child, keys);
+        } else {
+            collect_dep_keys(child, keys);
+        }
+    }
+}
+
+fn push_dep_keys(value: &toml::Value, keys: &mut std::collections::BTreeMap<String, String>) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for (key, spec) in table {
+        match spec {
+            toml::Value::String(_) => {
+                keys.insert(key.clone(), key.clone());
+            }
+            toml::Value::Table(body) => {
+                let name = body
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key);
+                let enables_kernel = body
+                    .get("features")
+                    .and_then(toml::Value::as_array)
+                    .is_some_and(|items| {
+                        items
+                            .iter()
+                            .filter_map(toml::Value::as_str)
+                            .any(|feature| feature == "kernel")
+                    });
+                if name == "hofund-plugin-api" && enables_kernel {
+                    keys.insert("__kernel__".to_owned(), "direct".to_owned());
+                }
+                keys.insert(key.clone(), name.to_owned());
+            }
+            toml::Value::Array(_)
+            | toml::Value::Integer(_)
+            | toml::Value::Float(_)
+            | toml::Value::Boolean(_)
+            | toml::Value::Datetime(_) => {}
+        }
+    }
+}
+
+fn feature_forwards_kernel(
+    value: &toml::Value,
+    keys: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    if keys.contains_key("__kernel__") {
+        return true;
+    }
+    let Some(features) = value.get("features").and_then(toml::Value::as_table) else {
+        return false;
+    };
+    features.keys().any(|name| {
+        feature_list_enables_kernel(name, features, keys, &mut std::collections::BTreeSet::new())
+    })
+}
+
+fn feature_list_enables_kernel(
+    name: &str,
+    features: &toml::map::Map<String, toml::Value>,
+    keys: &std::collections::BTreeMap<String, String>,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    if !seen.insert(name.to_owned()) {
+        return false;
+    }
+    let Some(items) = features.get(name).and_then(toml::Value::as_array) else {
+        return false;
+    };
+    for item in items {
+        let Some(text) = item.as_str() else {
+            continue;
+        };
+        if is_kernel_forward(text, keys)
+            || (!text.contains('/') && feature_list_enables_kernel(text, features, keys, seen))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_kernel_forward(text: &str, keys: &std::collections::BTreeMap<String, String>) -> bool {
+    let text = text.strip_prefix("dep:").unwrap_or(text);
+    let Some((dep, feature)) = text.split_once('/') else {
+        return false;
+    };
+    let dep = dep.strip_suffix('?').unwrap_or(dep);
+    let package = keys.get(dep).map(String::as_str).unwrap_or(dep);
+    package == "hofund-plugin-api" && feature == "kernel"
+}
+
+fn resolved_kernel_feature(package: &str) -> Result<bool, String> {
+    let output = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            package,
+            "-e",
+            "features",
+            "-i",
+            "hofund-plugin-api",
+            "--prefix",
+            "none",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .map_err(|error| format!("cargo tree -p {package}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo tree -p {package} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .any(|line| line.contains("hofund-plugin-api feature \"kernel\"")))
 }
 
 fn check_plugins() -> ExitCode {
-    let plugins = Path::new("plugins");
-    let packages = plugin_packages(plugins);
-    if packages.is_empty() {
-        println!("no plugin packages to check");
-        return ExitCode::SUCCESS;
+    let plugins = workspace_root().join("plugins");
+    if !plugins.is_absolute() {
+        eprintln!("check-plugins: plugins path is not absolute");
+        return ExitCode::from(1);
     }
+    let packages = match load_plugin_packages(&plugins) {
+        Ok(packages) if packages.is_empty() => {
+            println!("no plugin packages to check");
+            return ExitCode::SUCCESS;
+        }
+        Ok(packages) => packages,
+        Err(error) => {
+            eprintln!("check-plugins: {error}");
+            return ExitCode::from(1);
+        }
+    };
     for package in &packages {
         println!("cargo check -p {package}");
         let status = Command::new("cargo")
             .args(["check", "-p", package])
+            .current_dir(workspace_root())
             .status();
         match status {
             Ok(status) if status.success() => {}
@@ -96,16 +305,27 @@ fn check_plugins() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
+        match resolved_kernel_feature(package) {
+            Ok(false) => {}
+            Ok(true) => {
+                eprintln!("{package} resolves hofund-plugin-api with the kernel feature");
+                return ExitCode::from(1);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::from(1);
+            }
+        }
     }
     ExitCode::SUCCESS
 }
 
 #[cfg(test)]
 mod tests {
-    use super::plugin_packages;
+    use super::{load_plugin_packages, resolved_kernel_feature, workspace_root};
 
     #[test]
-    fn plugin_packages_reads_the_package_name() {
+    fn plugin_packages_fail_closed() {
         let root =
             std::env::temp_dir().join(format!("hofund-plugin-packages-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -113,12 +333,99 @@ mod tests {
         std::fs::create_dir_all(&plugin).expect("dir");
         std::fs::write(
             plugin.join("Cargo.toml"),
-            "[package]\nname = \"hofund-plugin-example\"\n",
+            "[package]\nname = \"hofund-plugin-example\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n",
         )
         .expect("manifest");
-        let names = plugin_packages(&root.join("plugins"));
+        let names = load_plugin_packages(&root.join("plugins")).expect("packages");
         assert_eq!(names, ["hofund-plugin-example".to_owned()]);
+
+        let missing = root.join("missing");
+        assert!(
+            load_plugin_packages(&missing)
+                .expect("missing dir")
+                .is_empty(),
+            "a missing plugins directory may succeed"
+        );
+
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).expect("empty");
+        assert!(
+            load_plugin_packages(&empty).is_err(),
+            "an existing plugins directory with zero packages must fail"
+        );
+
+        let unknown = root.join("unknown");
+        std::fs::create_dir_all(unknown.join("unknownkind/x")).expect("unknown");
+        std::fs::write(
+            unknown.join("unknownkind/x/Cargo.toml"),
+            "[package]\nname = \"x\"\n",
+        )
+        .expect("unknown manifest");
+        let unknown_error = load_plugin_packages(&unknown).expect_err("unknown kind");
+        assert!(
+            unknown_error.contains("unknown plugin kind"),
+            "{unknown_error}"
+        );
+
+        let broken = root.join("broken");
+        std::fs::create_dir_all(broken.join("providers/bad")).expect("broken");
+        std::fs::write(broken.join("providers/bad/Cargo.toml"), "not toml [\n").expect("toml");
+        let broken_error = load_plugin_packages(&broken).expect_err("bad toml");
+        assert!(broken_error.contains("not valid toml"), "{broken_error}");
+
+        let renamed = root.join("renamed");
+        std::fs::create_dir_all(renamed.join("providers/api")).expect("renamed");
+        std::fs::write(
+            renamed.join("providers/api/Cargo.toml"),
+            "[package]\nname = \"renamed\"\n[dependencies]\napi = { package = \"hofund-plugin-api\" }\n[features]\nfast = [\"api/kernel\"]\n",
+        )
+        .expect("renamed manifest");
+        let renamed_error = load_plugin_packages(&renamed).expect_err("rename");
+        assert!(
+            renamed_error.contains("renames hofund-plugin-api"),
+            "{renamed_error}"
+        );
+
+        let weak = root.join("weak");
+        std::fs::create_dir_all(weak.join("providers/weak")).expect("weak");
+        std::fs::write(
+            weak.join("providers/weak/Cargo.toml"),
+            "[package]\nname = \"weak\"\n[dependencies]\nhofund-plugin-api = { optional = true }\n[features]\nfast = [\"hofund-plugin-api?/kernel\"]\n",
+        )
+        .expect("weak manifest");
+        let weak_error = load_plugin_packages(&weak).expect_err("weak");
+        assert!(weak_error.contains("kernel"), "{weak_error}");
+
+        let tokio = root.join("tokio");
+        std::fs::create_dir_all(tokio.join("providers/tk")).expect("tokio");
+        std::fs::write(
+            tokio.join("providers/tk/Cargo.toml"),
+            "[package]\nname = \"tk-plugin\"\n[dependencies]\ntk = { package = \"tokio\" }\n",
+        )
+        .expect("tokio manifest");
+        let tokio_error = load_plugin_packages(&tokio).expect_err("tokio rename");
+        assert!(tokio_error.contains("renames tokio"), "{tokio_error}");
+
+        assert!(
+            workspace_root().join("plugins").is_absolute(),
+            "check-plugins resolves plugins from the workspace root"
+        );
         let _ = std::fs::remove_dir_all(&root);
-        assert!(plugin_packages(&root.join("missing")).is_empty());
+    }
+
+    #[test]
+    fn cargo_tree_sees_the_kernel_feature_per_package() {
+        assert!(
+            resolved_kernel_feature("hofund-plugin-host").expect("host tree"),
+            "the host enables the kernel feature"
+        );
+        assert!(
+            !resolved_kernel_feature("hofund-provider").expect("provider tree"),
+            "another workspace member must not inherit that feature"
+        );
+        assert!(
+            !resolved_kernel_feature("hofund-plugin-fixture").expect("fixture tree"),
+            "the fixture plugin must compile without the kernel feature"
+        );
     }
 }

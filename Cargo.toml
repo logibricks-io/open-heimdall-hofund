@@ -12,6 +12,7 @@ members = [
     "crates/plugin-api",
     "crates/plugin-host",
     "crates/plugin-sdk",
+    "plugins/providers/fixture",
     "crates/provider",
     "kits/agent",
     "kits/subscription",
