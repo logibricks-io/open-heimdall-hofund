@@ -75,9 +75,25 @@ sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
 cargo build -p hofund-desktop
 ```
 
-The app reads `HOFUND_CONFIG`, or `hofund/hofund.toml` under the platform
-config directory, and creates a starter file on Start or Open config. The CLI
-still defaults to `./hofund.toml`.
+The CLI and the menu-bar app both read `HOFUND_CONFIG` when it is set.
+Otherwise they use `hofund/hofund.toml` under the platform config directory:
+`XDG_CONFIG_HOME` or `~/.config` on Unix, `~/Library/Application Support` on
+macOS, and `%APPDATA%` on Windows. `--config` selects another file. The app
+creates a starter file on Start or Open config.
+
+## Configuration
+
+[`examples/hofund.toml`](examples/hofund.toml) is a complete file: two
+`[[providers]]` tables and a `[[routes]]` table whose `upstreams` list is the
+failover order. `api_key` may be a literal or `env:NAME`. Check it in place:
+
+```sh
+hofund config check --config examples/hofund.toml
+```
+
+`hofund config check` prints `config ok:` and the path it read when the file
+loads. When it does not, the message starts with that path. `hofund --help`
+and `hofund <command> --help` print that command's usage.
 
 ## Architecture
 

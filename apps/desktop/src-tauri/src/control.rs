@@ -203,7 +203,9 @@ impl Control {
                     .apply(session, &target)
                     .map_err(|error| error.to_string())?;
             } else {
-                adapter.revert(session).map_err(|error| error.to_string())?;
+                adapter
+                    .disconnect(session, false)
+                    .map_err(|error| error.to_string())?;
             }
             Ok(())
         })();

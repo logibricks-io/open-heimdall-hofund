@@ -316,6 +316,7 @@ async fn a_header_secret_or_query_secret_is_accepted() {
     assert!(body.contains("ok"));
 
     let queried = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -326,6 +327,18 @@ async fn a_header_secret_or_query_secret_is_accepted() {
         .await
         .expect("response");
     assert_eq!(queried.status(), StatusCode::OK);
+
+    let (status, body) = call_with(
+        app.clone(),
+        "x-api-key",
+        "secret",
+        "/v1/plain",
+        r#"{"model":"demo"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = call_with(app, "x-api-key", "nope", "/v1/plain", r#"{"model":"demo"}"#).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -372,6 +385,65 @@ async fn generative_routes_inject_the_model_and_list_models() {
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("models/demo"), "{text}");
     assert!(text.contains("streamGenerateContent"), "{text}");
+}
+
+#[tokio::test]
+async fn health_is_open_and_names_no_secret() {
+    let app = gateway(
+        vec![fake("primary", &Arc::new(AtomicUsize::new(0)), None)],
+        "secret",
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("health");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(text, "{\"status\":\"ok\"}");
+    assert!(!text.contains("secret"));
+}
+
+#[tokio::test]
+async fn a_replaced_token_file_is_read_on_the_next_request() {
+    let dir = std::env::temp_dir().join(format!("hofund-edge-token-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let token_path = dir.join("token");
+    std::fs::write(&token_path, "first\n").expect("token");
+    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "demo".to_owned(),
+        vec![fake("primary", &Arc::new(AtomicUsize::new(0)), None)],
+    );
+    let mut codecs = HashMap::new();
+    codecs.insert("/v1/plain".to_owned(), Arc::new(Plain) as Arc<dyn Codec>);
+    let app = Gateway::with_token_file(
+        Router::new(routes, FailoverPolicy::default()),
+        "first".to_owned(),
+        token_path.clone(),
+        codecs,
+        usage,
+    )
+    .into_router();
+    let (status, _) = call(app.clone(), Some("first"), r#"{"model":"demo"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    std::fs::write(&token_path, "second\n").expect("rotate");
+    let (status, _) = call(app.clone(), Some("first"), r#"{"model":"demo"}"#).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = call(app.clone(), Some("second"), r#"{"model":"demo"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    std::fs::write(&token_path, "\n").expect("empty");
+    let (status, _) = call(app, Some("second"), r#"{"model":"demo"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 async fn call_with(

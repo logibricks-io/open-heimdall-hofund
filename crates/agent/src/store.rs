@@ -66,6 +66,51 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AgentError> 
     replace_file(&temporary, path)
 }
 
+/// Whether connect saved a backup or an absent marker beside `path`.
+pub(crate) fn marker_present(path: &Path) -> bool {
+    sibling(path, ".hofund.bak").is_file() || sibling(path, ".hofund.absent").is_file()
+}
+
+/// Whether connect created `path` (an absent marker, and no backup).
+pub(crate) fn created_here(path: &Path) -> bool {
+    sibling(path, ".hofund.absent").is_file() && !sibling(path, ".hofund.bak").is_file()
+}
+
+/// Deletes the backup and the absent marker beside `path`.
+pub(crate) fn clear_markers(path: &Path) -> Result<(), AgentError> {
+    for suffix in [".hofund.bak", ".hofund.absent"] {
+        let marker = sibling(path, suffix);
+        if marker.is_file() {
+            fs::remove_file(&marker).map_err(|error| io(&marker, error))?;
+        }
+    }
+    Ok(())
+}
+
+/// Deletes `path` when it exists.
+pub(crate) fn delete_file(path: &Path) -> Result<(), AgentError> {
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| io(path, error))?;
+    }
+    Ok(())
+}
+
+/// Removes empty parents of `start`, and stops at any directory in `preserve`.
+pub(crate) fn remove_empty_parents(start: &Path, preserve: &[PathBuf]) -> Result<(), AgentError> {
+    let mut current = start.parent().map(Path::to_path_buf);
+    while let Some(dir) = current {
+        if preserve.contains(&dir) || dir.parent().is_none() {
+            break;
+        }
+        match fs::remove_dir(&dir) {
+            Ok(()) => current = dir.parent().map(Path::to_path_buf),
+            Err(error) if error.kind() == ErrorKind::NotFound => break,
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
 /// Restores `path` from its backup. Returns whether a backup was present.
 pub(crate) fn revert_path(path: &Path) -> Result<bool, AgentError> {
     let backup = sibling(path, ".hofund.bak");

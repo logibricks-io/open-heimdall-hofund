@@ -141,7 +141,9 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 ## What is intentionally absent
 
 - Routing strategies other than ordered failover.
-- A running process does not reload configuration.
+- A running process does not reload configuration. It does re-read the bearer
+  token file on each request, so `hofund token rotate` takes effect without a
+  restart. `GET /health` is unauthenticated and returns no secrets.
 - There is no rest timer and no process-global route counter.
 - Language packs. A future i18n pack is the other place, besides
   `README.<lang>.md`, where a language other than English may appear.

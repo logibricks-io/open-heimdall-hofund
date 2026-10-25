@@ -51,7 +51,17 @@ sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
 cargo build -p hofund-desktop
 ```
 
-应用读取 `HOFUND_CONFIG`；未设置时使用平台配置目录下的 `hofund/hofund.toml`。第一次 Start 或 Open config 会写入一份只有默认监听地址的配置。命令行仍默认使用当前目录的 `./hofund.toml`。
+命令行和菜单栏应用在设置了 `HOFUND_CONFIG` 时都读取它。否则使用平台配置目录下的 `hofund/hofund.toml`：Unix 上是 `XDG_CONFIG_HOME` 或 `~/.config`，macOS 上是 `~/Library/Application Support`，Windows 上是 `%APPDATA%`。`--config` 可以改用别的文件。应用在第一次 Start 或 Open config 时写入一份只有默认监听地址的配置。
+
+## 配置
+
+[`examples/hofund.toml`](examples/hofund.toml) 是一份完整示例：两张 `[[providers]]` 表，以及一张 `[[routes]]` 表，其中 `upstreams` 的顺序就是故障转移顺序。`api_key` 可以是字面量，也可以是 `env:NAME`。可以就地检查：
+
+```sh
+hofund config check --config examples/hofund.toml
+```
+
+`hofund config check` 在文件可以加载时打印 `config ok:` 和它读取的路径。失败时，错误信息以该路径开头。`hofund --help` 和 `hofund <command> --help` 打印对应命令的用法。
 
 ## 架构
 

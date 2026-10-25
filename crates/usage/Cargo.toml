@@ -13,6 +13,7 @@ rust-version.workspace = true
 [dependencies]
 # `cache` (the default) pulls an older hashbrown through hashlink. The ledger
 # does not use the statement cache, so only the bundled SQLite build is enabled.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }
 thiserror = "2.0.21"
 

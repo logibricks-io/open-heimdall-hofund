@@ -114,6 +114,16 @@ pub fn configured_listen(path: &Path) -> Option<String> {
     load_path(path).ok().map(|config| config.listen.to_string())
 }
 
+/// Model names declared in `path`'s routes.
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] when the config cannot be read.
+pub fn route_models(path: &Path) -> Result<Vec<String>, DaemonError> {
+    let config = load_path(path).map_err(show)?;
+    Ok(config.routes.into_iter().map(|route| route.model).collect())
+}
+
 /// The usage table for the database named by `path`'s config.
 ///
 /// # Errors
@@ -135,11 +145,11 @@ pub fn usage_report(path: &Path) -> Result<String, DaemonError> {
 /// the server task.
 pub async fn start(path: &Path) -> Result<Running, DaemonError> {
     let config = load_path(path).map_err(show)?;
-    let token = TokenFile::new(beside(path, &config.token_file))
-        .load_or_create()
-        .map_err(show)?;
+    let token_path = beside(path, &config.token_file);
+    let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
     let usage = Arc::new(Ledger::open(&beside(path, &config.usage_file)).map_err(show)?);
-    let gateway = Gateway::new(router(&config)?, token, inbound_codecs(), usage);
+    let gateway =
+        Gateway::with_token_file(router(&config)?, token, token_path, inbound_codecs(), usage);
     gateway
         .bind(config.listen)
         .await

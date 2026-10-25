@@ -38,17 +38,54 @@ pub(crate) fn get(kind: FileKind, text: &str, key: &str) -> Result<Option<String
     }
 }
 
+/// The string stored at `key`, when that value is a string.
+pub(crate) fn string_at(
+    kind: FileKind,
+    text: &str,
+    key: &str,
+) -> Result<Option<String>, AgentError> {
+    match kind {
+        FileKind::Json => json_string(&json_root(text)?, key),
+        FileKind::Toml => Ok(toml_get(&parse_toml(text)?, key)),
+        FileKind::Env => Ok(env_get(text, key)),
+    }
+}
+
+/// Deletes `keys` and drops object or table parents that become empty.
+pub(crate) fn remove_keys(
+    kind: FileKind,
+    original: &str,
+    keys: &[&str],
+) -> Result<Vec<u8>, AgentError> {
+    let text = match kind {
+        FileKind::Json => remove_json(original, keys)?,
+        FileKind::Toml => remove_toml(original, keys)?,
+        FileKind::Env => remove_env(original, keys),
+    };
+    Ok(text.into_bytes())
+}
+
+/// Whether `bytes` has no keys left. Comments alone count as empty.
+pub(crate) fn is_empty_document(kind: FileKind, bytes: &[u8]) -> Result<bool, AgentError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| AgentError::message("file is not UTF-8".to_owned()))?;
+    match kind {
+        FileKind::Json => Ok(json_root(text)?
+            .as_object()
+            .is_some_and(|object| object.is_empty())),
+        FileKind::Toml => Ok(parse_toml(text)?.as_table().is_empty()),
+        FileKind::Env => Ok(!split_lines(text)
+            .iter()
+            .any(|line| parse_assignment(line).is_some())),
+    }
+}
+
 fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
     let mut root = json_root(original)?;
     for assignment in assignments {
         set_json(&mut root, &split_key(assignment.key), &assignment.value)?;
     }
-    let mut bytes = serde_json::to_vec_pretty(&root)
-        .map_err(|error| AgentError::message(format!("JSON: {error}")))?;
-    if !bytes.ends_with(b"\n") {
-        bytes.push(b'\n');
-    }
-    String::from_utf8(bytes).map_err(|error| AgentError::message(format!("JSON: {error}")))
+    pretty_json(&root)
 }
 
 fn render_toml(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
@@ -113,6 +150,69 @@ fn json_root(text: &str) -> Result<Value, AgentError> {
         .map_err(|error| AgentError::message(format!("JSON: {error}")))
 }
 
+fn remove_json(original: &str, keys: &[&str]) -> Result<String, AgentError> {
+    let mut root = json_root(original)?;
+    for key in keys {
+        unset_json(&mut root, &split_key(key))?;
+    }
+    pretty_json(&root)
+}
+
+fn pretty_json(root: &Value) -> Result<String, AgentError> {
+    let mut bytes = serde_json::to_vec_pretty(root)
+        .map_err(|error| AgentError::message(format!("JSON: {error}")))?;
+    if !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    String::from_utf8(bytes).map_err(|error| AgentError::message(format!("JSON: {error}")))
+}
+
+fn unset_json(value: &mut Value, path: &[&str]) -> Result<(), AgentError> {
+    let Some((key, rest)) = path.split_first() else {
+        return Err(AgentError::message("empty JSON key"));
+    };
+    if !value.is_object() {
+        return Err(AgentError::message("JSON value is not an object"));
+    }
+    let object = value.as_object_mut().expect("checked object");
+    if rest.is_empty() {
+        object.remove(*key);
+        return Ok(());
+    }
+    let Some(child) = object.get(*key) else {
+        return Ok(());
+    };
+    if !child.is_object() {
+        return Err(AgentError::message(format!("`{key}` is not an object")));
+    }
+    unset_json(object.get_mut(*key).expect("child"), rest)?;
+    let empty = object
+        .get(*key)
+        .and_then(Value::as_object)
+        .is_some_and(|child| child.is_empty());
+    if empty {
+        object.remove(*key);
+    }
+    Ok(())
+}
+
+fn json_string(value: &Value, key: &str) -> Result<Option<String>, AgentError> {
+    let mut cursor = value;
+    for part in split_key(key) {
+        let Some(object) = cursor.as_object() else {
+            return Err(AgentError::message(format!("`{part}` is not an object")));
+        };
+        let Some(child) = object.get(part) else {
+            return Ok(None);
+        };
+        cursor = child;
+    }
+    match cursor {
+        Value::String(text) => Ok(Some(text.clone())),
+        _ => Ok(None),
+    }
+}
+
 fn json_get(value: &Value, key: &str) -> Result<Option<String>, AgentError> {
     let mut cursor = value;
     for part in split_key(key) {
@@ -173,6 +273,83 @@ fn lookup<'a>(item: &'a Item, path: &[&str]) -> Option<&'a str> {
     } else {
         lookup(child, rest)
     }
+}
+
+fn remove_toml(original: &str, keys: &[&str]) -> Result<String, AgentError> {
+    let mut document = parse_toml(original)?;
+    for key in keys {
+        unset_toml(document.as_item_mut(), &split_key(key))?;
+    }
+    let mut text = document.to_string();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+fn unset_toml(item: &mut Item, path: &[&str]) -> Result<(), AgentError> {
+    let Some((key, rest)) = path.split_first() else {
+        return Err(AgentError::message("empty TOML key"));
+    };
+    if item.as_table_like().is_none() {
+        return Err(AgentError::message(format!("`{key}` is not a table")));
+    }
+    if rest.is_empty() {
+        if let Some(table) = item.as_table_like_mut() {
+            table.remove(key);
+        }
+        return Ok(());
+    }
+    let present = item
+        .as_table_like()
+        .and_then(|table| table.get(key))
+        .is_some();
+    if !present {
+        return Ok(());
+    }
+    let is_table = item
+        .as_table_like()
+        .and_then(|table| table.get(key))
+        .is_some_and(Item::is_table_like);
+    if !is_table {
+        return Err(AgentError::message(format!("`{key}` is not a table")));
+    }
+    {
+        let child = item
+            .as_table_like_mut()
+            .and_then(|table| table.get_mut(key))
+            .expect("child");
+        unset_toml(child, rest)?;
+    }
+    let empty = item
+        .as_table_like()
+        .and_then(|table| table.get(key))
+        .and_then(Item::as_table_like)
+        .is_some_and(|table| table.is_empty());
+    if empty && let Some(table) = item.as_table_like_mut() {
+        table.remove(key);
+    }
+    Ok(())
+}
+
+fn remove_env(original: &str, keys: &[&str]) -> String {
+    let newline = if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let lines: Vec<String> = split_lines(original)
+        .into_iter()
+        .filter(|line| match parse_assignment(line) {
+            Some((_, key, _)) => !keys.iter().any(|candidate| *candidate == key),
+            None => true,
+        })
+        .collect();
+    let mut text = lines.join(newline);
+    if !text.is_empty() && !text.ends_with(newline) {
+        text.push_str(newline);
+    }
+    text
 }
 
 fn set_toml(item: &mut Item, path: &[&str], text: &str) -> Result<(), AgentError> {
@@ -387,7 +564,7 @@ fn loosen_json(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Assignment, FileKind, get, render};
+    use super::{Assignment, FileKind, get, is_empty_document, remove_keys, render};
 
     #[test]
     fn json_keeps_unrelated_keys_and_accepts_jsonc() {
@@ -463,5 +640,36 @@ mod tests {
         );
         let again = render(FileKind::Env, Some(&text), &assignments).expect("again");
         assert_eq!(again, text.into_bytes());
+    }
+
+    #[test]
+    fn toml_removal_keeps_a_key_added_beside_ours() {
+        let original = "\
+# keep me
+model = \"gpt-5\"
+model_provider = \"hofund\"
+sandbox_mode = \"workspace-write\"
+
+[model_providers.hofund]
+name = \"hofund\"
+base_url = \"http://127.0.0.1:3425/v1\"
+wire_api = \"responses\"
+experimental_bearer_token = \"local-token\"
+";
+        let keys = [
+            "model_provider",
+            "model_providers.hofund.name",
+            "model_providers.hofund.base_url",
+            "model_providers.hofund.wire_api",
+            "model_providers.hofund.experimental_bearer_token",
+        ];
+        let bytes = remove_keys(FileKind::Toml, original, &keys).expect("remove");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert!(text.contains("# keep me"));
+        assert!(text.contains("model = \"gpt-5\""));
+        assert!(text.contains("sandbox_mode = \"workspace-write\""));
+        assert!(!text.contains("hofund"));
+        assert!(!text.contains("local-token"));
+        assert!(!is_empty_document(FileKind::Toml, text.as_bytes()).expect("empty"));
     }
 }
