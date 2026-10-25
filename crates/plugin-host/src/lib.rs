@@ -72,9 +72,9 @@ pub fn surface_host(
 
 /// A [`HostContext`] for one configured provider.
 ///
-/// The HTTP handle is the pooled direct client. `api_key` is the secret
-/// `api_key` for this plugin. Accounts live at `root/accounts.json`. The
-/// scheduler records jobs and does not run them.
+/// The HTTP handle is the pooled direct client with `limits`. `api_key` is
+/// the secret `api_key` for this plugin. Accounts live at `root/accounts.json`.
+/// The scheduler records jobs and does not run them.
 ///
 /// # Errors
 ///
@@ -83,12 +83,13 @@ pub fn runtime_host(
     plugin: PluginId,
     api_key: impl Into<String>,
     root: impl Into<PathBuf>,
+    limits: HttpLimits,
 ) -> Result<HostContext, StoreError> {
     let root = root.into();
     let accounts = PlaintextFileAccountStore::open(root.join("accounts.json"))?;
     Ok(host_context(
         plugin.clone(),
-        Arc::new(PooledHttp::direct()),
+        Arc::new(PooledHttp::with_limits(HttpProfile::direct(), limits)),
         Arc::new(KeySecrets {
             plugin,
             api_key: api_key.into(),

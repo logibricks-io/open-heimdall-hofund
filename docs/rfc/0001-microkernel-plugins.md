@@ -903,6 +903,7 @@ D2 follows the review answers on D1. Shared protocol helpers stay in the SDK and
 - The daemon's Chat, Responses, Messages, and Generative arms call `registry.factory` and adapt the `UpstreamProvider` back to `Provider`. Vertex and Bedrock stay on the old constructors. The four factories still run the `hofund-provider` adapters, so E replaces the factory body without adding a second routing path.
 - `plugins/registry/build.rs` indexes `PresetId` to a plugin id plus static config and fails on a duplicate or a non-kebab id. The catalog of 58 presets is not in that index yet.
 - The gateway fallback authenticates, then calls `InboundSurface::handle` inside an `inbound` span and a 60 second timeout. `echo` is mounted, including a path under its prefix. Codec routes stay on their own axum paths.
+- The daemon config supplies `connect_timeout_ms` and `read_timeout_ms` to `HttpLimits`. Omitted keys use the 10 second connect and 60 second idle-read defaults. These are the socket budgets. The kernel idle deadline stays the endpoint timeout.
 
 ### Parallel work plan
 

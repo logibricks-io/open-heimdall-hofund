@@ -12,6 +12,7 @@ use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, Ope
 use hofund_config::{Config, Kind, PresetWire, Protocol, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 use hofund_plugin_api::{DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue};
+use hofund_plugin_host::HttpLimits;
 
 pub use hofund_gateway::Running;
 use hofund_provider::{Bedrock, Credential, Endpoint, Provider, Vertex, Wire, resolve};
@@ -233,6 +234,7 @@ fn providers(
     config: &Config,
     path: &Path,
 ) -> Result<BTreeMap<String, membership::BuiltProvider>, DaemonError> {
+    let limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
     let mut built = BTreeMap::new();
     for provider in &config.providers {
         let planned = plan(provider)?;
@@ -257,7 +259,7 @@ fn providers(
         let plugin_id = plugin_for(provider, planned.wire);
         let adapter: Arc<dyn Provider> = match planned.wire {
             Wire::Chat | Wire::Responses | Wire::Messages | Wire::Generative => {
-                Arc::new(build_plugin(provider, &planned, &endpoint, path)?)
+                Arc::new(build_plugin(provider, &planned, &endpoint, path, limits)?)
             }
             Wire::Vertex => Arc::new(
                 Vertex::new(endpoint, &provider.credentials, &provider.impersonate)
@@ -313,6 +315,7 @@ fn build_plugin(
     planned: &Planned,
     endpoint: &Endpoint,
     path: &Path,
+    limits: HttpLimits,
 ) -> Result<adapt::ProviderAdapter, DaemonError> {
     let plugin_id = plugin_for(provider, planned.wire);
     let factory = hofund_plugin_registry::factory(&plugin_id)
@@ -325,9 +328,13 @@ fn build_plugin(
         raw_from_endpoint(provider, planned, endpoint)
     };
     let plugin = PluginId::try_from(plugin_id.as_str()).map_err(show)?;
-    let host =
-        hofund_plugin_host::runtime_host(plugin, endpoint.api_key.clone(), beside(path, ".hofund"))
-            .map_err(show)?;
+    let host = hofund_plugin_host::runtime_host(
+        plugin,
+        endpoint.api_key.clone(),
+        beside(path, ".hofund"),
+        limits,
+    )
+    .map_err(show)?;
     let upstream = factory.validate_and_build(&raw, &host).map_err(show)?;
     Ok(adapt::ProviderAdapter::new(provider.id.clone(), upstream))
 }
@@ -611,6 +618,12 @@ mod tests {
         )
         .expect("write");
         check(&path).expect("relay");
+        std::fs::write(
+            &path,
+            "connect_timeout_ms = 1500\nread_timeout_ms = 2500\n[[providers]]\nid = \"box\"\npreset = \"relay\"\nbase_url = \"http://127.0.0.1:9\"\napi_key = \"test\"\n",
+        )
+        .expect("write");
+        check(&path).expect("pooled timeouts");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

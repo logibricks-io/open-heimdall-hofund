@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -22,6 +23,12 @@ pub struct Config {
     pub usage_file: String,
     /// Which upstream failures may try the next provider.
     pub failover: Failover,
+    /// Socket connect budget for the pooled HTTP client.
+    ///
+    /// This is not the kernel idle deadline. That stays on each provider endpoint.
+    pub connect_timeout: Duration,
+    /// Idle time allowed between socket reads on the pooled HTTP client.
+    pub read_timeout: Duration,
     /// Upstream endpoints, in file order.
     pub providers: Vec<Provider>,
     /// Model routes, in file order.
@@ -371,9 +378,21 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             connect_errors: raw.failover.connect_errors,
             statuses: raw.failover.statuses,
         },
+        connect_timeout: duration_ms("connect_timeout_ms", raw.connect_timeout_ms)?,
+        read_timeout: duration_ms("read_timeout_ms", raw.read_timeout_ms)?,
         providers,
         routes,
     })
+}
+
+fn duration_ms(name: &str, millis: u64) -> Result<Duration, ConfigError> {
+    if millis == 0 {
+        return Err(ConfigError::Invalid(format!("{name} is 0")));
+    }
+    let nanos = millis
+        .checked_mul(1_000_000)
+        .ok_or_else(|| ConfigError::Invalid(format!("{name} is too large")))?;
+    Ok(Duration::from_nanos(nanos))
 }
 
 fn upstream_of(
@@ -663,6 +682,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_connect_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_read_timeout_ms() -> u64 {
+    60_000
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFile {
@@ -674,6 +701,10 @@ struct RawFile {
     usage_file: String,
     #[serde(default)]
     failover: RawFailover,
+    #[serde(default = "default_connect_timeout_ms")]
+    connect_timeout_ms: u64,
+    #[serde(default = "default_read_timeout_ms")]
+    read_timeout_ms: u64,
     #[serde(default)]
     providers: Vec<RawProvider>,
     #[serde(default)]
@@ -767,6 +798,7 @@ struct RawMappedUpstream {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::{Kind, Protocol, load};
 
@@ -798,6 +830,25 @@ mod tests {
         assert_eq!(config.routes[0].upstreams[0].model, None);
         assert_eq!(config.providers[0].max_output_tokens, None);
         assert_eq!(config.routes[0].upstreams[0].max_output_tokens, None);
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.read_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn pooled_timeouts_parse_and_reject_zero_or_overflow() {
+        let config = load(
+            r#"
+            connect_timeout_ms = 1500
+            read_timeout_ms = 2500
+            "#,
+        )
+        .expect("config");
+        assert_eq!(config.connect_timeout, Duration::from_millis(1500));
+        assert_eq!(config.read_timeout, Duration::from_millis(2500));
+        let zero = load("connect_timeout_ms = 0\n").expect_err("zero");
+        assert!(zero.to_string().contains("connect_timeout_ms is 0"));
+        let huge = load("read_timeout_ms = 18446744073710\n").expect_err("overflow");
+        assert!(huge.to_string().contains("read_timeout_ms is too large"));
     }
 
     #[test]
