@@ -20,6 +20,35 @@ pub fn reserved(id: &str) -> bool {
     matches!(id, "api" | "sdk" | "host" | "registry")
 }
 
+/// Factory ids compiled into the registry beside the plugins.
+#[must_use]
+pub fn builtin_factory_ids() -> &'static [&'static str] {
+    &["anthropic", "generative", "openai-compat"]
+}
+
+/// True when `id` is not a kebab-case preset id.
+#[must_use]
+pub fn invalid_preset_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    if bytes.is_empty() {
+        return true;
+    }
+    let mut prev_hyphen = true;
+    for byte in bytes {
+        if *byte == b'-' {
+            if prev_hyphen {
+                return true;
+            }
+            prev_hyphen = true;
+        } else if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            prev_hyphen = false;
+        } else {
+            return true;
+        }
+    }
+    prev_hyphen
+}
+
 /// The first repeated id, if any.
 #[must_use]
 pub fn duplicate_id<'a>(ids: &[&'a str]) -> Option<&'a str> {
@@ -156,5 +185,10 @@ mod tests {
         assert!(invalid_prefix("hofund"));
         assert!(invalid_prefix("/hofund echo"));
         assert!(!invalid_prefix("/hofund/echo"));
+        assert!(super::invalid_preset_id(""));
+        assert!(super::invalid_preset_id("OpenAI"));
+        assert!(super::invalid_preset_id("-relay"));
+        assert!(!super::invalid_preset_id("relay"));
+        assert!(!super::invalid_preset_id("openai-compat"));
     }
 }

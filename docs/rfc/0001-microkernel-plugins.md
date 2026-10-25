@@ -896,6 +896,15 @@ PR D1 lands the registry seam and the pooled client. These are the places the co
 - The gateway does not mount `InboundSurface` yet. `match_route` is the lookup the mount will call. Auth, the span, and the timeout are not wired.
 - `SigV4`, OAuth, paging, the 58-preset catalog, kit `conformance`, `cargo hack --each-feature`, and `fuzz/` targets are not in this pull request.
 
+### PR D2 notes
+
+D2 follows the review answers on D1. Shared protocol helpers stay in the SDK and are added in E, when the first plugin that needs each one migrates. They are not copied into a plugin.
+
+- The daemon's Chat, Responses, Messages, and Generative arms call `registry.factory` and adapt the `UpstreamProvider` back to `Provider`. Vertex and Bedrock stay on the old constructors. The four factories still run the `hofund-provider` adapters, so E replaces the factory body without adding a second routing path.
+- `plugins/registry/build.rs` indexes `PresetId` to a plugin id plus static config and fails on a duplicate or a non-kebab id. The catalog of 58 presets is not in that index yet.
+- The gateway fallback authenticates, then calls `InboundSurface::handle` inside an `inbound` span and a 60 second timeout. `echo` is mounted, including a path under its prefix. Codec routes stay on their own axum paths.
+- The daemon config supplies `connect_timeout_ms` and `read_timeout_ms` to `HttpLimits`. Omitted keys use the 10 second connect and 60 second idle-read defaults. These are the socket budgets. The kernel idle deadline stays the endpoint timeout.
+
 ### Parallel work plan
 
 B is alone. After B, B2 and C can proceed together. D starts after C, because both edit `providers` and C lands the snapshot those calls publish. K waits for C and must merge before H. L waits for D. H does not wait for L: until L, subscription commands stay on the in-process CLI path. H does wait for encrypted account storage. `PlaintextFileAccountStore` is not the store those plugins persist to.

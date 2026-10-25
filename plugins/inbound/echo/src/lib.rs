@@ -1,7 +1,7 @@
 //! Sample inbound plugin.
 //!
-//! The gateway does not mount this route yet. The registry records the prefix
-//! and rejects a conflicting one at build time.
+//! The gateway mounts `GET /hofund/echo`. The registry rejects a conflicting
+//! prefix at build time.
 
 #![deny(missing_docs)]
 

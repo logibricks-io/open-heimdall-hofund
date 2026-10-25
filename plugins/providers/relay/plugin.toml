@@ -1,6 +1,6 @@
 id = "relay"
 kind = "provider"
-preset = "relay"
-protocol = "openai-chat"
-credential = "bearer"
-list = "unsupported"
+
+# The preset id is the plugin id. Callers supply base_url.
+[[preset]]
+id = "relay"
