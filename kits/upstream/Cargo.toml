@@ -12,6 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 hofund-plugin-host = { workspace = true }
+tokio = { version = "1.52.2", features = ["rt"] }
 
 [lints]
 workspace = true

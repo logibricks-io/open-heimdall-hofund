@@ -1670,7 +1670,10 @@ fn closure(meta: &Metadata, root: &str) -> BTreeSet<String> {
     seen
 }
 
-/// True when `plugins/registry` contains a Cargo manifest.
+/// True when `plugins/registry` contains a nested Cargo package.
+///
+/// The registry crate's own manifest, at the root of this directory, is the
+/// composition crate. A package in a subdirectory is still rejected.
 ///
 /// # Errors
 ///
@@ -1679,7 +1682,15 @@ pub fn registry_has_package(dir: &Path) -> Result<bool, String> {
     if !dir.exists() {
         return Ok(false);
     }
-    contains_manifest(dir)
+    let entries = fs::read_dir(dir).map_err(|error| format!("read {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read {}: {error}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() && contains_manifest(&path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn contains_manifest(dir: &Path) -> Result<bool, String> {

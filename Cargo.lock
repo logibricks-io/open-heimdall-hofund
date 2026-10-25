@@ -1691,6 +1691,7 @@ name = "hofund-kit-upstream"
 version = "0.1.0"
 dependencies = [
  "hofund-plugin-host",
+ "tokio",
 ]
 
 [[package]]
@@ -1711,6 +1712,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-echo"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+]
+
+[[package]]
 name = "hofund-plugin-fixture"
 version = "0.1.0"
 dependencies = [
@@ -1724,6 +1733,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "hofund-plugin-api",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1731,11 +1741,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "hofund-plugin-sdk"
+name = "hofund-plugin-registry"
 version = "0.1.0"
 dependencies = [
  "hofund-plugin-api",
+ "hofund-plugin-echo",
+ "hofund-plugin-relay",
+ "hofund-plugin-sdk",
+ "toml 0.8.2",
+]
+
+[[package]]
+name = "hofund-plugin-relay"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-upstream",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+]
+
+[[package]]
+name = "hofund-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hofund-plugin-api",
  "hofund-quirks",
+ "http",
+ "secrecy",
+ "tokio",
  "tracing",
 ]
 

@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-sdk"
-description = "Helpers plugins share. Transports land in a later pull request."
+description = "Helpers plugins share. Calls go through the host HTTP handle."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -13,7 +13,13 @@ rust-version.workspace = true
 [dependencies]
 hofund-plugin-api = { workspace = true }
 hofund-quirks = { workspace = true }
+async-trait = "0.1.89"
+http = "1.5.0"
+secrecy = "0.10.3"
 tracing = "0.1.44"
+
+[dev-dependencies]
+tokio = { version = "1.52.2", features = ["macros", "rt"] }
 
 [lints]
 workspace = true

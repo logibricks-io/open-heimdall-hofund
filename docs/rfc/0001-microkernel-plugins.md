@@ -884,6 +884,17 @@ PR C puts the router on `Member` and `PluginError`. These are the places the cod
 
 Quirks stay in the kernel for the whole sequence. A new `Rule` variant is a kernel pull request. Vendor behavior stays in the plugin that calls `quirks::apply` through the SDK.
 
+### PR D notes
+
+PR D1 lands the registry seam and the pooled client. These are the places the code does not match row D, and why.
+
+- The pooled `reqwest` client lives in `hofund-plugin-host` (`PooledHttp`), keyed by proxy and insecure TLS. [`HttpBackend::send`](../../crates/plugin-api/src/kernel.rs) is unchanged: one handle is one profile, and the API does not grow a transport type. `hofund-plugin-sdk::Call` builds the request, places the credential, and calls `HostContext::http()`. It does not construct a client. Plugins do not depend on `reqwest`, `http`, or `async-trait`. The SDK re-exports `async_trait` and aliases the HTTP types.
+- Plugins register only through `contribute() -> Contribution`. `plugins/registry/build.rs` reads the sorted `plugins.toml` and each `plugin.toml`, fails on a duplicate id, a missing entry, an unsorted list, or a same-method prefix conflict, and calls `contribute` behind one feature per plugin. The two plugins are `relay` (provider, preset id equal to the plugin id) and `echo` (inbound, `GET /hofund/echo`). The fixture package stays outside the registry.
+- `plugins/registry` root is the composition crate. A nested package under that directory is still rejected by `check-plugins`.
+- The daemon still builds `Arc<dyn Provider>` in `providers()`. It does not call `registry.upstream`. Vertex and Bedrock stay in that match. Chat, Responses, Messages, and Generative stay there too, until an adapter from `UpstreamProvider` exists.
+- The gateway does not mount `InboundSurface` yet. `match_route` is the lookup the mount will call. Auth, the span, and the timeout are not wired.
+- `SigV4`, OAuth, paging, the 58-preset catalog, kit `conformance`, `cargo hack --each-feature`, and `fuzz/` targets are not in this pull request.
+
 ### Parallel work plan
 
 B is alone. After B, B2 and C can proceed together. D starts after C, because both edit `providers` and C lands the snapshot those calls publish. K waits for C and must merge before H. L waits for D. H does not wait for L: until L, subscription commands stay on the in-process CLI path. H does wait for encrypted account storage. `PlaintextFileAccountStore` is not the store those plugins persist to.

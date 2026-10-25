@@ -1,0 +1,21 @@
+[package]
+name = "hofund-plugin-relay"
+description = "Sample upstream plugin. Posts the model name through the SDK."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-plugin-api = { workspace = true }
+hofund-plugin-sdk = { workspace = true }
+
+[dev-dependencies]
+hofund-kit-upstream = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[[plugin]]
+id = "echo"
+kind = "inbound"
+path = "plugins/inbound/echo"
+package = "hofund-plugin-echo"
+feature = "echo"
+
+[[plugin]]
+id = "relay"
+kind = "provider"
+path = "plugins/providers/relay"
+package = "hofund-plugin-relay"
+feature = "relay"

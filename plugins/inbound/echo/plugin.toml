@@ -1,0 +1,6 @@
+id = "echo"
+kind = "inbound"
+
+[[route]]
+method = "GET"
+prefix = "/hofund/echo"

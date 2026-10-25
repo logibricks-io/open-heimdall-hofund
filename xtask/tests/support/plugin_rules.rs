@@ -661,6 +661,17 @@ fast = ["dep:api/kernel"]
     ] {
         assert!(found.contains(needle), "missing {needle} in:\n{found}");
     }
+    let root_only = bypass.join("root-only/plugins/registry");
+    fs::create_dir_all(root_only.join("src")).expect("registry src");
+    fs::write(
+        root_only.join("Cargo.toml"),
+        "[package]\nname = \"hofund-plugin-registry\"\n",
+    )
+    .expect("registry root");
+    assert!(
+        plugin_tree_violations(&bypass.join("root-only/plugins")).is_empty(),
+        "the registry crate's own manifest is not a nested package"
+    );
     let _ = fs::remove_dir_all(&bypass);
 
     let round3 = [
@@ -1503,10 +1514,23 @@ fn registry_has_manifest(dir: &Path) -> bool {
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        if path.is_dir() && nested_manifest(&path) {
+            return true;
+        }
+    }
+    false
+}
+
+fn nested_manifest(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
         if entry.file_name() == "Cargo.toml" {
             return true;
         }
-        if path.is_dir() && registry_has_manifest(&path) {
+        if path.is_dir() && nested_manifest(&path) {
             return true;
         }
     }

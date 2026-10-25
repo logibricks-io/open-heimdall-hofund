@@ -15,6 +15,7 @@
 #![deny(missing_docs, unreachable_pub, rust_2018_idioms)]
 
 mod accounts;
+mod pool;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
@@ -34,6 +35,7 @@ use hofund_plugin_api::{
 };
 
 pub use accounts::{PlaintextFileAccountStore, StoreError};
+pub use pool::{HttpProfile, PooledHttp};
 
 /// Builds a [`HostContext`] bound to `plugin`.
 ///
@@ -57,7 +59,7 @@ pub fn host_context(
     )
 }
 
-/// Builds a [`SurfaceHost`]. The gateway mount in PR D is what fills the live snapshot.
+/// Builds a [`SurfaceHost`]. The gateway mount that fills the live snapshot is later work.
 #[must_use]
 pub fn surface_host(
     members: Vec<MemberId>,
@@ -344,11 +346,16 @@ impl ProcessBackend for StdProcess {
 }
 
 /// One HTTP call the recording client saw.
+///
+/// Header values are not stored. [`RecordedRequest::sensitive_headers`] is the
+/// names of headers the caller marked sensitive.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RecordedRequest {
     method: String,
     uri: String,
+    body: Vec<u8>,
+    sensitive_headers: Vec<String>,
 }
 
 impl RecordedRequest {
@@ -363,22 +370,51 @@ impl RecordedRequest {
     pub fn uri(&self) -> &str {
         &self.uri
     }
+
+    /// The request body.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Sensitive header names, sorted. Values are not recorded.
+    #[must_use]
+    pub fn sensitive_headers(&self) -> &[String] {
+        &self.sensitive_headers
+    }
+}
+
+enum Scripted {
+    Body(Vec<u8>),
+    Connect(String),
+    Timeout(String),
 }
 
 /// An HTTP backend that records calls and replies with scripted bodies.
 #[derive(Default)]
 pub struct RecordingHttp {
     calls: Mutex<Vec<RecordedRequest>>,
-    scripted: Mutex<VecDeque<Vec<u8>>>,
+    scripted: Mutex<VecDeque<Scripted>>,
 }
 
 impl RecordingHttp {
-    /// Queues a response body. The next `send` pops it. An empty queue replies with `ok`.
+    /// Queues a 200 body. The next `send` pops it. An empty queue replies with `ok`.
     pub fn enqueue(&self, body: impl Into<Vec<u8>>) {
-        self.scripted
-            .lock()
-            .expect("http lock")
-            .push_back(body.into());
+        self.push(Scripted::Body(body.into()));
+    }
+
+    /// The next `send` fails as [`PluginErrorKind::Connect`](hofund_plugin_api::PluginErrorKind::Connect).
+    pub fn enqueue_connect(&self, message: impl Into<String>) {
+        self.push(Scripted::Connect(message.into()));
+    }
+
+    /// The next `send` fails as [`PluginErrorKind::Timeout`](hofund_plugin_api::PluginErrorKind::Timeout).
+    pub fn enqueue_timeout(&self, message: impl Into<String>) {
+        self.push(Scripted::Timeout(message.into()));
+    }
+
+    fn push(&self, scripted: Scripted) {
+        self.scripted.lock().expect("http lock").push_back(scripted);
     }
 
     /// Calls in the order they were sent.
@@ -388,23 +424,38 @@ impl RecordingHttp {
     }
 }
 
+fn recorded(request: &HttpRequest<Body>) -> RecordedRequest {
+    let mut sensitive_headers = Vec::new();
+    for (name, value) in request.headers() {
+        if value.is_sensitive() {
+            sensitive_headers.push(name.as_str().to_owned());
+        }
+    }
+    sensitive_headers.sort();
+    RecordedRequest {
+        method: request.method().to_string(),
+        uri: request.uri().to_string(),
+        body: request.body().bytes().to_vec(),
+        sensitive_headers,
+    }
+}
+
 #[async_trait]
 impl HttpBackend for RecordingHttp {
     async fn send(
         &self,
         request: HttpRequest<Body>,
     ) -> Result<HttpResponse<BodyStream>, PluginError> {
-        self.calls.lock().expect("http lock").push(RecordedRequest {
-            method: request.method().to_string(),
-            uri: request.uri().to_string(),
-        });
-        let body = self
-            .scripted
+        self.calls
             .lock()
             .expect("http lock")
-            .pop_front()
-            .unwrap_or_else(|| b"ok".to_vec());
-        Ok(HttpResponse::new(BodyStream::from_bytes(body)))
+            .push(recorded(&request));
+        match self.scripted.lock().expect("http lock").pop_front() {
+            Some(Scripted::Connect(message)) => Err(PluginError::connect(message)),
+            Some(Scripted::Timeout(message)) => Err(PluginError::timeout(message)),
+            Some(Scripted::Body(body)) => Ok(HttpResponse::new(BodyStream::from_bytes(body))),
+            None => Ok(HttpResponse::new(BodyStream::from_bytes(b"ok".to_vec()))),
+        }
     }
 }
 
@@ -844,7 +895,7 @@ mod tests {
             .send(
                 hofund_plugin_api::kernel::HttpRequest::builder()
                     .uri("https://example.test/v1")
-                    .body(hofund_plugin_api::Body::empty())
+                    .body(hofund_plugin_api::Body::from_bytes(b"gpt".as_slice()))
                     .expect("request"),
             )
             .await
@@ -857,6 +908,8 @@ mod tests {
             .expect("bytes");
         assert_eq!(&chunk[..], b"pong");
         assert_eq!(host.http().calls().len(), 1);
+        assert_eq!(host.http().calls()[0].body(), b"gpt");
+        assert!(host.http().calls()[0].sensitive_headers().is_empty());
         host.context()
             .observe()
             .observe(host.context().observe().observation())

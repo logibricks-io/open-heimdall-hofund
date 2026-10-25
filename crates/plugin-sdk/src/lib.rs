@@ -1,8 +1,11 @@
 //! Helpers a plugin may use without depending on the kernel.
 //!
-//! HTTP transports, `SigV4`, OAuth, retry, and paging move here in PR D. This
-//! crate is the skeleton: it re-exports [`tracing`] and [`apply_quirks`] so a
-//! plugin does not name those crates itself. The API does not depend on quirks.
+//! [`transport::Call`] sends on the host's pooled client. The client itself
+//! lives in `hofund-plugin-host`. This crate re-exports [`tracing`],
+//! [`async_trait`], and [`apply_quirks`] so a plugin does not name those
+//! crates. The API does not depend on quirks.
+//!
+//! `SigV4`, OAuth, and paging are not here yet.
 
 #![deny(missing_docs, unreachable_pub, rust_2018_idioms)]
 #![warn(
@@ -11,11 +14,15 @@
     clippy::must_use_candidate
 )]
 
+pub use async_trait::async_trait;
 pub use hofund_quirks::apply as apply_quirks;
 pub use tracing;
 
-/// Transports for the five protocols. Empty until PR D moves them onto the pooled client.
-pub mod transport {}
+pub mod register;
+pub mod transport;
+
+pub use register::Contribution;
+pub use transport::{Call, HttpRequest, HttpResponse, Reply, text_response};
 
 #[cfg(test)]
 mod tests {
