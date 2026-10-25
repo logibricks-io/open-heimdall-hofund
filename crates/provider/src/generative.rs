@@ -184,7 +184,7 @@ fn count_path(model: &str) -> Result<String, ProviderError> {
     Ok(format!("/models/{}:countTokens", escape_model(model)?))
 }
 
-fn escape_model(model: &str) -> Result<String, ProviderError> {
+pub(crate) fn escape_model(model: &str) -> Result<String, ProviderError> {
     let model = model.trim().strip_prefix("models/").unwrap_or(model.trim());
     if model.is_empty() {
         return Err(ProviderError::status(400, "model is empty"));
@@ -197,7 +197,7 @@ fn escape_model(model: &str) -> Result<String, ProviderError> {
 /// Unreserved characters and `$&+:=@` stay literal, matching the encoding
 /// used for a path segment that may contain a colon (a tag) but must not
 /// contain a slash.
-fn path_segment(text: &str) -> String {
+pub(crate) fn path_segment(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
         if path_segment_unescaped(byte) {
@@ -227,7 +227,7 @@ fn join_url(base: &str, path: &str) -> Result<String, ProviderError> {
     Ok(url)
 }
 
-fn classify_count(status: u16, bytes: &[u8]) -> Result<CountOutcome, ProviderError> {
+pub(crate) fn classify_count(status: u16, bytes: &[u8]) -> Result<CountOutcome, ProviderError> {
     if status == 404
         || status == 405
         || status == 501

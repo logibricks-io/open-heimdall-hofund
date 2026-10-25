@@ -74,6 +74,19 @@ pub struct Provider {
     /// A route member can override this. Absent leaves the cap to a quirk
     /// profile, or to the Messages codec's fallback.
     pub max_output_tokens: Option<u64>,
+    /// Google Cloud project id. Used by `preset = "google-vertex"`.
+    ///
+    /// Empty for every other provider. The value is trimmed and lowercased.
+    pub project: String,
+    /// Vertex AI location (`global`, `us`, `eu`, or a region). Empty means
+    /// `global` when the preset is `google-vertex`.
+    pub location: String,
+    /// Path of a Google credentials file. Empty uses Application Default
+    /// Credentials. The file is not read into this config.
+    pub credentials: String,
+    /// Service account email the Vertex token is traded for. Empty keeps the
+    /// account in the credentials file.
+    pub impersonate: String,
 }
 
 /// Protocol family of one provider.
@@ -282,6 +295,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
                 provider.id
             )));
         }
+        let vertex = vertex_of(&provider)?;
         providers.push(Provider {
             id: provider.id,
             kind: source.kind,
@@ -293,6 +307,10 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             quirks: provider.quirks,
             headers: provider.headers,
             max_output_tokens: provider.max_output_tokens,
+            project: vertex.project,
+            location: vertex.location,
+            credentials: vertex.credentials,
+            impersonate: vertex.impersonate,
         });
     }
     let mut models = BTreeSet::new();
@@ -435,6 +453,49 @@ fn source_of(provider: &RawProvider) -> Result<Source, ConfigError> {
     }
 }
 
+struct VertexFields {
+    project: String,
+    location: String,
+    credentials: String,
+    impersonate: String,
+}
+
+fn vertex_of(provider: &RawProvider) -> Result<VertexFields, ConfigError> {
+    let project = provider.project.trim().to_ascii_lowercase();
+    let location = provider.location.trim().to_ascii_lowercase();
+    let credentials = provider.credentials.trim().to_owned();
+    let impersonate = provider.impersonate.trim().to_ascii_lowercase();
+    let set = !project.is_empty()
+        || !location.is_empty()
+        || !credentials.is_empty()
+        || !impersonate.is_empty();
+    let is_vertex = provider.preset.as_deref() == Some("google-vertex");
+    if set && !is_vertex {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{}` sets project, location, credentials, or impersonate, which only preset `google-vertex` uses",
+            provider.id
+        )));
+    }
+    if is_vertex && !provider.api_key.is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{}` is Google Vertex AI and does not take an API key",
+            provider.id
+        )));
+    }
+    if is_vertex && provider.protocol.is_some() {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{}` is Google Vertex AI and has no protocol choice",
+            provider.id
+        )));
+    }
+    Ok(VertexFields {
+        project,
+        location,
+        credentials,
+        impersonate,
+    })
+}
+
 fn preset_wire_of(provider: &RawProvider) -> Result<Option<PresetWire>, ConfigError> {
     match provider.protocol.as_deref() {
         None => Ok(None),
@@ -566,6 +627,14 @@ struct RawProvider {
     headers: BTreeMap<String, String>,
     #[serde(default)]
     max_output_tokens: Option<u64>,
+    #[serde(default)]
+    project: String,
+    #[serde(default)]
+    location: String,
+    #[serde(default)]
+    credentials: String,
+    #[serde(default)]
+    impersonate: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -783,6 +852,48 @@ mod tests {
         )
         .expect_err("both");
         assert!(error.to_string().contains("both preset and kind"));
+    }
+
+    #[test]
+    fn a_vertex_preset_keeps_the_project_and_refuses_a_key() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "vertex"
+            preset = "google-vertex"
+            project = "My-Project"
+            location = "US"
+            credentials = "/tmp/adc.json"
+            impersonate = "Worker@Example.com"
+            "#,
+        )
+        .expect("vertex");
+        let provider = &config.providers[0];
+        assert_eq!(provider.project, "my-project");
+        assert_eq!(provider.location, "us");
+        assert_eq!(provider.credentials, "/tmp/adc.json");
+        assert_eq!(provider.impersonate, "worker@example.com");
+        let error = load(
+            r#"
+            [[providers]]
+            id = "openai"
+            preset = "openai"
+            project = "my-project"
+            "#,
+        )
+        .expect_err("project on openai");
+        assert!(error.to_string().contains("google-vertex"));
+        let error = load(
+            r#"
+            [[providers]]
+            id = "vertex"
+            preset = "google-vertex"
+            project = "my-project"
+            api_key = "secret"
+            "#,
+        )
+        .expect_err("key");
+        assert!(error.to_string().contains("does not take an API key"));
     }
 
     #[test]

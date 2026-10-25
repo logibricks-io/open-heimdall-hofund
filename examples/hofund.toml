@@ -52,6 +52,17 @@ api_key = "replace-me-too"
 # id = "gemini"
 # preset = "google"
 # api_key = "env:GEMINI_API_KEY"
+# Google Vertex AI. No API key. `project` is the Cloud project that is billed.
+# `location` defaults to global. `credentials` is an optional absolute path,
+# or `~/...`, of an Application Default Credentials file. Leave it empty to
+# use GOOGLE_APPLICATION_CREDENTIALS, then gcloud's application-default file.
+# `impersonate` is an optional service-account email. Do not paste a key here.
+# [[providers]]
+# id = "vertex"
+# preset = "google-vertex"
+# project = "my-project"
+# location = "global"
+# credentials = "~/adc.json"
 
 [[routes]]
 model = "demo"

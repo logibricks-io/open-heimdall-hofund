@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `preset = "google-vertex"` posts Vertex AI `generateContent` with an OAuth
+  token minted from Application Default Credentials. `project` is required.
+  `location`, `credentials`, and `impersonate` are optional. No API key is
+  stored. A service-account key stays in the credentials file.
+
 ### Fixed
 
 - A version tag can get past `dist host --steps=create`. `allow-dirty = ["ci"]`
