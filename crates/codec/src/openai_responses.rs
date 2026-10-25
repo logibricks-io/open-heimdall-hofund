@@ -22,7 +22,7 @@ use crate::jsonutil::{
 };
 use crate::openai_chat::openai_error_body;
 use crate::sse::{self, SseFrame, SseParser};
-use crate::{Codec, StreamDecoder};
+use crate::{Codec, StreamDecoder, StreamEncoder as StreamEncoderTrait};
 
 const SEALED_ITEM: &str = "sealed_item";
 
@@ -977,11 +977,13 @@ fn encode_usage(usage: &Usage) -> Value {
 }
 
 fn encode_stream(events: &[StreamEvent]) -> Result<Vec<u8>, CodecError> {
-    let mut encoder = StreamEncoder::default();
+    let mut encoder = Encoder::default();
+    let mut out = Vec::new();
     for event in events {
-        encoder.push(event)?;
+        out.extend(encoder.push(event)?);
     }
-    Ok(encoder.out)
+    out.extend(encoder.finish()?);
+    Ok(out)
 }
 
 #[derive(Default)]
@@ -995,6 +997,20 @@ impl crate::StreamEncoder for Encoder {
         self.inner.push(event)?;
         Ok(self.inner.out.split_off(before))
     }
+
+    fn finish(&mut self) -> Result<Vec<u8>, CodecError> {
+        let before = self.inner.out.len();
+        self.inner.complete();
+        Ok(self.inner.out.split_off(before))
+    }
+}
+
+struct ItemState {
+    kind: ItemKind,
+    id: String,
+    call_id: String,
+    name: String,
+    text: String,
 }
 
 #[derive(Default)]
@@ -1002,9 +1018,12 @@ struct StreamEncoder {
     out: Vec<u8>,
     id: Option<String>,
     model: Option<String>,
-    open: BTreeMap<u32, ItemKind>,
+    open: BTreeMap<u32, ItemState>,
+    done: BTreeMap<u32, Value>,
     stop: Option<Stop>,
     usage: Option<Usage>,
+    sequence: u64,
+    completed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1031,6 +1050,9 @@ impl StreamEncoder {
             StreamEvent::ContentBlockStart(start) => self.open_block(start)?,
             StreamEvent::TextDelta(delta) => {
                 self.ensure(delta.index, ItemKind::Message);
+                if let Some(item) = self.open.get_mut(&delta.index) {
+                    item.text.push_str(&delta.text);
+                }
                 self.write(
                     "response.output_text.delta",
                     serde_json::json!({
@@ -1043,6 +1065,9 @@ impl StreamEncoder {
             }
             StreamEvent::ThinkingDelta(delta) => {
                 self.ensure(delta.index, ItemKind::Reasoning);
+                if let Some(item) = self.open.get_mut(&delta.index) {
+                    item.text.push_str(&delta.text);
+                }
                 self.write(
                     "response.reasoning_text.delta",
                     serde_json::json!({
@@ -1055,6 +1080,9 @@ impl StreamEncoder {
             }
             StreamEvent::ToolArgumentsDelta(delta) => {
                 self.ensure(delta.index, ItemKind::Function);
+                if let Some(item) = self.open.get_mut(&delta.index) {
+                    item.text.push_str(&delta.partial_json);
+                }
                 self.write(
                     "response.function_call_arguments.delta",
                     serde_json::json!({
@@ -1074,7 +1102,7 @@ impl StreamEncoder {
                     self.usage.clone_from(&delta.usage);
                 }
             }
-            StreamEvent::MessageStop(_) => self.finish(),
+            StreamEvent::MessageStop(_) => self.complete(),
             StreamEvent::Ping(ping) => {
                 let mut payload = Object::new();
                 ping.extensions.merge_into(&mut payload);
@@ -1121,30 +1149,15 @@ impl StreamEncoder {
     }
 
     fn write_open(&mut self, index: u32, block: &BlockStart, extensions: &Extensions) {
-        let (kind, item) = match block {
-            BlockStart::Text => (
-                ItemKind::Message,
-                serde_json::json!({
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": [],
-                }),
-            ),
-            BlockStart::Thinking { .. } => (ItemKind::Reasoning, reasoning_open_item(extensions)),
-            BlockStart::ToolCall { id, name } => (
-                ItemKind::Function,
-                serde_json::json!({
-                    "type": "function_call",
-                    "call_id": id,
-                    "name": name,
-                    "arguments": "",
-                    "status": "in_progress",
-                }),
-            ),
-            BlockStart::Unknown { .. } => return,
+        if self.open.contains_key(&index) {
+            return;
+        }
+        let Some(state) = ItemState::from_block(index, block) else {
+            return;
         };
-        self.open.insert(index, kind);
+        let kind = state.kind;
+        let item = state.added_item(extensions);
+        self.open.insert(index, state);
         self.write(
             "response.output_item.added",
             serde_json::json!({
@@ -1160,26 +1173,80 @@ impl StreamEncoder {
                     "type": "response.content_part.added",
                     "output_index": index,
                     "content_index": 0,
-                    "part": {"type": "output_text", "text": ""},
+                    "part": {"type": "output_text", "text": "", "annotations": []},
                 }),
             );
         }
     }
 
     fn close(&mut self, index: u32, extensions: &Extensions) {
-        let Some(kind) = self.open.remove(&index) else {
+        let Some(state) = self.open.remove(&index) else {
             return;
         };
-        let item = match kind {
-            ItemKind::Message => serde_json::json!({"type": "message", "status": "completed"}),
-            ItemKind::Function => {
-                serde_json::json!({"type": "function_call", "status": "completed"})
+        let item = match state.kind {
+            ItemKind::Message => {
+                let text = state.text;
+                let part = serde_json::json!({
+                    "type": "output_text",
+                    "text": text.clone(),
+                    "annotations": [],
+                });
+                self.write(
+                    "response.output_text.done",
+                    serde_json::json!({
+                        "type": "response.output_text.done",
+                        "output_index": index,
+                        "content_index": 0,
+                        "text": text,
+                    }),
+                );
+                self.write(
+                    "response.content_part.done",
+                    serde_json::json!({
+                        "type": "response.content_part.done",
+                        "output_index": index,
+                        "content_index": 0,
+                        "part": part.clone(),
+                    }),
+                );
+                serde_json::json!({
+                    "id": state.id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [part],
+                })
             }
+            ItemKind::Function => serde_json::json!({
+                "id": state.id,
+                "type": "function_call",
+                "status": "completed",
+                "call_id": state.call_id,
+                "name": state.name,
+                "arguments": state.text,
+            }),
             ItemKind::Reasoning => match extensions.get(SEALED_ITEM) {
-                Some(Value::Object(sealed)) => Value::Object(sealed.clone()),
-                _ => serde_json::json!({"type": "reasoning", "status": "completed"}),
+                Some(Value::Object(sealed)) => {
+                    let mut sealed = sealed.clone();
+                    sealed
+                        .entry("id".to_owned())
+                        .or_insert_with(|| Value::String(state.id.clone()));
+                    Value::Object(sealed)
+                }
+                _ => {
+                    let text = state.text;
+                    let summary = text.clone();
+                    serde_json::json!({
+                        "id": state.id,
+                        "type": "reasoning",
+                        "status": "completed",
+                        "content": [{"type": "reasoning_text", "text": text}],
+                        "summary": [{"type": "summary_text", "text": summary}],
+                    })
+                }
             },
         };
+        self.done.insert(index, item.clone());
         self.write(
             "response.output_item.done",
             serde_json::json!({
@@ -1190,7 +1257,10 @@ impl StreamEncoder {
         );
     }
 
-    fn finish(&mut self) {
+    fn complete(&mut self) {
+        if self.completed {
+            return;
+        }
         let indexes: Vec<u32> = self.open.keys().copied().collect();
         for index in indexes {
             self.close(index, &Extensions::new());
@@ -1202,18 +1272,16 @@ impl StreamEncoder {
             _ => "response.completed",
         };
         let mut response = self.skeleton(&status);
+        let output: Vec<Value> = self.done.values().cloned().collect();
+        let object = response.as_object_mut().expect("skeleton is an object");
+        object.insert("output".to_owned(), Value::Array(output));
         if let Some(details) = details {
-            response
-                .as_object_mut()
-                .expect("skeleton is an object")
-                .insert("incomplete_details".to_owned(), details);
+            object.insert("incomplete_details".to_owned(), details);
         }
         if let Some(usage) = &self.usage {
-            response
-                .as_object_mut()
-                .expect("skeleton is an object")
-                .insert("usage".to_owned(), encode_usage(usage));
+            object.insert("usage".to_owned(), encode_usage(usage));
         }
+        self.completed = true;
         self.write(
             event,
             serde_json::json!({
@@ -1237,11 +1305,81 @@ impl StreamEncoder {
         Value::Object(response)
     }
 
-    fn write(&mut self, event: &str, value: Value) {
+    fn write(&mut self, event: &str, mut value: Value) {
+        if let Some(object) = value.as_object_mut() {
+            object
+                .entry("sequence_number".to_owned())
+                .or_insert_with(|| Value::from(self.sequence));
+            self.sequence += 1;
+        }
         let Ok(data) = serde_json::to_string(&value) else {
             return;
         };
         sse::write_event(&mut self.out, Some(event), &data);
+    }
+}
+
+impl ItemState {
+    fn from_block(index: u32, block: &BlockStart) -> Option<Self> {
+        let state = match block {
+            BlockStart::Text => Self {
+                kind: ItemKind::Message,
+                id: format!("msg_{index}"),
+                call_id: String::new(),
+                name: String::new(),
+                text: String::new(),
+            },
+            BlockStart::Thinking { .. } => Self {
+                kind: ItemKind::Reasoning,
+                id: format!("rs_{index}"),
+                call_id: String::new(),
+                name: String::new(),
+                text: String::new(),
+            },
+            BlockStart::ToolCall { id, name } => Self {
+                kind: ItemKind::Function,
+                id: format!("fc_{index}"),
+                call_id: id.clone(),
+                name: name.clone(),
+                text: String::new(),
+            },
+            BlockStart::Unknown { .. } => return None,
+        };
+        Some(state)
+    }
+
+    fn added_item(&self, extensions: &Extensions) -> Value {
+        match self.kind {
+            ItemKind::Message => serde_json::json!({
+                "id": self.id,
+                "type": "message",
+                "role": "assistant",
+                "status": "in_progress",
+                "content": [],
+            }),
+            ItemKind::Reasoning => match extensions.get(SEALED_ITEM) {
+                Some(Value::Object(sealed)) => {
+                    let mut sealed = sealed.clone();
+                    sealed
+                        .entry("id".to_owned())
+                        .or_insert_with(|| Value::String(self.id.clone()));
+                    Value::Object(sealed)
+                }
+                _ => serde_json::json!({
+                    "id": self.id,
+                    "type": "reasoning",
+                    "summary": [],
+                }),
+            },
+            ItemKind::Function => serde_json::json!({
+                "id": self.id,
+                "type": "function_call",
+                "call_id": self.call_id,
+                "name": self.name,
+                "arguments": "",
+                "status": "in_progress",
+            }),
+        }
     }
 }
 
@@ -1314,6 +1452,11 @@ impl Decoder {
                 let _ = object.remove("type");
                 self.text_delta(object, &mut events)?;
             }
+            "response.output_text.done" => {
+                let _ = object.remove("type");
+                self.text_done(object, &mut events)?;
+            }
+            "response.content_part.done" => {}
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 let _ = object.remove("type");
                 self.thinking_delta(object, &mut events)?;
@@ -1421,6 +1564,32 @@ impl Decoder {
         self.ensure_started(events);
         let index = index_of(&mut object)?;
         let text = take_string(&mut object, "delta")?.unwrap_or_default();
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.open_text(index, events);
+        self.deltas.insert(index);
+        events.push(StreamEvent::TextDelta(TextDelta {
+            index,
+            text,
+            extensions: Extensions::new(),
+        }));
+        Ok(())
+    }
+
+    /// A done frame is the whole text when no deltas arrived. After deltas it
+    /// repeats that text, so it does not append a second copy.
+    fn text_done(
+        &mut self,
+        mut object: Object,
+        events: &mut Vec<StreamEvent>,
+    ) -> Result<(), CodecError> {
+        self.ensure_started(events);
+        let index = index_of(&mut object)?;
+        if self.deltas.contains(&index) {
+            return Ok(());
+        }
+        let text = take_string(&mut object, "text")?.unwrap_or_default();
         if text.is_empty() {
             return Ok(());
         }
@@ -1736,13 +1905,6 @@ impl Decoder {
             extensions,
         }));
     }
-}
-
-fn reasoning_open_item(extensions: &Extensions) -> Value {
-    if let Some(Value::Object(sealed)) = extensions.get(SEALED_ITEM) {
-        return Value::Object(sealed.clone());
-    }
-    serde_json::json!({"type": "reasoning", "summary": []})
 }
 
 /// A failed turn that never started and has no output is not a reply yet.

@@ -50,7 +50,18 @@ impl Provider for Anthropic {
         http::id_of(&self.upstream)
     }
 
-    async fn execute(&self, request: Request) -> Result<Completion, ProviderError> {
-        http::execute(&self.upstream, &AnthropicMessages, request, None).await
+    async fn execute(
+        &self,
+        request: Request,
+        inbound_protocol: &str,
+    ) -> Result<Completion, ProviderError> {
+        http::execute(
+            &self.upstream,
+            &AnthropicMessages,
+            request,
+            None,
+            inbound_protocol,
+        )
+        .await
     }
 }

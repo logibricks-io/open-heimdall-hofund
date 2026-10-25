@@ -501,6 +501,85 @@ fn malformed_input_is_an_error_and_does_not_panic() {
     assert!(AnthropicMessages.encode_request(&request).is_err());
 }
 
+#[test]
+fn anthropic_stream_puts_usage_on_start_and_one_delta_after_stops() {
+    use hofund_ir::{
+        BlockStart, ContentBlockStart, ContentBlockStop, Extensions, MessageDelta, MessageStart,
+        MessageStop, Stop, StopReason, TextDelta, Usage,
+    };
+    let events = vec![
+        StreamEvent::MessageStart(MessageStart {
+            id: Some("chatcmpl-abc".to_owned()),
+            model: Some("m".to_owned()),
+            usage: None,
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::ContentBlockStart(ContentBlockStart {
+            index: 0,
+            block: BlockStart::Text,
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::TextDelta(TextDelta {
+            index: 0,
+            text: "ok".to_owned(),
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::MessageDelta(MessageDelta {
+            stop: Some(Stop {
+                reason: StopReason::EndTurn,
+                sequence: None,
+            }),
+            usage: Some(Usage {
+                input_tokens: Some(3),
+                output_tokens: Some(2),
+                ..Usage::default()
+            }),
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::ContentBlockStop(ContentBlockStop {
+            index: 0,
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::MessageStop(MessageStop::default()),
+    ];
+    let encoded = AnthropicMessages.encode_stream(&events).expect("encode");
+    let text = String::from_utf8(encoded).expect("utf8");
+    let names: Vec<&str> = text
+        .split("\n\n")
+        .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("event: ")))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ]
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| **name == "message_delta")
+            .count(),
+        1
+    );
+    let start = text
+        .split("\n\n")
+        .find(|frame| frame.contains("event: message_start"))
+        .expect("start");
+    let delta = text
+        .split("\n\n")
+        .find(|frame| frame.contains("event: message_delta"))
+        .expect("delta");
+    assert!(start.contains("\"id\":\"msg_chatcmpl-abc\""));
+    assert!(start.contains("\"usage\":{\"input_tokens\":0,\"output_tokens\":0}"));
+    assert!(delta.contains("\"usage\":{\"input_tokens\":3,\"output_tokens\":2}"));
+    assert!(delta.contains("\"stop_reason\":\"end_turn\""));
+}
+
 fn assert_err<T: std::fmt::Debug, E: std::fmt::Debug>(
     decode: impl FnOnce() -> Result<T, E> + std::panic::UnwindSafe,
 ) {

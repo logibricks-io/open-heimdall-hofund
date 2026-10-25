@@ -70,12 +70,19 @@ impl Router {
 
     /// Runs `request` against the upstreams configured for its model.
     ///
+    /// `inbound_protocol` is forwarded to each provider so an adapter can
+    /// tell a same-protocol passthrough from a translation.
+    ///
     /// # Errors
     ///
     /// Returns [`RouterError::NoRoute`] when the model has no upstream.
     /// Returns [`RouterError::Upstream`] when every allowed attempt failed,
     /// or when a failure is not one the policy retries.
-    pub async fn dispatch(&self, request: Request) -> Result<Routed, RouterError> {
+    pub async fn dispatch(
+        &self,
+        request: Request,
+        inbound_protocol: &str,
+    ) -> Result<Routed, RouterError> {
         let Some(providers) = self
             .routes
             .get(&request.model)
@@ -89,7 +96,7 @@ impl Router {
         let policy = self.policy.clone();
         let mut last = None;
         for provider in &providers {
-            let result = match provider.execute(request.clone()).await {
+            let result = match provider.execute(request.clone(), inbound_protocol).await {
                 Ok(completion) => accept(completion).await,
                 Err(error) => Err(error),
             };

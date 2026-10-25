@@ -378,3 +378,142 @@ async fn generative_inbound_carries_a_tool_call() {
         }
     }
 }
+
+#[tokio::test]
+async fn cross_protocol_fields_do_not_reach_the_client_or_the_upstream() {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("client");
+    let server = MockServer::start().await;
+    let stream = concat!(
+        "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let unary = r#"{"id":"chatcmpl-1","created":1710000000,"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body = String::from_utf8_lossy(&request.body);
+            if body.contains("\"stream\":true") {
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(stream)
+            } else {
+                ResponseTemplate::new(200).set_body_raw(unary, "application/json")
+            }
+        })
+        .mount(&server)
+        .await;
+
+    let upstream = Upstream {
+        kind: "openai_compat",
+        protocol: Some("chat"),
+        quirks: None,
+        wire_path: "/chat/completions",
+        body: "",
+        stream: "",
+    };
+    let dir = scratch();
+    let (running, token) = listen(
+        &dir,
+        &config_text(&server.uri(), &upstream, "[429, 500, 502, 503, 504]"),
+    )
+    .await;
+    let anthropic = r#"{"model":"demo","max_tokens":16,"stream":true,"thinking":{"type":"enabled","budget_tokens":64},"context_management":{"edits":[]},"output_config":{"effort":"low"},"metadata":{"user_id":"device-should-not-leak"},"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}"#;
+    let anthropic_text = post_text(&client, &running, "/v1/messages", &token, anthropic).await;
+    assert!(!anthropic_text.contains("1710000000"), "{anthropic_text}");
+    assert!(!anthropic_text.contains("device-should-not-leak"));
+    let names = event_names(&anthropic_text);
+    let stop = names.iter().position(|name| *name == "content_block_stop");
+    let delta = names.iter().position(|name| *name == "message_delta");
+    assert!(stop.is_some_and(|stop| delta.is_some_and(|delta| stop < delta)));
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| **name == "message_delta")
+            .count(),
+        1
+    );
+    assert!(anthropic_text.contains("\"id\":\"msg_chatcmpl-1\""));
+    assert!(anthropic_text.contains("\"usage\":{\"input_tokens\":0,\"output_tokens\":0}"));
+
+    let responses_text = post_text(
+        &client,
+        &running,
+        "/v1/responses",
+        &token,
+        r#"{"model":"demo","input":"hi"}"#,
+    )
+    .await;
+    assert!(!responses_text.contains("1710000000"), "{responses_text}");
+
+    let gemini_text = post_text(
+        &client,
+        &running,
+        "/v1beta/models/demo:streamGenerateContent?alt=sse",
+        &token,
+        GENERATE_BODY,
+    )
+    .await;
+    assert!(!gemini_text.contains("1710000000"), "{gemini_text}");
+    assert!(gemini_text.contains("\"parts\""));
+
+    let chat_text = post_text(
+        &client,
+        &running,
+        "/v1/chat/completions",
+        &token,
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"metadata":{"user_id":"device-should-not-leak"}}"#,
+    )
+    .await;
+    assert!(chat_text.contains("1710000000"), "{chat_text}");
+
+    let requests = server.received_requests().await.expect("requests");
+    let first = String::from_utf8(requests[0].body.clone()).expect("utf8");
+    for needle in [
+        "thinking",
+        "context_management",
+        "output_config",
+        "device-should-not-leak",
+        "cache_control",
+    ] {
+        assert!(!first.contains(needle), "{needle} leaked: {first}");
+    }
+    assert!(first.contains("\"include_usage\":true"), "{first}");
+    let same = requests
+        .iter()
+        .map(|request| String::from_utf8(request.body.clone()).expect("utf8"))
+        .find(|body| body.contains("device-should-not-leak"))
+        .expect("same-protocol metadata");
+    assert!(same.contains("device-should-not-leak"));
+    running.shutdown().await;
+    fs::remove_dir_all(dir).ok();
+}
+
+async fn post_text(
+    client: &reqwest::Client,
+    running: &hofund_daemon::Running,
+    route: &str,
+    token: &str,
+    body: &str,
+) -> String {
+    let response = client
+        .post(format!("http://{}{route}", running.local_addr))
+        .header("authorization", format!("Bearer {token}"))
+        .body(body.to_owned())
+        .send()
+        .await
+        .expect("send");
+    let status = response.status();
+    let text = response.text().await.expect("text");
+    assert_eq!(status.as_u16(), 200, "{route} {text}");
+    text
+}
+
+fn event_names(body: &str) -> Vec<&str> {
+    body.split("\n\n")
+        .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("event: ")))
+        .collect()
+}

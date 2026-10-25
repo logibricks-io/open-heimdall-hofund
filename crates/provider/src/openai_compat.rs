@@ -61,9 +61,13 @@ impl Provider for OpenAiCompat {
         http::id_of(&self.upstream)
     }
 
-    async fn execute(&self, request: Request) -> Result<Completion, ProviderError> {
+    async fn execute(
+        &self,
+        request: Request,
+        inbound_protocol: &str,
+    ) -> Result<Completion, ProviderError> {
         let prepare = match self.protocol {
-            OpenAiProtocol::Chat => None,
+            OpenAiProtocol::Chat => Some(OpenAiChat::prepare_upstream_body as http::Prepare),
             OpenAiProtocol::Responses => {
                 Some(OpenAiResponses::prepare_upstream_body as http::Prepare)
             }
@@ -72,6 +76,6 @@ impl Provider for OpenAiCompat {
             OpenAiProtocol::Chat => &OpenAiChat,
             OpenAiProtocol::Responses => &OpenAiResponses,
         };
-        http::execute(&self.upstream, codec, request, prepare).await
+        http::execute(&self.upstream, codec, request, prepare, inbound_protocol).await
     }
 }

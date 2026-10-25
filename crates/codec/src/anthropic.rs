@@ -22,7 +22,7 @@ use crate::jsonutil::{
     take_u64, to_bytes,
 };
 use crate::sse::{self, SseFrame, SseParser};
-use crate::{Codec, StreamDecoder};
+use crate::{Codec, StreamDecoder, StreamEncoder};
 
 /// Codec for the Anthropic Messages protocol.
 #[derive(Debug, Default, Clone, Copy)]
@@ -945,121 +945,211 @@ fn decode_message_delta(mut event: Object) -> Result<StreamEvent, CodecError> {
 }
 
 fn encode_stream(events: &[StreamEvent]) -> Result<Vec<u8>, CodecError> {
+    let mut encoder = Encoder::default();
     let mut out = Vec::new();
-    let mut started = BTreeSet::new();
     for event in events {
-        encode_stream_event(&mut out, &mut started, event)?;
+        out.extend(encoder.push(event)?);
     }
+    out.extend(encoder.finish()?);
     Ok(out)
 }
 
 #[derive(Default)]
 struct Encoder {
+    out: Vec<u8>,
     started: BTreeSet<u32>,
+    open: BTreeSet<u32>,
+    saw_message: bool,
+    stop: Option<Stop>,
+    usage: Option<Usage>,
+    have_usage: bool,
+    extensions: Extensions,
+    terminal: bool,
 }
 
 impl crate::StreamEncoder for Encoder {
     fn push(&mut self, event: &StreamEvent) -> Result<Vec<u8>, CodecError> {
-        let mut out = Vec::new();
-        encode_stream_event(&mut out, &mut self.started, event)?;
-        Ok(out)
+        let before = self.out.len();
+        self.push_event(event)?;
+        Ok(self.out.split_off(before))
+    }
+
+    fn finish(&mut self) -> Result<Vec<u8>, CodecError> {
+        let before = self.out.len();
+        self.flush_terminal(&Extensions::new())?;
+        Ok(self.out.split_off(before))
     }
 }
 
-fn encode_stream_event(
-    out: &mut Vec<u8>,
-    started: &mut BTreeSet<u32>,
-    event: &StreamEvent,
-) -> Result<(), CodecError> {
-    match event {
-        StreamEvent::MessageStart(start) => {
-            write_json(out, "message_start", &encode_message_start(start))
-        }
-        StreamEvent::ContentBlockStart(start) => {
-            started.insert(start.index);
-            write_json(out, "content_block_start", &encode_block_start(start))
-        }
-        StreamEvent::TextDelta(delta) => {
-            ensure_start(out, started, delta.index, &BlockStart::Text)?;
-            write_json(out, "content_block_delta", &text_delta_json(delta))
-        }
-        StreamEvent::ThinkingDelta(delta) => {
-            ensure_start(
-                out,
-                started,
-                delta.index,
-                &BlockStart::Thinking {
-                    redacted: false,
-                    data: None,
-                },
-            )?;
-            write_json(out, "content_block_delta", &thinking_delta_json(delta))
-        }
-        StreamEvent::SignatureDelta(delta) => {
-            if delta.signature.is_empty() {
-                return Ok(());
+impl Encoder {
+    fn push_event(&mut self, event: &StreamEvent) -> Result<(), CodecError> {
+        match event {
+            StreamEvent::MessageStart(start) => {
+                self.saw_message = true;
+                write_json(&mut self.out, "message_start", &encode_message_start(start))
             }
-            ensure_start(
-                out,
-                started,
-                delta.index,
-                &BlockStart::Thinking {
-                    redacted: false,
-                    data: None,
-                },
+            StreamEvent::ContentBlockStart(start) => {
+                self.started.insert(start.index);
+                self.open.insert(start.index);
+                write_json(
+                    &mut self.out,
+                    "content_block_start",
+                    &encode_block_start(start),
+                )
+            }
+            StreamEvent::TextDelta(delta) => {
+                self.ensure_start(delta.index, &BlockStart::Text)?;
+                write_json(
+                    &mut self.out,
+                    "content_block_delta",
+                    &text_delta_json(delta),
+                )
+            }
+            StreamEvent::ThinkingDelta(delta) => {
+                self.ensure_start(
+                    delta.index,
+                    &BlockStart::Thinking {
+                        redacted: false,
+                        data: None,
+                    },
+                )?;
+                write_json(
+                    &mut self.out,
+                    "content_block_delta",
+                    &thinking_delta_json(delta),
+                )
+            }
+            StreamEvent::SignatureDelta(delta) => {
+                if delta.signature.is_empty() {
+                    return Ok(());
+                }
+                self.ensure_start(
+                    delta.index,
+                    &BlockStart::Thinking {
+                        redacted: false,
+                        data: None,
+                    },
+                )?;
+                write_json(
+                    &mut self.out,
+                    "content_block_delta",
+                    &signature_delta_json(delta),
+                )
+            }
+            StreamEvent::ToolArgumentsDelta(delta) => {
+                self.ensure_start(
+                    delta.index,
+                    &BlockStart::ToolCall {
+                        id: String::new(),
+                        name: String::new(),
+                    },
+                )?;
+                write_json(
+                    &mut self.out,
+                    "content_block_delta",
+                    &arguments_delta_json(delta),
+                )
+            }
+            StreamEvent::ContentBlockStop(stop) => {
+                self.open.remove(&stop.index);
+                write_json(&mut self.out, "content_block_stop", &block_stop_json(stop))
+            }
+            StreamEvent::MessageDelta(delta) => {
+                self.saw_message = true;
+                if let Some(stop) = &delta.stop {
+                    self.stop = Some(stop.clone());
+                }
+                if let Some(usage) = &delta.usage {
+                    match &mut self.usage {
+                        Some(existing) => existing.merge_from(usage),
+                        None => self.usage = Some(usage.clone()),
+                    }
+                    self.have_usage = true;
+                }
+                self.extensions.absorb(&delta.extensions);
+                Ok(())
+            }
+            StreamEvent::MessageStop(stop) => self.flush_terminal(&stop.extensions),
+            StreamEvent::Ping(ping) => write_json(&mut self.out, "ping", &ping_json(ping)),
+            StreamEvent::Unknown(event) => {
+                let data = serde_json::to_string(&event.payload)?;
+                sse::write_event(&mut self.out, Some(&event.name), &data);
+                Ok(())
+            }
+        }
+    }
+
+    fn ensure_start(&mut self, index: u32, block: &BlockStart) -> Result<(), CodecError> {
+        if self.started.insert(index) {
+            self.open.insert(index);
+            let start = ContentBlockStart {
+                index,
+                block: block.clone(),
+                extensions: Extensions::new(),
+            };
+            write_json(
+                &mut self.out,
+                "content_block_start",
+                &encode_block_start(&start),
             )?;
-            write_json(out, "content_block_delta", &signature_delta_json(delta))
         }
-        StreamEvent::ToolArgumentsDelta(delta) => {
-            ensure_start(
-                out,
-                started,
-                delta.index,
-                &BlockStart::ToolCall {
-                    id: String::new(),
-                    name: String::new(),
-                },
-            )?;
-            write_json(out, "content_block_delta", &arguments_delta_json(delta))
+        Ok(())
+    }
+
+    /// One `message_delta` after every open block has stopped, then `message_stop`.
+    fn flush_terminal(&mut self, stop_extensions: &Extensions) -> Result<(), CodecError> {
+        if self.terminal {
+            return Ok(());
         }
-        StreamEvent::ContentBlockStop(stop) => {
-            write_json(out, "content_block_stop", &block_stop_json(stop))
+        if !self.saw_message && self.open.is_empty() && self.stop.is_none() && !self.have_usage {
+            return Ok(());
         }
-        StreamEvent::MessageDelta(delta) => {
-            write_json(out, "message_delta", &message_delta_json(delta))
+        let indexes: Vec<u32> = self.open.iter().copied().collect();
+        for index in indexes {
+            self.open.remove(&index);
+            let stop = ContentBlockStop {
+                index,
+                extensions: Extensions::new(),
+            };
+            write_json(&mut self.out, "content_block_stop", &block_stop_json(&stop))?;
         }
-        StreamEvent::MessageStop(stop) => write_json(out, "message_stop", &message_stop_json(stop)),
-        StreamEvent::Ping(ping) => write_json(out, "ping", &ping_json(ping)),
-        StreamEvent::Unknown(event) => {
-            let data = serde_json::to_string(&event.payload)?;
-            sse::write_event(out, Some(&event.name), &data);
-            Ok(())
-        }
+        let usage = if self.have_usage {
+            self.usage.clone().unwrap_or_default()
+        } else {
+            Usage {
+                output_tokens: Some(0),
+                ..Usage::default()
+            }
+        };
+        let delta = MessageDelta {
+            stop: self.stop.clone(),
+            usage: Some(usage),
+            extensions: self.extensions.clone(),
+        };
+        write_json(&mut self.out, "message_delta", &message_delta_json(&delta))?;
+        let stop = MessageStop {
+            extensions: stop_extensions.clone(),
+        };
+        write_json(&mut self.out, "message_stop", &message_stop_json(&stop))?;
+        self.terminal = true;
+        Ok(())
     }
 }
 
-fn ensure_start(
-    out: &mut Vec<u8>,
-    started: &mut BTreeSet<u32>,
-    index: u32,
-    block: &BlockStart,
-) -> Result<(), CodecError> {
-    if started.insert(index) {
-        let start = ContentBlockStart {
-            index,
-            block: block.clone(),
-            extensions: Extensions::new(),
-        };
-        write_json(out, "content_block_start", &encode_block_start(&start))?;
+fn anthropic_message_id(id: Option<&str>) -> String {
+    match id {
+        Some(id) if id.starts_with("msg_") => id.to_owned(),
+        Some(id) if !id.is_empty() => format!("msg_{id}"),
+        _ => "msg_local".to_owned(),
     }
-    Ok(())
 }
 
 fn encode_message_start(start: &MessageStart) -> Value {
     let mut message = Object::new();
-    if let Some(id) = &start.id {
-        message.insert("id".to_owned(), Value::String(id.clone()));
-    }
+    message.insert(
+        "id".to_owned(),
+        Value::String(anthropic_message_id(start.id.as_deref())),
+    );
     message.insert("type".to_owned(), Value::String("message".to_owned()));
     message.insert("role".to_owned(), Value::String("assistant".to_owned()));
     message.insert("content".to_owned(), Value::Array(Vec::new()));
@@ -1068,9 +1158,12 @@ fn encode_message_start(start: &MessageStart) -> Value {
     }
     message.insert("stop_reason".to_owned(), Value::Null);
     message.insert("stop_sequence".to_owned(), Value::Null);
-    if let Some(usage) = &start.usage {
-        message.insert("usage".to_owned(), encode_usage(usage));
-    }
+    let usage = start.usage.clone().unwrap_or(Usage {
+        input_tokens: Some(0),
+        output_tokens: Some(0),
+        ..Usage::default()
+    });
+    message.insert("usage".to_owned(), encode_usage(&usage));
     let mut event = Object::new();
     event.insert("type".to_owned(), Value::String("message_start".to_owned()));
     event.insert("message".to_owned(), Value::Object(message));

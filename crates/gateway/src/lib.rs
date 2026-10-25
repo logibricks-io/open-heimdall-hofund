@@ -249,7 +249,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             return coded(codec.as_ref(), StatusCode::BAD_REQUEST, &error.to_string());
         }
     };
-    match app.router.dispatch(model_request.clone()).await {
+    match app.router.dispatch(model_request.clone(), codec.id()).await {
         Ok(routed) => {
             success(
                 app,
@@ -423,14 +423,30 @@ fn sse_body(
     record: RecordOnEnd,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     futures_util::stream::unfold(
-        (incoming, encoder, record),
-        |(mut incoming, mut encoder, mut record)| async move {
+        (incoming, encoder, record, false),
+        |(mut incoming, mut encoder, mut record, flushed)| async move {
+            if flushed {
+                finish_record(&record, StatusCode::OK);
+                return None;
+            }
             loop {
                 match incoming.next().await {
-                    None => {
-                        finish_record(&record, StatusCode::OK);
-                        return None;
-                    }
+                    None => match encoder.finish() {
+                        Ok(bytes) if bytes.is_empty() => {
+                            finish_record(&record, StatusCode::OK);
+                            return None;
+                        }
+                        Ok(bytes) => {
+                            return Some((
+                                Ok(Bytes::from(bytes)),
+                                (incoming, encoder, record, true),
+                            ));
+                        }
+                        Err(_) => {
+                            finish_record(&record, StatusCode::BAD_GATEWAY);
+                            return None;
+                        }
+                    },
                     Some(Err(_)) => {
                         finish_record(&record, StatusCode::BAD_GATEWAY);
                         return None;
@@ -440,7 +456,10 @@ fn sse_body(
                         match encoder.push(&event) {
                             Ok(bytes) if bytes.is_empty() => {}
                             Ok(bytes) => {
-                                return Some((Ok(Bytes::from(bytes)), (incoming, encoder, record)));
+                                return Some((
+                                    Ok(Bytes::from(bytes)),
+                                    (incoming, encoder, record, false),
+                                ));
                             }
                             Err(_) => {
                                 finish_record(&record, StatusCode::BAD_GATEWAY);

@@ -75,7 +75,10 @@ async fn chat_unary_sends_bearer_and_decodes_text() {
     let mut endpoint = Endpoint::new("primary", server.uri());
     endpoint.api_key = "secret".to_owned();
     let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
-    let completion = provider.execute(user_request(false)).await.expect("call");
+    let completion = provider
+        .execute(user_request(false), "openai-chat")
+        .await
+        .expect("call");
     assert_eq!(text_of(completion).await, "hello");
 
     let requests = server.received_requests().await.expect("requests");
@@ -105,7 +108,10 @@ async fn chat_stream_yields_text_deltas() {
 
     let endpoint = Endpoint::new("primary", server.uri());
     let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
-    let completion = provider.execute(user_request(true)).await.expect("call");
+    let completion = provider
+        .execute(user_request(true), "openai-chat")
+        .await
+        .expect("call");
     assert_eq!(text_of(completion).await, "hello");
 }
 
@@ -128,7 +134,10 @@ async fn responses_unary_sets_store_false() {
 
     let endpoint = Endpoint::new("primary", format!("{}/v1", server.uri()));
     let provider = OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).expect("provider");
-    let completion = provider.execute(user_request(false)).await.expect("call");
+    let completion = provider
+        .execute(user_request(false), "openai-responses")
+        .await
+        .expect("call");
     assert_eq!(text_of(completion).await, "rain");
 
     let requests = server.received_requests().await.expect("requests");
@@ -159,7 +168,10 @@ async fn responses_stream_decodes_output_text() {
 
     let endpoint = Endpoint::new("primary", server.uri());
     let provider = OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).expect("provider");
-    let completion = provider.execute(user_request(true)).await.expect("call");
+    let completion = provider
+        .execute(user_request(true), "openai-responses")
+        .await
+        .expect("call");
     assert_eq!(text_of(completion).await, "rain");
 }
 
@@ -182,7 +194,10 @@ async fn leading_failed_responses_stream_is_a_status_error() {
 
     let endpoint = Endpoint::new("primary", server.uri());
     let provider = OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).expect("provider");
-    let Completion::Stream(mut stream) = provider.execute(user_request(true)).await.expect("call")
+    let Completion::Stream(mut stream) = provider
+        .execute(user_request(true), "openai-responses")
+        .await
+        .expect("call")
     else {
         panic!("expected a stream");
     };
@@ -212,7 +227,10 @@ async fn messages_unary_sends_version_and_key() {
     let provider = Anthropic::new(endpoint).expect("provider");
     let mut request = user_request(false);
     request.params.max_tokens = Some(16);
-    let completion = provider.execute(request).await.expect("call");
+    let completion = provider
+        .execute(request, "anthropic-messages")
+        .await
+        .expect("call");
     assert_eq!(text_of(completion).await, "hello");
 
     let requests = server.received_requests().await.expect("requests");
@@ -259,7 +277,10 @@ async fn messages_stream_yields_text_deltas() {
     let provider = Anthropic::new(endpoint).expect("provider");
     let mut request = user_request(true);
     request.params.max_tokens = Some(16);
-    let completion = provider.execute(request).await.expect("call");
+    let completion = provider
+        .execute(request, "anthropic-messages")
+        .await
+        .expect("call");
     assert_eq!(text_of(completion).await, "hello");
 }
 
@@ -276,7 +297,7 @@ async fn status_503_is_a_status_error() {
 
     let endpoint = Endpoint::new("primary", server.uri());
     let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
-    let error = match provider.execute(user_request(false)).await {
+    let error = match provider.execute(user_request(false), "openai-chat").await {
         Ok(_) => panic!("expected a status error"),
         Err(error) => error,
     };
@@ -305,7 +326,10 @@ async fn no_sampling_profile_omits_temperature_and_top_p() {
     let mut endpoint = Endpoint::new("primary", server.uri());
     endpoint.quirks = named("no-sampling");
     let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
-    provider.execute(user_request(false)).await.expect("call");
+    provider
+        .execute(user_request(false), "openai-chat")
+        .await
+        .expect("call");
 }
 
 #[tokio::test]
@@ -328,7 +352,10 @@ async fn extra_header_is_sent() {
         .headers
         .push(("X-Title".to_owned(), "hofund".to_owned()));
     let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
-    provider.execute(user_request(false)).await.expect("call");
+    provider
+        .execute(user_request(false), "openai-chat")
+        .await
+        .expect("call");
     let requests = server.received_requests().await.expect("requests");
     assert_eq!(
         requests[0]
@@ -339,4 +366,69 @@ async fn extra_header_is_sent() {
             .expect("text"),
         "hofund"
     );
+}
+
+#[tokio::test]
+async fn chat_stream_sets_include_usage_and_drops_foreign_fields() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"id\":\"chatcmpl-1\",\"created\":1710000000,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let endpoint = Endpoint::new("primary", server.uri());
+    let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+    let mut request = user_request(true);
+    request
+        .extensions
+        .insert("metadata", json!({"user_id": "device-should-not-leak"}));
+    let foreign = provider
+        .execute(request.clone(), "anthropic-messages")
+        .await
+        .expect("cross");
+    let same = provider
+        .execute(request, "openai-chat")
+        .await
+        .expect("same");
+    assert!(!event_has_created(foreign).await);
+    assert!(event_has_created(same).await);
+
+    let requests = server.received_requests().await.expect("requests");
+    let foreign_body: Value = serde_json::from_slice(&requests[0].body).expect("json");
+    let same_body: Value = serde_json::from_slice(&requests[1].body).expect("json");
+    assert_eq!(foreign_body["stream_options"]["include_usage"], json!(true));
+    assert!(foreign_body.get("metadata").is_none());
+    assert!(!foreign_body.to_string().contains("device-should-not-leak"));
+    assert_eq!(same_body["stream_options"]["include_usage"], json!(true));
+    assert_eq!(
+        same_body["metadata"]["user_id"],
+        json!("device-should-not-leak")
+    );
+}
+
+async fn event_has_created(completion: Completion) -> bool {
+    let Completion::Stream(mut stream) = completion else {
+        return false;
+    };
+    let mut found = false;
+    while let Some(item) = stream.next().await {
+        if let Ok(event) = item
+            && event
+                .extensions()
+                .is_some_and(|extensions| extensions.get("created").is_some())
+        {
+            found = true;
+        }
+    }
+    found
 }
