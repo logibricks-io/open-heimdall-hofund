@@ -1,0 +1,7 @@
+data: {"responseId":"resp_1","modelVersion":"demo","candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]}}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"hmm","thoughtSignature":"sig-think"}]}}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Paris"},"id":"c1"},"thoughtSignature":"sig"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5,"thoughtsTokenCount":1}}
+
+data: [DONE]

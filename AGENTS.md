@@ -26,20 +26,22 @@ Crates must not grow product behavior unless the task asks for it.
 Present:
 
 - canonical IR for requests, responses, and stream events (`ir`)
-- hub-and-spoke codecs for Anthropic Messages, OpenAI Chat Completions, and
-  OpenAI Responses, including streaming (`codec`). The field mapping and lossy
-  conversions are in [docs/codecs.md](docs/codecs.md).
+- hub-and-spoke codecs for Anthropic Messages, OpenAI Chat Completions,
+  OpenAI Responses, and the Generative Language API (`generateContent` and
+  `streamGenerateContent`), including streaming (`codec`). The field mapping
+  and lossy conversions are in [docs/codecs.md](docs/codecs.md).
 - named quirk profiles (`quirks`) and the `Provider` trait with Chat,
   Responses, and Messages adapters (`provider`)
 - ordered model routes and failover before the first stream event (`router`)
 - an axum HTTP server (`gateway`), TOML configuration (`config`), a bearer
   token file (`secrets`), SQLite usage rows (`usage`), and the `hofund`
   commands `serve`, `config check`, `token show`, `token rotate`, and `usage`
+- coding-agent config adapters (`agent`) for Claude Code, Codex CLI, Gemini
+  CLI, and OpenCode, with `hofund agent list`, `hofund agent connect`,
+  `hofund agent disconnect`, and `hofund agent status`
 
 Planned behavior, not present yet:
 
-- Gemini codec
-- coding-agent config adapters that plan and apply edits (`agent`)
 - a future Tauri v2 menu-bar app at `apps/desktop` (do not create it until a
   task asks for it)
 

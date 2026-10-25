@@ -1,0 +1,124 @@
+---
+source: crates/codec/tests/generative.rs
+expression: pretty_value!(&request)
+---
+{
+  "model": "demo",
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "be brief"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "hi"
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "aaaa"
+          }
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "url",
+            "url": "https://example.com/a.jpg"
+          },
+          "extensions": {
+            "mimeType": "image/jpeg"
+          }
+        },
+        {
+          "type": "tool_result",
+          "id": "call_1",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"result\":\"sunny\"}"
+            }
+          ],
+          "extensions": {
+            "name": "get_weather"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "text": "checking",
+          "signature": "sig-think"
+        },
+        {
+          "type": "tool_call",
+          "id": "call_1",
+          "name": "get_weather",
+          "arguments": {
+            "form": "json",
+            "value": {
+              "city": "Paris"
+            }
+          },
+          "extensions": {
+            "thoughtSignature": "sig-call"
+          }
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Weather",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        }
+      },
+      "extensions": {
+        "behavior": "BLOCKING"
+      }
+    }
+  ],
+  "tool_choice": {
+    "mode": {
+      "mode": "named",
+      "name": "get_weather"
+    },
+    "extensions": {
+      "allowedFunctionNames": [
+        "get_weather"
+      ]
+    }
+  },
+  "params": {
+    "max_tokens": 100,
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "top_k": 40,
+    "stop": [
+      "END"
+    ],
+    "seed": 1,
+    "extensions": {
+      "candidateCount": 1
+    }
+  },
+  "stream": true
+}

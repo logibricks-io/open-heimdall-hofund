@@ -22,6 +22,7 @@ struct Upstream {
 
 struct Inbound {
     route: &'static str,
+    stream_route: &'static str,
     body: &'static str,
     stream_body: &'static str,
 }
@@ -53,21 +54,32 @@ const UPSTREAMS: &[Upstream] = &[
     },
 ];
 
+const GENERATE_BODY: &str = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+
 const INBOUNDS: &[Inbound] = &[
     Inbound {
         route: "/v1/messages",
+        stream_route: "/v1/messages",
         body: r#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
         stream_body: r#"{"model":"demo","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
     },
     Inbound {
         route: "/v1/chat/completions",
+        stream_route: "/v1/chat/completions",
         body: r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#,
         stream_body: r#"{"model":"demo","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
     },
     Inbound {
         route: "/v1/responses",
+        stream_route: "/v1/responses",
         body: r#"{"model":"demo","input":"hi"}"#,
         stream_body: r#"{"model":"demo","input":"hi","stream":true}"#,
+    },
+    Inbound {
+        route: "/v1beta/models/demo:generateContent",
+        stream_route: "/v1beta/models/demo:streamGenerateContent?alt=sse",
+        body: GENERATE_BODY,
+        stream_body: GENERATE_BODY,
     },
 ];
 
@@ -149,8 +161,13 @@ async fn each_inbound_talks_to_each_upstream() {
                 } else {
                     inbound.body
                 };
+                let route = if stream {
+                    inbound.stream_route
+                } else {
+                    inbound.route
+                };
                 let response = client
-                    .post(format!("http://{}{}", running.local_addr, inbound.route))
+                    .post(format!("http://{}{route}", running.local_addr))
                     .header("authorization", format!("Bearer {token}"))
                     .body(body)
                     .send()
@@ -242,6 +259,31 @@ upstreams = ["primary", "backup"]
         .await
         .expect("models");
     assert!(models.text().await.expect("text").contains("demo"));
+
+    let missing_list = client
+        .get(format!("http://{}/v1beta/models", running.local_addr))
+        .send()
+        .await
+        .expect("models");
+    assert_eq!(missing_list.status().as_u16(), 401);
+    let missing_list_body = missing_list.text().await.expect("text");
+    assert!(
+        missing_list_body.contains("UNAUTHENTICATED"),
+        "{missing_list_body}"
+    );
+    let listed = client
+        .get(format!(
+            "http://{}/v1beta/models?alt=json",
+            running.local_addr
+        ))
+        .header("x-goog-api-key", &token)
+        .send()
+        .await
+        .expect("models");
+    assert!(listed.status().is_success());
+    let listed_body = listed.text().await.expect("text");
+    assert!(listed_body.contains("models/demo"), "{listed_body}");
+    assert!(listed_body.contains("generateContent"), "{listed_body}");
     running.shutdown().await;
 
     let bad = dir.join("bad.toml");
@@ -249,4 +291,90 @@ upstreams = ["primary", "backup"]
     let error = check(&bad).expect_err("config");
     assert!(error.to_string().contains("listen"));
     fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn generative_inbound_carries_a_tool_call() {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("client");
+    let cases = [
+        (
+            "openai_compat",
+            Some("chat"),
+            None,
+            "/chat/completions",
+            r#"{"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{}}]}\n\ndata: [DONE]\n\n",
+        ),
+        (
+            "anthropic",
+            None,
+            Some("messages-default"),
+            "/v1/messages",
+            r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Paris"}}],"stop_reason":"tool_use"}"#,
+            "",
+        ),
+    ];
+    for (kind, protocol, quirks, wire_path, body, stream) in cases {
+        let upstream = Upstream {
+            kind,
+            protocol,
+            quirks,
+            wire_path,
+            body,
+            stream,
+        };
+        for stream_call in [false, true] {
+            if stream_call && stream.is_empty() {
+                continue;
+            }
+            let server = MockServer::start().await;
+            let template = if stream_call {
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(stream)
+            } else {
+                ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            };
+            Mock::given(method("POST"))
+                .and(path(wire_path))
+                .respond_with(template)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = scratch();
+            let (running, token) = listen(
+                &dir,
+                &config_text(&server.uri(), &upstream, "[429, 500, 502, 503, 504]"),
+            )
+            .await;
+            let route = if stream_call {
+                "/v1beta/models/demo:streamGenerateContent?alt=sse"
+            } else {
+                "/v1beta/models/demo:generateContent"
+            };
+            let response = client
+                .post(format!("http://{}{route}", running.local_addr))
+                .header("x-goog-api-key", &token)
+                .body(GENERATE_BODY)
+                .send()
+                .await
+                .expect("send");
+            let status = response.status();
+            let text = response.text().await.expect("text");
+            assert_eq!(status.as_u16(), 200, "{text}");
+            assert!(
+                text.contains("get_weather"),
+                "{kind} stream={stream_call}: {text}"
+            );
+            assert!(
+                text.contains("Paris"),
+                "{kind} stream={stream_call}: {text}"
+            );
+            running.shutdown().await;
+            fs::remove_dir_all(dir).ok();
+        }
+    }
 }

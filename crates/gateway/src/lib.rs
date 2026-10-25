@@ -2,7 +2,12 @@
 //!
 //! The process authenticates a request, decodes it with the codec it was
 //! given for that path, asks the router, and writes the encoded body. Vendor
-//! names do not belong in this crate.
+//! names do not belong in this crate. Generative Language paths are matched
+//! in [`endpoints`].
+
+mod endpoints;
+
+pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -12,9 +17,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+
 use axum::response::Response;
 use axum::routing::{get, post};
+use endpoints::{GENERATIVE_CATCHALL, inject_target, match_generate, query_key};
 use futures_util::{Stream, StreamExt};
 use hofund_codec::{Codec, StreamEncoder};
 use hofund_ir::{Request as ModelRequest, StreamEvent};
@@ -79,12 +86,26 @@ impl Gateway {
         }
     }
 
-    /// The axum router, including authentication on every `/v1` route.
+    /// The axum router, including authentication on every routed request.
+    ///
+    /// Codec paths that contain `{` are map keys, not routable patterns. When
+    /// a Generative Language codec is registered, the process binds the
+    /// catch-all generate route and the model list instead.
     pub fn into_router(self) -> axum::Router {
         let mut routes = axum::Router::new().route("/v1/models", get(models));
+        let generative = self.inner.codecs.contains_key(GENERATIVE_UNARY)
+            || self.inner.codecs.contains_key(GENERATIVE_STREAM);
         let paths: Vec<String> = self.inner.codecs.keys().cloned().collect();
         for path in paths {
+            if path.contains('{') {
+                continue;
+            }
             routes = routes.route(&path, post(complete));
+        }
+        if generative {
+            routes = routes
+                .route(GENERATIVE_CATCHALL, post(complete))
+                .route(GENERATIVE_LIST, get(generative_models));
         }
         routes.with_state(Arc::clone(&self.inner))
     }
@@ -139,7 +160,7 @@ impl Drop for Running {
 }
 
 async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
-    if let Some(response) = reject(&app.token, request.headers(), None) {
+    if let Some(response) = reject(&app.token, request.headers(), request.uri(), None) {
         return response;
     }
     let data: Vec<_> = app
@@ -155,12 +176,47 @@ async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
     )
 }
 
+async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> Response {
+    let codec = app
+        .codecs
+        .get(GENERATIVE_UNARY)
+        .or_else(|| app.codecs.get(GENERATIVE_STREAM))
+        .map(AsRef::as_ref);
+    if let Some(response) = reject(&app.token, request.headers(), request.uri(), codec) {
+        return response;
+    }
+    let models: Vec<_> = app
+        .router
+        .models()
+        .into_iter()
+        .map(|id| {
+            serde_json::json!({
+                "name": format!("models/{id}"),
+                "displayName": id,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+            })
+        })
+        .collect();
+    json_response(
+        StatusCode::OK,
+        serde_json::to_vec(&serde_json::json!({"models": models}))
+            .unwrap_or_else(|_| b"{\"models\":[]}".to_vec()),
+    )
+}
+
 async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let path = request.uri().path().to_owned();
-    let Some(codec) = app.codecs.get(&path).cloned() else {
+    let uri = request.uri().clone();
+    let headers = request.headers().clone();
+    let matched = match_generate(&path);
+    let codec_key = matched
+        .as_ref()
+        .map(|route| route.key)
+        .unwrap_or(path.as_str());
+    let Some(codec) = app.codecs.get(codec_key).cloned() else {
         return text_response(StatusCode::NOT_FOUND, "not found");
     };
-    if let Some(response) = reject(&app.token, request.headers(), Some(codec.as_ref())) {
+    if let Some(response) = reject(&app.token, &headers, &uri, Some(codec.as_ref())) {
         return response;
     }
     let started = Instant::now();
@@ -173,6 +229,11 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 "request body is too large",
             );
         }
+    };
+    let bytes = if let Some(route) = &matched {
+        Bytes::from(inject_target(&bytes, &route.model, route.stream))
+    } else {
+        bytes
     };
     let model_request = match codec.decode_request(&bytes) {
         Ok(model_request) => model_request,
@@ -204,9 +265,13 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     }
 }
 
-fn reject(expected: &str, headers: &HeaderMap, codec: Option<&dyn Codec>) -> Option<Response> {
-    let presented = bearer(headers);
-    if presented.is_some_and(|token| tokens_match(expected, token)) {
+fn reject(
+    expected: &str,
+    headers: &HeaderMap,
+    uri: &Uri,
+    codec: Option<&dyn Codec>,
+) -> Option<Response> {
+    if authorized(expected, headers, uri) {
         return None;
     }
     let body = match codec {
@@ -214,6 +279,36 @@ fn reject(expected: &str, headers: &HeaderMap, codec: Option<&dyn Codec>) -> Opt
         None => list_error("unauthorized"),
     };
     Some(json_response(StatusCode::UNAUTHORIZED, body))
+}
+
+/// Accepts the bearer token, `x-goog-api-key`, or a `key` query value.
+///
+/// Each presented secret is compared in constant time. One match is enough.
+/// A request with no secret is still rejected.
+fn authorized(expected: &str, headers: &HeaderMap, uri: &Uri) -> bool {
+    let mut saw = false;
+    let mut matched = false;
+    if let Some(token) = bearer(headers) {
+        saw = true;
+        matched |= tokens_match(expected, token);
+    }
+    if let Some(token) = header_secret(headers, "x-goog-api-key") {
+        saw = true;
+        matched |= tokens_match(expected, token);
+    }
+    if let Some(query) = uri.query()
+        && let Some(token) = query_key(query)
+    {
+        saw = true;
+        matched |= tokens_match(expected, &token);
+    }
+    saw && matched
+}
+
+fn header_secret<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let value = headers.get(name)?.to_str().ok()?;
+    let token = value.trim();
+    if token.is_empty() { None } else { Some(token) }
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {

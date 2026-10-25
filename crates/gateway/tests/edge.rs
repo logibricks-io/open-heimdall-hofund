@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use futures_util::stream;
-use hofund_codec::{Codec, CodecError, StreamDecoder, StreamEncoder};
+use hofund_codec::{Codec, CodecError, GenerativeLanguage, StreamDecoder, StreamEncoder};
 use hofund_gateway::Gateway;
+use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY};
 use hofund_ir::{
     ContentPart, Extensions, Message, Request as ModelRequest, Response, Role, StreamEvent,
     TextDelta,
@@ -151,8 +152,12 @@ impl Provider for Fake {
 }
 
 fn gateway(providers: Vec<Arc<dyn Provider>>, token: &str) -> axum::Router {
+    gateway_with(providers, token, false)
+}
+
+fn gateway_with(providers: Vec<Arc<dyn Provider>>, token: &str, generative: bool) -> axum::Router {
     let dir = std::env::temp_dir().join(format!(
-        "hofund-edge-{}-{}",
+        "hofund-edge-{}-{}-{generative}",
         std::process::id(),
         providers.len()
     ));
@@ -162,6 +167,13 @@ fn gateway(providers: Vec<Arc<dyn Provider>>, token: &str) -> axum::Router {
     routes.insert("demo".to_owned(), providers);
     let mut codecs = HashMap::new();
     codecs.insert("/v1/plain".to_owned(), Arc::new(Plain) as Arc<dyn Codec>);
+    if generative {
+        codecs.insert(
+            GENERATIVE_UNARY.to_owned(),
+            Arc::new(GenerativeLanguage) as Arc<dyn Codec>,
+        );
+        codecs.insert(GENERATIVE_STREAM.to_owned(), Arc::new(GenerativeLanguage));
+    }
     Gateway::new(
         Router::new(routes, FailoverPolicy::default()),
         token.to_owned(),
@@ -273,4 +285,112 @@ async fn a_stream_is_pulled_and_a_client_error_does_not_fail_over() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("ok"));
     assert_eq!(backup.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_header_secret_or_query_secret_is_accepted() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = gateway(vec![fake("primary", &hits, None)], "secret");
+    let (status, _) = call_with(
+        app.clone(),
+        "x-goog-api-key",
+        "nope",
+        "/v1/plain",
+        r#"{"model":"demo"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = call_with(
+        app.clone(),
+        "x-goog-api-key",
+        "secret",
+        "/v1/plain",
+        r#"{"model":"demo"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("ok"));
+
+    let queried = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/plain?key=secret")
+                .body(Body::from(r#"{"model":"demo"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(queried.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn generative_routes_inject_the_model_and_list_models() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = gateway_with(vec![fake("primary", &hits, None)], "secret", true);
+    let (status, body) = call_with(
+        app.clone(),
+        "x-goog-api-key",
+        "secret",
+        "/v1beta/models/demo:generateContent",
+        r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("ok"), "{body}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    let (status, body) = call_with(
+        app.clone(),
+        "authorization",
+        "Bearer secret",
+        "/v1beta/models/demo:streamGenerateContent?alt=sse",
+        r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("hi"), "{body}");
+
+    let listed = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1beta/models")
+                .header("x-goog-api-key", "secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("models");
+    assert_eq!(listed.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(listed.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("models/demo"), "{text}");
+    assert!(text.contains("streamGenerateContent"), "{text}");
+}
+
+async fn call_with(
+    app: axum::Router,
+    header: &str,
+    value: &str,
+    uri: &str,
+    body: &'static str,
+) -> (StatusCode, String) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header, value)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (status, String::from_utf8_lossy(&bytes).into_owned())
 }

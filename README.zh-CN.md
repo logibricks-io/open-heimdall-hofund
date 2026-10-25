@@ -14,13 +14,13 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 
 ## 状态
 
-**Pre-alpha。** 规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions 与 OpenAI Responses 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，以及本地 HTTP 服务已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。Gemini、配置改写和桌面应用都还没有实现。
+**Pre-alpha。** 规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 与 Generative Language API 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，本地 HTTP 服务，以及 Claude Code、Codex CLI、Gemini CLI、OpenCode 的配置适配器已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。桌面应用还没有实现。
 
-`hofund serve` 默认监听 `127.0.0.1:3425`，除非配置文件另有指定。所有 `/v1` 请求都需要 `hofund token show` 打印的 bearer token。命令有 `serve`、`config check`、`token show`、`token rotate` 和 `usage`。
+`hofund serve` 默认监听 `127.0.0.1:3425`，除非配置文件另有指定。所有 `/v1` 请求都需要 `hofund token show` 打印的 bearer token。命令有 `serve`、`config check`、`token show`、`token rotate`、`usage`，以及 `agent list`、`agent connect`、`agent disconnect`、`agent status`。
 
 ## 计划中的能力
 
-- 以轮辐式（hub-and-spoke）结构在 LLM API 协议之间转换：Anthropic Messages、OpenAI Chat Completions、OpenAI Responses，以及之后的 Gemini。每种协议只对照一份规范中间表示（IR）实现一次，而不是做成 N×M 的两两直译。
+- 以轮辐式（hub-and-spoke）结构在 LLM API 协议之间转换：Anthropic Messages、OpenAI Chat Completions、OpenAI Responses，以及 Generative Language API。每种协议只对照一份规范中间表示（IR）实现一次，而不是做成 N×M 的两两直译。
 - 编码代理的配置适配器（Claude Code、Codex、Gemini CLI、OpenCode 等）。适配器先生成修改计划，再把修改应用到代理自己的配置上，使任意代理都能调用任意模型。
 - 路由组、选择策略，以及跨提供商和账号的故障转移。
 - 长期运行的本地守护进程，以及 `hofund` 命令行工具。

@@ -230,6 +230,24 @@ fn decode_function_output(mut object: Object) -> Result<Message, CodecError> {
     })
 }
 
+/// Keeps a non-empty `encrypted_content` as the original reasoning item.
+///
+/// `type` is restored because the stream decoder removes it before this runs.
+/// An empty or missing seal is not stored.
+fn seal_extensions(item: &Object) -> Extensions {
+    let Some(value) = item.get("encrypted_content").and_then(Value::as_str) else {
+        return Extensions::new();
+    };
+    if value.is_empty() {
+        return Extensions::new();
+    }
+    let mut object = item.clone();
+    object.insert("type".to_owned(), Value::String("reasoning".to_owned()));
+    let mut extensions = Extensions::new();
+    extensions.insert(SEALED_ITEM, Value::Object(object));
+    extensions
+}
+
 fn decode_reasoning(mut object: Object) -> Result<Option<Message>, CodecError> {
     let sealed = object
         .get("encrypted_content")
@@ -1047,7 +1065,7 @@ impl StreamEncoder {
                 );
             }
             StreamEvent::SignatureDelta(_) => {}
-            StreamEvent::ContentBlockStop(stop) => self.close(stop.index),
+            StreamEvent::ContentBlockStop(stop) => self.close(stop.index, &stop.extensions),
             StreamEvent::MessageDelta(delta) => {
                 if delta.stop.is_some() {
                     self.stop.clone_from(&delta.stop);
@@ -1078,7 +1096,7 @@ impl StreamEncoder {
                 message: "unknown stream blocks cannot be encoded".to_owned(),
             }),
             block => {
-                self.write_open(start.index, block);
+                self.write_open(start.index, block, &start.extensions);
                 Ok(())
             }
         }
@@ -1099,10 +1117,10 @@ impl StreamEncoder {
                 name: String::new(),
             },
         };
-        self.write_open(index, &block);
+        self.write_open(index, &block, &Extensions::new());
     }
 
-    fn write_open(&mut self, index: u32, block: &BlockStart) {
+    fn write_open(&mut self, index: u32, block: &BlockStart, extensions: &Extensions) {
         let (kind, item) = match block {
             BlockStart::Text => (
                 ItemKind::Message,
@@ -1113,10 +1131,7 @@ impl StreamEncoder {
                     "content": [],
                 }),
             ),
-            BlockStart::Thinking { .. } => (
-                ItemKind::Reasoning,
-                serde_json::json!({"type": "reasoning", "summary": []}),
-            ),
+            BlockStart::Thinking { .. } => (ItemKind::Reasoning, reasoning_open_item(extensions)),
             BlockStart::ToolCall { id, name } => (
                 ItemKind::Function,
                 serde_json::json!({
@@ -1151,21 +1166,26 @@ impl StreamEncoder {
         }
     }
 
-    fn close(&mut self, index: u32) {
+    fn close(&mut self, index: u32, extensions: &Extensions) {
         let Some(kind) = self.open.remove(&index) else {
             return;
         };
-        let item_type = match kind {
-            ItemKind::Message => "message",
-            ItemKind::Reasoning => "reasoning",
-            ItemKind::Function => "function_call",
+        let item = match kind {
+            ItemKind::Message => serde_json::json!({"type": "message", "status": "completed"}),
+            ItemKind::Function => {
+                serde_json::json!({"type": "function_call", "status": "completed"})
+            }
+            ItemKind::Reasoning => match extensions.get(SEALED_ITEM) {
+                Some(Value::Object(sealed)) => Value::Object(sealed.clone()),
+                _ => serde_json::json!({"type": "reasoning", "status": "completed"}),
+            },
         };
         self.write(
             "response.output_item.done",
             serde_json::json!({
                 "type": "response.output_item.done",
                 "output_index": index,
-                "item": {"type": item_type, "status": "completed"},
+                "item": item,
             }),
         );
     }
@@ -1173,7 +1193,7 @@ impl StreamEncoder {
     fn finish(&mut self) {
         let indexes: Vec<u32> = self.open.keys().copied().collect();
         for index in indexes {
-            self.close(index);
+            self.close(index, &Extensions::new());
         }
         let (status, details) = encode_status(self.stop.as_ref());
         let event = match status.as_str() {
@@ -1368,7 +1388,10 @@ impl Decoder {
                 let name = take_string(&mut item, "name")?.unwrap_or_default();
                 self.open_tool(index, id, name, events);
             }
-            "reasoning" => self.open_thinking(index, events),
+            "reasoning" => {
+                let extensions = seal_extensions(&item);
+                self.open_thinking(index, extensions, events);
+            }
             _ => {}
         }
         Ok(())
@@ -1422,7 +1445,7 @@ impl Decoder {
         if text.is_empty() {
             return Ok(());
         }
-        self.open_thinking(index, events);
+        self.open_thinking(index, Extensions::new(), events);
         self.deltas.insert(index);
         events.push(StreamEvent::ThinkingDelta(ThinkingDelta {
             index,
@@ -1473,8 +1496,12 @@ impl Decoder {
     ) -> Result<(), CodecError> {
         self.ensure_started(events);
         let index = index_of(&mut object)?;
+        let mut seal = Extensions::new();
         if let Some(mut item) = take_object(&mut object, "item")? {
             let kind = take_string(&mut item, "type")?.unwrap_or_default();
+            if kind == "reasoning" {
+                seal = seal_extensions(&item);
+            }
             if !self.deltas.contains(&index) {
                 match kind.as_str() {
                     "message" => {
@@ -1501,14 +1528,16 @@ impl Decoder {
                     }
                     "reasoning" => {
                         let text = reasoning_text(&item);
-                        if !text.is_empty() {
-                            self.open_thinking(index, events);
-                            self.deltas.insert(index);
-                            events.push(StreamEvent::ThinkingDelta(ThinkingDelta {
-                                index,
-                                text,
-                                extensions: Extensions::new(),
-                            }));
+                        if !text.is_empty() || !seal.is_empty() {
+                            self.open_thinking(index, seal.clone(), events);
+                            if !text.is_empty() {
+                                self.deltas.insert(index);
+                                events.push(StreamEvent::ThinkingDelta(ThinkingDelta {
+                                    index,
+                                    text,
+                                    extensions: Extensions::new(),
+                                }));
+                            }
                         }
                     }
                     _ => {}
@@ -1518,7 +1547,7 @@ impl Decoder {
                 self.emit_arg_suffix(index, &arguments, events);
             }
         }
-        self.close(index, events);
+        self.close(index, seal, events);
         Ok(())
     }
 
@@ -1557,7 +1586,7 @@ impl Decoder {
         };
         let indexes: Vec<u32> = self.open.iter().copied().collect();
         for index in indexes {
-            self.close(index, events);
+            self.close(index, Extensions::new(), events);
         }
         events.push(StreamEvent::MessageDelta(MessageDelta {
             stop: Some(stop_from(&status, reason.as_deref(), self.called)),
@@ -1588,18 +1617,22 @@ impl Decoder {
                             text: text.text,
                             extensions: Extensions::new(),
                         }));
-                        self.close(index, events);
+                        self.close(index, Extensions::new(), events);
                         index += 1;
                     }
-                    ContentPart::Thinking(thinking) if !thinking.text.is_empty() => {
-                        self.open_thinking(index, events);
-                        self.deltas.insert(index);
-                        events.push(StreamEvent::ThinkingDelta(ThinkingDelta {
-                            index,
-                            text: thinking.text,
-                            extensions: Extensions::new(),
-                        }));
-                        self.close(index, events);
+                    ContentPart::Thinking(thinking)
+                        if !thinking.text.is_empty() || !thinking.extensions.is_empty() =>
+                    {
+                        self.open_thinking(index, thinking.extensions.clone(), events);
+                        if !thinking.text.is_empty() {
+                            self.deltas.insert(index);
+                            events.push(StreamEvent::ThinkingDelta(ThinkingDelta {
+                                index,
+                                text: thinking.text,
+                                extensions: Extensions::new(),
+                            }));
+                        }
+                        self.close(index, thinking.extensions, events);
                         index += 1;
                     }
                     ContentPart::ToolCall(call) => {
@@ -1609,7 +1642,7 @@ impl Decoder {
                         if !arguments.is_empty() {
                             self.emit_arg_suffix(index, &arguments, events);
                         }
-                        self.close(index, events);
+                        self.close(index, Extensions::new(), events);
                         index += 1;
                     }
                     _ => {}
@@ -1669,7 +1702,7 @@ impl Decoder {
         }));
     }
 
-    fn open_thinking(&mut self, index: u32, events: &mut Vec<StreamEvent>) {
+    fn open_thinking(&mut self, index: u32, extensions: Extensions, events: &mut Vec<StreamEvent>) {
         if !self.open.insert(index) {
             return;
         }
@@ -1679,7 +1712,7 @@ impl Decoder {
                 redacted: false,
                 data: None,
             },
-            extensions: Extensions::new(),
+            extensions,
         }));
     }
 
@@ -1694,15 +1727,22 @@ impl Decoder {
         }));
     }
 
-    fn close(&mut self, index: u32, events: &mut Vec<StreamEvent>) {
+    fn close(&mut self, index: u32, extensions: Extensions, events: &mut Vec<StreamEvent>) {
         if !self.open.remove(&index) {
             return;
         }
         events.push(StreamEvent::ContentBlockStop(ContentBlockStop {
             index,
-            extensions: Extensions::new(),
+            extensions,
         }));
     }
+}
+
+fn reasoning_open_item(extensions: &Extensions) -> Value {
+    if let Some(Value::Object(sealed)) = extensions.get(SEALED_ITEM) {
+        return Value::Object(sealed.clone());
+    }
+    serde_json::json!({"type": "reasoning", "summary": []})
 }
 
 /// A failed turn that never started and has no output is not a reply yet.

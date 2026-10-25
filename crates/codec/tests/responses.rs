@@ -251,6 +251,33 @@ data: {"type":"response.failed","response":{"id":"resp_f","status":"failed","out
 }
 
 #[test]
+fn streamed_encrypted_content_is_kept_on_the_thinking_part() {
+    let bytes = br#"event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"seal-1","summary":[]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_s","status":"completed","output":[]}}
+
+"#;
+    let events = OpenAiResponses.decode_stream(bytes).expect("decode");
+    let response = assemble(&events);
+    let sealed = response
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            ContentPart::Thinking(thinking) => thinking.extensions.get("sealed_item").cloned(),
+            _ => None,
+        })
+        .expect("thinking");
+    assert_eq!(sealed.get("encrypted_content"), Some(&json!("seal-1")));
+    assert_eq!(sealed.get("id"), Some(&json!("rs_1")));
+    let encoded = OpenAiResponses.encode_stream(&events).expect("encode");
+    let text = String::from_utf8(encoded).expect("utf8");
+    assert!(text.contains("seal-1"));
+}
+
+#[test]
 fn failed_after_created_is_a_stop_reason() {
     let bytes = br#"event: response.created
 data: {"type":"response.created","response":{"id":"resp_f","status":"in_progress","output":[]}}

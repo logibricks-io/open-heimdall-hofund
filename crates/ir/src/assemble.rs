@@ -18,6 +18,7 @@ struct Block {
     tool_name: String,
     tool_args: String,
     unknown_kind: Option<String>,
+    extensions: Extensions,
 }
 
 /// Folds `events` into one assistant response.
@@ -25,6 +26,8 @@ struct Block {
 /// Content blocks are ordered by index. Tool-argument fragments are
 /// concatenated and then parsed; text that is not JSON is kept raw. Ping
 /// events are ignored. A later usage event overwrites counters it sets.
+/// Extension bags on one block are merged, and the first value for a key
+/// wins. A thinking part keeps that bag.
 ///
 /// This function does not fail on incomplete JSON arguments. Callers that need
 /// a hard failure can inspect [`ToolArguments`].
@@ -65,6 +68,7 @@ pub fn assemble(events: &[StreamEvent]) -> Response {
                 if let BlockStart::Unknown { kind } = &start.block {
                     block.unknown_kind = Some(kind.clone());
                 }
+                block.extensions.absorb(&start.extensions);
             }
             StreamEvent::TextDelta(delta) => {
                 blocks
@@ -82,6 +86,7 @@ pub fn assemble(events: &[StreamEvent]) -> Response {
                     });
                 }
                 block.text.push_str(&delta.text);
+                block.extensions.absorb(&delta.extensions);
             }
             StreamEvent::SignatureDelta(delta) => {
                 blocks.entry(delta.index).or_default().signature = Some(delta.signature.clone());
@@ -93,10 +98,14 @@ pub fn assemble(events: &[StreamEvent]) -> Response {
                     .tool_args
                     .push_str(&delta.partial_json);
             }
-            StreamEvent::ContentBlockStop(_)
-            | StreamEvent::Ping(_)
-            | StreamEvent::Unknown(_)
-            | StreamEvent::MessageStop(_) => {}
+            StreamEvent::ContentBlockStop(stop) => {
+                blocks
+                    .entry(stop.index)
+                    .or_default()
+                    .extensions
+                    .absorb(&stop.extensions);
+            }
+            StreamEvent::Ping(_) | StreamEvent::Unknown(_) | StreamEvent::MessageStop(_) => {}
             StreamEvent::MessageDelta(delta) => {
                 if delta.stop.is_some() {
                     stop.clone_from(&delta.stop);
@@ -150,7 +159,7 @@ fn finish_block(block: Block) -> Option<ContentPart> {
             signature: block.signature,
             redacted,
             data: block.redacted_data.or(data),
-            extensions: Extensions::new(),
+            extensions: block.extensions,
         }),
         BlockStart::ToolCall { id, name } => ContentPart::ToolCall(ToolCallPart {
             id: if block.tool_id.is_empty() {

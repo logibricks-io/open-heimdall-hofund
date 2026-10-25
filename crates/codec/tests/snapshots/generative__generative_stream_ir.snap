@@ -1,0 +1,84 @@
+---
+source: crates/codec/tests/generative.rs
+expression: pretty_value!(&events)
+---
+[
+  {
+    "type": "message_start",
+    "id": "resp_1",
+    "model": "demo"
+  },
+  {
+    "type": "content_block_start",
+    "index": 0,
+    "block": {
+      "type": "text"
+    }
+  },
+  {
+    "type": "text_delta",
+    "index": 0,
+    "text": "Hi"
+  },
+  {
+    "type": "content_block_start",
+    "index": 1,
+    "block": {
+      "type": "thinking"
+    }
+  },
+  {
+    "type": "thinking_delta",
+    "index": 1,
+    "text": "hmm"
+  },
+  {
+    "type": "signature_delta",
+    "index": 1,
+    "signature": "sig-think"
+  },
+  {
+    "type": "content_block_start",
+    "index": 2,
+    "block": {
+      "type": "tool_call",
+      "id": "c1",
+      "name": "get_weather"
+    },
+    "extensions": {
+      "thoughtSignature": "sig"
+    }
+  },
+  {
+    "type": "tool_arguments_delta",
+    "index": 2,
+    "partial_json": "{\"city\":\"Paris\"}"
+  },
+  {
+    "type": "content_block_stop",
+    "index": 2
+  },
+  {
+    "type": "message_delta",
+    "stop": {
+      "reason": "tool_use"
+    },
+    "usage": {
+      "input_tokens": 2,
+      "output_tokens": 3,
+      "total_tokens": 5,
+      "reasoning_tokens": 1
+    }
+  },
+  {
+    "type": "content_block_stop",
+    "index": 0
+  },
+  {
+    "type": "content_block_stop",
+    "index": 1
+  },
+  {
+    "type": "message_stop"
+  }
+]
