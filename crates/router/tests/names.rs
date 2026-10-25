@@ -56,14 +56,9 @@ impl Provider for Fake {
         }
         let mut message = Message::new(Role::Assistant);
         message.content.push(ContentPart::text("ok"));
-        Ok(Completion::Unary(Box::new(Response::from_parts(
-            None,
-            Some(request.model),
-            message,
-            None,
-            None,
-            hofund_ir::Extensions::new(),
-        ))))
+        Ok(Completion::Unary(Box::new(
+            Response::new(message).with_model(Some(request.model)),
+        )))
     }
 }
 

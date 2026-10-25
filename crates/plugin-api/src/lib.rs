@@ -9,7 +9,7 @@
 //!
 //! # Semver
 //!
-//! Public structs and enums are [`non_exhaustive`] and their fields are
+//! Public structs and enums are `#[non_exhaustive]` and their fields are
 //! private. A change to this surface updates `public-api.txt` in the same
 //! pull request.
 
@@ -29,8 +29,16 @@ mod host;
 mod id;
 mod inbound;
 /// Kernel backends. Plugins do not implement these traits.
+///
+/// The module is public only with the `kernel` feature. `hofund-plugin-host`
+/// is the crate that enables it. A workspace build unifies features, so
+/// `xtask` also rejects any use of this module outside the host stack.
+#[cfg(feature = "kernel")]
 #[doc(hidden)]
 pub mod kernel;
+
+#[cfg(not(feature = "kernel"))]
+mod kernel;
 mod records;
 mod subscription;
 mod upstream;
@@ -49,8 +57,8 @@ pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfi
 pub use error::{PluginError, PluginErrorKind};
 pub use hofund_ir::{Request, Response, StreamEvent};
 pub use host::{
-    AccountsHandle, AuthResult, ClockHandle, DirHandle, HostContext, HttpHandle, JobId, JobSpec,
-    ObserveHandle, ProcessHandle, SchedulerHandle, SecretsHandle, SpawnRequest, Spawned,
+    AccountsHandle, AuthResult, ClockHandle, DirHandle, HostContext, HttpHandle, Job, JobId,
+    JobSpec, ObserveHandle, ProcessHandle, SchedulerHandle, SecretsHandle, SpawnRequest, Spawned,
     SurfaceHost,
 };
 pub use id::{
@@ -72,10 +80,36 @@ pub use upstream::{
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use static_assertions::assert_impl_all;
+
     use super::API;
 
     #[test]
     fn handshake_is_one() {
         assert_eq!(API, "1");
+    }
+
+    #[test]
+    fn handles_and_errors_are_send_and_sync() {
+        assert_impl_all!(crate::HostContext: Send, Sync);
+        assert_impl_all!(crate::HttpHandle: Send, Sync);
+        assert_impl_all!(crate::SecretsHandle: Send, Sync);
+        assert_impl_all!(crate::AccountsHandle: Send, Sync);
+        assert_impl_all!(crate::ClockHandle: Send, Sync);
+        assert_impl_all!(crate::SchedulerHandle: Send, Sync);
+        assert_impl_all!(crate::ProcessHandle: Send, Sync);
+        assert_impl_all!(crate::DirHandle: Send, Sync);
+        assert_impl_all!(crate::ObserveHandle: Send, Sync);
+        assert_impl_all!(crate::SurfaceHost: Send, Sync);
+        assert_impl_all!(crate::PluginError: Send, Sync);
+        assert_impl_all!(Arc<dyn crate::DynUpstreamFactory>: Send, Sync);
+        assert_impl_all!(Arc<dyn crate::DynSubscriptionFactory>: Send, Sync);
+        assert_impl_all!(Arc<dyn crate::DynAgentFactory>: Send, Sync);
+        assert_impl_all!(Arc<dyn crate::UpstreamProvider>: Send, Sync);
+        assert_impl_all!(Arc<dyn crate::Subscription>: Send, Sync);
+        assert_impl_all!(Arc<dyn crate::AgentIntegration>: Send, Sync);
+        assert_impl_all!(Arc<dyn crate::InboundSurface>: Send, Sync);
     }
 }

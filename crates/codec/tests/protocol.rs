@@ -2,8 +2,8 @@
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
 use hofund_ir::{
-    ContentPart, Extensions, ImageDetail, ImageSource, Message, Request, Response, Role, Stop,
-    StopReason, StreamEvent, ToolArguments, ToolChoiceMode, Usage, assemble,
+    ContentPart, ImageDetail, ImageSource, Message, Request, Response, Role, Stop, StopReason,
+    StreamEvent, ToolArguments, ToolChoiceMode, Usage, assemble,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -238,14 +238,8 @@ fn chat_turn() -> Vec<StreamEvent> {
 
 #[test]
 fn anthropic_unary_id_uses_the_message_prefix() {
-    let mut response = Response::from_parts(
-        None,
-        Some("m".to_owned()),
-        hofund_ir::Message::new(Role::Assistant),
-        None,
-        None,
-        hofund_ir::Extensions::new(),
-    );
+    let mut response =
+        Response::new(hofund_ir::Message::new(Role::Assistant)).with_model(Some("m".to_owned()));
     response.message.content.push(ContentPart::text("ok"));
     let encoded = AnthropicMessages
         .encode_response(&response)
@@ -454,17 +448,11 @@ fn chat_joins_assistant_text_and_stop_sequence_becomes_end_turn() {
     let decoded = OpenAiChat.decode_request(&encoded).expect("decode");
     assert_eq!(decoded.messages[0].content, vec![ContentPart::text("abc")]);
 
-    let mut response = Response::from_parts(
-        None,
-        None,
-        hofund_ir::Message::new(Role::Assistant),
-        Some(hofund_ir::Stop {
+    let mut response =
+        Response::new(hofund_ir::Message::new(Role::Assistant)).with_stop(Some(hofund_ir::Stop {
             reason: StopReason::StopSequence,
             sequence: Some("END".to_owned()),
-        }),
-        None,
-        hofund_ir::Extensions::new(),
-    );
+        }));
     response.message.content.push(ContentPart::text("x"));
     let encoded = OpenAiChat.encode_response(&response).expect("encode");
     let decoded = OpenAiChat.decode_response(&encoded).expect("decode");
@@ -818,24 +806,21 @@ data: {"type":"message_stop"}
 
 #[test]
 fn partial_usage_fills_the_fields_each_protocol_requires() {
-    let response = Response::from_parts(
-        Some("resp_local".to_owned()),
-        Some("m".to_owned()),
-        {
-            let mut message = Message::new(Role::Assistant);
-            message.content.push(ContentPart::text("ok"));
-            message
-        },
-        Some(Stop {
-            reason: StopReason::EndTurn,
-            sequence: None,
-        }),
-        Some(Usage {
-            output_tokens: Some(5),
-            ..Usage::default()
-        }),
-        Extensions::new(),
-    );
+    let response = Response::new({
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(ContentPart::text("ok"));
+        message
+    })
+    .with_id(Some("resp_local".to_owned()))
+    .with_model(Some("m".to_owned()))
+    .with_stop(Some(Stop {
+        reason: StopReason::EndTurn,
+        sequence: None,
+    }))
+    .with_usage(Some(Usage {
+        output_tokens: Some(5),
+        ..Usage::default()
+    }));
     let responses = OpenAiResponses
         .encode_response(&response)
         .expect("responses");

@@ -30,13 +30,17 @@ pub enum PluginErrorKind {
     Config,
     /// The kernel cancelled the call.
     Cancelled,
+    /// The filesystem or a process call failed.
+    Io,
+    /// The host hit a bug, such as a poisoned lock.
+    Internal,
 }
 
 /// A plugin call failed.
 ///
 /// Fields are private. Callers branch on [`PluginError::kind`] and read
 /// [`PluginError::status`], [`PluginError::retry_after`], and
-/// [`PluginError::source`].
+/// [`PluginError::cause`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 #[error("{message}")]
@@ -117,6 +121,18 @@ impl PluginError {
         Self::new(PluginErrorKind::Cancelled, message)
     }
 
+    /// A filesystem or process failure.
+    #[must_use]
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::new(PluginErrorKind::Io, message)
+    }
+
+    /// An internal host failure.
+    #[must_use]
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(PluginErrorKind::Internal, message)
+    }
+
     /// Attaches a retry hint. The kernel, not the plugin, cools the member down.
     #[must_use]
     pub fn with_retry_after(mut self, after: Duration) -> Self {
@@ -150,8 +166,10 @@ impl PluginError {
     }
 
     /// The underlying error, when one was attached.
+    ///
+    /// Named `cause` so it does not shadow [`Error::source`].
     #[must_use]
-    pub fn source(&self) -> Option<&(dyn Error + 'static)> {
+    pub fn cause(&self) -> Option<&(dyn Error + 'static)> {
         self.cause
             .as_deref()
             .map(|error| error as &(dyn Error + 'static))
@@ -176,6 +194,8 @@ impl fmt::Display for PluginErrorKind {
             Self::Quota => "quota",
             Self::Config => "config",
             Self::Cancelled => "cancelled",
+            Self::Io => "io",
+            Self::Internal => "internal",
         })
     }
 }
@@ -197,6 +217,13 @@ mod tests {
         assert_eq!(error.retry_after(), Some(Duration::from_secs(2)));
         let source = Error::source(&error).expect("source");
         assert_eq!(source.to_string(), "body");
+        assert_eq!(error.cause().expect("cause").to_string(), "body");
+        let io = PluginError::io("disk");
+        assert_eq!(io.kind(), PluginErrorKind::Io);
+        assert_eq!(
+            PluginError::internal("poison").kind(),
+            PluginErrorKind::Internal
+        );
         assert_eq!(error.message(), "slow down");
     }
 

@@ -559,15 +559,13 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         ..GenerationParams::default()
     };
     let stream = take_bool(&mut object, "stream")?.unwrap_or(false);
-    Ok(Request::from_parts(
-        model,
-        messages,
-        tools,
-        tool_choice,
-        params,
-        stream,
-        Extensions::from_map(object),
-    ))
+    Ok(Request::new(model)
+        .with_messages(messages)
+        .with_tools(tools)
+        .with_tool_choice(tool_choice)
+        .with_params(params)
+        .with_stream(stream)
+        .with_extensions(Extensions::from_map(object)))
 }
 
 fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
@@ -666,9 +664,12 @@ fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> {
     };
     let mut extensions = Extensions::from_map(object);
     extensions.absorb(&Extensions::from_map(choice_extra));
-    Ok(Response::from_parts(
-        id, model, message, stop, usage, extensions,
-    ))
+    Ok(Response::new(message)
+        .with_id(id)
+        .with_model(model)
+        .with_stop(stop)
+        .with_usage(usage)
+        .with_extensions(extensions))
 }
 
 fn decode_response_choice(choice: Value) -> Result<(Message, Option<Stop>, Object), CodecError> {

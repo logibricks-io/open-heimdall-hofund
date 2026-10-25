@@ -99,7 +99,7 @@ impl std::fmt::Debug for Vertex {
 impl Vertex {
     /// Builds a client that mints tokens at Google's own endpoints.
     ///
-    /// `endpoint.base_url` is the root returned by [`base_url`]: the project
+    /// `endpoint.base_url` is the root returned by `base_url`: the project
     /// and location are already in it. `credentials` is empty to use
     /// Application Default Credentials, or an absolute path (or `~/...`) to
     /// a credentials file. `impersonate` is empty, or the email of a service

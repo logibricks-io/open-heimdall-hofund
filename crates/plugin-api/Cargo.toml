@@ -10,6 +10,11 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 
+[features]
+# Kernel backends and the constructors only `hofund-plugin-host` may call.
+# A plugin that enables this feature is rejected by `xtask`.
+kernel = []
+
 [dependencies]
 hofund-ir = { workspace = true }
 async-trait = "0.1.89"
@@ -20,6 +25,8 @@ secrecy = "0.10.3"
 thiserror = "2.0.21"
 
 [dev-dependencies]
+quote = "1.0.45"
+static_assertions = "1.1.0"
 syn = { version = "3.0.9", features = ["full"] }
 tokio = { version = "1.52.2", features = ["macros", "rt"] }
 

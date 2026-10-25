@@ -7,9 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use futures_util::stream;
-use hofund_ir::{
-    ContentPart, Extensions, Message, Request, Response, Role, StreamEvent, TextDelta,
-};
+use hofund_ir::{ContentPart, Message, Request, Response, Role, StreamEvent, TextDelta};
 use hofund_router::{
     Completion, FailoverPolicy, Provider, ProviderError, ProviderErrorKind, Router, RouterError,
 };
@@ -60,7 +58,7 @@ impl Provider for Fake {
 fn reply() -> Response {
     let mut message = Message::new(Role::Assistant);
     message.content.push(ContentPart::text("ok"));
-    Response::from_parts(None, None, message, None, None, Extensions::new())
+    Response::new(message)
 }
 
 fn text_event(text: &str) -> StreamEvent {

@@ -1,8 +1,9 @@
 //! Handles a plugin receives. Construction is `hofund_plugin_host::host_context`.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use crate::SecretString;
@@ -14,6 +15,8 @@ use crate::kernel::{
     SchedulerBackend, SecretsBackend,
 };
 use crate::records::{Account, QuotaObservation};
+
+pub use crate::kernel::Job;
 
 /// HTTP on the kernel's pooled client.
 #[derive(Clone)]
@@ -64,35 +67,48 @@ impl SecretsHandle {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AccountsHandle {
+    plugin: PluginId,
     inner: Arc<dyn AccountBackend>,
 }
 
 impl AccountsHandle {
-    /// Accounts for `plugin`.
+    /// An account owned by this context's plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `label` is empty.
+    pub fn account(&self, id: AccountId, label: impl Into<String>) -> Result<Account, PluginError> {
+        Account::new(self.plugin.clone(), id, label)
+    }
+
+    /// Accounts for this context's plugin.
     ///
     /// # Errors
     ///
     /// Returns [`PluginError`] when the store cannot be read.
-    pub async fn list(&self, plugin: &PluginId) -> Result<Vec<Account>, PluginError> {
-        self.inner.list(plugin).await
+    pub async fn list(&self) -> Result<Vec<Account>, PluginError> {
+        self.inner.list(&self.plugin).await
     }
 
     /// Inserts or replaces `account` and its secret, then drops the cache.
     ///
     /// # Errors
     ///
-    /// Returns [`PluginError`] when the write fails.
+    /// Returns [`PluginError`] when `account` belongs to another plugin or the write fails.
     pub async fn upsert(&self, account: Account, secret: SecretString) -> Result<(), PluginError> {
+        if account.plugin() != &self.plugin {
+            return Err(PluginError::config("account belongs to another plugin"));
+        }
         self.inner.upsert(account, secret).await
     }
 
-    /// Removes one account.
+    /// Removes one account of this context's plugin.
     ///
     /// # Errors
     ///
     /// Returns [`PluginError`] when the write fails.
-    pub async fn remove(&self, plugin: &PluginId, id: &AccountId) -> Result<(), PluginError> {
-        self.inner.remove(plugin, id).await
+    pub async fn remove(&self, id: &AccountId) -> Result<(), PluginError> {
+        self.inner.remove(&self.plugin, id).await
     }
 
     /// The current secret. This hits the cache until a write drops it.
@@ -100,12 +116,8 @@ impl AccountsHandle {
     /// # Errors
     ///
     /// Returns [`PluginError`] when the store cannot be read.
-    pub async fn secret(
-        &self,
-        plugin: &PluginId,
-        id: &AccountId,
-    ) -> Result<Option<SecretString>, PluginError> {
-        self.inner.secret(plugin, id).await
+    pub async fn secret(&self, id: &AccountId) -> Result<Option<SecretString>, PluginError> {
+        self.inner.secret(&self.plugin, id).await
     }
 }
 
@@ -117,10 +129,18 @@ pub struct ClockHandle {
 }
 
 impl ClockHandle {
-    /// The current time.
+    /// The current wall time.
     #[must_use]
     pub fn now(&self) -> SystemTime {
         self.inner.now()
+    }
+
+    /// Elapsed time that does not go backwards.
+    ///
+    /// Use this for deadlines and intervals. [`ClockHandle::now`] is the wall clock.
+    #[must_use]
+    pub fn monotonic(&self) -> Duration {
+        self.inner.monotonic()
     }
 }
 
@@ -186,33 +206,49 @@ impl JobId {
 #[non_exhaustive]
 pub struct SchedulerHandle {
     inner: Arc<dyn SchedulerBackend>,
+    owned: Arc<Mutex<BTreeSet<u64>>>,
 }
 
 impl SchedulerHandle {
-    /// Registers `job`. The closure must not spawn its own task.
+    /// Registers `job`. The closure returns a future. It must not spawn a task.
     ///
     /// # Errors
     ///
     /// Returns [`PluginError`] when the scheduler rejects the job.
-    pub fn register(
-        &self,
-        spec: &JobSpec,
-        job: Arc<dyn Fn() + Send + Sync>,
-    ) -> Result<JobId, PluginError> {
+    pub fn register(&self, spec: &JobSpec, job: Job) -> Result<JobId, PluginError> {
         let every_ms = u64::try_from(spec.every.as_millis())
             .map_err(|_| PluginError::config("job interval is too large"))?;
         let id = self.inner.register(&spec.name, every_ms, job)?;
-        Ok(JobId::new(id))
+        match self.owned.lock() {
+            Ok(mut owned) => {
+                owned.insert(id);
+                Ok(JobId::new(id))
+            }
+            Err(_poisoned) => {
+                self.inner.cancel(id);
+                Err(PluginError::internal("scheduler lock is poisoned"))
+            }
+        }
     }
 
-    /// Cancels one job. An unknown id does nothing.
-    pub fn cancel(&self, id: JobId) {
+    /// Cancels one job this context registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `id` was not registered here, or the lock is poisoned.
+    pub fn cancel(&self, id: JobId) -> Result<(), PluginError> {
+        let mut owned = self
+            .owned
+            .lock()
+            .map_err(|_| PluginError::internal("scheduler lock is poisoned"))?;
+        if !owned.remove(&id.get()) {
+            return Err(PluginError::config(
+                "job id was not registered by this host",
+            ));
+        }
+        drop(owned);
         self.inner.cancel(id.get());
-    }
-
-    /// Cancels every job this scheduler is holding.
-    pub fn shutdown(&self) {
-        self.inner.shutdown();
+        Ok(())
     }
 }
 
@@ -327,32 +363,53 @@ impl ProcessHandle {
             .await?;
         Ok(Spawned::new(id))
     }
+
+    /// Waits for `spawned` and reaps it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the process is not one this handle spawned,
+    /// or the wait fails.
+    pub async fn wait(&self, spawned: Spawned) -> Result<i32, PluginError> {
+        self.inner.wait(spawned.id()).await
+    }
+
+    /// Kills `spawned` and reaps it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the process is not one this handle spawned,
+    /// or the kill fails.
+    pub fn kill(&self, spawned: Spawned) -> Result<(), PluginError> {
+        self.inner.kill(spawned.id())
+    }
 }
 
 /// Per-plugin directories.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct DirHandle {
+    plugin: PluginId,
     inner: Arc<dyn DirBackend>,
 }
 
 impl DirHandle {
-    /// The cache directory for `plugin`. The kernel creates it.
+    /// The cache directory for this context's plugin. The kernel creates it.
     ///
     /// # Errors
     ///
     /// Returns [`PluginError`] when the directory cannot be created.
-    pub fn cache_dir(&self, plugin: &PluginId) -> Result<PathBuf, PluginError> {
-        self.inner.cache_dir(plugin)
+    pub fn cache_dir(&self) -> Result<PathBuf, PluginError> {
+        self.inner.cache_dir(&self.plugin)
     }
 
-    /// The state directory for `plugin`. The kernel creates it.
+    /// The state directory for this context's plugin. The kernel creates it.
     ///
     /// # Errors
     ///
     /// Returns [`PluginError`] when the directory cannot be created.
-    pub fn state_dir(&self, plugin: &PluginId) -> Result<PathBuf, PluginError> {
-        self.inner.state_dir(plugin)
+    pub fn state_dir(&self) -> Result<PathBuf, PluginError> {
+        self.inner.state_dir(&self.plugin)
     }
 }
 
@@ -360,16 +417,27 @@ impl DirHandle {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct ObserveHandle {
+    plugin: PluginId,
     inner: Arc<dyn ObserveBackend>,
 }
 
 impl ObserveHandle {
+    /// An observation for this context's plugin.
+    #[must_use]
+    pub fn observation(&self) -> QuotaObservation {
+        QuotaObservation::new(self.plugin.clone())
+    }
+
     /// Records `observation`. This does not edit the router.
     ///
     /// # Errors
     ///
-    /// Returns [`PluginError`] when the kernel rejects the observation.
+    /// Returns [`PluginError`] when `observation` belongs to another plugin,
+    /// or the kernel rejects it.
     pub fn observe(&self, observation: QuotaObservation) -> Result<(), PluginError> {
+        if observation.plugin() != &self.plugin {
+            return Err(PluginError::config("observation belongs to another plugin"));
+        }
         self.inner.observe(observation)
     }
 }
@@ -381,6 +449,7 @@ impl ObserveHandle {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct HostContext {
+    plugin: PluginId,
     http: HttpHandle,
     secrets: SecretsHandle,
     accounts: AccountsHandle,
@@ -393,10 +462,15 @@ pub struct HostContext {
 
 impl HostContext {
     /// Kernel-only. Plugins do not call this.
+    ///
+    /// `plugin` is stored in the handles. Account, directory, and observation
+    /// calls use it. A plugin cannot pass a different id.
+    #[cfg(feature = "kernel")]
     #[doc(hidden)]
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn from_backends(
+        plugin: PluginId,
         http: Arc<dyn HttpBackend>,
         secrets: Arc<dyn SecretsBackend>,
         accounts: Arc<dyn AccountBackend>,
@@ -407,15 +481,34 @@ impl HostContext {
         observe: Arc<dyn ObserveBackend>,
     ) -> Self {
         Self {
+            plugin: plugin.clone(),
             http: HttpHandle { inner: http },
             secrets: SecretsHandle { inner: secrets },
-            accounts: AccountsHandle { inner: accounts },
+            accounts: AccountsHandle {
+                plugin: plugin.clone(),
+                inner: accounts,
+            },
             clock: ClockHandle { inner: clock },
-            scheduler: SchedulerHandle { inner: scheduler },
+            scheduler: SchedulerHandle {
+                inner: scheduler,
+                owned: Arc::new(Mutex::new(BTreeSet::new())),
+            },
             process: ProcessHandle { inner: process },
-            dirs: DirHandle { inner: dirs },
-            observe: ObserveHandle { inner: observe },
+            dirs: DirHandle {
+                plugin: plugin.clone(),
+                inner: dirs,
+            },
+            observe: ObserveHandle {
+                plugin,
+                inner: observe,
+            },
         }
+    }
+
+    /// The plugin this context was built for.
+    #[must_use]
+    pub fn plugin(&self) -> &PluginId {
+        &self.plugin
     }
 
     /// The pooled HTTP client.
@@ -475,7 +568,9 @@ pub struct AuthResult {
 }
 
 impl AuthResult {
-    /// An auth result.
+    /// Kernel-only. Plugins read [`AuthResult::accepted`] on the [`SurfaceHost`] they are given.
+    #[cfg(feature = "kernel")]
+    #[doc(hidden)]
     #[must_use]
     pub const fn new(accepted: bool) -> Self {
         Self { accepted }
@@ -499,6 +594,7 @@ pub struct SurfaceHost {
 
 impl SurfaceHost {
     /// Kernel-only. Plugins do not call this.
+    #[cfg(feature = "kernel")]
     #[doc(hidden)]
     #[must_use]
     pub fn from_parts(
@@ -540,13 +636,13 @@ mod tests {
 
     #[test]
     fn spawn_rejects_a_relative_program() {
-        let error =
-            SpawnRequest::new("claude", Vec::new(), Vec::new(), "/tmp").expect_err("relative");
+        let error = SpawnRequest::new("example-agent", Vec::new(), Vec::new(), "/tmp")
+            .expect_err("relative");
         assert_eq!(error.kind(), crate::error::PluginErrorKind::Config);
         let program = if cfg!(windows) {
-            PathBuf::from(r"C:\Tools\claude.exe")
+            PathBuf::from(r"C:\Tools\example-agent.exe")
         } else {
-            PathBuf::from("/usr/bin/claude")
+            PathBuf::from("/usr/bin/example-agent")
         };
         let cwd = if cfg!(windows) {
             PathBuf::from(r"C:\Tools")

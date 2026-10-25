@@ -11,28 +11,57 @@ use crate::error::PluginError;
 pub trait ValidConfig: Send + Sync + 'static {}
 
 /// A config value the factory rejected.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+///
+/// [`ConfigError::path`] is a dotted field path such as `options.project`.
+/// It is empty when the rejection is not about one field.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[error("{message}")]
 pub struct ConfigError {
+    path: String,
     message: String,
 }
 
 impl ConfigError {
-    /// A rejection with `message`.
+    /// A rejection with `message` and an empty field path.
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
+            path: String::new(),
             message: message.into(),
         }
     }
 
-    /// The rejection text.
+    /// Sets the field path. `path` is dotted, such as `options.region`.
+    #[must_use]
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = path.into();
+        self
+    }
+
+    /// The field path, or an empty string when the rejection is not about one field.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The rejection text, without the field path.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
 }
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.path.is_empty() {
+            formatter.write_str(&self.message)
+        } else {
+            write!(formatter, "{}: {}", self.path, self.message)
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
 
 /// `build` failed, or `validate` failed on the erased path.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -61,7 +90,7 @@ impl BuildError {
 impl From<ConfigError> for BuildError {
     fn from(error: ConfigError) -> Self {
         Self {
-            message: error.message,
+            message: error.to_string(),
         }
     }
 }
@@ -75,7 +104,7 @@ impl From<BuildError> for PluginError {
 /// One JSON-like config value.
 ///
 /// Numbers are integers. A later variant can add a float without a breaking
-/// match, because the enum is [`non_exhaustive`].
+/// match, because the enum is `#[non_exhaustive]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RawValue {
@@ -122,6 +151,20 @@ impl RawTable {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Every key and value, in key order.
+    ///
+    /// A factory walks this to reject unknown keys.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &RawValue)> {
+        self.entries
+            .iter()
+            .map(|(key, value)| (key.as_str(), value))
+    }
+
+    /// The keys, in order.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
     }
 }
 
@@ -274,5 +317,18 @@ mod tests {
         table.insert("a", RawValue::Boolean(true));
         assert!(matches!(table.get("a"), Some(RawValue::Boolean(true))));
         assert!(table.get("missing").is_none());
+        let keys: Vec<_> = table.keys().collect();
+        assert_eq!(keys, ["a", "b"]);
+        assert!(table.iter().any(|(key, _)| key == "a"));
+    }
+
+    #[test]
+    fn config_error_keeps_the_field_path() {
+        let error = ConfigError::new("required").with_path("options.project");
+        assert_eq!(error.path(), "options.project");
+        assert_eq!(error.message(), "required");
+        assert_eq!(error.to_string(), "options.project: required");
+        let build = BuildError::from(error);
+        assert_eq!(build.message(), "options.project: required");
     }
 }

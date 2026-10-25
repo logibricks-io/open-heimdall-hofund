@@ -126,15 +126,13 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         ..GenerationParams::default()
     };
     let stream = take_bool(&mut object, "stream")?.unwrap_or(false);
-    Ok(Request::from_parts(
-        model,
-        messages,
-        tools,
-        tool_choice,
-        params,
-        stream,
-        Extensions::from_map(object),
-    ))
+    Ok(Request::new(model)
+        .with_messages(messages)
+        .with_tools(tools)
+        .with_tool_choice(tool_choice)
+        .with_params(params)
+        .with_stream(stream)
+        .with_extensions(Extensions::from_map(object)))
 }
 
 /// Cap used when the client, the route, and the quirk profile all omit one.
@@ -255,18 +253,16 @@ fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> {
         Some(usage) => Some(decode_usage(usage)?),
         None => None,
     };
-    Ok(Response::from_parts(
-        id,
-        model,
-        Message {
-            role: Role::Assistant,
-            content,
-            extensions: Extensions::new(),
-        },
-        stop,
-        usage,
-        Extensions::from_map(object),
-    ))
+    Ok(Response::new(Message {
+        role: Role::Assistant,
+        content,
+        extensions: Extensions::new(),
+    })
+    .with_id(id)
+    .with_model(model)
+    .with_stop(stop)
+    .with_usage(usage)
+    .with_extensions(Extensions::from_map(object)))
 }
 
 fn encode_response(response: &Response) -> Result<Vec<u8>, CodecError> {

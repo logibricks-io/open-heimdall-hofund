@@ -12,14 +12,14 @@ use serde_json::Value;
 
 /// Codec-map key for a unary Generative Language request.
 ///
-/// The bound route is [`GENERATIVE_CATCHALL`]. The handler copies the model
+/// The bound route is `GENERATIVE_CATCHALL`. The handler copies the model
 /// segment onto the JSON body before the codec runs, and it removes a `stream`
 /// field so this path stays unary.
 pub const GENERATIVE_UNARY: &str = "/v1beta/models/{model}:generateContent";
 
 /// Codec-map key for a streamed Generative Language request.
 ///
-/// The bound route is [`GENERATIVE_CATCHALL`]. `streamGenerateContent` is a
+/// The bound route is `GENERATIVE_CATCHALL`. `streamGenerateContent` is a
 /// stream even when the query does not contain `alt=sse`. The handler sets
 /// `stream` to true on the JSON body before the codec runs.
 pub const GENERATIVE_STREAM: &str = "/v1beta/models/{model}:streamGenerateContent";

@@ -25,11 +25,15 @@ pub enum CredentialStyle {
     XApiKey,
     /// Both the Messages `x-api-key` header and a bearer token.
     MessagesBoth,
-    /// A header name the plugin supplies, such as `x-goog-api-key`.
+    /// A header name the plugin supplies, such as `x-acme-key`.
     NamedHeader(HeaderName),
 }
 
-/// An HTTP header name: ASCII, no spaces, no colon.
+/// A lowercase HTTP header name.
+///
+/// This is not `http::HeaderName`. [`HeaderName::as_str`] is restricted to
+/// `[a-z0-9_-]` so `http::HeaderName::from_static` accepts it. Uppercase is
+/// rejected here because `from_static` panics on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HeaderName {
@@ -37,14 +41,17 @@ pub struct HeaderName {
 }
 
 impl HeaderName {
-    /// A header name.
+    /// A lowercase header name.
     ///
     /// # Panics
     ///
-    /// Panics when `value` is empty or contains a space, colon, or non-ASCII byte.
+    /// Panics when `value` is empty or contains anything outside `[a-z0-9_-]`.
     #[must_use]
     pub const fn new(value: &'static str) -> Self {
-        assert!(is_header(value), "header name must be an ASCII token");
+        assert!(
+            is_header(value),
+            "header name must be a lowercase ASCII token"
+        );
         Self { value }
     }
 
@@ -63,7 +70,7 @@ const fn is_header(value: &str) -> bool {
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
-        let ok = byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_';
+        let ok = byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_';
         if !ok {
             return false;
         }
@@ -96,6 +103,7 @@ pub struct UpstreamSpec {
 
 impl UpstreamSpec {
     /// A spec. Generated code calls this instead of a struct literal.
+    #[doc(hidden)]
     #[must_use]
     pub const fn from_static(
         plugin: PluginId,
@@ -271,7 +279,7 @@ pub trait UpstreamProvider: Send + Sync + 'static {
         let completion = self
             .execute(query.minimal_request(), query.protocol())
             .await?;
-        Ok(ProbeReport::from_completion(completion).await)
+        ProbeReport::from_completion(completion).await
     }
 
     /// Polls quota windows.
@@ -304,5 +312,22 @@ pub trait UpstreamProvider: Send + Sync + 'static {
     async fn shutdown(&self, deadline: Duration) -> Result<(), PluginError> {
         let _ = deadline;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HeaderName;
+
+    #[test]
+    fn header_names_are_lowercase_tokens() {
+        let name = HeaderName::new("x-acme-key");
+        assert_eq!(name.as_str(), "x-acme-key");
+    }
+
+    #[test]
+    #[should_panic(expected = "lowercase")]
+    fn header_names_reject_uppercase() {
+        let _ = HeaderName::new("X-Api-Key");
     }
 }

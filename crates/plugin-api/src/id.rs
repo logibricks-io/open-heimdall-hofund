@@ -172,7 +172,7 @@ macro_rules! kebab_id {
 }
 
 kebab_id!(
-    /// A plugin directory id, such as `openai-compat` or `claude-code`.
+    /// A plugin directory id, such as `example-agent` or `acme-cloud`.
     ///
     /// The ids `api`, `sdk`, `host`, and `registry` are reserved and are not
     /// plugin ids. Constructors do not know that list: the registry rejects
@@ -181,7 +181,7 @@ kebab_id!(
     "plugin id"
 );
 kebab_id!(
-    /// A catalog preset id, such as `openai` or `google-vertex`.
+    /// A catalog preset id, such as `acme` or `acme-cloud`.
     PresetId,
     "preset id"
 );
@@ -194,7 +194,7 @@ kebab_id!(
     "account id"
 );
 kebab_id!(
-    /// An inbound surface id, such as `ollama` or `codex-backend`.
+    /// An inbound surface id, such as `example-surface`.
     SurfaceId,
     "surface id"
 );
@@ -358,8 +358,8 @@ impl fmt::Display for ProtocolId {
 
 /// A tier name such as `opus` or `fable`.
 ///
-/// The alphabet is `[a-z0-9]`. It is not kebab-case: those names are the
-/// tokens Claude already uses. The Fable skip rule is data on the slot, not a
+/// The alphabet is `[a-z0-9]`. It is not kebab-case: tier tokens already in
+/// use are single words. A model-specific skip rule is data on the slot, not a
 /// special case in this type.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -463,13 +463,63 @@ impl MemberId {
             },
         }
     }
+
+    /// The preset, when this member is a preset row.
+    #[must_use]
+    pub fn preset(&self) -> Option<&PresetId> {
+        match &self.kind {
+            MemberKind::Preset { preset, .. } => Some(preset),
+            MemberKind::Account { .. } => None,
+        }
+    }
+
+    /// The preset key, when this member is a preset row.
+    #[must_use]
+    pub fn member_key(&self) -> Option<&MemberKey> {
+        match &self.kind {
+            MemberKind::Preset { key, .. } => Some(key),
+            MemberKind::Account { .. } => None,
+        }
+    }
+
+    /// The subscription plugin, when this member is an account.
+    #[must_use]
+    pub fn subscription(&self) -> Option<&PluginId> {
+        match &self.kind {
+            MemberKind::Account { subscription, .. } => Some(subscription),
+            MemberKind::Preset { .. } => None,
+        }
+    }
+
+    /// The account id, when this member is an account.
+    #[must_use]
+    pub fn account(&self) -> Option<&AccountId> {
+        match &self.kind {
+            MemberKind::Account { account, .. } => Some(account),
+            MemberKind::Preset { .. } => None,
+        }
+    }
 }
 
-const _: PluginId = PluginId::from_static("claude-code");
-const _: PresetId = PresetId::from_static("google-vertex");
+impl fmt::Display for MemberId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            MemberKind::Preset { preset, key } => {
+                write!(formatter, "preset:{preset}:{key}")
+            }
+            MemberKind::Account {
+                subscription,
+                account,
+            } => write!(formatter, "account:{subscription}:{account}"),
+        }
+    }
+}
+
+const _: PluginId = PluginId::from_static("example-agent");
+const _: PresetId = PresetId::from_static("acme-cloud");
 const _: ProtocolId = ProtocolId::from_static("openai-chat");
-const _: TierId = TierId::from_static("fable");
-const _: SurfaceId = SurfaceId::from_static("codex-backend");
+const _: TierId = TierId::from_static("fast");
+const _: SurfaceId = SurfaceId::from_static("example-surface");
 
 #[cfg(test)]
 mod tests {
@@ -477,14 +527,14 @@ mod tests {
 
     #[test]
     fn kebab_ids_reject_shape_errors() {
-        for bad in ["", "OpenAI", "a-", "-a", "a--b", "a_b", "a b", "API"] {
+        for bad in ["", "Acme", "a-", "-a", "a--b", "a_b", "a b", "API"] {
             assert!(PluginId::try_from(bad).is_err(), "{bad}");
             assert!(PresetId::try_from(bad).is_err(), "{bad}");
             assert!(AccountId::try_from(bad).is_err(), "{bad}");
         }
-        let id = PluginId::try_from("google-vertex").expect("id");
-        assert_eq!(id.as_str(), "google-vertex");
-        assert_eq!(id, PluginId::from_static("google-vertex"));
+        let id = PluginId::try_from("acme-cloud").expect("id");
+        assert_eq!(id.as_str(), "acme-cloud");
+        assert_eq!(id, PluginId::from_static("acme-cloud"));
     }
 
     #[test]
@@ -501,7 +551,7 @@ mod tests {
 
     #[test]
     fn tier_ids_are_not_kebab_case() {
-        assert!(TierId::try_from("claude-fable").is_err());
+        assert!(TierId::try_from("example-tier").is_err());
         assert!(TierId::try_from("").is_err());
         assert!(TierId::try_from("Opus").is_err());
         assert_eq!(TierId::try_from("fable").expect("tier").as_str(), "fable");
@@ -510,18 +560,27 @@ mod tests {
     #[test]
     fn member_ids_compare_by_parts() {
         let preset = MemberId::from_preset(
-            PresetId::from_static("openai"),
+            PresetId::from_static("acme"),
             MemberKey::from_static("primary"),
         );
         let account = MemberId::from_parts(
-            PluginId::from_static("codex"),
+            PluginId::from_static("example-agent"),
             AccountId::from_static("work"),
         );
         assert_ne!(preset, account);
+        assert_eq!(preset.preset().expect("preset").as_str(), "acme");
+        assert_eq!(preset.member_key().expect("key").as_str(), "primary");
+        assert!(preset.account().is_none());
+        assert_eq!(
+            account.subscription().expect("plugin").as_str(),
+            "example-agent"
+        );
+        assert_eq!(account.account().expect("account").as_str(), "work");
+        assert_eq!(account.to_string(), "account:example-agent:work");
         assert_eq!(
             account,
             MemberId::from_parts(
-                PluginId::try_from("codex").expect("id"),
+                PluginId::try_from("example-agent").expect("id"),
                 AccountId::try_from("work").expect("id")
             )
         );

@@ -175,21 +175,19 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
     if !named.is_empty() {
         extensions.insert(TOOL_NAMES, Value::Object(named));
     }
-    Ok(Request::from_parts(
-        model,
-        messages,
-        tools,
-        tool_choice,
-        GenerationParams {
+    Ok(Request::new(model)
+        .with_messages(messages)
+        .with_tools(tools)
+        .with_tool_choice(tool_choice)
+        .with_params(GenerationParams {
             max_tokens,
             temperature,
             top_p,
             effort,
             ..GenerationParams::default()
-        },
-        stream,
-        extensions,
-    ))
+        })
+        .with_stream(stream)
+        .with_extensions(extensions))
 }
 
 fn decode_input(input: Value) -> Result<Vec<Message>, CodecError> {
@@ -1385,14 +1383,12 @@ fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> {
         Some(usage) => Some(decode_usage(usage)?),
         None => None,
     };
-    Ok(Response::from_parts(
-        id,
-        model,
-        message,
-        Some(stop_from(&status, reason.as_deref(), has_tool)),
-        usage,
-        Extensions::from_map(object),
-    ))
+    Ok(Response::new(message)
+        .with_id(id)
+        .with_model(model)
+        .with_stop(Some(stop_from(&status, reason.as_deref(), has_tool)))
+        .with_usage(usage)
+        .with_extensions(Extensions::from_map(object)))
 }
 
 fn flatten_assistant(messages: Vec<Message>) -> Message {

@@ -21,10 +21,13 @@ pub struct Account {
 impl Account {
     /// An account for `plugin`.
     ///
+    /// Plugins use [`AccountsHandle::account`](crate::AccountsHandle::account),
+    /// which fills `plugin` from the [`HostContext`](crate::HostContext).
+    ///
     /// # Errors
     ///
     /// Returns [`PluginError`] when `label` is empty.
-    pub fn new(
+    pub(crate) fn new(
         plugin: PluginId,
         id: AccountId,
         label: impl Into<String>,
@@ -34,6 +37,20 @@ impl Account {
             return Err(PluginError::config("account label is empty"));
         }
         Ok(Self { plugin, id, label })
+    }
+
+    /// Rebuilds an account the store already accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `label` is empty.
+    #[doc(hidden)]
+    pub fn from_stored(
+        plugin: PluginId,
+        id: AccountId,
+        label: impl Into<String>,
+    ) -> Result<Self, PluginError> {
+        Self::new(plugin, id, label)
     }
 
     /// The plugin that owns the account.
@@ -132,14 +149,23 @@ pub struct QuotaObservation {
 
 impl QuotaObservation {
     /// An observation for `plugin`.
+    ///
+    /// Plugins use [`ObserveHandle::observation`](crate::ObserveHandle::observation).
     #[must_use]
-    pub fn new(plugin: PluginId) -> Self {
+    pub(crate) fn new(plugin: PluginId) -> Self {
         Self {
             plugin,
             retry_after: None,
             remaining: None,
             window: None,
         }
+    }
+
+    /// Rebuilds an observation the kernel already accepted.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_stored(plugin: PluginId) -> Self {
+        Self::new(plugin)
     }
 
     /// Sets the retry hint.
@@ -406,7 +432,7 @@ pub struct BinaryName {
 }
 
 impl BinaryName {
-    /// A single binary name such as `claude`.
+    /// A single binary name such as `example-agent`.
     ///
     /// # Panics
     ///
@@ -496,7 +522,7 @@ pub enum SignInFlow {
     TokenFile,
     /// A vendor binary the spawner resolves. Not a shell string.
     Bridge {
-        /// The binary name, such as `claude`.
+        /// The binary name, such as `example-agent`.
         command: BinaryName,
     },
 }
@@ -669,11 +695,12 @@ pub struct SubscriptionSpec {
 }
 
 impl SubscriptionSpec {
-    /// A spec. `display_name` must be non-empty.
+    /// A spec. `display_name` must be non-empty. Generated code calls this.
     ///
     /// # Panics
     ///
     /// Panics when `display_name` is empty.
+    #[doc(hidden)]
     #[must_use]
     pub const fn from_static(
         plugin: PluginId,
@@ -718,11 +745,14 @@ pub struct MatchNeedle {
 }
 
 impl MatchNeedle {
-    /// A non-empty needle such as `claude-fable-`.
+    /// A non-empty needle such as `example-fable-`.
+    ///
+    /// Generated descriptions call this while building a [`Slot`].
     ///
     /// # Panics
     ///
     /// Panics when `value` is empty.
+    #[doc(hidden)]
     #[must_use]
     pub const fn new(value: &'static str) -> Self {
         assert!(!value.is_empty(), "model match needle is empty");
@@ -741,14 +771,19 @@ impl MatchNeedle {
 #[non_exhaustive]
 pub enum Slot {
     /// The gateway origin, without a trailing `/v1`.
+    #[doc(hidden)]
     Origin,
     /// The gateway origin plus `/v1`.
+    #[doc(hidden)]
     V1,
     /// The bearer token.
+    #[doc(hidden)]
     Token,
     /// A fixed string.
+    #[doc(hidden)]
     Literal(&'static str),
     /// A tier environment variable. The needle skips the write when it does not match.
+    #[doc(hidden)]
     ModelTier {
         /// Tier name, such as `fable`.
         tier: TierId,
@@ -756,6 +791,7 @@ pub enum Slot {
         when_model_matches: Option<MatchNeedle>,
     },
     /// One models object per visible route.
+    #[doc(hidden)]
     CatalogModels,
 }
 
@@ -803,10 +839,12 @@ pub struct AgentFile {
 
 impl AgentFile {
     /// A managed file. Paths are the template strings, not expanded paths.
+    /// Generated code calls this.
     ///
     /// # Panics
     ///
     /// Panics when `id` is empty or any path is empty.
+    #[doc(hidden)]
     #[must_use]
     pub const fn from_static(
         id: &'static str,
@@ -881,11 +919,12 @@ pub struct AgentSet {
 }
 
 impl AgentSet {
-    /// A write of `slot` into `key` of `file`.
+    /// A write of `slot` into `key` of `file`. Generated code calls this.
     ///
     /// # Panics
     ///
     /// Panics when `file` or `key` is empty.
+    #[doc(hidden)]
     #[must_use]
     pub const fn from_static(file: &'static str, key: &'static str, slot: Slot) -> Self {
         assert!(
@@ -936,6 +975,7 @@ impl AgentDescription {
     /// # Panics
     ///
     /// Panics when the display name or binary is empty, or a key option is empty.
+    #[doc(hidden)]
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub const fn from_static(
@@ -1047,7 +1087,7 @@ mod tests {
     fn account_label_and_quota_limit_are_checked() {
         assert!(
             Account::new(
-                PluginId::from_static("codex"),
+                PluginId::from_static("example-agent"),
                 AccountId::from_static("work"),
                 ""
             )
@@ -1071,6 +1111,6 @@ mod tests {
         assert!(SignInChallenge::open_url("javascript:alert(1)").is_err());
         assert!(SignInChallenge::device_code("", "https://example.com").is_err());
         let _url = StaticUrl::new("https://auth.example.com/device");
-        let _binary = BinaryName::new("claude");
+        let _binary = BinaryName::new("example-agent");
     }
 }

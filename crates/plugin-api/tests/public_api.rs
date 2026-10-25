@@ -1,12 +1,15 @@
 //! Reviewed list of the public surface.
 //!
-//! `cargo-public-api` needs rustdoc JSON, and the pinned stable toolchain
-//! only emits HTML. This test walks the source with `syn` instead. A pull
-//! request that adds or removes a public item updates `public-api.txt`.
+//! `cargo-public-api` needs rustdoc JSON. The pinned stable toolchain's
+//! rustdoc JSON is still an unstable option, so this test walks the source
+//! with `syn` and records function signatures, `#[non_exhaustive]`, and
+//! derives. A pull request that changes any of those updates `public-api.txt`.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+
+use quote::ToTokens;
 
 #[test]
 fn public_surface_matches_the_snapshot() {
@@ -91,7 +94,7 @@ fn collect_file(
             }
             syn::Item::Struct(item) if visible(in_kernel, &item.vis, &item.ident, exported) => {
                 let name = qualify(in_kernel, &item.ident.to_string());
-                lines.insert(name.clone());
+                lines.insert(shape_line(&name, &item.attrs));
                 if let syn::Fields::Named(fields) = &item.fields {
                     for field in &fields.named {
                         if is_pub(&field.vis)
@@ -104,7 +107,7 @@ fn collect_file(
             }
             syn::Item::Enum(item) if visible(in_kernel, &item.vis, &item.ident, exported) => {
                 let name = qualify(in_kernel, &item.ident.to_string());
-                lines.insert(name.clone());
+                lines.insert(shape_line(&name, &item.attrs));
                 for variant in &item.variants {
                     lines.insert(format!("{name}::{}", variant.ident));
                 }
@@ -115,7 +118,7 @@ fn collect_file(
                 for trait_item in &item.items {
                     match trait_item {
                         syn::TraitItem::Fn(function) => {
-                            lines.insert(format!("{name}::{}", function.sig.ident));
+                            lines.insert(format!("{name}::{}", tokens(&function.sig)));
                         }
                         syn::TraitItem::Const(constant) => {
                             lines.insert(format!("{name}::{}", constant.ident));
@@ -128,7 +131,7 @@ fn collect_file(
                 }
             }
             syn::Item::Fn(item) if visible(in_kernel, &item.vis, &item.sig.ident, exported) => {
-                lines.insert(qualify(in_kernel, &item.sig.ident.to_string()));
+                lines.insert(qualify(in_kernel, &tokens(&item.sig)));
             }
             syn::Item::Const(item) if visible(in_kernel, &item.vis, &item.ident, exported) => {
                 lines.insert(format!(
@@ -168,7 +171,7 @@ fn collect_file(
                 for impl_item in &item.items {
                     match impl_item {
                         syn::ImplItem::Fn(function) if is_pub(&function.vis) => {
-                            lines.insert(format!("{name}::{}", function.sig.ident));
+                            lines.insert(format!("{name}::{}", tokens(&function.sig)));
                         }
                         syn::ImplItem::Const(constant) if is_pub(&constant.vis) => {
                             lines.insert(format!("{name}::{}", constant.ident));
@@ -180,6 +183,59 @@ fn collect_file(
             _ => {}
         }
     }
+}
+
+fn shape_line(name: &str, attrs: &[syn::Attribute]) -> String {
+    let mut line = name.to_owned();
+    if attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("non_exhaustive"))
+    {
+        line.push_str(" #[non_exhaustive]");
+    }
+    if let Some(derives) = derive_list(attrs) {
+        line.push(' ');
+        line.push_str(&derives);
+    }
+    line
+}
+
+fn derive_list(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let syn::Meta::List(list) = &attr.meta else {
+            continue;
+        };
+        let Ok(nested) = list.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+        ) else {
+            continue;
+        };
+        let names = nested
+            .iter()
+            .filter_map(|path| {
+                path.segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !names.is_empty() {
+            return Some(format!("derives({names})"));
+        }
+    }
+    None
+}
+
+fn tokens(value: &impl ToTokens) -> String {
+    value
+        .to_token_stream()
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn visible(

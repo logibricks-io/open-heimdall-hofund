@@ -175,6 +175,35 @@ jobs:
             exit 1
           fi
 
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/rust-toolchain
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install desktop host libraries
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Dpkg::Options::="--force-confold" \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev
+      - name: Rustdoc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest

@@ -48,17 +48,8 @@ impl ProbeReport {
     #[must_use]
     pub fn new(snippet: impl Into<String>) -> Self {
         let snippet = snippet.into();
-        if snippet.len() <= PROBE_CAP {
-            Self {
-                snippet,
-                truncated: false,
-            }
-        } else {
-            Self {
-                snippet: snippet.chars().take(PROBE_CAP).collect(),
-                truncated: true,
-            }
-        }
+        let (snippet, truncated) = cap_snippet(snippet);
+        Self { snippet, truncated }
     }
 
     /// Reads a unary body, the first stream event, or the first raw chunk.
@@ -66,30 +57,36 @@ impl ProbeReport {
     /// This is async because the stream is async. It polls the stream once and
     /// then drops it, so a later event is not read. The sketch in the RFC
     /// called this synchronously; a sync poll cannot wait for the first chunk.
-    pub async fn from_completion(completion: Completion) -> Self {
+    ///
+    /// An upstream error, including HTTP 401, is a failure. It is not a report.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stream or body error unchanged.
+    pub async fn from_completion(completion: Completion) -> Result<Self, PluginError> {
         match completion {
-            Completion::Unary(response) => Self::new(text_of(&response)),
+            Completion::Unary(response) => Ok(Self::new(text_of(&response))),
             Completion::Stream(mut stream) => {
                 let Some(event) = stream.next().await else {
-                    return Self::new("");
+                    return Ok(Self::new(""));
                 };
                 drop(stream);
                 match event {
-                    Ok(event) => Self::new(event_label(&event)),
-                    Err(error) => Self::new(error.message()),
+                    Ok(event) => Ok(Self::new(event_label(&event))),
+                    Err(error) => Err(error),
                 }
             }
             Completion::Raw(mut body) => {
                 let Some(chunk) = body.next_chunk().await else {
-                    return Self::new("");
+                    return Ok(Self::new(""));
                 };
                 drop(body);
                 match chunk {
                     Ok(bytes) => {
                         let text = String::from_utf8_lossy(&bytes);
-                        Self::new(text.as_ref())
+                        Ok(Self::new(text.as_ref()))
                     }
-                    Err(error) => Self::new(error.message()),
+                    Err(error) => Err(error),
                 }
             }
         }
@@ -106,6 +103,15 @@ impl ProbeReport {
     pub const fn truncated(&self) -> bool {
         self.truncated
     }
+}
+
+fn cap_snippet(snippet: String) -> (String, bool) {
+    if snippet.len() <= PROBE_CAP {
+        return (snippet, false);
+    }
+    let end = snippet.floor_char_boundary(PROBE_CAP);
+    let snippet = snippet[..end].to_owned();
+    (snippet, true)
 }
 
 fn text_of(response: &Response) -> String {
@@ -164,7 +170,9 @@ mod tests {
     #[test]
     fn cap_marks_truncation_and_keeps_a_char_boundary() {
         let report = ProbeReport::new("é".repeat(PROBE_CAP));
-        assert!(report.truncated() || report.snippet().len() <= "é".repeat(PROBE_CAP).len());
+        assert!(report.truncated());
+        assert!(report.snippet().len() <= PROBE_CAP);
+        assert!(report.snippet().is_char_boundary(report.snippet().len()));
         let long = "a".repeat(PROBE_CAP + 10);
         let report = ProbeReport::new(long);
         assert!(report.truncated());
@@ -182,15 +190,32 @@ mod tests {
             Box::pin(Once {
                 item: Some(Ok(event)),
             });
-        let report = ProbeReport::from_completion(Completion::Stream(stream)).await;
+        let report = ProbeReport::from_completion(Completion::Stream(stream))
+            .await
+            .expect("report");
         assert_eq!(report.snippet(), "hello");
         assert!(!report.truncated());
     }
 
     #[tokio::test]
+    async fn an_upstream_error_is_not_a_successful_probe() {
+        let stream: Pin<Box<dyn Stream<Item = Result<StreamEvent, PluginError>> + Send>> =
+            Box::pin(Once {
+                item: Some(Err(PluginError::status_error(401, "unauthorized"))),
+            });
+        let error = ProbeReport::from_completion(Completion::Stream(stream))
+            .await
+            .expect_err("401");
+        assert_eq!(error.status(), Some(401));
+        assert_eq!(error.kind(), crate::error::PluginErrorKind::Status);
+    }
+
+    #[tokio::test]
     async fn raw_probe_reads_one_chunk() {
         let body = BodyStream::from_bytes(Bytes::from_static(b"raw-body"));
-        let report = ProbeReport::from_completion(Completion::Raw(body)).await;
+        let report = ProbeReport::from_completion(Completion::Raw(body))
+            .await
+            .expect("report");
         assert_eq!(report.snippet(), "raw-body");
     }
 
@@ -198,15 +223,10 @@ mod tests {
     async fn unary_probe_reads_text_parts() {
         let mut message = Message::new(Role::Assistant);
         message.content.push(ContentPart::text("pong"));
-        let response = Response::from_parts(
-            None,
-            None,
-            message,
-            None,
-            None,
-            hofund_ir::Extensions::new(),
-        );
-        let report = ProbeReport::from_completion(Completion::Unary(Box::new(response))).await;
+        let response = Response::new(message);
+        let report = ProbeReport::from_completion(Completion::Unary(Box::new(response)))
+            .await
+            .expect("report");
         assert_eq!(report.snippet(), "pong");
     }
 }

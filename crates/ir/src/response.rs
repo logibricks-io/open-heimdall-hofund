@@ -63,27 +63,55 @@ pub struct Response {
 }
 
 impl Response {
-    /// Builds a response from decoded parts.
+    /// A response with `message` and no id, model, stop, usage, or extensions.
     ///
-    /// Other crates use this constructor. The struct is [`non_exhaustive`], so
-    /// a struct literal outside this crate does not compile.
+    /// Add the other parts with the `with_*` methods. A new field can take a
+    /// default here without breaking callers.
     #[must_use]
-    pub fn from_parts(
-        id: Option<String>,
-        model: Option<String>,
-        message: Message,
-        stop: Option<Stop>,
-        usage: Option<Usage>,
-        extensions: Extensions,
-    ) -> Self {
+    pub fn new(message: Message) -> Self {
         Self {
-            id,
-            model,
+            id: None,
+            model: None,
             message,
-            stop,
-            usage,
-            extensions,
+            stop: None,
+            usage: None,
+            extensions: Extensions::new(),
         }
+    }
+
+    /// Sets the response id.
+    #[must_use]
+    pub fn with_id(mut self, id: Option<String>) -> Self {
+        self.id = id;
+        self
+    }
+
+    /// Sets the model name.
+    #[must_use]
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Sets the stop reason.
+    #[must_use]
+    pub fn with_stop(mut self, stop: Option<Stop>) -> Self {
+        self.stop = stop;
+        self
+    }
+
+    /// Sets the usage counters.
+    #[must_use]
+    pub fn with_usage(mut self, usage: Option<Usage>) -> Self {
+        self.usage = usage;
+        self
+    }
+
+    /// Replaces the extension bag.
+    #[must_use]
+    pub fn with_extensions(mut self, extensions: Extensions) -> Self {
+        self.extensions = extensions;
+        self
     }
 
     /// Drops extension bags on the response, its usage, and its message.

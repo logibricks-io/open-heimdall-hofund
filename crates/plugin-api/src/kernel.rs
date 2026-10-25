@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "kernel"), allow(dead_code, unreachable_pub))]
+
 //! Kernel backends stored inside the handles.
 //!
 //! These traits are `doc(hidden)` because a plugin is not supposed to implement
@@ -7,9 +9,11 @@
 //! `from_backends` outside that crate.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use futures_util::future::BoxFuture;
 
 use crate::body::{Body, BodyStream};
 use crate::error::PluginError;
@@ -76,9 +80,18 @@ pub trait AccountBackend: Send + Sync {
 /// The kernel clock. Plugins do not call [`SystemTime::now`](SystemTime::now).
 #[doc(hidden)]
 pub trait ClockBackend: Send + Sync {
-    /// The current time.
+    /// The current wall time.
     fn now(&self) -> SystemTime;
+
+    /// Time that does not go backwards for the life of this clock.
+    fn monotonic(&self) -> Duration;
 }
+
+/// Work the kernel awaits.
+///
+/// The future is `'static` so the scheduler can hold it. The plugin does not
+/// spawn a task to get there: list refresh and quota polling return this future.
+pub type Job = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// A job the scheduler will run. The kernel runs it. The plugin does not spawn.
 #[doc(hidden)]
@@ -88,17 +101,15 @@ pub trait SchedulerBackend: Send + Sync {
     /// # Errors
     ///
     /// Returns [`PluginError`] when the backend rejects the job.
-    fn register(
-        &self,
-        name: &str,
-        every_ms: u64,
-        job: std::sync::Arc<dyn Fn() + Send + Sync>,
-    ) -> Result<u64, PluginError>;
+    fn register(&self, name: &str, every_ms: u64, job: Job) -> Result<u64, PluginError>;
 
-    /// Cancels a job. Unknown ids are not an error.
+    /// Cancels one job. Unknown ids are not an error.
+    ///
+    /// The plugin-facing handle rejects an id it did not register. This method
+    /// is the kernel side and does not know which context registered the id.
     fn cancel(&self, id: u64);
 
-    /// Cancels every job. Called from plugin shutdown.
+    /// Cancels every job. Kernel shutdown calls this. It is not on [`crate::SchedulerHandle`].
     fn shutdown(&self);
 }
 
@@ -114,6 +125,22 @@ pub trait ProcessBackend: Send + Sync {
         env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
         cwd: PathBuf,
     ) -> Result<u32, PluginError>;
+
+    /// Waits for process `id` and reaps it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `id` is not a child this backend spawned,
+    /// or the wait fails.
+    async fn wait(&self, id: u32) -> Result<i32, PluginError>;
+
+    /// Kills process `id` and reaps it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `id` is not a child this backend spawned,
+    /// or the kill fails.
+    fn kill(&self, id: u32) -> Result<(), PluginError>;
 }
 
 /// Per-plugin directories the kernel creates.

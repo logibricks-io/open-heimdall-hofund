@@ -152,7 +152,7 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | `ir` | Canonical request, response, and stream-event types. No I/O. |
 | `plugin-api` | Plugin traits, `PluginError`, newtypes, and `HostContext` handles. |
 | `plugin-sdk` | Helpers a plugin may use. Transports land later. Re-exports `tracing`. |
-| `plugin-host` | The `HostContext` constructor and the account-file backend. |
+| `plugin-host` | The `HostContext` constructor and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
 | `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |
 | `codec` | Per-protocol encode and decode to and from the IR. Hub-and-spoke, so N protocols do not become an N-by-M matrix. |
 | `quirks` | Data-driven vendor capability and quirk descriptions. |

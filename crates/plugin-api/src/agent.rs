@@ -225,7 +225,7 @@ impl ConnectionStatus {
         }
     }
 
-    /// Stable id, such as `claude-code`.
+    /// Stable id, such as `example-agent`.
     #[must_use]
     pub const fn id(&self) -> &'static str {
         self.id
@@ -348,6 +348,16 @@ impl ImportedProvider {
     #[must_use]
     pub const fn protocol(&self) -> ProtocolId {
         self.protocol
+    }
+
+    /// The imported credential, when the other app stored one.
+    ///
+    /// `id` stays a [`PluginId`](crate::PluginId). An import may name a preset
+    /// row or a plugin, and both are kebab-case ids. The registry, not this
+    /// type, decides which kind it is.
+    #[must_use]
+    pub fn api_key(&self) -> Option<&SecretString> {
+        self.api_key.as_ref()
     }
 }
 

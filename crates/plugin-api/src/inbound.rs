@@ -34,11 +34,12 @@ pub enum Method {
 }
 
 impl RouteSpec {
-    /// A route. `prefix` starts with `/` and has no `?`.
+    /// A route. `prefix` starts with `/` and has no `?`. Generated code calls this.
     ///
     /// # Panics
     ///
     /// Panics when `prefix` is not a path prefix.
+    #[doc(hidden)]
     #[must_use]
     pub const fn from_static(method: Method, prefix: &'static str) -> Self {
         assert!(
