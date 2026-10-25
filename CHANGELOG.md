@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `docs/feature-parity.md` lists magpie capabilities with a stage (`core` or
+  `auxiliary`) and the hofund status of each row.
+- `docs/roadmap.md` records the two-stage plan. The terminal UI and every
+  subscription capability, including the Claude bridge, are stage 1.
 - `GET /health` returns `{"status":"ok"}` with no authentication and no secrets.
 - `hofund --help`, `-h`, and `help` print usage for each command.
 - `examples/hofund.toml` documents `[[providers]]` and `[[routes]]`.
