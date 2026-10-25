@@ -1,0 +1,43 @@
+{
+  "model": "demo",
+  "instructions": "You are a coding agent.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [{ "type": "input_text", "text": "list the files" }]
+    }
+  ],
+  "tools": [
+    {
+      "type": "namespace",
+      "name": "multi_agent_v1",
+      "description": "Sub-agents.",
+      "tools": [
+        {
+          "type": "function",
+          "name": "spawn_agent",
+          "description": "Start a sub-agent.",
+          "parameters": {
+            "type": "object",
+            "properties": { "task": { "type": "string" } },
+            "required": ["task"]
+          }
+        }
+      ]
+    },
+    { "type": "web_search" },
+    {
+      "type": "custom",
+      "name": "apply_patch",
+      "description": "Apply a patch.",
+      "format": {
+        "type": "grammar",
+        "syntax": "lark",
+        "definition": "start: /.+/ "
+      }
+    }
+  ],
+  "stream": false,
+  "store": false
+}

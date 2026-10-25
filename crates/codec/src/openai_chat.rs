@@ -85,7 +85,11 @@ impl Codec for OpenAiChat {
     }
 
     fn stream_encoder(&self) -> Box<dyn crate::StreamEncoder> {
-        Box::new(Encoder)
+        Box::new(Encoder::default())
+    }
+
+    fn stream_encoder_for(&self, request: &Request) -> Box<dyn crate::StreamEncoder> {
+        Box::new(OpenAiChat::stream_encoder_for_request(request))
     }
 
     fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
@@ -100,6 +104,9 @@ struct Decoder {
     text_open: bool,
     thinking_open: bool,
     tools_open: BTreeSet<u32>,
+    /// A stop delta with no usage, held until the next chunk so a following
+    /// usage-only chunk can join it.
+    held: Option<MessageDelta>,
 }
 
 impl StreamDecoder for Decoder {
@@ -110,7 +117,9 @@ impl StreamDecoder for Decoder {
 
     fn finish(&mut self) -> Result<Vec<StreamEvent>, CodecError> {
         let frames = self.parser.finish()?;
-        self.frames(frames)
+        let mut events = self.frames(frames)?;
+        events.extend(self.flush_held());
+        Ok(events)
     }
 }
 
@@ -128,18 +137,63 @@ impl Decoder {
             return Ok(Vec::new());
         }
         if frame.data.trim() == "[DONE]" {
-            return Ok(self.finish_blocks());
+            let mut events = self.flush_held();
+            events.extend(self.finish_blocks());
+            return Ok(events);
         }
         let value: Value = serde_json::from_str(&frame.data)?;
-        match value {
-            Value::Object(object) => self.decode_chunk(object),
-            other => Ok(vec![StreamEvent::Unknown(UnknownEvent {
+        let decoded = match value {
+            Value::Object(object) => self.decode_chunk(object)?,
+            other => vec![StreamEvent::Unknown(UnknownEvent {
                 name: "data".to_owned(),
                 payload: other,
-            })]),
-        }
+            })],
+        };
+        Ok(self.absorb(decoded))
     }
 
+    fn flush_held(&mut self) -> Vec<StreamEvent> {
+        self.held
+            .take()
+            .map(|delta| vec![StreamEvent::MessageDelta(delta)])
+            .unwrap_or_default()
+    }
+
+    fn absorb(&mut self, mut decoded: Vec<StreamEvent>) -> Vec<StreamEvent> {
+        if let Some(held) = self.held.take() {
+            if let Some(usage) = usage_only(&decoded) {
+                let mut held = held;
+                held.usage = usage.usage.clone();
+                held.extensions.absorb(&usage.extensions);
+                return vec![StreamEvent::MessageDelta(held)];
+            }
+            let mut out = vec![StreamEvent::MessageDelta(held)];
+            out.extend(self.absorb(decoded));
+            return out;
+        }
+        if let Some(StreamEvent::MessageDelta(delta)) = decoded.last()
+            && delta.stop.is_some()
+            && delta.usage.is_none()
+        {
+            let Some(StreamEvent::MessageDelta(delta)) = decoded.pop() else {
+                return decoded;
+            };
+            self.held = Some(delta);
+        }
+        decoded
+    }
+}
+
+fn usage_only(events: &[StreamEvent]) -> Option<&MessageDelta> {
+    match events {
+        [StreamEvent::MessageDelta(delta)] if delta.stop.is_none() && delta.usage.is_some() => {
+            Some(delta)
+        }
+        _ => None,
+    }
+}
+
+impl Decoder {
     fn finish_blocks(&mut self) -> Vec<StreamEvent> {
         let mut open = self.tools_open.clone();
         if self.text_open {
@@ -1344,40 +1398,85 @@ fn take_content_string(object: &mut Object) -> Result<Option<String>, CodecError
 }
 
 fn encode_stream(events: &[StreamEvent]) -> Result<Vec<u8>, CodecError> {
+    let mut encoder = Encoder {
+        include_usage: true,
+        ..Encoder::default()
+    };
     let mut out = Vec::new();
     for event in events {
-        encode_stream_event(&mut out, event)?;
+        encoder.write(&mut out, event)?;
     }
     Ok(out)
 }
 
 #[derive(Default)]
-struct Encoder;
+struct Encoder {
+    id: Option<String>,
+    model: Option<String>,
+    include_usage: bool,
+}
+
+impl OpenAiChat {
+    fn stream_encoder_for_request(request: &Request) -> Encoder {
+        Encoder {
+            include_usage: client_wants_usage(request),
+            ..Encoder::default()
+        }
+    }
+}
+
+fn client_wants_usage(request: &Request) -> bool {
+    request
+        .extensions
+        .get("stream_options")
+        .and_then(Value::as_object)
+        .and_then(|options| options.get("include_usage"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
 
 impl crate::StreamEncoder for Encoder {
     fn push(&mut self, event: &StreamEvent) -> Result<Vec<u8>, CodecError> {
         let mut out = Vec::new();
-        encode_stream_event(&mut out, event)?;
+        self.write(&mut out, event)?;
         Ok(out)
     }
 }
 
-fn encode_stream_event(out: &mut Vec<u8>, event: &StreamEvent) -> Result<(), CodecError> {
+impl Encoder {
+    fn write(&mut self, out: &mut Vec<u8>, event: &StreamEvent) -> Result<(), CodecError> {
+        encode_stream_event(self, out, event)
+    }
+}
+
+fn encode_stream_event(
+    encoder: &mut Encoder,
+    out: &mut Vec<u8>,
+    event: &StreamEvent,
+) -> Result<(), CodecError> {
     match event {
-        StreamEvent::MessageStart(start) => write_chunk(
-            out,
-            start.id.as_deref(),
-            start.model.as_deref(),
-            &start.extensions,
-            {
-                let mut delta = Object::new();
-                delta.insert("role".to_owned(), Value::String("assistant".to_owned()));
-                delta
-            },
-            None,
-            None,
-        ),
-        StreamEvent::ContentBlockStart(start) => encode_block_start(out, start),
+        StreamEvent::MessageStart(start) => {
+            if start.id.is_some() {
+                encoder.id.clone_from(&start.id);
+            }
+            if start.model.is_some() {
+                encoder.model.clone_from(&start.model);
+            }
+            write_chunk(
+                out,
+                encoder.id.as_deref(),
+                encoder.model.as_deref(),
+                &start.extensions,
+                {
+                    let mut delta = Object::new();
+                    delta.insert("role".to_owned(), Value::String("assistant".to_owned()));
+                    delta
+                },
+                None,
+                None,
+            )
+        }
+        StreamEvent::ContentBlockStart(start) => encode_block_start(encoder, out, start),
         StreamEvent::TextDelta(delta) => {
             if delta.text.is_empty() {
                 return Ok(());
@@ -1385,7 +1484,15 @@ fn encode_stream_event(out: &mut Vec<u8>, event: &StreamEvent) -> Result<(), Cod
             expect_stream_index(delta.index, TEXT_INDEX, "text")?;
             let mut inner = Object::new();
             inner.insert("content".to_owned(), Value::String(delta.text.clone()));
-            write_chunk(out, None, None, &delta.extensions, inner, None, None)
+            write_chunk(
+                out,
+                encoder.id.as_deref(),
+                encoder.model.as_deref(),
+                &delta.extensions,
+                inner,
+                None,
+                None,
+            )
         }
         StreamEvent::ThinkingDelta(delta) => {
             if delta.text.is_empty() {
@@ -1397,7 +1504,15 @@ fn encode_stream_event(out: &mut Vec<u8>, event: &StreamEvent) -> Result<(), Cod
                 "reasoning_content".to_owned(),
                 Value::String(delta.text.clone()),
             );
-            write_chunk(out, None, None, &delta.extensions, inner, None, None)
+            write_chunk(
+                out,
+                encoder.id.as_deref(),
+                encoder.model.as_deref(),
+                &delta.extensions,
+                inner,
+                None,
+                None,
+            )
         }
         StreamEvent::SignatureDelta(_) => Ok(()),
         StreamEvent::ToolArgumentsDelta(delta) => {
@@ -1419,20 +1534,34 @@ fn encode_stream_event(out: &mut Vec<u8>, event: &StreamEvent) -> Result<(), Cod
                 "tool_calls".to_owned(),
                 Value::Array(vec![Value::Object(call)]),
             );
-            write_chunk(out, None, None, &Extensions::new(), inner, None, None)
+            write_chunk(
+                out,
+                encoder.id.as_deref(),
+                encoder.model.as_deref(),
+                &Extensions::new(),
+                inner,
+                None,
+                None,
+            )
         }
         StreamEvent::ContentBlockStop(_) => Ok(()),
         StreamEvent::MessageDelta(delta) => {
             let finish = delta.stop.as_ref().map(|stop| encode_finish(&stop.reason));
             write_chunk(
                 out,
-                None,
-                None,
+                encoder.id.as_deref(),
+                encoder.model.as_deref(),
                 &delta.extensions,
                 Object::new(),
                 finish,
-                delta.usage.as_ref(),
-            )
+                None,
+            )?;
+            if encoder.include_usage
+                && let Some(usage) = delta.usage.as_ref()
+            {
+                write_usage_chunk(out, encoder.id.as_deref(), encoder.model.as_deref(), usage)?;
+            }
+            Ok(())
         }
         StreamEvent::MessageStop(_) => {
             sse::write_event(out, None, "[DONE]");
@@ -1448,7 +1577,11 @@ fn encode_stream_event(out: &mut Vec<u8>, event: &StreamEvent) -> Result<(), Cod
     }
 }
 
-fn encode_block_start(out: &mut Vec<u8>, start: &ContentBlockStart) -> Result<(), CodecError> {
+fn encode_block_start(
+    encoder: &Encoder,
+    out: &mut Vec<u8>,
+    start: &ContentBlockStart,
+) -> Result<(), CodecError> {
     match &start.block {
         BlockStart::Text
         | BlockStart::Thinking {
@@ -1473,7 +1606,15 @@ fn encode_block_start(out: &mut Vec<u8>, start: &ContentBlockStart) -> Result<()
                 "tool_calls".to_owned(),
                 Value::Array(vec![Value::Object(call)]),
             );
-            write_chunk(out, None, None, &Extensions::new(), inner, None, None)
+            write_chunk(
+                out,
+                encoder.id.as_deref(),
+                encoder.model.as_deref(),
+                &Extensions::new(),
+                inner,
+                None,
+                None,
+            )
         }
         BlockStart::Unknown { kind } => {
             let mut object = Object::new();
@@ -1556,6 +1697,28 @@ fn write_chunk(
         object.insert("usage".to_owned(), encode_usage(usage));
     }
     extensions.merge_into(&mut object);
+    write_data(out, &Value::Object(object))
+}
+
+fn write_usage_chunk(
+    out: &mut Vec<u8>,
+    id: Option<&str>,
+    model: Option<&str>,
+    usage: &Usage,
+) -> Result<(), CodecError> {
+    let mut object = Object::new();
+    object.insert(
+        "object".to_owned(),
+        Value::String("chat.completion.chunk".to_owned()),
+    );
+    if let Some(id) = id {
+        object.insert("id".to_owned(), Value::String(id.to_owned()));
+    }
+    if let Some(model) = model {
+        object.insert("model".to_owned(), Value::String(model.to_owned()));
+    }
+    object.insert("choices".to_owned(), Value::Array(Vec::new()));
+    object.insert("usage".to_owned(), encode_usage(usage));
     write_data(out, &Value::Object(object))
 }
 

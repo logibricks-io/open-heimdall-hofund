@@ -33,6 +33,11 @@ impl Codec for Plain {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_owned();
+        if value.get("broken").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Err(CodecError::Unsupported {
+                message: "broken".to_owned(),
+            });
+        }
         if model.is_empty() {
             return Err(CodecError::MissingField("model"));
         }
@@ -443,6 +448,35 @@ async fn a_replaced_token_file_is_read_on_the_next_request() {
     std::fs::write(&token_path, "\n").expect("empty");
     let (status, _) = call(app, Some("second"), r#"{"model":"demo"}"#).await;
     assert_eq!(status, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_rejected_body_records_the_model_it_named() {
+    let dir = std::env::temp_dir().join(format!("hofund-edge-usage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "gpt-demo".to_owned(),
+        vec![fake("primary", &Arc::new(AtomicUsize::new(0)), None)],
+    );
+    let mut codecs = HashMap::new();
+    codecs.insert("/v1/plain".to_owned(), Arc::new(Plain) as Arc<dyn Codec>);
+    let app = Gateway::new(
+        Router::new(routes, FailoverPolicy::default()),
+        "secret".to_owned(),
+        codecs,
+        Arc::clone(&usage),
+    )
+    .into_router();
+    let (status, _) = call(app, Some("secret"), r#"{"model":"gpt-demo","broken":true}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let rows = usage.rows().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].model, "gpt-demo");
+    assert_eq!(rows[0].status, "400");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

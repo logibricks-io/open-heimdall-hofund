@@ -1426,6 +1426,7 @@ version = "0.1.0"
 dependencies = [
  "hofund-config",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "toml_edit 0.25.17+spec-1.1.0",
 ]
@@ -1446,6 +1447,7 @@ dependencies = [
  "insta",
  "proptest",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -1471,6 +1473,7 @@ dependencies = [
  "hofund-secrets",
  "hofund-usage",
  "reqwest 0.12.28",
+ "serde_json",
  "tokio",
  "wiremock",
 ]

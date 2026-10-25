@@ -451,6 +451,88 @@ async fn messages_count_is_forwarded_and_a_missing_endpoint_is_unsupported() {
     assert!(matches!(outcome, CountOutcome::Unsupported));
 }
 
+#[tokio::test]
+async fn billing_header_is_stripped_only_when_protocols_differ() {
+    let chat = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&chat)
+        .await;
+    let chat_provider =
+        OpenAiCompat::new(OpenAiProtocol::Chat, Endpoint::new("primary", chat.uri()))
+            .expect("chat");
+    chat_provider
+        .execute(billing_request(true), "anthropic-messages")
+        .await
+        .expect("cross");
+    chat_provider
+        .execute(billing_request(false), "anthropic-messages")
+        .await
+        .expect("line only");
+    let seen = chat.received_requests().await.expect("requests");
+    let crossed: Value = serde_json::from_slice(&seen[0].body).expect("json");
+    assert_eq!(crossed["messages"][0]["content"], json!("You are helpful."));
+    assert!(
+        crossed["messages"][1]["content"]
+            .as_str()
+            .expect("user")
+            .contains("x-anthropic-billing-header")
+    );
+    let only: Value = serde_json::from_slice(&seen[1].body).expect("json");
+    assert!(!only.to_string().contains("x-anthropic-billing-header"));
+    assert_eq!(only["messages"][0]["content"], json!("hi"));
+
+    let messages = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn"
+        })))
+        .mount(&messages)
+        .await;
+    let anthropic = Anthropic::new(Endpoint::new("primary", messages.uri())).expect("messages");
+    anthropic
+        .execute(billing_request(true), "anthropic-messages")
+        .await
+        .expect("same");
+    let seen = messages.received_requests().await.expect("requests");
+    let same = String::from_utf8(seen[0].body.clone()).expect("utf8");
+    assert!(same.contains("x-anthropic-billing-header"), "{same}");
+    assert!(same.contains("You are helpful."), "{same}");
+}
+
+fn billing_request(with_rest: bool) -> Request {
+    let mut request = Request::new("demo");
+    request.params.max_tokens = Some(16);
+    let mut system = Message::new(Role::System);
+    let line = if with_rest {
+        "x-anthropic-billing-header: cc_version=2.1.197; cc_entrypoint=cli; cch=abc;\nYou are helpful."
+    } else {
+        "x-anthropic-billing-header: cc_version=2.1.197; cc_entrypoint=cli; cch=abc;"
+    };
+    system.content.push(ContentPart::text(line));
+    request.messages.push(system);
+    let mut user = Message::new(Role::User);
+    user.content.push(ContentPart::text(if with_rest {
+        "see x-anthropic-billing-header: cc_version=1; in the middle"
+    } else {
+        "hi"
+    }));
+    request.messages.push(user);
+    request
+}
+
 async fn event_has_created(completion: Completion) -> bool {
     let Completion::Stream(mut stream) = completion else {
         return false;

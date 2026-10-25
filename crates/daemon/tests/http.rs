@@ -492,6 +492,92 @@ async fn cross_protocol_fields_do_not_reach_the_client_or_the_upstream() {
     fs::remove_dir_all(dir).ok();
 }
 
+#[tokio::test]
+async fn codex_responses_tools_are_accepted() {
+    // Same reconstructed Codex CLI 0.164.0 tool set as the codec fixture.
+    let fixture = include_str!("../../codec/tests/fixtures/codex_0_164_responses.json");
+    let original: serde_json::Value = serde_json::from_str(fixture).expect("fixture");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("client");
+
+    let responses = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&responses)
+        .await;
+    let responses_upstream = Upstream {
+        kind: "openai_compat",
+        protocol: Some("responses"),
+        quirks: None,
+        wire_path: "/responses",
+        body: "",
+        stream: "",
+    };
+    let dir = scratch();
+    let (running, token) = listen(
+        &dir,
+        &config_text(
+            &responses.uri(),
+            &responses_upstream,
+            "[429, 500, 502, 503, 504]",
+        ),
+    )
+    .await;
+    let text = post_text(&client, &running, "/v1/responses", &token, fixture).await;
+    assert!(text.contains("ok"), "{text}");
+    let seen = responses.received_requests().await.expect("requests");
+    let forwarded: serde_json::Value = serde_json::from_slice(&seen[0].body).expect("json");
+    assert_eq!(forwarded["tools"], original["tools"]);
+    running.shutdown().await;
+    fs::remove_dir_all(&dir).ok();
+
+    let chat = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&chat)
+        .await;
+    let chat_upstream = Upstream {
+        kind: "openai_compat",
+        protocol: Some("chat"),
+        quirks: None,
+        wire_path: "/chat/completions",
+        body: "",
+        stream: "",
+    };
+    let dir = scratch();
+    let (running, token) = listen(
+        &dir,
+        &config_text(&chat.uri(), &chat_upstream, "[429, 500, 502, 503, 504]"),
+    )
+    .await;
+    let text = post_text(&client, &running, "/v1/responses", &token, fixture).await;
+    assert!(text.contains("ok"), "{text}");
+    let seen = chat.received_requests().await.expect("requests");
+    let forwarded: serde_json::Value = serde_json::from_slice(&seen[0].body).expect("json");
+    let tools = forwarded["tools"].as_array().expect("tools");
+    assert!(tools.iter().all(|tool| tool["type"] == "function"));
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["multi_agent_v1__spawn_agent", "apply_patch"]);
+    assert!(!forwarded.to_string().contains("web_search"), "{forwarded}");
+    running.shutdown().await;
+    fs::remove_dir_all(&dir).ok();
+}
+
 async fn post_text(
     client: &reqwest::Client,
     running: &hofund_daemon::Running,

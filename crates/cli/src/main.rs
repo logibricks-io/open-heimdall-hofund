@@ -452,10 +452,13 @@ fn warn_unrouted_model(
 
 fn disconnect(adapter: &dyn hofund_agent::AgentAdapter, force: bool) -> Result<(), String> {
     let session = Session::from_process_env();
-    if adapter
+    let outcome = adapter
         .disconnect(&session, force)
-        .map_err(|error| error.to_string())?
-    {
+        .map_err(|error| error.to_string())?;
+    for warning in &outcome.warnings {
+        eprintln!("{warning}");
+    }
+    if outcome.changed {
         println!("{}: restored", adapter.id());
     } else {
         println!("{}: nothing to restore", adapter.id());

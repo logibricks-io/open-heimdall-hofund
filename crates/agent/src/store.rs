@@ -76,13 +76,38 @@ pub(crate) fn created_here(path: &Path) -> bool {
     sibling(path, ".hofund.absent").is_file() && !sibling(path, ".hofund.bak").is_file()
 }
 
-/// Deletes the backup and the absent marker beside `path`.
+/// Deletes the backup, the absent marker, and the connect snapshot beside `path`.
 pub(crate) fn clear_markers(path: &Path) -> Result<(), AgentError> {
-    for suffix in [".hofund.bak", ".hofund.absent"] {
+    for suffix in [".hofund.bak", ".hofund.absent", ".hofund.wrote"] {
         let marker = sibling(path, suffix);
         if marker.is_file() {
             fs::remove_file(&marker).map_err(|error| io(&marker, error))?;
         }
+    }
+    Ok(())
+}
+
+/// Writes `bytes` and reads them back. The caller keeps any backup until this returns.
+pub(crate) fn write_verified(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
+    write_atomic(path, bytes)?;
+    let read_back = fs::read(path).map_err(|error| io(path, error))?;
+    if read_back != bytes {
+        return Err(AgentError::message(format!(
+            "{}: written bytes did not match the bytes just read back",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Deletes `path` when it exists, then checks that it is gone.
+pub(crate) fn delete_verified(path: &Path) -> Result<(), AgentError> {
+    delete_file(path)?;
+    if path.exists() {
+        return Err(AgentError::message(format!(
+            "{}: file is still present after delete",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -112,23 +137,20 @@ pub(crate) fn remove_empty_parents(start: &Path, preserve: &[PathBuf]) -> Result
 }
 
 /// Restores `path` from its backup. Returns whether a backup was present.
+///
+/// The backup is removed only after the restored bytes are read back and match.
 pub(crate) fn revert_path(path: &Path) -> Result<bool, AgentError> {
     let backup = sibling(path, ".hofund.bak");
     let absent = sibling(path, ".hofund.absent");
     if backup.is_file() {
         let bytes = fs::read(&backup).map_err(|error| io(&backup, error))?;
-        write_atomic(path, &bytes)?;
-        fs::remove_file(&backup).map_err(|error| io(&backup, error))?;
-        if absent.is_file() {
-            fs::remove_file(&absent).map_err(|error| io(&absent, error))?;
-        }
+        write_verified(path, &bytes)?;
+        clear_markers(path)?;
         return Ok(true);
     }
     if absent.is_file() {
-        if path.exists() {
-            fs::remove_file(path).map_err(|error| io(path, error))?;
-        }
-        fs::remove_file(&absent).map_err(|error| io(&absent, error))?;
+        delete_verified(path)?;
+        clear_markers(path)?;
         return Ok(true);
     }
     Ok(false)

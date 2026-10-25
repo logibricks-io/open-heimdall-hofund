@@ -14,6 +14,7 @@ use hofund_ir::{
     ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::error::CodecError;
 use crate::jsonutil::{
@@ -25,6 +26,13 @@ use crate::sse::{self, SseFrame, SseParser};
 use crate::{Codec, StreamDecoder, StreamEncoder as StreamEncoderTrait};
 
 const SEALED_ITEM: &str = "sealed_item";
+const RAW_TOOLS: &str = "hofund_responses_tools";
+
+/// Request-extension key whose array names tools this codec did not map.
+///
+/// The provider logs them when the upstream protocol is different, then the
+/// extension bag is dropped. Same-protocol encode skips the key.
+pub const UNMAPPED_TOOLS: &str = "hofund_unmapped_tools";
 
 /// Codec for the OpenAI Responses API.
 #[derive(Debug, Default, Clone, Copy)]
@@ -110,8 +118,15 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
     }
     messages.extend(decode_input(input)?);
     messages = merge_assistant_runs(messages);
-    let tools = decode_tools(object.remove("tools"))?;
-    let (tool_choice, tools) = decode_tool_choice(object.remove("tool_choice"), tools)?;
+    let choice_value = object.remove("tool_choice");
+    let mut raw_tools = object.remove("tools");
+    if let Some(raw) = raw_tools.as_mut()
+        && let Some((names, web)) = allowed_spec(choice_value.as_ref())?
+    {
+        apply_allowed_filter(raw, &names, web);
+    }
+    let (tools, dropped) = decode_tools(raw_tools.clone())?;
+    let (tool_choice, tools) = decode_tool_choice(choice_value, tools)?;
     let max_tokens = take_u64(&mut object, "max_output_tokens")?;
     let temperature = take_f64(&mut object, "temperature")?;
     let top_p = take_f64(&mut object, "top_p")?;
@@ -122,6 +137,18 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         .and_then(|reasoning| reasoning.get("effort"))
         .and_then(Value::as_str)
         .and_then(Effort::from_label);
+    let mut extensions = Extensions::from_map(object);
+    if let Some(raw) = raw_tools
+        && needs_raw_tools(&raw)
+    {
+        extensions.insert(RAW_TOOLS, raw);
+    }
+    if !dropped.is_empty() {
+        extensions.insert(
+            UNMAPPED_TOOLS,
+            Value::Array(dropped.into_iter().map(Value::String).collect()),
+        );
+    }
     Ok(Request {
         model,
         messages,
@@ -135,7 +162,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
             ..GenerationParams::default()
         },
         stream,
-        extensions: Extensions::from_map(object),
+        extensions,
     })
 }
 
@@ -399,35 +426,240 @@ fn image_source(url: &str) -> ImageSource {
     }
 }
 
-fn decode_tools(value: Option<Value>) -> Result<Vec<Tool>, CodecError> {
+fn decode_tools(value: Option<Value>) -> Result<(Vec<Tool>, Vec<String>), CodecError> {
     let Some(value) = value else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     if value.is_null() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut tools = Vec::new();
+    let mut dropped = Vec::new();
     for item in expect_array(value, "tools")? {
-        let mut object = expect_object(item, "tools")?;
-        let kind = take_string(&mut object, "type")?.unwrap_or_else(|| "function".to_owned());
-        if kind != "function" {
-            return Err(CodecError::Unsupported {
-                message: format!("tool type `{kind}` is not supported"),
-            });
+        offer_tool(item, None, &mut tools, &mut dropped)?;
+    }
+    Ok((tools, dropped))
+}
+
+fn offer_tool(
+    value: Value,
+    namespace: Option<&str>,
+    tools: &mut Vec<Tool>,
+    dropped: &mut Vec<String>,
+) -> Result<(), CodecError> {
+    let mut object = expect_object(value, "tools")?;
+    let kind = take_string(&mut object, "type")?.unwrap_or_else(|| "function".to_owned());
+    if kind == "namespace" && namespace.is_none() {
+        let space = take_string(&mut object, "name")?.unwrap_or_default();
+        let Some(nested) = object.remove("tools") else {
+            dropped.push(label(&space, &kind));
+            return Ok(());
+        };
+        for item in expect_array(nested, "tools")? {
+            offer_tool(item, Some(space.as_str()), tools, dropped)?;
         }
-        let name = require_string(&mut object, "name")?;
+        return Ok(());
+    }
+    if kind.starts_with("web_search") {
+        dropped.push(kind);
+        return Ok(());
+    }
+    let name = take_string(&mut object, "name")?.unwrap_or_default();
+    let offered = match namespace {
+        Some(space) if !space.is_empty() => flat_name(space, &name),
+        _ => name.clone(),
+    };
+    let client_search = kind == "tool_search"
+        && take_string(&mut object, "execution")?.as_deref() == Some("client");
+    if kind == "function" || client_search {
+        if offered.is_empty() {
+            dropped.push(kind);
+            return Ok(());
+        }
         let description = take_string(&mut object, "description")?;
-        let input_schema = object
+        let mut schema = object
             .remove("parameters")
             .unwrap_or_else(|| Value::Object(Object::new()));
+        unseal(&mut schema);
         tools.push(Tool {
-            name,
+            name: offered,
             description,
-            input_schema,
+            input_schema: schema,
             extensions: Extensions::from_map(object),
         });
+        return Ok(());
     }
-    Ok(tools)
+    if kind == "custom" {
+        if offered.is_empty() {
+            dropped.push(kind);
+            return Ok(());
+        }
+        let description = take_string(&mut object, "description")?;
+        let format = object.remove("format");
+        tools.push(Tool {
+            name: offered,
+            description: Some(custom_description(description.as_deref(), format.as_ref())),
+            input_schema: custom_schema(),
+            extensions: Extensions::new(),
+        });
+        return Ok(());
+    }
+    dropped.push(label(&name, &kind));
+    Ok(())
+}
+
+fn needs_raw_tools(raw: &Value) -> bool {
+    let Some(items) = raw.as_array() else {
+        return !raw.is_null();
+    };
+    items.iter().any(|item| {
+        item.get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("function")
+            != "function"
+    })
+}
+
+fn label(name: &str, kind: &str) -> String {
+    if name.is_empty() {
+        kind.to_owned()
+    } else {
+        format!("{kind}:{name}")
+    }
+}
+
+fn custom_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": "The tool's free-form input, the whole of it, exactly as it is to be run."
+            }
+        },
+        "required": ["input"],
+        "additionalProperties": false
+    })
+}
+
+fn custom_description(description: Option<&str>, format: Option<&Value>) -> String {
+    let mut text = description.unwrap_or("").trim().to_owned();
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(
+        "Put the tool's whole free-form input, as it is to be run, in the `input` string; it is passed on as written, so it is not itself JSON.",
+    );
+    if let Some(Value::Object(format)) = format {
+        let definition = format
+            .get("definition")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if format.get("type").and_then(Value::as_str) == Some("grammar") && !definition.is_empty() {
+            let syntax = format
+                .get("syntax")
+                .and_then(Value::as_str)
+                .filter(|syntax| !syntax.is_empty())
+                .unwrap_or("the");
+            text.push_str(&format!(
+                "\n\nThe input follows this {syntax} grammar:\n{definition}"
+            ));
+        }
+    }
+    text
+}
+
+fn flat_name(namespace: &str, name: &str) -> String {
+    let flat = format!("{namespace}__{name}");
+    if flat.len() <= 64 {
+        return flat;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(namespace.as_bytes());
+    hasher.update([0]);
+    hasher.update(name.as_bytes());
+    let sum = hasher.finalize();
+    let hex: String = sum
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let prefix = flat.get(..55).unwrap_or(&flat);
+    format!("{prefix}_{hex}")
+}
+
+fn unseal(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("encrypted");
+            for child in object.values_mut() {
+                unseal(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                unseal(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn allowed_spec(choice: Option<&Value>) -> Result<Option<(BTreeSet<String>, bool)>, CodecError> {
+    let Some(Value::Object(object)) = choice else {
+        return Ok(None);
+    };
+    if object.get("type").and_then(Value::as_str) != Some("allowed_tools") {
+        return Ok(None);
+    }
+    let tools = object.get("tools").cloned();
+    let (names, web) = allowed_names(tools)?;
+    Ok(Some((names, web)))
+}
+
+fn apply_allowed_filter(raw: &mut Value, names: &BTreeSet<String>, web: bool) {
+    let Some(items) = raw.as_array_mut() else {
+        return;
+    };
+    items.retain_mut(|item| keep_raw_tool(item, None, names, web));
+}
+
+fn keep_raw_tool(
+    item: &mut Value,
+    namespace: Option<&str>,
+    names: &BTreeSet<String>,
+    web: bool,
+) -> bool {
+    let Some(object) = item.as_object_mut() else {
+        return false;
+    };
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("function")
+        .to_owned();
+    if kind == "namespace" && namespace.is_none() {
+        let space = object
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let Some(Value::Array(nested)) = object.get_mut("tools") else {
+            return false;
+        };
+        nested.retain_mut(|child| keep_raw_tool(child, Some(space.as_str()), names, web));
+        return !nested.is_empty();
+    }
+    if kind.starts_with("web_search") {
+        return web;
+    }
+    let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+    let offered = match namespace {
+        Some(space) if !space.is_empty() => flat_name(space, name),
+        _ => name.to_owned(),
+    };
+    names.contains(&offered)
 }
 
 fn decode_tool_choice(
@@ -459,7 +691,7 @@ fn decode_tool_choice(
                     message: format!("allowed_tools mode `{mode}` is not supported"),
                 });
             }
-            let allowed = allowed_names(object.remove("tools"))?;
+            let (allowed, _) = allowed_names(object.remove("tools"))?;
             tools.retain(|tool| allowed.contains(&tool.name));
             Ok((Some(choice_mode(&mode)?), tools))
         }
@@ -469,20 +701,33 @@ fn decode_tool_choice(
     }
 }
 
-fn allowed_names(value: Option<Value>) -> Result<BTreeSet<String>, CodecError> {
+fn allowed_names(value: Option<Value>) -> Result<(BTreeSet<String>, bool), CodecError> {
     let Some(value) = value else {
-        return Ok(BTreeSet::new());
+        return Ok((BTreeSet::new(), false));
     };
     let mut names = BTreeSet::new();
+    let mut web = false;
     for item in expect_array(value, "tools")? {
         let mut object = expect_object(item, "tools")?;
-        if take_string(&mut object, "type")?.as_deref() == Some("function")
-            && let Some(name) = take_string(&mut object, "name")?
-        {
+        let kind = take_string(&mut object, "type")?.unwrap_or_default();
+        if kind.starts_with("web_search") {
+            web = true;
+            continue;
+        }
+        if !matches!(kind.as_str(), "function" | "custom" | "tool_search") {
+            continue;
+        }
+        let Some(name) = take_string(&mut object, "name")? else {
+            continue;
+        };
+        let namespace = take_string(&mut object, "namespace")?.unwrap_or_default();
+        if namespace.is_empty() {
             names.insert(name);
+        } else {
+            names.insert(flat_name(&namespace, &name));
         }
     }
-    Ok(names)
+    Ok((names, web))
 }
 
 fn choice_mode(mode: &str) -> Result<ToolChoice, CodecError> {
@@ -522,7 +767,9 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
         object.insert("instructions".to_owned(), Value::String(text.to_owned()));
     }
     object.insert("input".to_owned(), Value::Array(encode_items(messages)?));
-    if !request.tools.is_empty() {
+    if let Some(raw) = request.extensions.get(RAW_TOOLS) {
+        object.insert("tools".to_owned(), raw.clone());
+    } else if !request.tools.is_empty() {
         object.insert("tools".to_owned(), encode_tools(&request.tools));
     }
     if let Some(choice) = &request.tool_choice {
@@ -535,7 +782,7 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
         object.insert("stream".to_owned(), Value::Bool(true));
     }
     write_responses_effort(&mut object, request);
-    request.extensions.merge_into(&mut object);
+    merge_public(&request.extensions, &mut object);
     to_bytes(&Value::Object(object))
 }
 
@@ -550,6 +797,15 @@ fn write_responses_effort(object: &mut Object, request: &Request) {
         "reasoning".to_owned(),
         serde_json::json!({ "effort": effort.openai_label() }),
     );
+}
+
+fn merge_public(extensions: &Extensions, object: &mut Object) {
+    for (key, value) in extensions.iter() {
+        if key.starts_with("hofund_") {
+            continue;
+        }
+        object.entry(key.clone()).or_insert_with(|| value.clone());
+    }
 }
 
 fn split_instructions(messages: &[Message]) -> (Option<&str>, &[Message]) {
@@ -918,9 +1174,10 @@ fn encode_response(response: &Response) -> Result<Vec<u8>, CodecError> {
     }
     let mut object = Object::new();
     object.insert("object".to_owned(), Value::String("response".to_owned()));
-    if let Some(id) = &response.id {
-        object.insert("id".to_owned(), Value::String(id.clone()));
-    }
+    object.insert(
+        "id".to_owned(),
+        Value::String(responses_id(response.id.as_deref())),
+    );
     if let Some(model) = &response.model {
         object.insert("model".to_owned(), Value::String(model.clone()));
     }
@@ -1044,6 +1301,7 @@ struct StreamEncoder {
     stop: Option<Stop>,
     usage: Option<Usage>,
     sequence: u64,
+    next_item: u64,
     completed: bool,
 }
 
@@ -1173,7 +1431,15 @@ impl StreamEncoder {
         if self.open.contains_key(&index) {
             return;
         }
-        let Some(state) = ItemState::from_block(index, block) else {
+        let prefix = match block {
+            BlockStart::Text => "msg",
+            BlockStart::Thinking { .. } => "rs",
+            BlockStart::ToolCall { .. } => "fc",
+            BlockStart::Unknown { .. } => return,
+        };
+        let id = format!("{prefix}_{}", self.next_item);
+        self.next_item += 1;
+        let Some(state) = ItemState::from_block(block, id) else {
             return;
         };
         let kind = state.kind;
@@ -1315,11 +1581,12 @@ impl StreamEncoder {
     fn skeleton(&self, status: &str) -> Value {
         let mut response = Object::new();
         response.insert("object".to_owned(), Value::String("response".to_owned()));
+        response.insert(
+            "id".to_owned(),
+            Value::String(responses_id(self.id.as_deref())),
+        );
         response.insert("status".to_owned(), Value::String(status.to_owned()));
         response.insert("output".to_owned(), Value::Array(Vec::new()));
-        if let Some(id) = &self.id {
-            response.insert("id".to_owned(), Value::String(id.clone()));
-        }
         if let Some(model) = &self.model {
             response.insert("model".to_owned(), Value::String(model.clone()));
         }
@@ -1341,26 +1608,26 @@ impl StreamEncoder {
 }
 
 impl ItemState {
-    fn from_block(index: u32, block: &BlockStart) -> Option<Self> {
+    fn from_block(block: &BlockStart, id: String) -> Option<Self> {
         let state = match block {
             BlockStart::Text => Self {
                 kind: ItemKind::Message,
-                id: format!("msg_{index}"),
+                id,
                 call_id: String::new(),
                 name: String::new(),
                 text: String::new(),
             },
             BlockStart::Thinking { .. } => Self {
                 kind: ItemKind::Reasoning,
-                id: format!("rs_{index}"),
+                id,
                 call_id: String::new(),
                 name: String::new(),
                 text: String::new(),
             },
-            BlockStart::ToolCall { id, name } => Self {
+            BlockStart::ToolCall { id: call_id, name } => Self {
                 kind: ItemKind::Function,
-                id: format!("fc_{index}"),
-                call_id: id.clone(),
+                id,
+                call_id: call_id.clone(),
                 name: name.clone(),
                 text: String::new(),
             },
@@ -1989,6 +2256,14 @@ fn repair_orphaned_outputs(object: &mut Object) {
                 "output": ""
             }));
         }
+    }
+}
+
+fn responses_id(id: Option<&str>) -> String {
+    match id {
+        Some(id) if id.starts_with("resp_") => id.to_owned(),
+        Some(id) if !id.is_empty() => format!("resp_{id}"),
+        _ => "resp_local".to_owned(),
     }
 }
 

@@ -269,9 +269,10 @@ fn encode_response(response: &Response) -> Result<Vec<u8>, CodecError> {
         });
     }
     let mut object = Object::new();
-    if let Some(id) = &response.id {
-        object.insert("id".to_owned(), Value::String(id.clone()));
-    }
+    object.insert(
+        "id".to_owned(),
+        Value::String(anthropic_message_id(response.id.as_deref())),
+    );
     object.insert("type".to_owned(), Value::String("message".to_owned()));
     object.insert("role".to_owned(), Value::String("assistant".to_owned()));
     if let Some(model) = &response.model {

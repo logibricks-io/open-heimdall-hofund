@@ -162,6 +162,104 @@ fn openai_response_round_trip_and_snapshot() {
 }
 
 #[test]
+fn chat_usage_chunk_follows_the_client_flag() {
+    let events = chat_turn();
+    let quiet = Request::new("m");
+    let mut encoder = OpenAiChat.stream_encoder_for(&quiet);
+    let mut out = Vec::new();
+    for event in &events {
+        out.extend(encoder.push(event).expect("push"));
+    }
+    let text = String::from_utf8(out).expect("utf8");
+    assert!(!text.contains("\"usage\""), "{text}");
+    for line in text.lines().filter(|line| line.starts_with("data: {")) {
+        assert!(line.contains("\"id\":\"chatcmpl-1\""), "{line}");
+        assert!(line.contains("\"model\":\"m\""), "{line}");
+    }
+
+    let mut asking = Request::new("m");
+    asking
+        .extensions
+        .insert("stream_options", json!({"include_usage": true}));
+    let mut encoder = OpenAiChat.stream_encoder_for(&asking);
+    let mut out = Vec::new();
+    for event in &events {
+        out.extend(encoder.push(event).expect("push"));
+    }
+    let text = String::from_utf8(out).expect("utf8");
+    let frames: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("data: {"))
+        .collect();
+    let finish = frames
+        .iter()
+        .find(|line| line.contains("finish_reason"))
+        .expect("finish");
+    assert!(!finish.contains("\"usage\""), "{finish}");
+    let usage = frames
+        .iter()
+        .find(|line| line.contains("\"usage\""))
+        .expect("usage");
+    assert!(usage.contains("\"choices\":[]"), "{usage}");
+    assert!(usage.contains("\"id\":\"chatcmpl-1\""), "{usage}");
+    assert!(usage.contains("\"model\":\"m\""), "{usage}");
+}
+
+fn chat_turn() -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::MessageStart(hofund_ir::MessageStart {
+            id: Some("chatcmpl-1".to_owned()),
+            model: Some("m".to_owned()),
+            usage: None,
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::TextDelta(hofund_ir::TextDelta {
+            index: 0,
+            text: "ok".to_owned(),
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::MessageDelta(hofund_ir::MessageDelta {
+            stop: Some(hofund_ir::Stop {
+                reason: StopReason::EndTurn,
+                sequence: None,
+            }),
+            usage: Some(hofund_ir::Usage {
+                input_tokens: Some(2),
+                output_tokens: Some(1),
+                total_tokens: Some(3),
+                ..hofund_ir::Usage::default()
+            }),
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::MessageStop(hofund_ir::MessageStop::default()),
+    ]
+}
+
+#[test]
+fn anthropic_unary_id_uses_the_message_prefix() {
+    let mut response = Response {
+        id: None,
+        model: Some("m".to_owned()),
+        message: hofund_ir::Message::new(Role::Assistant),
+        stop: None,
+        usage: None,
+        extensions: hofund_ir::Extensions::new(),
+    };
+    response.message.content.push(ContentPart::text("ok"));
+    let encoded = AnthropicMessages
+        .encode_response(&response)
+        .expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    assert_eq!(value["id"], json!("msg_local"));
+    response.id = Some("abc".to_owned());
+    let encoded = AnthropicMessages
+        .encode_response(&response)
+        .expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    assert_eq!(value["id"], json!("msg_abc"));
+}
+
+#[test]
 fn openai_stream_round_trip_and_snapshot() {
     let events = stable_stream(&OpenAiChat, OPENAI_STREAM);
     insta::assert_snapshot!("openai_stream_ir", pretty_value!(&events));

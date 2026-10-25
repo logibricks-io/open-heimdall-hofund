@@ -133,8 +133,9 @@ Tool results:
 A legacy `function_call` object on a Chat Completions message is not turned
 into a tool call. It stays in the message bag and is written back.
 
-Only `type: "function"` tools are canonical. Any other tool type is
-`CodecError::Unsupported`.
+Chat Completions accepts only `type: "function"` tools. Any other Chat tool
+type is `CodecError::Unsupported`. Responses accepts more than functions;
+see [Responses tools](#responses-tools).
 
 ## Tool arguments
 
@@ -159,9 +160,10 @@ stays raw. `assemble` does not return an error.
 | `Named { name }` | `{"type":"tool","name"}` | `{"type":"function","function":{"name"}}` | `{"type":"function","name"}` | `"ANY"` and `allowedFunctionNames: [name]` |
 
 Responses `tool_choice` of type `allowed_tools` filters the tool list down to
-the named functions and keeps the mode (`auto` or `required`). The wrapper
-object is not written back. Any other tool type, and any other `tool_choice`
-type, is `CodecError::Unsupported`.
+the named functions, custom tools, and client `tool_search` entries, and
+keeps the mode (`auto` or `required`). A namespaced name is matched after
+flattening. The wrapper object is not written back. Any other `tool_choice`
+type is `CodecError::Unsupported`.
 
 Each codec writes its own spelling, so a same-protocol round trip does not
 have to remember whether the wire said `any` or `required`. Extra fields such
@@ -174,6 +176,64 @@ Generative Language `ANY` with exactly one `allowedFunctionNames` entry is
 choice bag. `VALIDATED`, and any other mode token, is `Required` plus
 `extensions.mode` set to that token, so encode writes the token back. `AUTO`
 and `NONE` do not store the mode string.
+
+## Responses tools
+
+A Responses `tools` array may contain `function`, `custom`, `namespace`,
+`web_search` (any type whose name starts with `web_search`), and
+`tool_search`. Decode does not reject the request for an unknown type.
+
+Same-protocol encode writes the original `tools` array back unchanged,
+including entries that have no canonical form. `allowed_tools` still filters
+that array before it is stored.
+
+Crossing to another protocol uses the canonical tools only:
+
+- `function` stays a function. A nested function inside `namespace` is
+  offered as `namespace__name`. A name longer than 64 bytes keeps a 55-byte
+  prefix, an underscore, and the first 4 bytes of SHA-256 of the pair, in hex.
+- `custom` (a free-form tool, including one nested in a namespace) becomes a
+  function whose arguments are one required string, `input`. The description
+  says to put the whole free-form input in that string, and appends a grammar
+  when `format.type` is `grammar`.
+- `tool_search` with `execution: "client"` becomes a function using its
+  `parameters`. Any other `tool_search` is dropped.
+- `web_search` and every other type are dropped.
+
+Dropped names are logged by the provider (`warning: dropped tool ...`) and
+are not a 400. Checked 2026-10-25 against the Responses tool list and against
+`internal/gateway/responses.go` (`customSchema`, namespace flattening,
+`web_search` not offered as a function, client `tool_search`).
+
+## Client-facing ids and Chat usage chunks
+
+A Responses body and each `response.created` / completed skeleton use an id
+that starts with `resp_`. A missing id becomes `resp_local`. An id that
+already has the prefix is kept. Output item ids are `msg_N`, `rs_N`, and
+`fc_N` from one counter, so a later item does not reuse `msg_0` when its
+block index is 0 again.
+
+A non-streaming Messages body always has an id. A missing id becomes
+`msg_local`. An id without the `msg_` prefix is prefixed. The stream already
+did this on `message_start`.
+
+A Chat Completions stream remembers the id and model from the first chunk and
+writes them on every later chunk. Usage is a separate chunk with
+`choices: []` and is written only when the client request set
+`stream_options.include_usage` to true. The finish chunk does not carry
+`usage`. The Chat adapter still asks the upstream for usage, so the ledger
+can record it when the client did not ask to see it.
+
+## Billing header
+
+Claude Code may send a system text block that is only
+`x-anthropic-billing-header:` plus `key=value;` fields, or that prefix at the
+start of the first system text. There is no public schema for the line. It
+is kept when the upstream protocol is Messages. Crossing to another protocol
+removes a system or developer text part that is only the line, and cuts the
+same prefix off the first remaining system or developer text. A mention in
+user text, or later in a system string, stays. Checked 2026-10-25 against
+`internal/gateway/billing_line.go` and `withoutBillingHeader`.
 
 ## Generation parameters
 

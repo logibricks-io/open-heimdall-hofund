@@ -5,10 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::DisconnectOutcome;
 use crate::edit::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
 use crate::store::{
-    backup_once, clear_markers, created_here, delete_file, marker_present, read_optional,
-    remove_empty_parents, revert_path, unified_diff, write_atomic,
+    backup_once, clear_markers, created_here, delete_verified, marker_present, read_optional,
+    remove_empty_parents, revert_path, unified_diff, write_atomic, write_verified,
 };
 use crate::{
     AgentAdapter, AgentError, ConfigFile, ConnectionStatus, FileChange, GatewayTarget, Plan,
@@ -410,6 +411,12 @@ impl AgentAdapter for Described {
         for change in &plan.changes {
             write_atomic(&change.path, &change.after)?;
         }
+        for chosen in self.chosen(session)? {
+            if marker_present(&chosen.path) {
+                let assignments = assignments_for(chosen.sets, target);
+                snapshot_wrote(&chosen.path, chosen.kind, &assignments)?;
+            }
+        }
         Ok(plan)
     }
 
@@ -469,8 +476,9 @@ impl AgentAdapter for Described {
         })
     }
 
-    fn disconnect(&self, session: &Session, force: bool) -> Result<bool, AgentError> {
+    fn disconnect(&self, session: &Session, force: bool) -> Result<DisconnectOutcome, AgentError> {
         let mut changed = false;
+        let mut warnings = Vec::new();
         let preserve = preserve_dirs(session);
         for location in self.description.locations {
             let path = (location.resolve)(session);
@@ -486,16 +494,16 @@ impl AgentAdapter for Described {
                 }
                 continue;
             }
-            release_owned_keys(
+            warnings.extend(merge_owned_keys(
                 &path,
                 location.kind,
                 owned_keys(self.description, location.file),
                 &preserve,
                 self.description.id,
-            )?;
+            )?);
             changed = true;
         }
-        Ok(changed)
+        Ok(DisconnectOutcome { changed, warnings })
     }
 
     fn refresh_token(
@@ -525,6 +533,7 @@ impl AgentAdapter for Described {
                 .map_err(|error| annotate(&chosen.path, error))?;
             if before != after {
                 write_atomic(&chosen.path, &after)?;
+                refresh_wrote(&chosen.path, chosen.kind, &assignments)?;
                 updated.push(chosen.path);
             }
         }
@@ -637,32 +646,156 @@ fn owned_keys<'a>(description: &'a Description, file: &str) -> Vec<&'a str> {
         .collect()
 }
 
-fn release_owned_keys(
+/// Records the bytes apply would write onto the pre-connect file.
+///
+/// User edits are not part of this snapshot. Disconnect compares the live file
+/// with it, per key, so a later edit is not treated as something hofund wrote.
+fn snapshot_wrote(
     path: &Path,
     kind: FileKind,
-    keys: Vec<&str>,
-    preserve: &[PathBuf],
-    id: &str,
+    assignments: &[Assignment],
 ) -> Result<(), AgentError> {
-    let Some(before) = read_optional(path)? else {
-        clear_markers(path)?;
+    let backup = read_optional(&sibling_bak(path))?;
+    let text = match &backup {
+        Some(bytes) => Some(utf8(path, bytes)?),
+        None => None,
+    };
+    let wrote = render(kind, text, assignments).map_err(|error| annotate(path, error))?;
+    write_atomic(&sibling_wrote(path), &wrote)
+}
+
+/// Applies a token refresh to the connect snapshot, not to a user-edited copy.
+fn refresh_wrote(
+    path: &Path,
+    kind: FileKind,
+    assignments: &[Assignment],
+) -> Result<(), AgentError> {
+    let Some(bytes) = read_optional(&sibling_wrote(path))? else {
         return Ok(());
     };
-    let text = std::str::from_utf8(&before).map_err(|_| refused(id, path, "file is not UTF-8"))?;
-    let after =
-        remove_keys(kind, text, &keys).map_err(|error| refused(id, path, &error.to_string()))?;
+    let text = utf8(path, &bytes)?;
+    let wrote = render(kind, Some(text), assignments).map_err(|error| annotate(path, error))?;
+    write_atomic(&sibling_wrote(path), &wrote)
+}
+
+fn sibling_bak(path: &Path) -> PathBuf {
+    sibling_named(path, ".hofund.bak")
+}
+
+fn sibling_wrote(path: &Path) -> PathBuf {
+    sibling_named(path, ".hofund.wrote")
+}
+
+fn sibling_named(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map_or_else(|| std::ffi::OsString::from("hofund"), ToOwned::to_owned);
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+fn utf8<'a>(path: &Path, bytes: &'a [u8]) -> Result<&'a str, AgentError> {
+    std::str::from_utf8(bytes)
+        .map_err(|_| AgentError::message(format!("{} is not UTF-8", path.display())))
+}
+
+fn merge_owned_keys(
+    path: &Path,
+    kind: FileKind,
+    keys: Vec<&'static str>,
+    preserve: &[PathBuf],
+    id: &str,
+) -> Result<Vec<String>, AgentError> {
+    let wrote = read_optional(&sibling_wrote(path))?
+        .ok_or_else(|| refused(id, path, "connect snapshot is missing"))?;
+    let current = read_optional(path)?;
+    let backup = read_optional(&sibling_bak(path))?;
+    if current.as_ref() == Some(&wrote) {
+        restore_exact(path, backup, preserve, id)?;
+        return Ok(Vec::new());
+    }
+    let Some(current_bytes) = current else {
+        restore_exact(path, backup, preserve, id)?;
+        return Ok(Vec::new());
+    };
+    let current_text =
+        std::str::from_utf8(&current_bytes).map_err(|_| refused(id, path, "file is not UTF-8"))?;
+    let wrote_text = std::str::from_utf8(&wrote)
+        .map_err(|_| refused(id, path, "connect snapshot is not UTF-8"))?;
+    let backup_text = match &backup {
+        Some(bytes) => {
+            Some(std::str::from_utf8(bytes).map_err(|_| refused(id, path, "backup is not UTF-8"))?)
+        }
+        None => None,
+    };
+    let mut restore = Vec::new();
+    let mut remove = Vec::new();
+    let mut warnings = Vec::new();
+    for key in keys {
+        let current_value =
+            get(kind, current_text, key).map_err(|error| refused(id, path, &error.to_string()))?;
+        let wrote_value =
+            get(kind, wrote_text, key).map_err(|error| refused(id, path, &error.to_string()))?;
+        let original = match backup_text {
+            Some(text) => {
+                get(kind, text, key).map_err(|error| refused(id, path, &error.to_string()))?
+            }
+            None => None,
+        };
+        if current_value == wrote_value {
+            match original {
+                Some(value) => restore.push(Assignment { key, value }),
+                None => remove.push(key),
+            }
+        } else {
+            warnings.push(format!(
+                "warning: {id} kept `{key}` in {}; it no longer matches the value hofund wrote",
+                path.display()
+            ));
+        }
+    }
+    if restore.is_empty() && remove.is_empty() {
+        clear_markers(path).map_err(|error| refused(id, path, &error.to_string()))?;
+        return Ok(warnings);
+    }
+    let restored = render(kind, Some(current_text), &restore)
+        .map_err(|error| refused(id, path, &error.to_string()))?;
+    let restored_text = std::str::from_utf8(&restored)
+        .map_err(|_| refused(id, path, "merged file is not UTF-8"))?;
+    let after = remove_keys(kind, restored_text, &remove)
+        .map_err(|error| refused(id, path, &error.to_string()))?;
     let remove_file = created_here(path)
         && is_empty_document(kind, &after)
             .map_err(|error| refused(id, path, &error.to_string()))?;
     if remove_file {
-        delete_file(path)?;
-    } else if before.as_slice() != after.as_slice() {
-        write_atomic(path, &after)?;
+        delete_verified(path).map_err(|error| refused(id, path, &error.to_string()))?;
+    } else {
+        write_verified(path, &after).map_err(|error| refused(id, path, &error.to_string()))?;
     }
-    clear_markers(path)?;
+    clear_markers(path).map_err(|error| refused(id, path, &error.to_string()))?;
     if remove_file {
         remove_empty_parents(path, preserve)?;
     }
+    Ok(warnings)
+}
+
+fn restore_exact(
+    path: &Path,
+    backup: Option<Vec<u8>>,
+    preserve: &[PathBuf],
+    id: &str,
+) -> Result<(), AgentError> {
+    if created_here(path) {
+        delete_verified(path).map_err(|error| refused(id, path, &error.to_string()))?;
+        clear_markers(path).map_err(|error| refused(id, path, &error.to_string()))?;
+        remove_empty_parents(path, preserve)?;
+        return Ok(());
+    }
+    let Some(bytes) = backup else {
+        return Err(refused(id, path, "connect backup is missing"));
+    };
+    write_verified(path, &bytes).map_err(|error| refused(id, path, &error.to_string()))?;
+    clear_markers(path).map_err(|error| refused(id, path, &error.to_string()))?;
     Ok(())
 }
 
