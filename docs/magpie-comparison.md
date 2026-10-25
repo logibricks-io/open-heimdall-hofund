@@ -219,7 +219,7 @@ Official references, checked 2026-10-25:
 
 | Subsystem | magpie approach | Verdict | hofund approach | Rationale |
 | --- | --- | --- | --- | --- |
-| Deployment list | `GET {root}/deployments?api-version=2022-12-01` with `api-key` and no bearer token. A refusal or an empty list tries `{base}/models`. The id is the deployment name. Non-chat ids are dropped. A failure tells the user to type the names. The list is not filtered by status. Pages follow `has_more` and `last_id`. | Adopt the two URLs, the header, and the id. | `list_deployments` does that against the v1 root from `azure_base`. Extra headers replace a header of the same name. The gateway does not call it on a schedule (row 2.9). | The data-plane list is the one an `api-key` can still read. The v1 model list is only the deployments' ids when each deployment is named after its model, so it stays the fallback. |
+| Deployment list | `GET {root}/deployments?api-version=2022-12-01` with `api-key` and no bearer token. A refusal or an empty list tries `{base}/models`. The id is the deployment name. Non-chat ids are dropped. A failure tells the user to type the names. The list is not filtered by status. Pages follow `has_more` and `last_id`. | Adopt the two URLs, the header, and the id. | `list_deployments` does that against the v1 root from `azure_base`. Extra headers replace a header of the same name. The gateway does not call it on a schedule (row 2.9). Verified with mocks only. The parity row stays Partial until it cites a CI run. | The data-plane list is the one an `api-key` can still read. The v1 model list is only the deployments' ids when each deployment is named after its model, so it stays the fallback. |
 
 ## Not in this version
 
