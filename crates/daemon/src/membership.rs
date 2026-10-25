@@ -736,7 +736,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // Paused time keeps each 20ms gap inside the 30ms idle. Five gaps still
+    // outlast the old twice-idle cutoff, including on a coarse Windows timer.
+    #[tokio::test(start_paused = true)]
     async fn an_active_body_is_not_cut_off_at_twice_the_idle() {
         let hits = Arc::new(AtomicUsize::new(0));
         let mut built = BTreeMap::new();
