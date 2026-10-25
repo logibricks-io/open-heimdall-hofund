@@ -37,6 +37,20 @@ pub enum StreamEvent {
     Unknown(UnknownEvent),
 }
 
+impl StreamEvent {
+    /// Sets the model on a start event. Other events stay as they are.
+    #[must_use]
+    pub fn with_model(self, model: &str) -> Self {
+        match self {
+            Self::MessageStart(mut event) => {
+                event.model = Some(model.to_owned());
+                Self::MessageStart(event)
+            }
+            other => other,
+        }
+    }
+}
+
 /// The turn started.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageStart {

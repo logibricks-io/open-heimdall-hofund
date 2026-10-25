@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use hofund_ir::Request;
+use hofund_ir::{Request, StreamEvent, estimate_input_tokens};
 
-pub use hofund_provider::{Completion, Provider, ProviderError, ProviderErrorKind};
+pub use hofund_provider::{Completion, CountOutcome, Provider, ProviderError, ProviderErrorKind};
 
 /// Which failures may try the next provider.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,17 +45,75 @@ impl FailoverPolicy {
     }
 }
 
+/// One provider a route may call, and the model name that provider expects.
+#[derive(Clone)]
+pub struct Hop {
+    /// The upstream.
+    pub provider: Arc<dyn Provider>,
+    /// Model name sent to `provider`. Absent keeps the caller's model name,
+    /// after a `provider/model` id is reduced to its model portion.
+    pub wire_model: Option<String>,
+}
+
 /// A model-to-upstream table.
 pub struct Router {
-    routes: BTreeMap<String, Vec<Arc<dyn Provider>>>,
+    routes: BTreeMap<String, Vec<Hop>>,
+    providers: BTreeSet<String>,
     policy: FailoverPolicy,
+}
+
+/// A counted input.
+pub struct InputCount {
+    /// Input tokens.
+    pub tokens: u64,
+    /// `true` when no upstream counted and the number is a character estimate.
+    pub estimated: bool,
+    /// Provider that counted, when one did.
+    pub upstream_id: String,
+}
+
+struct Resolved {
+    hops: Vec<Hop>,
+    /// Name sent when a hop has no wire model.
+    bare: String,
 }
 
 impl Router {
     /// Builds a router. An empty list for a model is the same as no route.
+    ///
+    /// Each provider is called with the model name the client sent.
     #[must_use]
     pub fn new(routes: BTreeMap<String, Vec<Arc<dyn Provider>>>, policy: FailoverPolicy) -> Self {
-        Self { routes, policy }
+        let routes = routes
+            .into_iter()
+            .map(|(model, providers)| {
+                let hops = providers
+                    .into_iter()
+                    .map(|provider| Hop {
+                        provider,
+                        wire_model: None,
+                    })
+                    .collect();
+                (model, hops)
+            })
+            .collect();
+        Self::from_hops(routes, policy)
+    }
+
+    /// Builds a router from hops that may rename the model per provider.
+    #[must_use]
+    pub fn from_hops(routes: BTreeMap<String, Vec<Hop>>, policy: FailoverPolicy) -> Self {
+        let mut providers = BTreeSet::new();
+        for hops in routes.values() {
+            for hop in hops {
+                providers.insert(hop.provider.id().to_owned());
+            }
+        }
+        Self {
+            routes,
+            providers,
+            policy,
+        }
     }
 
     /// Model names that have at least one upstream, in order.
@@ -71,48 +129,44 @@ impl Router {
     /// Runs `request` against the upstreams configured for its model.
     ///
     /// `inbound_protocol` is forwarded to each provider so an adapter can
-    /// tell a same-protocol passthrough from a translation.
+    /// tell a same-protocol passthrough from a translation. The reply's model
+    /// is the name the client sent. Each hop may send a different name upstream.
     ///
     /// # Errors
     ///
     /// Returns [`RouterError::NoRoute`] when the model has no upstream.
-    /// Returns [`RouterError::Upstream`] when every allowed attempt failed,
-    /// or when a failure is not one the policy retries.
+    /// Returns [`RouterError::Ambiguous`] when a bare model name is served by
+    /// more than one provider. Returns [`RouterError::Upstream`] when every
+    /// allowed attempt failed, or when a failure is not one the policy retries.
     pub async fn dispatch(
         &self,
         request: Request,
         inbound_protocol: &str,
     ) -> Result<Routed, RouterError> {
-        let Some(providers) = self
-            .routes
-            .get(&request.model)
-            .filter(|list| !list.is_empty())
-            .cloned()
-        else {
-            return Err(RouterError::NoRoute {
-                model: request.model,
-            });
-        };
+        let asked = request.model.clone();
+        let resolved = self.resolve(&asked)?;
         let policy = self.policy.clone();
         let mut last = None;
-        for provider in &providers {
-            let result = match provider.execute(request.clone(), inbound_protocol).await {
+        for hop in &resolved.hops {
+            let mut attempt = request.clone();
+            apply_wire(&mut attempt, hop, &resolved.bare);
+            let result = match hop.provider.execute(attempt, inbound_protocol).await {
                 Ok(completion) => accept(completion).await,
                 Err(error) => Err(error),
             };
             match result {
                 Ok(completion) => {
                     return Ok(Routed {
-                        upstream_id: provider.id().to_owned(),
-                        completion,
+                        upstream_id: hop.provider.id().to_owned(),
+                        completion: label_model(completion, asked),
                     });
                 }
                 Err(error) if policy.allows(&error) => {
-                    last = Some((provider.id().to_owned(), error));
+                    last = Some((hop.provider.id().to_owned(), error));
                 }
                 Err(error) => {
                     return Err(RouterError::Upstream {
-                        upstream_id: provider.id().to_owned(),
+                        upstream_id: hop.provider.id().to_owned(),
                         error,
                     });
                 }
@@ -120,9 +174,132 @@ impl Router {
         }
         match last {
             Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
-            None => Err(RouterError::NoRoute {
-                model: request.model,
+            None => Err(self.missing(&request.model)),
+        }
+    }
+
+    /// Counts input tokens for `request`.
+    ///
+    /// An upstream that has a count endpoint is asked, with the same failover
+    /// rules as [`Self::dispatch`]. When every asked upstream has no count
+    /// endpoint, the result is a character estimate and [`InputCount::estimated`]
+    /// is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouterError::NoRoute`] or [`RouterError::Ambiguous`] for the
+    /// same model names as [`Self::dispatch`]. Returns [`RouterError::Upstream`]
+    /// when an upstream rejects the count and no later upstream can be tried.
+    pub async fn count(
+        &self,
+        request: Request,
+        inbound_protocol: &str,
+    ) -> Result<InputCount, RouterError> {
+        let resolved = self.resolve(&request.model)?;
+        let policy = self.policy.clone();
+        let mut last = None;
+        let mut unsupported = false;
+        for hop in &resolved.hops {
+            let mut attempt = request.clone();
+            apply_wire(&mut attempt, hop, &resolved.bare);
+            match hop.provider.count_input(attempt, inbound_protocol).await {
+                Ok(CountOutcome::Counted(tokens)) => {
+                    return Ok(InputCount {
+                        tokens,
+                        estimated: false,
+                        upstream_id: hop.provider.id().to_owned(),
+                    });
+                }
+                Ok(CountOutcome::Unsupported) => unsupported = true,
+                Err(error) if policy.allows(&error) => {
+                    last = Some((hop.provider.id().to_owned(), error));
+                }
+                Err(error) => {
+                    return Err(RouterError::Upstream {
+                        upstream_id: hop.provider.id().to_owned(),
+                        error,
+                    });
+                }
+            }
+        }
+        if unsupported {
+            return Ok(InputCount {
+                tokens: estimate_input_tokens(&request),
+                estimated: true,
+                upstream_id: String::new(),
+            });
+        }
+        match last {
+            Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
+            None => Err(self.missing(&request.model)),
+        }
+    }
+
+    fn resolve(&self, asked: &str) -> Result<Resolved, RouterError> {
+        if let Some(hops) = self.routes.get(asked).filter(|hops| !hops.is_empty()) {
+            return Ok(Resolved {
+                hops: hops.clone(),
+                bare: asked.to_owned(),
+            });
+        }
+        if let Some((provider_id, model)) = asked.split_once('/')
+            && self.providers.contains(provider_id)
+        {
+            let found = self.matching(|route_model, hop| {
+                hop.provider.id() == provider_id
+                    && (route_model == model || hop.wire_model.as_deref() == Some(model))
+            });
+            return self.one(asked, model, found);
+        }
+        let found = self.matching(|_, hop| hop.wire_model.as_deref() == Some(asked));
+        let bare = found
+            .first()
+            .and_then(|(_, hop)| hop.wire_model.clone())
+            .unwrap_or_else(|| asked.to_owned());
+        self.one(asked, &bare, found)
+    }
+
+    fn matching(&self, mut pred: impl FnMut(&str, &Hop) -> bool) -> Vec<(String, Hop)> {
+        let mut found = Vec::new();
+        for (route_model, hops) in &self.routes {
+            for hop in hops {
+                if pred(route_model, hop) {
+                    found.push((route_model.clone(), hop.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    fn one(
+        &self,
+        asked: &str,
+        bare: &str,
+        found: Vec<(String, Hop)>,
+    ) -> Result<Resolved, RouterError> {
+        match found.len() {
+            0 => Err(self.missing(asked)),
+            1 => Ok(Resolved {
+                hops: vec![found.into_iter().next().expect("one hop").1],
+                bare: bare.to_owned(),
             }),
+            _ => Err(RouterError::Ambiguous {
+                model: asked.to_owned(),
+                candidates: candidates(&found),
+            }),
+        }
+    }
+
+    fn missing(&self, model: &str) -> RouterError {
+        let routes = self.models().join(", ");
+        let detail = if routes.is_empty() {
+            String::new()
+        } else {
+            format!(". Routes: {routes}")
+        };
+        RouterError::NoRoute {
+            model: model.to_owned(),
+            detail,
         }
     }
 }
@@ -140,10 +317,20 @@ pub struct Routed {
 #[derive(Debug, thiserror::Error)]
 pub enum RouterError {
     /// No upstream is configured for the model.
-    #[error("no upstream is configured for model `{model}`")]
+    #[error("no upstream is configured for model `{model}`{detail}")]
     NoRoute {
         /// The requested model.
         model: String,
+        /// Route names, when any exist. Empty when the table is empty.
+        detail: String,
+    },
+    /// More than one provider serves this model name.
+    #[error("model `{model}` is served by more than one provider: {candidates}")]
+    Ambiguous {
+        /// The requested model.
+        model: String,
+        /// `provider/route` names, comma-separated.
+        candidates: String,
     },
     /// The upstreams that were tried failed.
     #[error("upstream `{upstream_id}` failed: {error}")]
@@ -153,6 +340,32 @@ pub enum RouterError {
         /// Its error.
         error: ProviderError,
     },
+}
+
+fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {
+    request.model = hop.wire_model.clone().unwrap_or_else(|| bare.to_owned());
+}
+
+fn candidates(found: &[(String, Hop)]) -> String {
+    found
+        .iter()
+        .map(|(route, hop)| format!("{}/{}", hop.provider.id(), route))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn label_model(completion: Completion, model: String) -> Completion {
+    match completion {
+        Completion::Unary(mut response) => {
+            response.model = Some(model);
+            Completion::Unary(response)
+        }
+        Completion::Stream(stream) => {
+            let labeled =
+                stream.map(move |item| item.map(|event: StreamEvent| event.with_model(&model)));
+            Completion::Stream(Box::pin(labeled))
+        }
+    }
 }
 
 async fn accept(completion: Completion) -> Result<Completion, ProviderError> {

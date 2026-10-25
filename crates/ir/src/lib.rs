@@ -12,6 +12,8 @@
 
 mod assemble;
 mod content;
+mod effort;
+mod estimate;
 mod extensions;
 mod message;
 mod params;
@@ -26,6 +28,8 @@ pub use content::{
     ContentPart, ImageDetail, ImagePart, ImageSource, TextPart, ThinkingPart, ToolArguments,
     ToolCallPart, ToolResultPart, UnknownPart,
 };
+pub use effort::Effort;
+pub use estimate::estimate_input_tokens;
 pub use extensions::Extensions;
 pub use message::{Message, Role};
 pub use params::GenerationParams;

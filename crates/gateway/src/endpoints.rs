@@ -36,6 +36,17 @@ pub(crate) struct GenerateRoute {
     pub key: &'static str,
 }
 
+/// Parses `/v1beta/models/{model}:countTokens`.
+pub(crate) fn match_count(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/v1beta/models/")?;
+    let encoded = rest.strip_suffix(":countTokens")?;
+    let model = percent_decode(encoded);
+    if model.is_empty() || model.contains('/') {
+        return None;
+    }
+    Some(model)
+}
+
 /// Parses `/v1beta/models/{model}:generateContent` and the stream method.
 pub(crate) fn match_generate(path: &str) -> Option<GenerateRoute> {
     let rest = path.strip_prefix("/v1beta/models/")?;

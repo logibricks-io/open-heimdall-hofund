@@ -5,11 +5,15 @@ This document compares every user-facing capability of
 hofund, the Rust rewrite. Each row cites a source path in each repository.
 
 - **magpie snapshot:** `641b121` (shallow clone, October 2026).
-- **hofund snapshot:** `main` at `695860d` ("Keep later agent edits on disconnect and honor a rotated token", #10).
-  Hofund line citations below were checked against that commit on 2026-10-25.
-  [#9](https://github.com/logibricks-io/open-heimdall-hofund/pull/9) is `ac6325a` and
-  [#10](https://github.com/logibricks-io/open-heimdall-hofund/pull/10) is `695860d`.
-  Both are on this snapshot. Rows they finish are Done and cite the code on `main`.
+- **hofund snapshot:** `main` at `77167f8` ("Record the magpie feature-parity matrix and two-stage roadmap", #11).
+  Hofund line citations below were checked against that commit on 2026-10-25,
+  except rows 1.5, 1.14, 1.20, and 2.13. Those four cite this change
+  ([#12](https://github.com/logibricks-io/open-heimdall-hofund/pull/12)), which
+  is not on `77167f8` by itself.
+  [#9](https://github.com/logibricks-io/open-heimdall-hofund/pull/9) is `ac6325a`,
+  [#10](https://github.com/logibricks-io/open-heimdall-hofund/pull/10) is `695860d`,
+  and [#11](https://github.com/logibricks-io/open-heimdall-hofund/pull/11) is `77167f8`.
+  Rows #9 and #10 finish are Done and cite the code on `main`.
 - **Goal:** rebuild every core magpie capability in Rust and do each one better.
   Copy designs that are good, stable, and efficient. Redesign the parts that are unsound.
   `docs/magpie-comparison.md` records each adopt-or-redesign verdict.
@@ -37,9 +41,9 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 | Status | Rows |
 | --- | --- |
-| Done | 20 |
-| Partial | 19 |
-| Missing | 115 |
+| Done | 24 |
+| Partial | 18 |
+| Missing | 112 |
 | Total counted | 154 |
 | Not planned (not counted) | 1 |
 
@@ -75,6 +79,11 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 9. **Release pipeline.** cargo-dist builds 5 targets plus a universal2 macOS binary,
    with checksums and optional signing (`dist-workspace.toml`, `.github/workflows/release*.yml`).
    That is reproducible from CI.
+10. **Per-upstream model names and reasoning effort.** Each route member names
+    the model it sends (`crates/config/src/lib.rs:98`). Effort is one enum on
+    the request (`crates/ir/src/effort.rs:16`), mapped by each codec. Token
+    counts ask a Messages upstream and otherwise return an estimate
+    (`crates/gateway/src/lib.rs:319`).
 
 ## Matrix
 
@@ -85,8 +94,8 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | 1.1 | OpenAI Chat Completions endpoint `/v1/chat/completions` | `internal/gateway/chat.go`; `ref.md:1880` | core | Done | `crates/codec/src/openai_chat.rs:51` (`include_usage`) | Streamed Chat requests set `stream_options.include_usage`, so the upstream reports usage. Next: golden stream tests per vendor. |
 | 1.2 | OpenAI Responses endpoint `/v1/responses` (SSE) | `internal/gateway/responses.go`; `ref.md:1882` | core | Done | `crates/codec/src/openai_responses.rs` | Streams emit `output_text.done` and `content_part.done`, put `id` and `content` on `output_item.done`, put the full `output` array on `response.completed`, and set `sequence_number` on every event. |
 | 1.3 | Anthropic Messages endpoint `/v1/messages` | `internal/gateway/anthropic.go`; `ref.md:1883` | core | Done | `crates/codec/src/anthropic.rs`; `crates/provider/src/http.rs` | Usage is on `message_start`. `content_block_stop` comes before a single `message_delta`. Message ids start with `msg_`. Extension fields pass through only when the inbound and outbound protocols match, so `metadata.user_id` and `cache_control` do not cross protocols. |
-| 1.4 | Gemini `generateContent` and `streamGenerateContent` | `internal/gateway/gemini.go`; `ref.md:1885` | core | Done | `crates/codec/src/generative.rs`; `crates/gateway/src/endpoints.rs` | Keep. Add `countTokens` (row 1.5). |
-| 1.5 | Token counting: `/v1/messages/count_tokens` and Gemini `:countTokens` | `ref.md:1884-1885` | core | Missing | none | Forward to the upstream when it supports counting. Otherwise estimate with a tokenizer chosen by model family and mark the result as an estimate. |
+| 1.4 | Gemini `generateContent` and `streamGenerateContent` | `internal/gateway/gemini.go`; `ref.md:1885` | core | Done | `crates/codec/src/generative.rs`; `crates/gateway/src/endpoints.rs` | Keep. Token counting is row 1.5. |
+| 1.5 | Token counting: `/v1/messages/count_tokens` and Gemini `:countTokens` | `ref.md:1884-1885` | core | Done | `crates/gateway/src/lib.rs:139` and `:319`; `crates/gateway/src/endpoints.rs:40` (`match_count`); `crates/provider/src/anthropic.rs:53` | A Messages upstream is asked to count. 404, 405, 501, and a 400 whose message says the endpoint is unsupported become an estimate of `ceil(chars/4)` with `estimated: true` (`crates/ir/src/estimate.rs:14`). A bad image or an unsupported tool stays an error. Counts do not write usage rows. This is not a model-family tokenizer; the catalog is not shipped. |
 | 1.6 | Model list `/v1/models` and `/v1beta/models`, with reasoning levels and context sizes | `ref.md:1887`, `ref.md:1890` | core | Partial | `crates/gateway/src/lib.rs:198` (ids only) | Add context window, output limit, modalities and reasoning levels from the model catalog (row 2.8). |
 | 1.7 | Codex model catalog `/v1/codex/models` | `internal/gateway/codex_catalog.go`; `ref.md:1888` | core | Missing | none | Render from the same catalog as row 1.6, in one codec-side formatter. |
 | 1.8 | Ollama-compatible listing `/api/version`, `/api/tags`, `/api/show` | `internal/gateway/ollama.go`; `ref.md:1889` | auxiliary | Missing | none | Low cost. Add as an optional listing codec. |
@@ -95,13 +104,13 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | 1.11 | Routes without the `/v1` prefix and behind a path-prefixed reverse proxy | `ref.md:1864-1866` | auxiliary | Missing | `crates/gateway/src/lib.rs:127` | Add a configurable base path. Never guess from headers. |
 | 1.12 | Cross-protocol translation with tools, reasoning and images | `internal/gateway/ir.go`, `chat_tool_shape.go`, `image_input.go` | core | Done | `crates/ir/src/content.rs`; `crates/codec` | Already better (hub IR). Add a translation conformance suite over every pair. |
 | 1.13 | Streaming with flow control | `internal/gateway/sse.go`, `whole_stream.go` | core | Done | `crates/provider/src/stream.rs` | Already better (backpressure). |
-| 1.14 | Reasoning effort mapped between wires (`effort`, `reasoning_effort`, `thinking.budget_tokens`) | `internal/gateway/wire_effort.go`, `effort_update.go`; `ref.md:1291` | core | Missing | `crates/ir` holds thinking parts only; no effort field | Add an IR effort enum with one mapping table per codec. Clamp to the levels the model catalog lists. |
+| 1.14 | Reasoning effort mapped between wires (`effort`, `reasoning_effort`, `thinking.budget_tokens`) | `internal/gateway/wire_effort.go`, `effort_update.go`; `ref.md:1291` | core | Done | `crates/ir/src/effort.rs:16`; `crates/ir/src/params.rs:42` | One enum on the request, not a process-global thread map. Same-protocol encode keeps the caller's field. Chat and Responses write `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Messages writes `output_config.effort` (`minimal` as `low`) and `thinking.type = disabled` when the caller asked for no reasoning. Generative Language writes `thinkingLevel`, folding `xhigh` and `max` to `high`, and `thinkingBudget: 0` for no reasoning. Levels are not clamped to a model. `budget_tokens` is not mapped. Level tables checked 2026-10-25. |
 | 1.15 | Prompt cache handling (Anthropic `cache_control`, cache stays on one account) | `internal/gateway/claude_cache.go`; `ref.md:1600-1616` | core | Partial | cache tokens are parsed in `crates/codec/src/*.rs` but not stored | Same-protocol requests keep `cache_control` on the extension bag. A different outbound protocol drops it. Store cache tokens (row 9.2) and keep a session on one upstream (row 4.6). |
 | 1.16 | Context compaction for Codex (native and summary) | `internal/gateway/native_compaction.go`, `compacting.go`; `internal/codexsummary` | auxiliary | Missing | none | Pass native compaction through. Add summary compaction only behind a flag. |
 | 1.17 | Vendor JSON-schema fixes for tools | `internal/gateway/deepseek_schema.go`, `kimi_schema.go`, `grok_schema.go`, `oneof_schema.go` | auxiliary | Partial | `crates/quirks/src/lib.rs` (5 rules, none for schemas) | Add schema-rewrite quirk rules as data, with one fixture per vendor. |
 | 1.18 | `max_tokens` default when a client omits it | `internal/gateway/maxoutput.go`; `ref.md:1420` | core | Done | `crates/quirks/src/lib.rs` (`DefaultMaxTokens`) | Take the default from the model's output limit in the catalog instead of a fixed number. |
 | 1.19 | Tool-call repair: text tool calls, undeclared tools, tool loop guard | `internal/gateway/textcalls.go`, `undeclared_tools.go`, `loop_guard.go`, `tool_loop.go` | auxiliary | Missing | none | Add as opt-in quirk rules, with metrics for how often each one fires. |
-| 1.20 | Bare model ids and `provider/model` names | `internal/gateway/unknown_model.go`; `internal/provider/bare.go`; `ref.md:1924` | core | Partial | `crates/router/src/lib.rs:88` (exact model name only) | Accept `provider/model`, a route alias, or a bare id that exactly one provider serves. Give a clear error naming candidates otherwise. |
+| 1.20 | Bare model ids and `provider/model` names | `internal/gateway/unknown_model.go`; `internal/provider/bare.go`; `ref.md:1924` | core | Done | `crates/router/src/lib.rs:141` (`dispatch`), `:238` (`resolve`), `:286` (`Ambiguous`) | The exact route name wins. `provider/model` selects that hop. A bare wire name works only when exactly one hop has it. Several hops is HTTP 400 and names the candidates. An unknown name is HTTP 404. |
 | 1.21 | CORS for browser clients | `internal/gateway/cors.go` | auxiliary | Missing | none | Off by default. Allow listed origins only. |
 
 ### 2. Upstream providers and models
@@ -120,7 +129,7 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | 2.10 | Provider test and endpoint detection | `internal/provider/test.go`, `detect.go`; `internal/probelog` | core | Missing | none | Add `hofund provider test <id>`, which sends a minimal request per protocol and logs it like any other request. |
 | 2.11 | Custom headers and User-Agent per provider | `internal/provider/authheader.go`, `user_agent.go`; `ref.md:340` | core | Done | `crates/config/src/lib.rs` (`headers`) | Keep. |
 | 2.12 | Several keys per provider, with rotation and per-key rest | `internal/provider/keys.go`; `ref.md:1560` | core | Missing | `crates/config/src/lib.rs` (one `api_key`) | Model keys as router members, so all routing strategies apply to keys too. |
-| 2.13 | Model alias and wire name (the name a client sends differs from the vendor's) | `internal/provider/usagealias.go`, `rename.go`; `ref.md:1367` | core | Missing | `crates/config/src/lib.rs:89` (`Route` maps a model to provider ids; the model name is sent unchanged) | Let each route member name its own upstream model: `upstreams = [{provider, model}]`. This is what makes cross-vendor failover work. |
+| 2.13 | Model alias and wire name (the name a client sends differs from the vendor's) | `internal/provider/usagealias.go`, `rename.go`; `ref.md:1367` | core | Done | `crates/config/src/lib.rs:89` (`Route`) and `:98` (`Upstream`) | Each route member may name the model sent upstream. A string upstream still sends the client model unchanged. The reply model is rewritten to the name the client sent. This is the route's wire name, separate from a usage-statistics alias. |
 | 2.14 | Model spec: context window, output limit, vision, reasoning levels | `internal/provider/modelspec.go`; `ref.md:1291` | core | Missing | none | Store the spec in the catalog (row 2.8) and use it in routing and quirks. |
 | 2.15 | Hide deprecated and retired models; disable a model | `internal/provider/retired.go`; `internal/gateway/disabled.go` | core | Missing | none | Add flags in the catalog. |
 | 2.16 | Extra body fields per provider or model | `internal/provider/extrabody.go` | auxiliary | Missing | none | A `set` and `unset` quirk rule with JSON-pointer paths. |
@@ -315,27 +324,28 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 ## Top 10 gaps
 
-Ranked by how much each one blocks real daily use.
+Ranked by how much each one blocks real daily use. Model names per upstream
+(row 2.13), `provider/model` and bare ids (row 1.20), reasoning effort
+(row 1.14), and token counts (row 1.5) are Done in pull request #12 and are
+not listed here. The v0.1 blockers on `main` (`ac6325a` #9, `695860d` #10)
+are not gaps either: stream event order (rows 1.1 to 1.3), field leakage
+across protocols (row 1.3), edits kept on disconnect (row 5.2), token
+rotation (row 10.3), `--help` and `examples/hofund.toml` (row 11.1), and
+constant-time `x-api-key` (row 10.2).
 
-1. **Model name per upstream (row 2.13).** The v0.1 blockers are on `main`
-   (`ac6325a` #9, `695860d` #10) and are no longer gaps: stream event order
-   (rows 1.1 to 1.3), field leakage across protocols (row 1.3), edits kept on
-   disconnect (row 5.2), token rotation (row 10.3), `--help` and
-   `examples/hofund.toml` (row 11.1), and constant-time `x-api-key` (row 10.2).
-   Without a per-upstream model name, failover between vendors that name a
-   model differently is impossible. That is the main reason to run a router.
-2. **Usage cost and cache tokens (rows 9.2, 9.3, 9.5).** These are what users look at every day.
-3. **Routing strategies, stickiness and cooldown (rows 4.5 to 4.7).** Prompt-cache stickiness
+1. **Usage cost and cache tokens (rows 9.2, 9.3, 9.5).** These are what users look at every day.
+2. **Routing strategies, stickiness and cooldown (rows 4.5 to 4.7).** Prompt-cache stickiness
    and backoff decide both cost and reliability.
-4. **Provider presets, model catalog and live model lists (rows 2.7 to 2.9, 2.14).**
+3. **Provider presets, model catalog and live model lists (rows 2.7 to 2.9, 2.14).**
    Every routing, pricing and UI feature depends on these.
-5. **Upstreams: Gemini, Vertex, Bedrock and Azure (rows 2.3 to 2.6).**
-6. **Named gateway keys, LAN and TLS (rows 10.4, 10.5, 10.7).** Constant-time `x-api-key` (row 10.2) is on `main`.
-7. **Hot reload, CLI config editing and a local management API (rows 11.2, 11.5, 12.3).**
+4. **Upstreams: Gemini, Vertex, Bedrock and Azure (rows 2.3 to 2.6).**
+5. **Named gateway keys, LAN and TLS (rows 10.4, 10.5, 10.7).** Constant-time `x-api-key` (row 10.2) is on `main`.
+6. **Hot reload, CLI config editing and a local management API (rows 11.2, 11.5, 12.3).**
    The UI is blocked on these. `GET /health` (row 12.4) is only the status body.
-8. **Subscriptions and quota windows (rows 3.1, 3.3, 3.8).** This is magpie's most used feature.
-9. **More agent adapters, profiles and per-agent model setting (rows 5.1, 5.5, 5.6).**
-10. **Reasoning effort and token counts (rows 1.14, 1.5).** Effort is not mapped across wires, and neither count endpoint exists.
+7. **Subscriptions and quota windows (rows 3.1, 3.3, 3.8).** This is magpie's most used feature.
+8. **More agent adapters, profiles and per-agent model setting (rows 5.1, 5.5, 5.6).**
+9. **Several keys per provider (row 2.12).** Config holds one `api_key`. Keys should be router members so every strategy applies to them.
+10. **Terminal UI (row 15.3).** It is stage 1. The first pull request is `docs/tui-design.md`. The UI is a client of the management API in item 6.
 
 ## Phase plan
 
@@ -348,7 +358,7 @@ A phase pull request updates the rows it touches.
 | Phase | Scope (rows) | PRs | Outcome |
 | --- | --- | --- | --- |
 | 0 | v0.1 blockers: 1.1, 1.2, 1.3, 5.2, 10.3, 11.1, and `x-api-key` from 10.2 | #9 (`ac6325a`) and #10 (`695860d`), merged | Real agents work end to end through hofund. |
-| 1 | Model name per upstream (2.13), `provider/model` and bare ids (1.20), effort mapping (1.14), `count_tokens` (1.5) | 1 to 2 | Cross-vendor failover works. |
+| 1 | Model name per upstream (2.13), `provider/model` and bare ids (1.20), effort mapping (1.14), `count_tokens` (1.5) | #12 | A route member names its upstream model. An ambiguous wire name is an error. Effort and counts are mapped. |
 | 2 | Ledger schema v2: cache and reasoning tokens, agent, session id, time to first byte (9.1, 9.2, 9.5, 9.9) and a richer `usage` command (9.4) | 1 | Accurate usage. |
 | 3 | Model catalog (2.8, 2.14, 2.15), provider presets as data (2.7), cost with stored prices (9.3), model metadata in `/v1/models` (1.6) | 2 | Cost in USD, plus presets and catalog data. |
 | 4 | Routing tree: named and nested groups (4.3), `Strategy` trait with order, weight, round-robin and least used (4.5), session stickiness (4.6), circuit breaker and `Retry-After` (4.7), several keys per provider (2.12) | 2 | Load balancing and cache-aware routing. |

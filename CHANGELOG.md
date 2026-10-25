@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auxiliary`) and the hofund status of that row.
 - `docs/roadmap.md` records the two-stage plan. The terminal UI and every
   subscription capability, including the Claude bridge, are stage 1.
+- A route member may name the model sent to that provider:
+  `upstreams = [{ provider = "...", model = "..." }]`. A string is still a
+  provider id.
+- Clients may call a route by its name, by `provider/model`, or by a wire
+  model that exactly one provider serves. A wire model served by several
+  providers is an error that names the candidates.
+- `GenerationParams.effort` maps reasoning effort across Chat Completions,
+  Responses, Messages, and Generative Language.
+- `POST /v1/messages/count_tokens` and
+  `POST /v1beta/models/{model}:countTokens`. A Messages upstream is asked to
+  count. Otherwise the body is a character estimate with `estimated` set.
 - `GET /health` returns `{"status":"ok"}` with no authentication and no secrets.
 - `hofund --help`, `-h`, and `help` print usage for each command.
 - `examples/hofund.toml` documents `[[providers]]` and `[[routes]]`.

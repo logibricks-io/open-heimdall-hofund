@@ -15,7 +15,7 @@ use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 pub use hofund_gateway::Running;
 use hofund_provider::{Anthropic, Endpoint, OpenAiCompat, OpenAiProtocol, Provider};
 use hofund_quirks::named;
-use hofund_router::{FailoverPolicy, Router};
+use hofund_router::{FailoverPolicy, Hop, Router};
 use hofund_secrets::{TokenFile, resolve};
 use hofund_usage::Ledger;
 
@@ -192,14 +192,17 @@ fn router(config: &Config) -> Result<Router, DaemonError> {
     let mut routes = BTreeMap::new();
     for route in &config.routes {
         let mut list = Vec::new();
-        for id in &route.upstreams {
-            let provider = built.get(id).ok_or_else(|| {
+        for upstream in &route.upstreams {
+            let provider = built.get(&upstream.provider).ok_or_else(|| {
                 DaemonError::new(format!(
-                    "route `{}` names unknown provider `{id}`",
-                    route.model
+                    "route `{}` names unknown provider `{}`",
+                    route.model, upstream.provider
                 ))
             })?;
-            list.push(Arc::clone(provider));
+            list.push(Hop {
+                provider: Arc::clone(provider),
+                wire_model: upstream.model.clone(),
+            });
         }
         routes.insert(route.model.clone(), list);
     }
@@ -207,7 +210,7 @@ fn router(config: &Config) -> Result<Router, DaemonError> {
         connect_errors: config.failover.connect_errors,
         statuses: config.failover.statuses.clone(),
     };
-    Ok(Router::new(routes, policy))
+    Ok(Router::from_hops(routes, policy))
 }
 
 fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, DaemonError> {

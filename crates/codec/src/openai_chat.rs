@@ -7,11 +7,11 @@
 use std::collections::BTreeSet;
 
 use hofund_ir::{
-    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Extensions, GenerationParams,
-    ImageDetail, ImagePart, ImageSource, Message, MessageDelta, MessageStart, MessageStop, Ping,
-    Request, Response, Role, Stop, StopReason, StreamEvent, TextDelta, TextPart, ThinkingDelta,
-    Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice, ToolChoiceMode,
-    ToolResultPart, UnknownEvent, UnknownPart, Usage,
+    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Effort, Extensions,
+    GenerationParams, ImageDetail, ImagePart, ImageSource, Message, MessageDelta, MessageStart,
+    MessageStop, Ping, Request, Response, Role, Stop, StopReason, StreamEvent, TextDelta, TextPart,
+    ThinkingDelta, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
+    ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
 };
 use serde_json::Value;
 
@@ -489,6 +489,10 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
     };
     let max_completion = take_u64(&mut object, "max_completion_tokens")?;
     let max_tokens = take_u64(&mut object, "max_tokens")?;
+    let effort = object
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .and_then(Effort::from_label);
     let params = GenerationParams {
         max_tokens: max_completion.or(max_tokens),
         temperature: take_f64(&mut object, "temperature")?,
@@ -497,6 +501,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         seed: take_i64(&mut object, "seed")?,
         presence_penalty: take_f64(&mut object, "presence_penalty")?,
         frequency_penalty: take_f64(&mut object, "frequency_penalty")?,
+        effort,
         ..GenerationParams::default()
     };
     let stream = take_bool(&mut object, "stream")?.unwrap_or(false);
@@ -562,9 +567,23 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     if request.stream {
         object.insert("stream".to_owned(), Value::Bool(true));
     }
+    write_chat_effort(&mut object, request);
     request.extensions.merge_into(&mut object);
     request.params.extensions.merge_into(&mut object);
     to_bytes(&Value::Object(object))
+}
+
+fn write_chat_effort(object: &mut Object, request: &Request) {
+    let Some(effort) = request.params.effort else {
+        return;
+    };
+    if request.extensions.get("reasoning_effort").is_some() {
+        return;
+    }
+    object.insert(
+        "reasoning_effort".to_owned(),
+        Value::String(effort.openai_label().to_owned()),
+    );
 }
 
 fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> {

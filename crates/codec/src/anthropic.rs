@@ -7,11 +7,11 @@
 use std::collections::BTreeSet;
 
 use hofund_ir::{
-    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Extensions, GenerationParams,
-    ImagePart, ImageSource, Message, MessageDelta, MessageStart, MessageStop, Ping, Request,
-    Response, Role, SignatureDelta, Stop, StopReason, StreamEvent, TextDelta, TextPart,
-    ThinkingDelta, ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
-    ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
+    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Effort, Extensions,
+    GenerationParams, ImagePart, ImageSource, Message, MessageDelta, MessageStart, MessageStop,
+    Ping, Request, Response, Role, SignatureDelta, Stop, StopReason, StreamEvent, TextDelta,
+    TextPart, ThinkingDelta, ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart,
+    ToolChoice, ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
 };
 use serde_json::Value;
 
@@ -122,6 +122,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         top_p: take_f64(&mut object, "top_p")?,
         top_k: take_u64(&mut object, "top_k")?,
         stop: take_string_list(&mut object, "stop_sequences")?,
+        effort: messages_effort(&object),
         ..GenerationParams::default()
     };
     let stream = take_bool(&mut object, "stream")?.unwrap_or(false);
@@ -180,9 +181,51 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     if request.stream {
         object.insert("stream".to_owned(), Value::Bool(true));
     }
+    write_messages_effort(&mut object, request);
     request.extensions.merge_into(&mut object);
     request.params.extensions.merge_into(&mut object);
     to_bytes(&Value::Object(object))
+}
+
+fn messages_effort(object: &Object) -> Option<Effort> {
+    if let Some(label) = object
+        .get("output_config")
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)
+        && let Some(effort) = Effort::from_label(label)
+    {
+        return Some(effort);
+    }
+    let disabled = object
+        .get("thinking")
+        .and_then(Value::as_object)
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        == Some("disabled");
+    disabled.then_some(Effort::None)
+}
+
+fn write_messages_effort(object: &mut Object, request: &Request) {
+    let Some(effort) = request.params.effort else {
+        return;
+    };
+    if request.extensions.get("output_config").is_some()
+        || request.extensions.get("thinking").is_some()
+    {
+        return;
+    }
+    if effort == Effort::None {
+        object.insert(
+            "thinking".to_owned(),
+            serde_json::json!({"type": "disabled"}),
+        );
+        return;
+    }
+    object.insert(
+        "output_config".to_owned(),
+        serde_json::json!({"effort": effort.messages_label()}),
+    );
 }
 
 fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> {

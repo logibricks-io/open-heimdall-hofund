@@ -3,7 +3,8 @@
 use futures_util::StreamExt;
 use hofund_ir::{ContentPart, Message, Request, Role, StreamEvent};
 use hofund_provider::{
-    Anthropic, Completion, Endpoint, OpenAiCompat, OpenAiProtocol, Provider, ProviderErrorKind,
+    Anthropic, Completion, CountOutcome, Endpoint, OpenAiCompat, OpenAiProtocol, Provider,
+    ProviderErrorKind,
 };
 use hofund_quirks::named;
 use serde_json::{Value, json};
@@ -414,6 +415,40 @@ async fn chat_stream_sets_include_usage_and_drops_foreign_fields() {
         same_body["metadata"]["user_id"],
         json!("device-should-not-leak")
     );
+}
+
+#[tokio::test]
+async fn messages_count_is_forwarded_and_a_missing_endpoint_is_unsupported() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 17})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut endpoint = Endpoint::new("primary", server.uri());
+    endpoint.api_key = "secret".to_owned();
+    let provider = Anthropic::new(endpoint).expect("provider");
+    let mut request = user_request(false);
+    request.params.max_tokens = Some(16);
+    let counted = provider
+        .count_input(request.clone(), "anthropic-messages")
+        .await
+        .expect("count");
+    assert!(matches!(counted, CountOutcome::Counted(17)));
+
+    let missing = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+        .mount(&missing)
+        .await;
+    let provider = Anthropic::new(Endpoint::new("backup", missing.uri())).expect("provider");
+    let outcome = provider
+        .count_input(request, "anthropic-messages")
+        .await
+        .expect("missing");
+    assert!(matches!(outcome, CountOutcome::Unsupported));
 }
 
 async fn event_has_created(completion: Completion) -> bool {

@@ -34,11 +34,37 @@ pub enum Completion {
     Stream(Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>),
 }
 
+/// The result of asking an upstream to count input tokens.
+pub enum CountOutcome {
+    /// The upstream counted `input_tokens`.
+    Counted(u64),
+    /// This upstream has no count endpoint.
+    Unsupported,
+}
+
 /// One upstream endpoint.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Stable id for routes and usage rows.
     fn id(&self) -> &str;
+
+    /// Counts input tokens for `request`.
+    ///
+    /// The default is [`CountOutcome::Unsupported`]. An adapter that has a
+    /// count endpoint overrides this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the upstream rejects the count for a
+    /// reason other than "this endpoint does not exist".
+    async fn count_input(
+        &self,
+        request: Request,
+        inbound_protocol: &str,
+    ) -> Result<CountOutcome, ProviderError> {
+        let _ = (request, inbound_protocol);
+        Ok(CountOutcome::Unsupported)
+    }
 
     /// Executes `request`.
     ///
