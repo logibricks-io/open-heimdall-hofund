@@ -19,7 +19,8 @@
 //!
 //! - Claude Code: `~/.claude/settings.json` (`CLAUDE_CONFIG_DIR` replaces that
 //!   directory). `env.ANTHROPIC_BASE_URL` is the gateway origin and
-//!   `env.ANTHROPIC_AUTH_TOKEN` is the bearer token.
+//!   `env.ANTHROPIC_AUTH_TOKEN` is the bearer token. Opus, Sonnet, and Haiku
+//!   tier env vars follow the selected model.
 //!   <https://code.claude.com/docs/en/settings>,
 //!   <https://code.claude.com/docs/en/llm-gateway-connect>,
 //!   <https://code.claude.com/docs/en/env-vars>.
@@ -28,15 +29,16 @@
 //!   `/v1`, and `experimental_bearer_token`.
 //!   <https://developers.openai.com/codex/config-reference>.
 //! - Gemini CLI: `~/.gemini/settings.json` and `~/.gemini/.env`
-//!   (`GEMINI_CLI_HOME` is the parent of `.gemini`).
+//!   (`GEMINI_CLI_HOME` is the parent of `.gemini`). The model is `model.name`.
 //!   <https://geminicli.com/docs/reference/configuration/>,
 //!   <https://geminicli.com/docs/get-started/authentication/>,
 //!   and the auth-type source in
 //!   <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.ts>.
 //! - OpenCode: `~/.config/opencode/opencode.json` (or `opencode.jsonc` when
 //!   that file already exists), `provider.hofund` with npm
-//!   `@ai-sdk/openai-compatible`. `XDG_CONFIG_HOME` replaces `~/.config` when
-//!   it is set. <https://opencode.ai/docs/config/>,
+//!   `@ai-sdk/openai-compatible`. `models` lists the gateway routes.
+//!   `XDG_CONFIG_HOME` replaces `~/.config` when it is set.
+//!   <https://opencode.ai/docs/config/>,
 //!   <https://opencode.ai/docs/providers/>.
 
 use std::ffi::OsString;
@@ -67,6 +69,12 @@ pub struct GatewayTarget {
     pub base_url: String,
     /// Bearer token. Adapters write it into the agent file that tool documents.
     pub token: String,
+    /// Route model ids from the gateway config, in file order.
+    ///
+    /// OpenCode's `models` object has one entry per id. Gemini CLI and Claude
+    /// Code use the id only when this list has one entry and the tool has no
+    /// model yet.
+    pub models: Vec<String>,
 }
 
 /// The home directory and optional path overrides an adapter reads.

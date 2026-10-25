@@ -19,7 +19,14 @@ fn target() -> GatewayTarget {
     GatewayTarget {
         base_url: "http://127.0.0.1:3425/".to_owned(),
         token: "local-token".to_owned(),
+        models: Vec::new(),
     }
+}
+
+fn target_with(models: &[&str]) -> GatewayTarget {
+    let mut gateway = target();
+    gateway.models = models.iter().map(|model| (*model).to_owned()).collect();
+    gateway
 }
 
 fn write(path: &Path, bytes: &str) {
@@ -440,6 +447,145 @@ fn disconnect_keeps_a_value_the_user_changed() {
     assert!(!after.contains("127.0.0.1"), "{after}");
     assert!(!sibling(&path, ".hofund.bak").exists());
     assert!(!disconnect(adapter, &session, true).changed);
+}
+
+#[test]
+fn gemini_writes_model_name_from_the_only_route() {
+    let home = scratch();
+    let session = Session::new(&home);
+    find("gemini-cli")
+        .expect("gemini")
+        .apply(&session, &target_with(&["gemini-2.5-pro"]))
+        .expect("apply");
+    let settings = home.join(".gemini").join("settings.json");
+    let value: serde_json::Value = serde_json::from_str(&read(&settings)).expect("json");
+    assert_eq!(value["model"]["name"], "gemini-2.5-pro");
+    assert_eq!(value["model"].as_object().expect("object").len(), 1);
+    assert_eq!(
+        find("gemini-cli")
+            .expect("gemini")
+            .configured_model(&session)
+            .expect("read")
+            .as_deref(),
+        Some("gemini-2.5-pro")
+    );
+}
+
+#[test]
+fn gemini_moves_a_string_model_and_keeps_an_existing_name() {
+    let home = scratch();
+    let settings = home.join(".gemini").join("settings.json");
+    write(&settings, "{\n  \"model\": \"gemini-2.5-flash\"\n}\n");
+    let session = Session::new(&home);
+    let adapter = find("gemini-cli").expect("gemini");
+    adapter
+        .apply(&session, &target_with(&["other-route"]))
+        .expect("apply");
+    let value: serde_json::Value = serde_json::from_str(&read(&settings)).expect("json");
+    assert_eq!(value["model"]["name"], "gemini-2.5-flash");
+    assert!(value["model"].as_str().is_none());
+
+    let home = scratch();
+    let settings = home.join(".gemini").join("settings.json");
+    write(
+        &settings,
+        "{\n  \"model\": { \"name\": \"kept\", \"extra\": true }\n}\n",
+    );
+    let session = Session::new(&home);
+    find("gemini-cli")
+        .expect("gemini")
+        .apply(&session, &target_with(&["gemini-2.5-pro"]))
+        .expect("apply");
+    let value: serde_json::Value = serde_json::from_str(&read(&settings)).expect("json");
+    assert_eq!(value["model"]["name"], "kept");
+    assert_eq!(value["model"]["extra"], true);
+}
+
+#[test]
+fn gemini_with_several_routes_does_not_pick_a_model() {
+    let home = scratch();
+    let session = Session::new(&home);
+    find("gemini-cli")
+        .expect("gemini")
+        .apply(&session, &target_with(&["one", "two"]))
+        .expect("apply");
+    let settings = home.join(".gemini").join("settings.json");
+    let value: serde_json::Value = serde_json::from_str(&read(&settings)).expect("json");
+    assert!(value.get("model").is_none());
+}
+
+#[test]
+fn opencode_lists_each_route_without_invented_catalog_fields() {
+    let home = scratch();
+    let session = Session::new(&home);
+    find("opencode")
+        .expect("opencode")
+        .apply(&session, &target_with(&["alpha", "beta", "alpha"]))
+        .expect("apply");
+    let json = home.join(".config").join("opencode").join("opencode.json");
+    let value: serde_json::Value = serde_json::from_str(&read(&json)).expect("json");
+    let models = value["provider"]["hofund"]["models"]
+        .as_object()
+        .expect("models");
+    assert_eq!(models.len(), 2);
+    for id in ["alpha", "beta"] {
+        assert_eq!(models[id]["name"], id);
+        assert!(
+            models[id]["variants"]
+                .as_object()
+                .expect("variants")
+                .is_empty()
+        );
+        assert!(models[id].get("modalities").is_none());
+        assert!(models[id].get("limit").is_none());
+        assert!(models[id].get("reasoning").is_none());
+    }
+}
+
+#[test]
+fn claude_writes_tier_models_and_leaves_subagent_and_effort_unset() {
+    let home = scratch();
+    let session = Session::new(&home);
+    find("claude-code")
+        .expect("claude")
+        .apply(&session, &target_with(&["route-a"]))
+        .expect("apply");
+    let path = home.join(".claude").join("settings.json");
+    let value: serde_json::Value = serde_json::from_str(&read(&path)).expect("json");
+    assert_eq!(value["model"], "route-a");
+    let env = &value["env"];
+    for key in [
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+    ] {
+        assert_eq!(env[key], "route-a", "{key}");
+    }
+    assert!(env.get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_none());
+    assert!(env.get("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
+    assert!(env.get("CLAUDE_CODE_EFFORT_LEVEL").is_none());
+    assert!(value.get("effortLevel").is_none());
+
+    let home = scratch();
+    let path = home.join(".claude").join("settings.json");
+    write(&path, "{\n  \"model\": \"claude-fable-5\"\n}\n");
+    let session = Session::new(&home);
+    find("claude-code")
+        .expect("claude")
+        .apply(&session, &target_with(&["route-a", "route-b"]))
+        .expect("apply");
+    let value: serde_json::Value = serde_json::from_str(&read(&path)).expect("json");
+    assert_eq!(value["model"], "claude-fable-5");
+    assert_eq!(
+        value["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+        "claude-fable-5"
+    );
+    assert_eq!(
+        value["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
+        "claude-fable-5"
+    );
+    assert!(value["env"].get("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
 }
 
 #[test]
