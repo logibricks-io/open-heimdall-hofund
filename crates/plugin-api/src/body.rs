@@ -4,7 +4,7 @@ use std::fmt;
 use std::pin::Pin;
 
 use bytes::Bytes;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 
 use crate::error::PluginError;
 
@@ -94,6 +94,18 @@ impl BodyStream {
     pub fn from_bytes(bytes: impl Into<Bytes>) -> Self {
         let chunk = bytes.into();
         Self::from_stream(futures_util::stream::once(async move { Ok(chunk) }))
+    }
+
+    /// `chunk`, then whatever `rest` had not yet yielded.
+    ///
+    /// The router uses this after peeking the first raw chunk so a failure
+    /// before that chunk can fail over, and a success still delivers the chunk.
+    #[must_use]
+    pub fn resume(chunk: Bytes, rest: Self) -> Self {
+        let head = futures_util::stream::once(async move { Ok(chunk) });
+        Self {
+            inner: Box::pin(head.chain(rest.inner)),
+        }
     }
 
     /// The next chunk, if the stream has one.

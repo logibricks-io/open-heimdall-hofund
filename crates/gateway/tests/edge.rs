@@ -15,7 +15,10 @@ use hofund_ir::{
     ContentPart, Extensions, Message, Request as ModelRequest, Response, Role, StreamEvent,
     TextDelta,
 };
-use hofund_router::{Completion, FailoverPolicy, Provider, ProviderError, Router};
+use hofund_router::{
+    Completion, FailoverPolicy, Member, MemberId, MemberKey, PluginError, PresetId, Router,
+    Snapshot,
+};
 use hofund_usage::Ledger;
 use tower::ServiceExt;
 
@@ -118,26 +121,35 @@ impl StreamEncoder for PlainEncoder {
 }
 
 struct Fake {
-    id: &'static str,
+    route_id: &'static str,
+    member_id: MemberId,
     hits: Arc<AtomicUsize>,
     fail: Option<u16>,
     stream: bool,
 }
 
 #[async_trait]
-impl Provider for Fake {
-    fn id(&self) -> &str {
-        self.id
+impl Member for Fake {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        self.route_id
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
     }
 
     async fn execute(
         &self,
         request: ModelRequest,
         _inbound_protocol: &str,
-    ) -> Result<Completion, ProviderError> {
+    ) -> Result<Completion, PluginError> {
         self.hits.fetch_add(1, Ordering::SeqCst);
         if let Some(status) = self.fail {
-            return Err(ProviderError::status(status, "nope"));
+            return Err(PluginError::status_error(status, "nope"));
         }
         if request.stream || self.stream {
             let event = StreamEvent::TextDelta(TextDelta {
@@ -153,20 +165,27 @@ impl Provider for Fake {
     }
 }
 
-fn gateway(providers: Vec<Arc<dyn Provider>>, token: &str) -> axum::Router {
-    gateway_with(providers, token, false)
+fn member_id(id: &'static str) -> MemberId {
+    MemberId::from_preset(
+        PresetId::try_from(id).expect("preset"),
+        MemberKey::from_static("row"),
+    )
 }
 
-fn gateway_with(providers: Vec<Arc<dyn Provider>>, token: &str, generative: bool) -> axum::Router {
+fn gateway(members: Vec<Arc<dyn Member>>, token: &str) -> axum::Router {
+    gateway_with(members, token, false)
+}
+
+fn gateway_with(members: Vec<Arc<dyn Member>>, token: &str, generative: bool) -> axum::Router {
     let dir = std::env::temp_dir().join(format!(
         "hofund-edge-{}-{}-{generative}",
         std::process::id(),
-        providers.len()
+        members.len()
     ));
     let _ = std::fs::create_dir_all(&dir);
     let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
-    routes.insert("demo".to_owned(), providers);
+    routes.insert("demo".to_owned(), members);
     let mut codecs = HashMap::new();
     codecs.insert("/v1/plain".to_owned(), Arc::new(Plain) as Arc<dyn Codec>);
     if generative {
@@ -177,7 +196,7 @@ fn gateway_with(providers: Vec<Arc<dyn Provider>>, token: &str, generative: bool
         codecs.insert(GENERATIVE_STREAM.to_owned(), Arc::new(GenerativeLanguage));
     }
     Gateway::new(
-        Router::new(routes, FailoverPolicy::default()),
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
         token.to_owned(),
         codecs,
         usage,
@@ -185,9 +204,10 @@ fn gateway_with(providers: Vec<Arc<dyn Provider>>, token: &str, generative: bool
     .into_router()
 }
 
-fn fake(id: &'static str, hits: &Arc<AtomicUsize>, fail: Option<u16>) -> Arc<dyn Provider> {
+fn fake(id: &'static str, hits: &Arc<AtomicUsize>, fail: Option<u16>) -> Arc<dyn Member> {
     Arc::new(Fake {
-        id,
+        route_id: id,
+        member_id: member_id(id),
         hits: Arc::clone(hits),
         fail,
         stream: false,
@@ -249,7 +269,8 @@ async fn a_stream_is_pulled_and_a_client_error_does_not_fail_over() {
     let app = gateway(
         vec![
             Arc::new(Fake {
-                id: "primary",
+                route_id: "primary",
+                member_id: member_id("primary"),
                 hits: Arc::new(AtomicUsize::new(0)),
                 fail: None,
                 stream: true,
@@ -261,6 +282,7 @@ async fn a_stream_is_pulled_and_a_client_error_does_not_fail_over() {
     let (status, body) = call(app, Some("secret"), r#"{"model":"demo","stream":true}"#).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("data: hi"));
+    assert!(!body.contains("event: error"));
     assert_eq!(second.load(Ordering::SeqCst), 0);
 
     let backup = Arc::new(AtomicUsize::new(0));
@@ -424,7 +446,7 @@ async fn a_replaced_token_file_is_read_on_the_next_request() {
     let mut codecs = HashMap::new();
     codecs.insert("/v1/plain".to_owned(), Arc::new(Plain) as Arc<dyn Codec>);
     let app = Gateway::with_token_file(
-        Router::new(routes, FailoverPolicy::default()),
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
         "first".to_owned(),
         token_path.clone(),
         codecs,
@@ -458,7 +480,7 @@ async fn a_rejected_body_records_the_model_it_named() {
     let mut codecs = HashMap::new();
     codecs.insert("/v1/plain".to_owned(), Arc::new(Plain) as Arc<dyn Codec>);
     let app = Gateway::new(
-        Router::new(routes, FailoverPolicy::default()),
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
         "secret".to_owned(),
         codecs,
         Arc::clone(&usage),
@@ -471,6 +493,56 @@ async fn a_rejected_body_records_the_model_it_named() {
     assert_eq!(rows[0].model, "gpt-demo");
     assert_eq!(rows[0].status, "400");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+struct ThenFail {
+    member_id: MemberId,
+}
+
+#[async_trait]
+impl Member for ThenFail {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, PluginError> {
+        let event = StreamEvent::TextDelta(TextDelta {
+            index: 0,
+            text: "hi".to_owned(),
+            extensions: Extensions::new(),
+        });
+        Ok(Completion::Stream(Box::pin(stream::iter(vec![
+            Ok(event),
+            Err(PluginError::status_error(502, "mid-stream")),
+        ]))))
+    }
+}
+
+#[tokio::test]
+async fn a_stream_error_after_an_event_is_an_error_frame() {
+    let app = gateway(
+        vec![Arc::new(ThenFail {
+            member_id: member_id("primary"),
+        })],
+        "secret",
+    );
+    let (status, body) = call(app, Some("secret"), r#"{"model":"demo","stream":true}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("data: hi"), "{body}");
+    assert!(body.contains("event: error"), "{body}");
+    assert!(body.contains("mid-stream"), "{body}");
 }
 
 async fn call_with(

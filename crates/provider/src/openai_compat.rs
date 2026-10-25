@@ -254,12 +254,12 @@ mod tests {
             .execute(say("newmaker.model-1"), "openai-chat")
             .await
             .expect("retry");
-        assert!(matches!(first, Completion::Unary(_)));
+        assert!(matches!(first, Completion::Raw(_)));
         let second = provider
             .execute(say("newmaker.model-1"), "openai-chat")
             .await
             .expect("remembered");
-        assert!(matches!(second, Completion::Unary(_)));
+        assert!(matches!(second, Completion::Raw(_)));
         let requests = server.received_requests().await.expect("requests");
         assert!(requests.iter().all(|request| {
             request

@@ -122,6 +122,19 @@ pub trait Codec: Send + Sync {
         self.stream_encoder()
     }
 
+    /// Encodes a stream error as an SSE event, not a clean end of stream.
+    ///
+    /// The default frame is `event: error` and the JSON from [`Codec::encode_error`].
+    /// A stream that fails after the first event still ends with this frame.
+    fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
+        let json = self.encode_error(status, message);
+        let mut out = Vec::with_capacity(json.len() + 16);
+        out.extend_from_slice(b"event: error\ndata: ");
+        out.extend_from_slice(&json);
+        out.extend_from_slice(b"\n\n");
+        out
+    }
+
     /// Encodes an error body in this protocol's JSON shape.
     ///
     /// `status` is the HTTP status the caller will send. The returned bytes are

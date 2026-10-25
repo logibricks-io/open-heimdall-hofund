@@ -12,13 +12,18 @@ rust-version.workspace = true
 
 [dependencies]
 hofund-ir = { workspace = true }
-hofund-provider = { workspace = true }
+hofund-plugin-api = { workspace = true }
+arc-swap = "1.7.1"
+async-trait = "0.1.89"
 futures-util = "0.3.32"
+metrics = "0.24.3"
 thiserror = "2.0.21"
+tracing = "0.1.44"
 
 [dev-dependencies]
 hofund-ir = { workspace = true }
 async-trait = "0.1.89"
+bytes = "1.12.0"
 futures-util = "0.3.32"
 tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread"] }
 

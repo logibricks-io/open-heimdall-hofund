@@ -18,9 +18,11 @@ use hofund_provider::{
     Vertex, Wire, resolve,
 };
 use hofund_quirks::named;
-use hofund_router::{FailoverPolicy, Hop, Router};
+use hofund_router::{FailoverPolicy, Snapshot};
 use hofund_secrets::TokenFile;
 use hofund_usage::Ledger;
+
+mod membership;
 
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
@@ -190,7 +192,7 @@ fn token_file(path: &Path) -> Result<TokenFile, DaemonError> {
     Ok(TokenFile::new(beside(path, &config.token_file)))
 }
 
-fn router(config: &Config) -> Result<Router, DaemonError> {
+fn router(config: &Config) -> Result<Snapshot, DaemonError> {
     let built = providers(config)?;
     let caps: BTreeMap<&str, u64> = config
         .providers
@@ -205,14 +207,8 @@ fn router(config: &Config) -> Result<Router, DaemonError> {
     for route in &config.routes {
         let mut list = Vec::new();
         for upstream in &route.upstreams {
-            let provider = built.get(&upstream.provider).ok_or_else(|| {
-                DaemonError::new(format!(
-                    "route `{}` names unknown provider `{}`",
-                    route.model, upstream.provider
-                ))
-            })?;
-            list.push(Hop {
-                provider: Arc::clone(provider),
+            list.push(membership::PlannedHop {
+                provider: upstream.provider.clone(),
                 wire_model: upstream.model.clone(),
                 max_output_tokens: upstream
                     .max_output_tokens
@@ -225,10 +221,10 @@ fn router(config: &Config) -> Result<Router, DaemonError> {
         connect_errors: config.failover.connect_errors,
         statuses: config.failover.statuses.clone(),
     };
-    Ok(Router::from_hops(routes, policy))
+    membership::open(&built, routes, policy)
 }
 
-fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, DaemonError> {
+fn providers(config: &Config) -> Result<BTreeMap<String, membership::BuiltProvider>, DaemonError> {
     let mut built = BTreeMap::new();
     for provider in &config.providers {
         let planned = plan(provider)?;
@@ -248,6 +244,8 @@ fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, Dae
                 ))
             })?);
         }
+        let timeout = endpoint.timeout;
+        let protocol = protocol_of(planned.wire);
         let adapter: Arc<dyn Provider> = match planned.wire {
             Wire::Chat => {
                 Arc::new(OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).map_err(show)?)
@@ -283,9 +281,26 @@ fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, Dae
                 )
             }
         };
-        built.insert(provider.id.clone(), adapter);
+        built.insert(
+            provider.id.clone(),
+            membership::BuiltProvider {
+                adapter,
+                protocol,
+                timeout,
+            },
+        );
     }
     Ok(built)
+}
+
+fn protocol_of(wire: Wire) -> &'static str {
+    match wire {
+        Wire::Chat => "openai-chat",
+        Wire::Responses => "openai-responses",
+        Wire::Messages => "anthropic-messages",
+        Wire::Generative | Wire::Vertex => "generative-language",
+        Wire::Converse => "bedrock-converse",
+    }
 }
 
 struct Planned {

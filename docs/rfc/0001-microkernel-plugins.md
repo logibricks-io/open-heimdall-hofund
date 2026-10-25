@@ -867,6 +867,19 @@ PR B landed the seam and kept gateway behavior the same. These are the places th
 - `hofund-plugin-host` depends only on `hofund-plugin-api`. The hidden kernel module re-exports the HTTP request and response types and `expose_secret`, so the host crate does not name `http` or `secrecy`.
 - `hofund-provider` re-exports `UpstreamFactory`, `UpstreamProvider`, `SubscriptionFactory`, `Subscription`, `InboundSurface`, and the erased factories. `hofund-agent` re-exports `AgentFactory`, `AgentIntegration`, `DynAgentFactory`, `GatewayTarget`, `Plan`, `FileChange`, `DisconnectOutcome`, and `ConnectionStatus`. The existing `Provider` and `AgentAdapter` traits stay. `GatewayTarget::token` is a `SecretString`. Callers use accessors. The bytes written into agent files are the same.
 
+### PR C notes
+
+PR C puts the router on `Member` and `PluginError`. These are the places the code does not match a sentence above, and why.
+
+- `Member` also has `route_id`, `protocol`, and `count_input`. Usage rows keep the configured provider id. `MemberId`'s display form is `preset:{preset}:{key}`, which is not that id. `protocol` lets an adapter tell a same-protocol passthrough from a translation. `count_input` keeps token-count routes on the same member list. The plugin trait is still not named by the router.
+- The daemon adapts today's `Arc<dyn Provider>`, not `Arc<dyn UpstreamProvider>`. The provider trait has not moved. `ProviderError` stays in the provider crate. The daemon maps it to `PluginError`. The alias was not added.
+- The kernel deadline is the endpoint timeout (60 seconds by default). The reqwest client timeout stays at that same duration so a socket still ends when a call does not go through the daemon layer, including the provider tests.
+- Spans and metrics wrap `execute` and `count_input` (`member` span; `hofund_member_requests`, `hofund_member_errors`, `hofund_member_ttft_ms`, `hofund_member_latency_ms`, and `hofund_tokens`). `plugin.id` is empty until a plugin is the member. `list_models`, `probe`, `quota`, `refresh`, and agent `apply` are not on the daemon call path, so they are not wrapped.
+- A same-protocol body, including Converse, is `Completion::Raw`. The gateway forwards the bytes and only reads them for token counts. A protocol-level failure inside those bytes is not a `PluginError`, so the router does not fail over on it. Cross-protocol still decodes, strips extensions, and turns a leading stream failure into a status the router can fail over.
+- `BodyStream::resume` puts a peeked raw chunk back so failover can look at the first chunk and a success still delivers it.
+- `criterion` benches for decode, encode, and stream relay live in `crates/codec/benches/relay.rs` and run in CI. Magpie is not a dependency.
+- The `ArcSwap` snapshot is published at startup. A panic publishes a snapshot that omits that member. There is no cooldown timer. Config hot reload is pull request L.
+
 Quirks stay in the kernel for the whole sequence. A new `Rule` variant is a kernel pull request. Vendor behavior stays in the plugin that calls `quirks::apply` through the SDK.
 
 ### Parallel work plan

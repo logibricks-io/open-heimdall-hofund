@@ -14,12 +14,16 @@ rust-version.workspace = true
 hofund-codec = { workspace = true }
 hofund-config = { workspace = true }
 hofund-gateway = { workspace = true }
+hofund-plugin-api = { workspace = true }
 hofund-provider = { workspace = true }
 hofund-quirks = { workspace = true }
 hofund-router = { workspace = true }
 hofund-secrets = { workspace = true }
 hofund-usage = { workspace = true }
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "signal"] }
+async-trait = "0.1.89"
+futures-util = "0.3.32"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tower = "0.5.3"
 
 [lints]
 workspace = true

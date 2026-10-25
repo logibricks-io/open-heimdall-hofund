@@ -47,6 +47,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-codec",
             "hofund-config",
             "hofund-gateway",
+            "hofund-plugin-api",
             "hofund-provider",
             "hofund-quirks",
             "hofund-router",
@@ -68,7 +69,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-quirks",
         ],
         "hofund-quirks" => &["hofund-ir"],
-        "hofund-router" => &["hofund-ir", "hofund-provider"],
+        "hofund-router" => &["hofund-ir", "hofund-plugin-api"],
         "hofund-secrets" => &[],
         "hofund-usage" => &[],
         "xtask" => &[],
@@ -237,6 +238,25 @@ fn gateway_and_router_do_not_name_vendors() {
     assert!(
         violations.is_empty(),
         "vendor names belong in quirks data and provider adapters, not in gateway or router:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn router_does_not_name_plugin_host_types() {
+    let root = workspace_root();
+    let mut violations = Vec::new();
+    for path in rust_files(&root.join("crates/router")) {
+        let text = read_to_string(&path);
+        for word in ["UpstreamProvider", "HostContext"] {
+            if contains_word(&text, word) {
+                violations.push(format!("{}: {word}", relative(&root, &path)));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "the router may depend on plugin-api only for PluginError, Request, Completion, and MemberId:\n{}",
         violations.join("\n")
     );
 }

@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The router speaks `Member` and `PluginError`. The daemon adapts each
+  provider into a tower service with a kernel deadline and panic containment,
+  and publishes the route table as an `ArcSwap` snapshot at startup. A panic
+  omits that member from the next snapshot. Same-protocol responses are
+  forwarded as bytes. A stream error after the first event is the client
+  protocol's `event: error` frame. Gateway routes, status codes, and usage
+  provider ids are unchanged.
 - The plugin seam from RFC 0001 is in `hofund-plugin-api`,
   `hofund-plugin-sdk`, and `hofund-plugin-host`, plus the three test kits.
   `hofund-provider` and `hofund-agent` re-export the new traits. Gateway,

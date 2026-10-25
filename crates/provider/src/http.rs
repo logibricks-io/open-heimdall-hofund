@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
 use hofund_ir::Request;
 use hofund_quirks::Profile;
@@ -400,6 +401,10 @@ async fn finish(
         let bytes = response.bytes().await.unwrap_or_default();
         return Err(ProviderError::status(status.as_u16(), message_from(&bytes)));
     }
+    if !cross_protocol {
+        return raw_completion(response, streaming).await;
+    }
+    // Cross-protocol only. Extensions are stripped on the way back.
     if streaming {
         let events = SseEvents::new(
             response.bytes_stream(),
@@ -412,11 +417,27 @@ async fn finish(
         let mut decoded = codec
             .decode_response(&bytes)
             .map_err(|error| ProviderError::decode(error.to_string()))?;
-        if cross_protocol {
-            decoded.strip_extensions();
-        }
+        decoded.strip_extensions();
         Ok(Completion::Unary(Box::new(decoded)))
     }
+}
+
+pub(crate) async fn raw_completion(
+    response: reqwest::Response,
+    streaming: bool,
+) -> Result<Completion, ProviderError> {
+    if streaming {
+        let stream = response.bytes_stream().map(map_chunk);
+        return Ok(Completion::Raw(Box::pin(stream)));
+    }
+    let bytes = response.bytes().await.map_err(map_transport)?;
+    Ok(Completion::Raw(Box::pin(futures_util::stream::once(
+        async move { Ok(bytes) },
+    ))))
+}
+
+fn map_chunk(chunk: Result<bytes::Bytes, reqwest::Error>) -> Result<bytes::Bytes, ProviderError> {
+    chunk.map_err(map_transport)
 }
 
 /// Adapter identity used by the concrete providers.

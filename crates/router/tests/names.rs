@@ -7,11 +7,13 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use hofund_ir::{ContentPart, Message, Request, Response, Role};
 use hofund_router::{
-    Completion, CountOutcome, FailoverPolicy, Hop, Provider, ProviderError, Router, RouterError,
+    Completion, CountOutcome, FailoverPolicy, Hop, Member, MemberId, MemberKey, PluginError,
+    PresetId, Router, RouterError,
 };
 
 struct Fake {
-    id: &'static str,
+    route_id: &'static str,
+    member_id: MemberId,
     seen: Arc<Mutex<Vec<String>>>,
     count: Count,
     caps: Option<Arc<Mutex<Vec<Option<u64>>>>>,
@@ -24,21 +26,29 @@ enum Count {
 }
 
 #[async_trait]
-impl Provider for Fake {
-    fn id(&self) -> &str {
-        self.id
+impl Member for Fake {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        self.route_id
+    }
+
+    fn protocol(&self) -> &str {
+        "test"
     }
 
     async fn count_input(
         &self,
         request: Request,
         _inbound_protocol: &str,
-    ) -> Result<CountOutcome, ProviderError> {
+    ) -> Result<CountOutcome, PluginError> {
         self.seen.lock().expect("seen").push(request.model);
         match self.count {
             Count::Number(tokens) => Ok(CountOutcome::Counted(tokens)),
             Count::Missing => Ok(CountOutcome::Unsupported),
-            Count::Reject(status) => Err(ProviderError::status(status, "no")),
+            Count::Reject(status) => Err(PluginError::status_error(status, "no")),
         }
     }
 
@@ -46,13 +56,13 @@ impl Provider for Fake {
         &self,
         request: Request,
         _inbound_protocol: &str,
-    ) -> Result<Completion, ProviderError> {
+    ) -> Result<Completion, PluginError> {
         self.seen.lock().expect("seen").push(request.model.clone());
         if let Some(caps) = &self.caps {
             caps.lock().expect("caps").push(request.params.max_tokens);
         }
         if let Count::Reject(status) = self.count {
-            return Err(ProviderError::status(status, "down"));
+            return Err(PluginError::status_error(status, "down"));
         }
         let mut message = Message::new(Role::Assistant);
         message.content.push(ContentPart::text("ok"));
@@ -62,16 +72,42 @@ impl Provider for Fake {
     }
 }
 
+fn member_id(id: &'static str) -> MemberId {
+    MemberId::from_preset(
+        PresetId::try_from(id).expect("preset"),
+        MemberKey::from_static("row"),
+    )
+}
+
 fn hop(id: &'static str, wire: Option<&str>, seen: &Arc<Mutex<Vec<String>>>, count: Count) -> Hop {
     Hop {
-        provider: Arc::new(Fake {
-            id,
+        member: Arc::new(Fake {
+            route_id: id,
+            member_id: member_id(id),
             seen: Arc::clone(seen),
             count,
             caps: None,
         }),
         wire_model: wire.map(str::to_owned),
         max_output_tokens: None,
+    }
+}
+
+fn capped(
+    id: &'static str,
+    seen: &Arc<Mutex<Vec<String>>>,
+    caps: &Arc<Mutex<Vec<Option<u64>>>>,
+) -> Hop {
+    Hop {
+        member: Arc::new(Fake {
+            route_id: id,
+            member_id: member_id(id),
+            seen: Arc::clone(seen),
+            count: Count::Number(1),
+            caps: Some(Arc::clone(caps)),
+        }),
+        wire_model: None,
+        max_output_tokens: Some(8192),
     }
 }
 
@@ -87,6 +123,13 @@ fn ask(model: &str) -> Request {
     request
 }
 
+fn unary_model(completion: Completion) -> Option<String> {
+    match completion {
+        Completion::Unary(response) => response.model,
+        _ => None,
+    }
+}
+
 #[tokio::test]
 async fn a_route_sends_each_upstream_its_own_model_and_returns_the_client_name() {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -99,7 +142,7 @@ async fn a_route_sends_each_upstream_its_own_model_and_returns_the_client_name()
         ],
     );
     let routed = router(routes)
-        .dispatch(ask("demo"), "inbound")
+        .dispatch(&ask("demo"), "inbound")
         .await
         .expect("routed");
     assert_eq!(routed.upstream_id, "backup");
@@ -107,10 +150,7 @@ async fn a_route_sends_each_upstream_its_own_model_and_returns_the_client_name()
         seen.lock().expect("seen").as_slice(),
         ["upstream-a", "gpt-demo"]
     );
-    match routed.completion {
-        Completion::Unary(response) => assert_eq!(response.model.as_deref(), Some("demo")),
-        Completion::Stream(_) => panic!("unary"),
-    }
+    assert_eq!(unary_model(routed.completion).as_deref(), Some("demo"));
 }
 
 #[tokio::test]
@@ -127,16 +167,16 @@ async fn provider_model_selects_one_hop_and_a_shared_wire_name_is_an_error() {
     );
     let table = router(routes);
     let routed = table
-        .dispatch(ask("primary/demo"), "inbound")
+        .dispatch(&ask("primary/demo"), "inbound")
         .await
         .expect("one hop");
     assert_eq!(routed.upstream_id, "primary");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["shared"]);
-    match routed.completion {
-        Completion::Unary(response) => assert_eq!(response.model.as_deref(), Some("primary/demo")),
-        Completion::Stream(_) => panic!("unary"),
-    }
-    let error = match table.dispatch(ask("shared"), "inbound").await {
+    assert_eq!(
+        unary_model(routed.completion).as_deref(),
+        Some("primary/demo")
+    );
+    let error = match table.dispatch(&ask("shared"), "inbound").await {
         Ok(_) => panic!("two providers"),
         Err(error) => error,
     };
@@ -156,7 +196,7 @@ async fn a_bare_wire_name_is_used_when_one_provider_serves_it() {
         vec![hop("primary", Some("vendor-model"), &seen, Count::Missing)],
     );
     let routed = router(routes)
-        .dispatch(ask("vendor-model"), "inbound")
+        .dispatch(&ask("vendor-model"), "inbound")
         .await
         .expect("bare");
     assert_eq!(routed.upstream_id, "primary");
@@ -175,7 +215,7 @@ async fn count_uses_an_upstream_count_and_estimates_when_none_can() {
         ],
     );
     let table = router(routes);
-    let count = table.count(ask("demo"), "inbound").await.expect("count");
+    let count = table.count(&ask("demo"), "inbound").await.expect("count");
     assert_eq!(count.tokens, 17);
     assert!(!count.estimated);
     assert_eq!(count.upstream_id, "backup");
@@ -191,7 +231,7 @@ async fn count_uses_an_upstream_count_and_estimates_when_none_can() {
         vec![hop("primary", None, &seen, Count::Missing)],
     );
     let count = router(routes)
-        .count(ask("demo"), "inbound")
+        .count(&ask("demo"), "inbound")
         .await
         .expect("estimate");
     assert!(count.estimated);
@@ -202,40 +242,18 @@ async fn count_uses_an_upstream_count_and_estimates_when_none_can() {
 async fn a_hop_cap_fills_an_omitted_max_tokens_and_a_client_cap_wins() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let caps = Arc::new(Mutex::new(Vec::new()));
-    let hop = Hop {
-        provider: Arc::new(Fake {
-            id: "primary",
-            seen: Arc::clone(&seen),
-            count: Count::Number(1),
-            caps: Some(Arc::clone(&caps)),
-        }),
-        wire_model: None,
-        max_output_tokens: Some(8192),
-    };
     let mut routes = BTreeMap::new();
-    routes.insert("demo".to_owned(), vec![hop]);
+    routes.insert("demo".to_owned(), vec![capped("primary", &seen, &caps)]);
     let mut request = ask("demo");
     router(routes)
-        .dispatch(request.clone(), "inbound")
+        .dispatch(&request, "inbound")
         .await
         .expect("dispatch");
     request.params.max_tokens = Some(32);
     let mut routes = BTreeMap::new();
-    routes.insert(
-        "demo".to_owned(),
-        vec![Hop {
-            provider: Arc::new(Fake {
-                id: "primary",
-                seen: Arc::clone(&seen),
-                count: Count::Number(1),
-                caps: Some(Arc::clone(&caps)),
-            }),
-            wire_model: None,
-            max_output_tokens: Some(8192),
-        }],
-    );
+    routes.insert("demo".to_owned(), vec![capped("primary", &seen, &caps)]);
     router(routes)
-        .dispatch(request, "inbound")
+        .dispatch(&request, "inbound")
         .await
         .expect("dispatch");
     assert_eq!(

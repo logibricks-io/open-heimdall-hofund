@@ -9,25 +9,37 @@ use axum::http::{Request, StatusCode};
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage};
 use hofund_gateway::{GENERATIVE_UNARY, Gateway};
 use hofund_ir::Request as ModelRequest;
-use hofund_router::{Completion, CountOutcome, FailoverPolicy, Provider, ProviderError, Router};
+use hofund_router::{
+    Completion, CountOutcome, FailoverPolicy, Member, MemberId, MemberKey, PluginError, PresetId,
+    Router, Snapshot,
+};
 use hofund_usage::Ledger;
 use tower::ServiceExt;
 
 struct Counter {
+    member_id: MemberId,
     tokens: Option<u64>,
 }
 
 #[async_trait]
-impl Provider for Counter {
-    fn id(&self) -> &str {
+impl Member for Counter {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
         "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
     }
 
     async fn count_input(
         &self,
         _request: ModelRequest,
         _inbound_protocol: &str,
-    ) -> Result<CountOutcome, ProviderError> {
+    ) -> Result<CountOutcome, PluginError> {
         match self.tokens {
             Some(tokens) => Ok(CountOutcome::Counted(tokens)),
             None => Ok(CountOutcome::Unsupported),
@@ -38,8 +50,8 @@ impl Provider for Counter {
         &self,
         _request: ModelRequest,
         _inbound_protocol: &str,
-    ) -> Result<Completion, ProviderError> {
-        Err(ProviderError::status(500, "unused"))
+    ) -> Result<Completion, PluginError> {
+        Err(PluginError::status_error(500, "unused"))
     }
 }
 
@@ -50,7 +62,13 @@ fn app(tokens: Option<u64>) -> axum::Router {
     let mut routes = BTreeMap::new();
     routes.insert(
         "demo".to_owned(),
-        vec![Arc::new(Counter { tokens }) as Arc<dyn Provider>],
+        vec![Arc::new(Counter {
+            member_id: MemberId::from_preset(
+                PresetId::from_static("primary"),
+                MemberKey::from_static("row"),
+            ),
+            tokens,
+        }) as Arc<dyn Member>],
     );
     let mut codecs = HashMap::new();
     codecs.insert(
@@ -59,7 +77,7 @@ fn app(tokens: Option<u64>) -> axum::Router {
     );
     codecs.insert(GENERATIVE_UNARY.to_owned(), Arc::new(GenerativeLanguage));
     Gateway::new(
-        Router::new(routes, FailoverPolicy::default()),
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
         "secret".to_owned(),
         codecs,
         usage,
