@@ -531,6 +531,6 @@ kernel::SchedulerBackend::fn cancel (& self , id : u64)
 kernel::SchedulerBackend::fn register (& self , name : & str , every_ms : u64 , job : Job) -> Result < u64 , PluginError >
 kernel::SchedulerBackend::fn shutdown (& self)
 kernel::SecretsBackend
-kernel::SecretsBackend::async fn get (& self , id : & str) -> Result < Option < SecretString > , PluginError >
+kernel::SecretsBackend::async fn get (& self , plugin : & PluginId , id : & str) -> Result < Option < SecretString > , PluginError >
 kernel::fn expose_secret (secret : & SecretString) -> & str
 mod kernel

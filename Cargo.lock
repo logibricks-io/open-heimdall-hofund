@@ -1711,6 +1711,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-fixture"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+]
+
+[[package]]
 name = "hofund-plugin-host"
 version = "0.1.0"
 dependencies = [
@@ -5508,8 +5515,10 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "proc-macro2",
  "serde_json",
  "syn 3.0.9",
+ "toml 0.8.2",
 ]
 
 [[package]]

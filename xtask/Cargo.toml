@@ -14,10 +14,14 @@ rust-version.workspace = true
 dist = false
 
 [dependencies]
-
-[dev-dependencies]
+proc-macro2 = "1.0.107"
 serde_json = "1.0.154"
 syn = { version = "3.0.9", features = ["full", "visit"] }
+toml = "0.8.2"
+
+[dev-dependencies]
+proc-macro2 = "1.0.107"
+serde_json = "1.0.154"
 
 [lints]
 workspace = true

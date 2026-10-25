@@ -48,12 +48,14 @@ pub trait HttpBackend: Send + Sync {
     ) -> Result<HttpResponse<BodyStream>, PluginError>;
 }
 
-/// Reads a secret by id. The handle does not cache the secret itself.
+/// Reads a secret for one plugin. The handle does not cache the secret itself.
 #[async_trait]
 #[doc(hidden)]
 pub trait SecretsBackend: Send + Sync {
-    /// The current secret, or `None` when it is unset.
-    async fn get(&self, id: &str) -> Result<Option<SecretString>, PluginError>;
+    /// The current secret for `plugin` and `id`, or `None` when it is unset.
+    ///
+    /// A secret stored for a different plugin is not returned.
+    async fn get(&self, plugin: &PluginId, id: &str) -> Result<Option<SecretString>, PluginError>;
 }
 
 /// The account store. Writes take a cross-process lock and drop the cache.
@@ -134,7 +136,11 @@ pub trait ProcessBackend: Send + Sync {
     /// or the wait fails.
     async fn wait(&self, id: u32) -> Result<i32, PluginError>;
 
-    /// Kills process `id` and reaps it.
+    /// Kills process `id` and reaps it without blocking the caller.
+    ///
+    /// Send the signal and return. Reaping happens off the caller so a stuck
+    /// child cannot stall the runtime. [`ProcessBackend::wait`] is the call
+    /// that reports the exit code.
     ///
     /// # Errors
     ///
