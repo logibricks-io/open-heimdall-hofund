@@ -14,6 +14,7 @@ mod http;
 mod openai_compat;
 mod presets;
 mod stream;
+mod vertex;
 
 pub use anthropic::Anthropic;
 pub use error::{ProviderError, ProviderErrorKind};
@@ -21,6 +22,7 @@ pub use generative::Generative;
 pub use http::{Credential, Endpoint};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
 pub use presets::{PresetError, Resolve, Resolved, Wire, catalog_commit, resolve};
+pub use vertex::Vertex;
 
 use std::pin::Pin;
 

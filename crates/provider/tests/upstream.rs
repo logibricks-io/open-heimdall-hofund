@@ -6,7 +6,7 @@ use hofund_ir::{
 };
 use hofund_provider::{
     Anthropic, Completion, CountOutcome, Credential, Endpoint, Generative, OpenAiCompat,
-    OpenAiProtocol, Provider, ProviderErrorKind,
+    OpenAiProtocol, Provider, ProviderErrorKind, Vertex,
 };
 use hofund_quirks::named;
 use serde_json::{Value, json};
@@ -801,4 +801,305 @@ async fn generative_count_reads_total_tokens_and_a_missing_method_is_unsupported
         .await
         .expect("missing");
     assert!(matches!(outcome, CountOutcome::Unsupported));
+}
+
+fn creds_file(name: &str, body: &Value) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("hofund-vertex-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("adc.json");
+    std::fs::write(&path, serde_json::to_vec(body).expect("json")).expect("write");
+    path
+}
+
+fn vertex_at(server: &MockServer, creds: &std::path::Path, impersonate: &str) -> Vertex {
+    let base = format!("{}/v1/projects/demo-project/locations/global", server.uri());
+    Vertex::with_token_endpoints(
+        Endpoint::new("vertex", base),
+        creds.display().to_string(),
+        impersonate,
+        format!("{}/token", server.uri()),
+        format!("{}/iam/v1", server.uri()),
+    )
+    .expect("vertex")
+}
+
+fn bearer(request: &wiremock::Request) -> &str {
+    request
+        .headers
+        .get("authorization")
+        .expect("authorization")
+        .to_str()
+        .expect("text")
+}
+
+#[tokio::test]
+async fn vertex_unary_mints_a_refresh_token_and_reuses_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "ya29.minted",
+            "expires_in": 3600
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/demo-project/locations/global/publishers/google/models/demo:generateContent",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "hello"}]},
+                "finishReason": "STOP"
+            }]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let creds = creds_file(
+        "refresh",
+        &json!({
+            "type": "authorized_user",
+            "client_id": "client",
+            "client_secret": "secret",
+            "refresh_token": "refresh-token"
+        }),
+    );
+    let provider = vertex_at(&server, &creds, "");
+    let completion = provider
+        .execute(user_request(false), "generative-language")
+        .await
+        .expect("call");
+    assert_eq!(text_of(completion).await, "hello");
+    provider
+        .execute(user_request(false), "generative-language")
+        .await
+        .expect("cached");
+
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 3);
+    let form = String::from_utf8(requests[0].body.clone()).expect("form");
+    assert!(form.contains("grant_type=refresh_token"), "{form}");
+    assert!(form.contains("refresh_token=refresh-token"), "{form}");
+    assert!(requests[0].headers.get("authorization").is_none());
+    assert_eq!(bearer(&requests[1]), "Bearer ya29.minted");
+    assert!(requests[1].headers.get("x-goog-api-key").is_none());
+    let body: Value = serde_json::from_slice(&requests[1].body).expect("json");
+    assert!(body.get("model").is_none());
+    assert!(body.get("stream").is_none());
+    assert_eq!(bearer(&requests[2]), "Bearer ya29.minted");
+    let _ = std::fs::remove_dir_all(creds.parent().expect("parent"));
+}
+
+#[tokio::test]
+async fn vertex_service_account_signs_a_jwt_and_streams() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "ya29.signed",
+            "expires_in": 3600
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sse = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello\"}]}}]}\n\n";
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/demo-project/locations/global/publishers/google/models/gemini-2.5-pro:streamGenerateContent",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let pem = include_str!("fixtures/vertex-sa-pkcs8.pem");
+    let creds = creds_file(
+        "sa",
+        &json!({
+            "type": "service_account",
+            "client_email": "sa@example.com",
+            "private_key": pem,
+            "private_key_id": "key-1"
+        }),
+    );
+    let provider = vertex_at(&server, &creds, "");
+    let mut request = user_request(true);
+    request.model = "gemini-2.5-pro".to_owned();
+    let completion = provider
+        .execute(request, "openai-chat")
+        .await
+        .expect("stream");
+    assert_eq!(text_of(completion).await, "hello");
+
+    let requests = server.received_requests().await.expect("requests");
+    let form = String::from_utf8(requests[0].body.clone()).expect("form");
+    assert!(
+        form.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer"),
+        "{form}"
+    );
+    assert!(form.contains("assertion=eyJ"), "{form}");
+    assert_eq!(requests[1].url.query(), Some("alt=sse"));
+    assert_eq!(bearer(&requests[1]), "Bearer ya29.signed");
+    let _ = std::fs::remove_dir_all(creds.parent().expect("parent"));
+}
+
+#[tokio::test]
+async fn vertex_impersonation_sends_the_traded_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "source-token",
+            "expires_in": 3600
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/iam/v1/projects/-/serviceAccounts/worker@example.com:generateAccessToken",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "impersonated-token",
+            "expireTime": "2026-10-25T08:00:00Z"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/demo-project/locations/global/publishers/google/models/demo:countTokens",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"totalTokens": 9})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let creds = creds_file(
+        "impersonate",
+        &json!({
+            "type": "authorized_user",
+            "client_id": "client",
+            "client_secret": "secret",
+            "refresh_token": "refresh-token"
+        }),
+    );
+    let provider = vertex_at(&server, &creds, "worker@example.com");
+    let counted = provider
+        .count_input(user_request(false), "generative-language")
+        .await
+        .expect("count");
+    assert!(matches!(counted, CountOutcome::Counted(9)));
+
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(bearer(&requests[1]), "Bearer source-token");
+    let body: Value = serde_json::from_slice(&requests[1].body).expect("iam");
+    assert_eq!(body["lifetime"], "3600s");
+    assert_eq!(bearer(&requests[2]), "Bearer impersonated-token");
+    let _ = std::fs::remove_dir_all(creds.parent().expect("parent"));
+}
+
+#[tokio::test]
+async fn vertex_impersonation_forbidden_names_the_token_creator_role() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "source-token",
+            "expires_in": 3600
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/iam/v1/projects/-/serviceAccounts/worker@example.com:generateAccessToken",
+        ))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error": {"message": "Permission denied"}
+        })))
+        .mount(&server)
+        .await;
+    let creds = creds_file(
+        "forbidden",
+        &json!({
+            "type": "authorized_user",
+            "client_id": "client",
+            "refresh_token": "refresh-token"
+        }),
+    );
+    let provider = vertex_at(&server, &creds, "worker@example.com");
+    let Err(error) = provider
+        .execute(user_request(false), "generative-language")
+        .await
+    else {
+        panic!("impersonation should have been forbidden");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("roles/iam.serviceAccountTokenCreator"),
+        "{message}"
+    );
+    assert!(message.contains("worker@example.com"), "{message}");
+    let _ = std::fs::remove_dir_all(creds.parent().expect("parent"));
+}
+
+#[tokio::test]
+async fn vertex_rejects_a_missing_file_workload_identity_and_an_api_key() {
+    let missing = std::env::temp_dir().join(format!(
+        "hofund-vertex-missing-{}-adc.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&missing);
+    let provider = Vertex::new(
+        Endpoint::new(
+            "vertex",
+            "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global",
+        ),
+        missing.display().to_string(),
+        "",
+    )
+    .expect("build");
+    let Err(error) = provider
+        .execute(user_request(false), "generative-language")
+        .await
+    else {
+        panic!("a missing credentials file should fail");
+    };
+    assert!(
+        error.to_string().contains("no Google credentials"),
+        "{error}"
+    );
+
+    let server = MockServer::start().await;
+    let creds = creds_file(
+        "wif",
+        &json!({
+            "type": "external_account",
+            "universe_domain": "googleapis.com"
+        }),
+    );
+    let provider = vertex_at(&server, &creds, "");
+    let Err(error) = provider
+        .execute(user_request(false), "generative-language")
+        .await
+    else {
+        panic!("workload identity federation should be refused");
+    };
+    assert!(
+        error.to_string().contains("workload identity federation"),
+        "{error}"
+    );
+    let mut endpoint = Endpoint::new("vertex", format!("{}/v1", server.uri()));
+    endpoint.api_key = "secret".to_owned();
+    let error = Vertex::new(endpoint, "", "").expect_err("key");
+    assert!(error.to_string().contains("not an API key"));
+    let _ = std::fs::remove_dir_all(creds.parent().expect("parent"));
 }

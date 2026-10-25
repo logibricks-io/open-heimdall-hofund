@@ -245,15 +245,41 @@ pub(crate) async fn post_json(
     url: &str,
     body: Vec<u8>,
 ) -> Result<reqwest::Response, ProviderError> {
-    upstream
+    send_json(upstream, url, body, None).await
+}
+
+pub(crate) async fn post_bearer(
+    upstream: &Upstream,
+    url: &str,
+    body: Vec<u8>,
+    bearer: &str,
+) -> Result<reqwest::Response, ProviderError> {
+    send_json(upstream, url, body, Some(bearer)).await
+}
+
+async fn send_json(
+    upstream: &Upstream,
+    url: &str,
+    body: Vec<u8>,
+    bearer: Option<&str>,
+) -> Result<reqwest::Response, ProviderError> {
+    let mut builder = upstream
         .client
         .post(url)
         .headers(upstream.headers.clone())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(map_transport)
+        .body(body);
+    if let Some(token) = bearer {
+        builder = builder.header(reqwest::header::AUTHORIZATION, bearer_header(token)?);
+    }
+    builder.send().await.map_err(map_transport)
+}
+
+fn bearer_header(token: &str) -> Result<HeaderValue, ProviderError> {
+    let mut value = HeaderValue::try_from(format!("Bearer {token}"))
+        .map_err(|_| ProviderError::decode("access token is not valid header text"))?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 pub(crate) async fn execute(
@@ -265,6 +291,31 @@ pub(crate) async fn execute(
 ) -> Result<Completion, ProviderError> {
     let url = upstream.url.clone();
     execute_at(upstream, &url, codec, request, prepare, inbound_protocol).await
+}
+
+/// Posts `request` to `url` with `bearer` in `Authorization`.
+///
+/// The header is marked sensitive. It is not taken from the map captured at
+/// [`Upstream::open`], because a minted token expires.
+pub(crate) async fn execute_bearer(
+    upstream: &Upstream,
+    url: &str,
+    codec: &dyn Codec,
+    request: Request,
+    prepare: Option<Prepare>,
+    inbound_protocol: &str,
+    bearer: &str,
+) -> Result<Completion, ProviderError> {
+    finish(
+        upstream,
+        url,
+        codec,
+        request,
+        prepare,
+        inbound_protocol,
+        Some(bearer),
+    )
+    .await
 }
 
 /// Posts `request` to `url` with the upstream's headers.
@@ -279,10 +330,31 @@ pub(crate) async fn execute_at(
     prepare: Option<Prepare>,
     inbound_protocol: &str,
 ) -> Result<Completion, ProviderError> {
+    finish(
+        upstream,
+        url,
+        codec,
+        request,
+        prepare,
+        inbound_protocol,
+        None,
+    )
+    .await
+}
+
+async fn finish(
+    upstream: &Upstream,
+    url: &str,
+    codec: &dyn Codec,
+    request: Request,
+    prepare: Option<Prepare>,
+    inbound_protocol: &str,
+    bearer: Option<&str>,
+) -> Result<Completion, ProviderError> {
     let cross_protocol = codec.id() != inbound_protocol;
     let streaming = request.stream;
     let body = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
-    let response = post_json(upstream, url, body).await?;
+    let response = send_json(upstream, url, body, bearer).await?;
     let status = response.status();
     if !status.is_success() {
         let bytes = response.bytes().await.unwrap_or_default();

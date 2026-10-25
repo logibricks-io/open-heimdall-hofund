@@ -109,7 +109,8 @@ Official references, checked 2026-10-25:
 | Key header | Chat and Responses send `Authorization: Bearer`. Azure sends `api-key`. Messages to `anthropic.com` or Bedrock sends `x-api-key` alone. Other Messages hosts send both headers. Gemini's native protocol sends `x-goog-api-key`. Vertex sends a Google token. | Adopt for the presets this build can call. | The same split, chosen from the preset id and the host. An explicit `kind` keeps the previous default: bearer for Chat and Responses, `x-api-key` for Messages. | Azure rejects a key presented as a bearer token. Bedrock rejects Messages calls that send both headers. Third-party Messages gateways disagree, which is why a preset that is neither Anthropic nor Bedrock sends both. |
 | Azure URL | Any pasted resource, deployment URL, or bare resource name is rewritten to `https://<host>/openai/v1`. Localhost is left alone. | Adopt | `azure_base` does that rewrite. There is no `api-version` query. | That is the v1 surface Azure documents, and it is the path the OpenAI adapter already appends `chat/completions` or `responses` to. |
 | Bedrock | A Bedrock API key, not SigV4. Runtime and Mantle regions are base URLs. Mantle serves some models under `/openai/v1` instead of `/v1`. | Adopt the key and the regions. Leave SigV4 and the per-model path. | Presets `bedrock` and `bedrock-mantle` resolve to those regional roots. Chat uses a bearer token. Messages uses `x-api-key`. | The API-key guide shows a bearer token. The Messages behavior matches the upstream client, which found that both headers together are rejected. SigV4 is the other official mechanism and needs the standard AWS credential chain; it is not in this change. Mantle's extra `/openai/v1` path depends on the model id, which this gateway does not choose per call yet. |
-| Vertex and a remote gateway | Vertex signs with Google credentials. A remote gateway forwards the client's own protocol. | Record them. Do not pretend an adapter exists. | Both presets are in the catalog. `resolve` returns an error that names the missing adapter. | A Chat adapter with a bearer token would send the wrong request. |
+| Vertex | Signs with Google credentials: a refresh token, a service-account JWT, or impersonation. The model is a publisher path. No API key. | Adopt the credential file and the path. Call the method the request asked for. | `preset = "google-vertex"` builds `Vertex`. See the Vertex section. | A Chat adapter with a bearer token would send the wrong request. |
+| Remote gateway | Forwards the client's own protocol. | Record it. Do not pretend an adapter exists. | Preset `remote-gateway` is in the catalog. `resolve` returns an error that names the missing adapter. | Forwarding the inbound protocol is a different adapter. |
 | Gemini preset | The Google preset's only root is the OpenAI-compatible chat URL `https://generativelanguage.googleapis.com/v1beta/openai`, and the key is a bearer token. Native `generateContent` is a separate URL a custom provider sets, with the key in `x-goog-api-key`. | Keep the compatibility root as an explicit protocol. Default the preset to the native API. | Preset `google` defaults to `https://generativelanguage.googleapis.com/v1beta` and `x-goog-api-key`. `protocol = "chat"` still uses `.../v1beta/openai` and a bearer token. | The compatibility endpoint is what the preset list records (<https://ai.google.dev/gemini-api/docs/openai>, checked 2026-10-25). The native method is what an API key for that API calls (<https://ai.google.dev/api/generate-content>, <https://ai.google.dev/gemini-api/docs/api-key>). `protocol = "chat"` keeps the recorded root without making it the default. |
 
 ## Generative Language upstream
@@ -136,6 +137,39 @@ Official references, checked 2026-10-25:
 | Subsystem | magpie approach | Verdict | hofund approach | Rationale |
 | --- | --- | --- | --- | --- |
 | Generative Language upstream | A custom provider with a Gemini URL speaks `models/{model}:streamGenerateContent` under that base. `GeminiBase` trims the URL, cuts a pasted `:generateContent`, `:streamGenerateContent`, or `/models` URL back to the root, and adds `/v1beta` when the path is empty. `GeminiPath` strips a `models/` prefix and path-escapes the model. The gateway always asks the stream method, then reassembles. `AuthHeaders` sends `x-goog-api-key` and not a bearer token. The served `:countTokens` route estimates locally and does not call upstream. Factory's generate route and Vertex's publisher path are separate. | Adopt the base, the path, and the header. Call the method the request asked for. | `kind = "generative"` and `preset = "google"` build `Generative`. The same base rules apply. A unary request posts `:generateContent`. A stream posts `:streamGenerateContent?alt=sse`. The codec's `model` and `stream` fields are removed before the POST. The API key is `x-goog-api-key` only. `count_input` posts `:countTokens` and reads `totalTokens`. A 404, 405, 501, or a 400 that says the method is missing, becomes the local estimate. `protocol = "chat"` on preset `google` stays on the compatibility root. Vertex, Code Assist, and a generate route that puts the model in the body are not this adapter. | The path and the header are what the API and the existing clients already use. Always streaming forces a unary client through a reassembly step the unary method does not need. The key stays out of the URL, so it does not land in an access log; the documented `key` query is not sent. Counting through the upstream method matches Messages. A local estimate remains the fallback when the method is absent. |
+
+## Vertex AI upstream
+
+Read from yetone/magpie `5b2b3d3f50959735403dff6b77a85eec65772218`
+(`internal/provider/vertex.go`, `internal/gateway/vertex.go` `buildVertex`).
+
+Official references, checked 2026-10-25:
+
+- Inference:
+  <https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference>.
+  The method is
+  `POST https://{host}/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent`.
+  `streamGenerateContent` with `alt=sse` is the stream form.
+- Location hosts:
+  <https://cloud.google.com/vertex-ai/generative-ai/docs/learn/locations>.
+  `global` is `aiplatform.googleapis.com`. `us` and `eu` are
+  `aiplatform.us.rep.googleapis.com` and `aiplatform.eu.rep.googleapis.com`.
+  A region is `{region}-aiplatform.googleapis.com`.
+- Application Default Credentials:
+  <https://cloud.google.com/docs/authentication/application-default-credentials>.
+  The file named by the provider, else `GOOGLE_APPLICATION_CREDENTIALS`, else
+  gcloud's `application_default_credentials.json`.
+- Service-account JWT:
+  <https://developers.google.com/identity/protocols/oauth2/service-account>.
+  RS256, scope `https://www.googleapis.com/auth/cloud-platform`, audience the
+  token endpoint `https://oauth2.googleapis.com/token`.
+- Impersonation:
+  <https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken>.
+  The body is `scope`, `lifetime` of `3600s`, and optional `delegates`.
+
+| Subsystem | magpie approach | Verdict | hofund approach | Rationale |
+| --- | --- | --- | --- | --- |
+| Vertex upstream | The gateway always posts `streamGenerateContent?alt=sse` and reassembles. `VertexWholePath` is the unary method, used by the connectivity probe. The token is minted from `authorized_user`, `service_account` (PKCS#8 or PKCS#1 RSA), or `impersonated_service_account`, then optionally traded for `impersonate`. The cache key is the file plus the impersonation email. A mint is single-flight, refreshed five minutes early, and dropped when the file's size and mtime change. `buildVertex` sends Gemini 3 a thinking level and Gemini 2.5 a budget. No metadata server, no workload identity federation, no express-mode API key, no quota-project header. | Adopt the path, the hosts, and the credential kinds. Call the method the request asked for. | `preset = "google-vertex"` requires `project`. `location` defaults to `global`. `credentials` is an absolute path or `~/...`, or empty for ADC. `impersonate` is an optional email. A unary call posts `:generateContent`. A stream posts `:streamGenerateContent?alt=sse`. `:countTokens` reads `totalTokens`. The body is the shared Generative Language encode, with `model` and `stream` removed. The bearer token is minted per cache window and is not an API key. A 403 from impersonation names `roles/iam.serviceAccountTokenCreator`. `Vertex::models_for` holds the static per-location ids. Two overlapping calls may each mint; the next call reuses the token. Vertex-specific thinking budgets and the thought-signature retry are not applied. | The publisher path is what the project is billed on. Always streaming forces a unary client through reassembly the unary method does not need. The key stays out of config so a service-account JSON is not copied into `hofund.toml`. The static model list is not a live list; serving it is row 2.9. Thinking budgets differ by model generation and belong with the connectivity probe, not with the first credential adapter. |
 
 ## Not in this version
 

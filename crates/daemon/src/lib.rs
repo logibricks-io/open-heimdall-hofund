@@ -14,8 +14,8 @@ use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 
 pub use hofund_gateway::Running;
 use hofund_provider::{
-    Anthropic, Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, Wire,
-    resolve,
+    Anthropic, Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, Vertex,
+    Wire, resolve,
 };
 use hofund_quirks::named;
 use hofund_router::{FailoverPolicy, Hop, Router};
@@ -257,6 +257,10 @@ fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, Dae
             }
             Wire::Messages => Arc::new(Anthropic::new(endpoint).map_err(show)?),
             Wire::Generative => Arc::new(Generative::new(endpoint).map_err(show)?),
+            Wire::Vertex => Arc::new(
+                Vertex::new(endpoint, &provider.credentials, &provider.impersonate)
+                    .map_err(show)?,
+            ),
         };
         built.insert(provider.id.clone(), adapter);
     }
@@ -281,6 +285,8 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
                 PresetWire::Generative => Wire::Generative,
             }),
             base_url: &provider.base_url,
+            project: &provider.project,
+            location: &provider.location,
         })
         .map_err(show)?;
         return Ok(Planned {
@@ -388,7 +394,23 @@ mod tests {
         )
         .expect("write");
         let error = check(&path).expect_err("vertex");
-        assert!(error.to_string().contains("Google credentials"));
+        assert!(
+            error.to_string().contains("Google Cloud project"),
+            "{error}"
+        );
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\nproject = \"my-project\"\n",
+        )
+        .expect("write");
+        check(&path).expect("vertex project");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\nproject = \"my-project\"\ncredentials = \"relative.json\"\n",
+        )
+        .expect("write");
+        let error = check(&path).expect_err("relative credentials");
+        assert!(error.to_string().contains("full path"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -24,6 +24,9 @@ pub enum Wire {
     Messages,
     /// `POST {base}/models/{model}:generateContent`.
     Generative,
+    /// Vertex AI publisher `generateContent`. The base includes the project
+    /// and the location. The adapter appends `publishers/google/models/{model}`.
+    Vertex,
 }
 
 /// What the caller asked the catalog to resolve.
@@ -38,6 +41,10 @@ pub struct Resolve<'a> {
     /// Caller-supplied root. Required for a preset that has no URL of its own.
     /// When the preset already has a URL, this replaces it.
     pub base_url: &'a str,
+    /// Google Cloud project id. Required for `google-vertex`. Empty otherwise.
+    pub project: &'a str,
+    /// Vertex AI location. Empty means `global`. Used by `google-vertex`.
+    pub location: &'a str,
 }
 
 /// One preset after region and protocol selection.
@@ -93,7 +100,10 @@ pub fn catalog_commit() -> &'static str {
 pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
     let catalog = catalog();
     let (preset, alias_region) = find(catalog, request.id)?;
-    if preset.id == "google-vertex" || preset.id == "remote-gateway" {
+    if preset.id == "google-vertex" {
+        return resolve_vertex(preset, request);
+    }
+    if preset.id == "remote-gateway" {
         return Err(unavailable(preset));
     }
     let region_id = request.region.or(alias_region);
@@ -176,6 +186,40 @@ fn prefer_override(catalog_url: &str, override_url: &str) -> String {
     }
 }
 
+fn resolve_vertex(preset: &Preset, request: &Resolve<'_>) -> Result<Resolved, PresetError> {
+    if let Some(region) = request.region {
+        return Err(PresetError::new(format!(
+            "preset `google-vertex` has no region `{region}`"
+        )));
+    }
+    if let Some(wire) = request.wire
+        && wire != Wire::Vertex
+    {
+        return Err(PresetError::new(format!(
+            "preset `google-vertex` has no {} endpoint",
+            wire_name(wire)
+        )));
+    }
+    let base = crate::vertex::base_url(request.project, request.location, request.base_url)
+        .map_err(|error| PresetError::new(error.to_string()))?;
+    Ok(Resolved {
+        credential: Credential::Bearer,
+        preset_id: preset.id.clone(),
+        name: preset.name.clone(),
+        wire: Wire::Vertex,
+        base_url: base,
+    })
+}
+
+/// Model ids recorded for one preset. `None` when the id is not in the catalog.
+pub(crate) fn preset_models(id: &str) -> Option<&[String]> {
+    catalog()
+        .preset
+        .iter()
+        .find(|preset| preset.id == id)
+        .map(|preset| preset.models.as_slice())
+}
+
 fn unavailable(preset: &Preset) -> PresetError {
     if preset.id == "google-vertex" {
         return PresetError::new(
@@ -197,6 +241,9 @@ fn unavailable(preset: &Preset) -> PresetError {
 }
 
 fn credential(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
+    if wire == Wire::Vertex {
+        return Credential::Bearer;
+    }
     if wire == Wire::Generative {
         return Credential::GoogApiKey;
     }
@@ -204,7 +251,7 @@ fn credential(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
     if preset_id == "azure" || azure_host(&host) {
         return match wire {
             Wire::Messages => Credential::XApiKey,
-            Wire::Chat | Wire::Responses => Credential::ApiKey,
+            Wire::Chat | Wire::Responses | Wire::Vertex => Credential::ApiKey,
             Wire::Generative => Credential::GoogApiKey,
         };
     }
@@ -288,6 +335,7 @@ fn wire_name(wire: Wire) -> &'static str {
         Wire::Responses => "responses",
         Wire::Messages => "messages",
         Wire::Generative => "generative",
+        Wire::Vertex => "vertex",
     }
 }
 
@@ -322,6 +370,7 @@ impl<'a> Endpoints<'a> {
             Wire::Responses => Some(self.responses),
             Wire::Messages => Some(self.messages),
             Wire::Generative => Some(self.generative),
+            Wire::Vertex => None,
         }
     }
 }
@@ -537,6 +586,8 @@ mod tests {
             region: None,
             wire: None,
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("openai");
         assert_eq!(openai.wire, Wire::Chat);
@@ -548,6 +599,8 @@ mod tests {
             region: None,
             wire: Some(Wire::Responses),
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("responses");
         assert_eq!(responses.wire, Wire::Responses);
@@ -558,6 +611,8 @@ mod tests {
             region: None,
             wire: None,
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("anthropic");
         assert_eq!(anthropic.wire, Wire::Messages);
@@ -569,6 +624,8 @@ mod tests {
             region: None,
             wire: Some(Wire::Messages),
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("deepseek");
         assert_eq!(deepseek.base_url, "https://api.deepseek.com/anthropic");
@@ -579,6 +636,8 @@ mod tests {
             region: Some("eu-west-1"),
             wire: Some(Wire::Messages),
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("bedrock");
         assert_eq!(
@@ -591,6 +650,8 @@ mod tests {
             region: Some("eu-west-1"),
             wire: Some(Wire::Chat),
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("bedrock chat");
         assert_eq!(
@@ -604,6 +665,8 @@ mod tests {
             region: Some("ap-southeast-2"),
             wire: Some(Wire::Responses),
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("mantle");
         assert_eq!(
@@ -616,6 +679,8 @@ mod tests {
             region: None,
             wire: None,
             base_url: "my-resource",
+            project: "",
+            location: "",
         })
         .expect("azure");
         assert_eq!(
@@ -628,6 +693,8 @@ mod tests {
             region: None,
             wire: Some(Wire::Responses),
             base_url: "https://mine.openai.azure.com/openai/deployments/demo?api-version=2024-10-21",
+            project: "",
+            location: "",
         })
         .expect("pasted");
         assert_eq!(pasted.base_url, "https://mine.openai.azure.com/openai/v1");
@@ -638,6 +705,8 @@ mod tests {
             region: None,
             wire: Some(Wire::Responses),
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("alias");
         assert_eq!(alias.preset_id, "tencent-cloud");
@@ -648,6 +717,8 @@ mod tests {
             region: Some("coding"),
             wire: Some(Wire::Responses),
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("zhipu");
         assert_eq!(zhipu.base_url, "https://open.bigmodel.cn/api/v1");
@@ -657,6 +728,8 @@ mod tests {
             region: None,
             wire: None,
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("google");
         assert_eq!(google.wire, Wire::Generative);
@@ -670,6 +743,8 @@ mod tests {
             region: None,
             wire: Some(Wire::Chat),
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect("google chat");
         assert_eq!(google_chat.wire, Wire::Chat);
@@ -679,19 +754,51 @@ mod tests {
         );
         assert_eq!(google_chat.credential, crate::Credential::Bearer);
 
+        let vertex = resolve(&Resolve {
+            id: "google-vertex",
+            region: None,
+            wire: None,
+            base_url: "",
+            project: "My-Project",
+            location: "",
+        })
+        .expect("vertex");
+        assert_eq!(vertex.wire, Wire::Vertex);
+        assert_eq!(
+            vertex.base_url,
+            "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global"
+        );
+        assert_eq!(vertex.credential, crate::Credential::Bearer);
+        let regional = resolve(&Resolve {
+            id: "google-vertex",
+            region: None,
+            wire: None,
+            base_url: "",
+            project: "my-project",
+            location: "us-central1",
+        })
+        .expect("region");
+        assert_eq!(
+            regional.base_url,
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1"
+        );
         let error = resolve(&Resolve {
             id: "google-vertex",
             region: None,
             wire: None,
             base_url: "",
+            project: "",
+            location: "",
         })
-        .expect_err("vertex");
-        assert!(error.to_string().contains("Google credentials"));
+        .expect_err("vertex project");
+        assert!(error.to_string().contains("Google Cloud project"));
         let error = resolve(&Resolve {
             id: "typesafe",
             region: None,
             wire: None,
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect_err("decide");
         assert!(error.to_string().contains("classifies"));
@@ -700,6 +807,8 @@ mod tests {
             region: None,
             wire: None,
             base_url: "",
+            project: "",
+            location: "",
         })
         .expect_err("missing");
         assert!(error.to_string().contains("unknown preset"));
