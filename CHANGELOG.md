@@ -29,12 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off at twice the endpoint timeout. Same-protocol responses are forwarded
   as bytes. The codec reads token usage across chunk boundaries. When the
   name the client asked for is the name sent upstream, the body is forwarded
-  without parsing it for a rewrite. When the names differ, only the bytes of
-  that protocol's model string are spliced, so numbers, escapes, and tool
-  arguments stay byte-exact. An event larger than 1 MiB, or one that cannot
-  be scanned, is forwarded after a literal replacement of the quoted upstream
-  model name. A partial event flushed on an upstream error takes that same
-  path, so the upstream name is not sent to the client. A leading in-band
+  without parsing it for a rewrite, and the typed response keeps the model
+  the upstream returned. When the names differ, only the bytes of that
+  protocol's model string are spliced, so numbers, escapes, and tool
+  arguments stay byte-exact, and the typed response is labelled with the
+  client name. The match is the field path, not the string value. A leading
+  BOM is stripped. An event larger than 1 MiB splices a model string found
+  in the held prefix and streams the rest. A model string not found by that
+  cap, invalid JSON, trailing garbage, two JSON values, or a partial event
+  flushed on an upstream error is forwarded unchanged and counted in
+  `hofund_model_rewrite_skipped_total`. The contract is
+  `docs/model-names.md`. A leading in-band
   failure still fails over. A later stream error is that protocol's error
   frame. Bytes still held by the rewriter are flushed and closed as an event
   first. A frame that already ends in `\r\n\r\n` or `\r\r` does not gain an

@@ -905,9 +905,8 @@ async fn held_rewriter_bytes_are_flushed_before_the_error_frame() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
-        body.starts_with("data: {\"model\":\"demo\"\n\ndata: {\"error\":"),
+        body.starts_with("data: {\"model\":\"upstream\n\ndata: {\"error\":"),
         "{body}"
     );
-    assert!(!body.contains("upstream"), "{body}");
     let _ = std::fs::remove_dir_all(dir);
 }

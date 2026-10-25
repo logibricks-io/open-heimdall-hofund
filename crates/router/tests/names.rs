@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use hofund_ir::{ContentPart, Message, Request, Response, Role};
 use hofund_plugin_api::{CountOutcome, MemberId, MemberKey, PluginError, PresetId};
 use hofund_router::{Completion, FailoverPolicy, Hop, Member, Router, RouterError};
@@ -15,6 +16,9 @@ struct Fake {
     seen: Arc<Mutex<Vec<String>>>,
     count: Count,
     caps: Option<Arc<Mutex<Vec<Option<u64>>>>>,
+    /// Model written on the typed response. `None` repeats the request model.
+    answer: Option<String>,
+    stream: bool,
 }
 
 enum Count {
@@ -64,8 +68,20 @@ impl Member for Fake {
         }
         let mut message = Message::new(Role::Assistant);
         message.content.push(ContentPart::text("ok"));
+        let model = self.answer.clone().unwrap_or(request.model);
+        if self.stream {
+            let event = hofund_ir::StreamEvent::MessageStart(hofund_ir::MessageStart {
+                id: None,
+                model: Some(model),
+                usage: None,
+                extensions: hofund_ir::Extensions::new(),
+            });
+            return Ok(Completion::Stream(Box::pin(futures_util::stream::iter([
+                Ok(event),
+            ]))));
+        }
         Ok(Completion::Unary(Box::new(
-            Response::new(message).with_model(Some(request.model)),
+            Response::new(message).with_model(Some(model)),
         )))
     }
 }
@@ -85,6 +101,8 @@ fn hop(id: &'static str, wire: Option<&str>, seen: &Arc<Mutex<Vec<String>>>, cou
             seen: Arc::clone(seen),
             count,
             caps: None,
+            answer: None,
+            stream: false,
         }),
         wire_model: wire.map(str::to_owned),
         max_output_tokens: None,
@@ -103,6 +121,8 @@ fn capped(
             seen: Arc::clone(seen),
             count: Count::Number(1),
             caps: Some(Arc::clone(caps)),
+            answer: None,
+            stream: false,
         }),
         wire_model: None,
         max_output_tokens: Some(8192),
@@ -258,4 +278,118 @@ async fn a_hop_cap_fills_an_omitted_max_tokens_and_a_client_cap_wins() {
         caps.lock().expect("caps").as_slice(),
         [Some(8192), Some(32)]
     );
+}
+
+fn answering(
+    id: &'static str,
+    wire: Option<&str>,
+    seen: &Arc<Mutex<Vec<String>>>,
+    answer: &str,
+    stream: bool,
+) -> Hop {
+    Hop {
+        member: Arc::new(Fake {
+            route_id: id,
+            member_id: member_id(id),
+            seen: Arc::clone(seen),
+            count: Count::Missing,
+            caps: None,
+            answer: Some(answer.to_owned()),
+            stream,
+        }),
+        wire_model: wire.map(str::to_owned),
+        max_output_tokens: None,
+    }
+}
+
+#[tokio::test]
+async fn a_mapped_name_is_relabelled_and_an_equal_name_keeps_the_upstream_model() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "alias".to_owned(),
+        vec![answering(
+            "primary",
+            Some("vendor-model"),
+            &seen,
+            "vendor-model-2024-08-06",
+            false,
+        )],
+    );
+    let mapped = router(routes)
+        .dispatch(&ask("alias"), "inbound")
+        .await
+        .expect("mapped");
+    assert_eq!(unary_model(mapped.completion).as_deref(), Some("alias"));
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "vendor-model".to_owned(),
+        vec![answering(
+            "primary",
+            None,
+            &seen,
+            "vendor-model-2024-08-06",
+            false,
+        )],
+    );
+    let same = router(routes)
+        .dispatch(&ask("vendor-model"), "inbound")
+        .await
+        .expect("same");
+    assert_eq!(
+        unary_model(same.completion).as_deref(),
+        Some("vendor-model-2024-08-06")
+    );
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "vendor-model".to_owned(),
+        vec![answering(
+            "primary",
+            None,
+            &seen,
+            "vendor-model-2024-08-06",
+            true,
+        )],
+    );
+    let streamed = router(routes)
+        .dispatch(&ask("vendor-model"), "inbound")
+        .await
+        .expect("stream");
+    let Completion::Stream(mut stream) = streamed.completion else {
+        panic!("stream");
+    };
+    let event = stream.next().await.expect("event").expect("ok");
+    let hofund_ir::StreamEvent::MessageStart(start) = event else {
+        panic!("start");
+    };
+    assert_eq!(start.model.as_deref(), Some("vendor-model-2024-08-06"));
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "alias".to_owned(),
+        vec![answering(
+            "primary",
+            Some("vendor-model"),
+            &seen,
+            "vendor-model-2024-08-06",
+            true,
+        )],
+    );
+    let mapped_stream = router(routes)
+        .dispatch(&ask("alias"), "inbound")
+        .await
+        .expect("mapped stream");
+    let Completion::Stream(mut stream) = mapped_stream.completion else {
+        panic!("stream");
+    };
+    let event = stream.next().await.expect("event").expect("ok");
+    let hofund_ir::StreamEvent::MessageStart(start) = event else {
+        panic!("start");
+    };
+    assert_eq!(start.model.as_deref(), Some("alias"));
 }

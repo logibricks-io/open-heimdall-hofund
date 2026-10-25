@@ -1,15 +1,18 @@
 //! Same-protocol passthrough helpers.
 //!
 //! The gateway forwards raw bytes. It asks the codec to read token usage and,
-//! when the client-requested model differs from the upstream model, to splice
-//! that protocol's model field. Equal names are copied through with no JSON
-//! parse. A differing name replaces only the bytes of the model string, so
-//! every other byte, including large integers and escape sequences, stays as
-//! the upstream sent it.
+//! when the client-requested model differs from the name sent upstream, to
+//! splice that protocol's model field. Equal names are copied through with no
+//! JSON parse, so a dated snapshot the upstream returns stays as it arrived.
+//! A differing name replaces only the bytes of the model string. The match is
+//! the field path, never the string value, so every other byte stays.
 //!
-//! An event is scanned once. More than 1 MiB, a leading BOM, or a value the
-//! scanner cannot read, is forwarded after a literal replacement of the
-//! quoted upstream model name.
+//! A leading BOM is removed and the rest is spliced on that same path. An
+//! event larger than 1 MiB is scanned once for a model string in the held
+//! prefix. When that string is complete it is spliced and the rest of the
+//! event is streamed unchanged. When it is not, or when a finished event
+//! cannot be parsed, the bytes are forwarded unchanged and
+//! `hofund_model_rewrite_skipped_total` counts the reason.
 
 use hofund_ir::{StreamEvent, Usage};
 
@@ -128,8 +131,14 @@ enum Kind {
     Undecided,
     Sse,
     Json,
-    BomSse,
-    BomJson,
+}
+
+#[derive(Clone, Copy)]
+enum Fail {
+    /// The buffer ended inside a value.
+    Incomplete,
+    /// A byte cannot be part of a JSON value.
+    Invalid,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -144,34 +153,35 @@ enum Step {
 
 struct EventBuf<'p> {
     paths: &'p [&'p [&'p str]],
-    quoted_from: Vec<u8>,
     quoted_to: Vec<u8>,
     cap: usize,
     kind: Kind,
     overflowing: bool,
+    bom_checked: bool,
     pending: Vec<u8>,
     cursor: usize,
     at_line_start: bool,
     saw_content_line: bool,
     cr_held: bool,
-    overlap: Vec<u8>,
+    /// Last few bytes already forwarded while an oversize event is streaming.
+    tail: Vec<u8>,
 }
 
 impl<'p> EventBuf<'p> {
-    fn new(paths: &'p [&'p [&'p str]], client: &str, upstream: &str, cap: usize) -> Self {
+    fn new(paths: &'p [&'p [&'p str]], client: &str, _upstream: &str, cap: usize) -> Self {
         Self {
             paths,
-            quoted_from: json_quote(upstream),
             quoted_to: json_quote(client),
             cap,
             kind: Kind::Undecided,
             overflowing: false,
+            bom_checked: false,
             pending: Vec::new(),
             cursor: 0,
             at_line_start: true,
             saw_content_line: false,
             cr_held: false,
-            overlap: Vec::new(),
+            tail: Vec::new(),
         }
     }
 
@@ -185,31 +195,33 @@ impl<'p> EventBuf<'p> {
         self.pending.extend_from_slice(chunk);
         self.classify_if_needed();
         match self.kind {
-            Kind::Sse | Kind::BomSse => self.drain_events(),
-            Kind::Json | Kind::BomJson | Kind::Undecided if self.pending.len() > self.cap => {
+            Kind::Sse => self.drain_events(),
+            Kind::Json | Kind::Undecided if self.pending.len() > self.cap => {
                 self.overflow_pending()
             }
-            Kind::Json | Kind::BomJson | Kind::Undecided => Vec::new(),
+            Kind::Json | Kind::Undecided => Vec::new(),
         }
     }
 
     fn finish(&mut self) -> Vec<u8> {
         if self.overflowing {
-            self.cr_held = false;
-            let mut tail = self.finish_literal_window();
-            if !matches!(self.kind, Kind::Json | Kind::BomJson) {
-                terminate_event(&mut tail);
-            }
             self.overflowing = false;
+            self.cr_held = false;
+            if self.kind == Kind::Json {
+                self.tail.clear();
+                self.reset_line();
+                return Vec::new();
+            }
+            let tail = self.finish_overflow_frame();
             self.reset_line();
             return tail;
         }
         self.classify_if_needed();
         let mut out = Vec::new();
-        if matches!(self.kind, Kind::Sse | Kind::BomSse) && self.finish_held_cr() {
+        if self.kind == Kind::Sse && self.finish_held_cr() {
             out.extend(self.take_ready_event());
         }
-        if matches!(self.kind, Kind::Sse | Kind::BomSse) {
+        if self.kind == Kind::Sse {
             out.extend(self.drain_events());
         }
         if self.pending.is_empty() {
@@ -218,22 +230,18 @@ impl<'p> EventBuf<'p> {
         let rest = std::mem::take(&mut self.pending);
         self.reset_line();
         match self.kind {
-            Kind::Json => out.extend(splice_document(
-                &rest,
-                self.paths,
-                &self.quoted_to,
-                &self.quoted_from,
-            )),
-            Kind::BomJson => out.extend(literal_replace(
-                &rest,
-                &self.quoted_from,
-                &self.quoted_to,
-                true,
-            )),
-            Kind::Sse | Kind::BomSse | Kind::Undecided => {
-                let mut replaced = literal_replace(&rest, &self.quoted_from, &self.quoted_to, true);
-                terminate_event(&mut replaced);
-                out.extend(replaced);
+            Kind::Json => match splice_value(&rest, self.paths, &self.quoted_to) {
+                Ok(rewritten) => out.extend(rewritten),
+                Err(reason) => {
+                    note_skip(reason);
+                    out.extend(rest);
+                }
+            },
+            Kind::Sse | Kind::Undecided => {
+                note_skip("partial");
+                let mut raw = rest;
+                terminate_event(&mut raw);
+                out.extend(raw);
             }
         }
         out
@@ -242,6 +250,16 @@ impl<'p> EventBuf<'p> {
     fn classify_if_needed(&mut self) {
         if self.kind != Kind::Undecided {
             return;
+        }
+        if !self.bom_checked {
+            match find_bom(&self.pending) {
+                Bom::NeedMore => return,
+                Bom::Absent => self.bom_checked = true,
+                Bom::At(index) => {
+                    self.pending.drain(index..index + 3);
+                    self.bom_checked = true;
+                }
+            }
         }
         if let Some(kind) = classify(&self.pending) {
             self.kind = kind;
@@ -273,44 +291,60 @@ impl<'p> EventBuf<'p> {
     }
 
     fn rewrite_event(&self, event: &[u8]) -> Vec<u8> {
-        if self.kind == Kind::BomSse {
-            return literal_replace(event, &self.quoted_from, &self.quoted_to, true);
+        match splice_sse_event(event, self.paths, &self.quoted_to) {
+            Ok(rewritten) => rewritten,
+            Err(reason) => {
+                note_skip(reason);
+                event.to_vec()
+            }
         }
-        splice_sse_event(event, self.paths, &self.quoted_to)
-            .unwrap_or_else(|| literal_replace(event, &self.quoted_from, &self.quoted_to, true))
     }
 
     fn overflow_pending(&mut self) -> Vec<u8> {
         self.overflowing = true;
         let bytes = std::mem::take(&mut self.pending);
         self.cursor = 0;
-        self.stream_literal(&bytes)
+        let limit = self.cap.min(bytes.len());
+        let out = match prefix_decision(&bytes[..limit], self.kind, self.paths, &self.quoted_to) {
+            Ok(mut rewritten) => {
+                rewritten.extend_from_slice(&bytes[limit..]);
+                rewritten
+            }
+            Err(reason) => {
+                note_skip(reason);
+                bytes
+            }
+        };
+        self.note_tail(&out);
+        out
     }
 
     fn push_overflow(&mut self, chunk: &[u8]) -> Vec<u8> {
-        if !matches!(self.kind, Kind::Sse | Kind::BomSse) {
-            return self.stream_literal(chunk);
+        if self.kind != Kind::Sse {
+            self.note_tail(chunk);
+            return chunk.to_vec();
         }
         let mut out = Vec::new();
-        let start = 0;
         let mut index = 0;
         while index < chunk.len() {
             match self.feed_one(chunk[index]) {
                 Step::Keep => index += 1,
                 Step::End => {
                     let end = index + 1;
-                    out.extend(self.stream_literal(&chunk[start..end]));
-                    out.extend(self.finish_literal_window());
+                    out.extend_from_slice(&chunk[..end]);
+                    self.note_tail(&out);
                     self.overflowing = false;
+                    self.tail.clear();
                     self.reset_line();
                     self.pending.extend_from_slice(&chunk[end..]);
                     out.extend(self.drain_events());
                     return out;
                 }
                 Step::Replay => {
-                    out.extend(self.stream_literal(&chunk[start..index]));
-                    out.extend(self.finish_literal_window());
+                    out.extend_from_slice(&chunk[..index]);
+                    self.note_tail(&out);
                     self.overflowing = false;
+                    self.tail.clear();
                     self.reset_line();
                     self.pending.extend_from_slice(&chunk[index..]);
                     out.extend(self.drain_events());
@@ -318,7 +352,8 @@ impl<'p> EventBuf<'p> {
                 }
             }
         }
-        out.extend(self.stream_literal(&chunk[start..]));
+        out.extend_from_slice(chunk);
+        self.note_tail(&out);
         out
     }
 
@@ -392,38 +427,26 @@ impl<'p> EventBuf<'p> {
         self.cr_held = false;
     }
 
-    /// Forwards `bytes`, keeping a suffix long enough that a quoted model name
-    /// split on this boundary is still replaced with the next chunk.
-    fn stream_literal(&mut self, bytes: &[u8]) -> Vec<u8> {
+    fn note_tail(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
-            return Vec::new();
+            return;
         }
-        let mut window = std::mem::take(&mut self.overlap);
-        window.extend_from_slice(bytes);
-        let needle = self.quoted_from.len();
-        if needle < 3 {
-            self.overlap.clear();
-            return window;
+        if bytes.len() >= 4 {
+            self.tail = bytes[bytes.len() - 4..].to_vec();
+            return;
         }
-        let safe = window.len().saturating_sub(needle - 1);
-        let mut out = Vec::with_capacity(window.len());
-        let mut index = 0;
-        while index < safe {
-            if window[index..].starts_with(&self.quoted_from) {
-                out.extend_from_slice(&self.quoted_to);
-                index += needle;
-            } else {
-                out.push(window[index]);
-                index += 1;
-            }
+        self.tail.extend_from_slice(bytes);
+        if self.tail.len() > 4 {
+            let extra = self.tail.len() - 4;
+            self.tail.drain(..extra);
         }
-        self.overlap = window[index..].to_vec();
-        out
     }
 
-    fn finish_literal_window(&mut self) -> Vec<u8> {
-        let window = std::mem::take(&mut self.overlap);
-        literal_replace(&window, &self.quoted_from, &self.quoted_to, true)
+    fn finish_overflow_frame(&mut self) -> Vec<u8> {
+        let mut closed = std::mem::take(&mut self.tail);
+        let before = closed.len();
+        terminate_event(&mut closed);
+        closed.split_off(before)
     }
 }
 
@@ -451,27 +474,31 @@ enum Prefix {
 
 enum Bom {
     NeedMore,
-    Absent(usize),
-    Present(usize),
+    Absent,
+    At(usize),
+}
+
+fn note_skip(reason: &'static str) {
+    metrics::counter!("hofund_model_rewrite_skipped_total", "reason" => reason).increment(1);
+    tracing::debug!(reason, "model rewrite skipped");
 }
 
 fn classify(bytes: &[u8]) -> Option<Kind> {
-    let (bom, index) = match bom_index(bytes) {
-        Bom::NeedMore => return None,
-        Bom::Absent(index) => (false, index),
-        Bom::Present(index) => (true, index),
-    };
+    let mut index = 0;
+    while index < bytes.len() && is_ws(bytes[index]) {
+        index += 1;
+    }
     if index >= bytes.len() {
         return None;
     }
     match sse_prefix(&bytes[index..]) {
         Prefix::More => None,
-        Prefix::Yes => Some(if bom { Kind::BomSse } else { Kind::Sse }),
-        Prefix::No => Some(if bom { Kind::BomJson } else { Kind::Json }),
+        Prefix::Yes => Some(Kind::Sse),
+        Prefix::No => Some(Kind::Json),
     }
 }
 
-fn bom_index(bytes: &[u8]) -> Bom {
+fn find_bom(bytes: &[u8]) -> Bom {
     let mut index = 0;
     while index < bytes.len() && is_ws(bytes[index]) {
         index += 1;
@@ -480,25 +507,18 @@ fn bom_index(bytes: &[u8]) -> Bom {
         return Bom::NeedMore;
     }
     if bytes[index] != 0xEF {
-        return Bom::Absent(index);
+        return Bom::Absent;
     }
     if bytes.len() - index < 3 {
         if [0xEF, 0xBB, 0xBF].starts_with(&bytes[index..]) {
             return Bom::NeedMore;
         }
-        return Bom::Absent(index);
+        return Bom::Absent;
     }
-    if bytes[index..index + 3] != [0xEF, 0xBB, 0xBF] {
-        return Bom::Absent(index);
-    }
-    index += 3;
-    while index < bytes.len() && is_ws(bytes[index]) {
-        index += 1;
-    }
-    if index >= bytes.len() {
-        Bom::NeedMore
+    if bytes[index..index + 3] == [0xEF, 0xBB, 0xBF] {
+        Bom::At(index)
     } else {
-        Bom::Present(index)
+        Bom::Absent
     }
 }
 
@@ -516,43 +536,118 @@ fn sse_prefix(rest: &[u8]) -> Prefix {
     Prefix::No
 }
 
-fn splice_document(bytes: &[u8], paths: &[&[&str]], replacement: &[u8], needle: &[u8]) -> Vec<u8> {
-    if bytes.is_empty() {
-        return Vec::new();
+fn splice_value(
+    bytes: &[u8],
+    paths: &[&[&str]],
+    replacement: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    if bytes.is_empty() || bytes.iter().all(|byte| is_ws(*byte)) {
+        return Ok(bytes.to_vec());
     }
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut offset = 0;
-    while offset < bytes.len() {
-        if bytes[offset..].iter().all(|byte| is_ws(*byte)) {
-            out.extend_from_slice(&bytes[offset..]);
-            break;
-        }
-        match scan_json(&bytes[offset..], paths) {
-            Ok((end, spans)) if spans.is_empty() => {
-                out.extend_from_slice(&bytes[offset..offset + end]);
-                offset += end;
-            }
-            Ok((end, spans)) => match apply_spans(&bytes[offset..offset + end], spans, replacement)
-            {
-                Some(piece) => {
-                    out.extend(piece);
-                    offset += end;
-                }
-                None => {
-                    out.extend(literal_replace(&bytes[offset..], needle, replacement, true));
-                    return out;
-                }
-            },
-            Err(()) => {
-                out.extend(literal_replace(&bytes[offset..], needle, replacement, true));
-                return out;
-            }
-        }
+    let scan = scan_prefix(bytes, paths);
+    if scan.fail.is_some() {
+        return Err("invalid_json");
     }
-    out
+    if bytes[scan.end..].iter().any(|byte| !is_ws(*byte)) {
+        return Err(trailing_reason(&bytes[scan.end..]));
+    }
+    if scan.spans.is_empty() {
+        return Ok(bytes.to_vec());
+    }
+    apply_spans(bytes, scan.spans, replacement).ok_or("split_field")
 }
 
-fn splice_sse_event(event: &[u8], paths: &[&[&str]], replacement: &[u8]) -> Option<Vec<u8>> {
+fn splice_sse_event(
+    event: &[u8],
+    paths: &[&[&str]],
+    replacement: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let Some((joined, origin)) = join_data(event) else {
+        return Ok(event.to_vec());
+    };
+    if is_done(&joined) {
+        return Ok(event.to_vec());
+    }
+    let scan = scan_prefix(&joined, paths);
+    if scan.fail.is_some() {
+        return Err("invalid_json");
+    }
+    if joined[scan.end..].iter().any(|byte| !is_ws(*byte)) {
+        return Err(trailing_reason(&joined[scan.end..]));
+    }
+    if scan.spans.is_empty() {
+        return Ok(event.to_vec());
+    }
+    let mut mapped = Vec::with_capacity(scan.spans.len());
+    for (start, stop) in scan.spans {
+        mapped.push(map_span(&origin, start, stop).ok_or("split_field")?);
+    }
+    apply_spans(event, mapped, replacement).ok_or("split_field")
+}
+
+fn prefix_decision(
+    bytes: &[u8],
+    kind: Kind,
+    paths: &[&[&str]],
+    replacement: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    if kind != Kind::Sse {
+        return json_prefix(bytes, paths, replacement);
+    }
+    let Some((joined, origin)) = join_data(bytes) else {
+        return Err("oversize");
+    };
+    let scan = scan_prefix(&joined, paths);
+    if scan.spans.is_empty() {
+        return Err(match scan.fail {
+            Some(Fail::Invalid) => "invalid_json",
+            _ => "oversize",
+        });
+    }
+    let mut mapped = Vec::with_capacity(scan.spans.len());
+    for (start, stop) in &scan.spans {
+        let Some(span) = map_span(&origin, *start, *stop) else {
+            return Err("split_field");
+        };
+        mapped.push(span);
+    }
+    apply_spans(bytes, mapped, replacement).ok_or("split_field")
+}
+
+fn json_prefix(
+    bytes: &[u8],
+    paths: &[&[&str]],
+    replacement: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let scan = scan_prefix(bytes, paths);
+    if scan.spans.is_empty() {
+        return Err(match scan.fail {
+            Some(Fail::Invalid) => "invalid_json",
+            _ => "oversize",
+        });
+    }
+    apply_spans(bytes, scan.spans, replacement).ok_or("split_field")
+}
+
+fn trailing_reason(rest: &[u8]) -> &'static str {
+    let scan = scan_prefix(rest, &[]);
+    if scan.fail.is_none() {
+        "multiple_values"
+    } else {
+        "trailing_garbage"
+    }
+}
+
+fn is_done(joined: &[u8]) -> bool {
+    let start = joined.iter().position(|byte| !is_ws(*byte)).unwrap_or(0);
+    let end = joined
+        .iter()
+        .rposition(|byte| !is_ws(*byte))
+        .map_or(start, |index| index + 1);
+    &joined[start..end] == b"[DONE]"
+}
+
+fn join_data(event: &[u8]) -> Option<(Vec<u8>, Vec<usize>)> {
     let mut joined = Vec::new();
     let mut origin = Vec::new();
     let mut saw_data = false;
@@ -572,20 +667,10 @@ fn splice_sse_event(event: &[u8], paths: &[&[&str]], replacement: &[u8]) -> Opti
         }
     }
     if !saw_data || joined.iter().all(|byte| is_ws(*byte)) {
-        return Some(event.to_vec());
+        None
+    } else {
+        Some((joined, origin))
     }
-    let (end, spans) = scan_json(&joined, paths).ok()?;
-    if joined[end..].iter().any(|byte| !is_ws(*byte)) {
-        return None;
-    }
-    if spans.is_empty() {
-        return Some(event.to_vec());
-    }
-    let mut mapped = Vec::with_capacity(spans.len());
-    for (start, stop) in spans {
-        mapped.push(map_span(&origin, start, stop)?);
-    }
-    apply_spans(event, mapped, replacement)
 }
 
 fn content_lines(event: &[u8]) -> Vec<(usize, usize)> {
@@ -661,16 +746,30 @@ fn apply_spans(
     Some(out)
 }
 
-fn scan_json(bytes: &[u8], paths: &[&[&str]]) -> Result<(usize, Vec<(usize, usize)>), ()> {
+struct PrefixScan {
+    end: usize,
+    spans: Vec<(usize, usize)>,
+    fail: Option<Fail>,
+}
+
+fn scan_prefix(bytes: &[u8], paths: &[&[&str]]) -> PrefixScan {
     let mut scanner = Scanner { bytes, index: 0 };
     scanner.skip_ws();
     if scanner.index >= bytes.len() {
-        return Err(());
+        return PrefixScan {
+            end: scanner.index,
+            spans: Vec::new(),
+            fail: Some(Fail::Incomplete),
+        };
     }
     let mut stack = Vec::new();
     let mut spans = Vec::new();
-    scanner.value(paths, &mut stack, 0, &mut spans)?;
-    Ok((scanner.index, spans))
+    let fail = scanner.value(paths, &mut stack, 0, &mut spans).err();
+    PrefixScan {
+        end: scanner.index,
+        spans,
+        fail,
+    }
 }
 
 struct Scanner<'a> {
@@ -681,6 +780,8 @@ struct Scanner<'a> {
 enum StackKey {
     Raw(usize, usize),
     Owned(String),
+    /// An array element. A model field that is an array is not a string.
+    Element,
 }
 
 impl<'a> Scanner<'a> {
@@ -696,13 +797,13 @@ impl<'a> Scanner<'a> {
         stack: &mut Vec<StackKey>,
         depth: usize,
         spans: &mut Vec<(usize, usize)>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), Fail> {
         if depth > 64 {
-            return Err(());
+            return Err(Fail::Invalid);
         }
         self.skip_ws();
         let Some(byte) = self.bytes.get(self.index).copied() else {
-            return Err(());
+            return Err(Fail::Incomplete);
         };
         match byte {
             b'{' => self.object(paths, stack, depth, spans),
@@ -718,7 +819,7 @@ impl<'a> Scanner<'a> {
             b'f' => self.literal(b"false"),
             b'n' => self.literal(b"null"),
             b'-' | b'0'..=b'9' => self.number(),
-            _ => Err(()),
+            _ => Err(Fail::Invalid),
         }
     }
 
@@ -728,13 +829,16 @@ impl<'a> Scanner<'a> {
         stack: &mut Vec<StackKey>,
         depth: usize,
         spans: &mut Vec<(usize, usize)>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), Fail> {
         self.index += 1;
         loop {
             self.skip_ws();
             if self.bytes.get(self.index) == Some(&b'}') {
                 self.index += 1;
                 return Ok(());
+            }
+            if self.index >= self.bytes.len() {
+                return Err(Fail::Incomplete);
             }
             let (start, end, escaped) = self.string_span()?;
             let key = if escaped {
@@ -743,8 +847,11 @@ impl<'a> Scanner<'a> {
                 StackKey::Raw(start + 1, end - 1)
             };
             self.skip_ws();
+            if self.index >= self.bytes.len() {
+                return Err(Fail::Incomplete);
+            }
             if self.bytes.get(self.index) != Some(&b':') {
-                return Err(());
+                return Err(Fail::Invalid);
             }
             self.index += 1;
             stack.push(key);
@@ -757,7 +864,8 @@ impl<'a> Scanner<'a> {
                     self.index += 1;
                     return Ok(());
                 }
-                _ => return Err(()),
+                Some(_) => return Err(Fail::Invalid),
+                None => return Err(Fail::Incomplete),
             }
         }
     }
@@ -768,7 +876,7 @@ impl<'a> Scanner<'a> {
         stack: &mut Vec<StackKey>,
         depth: usize,
         spans: &mut Vec<(usize, usize)>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), Fail> {
         self.index += 1;
         loop {
             self.skip_ws();
@@ -776,7 +884,12 @@ impl<'a> Scanner<'a> {
                 self.index += 1;
                 return Ok(());
             }
+            if self.index >= self.bytes.len() {
+                return Err(Fail::Incomplete);
+            }
+            stack.push(StackKey::Element);
             self.value(paths, stack, depth + 1, spans)?;
+            stack.pop();
             self.skip_ws();
             match self.bytes.get(self.index).copied() {
                 Some(b',') => self.index += 1,
@@ -784,41 +897,48 @@ impl<'a> Scanner<'a> {
                     self.index += 1;
                     return Ok(());
                 }
-                _ => return Err(()),
+                Some(_) => return Err(Fail::Invalid),
+                None => return Err(Fail::Incomplete),
             }
         }
     }
 
-    fn string_span(&mut self) -> Result<(usize, usize, bool), ()> {
+    fn string_span(&mut self) -> Result<(usize, usize, bool), Fail> {
         let start = self.index;
         if self.bytes.get(self.index) != Some(&b'"') {
-            return Err(());
+            return Err(if self.index >= self.bytes.len() {
+                Fail::Incomplete
+            } else {
+                Fail::Invalid
+            });
         }
         self.index += 1;
         let mut escaped = false;
-        while self.index < self.bytes.len() {
-            let byte = self.bytes[self.index];
+        loop {
+            let Some(byte) = self.bytes.get(self.index).copied() else {
+                return Err(Fail::Incomplete);
+            };
             if byte == b'\\' {
                 escaped = true;
                 self.index += 1;
                 let Some(mark) = self.bytes.get(self.index).copied() else {
-                    return Err(());
+                    return Err(Fail::Incomplete);
                 };
                 if mark == b'u' {
                     if self.index + 4 >= self.bytes.len() {
-                        return Err(());
+                        return Err(Fail::Incomplete);
                     }
                     if !self.bytes[self.index + 1..self.index + 5]
                         .iter()
                         .all(u8::is_ascii_hexdigit)
                     {
-                        return Err(());
+                        return Err(Fail::Invalid);
                     }
                     self.index += 5;
                     continue;
                 }
                 if !matches!(mark, b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') {
-                    return Err(());
+                    return Err(Fail::Invalid);
                 }
                 self.index += 1;
                 continue;
@@ -828,23 +948,25 @@ impl<'a> Scanner<'a> {
                 return Ok((start, self.index, escaped));
             }
             if byte < 0x20 {
-                return Err(());
+                return Err(Fail::Invalid);
             }
             self.index += 1;
         }
-        Err(())
     }
 
-    fn literal(&mut self, text: &[u8]) -> Result<(), ()> {
+    fn literal(&mut self, text: &[u8]) -> Result<(), Fail> {
         if self.bytes[self.index..].starts_with(text) {
             self.index += text.len();
-            Ok(())
+            return Ok(());
+        }
+        if text.starts_with(&self.bytes[self.index..]) {
+            Err(Fail::Incomplete)
         } else {
-            Err(())
+            Err(Fail::Invalid)
         }
     }
 
-    fn number(&mut self) -> Result<(), ()> {
+    fn number(&mut self) -> Result<(), Fail> {
         if self.bytes.get(self.index) == Some(&b'-') {
             self.index += 1;
         }
@@ -854,13 +976,18 @@ impl<'a> Scanner<'a> {
             while self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
                 self.index += 1;
             }
+        } else if self.index >= self.bytes.len() {
+            return Err(Fail::Incomplete);
         } else {
-            return Err(());
+            return Err(Fail::Invalid);
         }
         if self.bytes.get(self.index) == Some(&b'.') {
             self.index += 1;
+            if self.index >= self.bytes.len() {
+                return Err(Fail::Incomplete);
+            }
             if !self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
-                return Err(());
+                return Err(Fail::Invalid);
             }
             while self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
                 self.index += 1;
@@ -871,8 +998,11 @@ impl<'a> Scanner<'a> {
             if matches!(self.bytes.get(self.index), Some(b'+' | b'-')) {
                 self.index += 1;
             }
+            if self.index >= self.bytes.len() {
+                return Err(Fail::Incomplete);
+            }
             if !self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
-                return Err(());
+                return Err(Fail::Invalid);
             }
             while self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
                 self.index += 1;
@@ -891,11 +1021,12 @@ fn path_matches(bytes: &[u8], stack: &[StackKey], paths: &[&[&str]]) -> bool {
                 .all(|(segment, key)| match key {
                     StackKey::Raw(start, end) => &bytes[*start..*end] == segment.as_bytes(),
                     StackKey::Owned(text) => text == segment,
+                    StackKey::Element => false,
                 })
     })
 }
 
-fn decode_string(content: &[u8]) -> Result<String, ()> {
+fn decode_string(content: &[u8]) -> Result<String, Fail> {
     let mut out = String::new();
     let mut index = 0;
     while index < content.len() {
@@ -904,13 +1035,13 @@ fn decode_string(content: &[u8]) -> Result<String, ()> {
             while index < content.len() && content[index] != b'\\' {
                 index += 1;
             }
-            let text = std::str::from_utf8(&content[start..index]).map_err(|_| ())?;
+            let text = std::str::from_utf8(&content[start..index]).map_err(|_| Fail::Invalid)?;
             out.push_str(text);
             continue;
         }
         index += 1;
         let Some(mark) = content.get(index).copied() else {
-            return Err(());
+            return Err(Fail::Invalid);
         };
         match mark {
             b'"' => out.push('"'),
@@ -922,7 +1053,7 @@ fn decode_string(content: &[u8]) -> Result<String, ()> {
             b'r' => out.push('\r'),
             b't' => out.push('\t'),
             b'u' => push_unicode(content, &mut index, &mut out)?,
-            _ => return Err(()),
+            _ => return Err(Fail::Invalid),
         }
         if mark != b'u' {
             index += 1;
@@ -931,34 +1062,34 @@ fn decode_string(content: &[u8]) -> Result<String, ()> {
     Ok(out)
 }
 
-fn push_unicode(content: &[u8], index: &mut usize, out: &mut String) -> Result<(), ()> {
+fn push_unicode(content: &[u8], index: &mut usize, out: &mut String) -> Result<(), Fail> {
     *index += 1;
     let unit = hex4(&content[*index..])?;
     *index += 4;
     if (0xD800..=0xDBFF).contains(&unit) {
         if content.get(*index) != Some(&b'\\') || content.get(*index + 1) != Some(&b'u') {
-            return Err(());
+            return Err(Fail::Invalid);
         }
         *index += 2;
         let low = hex4(&content[*index..])?;
         *index += 4;
         if !(0xDC00..=0xDFFF).contains(&low) {
-            return Err(());
+            return Err(Fail::Invalid);
         }
         let code = 0x1_0000 + (((u32::from(unit) - 0xD800) << 10) | (u32::from(low) - 0xDC00));
-        out.push(char::from_u32(code).ok_or(())?);
+        out.push(char::from_u32(code).ok_or(Fail::Invalid)?);
         return Ok(());
     }
     if (0xDC00..=0xDFFF).contains(&unit) {
-        return Err(());
+        return Err(Fail::Invalid);
     }
-    out.push(char::from_u32(u32::from(unit)).ok_or(())?);
+    out.push(char::from_u32(u32::from(unit)).ok_or(Fail::Invalid)?);
     Ok(())
 }
 
-fn hex4(bytes: &[u8]) -> Result<u16, ()> {
+fn hex4(bytes: &[u8]) -> Result<u16, Fail> {
     if bytes.len() < 4 {
-        return Err(());
+        return Err(Fail::Invalid);
     }
     let mut value = 0u16;
     for byte in &bytes[..4] {
@@ -967,50 +1098,13 @@ fn hex4(bytes: &[u8]) -> Result<u16, ()> {
     Ok(value)
 }
 
-fn hex_value(byte: u8) -> Result<u16, ()> {
+fn hex_value(byte: u8) -> Result<u16, Fail> {
     match byte {
         b'0'..=b'9' => Ok(u16::from(byte - b'0')),
         b'a'..=b'f' => Ok(u16::from(byte - b'a' + 10)),
         b'A'..=b'F' => Ok(u16::from(byte - b'A' + 10)),
-        _ => Err(()),
+        _ => Err(Fail::Invalid),
     }
-}
-
-fn literal_replace(bytes: &[u8], from: &[u8], to: &[u8], partial: bool) -> Vec<u8> {
-    let mut out = if from.len() < 3 {
-        bytes.to_vec()
-    } else {
-        replace_exact(bytes, from, to)
-    };
-    if !partial || from.len() < 2 {
-        return out;
-    }
-    let max = (from.len() - 1).min(out.len());
-    let mut len = max;
-    while len >= 2 {
-        if out.ends_with(&from[..len]) {
-            out.truncate(out.len() - len);
-            out.extend_from_slice(to);
-            break;
-        }
-        len -= 1;
-    }
-    out
-}
-
-fn replace_exact(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(haystack.len());
-    let mut index = 0;
-    while index < haystack.len() {
-        if haystack[index..].starts_with(needle) {
-            out.extend_from_slice(replacement);
-            index += needle.len();
-        } else {
-            out.push(haystack[index]);
-            index += 1;
-        }
-    }
-    out
 }
 
 fn json_quote(text: &str) -> Vec<u8> {
@@ -1178,17 +1272,6 @@ mod tests {
         );
         assert!(!rewritten.windows(8).any(|window| window == b"upstream"));
         assert!(rewritten.contains(&0xff));
-
-        let mut bom = vec![0xEF, 0xBB, 0xBF];
-        bom.extend_from_slice(b"data: {\"model\":\"upstream\"}\n\n");
-        let rewritten = rewrite_all(&bom, paths, "demo", "upstream");
-        assert!(rewritten.starts_with(&[0xEF, 0xBB, 0xBF]));
-        assert!(
-            rewritten
-                .windows(14)
-                .any(|window| window == b"\"model\":\"demo\"")
-        );
-        assert!(!rewritten.windows(8).any(|window| window == b"upstream"));
     }
 
     #[test]
@@ -1307,10 +1390,220 @@ mod tests {
     #[test]
     fn a_partial_event_is_terminated_when_the_tap_finishes() {
         let mut tap = OpenAiChat.raw_tap("demo", "upstream");
-        assert!(tap.push(br#"data: {"model":"upstream"#).is_empty());
-        let tail = String::from_utf8(tap.finish()).expect("utf-8");
-        assert_eq!(tail, "data: {\"model\":\"demo\"\n\n");
-        assert!(!tail.contains("upstream"));
+        assert!(
+            tap.push(br#"data: {"model":"upstream-2024-08-06"#)
+                .is_empty()
+        );
+        let tail = tap.finish();
+        assert_eq!(tail, b"data: {\"model\":\"upstream-2024-08-06\n\n");
+        assert_eq!(
+            skip_reasons(|| {
+                let mut tap = OpenAiChat.raw_tap("demo", "upstream");
+                let _ = tap.push(br#"data: {"model":"upstream-2024-08-06"#);
+                let _ = tap.finish();
+            }),
+            vec!["partial"]
+        );
+    }
+
+    #[test]
+    fn a_dated_snapshot_and_an_escaped_name_are_spliced_by_path() {
+        let paths: &[&[&str]] = &[&["model"]];
+        let dated = br#"{"model":"gpt-4o-2024-08-06","source":"upstream","f":10.10}"#;
+        let dated_out = rewrite_all(dated, paths, "demo", "gpt-4o");
+        assert_eq!(
+            dated_out,
+            br#"{"model":"demo","source":"upstream","f":10.10}"#
+        );
+        let escaped = br#"{"model":"openai\/x","source":"upstream"}"#;
+        assert_eq!(
+            rewrite_all(escaped, paths, "demo", "gpt-4o"),
+            br#"{"model":"demo","source":"upstream"}"#
+        );
+        let array = br#"{"model":["upstream"],"source":"upstream"}"#;
+        assert_eq!(rewrite_all(array, paths, "demo", "upstream"), array);
+        let object = br#"{"model":{"name":"upstream"},"n":1}"#;
+        assert_eq!(rewrite_all(object, paths, "demo", "upstream"), object);
+    }
+
+    #[test]
+    fn a_bom_is_stripped_and_the_model_path_is_spliced() {
+        let paths: &[&[&str]] = &[&["model"]];
+        let mut stream = vec![0xEF, 0xBB, 0xBF];
+        stream.extend_from_slice(
+            b"data: {\"model\":\"gpt-4o-2024-08-06\",\"source\":\"upstream\"}\n\n",
+        );
+        let streamed = rewrite_all(&stream, paths, "demo", "gpt-4o");
+        assert!(
+            !streamed
+                .windows(3)
+                .any(|window| window == [0xEF, 0xBB, 0xBF])
+        );
+        assert_eq!(
+            streamed,
+            b"data: {\"model\":\"demo\",\"source\":\"upstream\"}\n\n"
+        );
+        let mut unary = vec![0xEF, 0xBB, 0xBF];
+        unary.extend_from_slice(br#"{"model":"openai\/x","source":"upstream","f":10.10}"#);
+        assert_eq!(
+            rewrite_all(&unary, paths, "demo", "gpt-4o"),
+            br#"{"model":"demo","source":"upstream","f":10.10}"#
+        );
+    }
+
+    #[test]
+    fn an_oversize_event_splices_a_model_at_the_start() {
+        let mut body =
+            br#"data: {"model":"gpt-4o-2024-08-06","source":"upstream","pad":""#.to_vec();
+        body.resize((1 << 20) + 64, b'q');
+        let mut tap = DecoderTap::with_cap(
+            OpenAiChat.stream_decoder(),
+            OpenAiChat.model_paths(),
+            "demo",
+            "gpt-4o",
+            1 << 20,
+        );
+        let forwarded = tap.push(&body);
+        assert!(
+            forwarded
+                .windows(14)
+                .any(|window| window == b"\"model\":\"demo\"")
+        );
+        assert!(
+            !forwarded
+                .windows(17)
+                .any(|window| window == b"gpt-4o-2024-08-06")
+        );
+        assert!(
+            forwarded
+                .windows(19)
+                .any(|window| window == b"\"source\":\"upstream\"")
+        );
+        let _ = tap.finish();
+    }
+
+    #[test]
+    fn unparsed_events_stay_byte_exact_and_count_a_skip() {
+        let paths: &[&[&str]] = &[&["model"]];
+        let invalid = b"data: {\"source\":\"upstream\",\"x\":tru}\n\n";
+        let trailing = b"data: {\"model\":\"gpt-4o-2024-08-06\"} trailing\n\n";
+        let twice = b"data: {\"model\":\"gpt-4o-2024-08-06\"}{\"model\":\"other\"}\n\n";
+        let reasons = skip_reasons(|| {
+            assert_eq!(rewrite_all(invalid, paths, "demo", "upstream"), invalid);
+            assert_eq!(rewrite_all(trailing, paths, "demo", "gpt-4o"), trailing);
+            assert_eq!(rewrite_all(twice, paths, "demo", "gpt-4o"), twice);
+        });
+        assert_eq!(
+            reasons,
+            vec!["invalid_json", "trailing_garbage", "multiple_values"]
+        );
+        let mut late = br#"data: {"pad":""#.to_vec();
+        late.resize((1 << 20) + 8, b'q');
+        let reasons = skip_reasons(|| {
+            let mut tap = DecoderTap::with_cap(
+                OpenAiChat.stream_decoder(),
+                OpenAiChat.model_paths(),
+                "demo",
+                "gpt-4o",
+                1 << 20,
+            );
+            let mut all = tap.push(&late);
+            let rest = b"\",\"model\":\"gpt-4o-2024-08-06\"}\n\n";
+            all.extend(tap.push(rest));
+            all.extend(tap.finish());
+            assert!(all.windows(17).any(|window| window == b"gpt-4o-2024-08-06"));
+            assert!(
+                !all.windows(14)
+                    .any(|window| window == b"\"model\":\"demo\"")
+            );
+        });
+        assert_eq!(reasons, vec!["oversize"]);
+    }
+
+    fn skip_reasons(body: impl FnOnce()) -> Vec<String> {
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = SkipRecorder {
+            hits: std::sync::Arc::clone(&hits),
+        };
+        metrics::with_local_recorder(&recorder, body);
+        hits.lock().expect("hits").clone()
+    }
+
+    struct SkipRecorder {
+        hits: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    struct SkipCount {
+        hits: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        reason: String,
+    }
+
+    impl metrics::CounterFn for SkipCount {
+        fn increment(&self, value: u64) {
+            if value > 0 {
+                self.hits.lock().expect("hits").push(self.reason.clone());
+            }
+        }
+
+        fn absolute(&self, _value: u64) {}
+    }
+
+    impl metrics::Recorder for SkipRecorder {
+        fn describe_counter(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            let reason = key
+                .labels()
+                .find(|label| label.key() == "reason")
+                .map(|label| label.value().to_owned())
+                .unwrap_or_default();
+            metrics::Counter::from_arc(std::sync::Arc::new(SkipCount {
+                hits: std::sync::Arc::clone(&self.hits),
+                reason,
+            }))
+        }
+
+        fn register_gauge(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
     }
 
     #[test]

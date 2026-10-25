@@ -155,10 +155,12 @@ impl Router {
     /// Runs `request` against the upstreams configured for its model.
     ///
     /// `inbound_protocol` is forwarded to each member so an adapter can tell
-    /// a same-protocol passthrough from a translation. The reply's model is
-    /// the name the client sent. A decoded body is relabelled here. A raw
-    /// body is relabelled by the gateway, which asks the codec to patch the
-    /// model field. Each hop may send a different name upstream.
+    /// a same-protocol passthrough from a translation. When the name sent
+    /// upstream differs from the name the client asked for, a decoded body is
+    /// relabelled with the client name. When the names are equal, the model
+    /// the member returned is kept, including a dated snapshot. A raw body
+    /// follows the same rule in the gateway. Each hop may send a different
+    /// name upstream.
     ///
     /// The per-attempt clone of `request` stays. The caller does not clone
     /// before this call.
@@ -185,10 +187,15 @@ impl Router {
             let result = call_member(hop, index, inbound_protocol, attempt).await;
             match result {
                 Ok(completion) => {
+                    let completion = if asked == upstream_model {
+                        completion
+                    } else {
+                        label_model(completion, asked)
+                    };
                     return Ok(Routed {
                         upstream_id: hop.member.route_id().to_owned(),
                         upstream_model,
-                        completion: label_model(completion, asked),
+                        completion,
                     });
                 }
                 Err(error) if policy.allows(&error) => {
