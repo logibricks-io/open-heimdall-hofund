@@ -43,6 +43,10 @@ Present:
   stops the gateway, lists agents from the catalog, and shows the usage table
 
 Planned behavior is the stage plan in [docs/roadmap.md](docs/roadmap.md).
+RFC 0001, the accepted microkernel and plugin design, is in
+[docs/rfc/0001-microkernel-plugins.md](docs/rfc/0001-microkernel-plugins.md).
+The dependency table in `docs/architecture.md` is still the build until the
+migration pull requests land.
 Not present yet:
 
 - further routing strategies, and i18n language packs

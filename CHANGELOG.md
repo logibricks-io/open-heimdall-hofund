@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RFC 0001, a microkernel and plugin design, is accepted in
+  `docs/rfc/0001-microkernel-plugins.md` (2026-10-25, owner sign-off
+  conditional on the architecture review). No crate moves in that pull
+  request. Migration starts after it merges.
 - Coverage inventories for the 65 coding agents, the 58 provider presets,
   and the 33 subscription rows are in `docs/coverage/`. The preset catalog
   pin is commit `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`.
