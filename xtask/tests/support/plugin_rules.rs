@@ -5,6 +5,8 @@
 //! statement-form macro. Plugin manifests are parsed as TOML. A renamed
 //! `hofund-plugin-api` is rejected, and a feature forward enables `kernel`
 //! under the dependency's package name, including `api/kernel` and `?/kernel`.
+//! Macro fragments that splice `std::$m` are denied by Clippy after expansion,
+//! not by matching `$` in the source.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -46,6 +48,10 @@ fn plugin_seam_matches_the_contract() {
     assert!(
         !api.contains("hofund_quirks") && !api.contains("tracing"),
         "the API does not depend on quirks or tracing"
+    );
+    assert!(
+        api.contains("#[cfg(not(feature = \"kernel\"))]\nmod kernel;"),
+        "hofund_plugin_api::kernel stays private, so a macro splice cannot name it"
     );
     assert!(
         root.join("crates/plugin-api/public-api.txt").is_file(),
@@ -591,6 +597,70 @@ fast = ["dep:api/kernel"]
         assert!(found.contains(needle), "missing {needle} in:\n{found}");
     }
     let _ = fs::remove_dir_all(&tree);
+
+    let module_path = seam_hits(
+        "mod a { pub use hofund_plugin_api as api; }\nfn sneak(value: self::a::api::kernel::HttpBackend) {}\n",
+    );
+    assert!(
+        module_path.iter().any(|hit| hit.contains("kernel")),
+        "module path alias: {module_path:?}"
+    );
+    assert!(
+        runtime_hits("fn sneak() { let _ = std::os::unix::net::UnixStream::connect(\"x\"); }\n")
+            .iter()
+            .any(|hit| hit.contains("std::os::unix::net"))
+    );
+    assert!(
+        runtime_hits("fn sneak() { let _ = std::os::windows::process::CommandExt::raw_arg; }\n")
+            .iter()
+            .any(|hit| hit.contains("std::os::windows::process"))
+    );
+
+    let bypass = std::env::temp_dir().join(format!("hofund-plugin-round2-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&bypass);
+    let outside = bypass.join("plugins/providers/outside");
+    fs::create_dir_all(outside.join("src")).expect("dir");
+    fs::write(
+        outside.join("Cargo.toml"),
+        "[package]\nname = \"outside\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n",
+    )
+    .expect("outside manifest");
+    fs::write(
+        outside.join("src/lib.rs"),
+        "#[path = \"../hidden/net.rs\"]\nmod net;\nfn load() { include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/hidden/net.rs\")); }\n",
+    )
+    .expect("source");
+    fs::write(
+        outside.join("build.rs"),
+        "fn main() { let _ = std::process::Command::new(\"true\"); }\n",
+    )
+    .expect("build");
+    let sockets = bypass.join("plugins/providers/sockets");
+    fs::create_dir_all(sockets.join("src")).expect("sockets");
+    fs::write(
+        sockets.join("Cargo.toml"),
+        "[package]\nname = \"sockets\"\n[dependencies]\nureq = \"2\"\nsocket2 = \"0.5\"\nmio = \"1\"\nrustix = \"0.38\"\ntokio = { version = \"1\", features = [\"net\"] }\n[lints]\nworkspace = true\n",
+    )
+    .expect("sockets manifest");
+    fs::write(sockets.join("src/lib.rs"), "fn clean() {}\n").expect("sockets source");
+    let registry = bypass.join("plugins/registry/evil");
+    fs::create_dir_all(&registry).expect("registry");
+    fs::write(registry.join("Cargo.toml"), "[package]\nname = \"evil\"\n").expect("registry");
+    let found = plugin_tree_violations(&bypass.join("plugins")).join("\n");
+    for needle in [
+        "#[path]",
+        "non-literal include!",
+        "std::process",
+        "depends on ureq",
+        "depends on socket2",
+        "depends on mio",
+        "depends on rustix",
+        "enables tokio feature net",
+        "plugins/registry must not contain a package",
+    ] {
+        assert!(found.contains(needle), "missing {needle} in:\n{found}");
+    }
+    let _ = fs::remove_dir_all(&bypass);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1023,16 +1093,20 @@ fn canonical_segments(segs: &[String], crates: &BTreeMap<String, String>) -> Vec
         out.remove(0);
     }
     for _ in 0..8 {
-        let Some(first) = out.first().cloned() else {
-            break;
-        };
-        let Some(real) = crates.get(&first) else {
-            break;
-        };
-        if real == &first {
+        let mut changed = false;
+        for slot in &mut out {
+            let Some(real) = crates.get(slot.as_str()).cloned() else {
+                continue;
+            };
+            if real == *slot {
+                continue;
+            }
+            *slot = real;
+            changed = true;
+        }
+        if !changed {
             break;
         }
-        out[0] = real.clone();
     }
     out
 }
@@ -1258,13 +1332,17 @@ fn forbidden_runtime(segments: &[String]) -> Option<&'static str> {
     if segments.len() >= 2 && segments[0] == "std" && segments[1] == "net" {
         return Some("std::net");
     }
-    if segments.len() >= 4
-        && segments[0] == "std"
-        && segments[1] == "os"
-        && segments[2] == "unix"
-        && segments[3] == "process"
-    {
-        return Some("std::os::unix::process");
+    if segments.len() >= 4 && segments[0] == "std" && segments[1] == "os" {
+        let family = segments[2].as_str();
+        let module = segments[3].as_str();
+        if matches!(family, "unix" | "windows") && matches!(module, "process" | "net") {
+            return Some(match (family, module) {
+                ("unix", "process") => "std::os::unix::process",
+                ("unix", "net") => "std::os::unix::net",
+                ("windows", "process") => "std::os::windows::process",
+                _ => "std::os::windows::net",
+            });
+        }
     }
     if segments.len() >= 2 && segments[0] == "tokio" && segments[1] == "process" {
         return Some("tokio::process");
@@ -1295,7 +1373,13 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
         }
         let kind = entry.file_name();
         let kind = kind.to_string_lossy();
-        if kind.starts_with('.') || kind == "registry" {
+        if kind.starts_with('.') {
+            continue;
+        }
+        if kind == "registry" {
+            if registry_has_manifest(&kind_path) {
+                violations.push("plugins/registry must not contain a package".to_owned());
+            }
             continue;
         }
         if !kinds.contains(&kind.as_ref()) {
@@ -1341,19 +1425,19 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                     violations.push(format!("{kind}/{id} depends on a std shim"));
                 }
                 if dep.kind == DepKind::Dev {
-                    let own_kit = match kind.as_ref() {
-                        "providers" => "hofund-kit-upstream",
-                        "subscriptions" => "hofund-kit-subscription",
-                        "agents" => "hofund-kit-agent",
-                        _ => "",
-                    };
-                    if dep.name.starts_with("hofund-kit-") && dep.name != own_kit {
+                    let kit = own_kit(kind.as_ref()).unwrap_or("");
+                    if dep.name.starts_with("hofund-kit-") && dep.name != kit {
                         violations.push(format!("{kind}/{id} dev-depends on {}", dep.name));
                     }
-                    continue;
                 }
-                if forbidden_dep(&dep.name) {
-                    violations.push(format!("{kind}/{id} depends on {}", dep.name));
+                let dev = dep.kind == DepKind::Dev;
+                if let Some(hit) = xtask::boundary::dependency_error(
+                    &dep.name,
+                    &dep.features,
+                    dev,
+                    own_kit(kind.as_ref()),
+                ) {
+                    violations.push(format!("{kind}/{id} {hit}"));
                 }
             }
             if path.join("src").is_dir() {
@@ -1364,27 +1448,46 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                     }
                 }
             }
+            let build = path.join("build.rs");
+            if build.is_file() {
+                for hit in runtime_hits_file(&build, &mut BTreeSet::new()) {
+                    violations.push(format!("{kind}/{id} uses {hit} in build.rs"));
+                }
+                for hit in seam_hits_file(&build, &mut BTreeSet::new()) {
+                    violations.push(format!("{kind}/{id} {hit} in build.rs"));
+                }
+            }
+            for hit in xtask::boundary::source_violations(&path) {
+                violations.push(format!("{kind}/{id} {hit}"));
+            }
         }
     }
     violations
 }
 
-fn forbidden_dep(dep: &str) -> bool {
-    dep == "hofund-plugin-host"
-        || dep == "hofund-ir"
-        || dep == "hofund-provider"
-        || dep == "hofund-router"
-        || dep == "hofund-gateway"
-        || dep == "hofund-daemon"
-        || dep == "hofund-plugin-registry"
-        || dep.starts_with("hofund-kit-")
-        || (dep.starts_with("hofund-plugin-")
-            && dep != "hofund-plugin-api"
-            && dep != "hofund-plugin-sdk")
-        || matches!(
-            dep,
-            "reqwest" | "hyper" | "axum" | "tracing" | "libc" | "nix"
-        )
+fn own_kit(kind: &str) -> Option<&'static str> {
+    match kind {
+        "providers" => Some("hofund-kit-upstream"),
+        "subscriptions" => Some("hofund-kit-subscription"),
+        "agents" => Some("hofund-kit-agent"),
+        _ => None,
+    }
+}
+
+fn registry_has_manifest(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name() == "Cargo.toml" {
+            return true;
+        }
+        if path.is_dir() && registry_has_manifest(&path) {
+            return true;
+        }
+    }
+    false
 }
 
 fn manifest_enables_kernel(manifest: &str) -> bool {

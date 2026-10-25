@@ -1,0 +1,27 @@
+# Applied by `cargo xtask check-plugins` via CLIPPY_CONF_DIR.
+# Clippy resolves paths after macro expansion, so `std::$m::Command` is
+# `std::process::Command` here. This file is not the workspace Clippy config.
+
+disallowed-types = [
+    { path = "std::process::Command", reason = "plugins do not spawn processes" },
+    { path = "std::process::Child", reason = "plugins do not spawn processes" },
+    { path = "std::net::TcpStream", reason = "plugins do not open sockets" },
+    { path = "std::net::TcpListener", reason = "plugins do not open sockets" },
+    { path = "std::net::UdpSocket", reason = "plugins do not open sockets" },
+    { path = "std::os::unix::net::UnixStream", reason = "plugins do not open sockets" },
+    { path = "std::os::unix::net::UnixListener", reason = "plugins do not open sockets" },
+    { path = "std::os::unix::net::UnixDatagram", reason = "plugins do not open sockets" },
+]
+
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "plugins do not spawn processes" },
+    { path = "std::process::Command::spawn", reason = "plugins do not spawn processes" },
+    { path = "std::process::Command::output", reason = "plugins do not spawn processes" },
+    { path = "std::process::Command::status", reason = "plugins do not spawn processes" },
+    { path = "std::net::TcpStream::connect", reason = "plugins do not open sockets" },
+    { path = "std::net::TcpListener::bind", reason = "plugins do not open sockets" },
+    { path = "std::net::UdpSocket::bind", reason = "plugins do not open sockets" },
+    { path = "std::os::unix::process::CommandExt::pre_exec", reason = "plugins do not spawn processes" },
+    { path = "std::os::unix::process::CommandExt::exec", reason = "plugins do not spawn processes" },
+    { path = "std::os::unix::net::UnixStream::connect", reason = "plugins do not open sockets" },
+]

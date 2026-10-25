@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use xtask::boundary;
+
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
         None | Some("help" | "--help" | "-h") => {
@@ -28,7 +30,7 @@ hofund xtask
 
 Tasks:
   help            Show this help
-  check-plugins   cargo check -p each plugin, so the kernel feature is not unified in
+  check-plugins   Check each plugin: allow-list, source boundary, Clippy, cargo tree
 
 Dependency direction and the vendor-name rule are enforced by
 `cargo test --workspace`."
@@ -51,7 +53,7 @@ fn workspace_root() -> PathBuf {
 /// A missing `plugins/` directory is an empty list. A directory that exists
 /// and contains no package, an unknown kind, or a manifest that cannot be
 /// read is an error: the check fails closed.
-fn load_plugin_packages(plugins: &Path) -> Result<Vec<String>, String> {
+fn load_plugin_packages(plugins: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     if !plugins.exists() {
         return Ok(Vec::new());
     }
@@ -65,10 +67,16 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<String>, String> {
         let entry = entry.map_err(|error| format!("read {}: {error}", plugins.display()))?;
         let kind = entry.file_name();
         let kind = kind.to_string_lossy();
-        if kind.starts_with('.') || kind == "registry" {
+        if kind.starts_with('.') {
             continue;
         }
         let kind_path = entry.path();
+        if kind == "registry" {
+            if boundary::registry_has_package(&kind_path)? {
+                return Err("plugins/registry must not contain a package".to_owned());
+            }
+            continue;
+        }
         if !kind_path.is_dir() {
             return Err(format!("plugins/{kind} is not a plugin kind directory"));
         }
@@ -98,8 +106,8 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<String>, String> {
             else {
                 return Err(format!("{kind}/{id} manifest has no package name"));
             };
-            audit_manifest(name, &text)?;
-            names.push(name.to_owned());
+            audit_manifest(name, &text, own_kit(&kind))?;
+            names.push((name.to_owned(), child.path()));
         }
     }
     if names.is_empty() {
@@ -113,7 +121,16 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn audit_manifest(package: &str, text: &str) -> Result<(), String> {
+fn own_kit(kind: &str) -> Option<&'static str> {
+    match kind {
+        "providers" => Some("hofund-kit-upstream"),
+        "subscriptions" => Some("hofund-kit-subscription"),
+        "agents" => Some("hofund-kit-agent"),
+        _ => None,
+    }
+}
+
+fn audit_manifest(package: &str, text: &str, own_kit: Option<&str>) -> Result<(), String> {
     let value: toml::Value = toml::from_str(text)
         .map_err(|error| format!("{package} manifest is not valid toml: {error}"))?;
     let mut keys = std::collections::BTreeMap::new();
@@ -128,9 +145,10 @@ fn audit_manifest(package: &str, text: &str) -> Result<(), String> {
         if key == "std" || name == "std" {
             return Err(format!("{package} depends on a std shim"));
         }
-        if matches!(name.as_str(), "libc" | "nix") {
-            return Err(format!("{package} depends on {name}"));
-        }
+    }
+    let errors = boundary::manifest_dependency_errors(text, own_kit)?;
+    if !errors.is_empty() {
+        return Err(format!("{package} {}", errors.join("; ")));
     }
     if feature_forwards_kernel(&value, &keys) {
         return Err(format!(
@@ -255,6 +273,8 @@ fn resolved_kernel_feature(package: &str) -> Result<bool, String> {
             "hofund-plugin-api",
             "--prefix",
             "none",
+            "--target",
+            "all",
         ])
         .current_dir(workspace_root())
         .output()
@@ -288,7 +308,12 @@ fn check_plugins() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    for package in &packages {
+    for (package, dir) in &packages {
+        let hits = boundary::source_violations(dir);
+        if !hits.is_empty() {
+            eprintln!("{package} {}", hits.join("; "));
+            return ExitCode::from(1);
+        }
         println!("cargo check -p {package}");
         let status = Command::new("cargo")
             .args(["check", "-p", package])
@@ -305,6 +330,10 @@ fn check_plugins() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
+        if let Err(error) = clippy_plugin(package) {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
         match resolved_kernel_feature(package) {
             Ok(false) => {}
             Ok(true) => {
@@ -316,8 +345,44 @@ fn check_plugins() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
+        if let Err(error) = boundary::link_allowance(&workspace_root(), package) {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
     }
     ExitCode::SUCCESS
+}
+
+fn clippy_plugin(package: &str) -> Result<(), String> {
+    println!("cargo clippy -p {package}");
+    let status = Command::new("cargo")
+        .args([
+            "clippy",
+            "-p",
+            package,
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+            "-D",
+            "clippy::disallowed_types",
+            "-D",
+            "clippy::disallowed_methods",
+        ])
+        .env(
+            "CLIPPY_CONF_DIR",
+            boundary::clippy_conf_dir(&workspace_root()),
+        )
+        .current_dir(workspace_root())
+        .status()
+        .map_err(|error| format!("could not run cargo clippy -p {package}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "cargo clippy -p {package} failed the plugin boundary ({status})"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -337,7 +402,13 @@ mod tests {
         )
         .expect("manifest");
         let names = load_plugin_packages(&root.join("plugins")).expect("packages");
-        assert_eq!(names, ["hofund-plugin-example".to_owned()]);
+        assert_eq!(
+            names
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["hofund-plugin-example"]
+        );
 
         let missing = root.join("missing");
         assert!(
@@ -405,6 +476,19 @@ mod tests {
         .expect("tokio manifest");
         let tokio_error = load_plugin_packages(&tokio).expect_err("tokio rename");
         assert!(tokio_error.contains("renames tokio"), "{tokio_error}");
+
+        let registry = root.join("registry");
+        std::fs::create_dir_all(registry.join("registry/evil")).expect("registry");
+        std::fs::write(
+            registry.join("registry/evil/Cargo.toml"),
+            "[package]\nname = \"evil\"\n",
+        )
+        .expect("registry manifest");
+        let registry_error = load_plugin_packages(&registry).expect_err("registry");
+        assert!(
+            registry_error.contains("plugins/registry must not contain a package"),
+            "{registry_error}"
+        );
 
         assert!(
             workspace_root().join("plugins").is_absolute(),
