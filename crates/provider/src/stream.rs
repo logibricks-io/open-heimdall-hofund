@@ -21,12 +21,16 @@ pub(crate) struct SseEvents {
     pending: VecDeque<Result<StreamEvent, ProviderError>>,
     finished: bool,
     yielded: bool,
+    /// Drop extension bags, and raw events this decoder does not model, when
+    /// the client protocol and the upstream protocol differ.
+    strip: bool,
 }
 
 impl SseEvents {
     pub(crate) fn new(
         incoming: impl Stream<Item = Result<Bytes, ReqwestError>> + Send + 'static,
         decoder: Box<dyn StreamDecoder>,
+        strip: bool,
     ) -> Self {
         Self {
             incoming: Box::pin(incoming),
@@ -34,23 +38,34 @@ impl SseEvents {
             pending: VecDeque::new(),
             finished: false,
             yielded: false,
+            strip,
         }
     }
 
     fn take_pending(&mut self) -> Option<Result<StreamEvent, ProviderError>> {
-        let item = self.pending.pop_front()?;
-        if !self.yielded
-            && let Ok(event) = &item
-            && let Some(error) = failure_of(event)
-        {
-            self.pending.clear();
-            self.finished = true;
-            return Some(Err(error));
+        loop {
+            let mut item = self.pending.pop_front()?;
+            if !self.yielded
+                && let Ok(event) = &item
+                && let Some(error) = failure_of(event)
+            {
+                self.pending.clear();
+                self.finished = true;
+                return Some(Err(error));
+            }
+            if self.strip
+                && let Ok(event) = &mut item
+            {
+                if matches!(event, StreamEvent::Unknown(_)) {
+                    continue;
+                }
+                event.strip_extensions();
+            }
+            if item.is_ok() {
+                self.yielded = true;
+            }
+            return Some(item);
         }
-        if item.is_ok() {
-            self.yielded = true;
-        }
-        Some(item)
     }
 }
 

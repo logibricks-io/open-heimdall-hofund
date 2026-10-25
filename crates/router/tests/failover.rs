@@ -33,7 +33,11 @@ impl Provider for Fake {
         self.id
     }
 
-    async fn execute(&self, _request: Request) -> Result<Completion, ProviderError> {
+    async fn execute(
+        &self,
+        _request: Request,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, ProviderError> {
         self.hits.fetch_add(1, Ordering::SeqCst);
         match &self.kind {
             Kind::Fail(error) => Err(ProviderError {
@@ -107,7 +111,7 @@ async fn ordered_failover_skips_status_and_connect_failures() {
         fake("third", &third_hits, Kind::Unary),
     ]);
     let routed = router
-        .dispatch(Request::new("demo"))
+        .dispatch(Request::new("demo"), "inbound")
         .await
         .expect("dispatch");
     assert_eq!(routed.upstream_id, "third");
@@ -127,7 +131,7 @@ async fn client_error_does_not_try_the_next_upstream() {
         ),
         fake("second", &second, Kind::Unary),
     ]);
-    let error = match router.dispatch(Request::new("demo")).await {
+    let error = match router.dispatch(Request::new("demo"), "inbound").await {
         Ok(_) => panic!("expected a status error"),
         Err(error) => error,
     };
@@ -151,7 +155,7 @@ async fn stream_error_before_an_event_fails_over() {
         fake("second", &Arc::new(AtomicUsize::new(0)), Kind::StreamOk),
     ]);
     let routed = router
-        .dispatch(Request::new("demo"))
+        .dispatch(Request::new("demo"), "inbound")
         .await
         .expect("dispatch");
     assert_eq!(routed.upstream_id, "second");
@@ -170,7 +174,7 @@ async fn stream_event_commits_the_upstream() {
         fake("second", &second, Kind::Unary),
     ]);
     let routed = router
-        .dispatch(Request::new("demo"))
+        .dispatch(Request::new("demo"), "inbound")
         .await
         .expect("dispatch");
     assert_eq!(routed.upstream_id, "first");
@@ -180,7 +184,7 @@ async fn stream_event_commits_the_upstream() {
 #[tokio::test]
 async fn unknown_model_has_no_route() {
     let router = router(vec![]);
-    let error = match router.dispatch(Request::new("other")).await {
+    let error = match router.dispatch(Request::new("other"), "inbound").await {
         Ok(_) => panic!("expected a missing route"),
         Err(error) => error,
     };

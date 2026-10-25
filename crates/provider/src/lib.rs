@@ -42,11 +42,21 @@ pub trait Provider: Send + Sync {
 
     /// Executes `request`.
     ///
+    /// `inbound_protocol` is the codec id of the client protocol. When it
+    /// differs from this adapter's codec id, the extension bag is dropped
+    /// before the upstream body is encoded and again on the decoded response
+    /// and stream events. The same id keeps the bag, so a same-protocol
+    /// passthrough still round-trips unknown fields.
+    ///
     /// When `request.stream` is set, the result is [`Completion::Stream`].
     ///
     /// # Errors
     ///
     /// Returns [`ProviderError`] when the upstream cannot be reached, rejects
     /// the call, or returns a body this adapter cannot decode.
-    async fn execute(&self, request: Request) -> Result<Completion, ProviderError>;
+    async fn execute(
+        &self,
+        request: Request,
+        inbound_protocol: &str,
+    ) -> Result<Completion, ProviderError>;
 }

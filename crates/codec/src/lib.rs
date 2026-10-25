@@ -133,4 +133,16 @@ pub trait StreamEncoder: Send {
     ///
     /// Returns [`CodecError`] when the event cannot be represented.
     fn push(&mut self, event: &StreamEvent) -> Result<Vec<u8>, CodecError>;
+
+    /// Writes any terminal frames the encoder was holding.
+    ///
+    /// The default implementation writes nothing. An encoder that delays a
+    /// closing event until the turn ends uses this to flush it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError`] when the trailing frame cannot be represented.
+    fn finish(&mut self) -> Result<Vec<u8>, CodecError> {
+        Ok(Vec::new())
+    }
 }

@@ -299,3 +299,90 @@ data: {"type":"response.failed","response":{"id":"resp_f","status":"failed","out
         )
     }));
 }
+
+#[test]
+fn responses_stream_emits_done_events_sequence_and_full_output() {
+    use hofund_ir::{
+        BlockStart, ContentBlockStart, ContentBlockStop, Extensions, MessageDelta, MessageStart,
+        MessageStop, Stop, StopReason, TextDelta, Usage,
+    };
+    let events = vec![
+        StreamEvent::MessageStart(MessageStart {
+            id: Some("resp_1".to_owned()),
+            model: Some("m".to_owned()),
+            usage: None,
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::ContentBlockStart(ContentBlockStart {
+            index: 0,
+            block: BlockStart::Text,
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::TextDelta(TextDelta {
+            index: 0,
+            text: "Hello".to_owned(),
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::ContentBlockStop(ContentBlockStop {
+            index: 0,
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::MessageDelta(MessageDelta {
+            stop: Some(Stop {
+                reason: StopReason::EndTurn,
+                sequence: None,
+            }),
+            usage: Some(Usage {
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                ..Usage::default()
+            }),
+            extensions: Extensions::new(),
+        }),
+        StreamEvent::MessageStop(MessageStop::default()),
+    ];
+    let encoded = OpenAiResponses.encode_stream(&events).expect("encode");
+    let text = String::from_utf8(encoded).expect("utf8");
+    let frames: Vec<serde_json::Value> = text
+        .split("\n\n")
+        .filter(|frame| !frame.trim().is_empty())
+        .map(|frame| {
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .expect("data");
+            serde_json::from_str(data).expect("json")
+        })
+        .collect();
+    let mut previous = None;
+    for frame in &frames {
+        let sequence = frame["sequence_number"].as_u64().expect("sequence");
+        if let Some(seen) = previous {
+            assert!(sequence > seen);
+        }
+        previous = Some(sequence);
+    }
+    let names: Vec<&str> = frames
+        .iter()
+        .map(|frame| frame["type"].as_str().unwrap_or(""))
+        .collect();
+    assert!(names.contains(&"response.output_text.done"));
+    assert!(names.contains(&"response.content_part.done"));
+    assert!(names.contains(&"response.output_item.done"));
+    assert!(names.contains(&"response.completed"));
+    let item_done = frames
+        .iter()
+        .find(|frame| frame["type"] == "response.output_item.done")
+        .expect("item done");
+    assert_eq!(item_done["item"]["id"], json!("msg_0"));
+    assert_eq!(item_done["item"]["content"][0]["text"], json!("Hello"));
+    let completed = frames
+        .iter()
+        .find(|frame| frame["type"] == "response.completed")
+        .expect("completed");
+    assert_eq!(
+        completed["response"]["output"][0]["content"][0]["text"],
+        json!("Hello")
+    );
+    assert_eq!(completed["response"]["output"][0]["id"], json!("msg_0"));
+}

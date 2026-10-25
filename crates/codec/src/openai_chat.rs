@@ -32,6 +32,29 @@ const TOOL_INDEX_BASE: u32 = 2;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpenAiChat;
 
+impl OpenAiChat {
+    /// Adapter policy for a streamed Chat Completions upstream.
+    ///
+    /// Sets `stream_options.include_usage` when the body asks for a stream, so
+    /// the upstream returns token counts. A codec round trip does not call this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError`] when `bytes` is not a JSON object.
+    pub fn prepare_upstream_body(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
+        let mut object = parse_object(bytes)?;
+        if object.get("stream") == Some(&Value::Bool(true)) {
+            let mut options = match object.remove("stream_options") {
+                Some(Value::Object(options)) => options,
+                _ => Object::new(),
+            };
+            options.insert("include_usage".to_owned(), Value::Bool(true));
+            object.insert("stream_options".to_owned(), Value::Object(options));
+        }
+        to_bytes(&Value::Object(object))
+    }
+}
+
 impl Codec for OpenAiChat {
     fn id(&self) -> &'static str {
         "openai-chat"

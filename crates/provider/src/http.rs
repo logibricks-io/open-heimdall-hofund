@@ -111,9 +111,14 @@ pub(crate) async fn execute(
     codec: &dyn Codec,
     mut request: Request,
     prepare: Option<Prepare>,
+    inbound_protocol: &str,
 ) -> Result<Completion, ProviderError> {
     if let Some(profile) = upstream.quirks {
         hofund_quirks::apply(profile, &mut request);
+    }
+    let cross_protocol = codec.id() != inbound_protocol;
+    if cross_protocol {
+        request.strip_extensions();
     }
     let streaming = request.stream;
     let mut body = codec
@@ -137,13 +142,20 @@ pub(crate) async fn execute(
         return Err(ProviderError::status(status.as_u16(), message_from(&bytes)));
     }
     if streaming {
-        let events = SseEvents::new(response.bytes_stream(), codec.stream_decoder());
+        let events = SseEvents::new(
+            response.bytes_stream(),
+            codec.stream_decoder(),
+            cross_protocol,
+        );
         Ok(Completion::Stream(Box::pin(events)))
     } else {
         let bytes = response.bytes().await.map_err(map_transport)?;
-        let decoded = codec
+        let mut decoded = codec
             .decode_response(&bytes)
             .map_err(|error| ProviderError::decode(error.to_string()))?;
+        if cross_protocol {
+            decoded.strip_extensions();
+        }
         Ok(Completion::Unary(Box::new(decoded)))
     }
 }

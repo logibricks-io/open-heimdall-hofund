@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The extension bag is forwarded only when the inbound and outbound protocols
+  are the same. A different protocol drops it, including caller identifiers
+  such as `metadata.user_id`, and drops raw stream events that the decoder
+  does not model.
+- A streamed Chat Completions upstream body sets
+  `stream_options.include_usage`, so usage is returned and recorded.
+- Anthropic streams write `message_start.message.usage`, prefix message ids
+  with `msg_`, and emit `content_block_stop` before the single `message_delta`
+  that carries usage.
+- Responses streams emit `response.output_text.done`,
+  `response.content_part.done`, a `response.output_item.done` item with `id`
+  and `content`, a terminal `output` array, and `sequence_number` on every
+  event.
+
 ## [0.1.0] - 2026-10-25
 
 ### Added

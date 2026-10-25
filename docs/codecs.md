@@ -64,9 +64,15 @@ is empty. Generative Language is the exception: unknown `generationConfig`
 keys stay on `GenerationParams.extensions` and are written back inside
 `generationConfig`.
 
-Callers that encode with a different protocol should call
+The provider drops every extension bag when the inbound protocol id differs
+from the outbound codec id, before it encodes the upstream body and again on
+the decoded response and stream events. Raw events the decoder does not model
+are dropped on that path too, after a leading upstream failure has been turned
+into an error. A same-protocol call keeps the bag. A caller that encodes with
+a different protocol without going through the provider should call
 `Request::strip_extensions` (and the response and event equivalents) first.
-Otherwise foreign fields are copied onto the other protocol's JSON.
+Otherwise foreign fields, including caller identifiers, are copied onto the
+other protocol's JSON.
 
 Same-protocol equality is semantic. `decode(encode(decode(bytes)))` equals
 `decode(bytes)`. The bytes are not required to match: a string `content` may
@@ -151,7 +157,7 @@ and `NONE` do not store the mode string.
 | `stop` | `stop_sequences` | `stop` (always an array) | omitted | `stopSequences` (always an array) |
 | `seed` | omitted | `seed` | omitted | `seed` |
 | penalties | omitted | same names | omitted | omitted |
-| `stream: true` | `stream: true` | `stream: true` | `stream: true` | `stream: true` on the body |
+| `stream: true` | `stream: true` | `stream: true`. The Chat adapter, not the codec, also sets `stream_options.include_usage` so the upstream returns usage. A codec round trip does not add that object. | `stream: true` | `stream: true` on the body |
 | `stream: false` | omitted | omitted | omitted | omitted |
 
 Anthropic encode returns `MissingField("max_tokens")` when the IR has no cap.
@@ -239,7 +245,14 @@ Anthropic frames are `event: <name>` plus `data: <json>`. There is no
 that name. Encode synthesizes a `content_block_start` when a delta arrives for
 an index that was not started. `message_start` writes the structural
 `type`, `role`, empty `content`, and null stop fields; those are not bag
-fields.
+fields. `message.id` is always present and always starts with `msg_`. An id
+that already has that prefix is kept; any other id is prefixed; a missing id
+is `msg_local`. `message.usage` is always present. When the IR has no usage
+yet, the counters are zero. `content_block_stop` is written before
+`message_delta`. Every `message_delta` in the IR is held and emitted once,
+after open blocks have stopped and immediately before `message_stop`. That
+one event carries usage. When the IR never supplied usage, the delta's
+`output_tokens` is zero.
 
 Chat Completions frames are `data: <json>` and the turn ends with
 `data: [DONE]`. The decoder's index space is fixed:
@@ -287,10 +300,20 @@ after `response.created` is the stop reason `Other("failed")`. A lone `error`
 event is an unknown event and does not synthesize `message_stop`. Signature
 deltas are skipped on encode.
 
-The Responses encoder writes `response.created`, then one item per block, then
-`response.completed`, `response.incomplete`, or `response.failed` from the stop
-reason. A same-protocol round trip of decoder output is stable. Hand-built
-events are not required to round-trip byte for byte.
+The Responses encoder writes `response.created`, then one item per block.
+Closing a text block writes `response.output_text.done` and
+`response.content_part.done` with the accumulated text, then
+`response.output_item.done` whose item has `id` and `content`. A function
+call's done item has `id`, `call_id`, `name`, and the accumulated `arguments`.
+A reasoning done item has `id` and the accumulated text, or the sealed item
+when one was stored. `response.completed`, `response.incomplete`, or
+`response.failed` then carries that full `output` array. Every event includes
+`sequence_number`, starting at 0. The decoder ignores `sequence_number`.
+`response.output_text.done` contributes text only when that index has not
+already produced a delta. `response.content_part.done` is ignored, because
+`output_item.done` still expands an index that has no deltas. A same-protocol
+round trip of decoder output is stable. Hand-built events are not required to
+round-trip byte for byte.
 
 ## Responses items
 

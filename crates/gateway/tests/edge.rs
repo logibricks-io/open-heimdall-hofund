@@ -125,7 +125,11 @@ impl Provider for Fake {
         self.id
     }
 
-    async fn execute(&self, request: ModelRequest) -> Result<Completion, ProviderError> {
+    async fn execute(
+        &self,
+        request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, ProviderError> {
         self.hits.fetch_add(1, Ordering::SeqCst);
         if let Some(status) = self.fail {
             return Err(ProviderError::status(status, "nope"));
