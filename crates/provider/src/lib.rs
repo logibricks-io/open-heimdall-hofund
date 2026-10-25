@@ -7,6 +7,7 @@
 //! polls, which is the backpressure.
 
 mod anthropic;
+mod azure;
 mod bedrock;
 mod billing;
 mod error;
@@ -20,6 +21,7 @@ mod stream;
 mod vertex;
 
 pub use anthropic::Anthropic;
+pub use azure::{AzureDeployment, list_deployments};
 pub use bedrock::Bedrock;
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;

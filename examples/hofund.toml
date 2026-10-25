@@ -74,6 +74,14 @@ api_key = "replace-me-too"
 # access_key_id = "env:AWS_ACCESS_KEY_ID"
 # secret_access_key = "env:AWS_SECRET_ACCESS_KEY"
 # session_token = "env:AWS_SESSION_TOKEN"
+# Azure OpenAI. `base_url` may be the resource name, the resource URL, or a
+# pasted deployment URL. Chat and Responses use `https://<host>/openai/v1`.
+# The key is sent as `api-key`. A deployment's name is the model id.
+# [[providers]]
+# id = "azure"
+# preset = "azure"
+# base_url = "my-resource"
+# api_key = "env:AZURE_OPENAI_API_KEY"
 
 [[routes]]
 model = "demo"
