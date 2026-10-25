@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token minted from Application Default Credentials. `project` is required.
   `location`, `credentials`, and `impersonate` are optional. No API key is
   stored. A service-account key stays in the credentials file.
+- `preset = "bedrock-mantle"` posts a closed OpenAI GPT id or an `xai.` id
+  under `/openai/v1`, and every other chat or Responses model under `/v1`.
+  A refusal that the model is not supported on that route is tried once at
+  the other prefix. Messages stay on `/anthropic`.
 
 ### Fixed
 

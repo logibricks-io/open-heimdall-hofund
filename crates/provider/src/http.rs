@@ -213,6 +213,10 @@ pub(crate) fn messages_url(upstream: &Upstream) -> &str {
     &upstream.url
 }
 
+pub(crate) fn request_url(upstream: &Upstream) -> &str {
+    &upstream.url
+}
+
 pub(crate) fn prepare_body(
     upstream: &Upstream,
     codec: &dyn Codec,
@@ -320,8 +324,9 @@ pub(crate) async fn execute_bearer(
 
 /// Posts `request` to `url` with the upstream's headers.
 ///
-/// The Generative Language adapter builds a URL per model. Chat, Responses,
-/// and Messages keep the URL fixed at [`Upstream::open`].
+/// The Generative Language adapter builds a URL per model. A Mantle chat or
+/// Responses call may also replace the `/v1` prefix. Every other Chat,
+/// Responses, and Messages call keeps the URL fixed at [`Upstream::open`].
 pub(crate) async fn execute_at(
     upstream: &Upstream,
     url: &str,

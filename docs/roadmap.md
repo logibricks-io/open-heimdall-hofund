@@ -65,8 +65,9 @@ Model mapping is pull request #12. Preset endpoints for Chat, Responses, and
 Messages, including Azure's v1 root and Bedrock's API-key headers, are on
 `main`. `kind = "generative"` and `preset = "google"` post `generateContent`
 (row 2.3). `protocol = "chat"` on that preset keeps the OpenAI-compatible
-root. Vertex credentials (row 2.4) are in. Still open in item 4: SigV4,
-live model lists, a connectivity test, and every subscription provider.
+root. Vertex credentials (row 2.4) are in. Mantle chat and Responses pick
+`/openai/v1` or `/v1` from the model id (row 2.5). Still open in item 4:
+SigV4, live model lists, a connectivity test, and every subscription provider.
 Usage v2, the catalog
 and cost, and the routing tree stay in stage 1 after that. Subscriptions,
 the full agent list, the management API, the terminal UI, and gateway keys
