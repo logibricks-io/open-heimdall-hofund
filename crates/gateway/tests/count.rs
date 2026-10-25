@@ -9,10 +9,8 @@ use axum::http::{Request, StatusCode};
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage};
 use hofund_gateway::{GENERATIVE_UNARY, Gateway};
 use hofund_ir::Request as ModelRequest;
-use hofund_router::{
-    Completion, CountOutcome, FailoverPolicy, Member, MemberId, MemberKey, PluginError, PresetId,
-    Router, Snapshot,
-};
+use hofund_plugin_api::{CountOutcome, MemberId, MemberKey, PluginError, PresetId};
+use hofund_router::{Completion, FailoverPolicy, Member, Router, Snapshot};
 use hofund_usage::Ledger;
 use tower::ServiceExt;
 

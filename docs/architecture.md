@@ -69,6 +69,7 @@ flowchart BT
   gateway --> codec
   gateway --> ir
   gateway --> usage
+  gateway --> pluginApi
   daemon --> gateway
   daemon --> config
   daemon --> secrets
@@ -88,7 +89,8 @@ flowchart BT
 
 The HTTP spine is `ir ← codec ← provider`, then `gateway ← daemon ← cli`.
 `router` depends on `ir` and `plugin-api`, not on `provider`. Read each arrow
-as "depends on". `agent` depends on `config` and `plugin-api`. `daemon`
+as "depends on". `gateway` depends on `plugin-api` for the raw body and
+`PluginError`. `agent` depends on `config` and `plugin-api`. `daemon`
 depends on `plugin-api` so it can adapt a provider into a router member.
 `desktop` sits beside `cli` and depends on the same two crates as `cli`.
 `plugin-api` depends on `ir`. `plugin-sdk` depends on `plugin-api` and
@@ -108,7 +110,7 @@ only on `plugin-host` and are not on the diagram.
 | `hofund-kit-agent` | `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
 | `hofund-router` | `hofund-ir`, `hofund-plugin-api` |
-| `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-router`, `hofund-usage` |
+| `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-router`, `hofund-usage` |
 | `hofund-config` | — |
 | `hofund-secrets` | — |
 | `hofund-usage` | — |

@@ -54,7 +54,13 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-secrets",
             "hofund-usage",
         ],
-        "hofund-gateway" => &["hofund-codec", "hofund-ir", "hofund-router", "hofund-usage"],
+        "hofund-gateway" => &[
+            "hofund-codec",
+            "hofund-ir",
+            "hofund-plugin-api",
+            "hofund-router",
+            "hofund-usage",
+        ],
         "hofund-ir" => &[],
         "hofund-kit-agent" => &["hofund-plugin-host"],
         "hofund-kit-subscription" => &["hofund-plugin-host"],
@@ -254,11 +260,69 @@ fn router_does_not_name_plugin_host_types() {
             }
         }
     }
+    let reexports = ["Completion", "MemberId", "PluginError", "Request"];
+    let imports = [
+        "BodyStream",
+        "Completion",
+        "CountOutcome",
+        "MemberId",
+        "PluginError",
+        "PluginErrorKind",
+        "Request",
+    ];
+    for path in rust_files(&root.join("crates/router/src")) {
+        let text = read_to_string(&path);
+        for (is_pub, name) in plugin_api_use_names(&text) {
+            let allowed = if is_pub { &reexports[..] } else { &imports[..] };
+            if !allowed.contains(&name.as_str()) {
+                let kind = if is_pub { "re-exports" } else { "imports" };
+                violations.push(format!(
+                    "{} {kind} `{name}` from hofund-plugin-api",
+                    relative(&root, &path)
+                ));
+            }
+        }
+    }
     assert!(
         violations.is_empty(),
-        "the router may depend on plugin-api only for PluginError, Request, Completion, and MemberId:\n{}",
+        "the router re-exports only PluginError, Request, Completion, and MemberId, and its other plugin-api imports are PluginErrorKind, CountOutcome, and BodyStream:\n{}",
         violations.join("\n")
     );
+}
+
+fn plugin_api_use_names(text: &str) -> Vec<(bool, String)> {
+    let needle = "use hofund_plugin_api::";
+    let mut found = Vec::new();
+    let mut start = 0;
+    while let Some(offset) = text[start..].find(needle) {
+        let index = start + offset;
+        let is_pub = text[..index].trim_end().ends_with("pub");
+        let tail = &text[index + needle.len()..];
+        let (body, next) = if let Some(rest) = tail.strip_prefix('{') {
+            let end = rest.find('}').unwrap_or(rest.len());
+            (&rest[..end], index + needle.len() + 1 + end)
+        } else {
+            let end = tail.find([';', '\n']).unwrap_or(tail.len());
+            (&tail[..end], index + needle.len() + end)
+        };
+        for name in imported_names(body) {
+            found.push((is_pub, name));
+        }
+        start = next;
+    }
+    found
+}
+
+fn imported_names(body: &str) -> Vec<String> {
+    body.split(',')
+        .filter_map(|part| {
+            let part = part.split("//").next().unwrap_or(part);
+            let part = part.split(" as ").next().unwrap_or(part);
+            part.split(|byte: char| !byte.is_ascii_alphanumeric() && byte != '_' && byte != '*')
+                .find(|token| !token.is_empty())
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 fn lints_follow_workspace(manifest: &str) -> bool {

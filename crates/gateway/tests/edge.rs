@@ -6,19 +6,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
+use bytes::Bytes;
 use futures_util::stream;
-use hofund_codec::{Codec, CodecError, GenerativeLanguage, StreamDecoder, StreamEncoder};
+use hofund_codec::{
+    AnthropicMessages, Codec, CodecError, GenerativeLanguage, OpenAiChat, OpenAiResponses,
+    StreamDecoder, StreamEncoder,
+};
 use hofund_gateway::Gateway;
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY};
 use hofund_ir::{
     ContentPart, Extensions, Message, Request as ModelRequest, Response, Role, StreamEvent,
     TextDelta,
 };
-use hofund_router::{
-    Completion, FailoverPolicy, Member, MemberId, MemberKey, PluginError, PresetId, Router,
-    Snapshot,
-};
+use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PresetId};
+use hofund_router::{Completion, FailoverPolicy, Member, Router, Snapshot};
 use hofund_usage::Ledger;
 use tower::ServiceExt;
 
@@ -568,4 +570,240 @@ async fn call_with(
         .await
         .expect("body");
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+struct RawReply {
+    member_id: MemberId,
+    parts: Vec<Vec<u8>>,
+    then_error: bool,
+}
+
+#[async_trait]
+impl Member for RawReply {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, PluginError> {
+        let mut items: Vec<Result<Bytes, PluginError>> = self
+            .parts
+            .iter()
+            .map(|part| Ok(Bytes::copy_from_slice(part)))
+            .collect();
+        if self.then_error {
+            items.push(Err(PluginError::status_error(502, "mid-stream")));
+        }
+        Ok(Completion::Raw(BodyStream::from_stream(stream::iter(
+            items,
+        ))))
+    }
+}
+
+fn raw_app(
+    parts: Vec<Vec<u8>>,
+    then_error: bool,
+) -> (axum::Router, Arc<Ledger>, std::path::PathBuf) {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "hofund-edge-raw-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "demo".to_owned(),
+        vec![Arc::new(RawReply {
+            member_id: member_id("primary"),
+            parts,
+            then_error,
+        }) as Arc<dyn Member>],
+    );
+    let mut codecs = HashMap::new();
+    codecs.insert(
+        "/v1/chat/completions".to_owned(),
+        Arc::new(OpenAiChat) as Arc<dyn Codec>,
+    );
+    codecs.insert("/v1/responses".to_owned(), Arc::new(OpenAiResponses));
+    codecs.insert("/v1/messages".to_owned(), Arc::new(AnthropicMessages));
+    codecs.insert(GENERATIVE_UNARY.to_owned(), Arc::new(GenerativeLanguage));
+    codecs.insert(GENERATIVE_STREAM.to_owned(), Arc::new(GenerativeLanguage));
+    let app = Gateway::new(
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
+        "secret".to_owned(),
+        codecs,
+        Arc::clone(&usage),
+    )
+    .into_router();
+    (app, usage, dir)
+}
+
+async fn post_raw(app: axum::Router, uri: &str, body: &str) -> (StatusCode, String, String) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("authorization", "Bearer secret")
+                .body(Body::from(body.to_owned()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        content_type,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+fn split_at(bytes: &'static [u8], marker: &str) -> Vec<Vec<u8>> {
+    let index = bytes
+        .windows(marker.len())
+        .position(|window| window == marker.as_bytes())
+        .unwrap_or_else(|| panic!("missing {marker}"));
+    vec![bytes[..index].to_vec(), bytes[index..].to_vec()]
+}
+
+#[tokio::test]
+async fn raw_passthrough_counts_usage_and_keeps_the_requested_model() {
+    let chat_stream = concat!(
+        "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream\",",
+        "\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
+    );
+    let chat_unary = br#"{"id":"c","object":"chat.completion","model":"upstream","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}"#;
+    let messages_body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",",
+        "\"role\":\"assistant\",\"model\":\"upstream\",\"content\":[],",
+        "\"usage\":{\"input_tokens\":11,\"output_tokens\":1}}}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
+        "\"usage\":{\"output_tokens\":7}}\n\n",
+    );
+    let responses = concat!(
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"upstream\",",
+        "\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}}\n\n",
+    );
+    let generative = concat!(
+        "data: {\"responseId\":\"g\",\"modelVersion\":\"upstream\",",
+        "\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":7}}\n\n",
+    );
+    let generative_unary = br#"{"responseId":"g","modelVersion":"upstream","candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7}}"#;
+    let chat_request =
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    let cases = [
+        (
+            "chat-stream",
+            "/v1/chat/completions",
+            chat_request,
+            vec![chat_stream.as_bytes().to_vec()],
+            "text/event-stream",
+        ),
+        (
+            "chat-split",
+            "/v1/chat/completions",
+            chat_request,
+            split_at(chat_stream.as_bytes(), "prompt_tokens"),
+            "text/event-stream",
+        ),
+        (
+            "chat-unary",
+            "/v1/chat/completions",
+            r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#,
+            split_at(chat_unary, "prompt_tokens"),
+            "application/json",
+        ),
+        (
+            "messages",
+            "/v1/messages",
+            r#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+            split_at(messages_body.as_bytes(), "input_tokens"),
+            "text/event-stream",
+        ),
+        (
+            "responses",
+            "/v1/responses",
+            r#"{"model":"demo","input":"hi","stream":true}"#,
+            split_at(responses.as_bytes(), "input_tokens"),
+            "text/event-stream",
+        ),
+        (
+            "generative-stream",
+            "/v1beta/models/demo:streamGenerateContent",
+            r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+            split_at(generative.as_bytes(), "promptTokenCount"),
+            "text/event-stream",
+        ),
+        (
+            "generative-unary",
+            "/v1beta/models/demo:generateContent",
+            r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+            split_at(generative_unary, "promptTokenCount"),
+            "application/json",
+        ),
+    ];
+    for (name, uri, request, parts, content_type) in cases {
+        let (app, usage, dir) = raw_app(parts, false);
+        let (status, got_type, body) = post_raw(app, uri, request).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        assert_eq!(got_type, content_type, "{name}");
+        assert!(body.contains("demo"), "{name} model: {body}");
+        assert!(
+            !body.contains("upstream"),
+            "{name} wire model leaked: {body}"
+        );
+        let rows = usage.rows().expect("rows");
+        assert_eq!(rows.len(), 1, "{name}");
+        assert_eq!(rows[0].model, "demo", "{name}");
+        assert_eq!(rows[0].upstream, "primary", "{name}");
+        assert_eq!(rows[0].input_tokens, Some(11), "{name}: {body}");
+        assert_eq!(rows[0].output_tokens, Some(7), "{name}: {body}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn a_partial_raw_frame_is_closed_before_the_protocol_error() {
+    let (app, _usage, dir) = raw_app(vec![br#"data: {"n":1"#.to_vec()], true);
+    let (status, content_type, body) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(content_type, "text/event-stream");
+    assert!(
+        body.starts_with("data: {\"n\":1\n\ndata: {\"error\":"),
+        "{body}"
+    );
+    assert!(!body.contains("event:"), "{body}");
+    assert!(body.contains("mid-stream"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
 }

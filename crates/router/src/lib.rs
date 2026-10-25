@@ -16,13 +16,10 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 use hofund_ir::{StreamEvent, estimate_input_tokens};
-use hofund_plugin_api::Request;
+use hofund_plugin_api::{BodyStream, CountOutcome, PluginErrorKind};
 use tracing::Instrument;
 
-pub use hofund_plugin_api::{
-    BodyStream, Completion, CountOutcome, MemberId, MemberKey, PluginError, PluginErrorKind,
-    PresetId,
-};
+pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::Member;
 pub use snapshot::Snapshot;
 
@@ -159,8 +156,9 @@ impl Router {
     ///
     /// `inbound_protocol` is forwarded to each member so an adapter can tell
     /// a same-protocol passthrough from a translation. The reply's model is
-    /// the name the client sent, except a [`Completion::Raw`] body, which is
-    /// forwarded unchanged. Each hop may send a different name upstream.
+    /// the name the client sent. A decoded body is relabelled here. A raw
+    /// body is relabelled by the gateway, which asks the codec to patch the
+    /// model field. Each hop may send a different name upstream.
     ///
     /// The per-attempt clone of `request` stays. The caller does not clone
     /// before this call.
@@ -409,7 +407,7 @@ fn label_model(completion: Completion, model: String) -> Completion {
                 stream.map(move |item| item.map(|event: StreamEvent| event.with_model(&model)));
             Completion::Stream(Box::pin(labeled))
         }
-        Completion::Raw(body) => Completion::Raw(body),
+        Completion::Raw(body) => Completion::Raw(body), // the gateway patches the model
         _ => completion,
     }
 }
@@ -456,8 +454,8 @@ async fn call_member(
 fn member_span(hop: &Hop, index: usize, inbound_protocol: &str) -> tracing::Span {
     tracing::info_span!(
         "member",
-        "plugin.id" = "",
-        "preset.id" = hop.member.route_id(),
+        "plugin.id" = hop.member.plugin_id(),
+        "preset.id" = hop.member.preset_id(),
         "member.id" = %hop.member.id(),
         attempt = index + 1,
         "protocol.in" = inbound_protocol,
@@ -473,7 +471,7 @@ fn record_call(span: &tracing::Span, status: &str, started: Instant) {
     span.record("ttft_ms", ttft_ms);
     metrics::counter!("hofund_member_requests").increment(1);
     metrics::histogram!("hofund_member_ttft_ms").record(ttft_ms as f64);
-    metrics::histogram!("hofund_member_latency_ms").record(ttft_ms as f64);
+    metrics::histogram!("hofund_member_ttfb_ms").record(ttft_ms as f64);
     if status != "ok" {
         metrics::counter!("hofund_member_errors", "kind" => status.to_owned()).increment(1);
     }

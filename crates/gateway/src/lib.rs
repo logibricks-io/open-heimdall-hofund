@@ -26,7 +26,8 @@ use endpoints::{GENERATIVE_CATCHALL, inject_target, match_count, match_generate,
 use futures_util::{Stream, StreamExt};
 use hofund_codec::{Codec, StreamEncoder};
 use hofund_ir::{Request as ModelRequest, StreamEvent};
-use hofund_router::{Completion, PluginError, PluginErrorKind, RouterError, Snapshot};
+use hofund_plugin_api::{BodyStream, PluginErrorKind};
+use hofund_router::{Completion, PluginError, RouterError, Snapshot};
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -502,7 +503,7 @@ async fn success(
             );
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/event-stream")
+                .header(header::CONTENT_TYPE, codec.stream_content_type())
                 .body(Body::from_stream(body))
                 .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
         }
@@ -515,11 +516,13 @@ async fn raw_body(
     app: Arc<Inner>,
     codec: Arc<dyn Codec>,
     request: &ModelRequest,
-    meta: UsageMeta,
-    mut body: hofund_router::BodyStream,
+    mut meta: UsageMeta,
+    mut body: BodyStream,
 ) -> Response {
+    let content_type = codec.response_content_type(request.stream);
     if request.stream {
         let usage = Arc::clone(&app.usage);
+        let tap = codec.raw_tap(&request.model);
         let on_error = {
             let codec = Arc::clone(&codec);
             move |error: &PluginError| {
@@ -527,43 +530,84 @@ async fn raw_body(
             }
         };
         let stream = futures_util::stream::unfold(
-            (body, meta, usage, on_error, false),
-            |(mut body, mut meta, usage, on_error, closed)| async move {
-                if closed {
+            (body, meta, usage, tap, on_error, true, 0u8),
+            |(mut body, mut meta, usage, mut tap, on_error, boundary, phase)| async move {
+                if phase == 1 {
+                    write_usage(
+                        &usage,
+                        &meta,
+                        Some((meta.input, meta.output)),
+                        StatusCode::OK,
+                    );
+                    return None;
+                }
+                if phase == 2 {
                     return None;
                 }
                 match body.next_chunk().await {
                     None => {
-                        write_usage(
-                            &usage,
-                            &meta,
-                            Some((meta.input, meta.output)),
-                            StatusCode::OK,
-                        );
-                        None
+                        let tail = tap.finish();
+                        let (input, output) = tap.tokens();
+                        meta.input = input.or(meta.input);
+                        meta.output = output.or(meta.output);
+                        if tail.is_empty() {
+                            write_usage(
+                                &usage,
+                                &meta,
+                                Some((meta.input, meta.output)),
+                                StatusCode::OK,
+                            );
+                            None
+                        } else {
+                            Some((
+                                Ok::<Bytes, std::io::Error>(Bytes::from(tail)),
+                                (body, meta, usage, tap, on_error, boundary, 1),
+                            ))
+                        }
                     }
                     Some(Err(error)) => {
+                        let _ = tap.finish();
+                        let (input, output) = tap.tokens();
+                        meta.input = input.or(meta.input);
+                        meta.output = output.or(meta.output);
                         write_usage(
                             &usage,
                             &meta,
                             Some((meta.input, meta.output)),
                             StatusCode::BAD_GATEWAY,
                         );
-                        let bytes: Result<Bytes, std::io::Error> =
-                            Ok(Bytes::from(on_error(&error)));
-                        Some((bytes, (body, meta, usage, on_error, true)))
+                        let mut frame = on_error(&error);
+                        if !boundary {
+                            let mut prefixed = b"\n\n".to_vec();
+                            prefixed.extend(frame);
+                            frame = prefixed;
+                        }
+                        Some((
+                            Ok(Bytes::from(frame)),
+                            (body, meta, usage, tap, on_error, true, 2),
+                        ))
                     }
                     Some(Ok(chunk)) => {
-                        observe_tokens(&chunk, &mut meta.input, &mut meta.output);
-                        let item: Result<Bytes, std::io::Error> = Ok(chunk);
-                        Some((item, (body, meta, usage, on_error, false)))
+                        let forwarded = tap.push(&chunk);
+                        let (input, output) = tap.tokens();
+                        meta.input = input.or(meta.input);
+                        meta.output = output.or(meta.output);
+                        let boundary = if forwarded.is_empty() {
+                            boundary
+                        } else {
+                            forwarded.ends_with(b"\n\n")
+                        };
+                        Some((
+                            Ok(Bytes::from(forwarded)),
+                            (body, meta, usage, tap, on_error, boundary, 0),
+                        ))
                     }
                 }
             },
         );
         return Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CONTENT_TYPE, content_type)
             .body(Body::from_stream(stream))
             .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"));
     }
@@ -582,9 +626,16 @@ async fn raw_body(
         write_usage(&app.usage, &meta, None, StatusCode::BAD_GATEWAY);
         return coded(codec.as_ref(), StatusCode::BAD_GATEWAY, error.message());
     }
-    let (input, output) = tokens_in(&bytes);
+    let (input, output) = codec.response_tokens(&bytes);
+    meta.input = input;
+    meta.output = output;
     write_usage(&app.usage, &meta, Some((input, output)), StatusCode::OK);
-    json_response(StatusCode::OK, bytes)
+    let body = codec.rewrite_model(&bytes, &request.model);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, codec.response_content_type(false))
+        .body(Body::from(body))
+        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "response"))
 }
 
 fn failure(
@@ -656,8 +707,8 @@ fn sse_body(
     on_error: ErrorFrame,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     futures_util::stream::unfold(
-        (incoming, encoder, record, on_error, 0u8),
-        |(mut incoming, mut encoder, mut record, on_error, phase)| async move {
+        (incoming, encoder, record, on_error, true, 0u8),
+        |(mut incoming, mut encoder, mut record, on_error, boundary, phase)| async move {
             if phase == 1 {
                 finish_record(&record, StatusCode::OK);
                 return None;
@@ -673,9 +724,10 @@ fn sse_body(
                             return None;
                         }
                         Ok(bytes) => {
+                            let boundary = bytes.ends_with(b"\n\n");
                             return Some((
                                 Ok(Bytes::from(bytes)),
-                                (incoming, encoder, record, on_error, 1),
+                                (incoming, encoder, record, on_error, boundary, 1),
                             ));
                         }
                         Err(_) => {
@@ -685,10 +737,15 @@ fn sse_body(
                     },
                     Some(Err(error)) => {
                         finish_record(&record, StatusCode::BAD_GATEWAY);
-                        let bytes = on_error(&error);
+                        let mut bytes = on_error(&error);
+                        if !boundary {
+                            let mut prefixed = b"\n\n".to_vec();
+                            prefixed.extend_from_slice(&bytes);
+                            bytes = prefixed;
+                        }
                         return Some((
                             Ok(Bytes::from(bytes)),
-                            (incoming, encoder, record, on_error, 2),
+                            (incoming, encoder, record, on_error, true, 2),
                         ));
                     }
                     Some(Ok(event)) => {
@@ -696,9 +753,10 @@ fn sse_body(
                         match encoder.push(&event) {
                             Ok(bytes) if bytes.is_empty() => {}
                             Ok(bytes) => {
+                                let boundary = bytes.ends_with(b"\n\n");
                                 return Some((
                                     Ok(Bytes::from(bytes)),
-                                    (incoming, encoder, record, on_error, 0),
+                                    (incoming, encoder, record, on_error, boundary, 0),
                                 ));
                             }
                             Err(_) => {
@@ -747,6 +805,8 @@ fn write_usage(
     if let Some(tokens) = output_tokens.and_then(|value| u64::try_from(value).ok()) {
         metrics::counter!("hofund_tokens", "direction" => "output").increment(tokens);
     }
+    metrics::histogram!("hofund_member_latency_ms")
+        .record(meta.started.elapsed().as_millis() as f64);
     let row = Row {
         created_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -761,57 +821,6 @@ fn write_usage(
         status: status.as_u16().to_string(),
     };
     let _ = usage.record(&row);
-}
-
-fn tokens_in(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
-    let mut input = None;
-    let mut output = None;
-    observe_tokens(bytes, &mut input, &mut output);
-    (input, output)
-}
-
-fn observe_tokens(bytes: &[u8], input: &mut Option<i64>, output: &mut Option<i64>) {
-    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
-        take_usage(&value, input, output);
-        return;
-    }
-    let text = String::from_utf8_lossy(bytes);
-    for frame in text.split("\n\n") {
-        let data = frame
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim)
-            .filter(|line| *line != "[DONE]")
-            .collect::<Vec<_>>()
-            .join("\n");
-        if data.is_empty() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
-            take_usage(&value, input, output);
-        }
-    }
-}
-
-fn take_usage(value: &serde_json::Value, input: &mut Option<i64>, output: &mut Option<i64>) {
-    let Some(usage) = value.get("usage") else {
-        return;
-    };
-    if let Some(number) = json_i64(usage, &["input_tokens", "prompt_tokens", "inputTokens"]) {
-        *input = Some(number);
-    }
-    if let Some(number) = json_i64(
-        usage,
-        &["output_tokens", "completion_tokens", "outputTokens"],
-    ) {
-        *output = Some(number);
-    }
-}
-
-fn json_i64(value: &serde_json::Value, names: &[&str]) -> Option<i64> {
-    names
-        .iter()
-        .find_map(|name| value.get(*name).and_then(serde_json::Value::as_i64))
 }
 
 fn as_i64(value: Option<u64>) -> Option<i64> {

@@ -58,5 +58,24 @@ fn stream_relay(criterion: &mut Criterion) {
     });
 }
 
-criterion_group!(relay, decode, encode, stream_relay);
+fn passthrough(criterion: &mut Criterion) {
+    let frame = concat!(
+        "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":",
+        "{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
+    );
+    let bytes = frame.as_bytes();
+    let split = bytes.len() / 2;
+    criterion.bench_function("passthrough", |bencher| {
+        bencher.iter(|| {
+            let mut tap = OpenAiChat.raw_tap("demo");
+            let mut out = tap.push(std::hint::black_box(&bytes[..split]));
+            out.extend(tap.push(std::hint::black_box(&bytes[split..])));
+            out.extend(tap.finish());
+            std::hint::black_box(out)
+        })
+    });
+}
+
+criterion_group!(relay, decode, encode, stream_relay, passthrough);
 criterion_main!(relay);

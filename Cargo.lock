@@ -1612,6 +1612,7 @@ name = "hofund-daemon"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "futures-util",
  "hofund-codec",
  "hofund-config",
@@ -1647,9 +1648,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "bytes",
  "futures-util",
  "hofund-codec",
  "hofund-ir",
+ "hofund-plugin-api",
  "hofund-router",
  "hofund-usage",
  "metrics",

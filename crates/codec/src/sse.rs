@@ -98,6 +98,14 @@ impl SseParser {
     }
 }
 
+pub(crate) fn data_frame(json: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(json.len() + 8);
+    out.extend_from_slice(b"data: ");
+    out.extend_from_slice(json);
+    out.extend_from_slice(b"\n\n");
+    out
+}
+
 pub(crate) fn write_event(out: &mut Vec<u8>, event: Option<&str>, data: &str) {
     if let Some(event) = event {
         out.extend_from_slice(b"event: ");

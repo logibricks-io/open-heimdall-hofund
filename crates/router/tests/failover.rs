@@ -9,10 +9,8 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use futures_util::stream;
 use hofund_ir::{ContentPart, Message, Request, Response, Role, StreamEvent, TextDelta};
-use hofund_router::{
-    BodyStream, Completion, FailoverPolicy, Member, MemberId, MemberKey, PluginError,
-    PluginErrorKind, PresetId, Router, RouterError, Snapshot,
-};
+use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PluginErrorKind, PresetId};
+use hofund_router::{Completion, FailoverPolicy, Member, Router, RouterError, Snapshot};
 
 struct Fake {
     route_id: &'static str,

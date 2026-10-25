@@ -179,7 +179,7 @@ impl Provider for Bedrock {
             ));
         }
         if !cross_protocol {
-            return http::raw_completion(response, stream).await;
+            return http::raw_completion(response, stream, &codec).await;
         }
         if stream {
             let events = crate::stream::SseEvents::new(

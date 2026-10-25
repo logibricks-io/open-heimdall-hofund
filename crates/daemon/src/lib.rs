@@ -287,6 +287,8 @@ fn providers(config: &Config) -> Result<BTreeMap<String, membership::BuiltProvid
                 adapter,
                 protocol,
                 timeout,
+                plugin_id: implementation_id(planned.wire).to_owned(),
+                preset_id: provider.preset.clone().unwrap_or_default(),
             },
         );
     }
@@ -300,6 +302,16 @@ fn protocol_of(wire: Wire) -> &'static str {
         Wire::Messages => "anthropic-messages",
         Wire::Generative | Wire::Vertex => "generative-language",
         Wire::Converse => "bedrock-converse",
+    }
+}
+
+fn implementation_id(wire: Wire) -> &'static str {
+    match wire {
+        Wire::Chat | Wire::Responses => "openai-compat",
+        Wire::Messages => "anthropic",
+        Wire::Generative => "generative",
+        Wire::Vertex => "google-vertex",
+        Wire::Converse => "bedrock",
     }
 }
 

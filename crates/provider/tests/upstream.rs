@@ -291,16 +291,16 @@ async fn leading_failed_responses_stream_is_a_status_error() {
 
     let endpoint = Endpoint::new("primary", server.uri());
     let provider = OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).expect("provider");
-    let same = provider
+    let same = match provider
         .execute(user_request(true), "openai-responses")
         .await
-        .expect("same");
-    let Completion::Raw(raw) = same else {
-        panic!("same-protocol bytes");
+    {
+        Ok(_) => panic!("leading failure fails over"),
+        Err(error) => error,
     };
-    let forwarded = String::from_utf8(collect_raw(raw).await).expect("utf-8");
-    assert!(forwarded.contains("response.failed"), "{forwarded}");
-    assert!(forwarded.contains("overloaded"), "{forwarded}");
+    assert_eq!(same.kind, ProviderErrorKind::Status);
+    assert_eq!(same.status, Some(502));
+    assert_eq!(same.message, "overloaded");
 
     let foreign = provider
         .execute(user_request(true), "openai-chat")

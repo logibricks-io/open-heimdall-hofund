@@ -15,7 +15,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::{FutureExt, StreamExt};
+use futures_util::{FutureExt, Stream, StreamExt};
 use hofund_plugin_api::{
     BodyStream, Completion, CountOutcome, MemberId, MemberKey, PluginError, PresetId, Request,
 };
@@ -32,6 +32,10 @@ pub(crate) struct BuiltProvider {
     pub adapter: Arc<dyn Provider>,
     pub protocol: &'static str,
     pub timeout: Duration,
+    /// Catalog or implementation id recorded on the member span.
+    pub plugin_id: String,
+    /// Preset id from configuration. Empty when the provider has no preset.
+    pub preset_id: String,
 }
 
 struct Table {
@@ -49,6 +53,8 @@ struct HopSpec {
 struct LiveMember {
     id: MemberId,
     route_id: String,
+    plugin_id: String,
+    preset_id: String,
     protocol: &'static str,
     failed: Arc<std::sync::atomic::AtomicBool>,
     stack: Guard<ProviderCall>,
@@ -89,9 +95,19 @@ pub(crate) fn open(
         snapshot,
     });
     let mut stored = BTreeMap::new();
+    let mut seen_ids: BTreeMap<String, String> = BTreeMap::new();
     for (model, planned) in routes {
         let mut specs = Vec::new();
         for hop in planned {
+            let label = member_id(&hop.provider).to_string();
+            if let Some(previous) = seen_ids.insert(label.clone(), hop.provider.clone())
+                && previous != hop.provider
+            {
+                return Err(DaemonError::new(format!(
+                    "member id `{label}` is shared by `{previous}` and `{}`",
+                    hop.provider
+                )));
+            }
             let built = built.get(&hop.provider).ok_or_else(|| {
                 DaemonError::new(format!(
                     "route `{model}` names unknown provider `{}`",
@@ -142,7 +158,6 @@ impl Table {
             })
             .collect();
         let policy = self.policy.clone();
-        drop(hops);
         self.snapshot.store(Router::from_hops(routes, policy));
     }
 }
@@ -161,6 +176,8 @@ impl LiveMember {
         Self {
             id: member_id(route_id),
             route_id: route_id.to_owned(),
+            plugin_id: built.plugin_id.clone(),
+            preset_id: built.preset_id.clone(),
             protocol: built.protocol,
             failed,
             stack,
@@ -180,6 +197,14 @@ impl Member for LiveMember {
 
     fn route_id(&self) -> &str {
         &self.route_id
+    }
+
+    fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    fn preset_id(&self) -> &str {
+        &self.preset_id
     }
 
     fn protocol(&self) -> &str {
@@ -230,6 +255,12 @@ where
         Box::pin(async move {
             let fut = AssertUnwindSafe(inner.call(job));
             match tokio::time::timeout(timeout, fut.catch_unwind()).await {
+                Ok(Ok(Ok(Out::Execute(completion)))) => Ok(Out::Execute(watch_completion(
+                    completion,
+                    timeout,
+                    Arc::clone(&failed),
+                    Weak::clone(&reload),
+                ))),
                 Ok(Ok(result)) => result,
                 Ok(Err(_panic)) => {
                     failed.store(true, std::sync::atomic::Ordering::Release);
@@ -273,6 +304,118 @@ impl Service<Job> for ProviderCall {
                 }
             }
         })
+    }
+}
+
+fn watch_completion(
+    completion: Completion,
+    idle: Duration,
+    failed: Arc<std::sync::atomic::AtomicBool>,
+    reload: Weak<Table>,
+) -> Completion {
+    let total = idle.saturating_mul(2);
+    match completion {
+        Completion::Stream(stream) => {
+            Completion::Stream(Box::pin(Watched::new(stream, idle, total, failed, reload)))
+        }
+        Completion::Raw(body) => Completion::Raw(BodyStream::from_stream(Watched::new(
+            body_to_stream(body),
+            idle,
+            total,
+            failed,
+            reload,
+        ))),
+        other => other,
+    }
+}
+
+fn body_to_stream(
+    body: BodyStream,
+) -> impl Stream<Item = Result<bytes::Bytes, PluginError>> + Send {
+    futures_util::stream::unfold(body, |mut body| async move {
+        let next = body.next_chunk().await?;
+        Some((next, body))
+    })
+}
+
+struct Watched<S> {
+    inner: Pin<Box<S>>,
+    idle: Duration,
+    total_deadline: tokio::time::Instant,
+    idle_deadline: tokio::time::Instant,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+    failed: Arc<std::sync::atomic::AtomicBool>,
+    reload: Weak<Table>,
+    done: bool,
+}
+
+impl<S> Watched<S> {
+    fn new(
+        inner: S,
+        idle: Duration,
+        total: Duration,
+        failed: Arc<std::sync::atomic::AtomicBool>,
+        reload: Weak<Table>,
+    ) -> Self {
+        let now = tokio::time::Instant::now();
+        let idle_deadline = now + idle;
+        let total_deadline = now + total;
+        Self {
+            inner: Box::pin(inner),
+            idle,
+            total_deadline,
+            idle_deadline,
+            sleep: Box::pin(tokio::time::sleep_until(idle_deadline.min(total_deadline))),
+            failed,
+            reload,
+            done: false,
+        }
+    }
+}
+
+impl<S, T> Stream for Watched<S>
+where
+    S: Stream<Item = Result<T, PluginError>>,
+{
+    type Item = Result<T, PluginError>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.done {
+            return Poll::Ready(None);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= this.total_deadline || now >= this.idle_deadline {
+            this.done = true;
+            return Poll::Ready(Some(Err(PluginError::timeout("kernel deadline exceeded"))));
+        }
+        let polled =
+            std::panic::catch_unwind(AssertUnwindSafe(|| this.inner.as_mut().poll_next(context)));
+        match polled {
+            Err(_panic) => {
+                this.done = true;
+                this.failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                if let Some(table) = this.reload.upgrade() {
+                    table.publish();
+                }
+                Poll::Ready(Some(Err(PluginError::internal("member panicked"))))
+            }
+            Ok(Poll::Pending) => match this.sleep.as_mut().poll(context) {
+                Poll::Ready(()) => {
+                    this.done = true;
+                    Poll::Ready(Some(Err(PluginError::timeout("kernel deadline exceeded"))))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+            Ok(Poll::Ready(item)) => {
+                this.idle_deadline = tokio::time::Instant::now() + this.idle;
+                this.sleep
+                    .as_mut()
+                    .reset(this.idle_deadline.min(this.total_deadline));
+                Poll::Ready(item)
+            }
+        }
     }
 }
 
@@ -383,6 +526,8 @@ mod tests {
                 }),
                 protocol: "openai-chat",
                 timeout: Duration::from_secs(60),
+                plugin_id: "boom".to_owned(),
+                preset_id: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -410,5 +555,204 @@ mod tests {
         };
         assert!(missing.to_string().contains("no upstream"));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    struct SecondChunk {
+        polls: u8,
+    }
+
+    impl futures_util::Stream for SecondChunk {
+        type Item = Result<bytes::Bytes, hofund_provider::ProviderError>;
+
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            this.polls += 1;
+            if this.polls == 1 {
+                std::task::Poll::Ready(Some(Ok(bytes::Bytes::from_static(b"data: hi\n\n"))))
+            } else {
+                panic!("second chunk");
+            }
+        }
+    }
+
+    struct Later {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for Later {
+        fn id(&self) -> &str {
+            "later"
+        }
+
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<Completion, ProviderError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(Completion::Raw(Box::pin(SecondChunk { polls: 0 })))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panic_on_the_second_chunk_drops_the_member() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let mut built = BTreeMap::new();
+        built.insert(
+            "later".to_owned(),
+            BuiltProvider {
+                adapter: Arc::new(Later {
+                    hits: Arc::clone(&hits),
+                }),
+                protocol: "openai-chat",
+                timeout: Duration::from_secs(60),
+                plugin_id: "openai-compat".to_owned(),
+                preset_id: "openai".to_owned(),
+            },
+        );
+        let mut routes = BTreeMap::new();
+        routes.insert(
+            "demo".to_owned(),
+            vec![PlannedHop {
+                provider: "later".to_owned(),
+                wire_model: None,
+                max_output_tokens: None,
+            }],
+        );
+        let snapshot = open(&built, routes, FailoverPolicy::default()).expect("snapshot");
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("the first chunk is delivered");
+        let hofund_plugin_api::Completion::Raw(mut body) = routed.completion else {
+            panic!("raw body");
+        };
+        let first = body.next_chunk().await.expect("chunk").expect("ok");
+        assert_eq!(&first[..], b"data: hi\n\n");
+        let error = body.next_chunk().await.expect("second").expect_err("panic");
+        assert_eq!(error.to_string(), "member panicked");
+        assert!(snapshot.load().models().is_empty());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    struct Stall;
+
+    impl futures_util::Stream for Stall {
+        type Item = Result<bytes::Bytes, hofund_provider::ProviderError>;
+
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    struct Quiet {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for Quiet {
+        fn id(&self) -> &str {
+            "quiet"
+        }
+
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<Completion, ProviderError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(Completion::Raw(Box::pin(Stall)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quiet_body_hits_the_kernel_deadline_and_stays_routable() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let mut built = BTreeMap::new();
+        built.insert(
+            "quiet".to_owned(),
+            BuiltProvider {
+                adapter: Arc::new(Quiet {
+                    hits: Arc::clone(&hits),
+                }),
+                protocol: "openai-chat",
+                timeout: Duration::from_millis(40),
+                plugin_id: "openai-compat".to_owned(),
+                preset_id: String::new(),
+            },
+        );
+        let mut routes = BTreeMap::new();
+        routes.insert(
+            "demo".to_owned(),
+            vec![PlannedHop {
+                provider: "quiet".to_owned(),
+                wire_model: None,
+                max_output_tokens: None,
+            }],
+        );
+        let snapshot = open(&built, routes, FailoverPolicy::default()).expect("snapshot");
+        let error = match snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+        {
+            Ok(_) => panic!("a quiet body should hit the deadline"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("kernel deadline exceeded"),
+            "{error}"
+        );
+        assert_eq!(snapshot.load().models(), ["demo".to_owned()]);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn colliding_member_ids_fail_startup() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let mut built = BTreeMap::new();
+        for id in ["My_Provider", "my-provider"] {
+            built.insert(
+                id.to_owned(),
+                BuiltProvider {
+                    adapter: Arc::new(Boom {
+                        hits: Arc::clone(&hits),
+                    }),
+                    protocol: "openai-chat",
+                    timeout: Duration::from_secs(60),
+                    plugin_id: "openai-compat".to_owned(),
+                    preset_id: String::new(),
+                },
+            );
+        }
+        let mut routes = BTreeMap::new();
+        routes.insert(
+            "demo".to_owned(),
+            vec![
+                PlannedHop {
+                    provider: "My_Provider".to_owned(),
+                    wire_model: None,
+                    max_output_tokens: None,
+                },
+                PlannedHop {
+                    provider: "my-provider".to_owned(),
+                    wire_model: None,
+                    max_output_tokens: None,
+                },
+            ],
+        );
+        let error = match open(&built, routes, FailoverPolicy::default()) {
+            Ok(_) => panic!("duplicate member ids should fail startup"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("my-provider"), "{error}");
     }
 }

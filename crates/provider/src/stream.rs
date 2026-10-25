@@ -110,7 +110,7 @@ impl Stream for SseEvents {
 
 /// A stream that reports an upstream failure before any content event is a
 /// status the router can fail over, when that status is configured.
-fn failure_of(event: &StreamEvent) -> Option<ProviderError> {
+pub(crate) fn failure_of(event: &StreamEvent) -> Option<ProviderError> {
     let StreamEvent::Unknown(unknown) = event else {
         return None;
     };

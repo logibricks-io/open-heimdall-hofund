@@ -118,6 +118,21 @@ impl Codec for OpenAiResponses {
     fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
         openai_error_body(status, message)
     }
+
+    fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
+        let body = serde_json::json!({
+            "type": "error",
+            "code": status,
+            "message": message,
+        });
+        let mut out = Vec::new();
+        crate::sse::write_event(
+            &mut out,
+            Some("error"),
+            &serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_owned()),
+        );
+        out
+    }
 }
 
 fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {

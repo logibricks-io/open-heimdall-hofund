@@ -5,8 +5,7 @@
 //! upstream trait.
 
 use async_trait::async_trait;
-use hofund_ir::Request;
-use hofund_plugin_api::{Completion, CountOutcome, MemberId, PluginError};
+use hofund_plugin_api::{Completion, CountOutcome, MemberId, PluginError, Request};
 
 /// One upstream the router may call.
 ///
@@ -19,6 +18,16 @@ pub trait Member: Send + Sync {
 
     /// Configured provider id. Usage rows and route errors use this text.
     fn route_id(&self) -> &str;
+
+    /// Plugin that owns this member. Empty when the member is not a plugin.
+    fn plugin_id(&self) -> &str {
+        ""
+    }
+
+    /// Preset id from configuration. Empty when the provider has no preset.
+    fn preset_id(&self) -> &str {
+        ""
+    }
 
     /// Codec id this member speaks. Compared with the inbound protocol.
     fn protocol(&self) -> &str;

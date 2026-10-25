@@ -6,10 +6,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use hofund_ir::{ContentPart, Message, Request, Response, Role};
-use hofund_router::{
-    Completion, CountOutcome, FailoverPolicy, Hop, Member, MemberId, MemberKey, PluginError,
-    PresetId, Router, RouterError,
-};
+use hofund_plugin_api::{CountOutcome, MemberId, MemberKey, PluginError, PresetId};
+use hofund_router::{Completion, FailoverPolicy, Hop, Member, Router, RouterError};
 
 struct Fake {
     route_id: &'static str,
