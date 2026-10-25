@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A version tag can get past `dist host --steps=create`. `allow-dirty = ["ci"]`
+  keeps the hand-edited release workflow (macOS repack, Windows signing, and
+  the universal archive). The desktop workflow installs `@tauri-apps/cli`
+  2.12.4. That package has no 2.12.5; the `tauri` crate is 2.12.5 and the CLI
+  published with it is 2.12.4. Every pull request runs `dist plan` and
+  installs that CLI.
+
 ## [0.1.0] - 2026-10-25
 
 Early preview of the local gateway. The notes below are everything on `main`

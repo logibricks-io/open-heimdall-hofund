@@ -7,6 +7,10 @@ members = ["cargo:."]
 # signs after a successful build, and only when the secrets are non-empty.
 [dist]
 cargo-dist-version = "0.32.0"
+# release.yml keeps steps that `dist generate` deletes: the macOS repack,
+# Windows signing, and the universal archive job. Without "ci" here, cargo-dist
+# 0.32 stops in `dist host --steps=create` and never opens a GitHub release.
+allow-dirty = ["ci"]
 ci = "github"
 installers = ["shell", "powershell"]
 targets = [

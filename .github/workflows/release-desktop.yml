@@ -51,7 +51,7 @@ jobs:
             libxdo-dev
       - name: Install the Tauri CLI
         shell: bash
-        run: npm install --global @tauri-apps/cli@2.12.5
+        run: npm install --global @tauri-apps/cli@2.12.4
       - name: Build bundles
         shell: bash
         working-directory: apps/desktop/src-tauri
