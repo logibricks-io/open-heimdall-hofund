@@ -30,7 +30,7 @@ SigV4's result contains the access key id. That is what AWS puts in `Authorizati
 
 The Chat, Responses, Messages, Generative, Vertex, and Bedrock adapters still live in `hofund-provider`. The registry factories validate options and call those adapters. A later pull request can move one adapter into its own plugin crate. This slice deletes the daemon's `Vertex::new` and `Bedrock::new` arms, so every wire is `registry.factory`.
 
-On that path the factory takes the `reqwest` client out of the host's `PooledHttp` and hands it to the adapter. Connect and idle-read timeouts are the daemon's `HttpLimits`, including Vertex token mint. `HttpHandle::send` is still the API a real plugin calls, and it still buffers. The SDK does not build a client.
+On that path the factory takes the `reqwest` client out of the host's `PooledHttp` and hands it to the adapter. Connect and idle-read timeouts are the daemon's `HttpLimits`, including Vertex token mint. That client is process-wide, so an idle socket can outlive the peer that owned its port. A send that fails because the connection is already closed is tried once on a new connection. A timeout is not retried. `HttpHandle::send` is still the API a real plugin calls, and it still buffers. The SDK does not build a client.
 
 An adapter constructed in a unit test, with no pooled client attached, still builds a private client. The daemon does not take that path. Vertex's private client keeps a 30 second whole-call budget for token mint. The factory path does not: mint uses `HttpLimits` like every other call.
 

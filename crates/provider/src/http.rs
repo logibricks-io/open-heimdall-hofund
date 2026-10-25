@@ -281,15 +281,15 @@ pub(crate) async fn post_with_headers(
     body: Vec<u8>,
     extra: HeaderMap,
 ) -> Result<reqwest::Response, ProviderError> {
-    upstream
-        .client
-        .post(url)
-        .headers(upstream.headers.clone())
-        .headers(extra)
-        .body(body)
-        .send()
-        .await
-        .map_err(map_transport)
+    send_builder(
+        upstream
+            .client
+            .post(url)
+            .headers(upstream.headers.clone())
+            .headers(extra)
+            .body(body),
+    )
+    .await
 }
 
 /// Header pairs captured at [`Upstream::open`], excluding `Authorization`.
@@ -334,7 +334,57 @@ async fn send_json(
     if let Some(token) = bearer {
         builder = builder.header(reqwest::header::AUTHORIZATION, bearer_header(token)?);
     }
-    builder.send().await.map_err(map_transport)
+    send_builder(builder).await
+}
+
+/// Sends `builder`, and once more when the pooled connection was already closed.
+///
+/// The process-wide client keeps idle sockets. A mock, or an upstream that
+/// restarted, can take that socket's port. The first write then fails before
+/// a status arrives. One new connection is safe: the timed-out and answered
+/// calls are not sent again.
+pub(crate) async fn send_builder(
+    builder: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, ProviderError> {
+    let retry = builder.try_clone();
+    match builder.send().await {
+        Ok(response) => Ok(response),
+        Err(error) if connection_already_closed(&error) => match retry {
+            Some(again) => again.send().await.map_err(map_transport),
+            None => Err(map_transport(error)),
+        },
+        Err(error) => Err(map_transport(error)),
+    }
+}
+
+fn connection_already_closed(error: &reqwest::Error) -> bool {
+    if error.is_timeout() || error.is_status() || error.is_decode() || error.is_body() {
+        return false;
+    }
+    if error.is_connect() {
+        return true;
+    }
+    let mut current = std::error::Error::source(error);
+    while let Some(err) = current {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotConnected
+            );
+        }
+        if err
+            .to_string()
+            .contains("connection closed before message completed")
+        {
+            return true;
+        }
+        current = err.source();
+    }
+    false
 }
 
 fn bearer_header(token: &str) -> Result<HeaderValue, ProviderError> {

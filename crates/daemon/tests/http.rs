@@ -696,7 +696,7 @@ model = \"demo\"
 upstreams = [\"vertex\"]
 ",
         base = server.uri(),
-        creds = credentials.display(),
+        creds = credentials.to_string_lossy().replace('\\', "/"),
     );
     let (running, token) = listen(&dir, &text).await;
     let chat = r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#;
@@ -714,6 +714,83 @@ upstreams = [\"vertex\"]
         .to_str()
         .expect("authorization text");
     assert_eq!(authorization, "Bearer ya29.test");
+    running.shutdown().await;
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn closed_idle_connection_is_retried() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&release);
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
+        let (mut stream, _) = listener.accept().expect("accept");
+        drop(listener);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let mut buf = [0_u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write");
+        stream.write_all(body.as_bytes()).expect("write");
+        while !flag.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("client");
+    let dir = scratch();
+    let text = format!(
+        "
+listen = \"127.0.0.1:0\"
+token_file = \"token\"
+usage_file = \"usage.sqlite\"
+[[providers]]
+id = \"primary\"
+protocol = \"openai-chat\"
+base_url = \"http://127.0.0.1:{port}\"
+api_key = \"test-key\"
+[[routes]]
+model = \"demo\"
+upstreams = [\"primary\"]
+"
+    );
+    let (running, token) = listen(&dir, &text).await;
+    let chat = r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#;
+    let first = post_text(&client, &running, "/v1/chat/completions", &token, chat).await;
+    assert!(first.contains("ok"), "{first}");
+
+    let again = std::net::TcpListener::bind(("127.0.0.1", port)).expect("rebind");
+    let second = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = again.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let mut buf = [0_u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write");
+        stream.write_all(body.as_bytes()).expect("write");
+    });
+    release.store(true, std::sync::atomic::Ordering::Relaxed);
+    let retried = post_text(&client, &running, "/v1/chat/completions", &token, chat).await;
+    assert!(retried.contains("ok"), "{retried}");
+    second.join().expect("second server");
     running.shutdown().await;
     fs::remove_dir_all(&dir).ok();
 }

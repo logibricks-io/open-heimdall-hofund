@@ -1089,7 +1089,7 @@ async fn post_token(
     if let Some(token) = bearer {
         builder = builder.header(reqwest::header::AUTHORIZATION, bearer_value(token)?);
     }
-    let response = builder.send().await.map_err(http::map_transport)?;
+    let response = http::send_builder(builder).await?;
     let status = response.status().as_u16();
     let bytes = response.bytes().await.map_err(http::map_transport)?;
     if bytes.len() > MAX_CREDENTIALS_BYTES as usize {
