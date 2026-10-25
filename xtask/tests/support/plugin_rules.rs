@@ -60,6 +60,8 @@ fn plugin_seam_matches_the_contract() {
     );
 
     let host_users = [
+        "hofund-daemon",
+        "hofund-gateway",
         "hofund-kit-agent",
         "hofund-kit-subscription",
         "hofund-kit-upstream",

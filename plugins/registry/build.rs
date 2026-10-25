@@ -12,6 +12,12 @@ struct Listed {
     package: String,
     feature: String,
     routes: Vec<DeclaredRoute>,
+    presets: Vec<Preset>,
+}
+
+struct Preset {
+    id: String,
+    config: Vec<(String, String)>,
 }
 
 fn main() {
@@ -45,6 +51,9 @@ fn run() -> Result<(), String> {
                 plugin.id, plugin.feature
             ));
         }
+        if builtin_factory_ids().contains(&plugin.id.as_str()) {
+            return Err(format!("{} is a builtin factory id", plugin.id));
+        }
         let expected = expected_path(&plugin.kind, &plugin.id)?;
         if plugin.path != expected {
             return Err(format!(
@@ -71,6 +80,21 @@ fn run() -> Result<(), String> {
     }
     if let Some(conflict) = route_conflicts(&routes) {
         return Err(conflict);
+    }
+    let mut preset_ids = Vec::new();
+    for plugin in &listed {
+        for preset in &plugin.presets {
+            if invalid_preset_id(&preset.id) {
+                return Err(format!(
+                    "{} preset {} is not kebab-case",
+                    plugin.id, preset.id
+                ));
+            }
+            preset_ids.push(preset.id.as_str());
+        }
+    }
+    if let Some(id) = duplicate_id(&preset_ids) {
+        return Err(format!("duplicate preset id {id}"));
     }
     check_features(&listed)?;
     let generated = emit(&listed);
@@ -101,6 +125,7 @@ fn parse_list(workspace: &Path, text: &str) -> Result<Vec<Listed>, String> {
         if kind == "inbound" && routes.is_empty() {
             return Err(format!("{id} declares no routes"));
         }
+        let presets = presets_of(&id, &declared)?;
         listed.push(Listed {
             id,
             kind,
@@ -108,6 +133,7 @@ fn parse_list(workspace: &Path, text: &str) -> Result<Vec<Listed>, String> {
             package,
             feature,
             routes,
+            presets,
         });
     }
     Ok(listed)
@@ -135,6 +161,46 @@ fn routes_of(plugin: &str, declared: &toml::Value) -> Result<Vec<DeclaredRoute>,
             method,
             prefix,
         });
+    }
+    Ok(parsed)
+}
+
+fn presets_of(plugin: &str, declared: &toml::Value) -> Result<Vec<Preset>, String> {
+    let Some(presets) = declared.get("preset") else {
+        return Ok(Vec::new());
+    };
+    let Some(presets) = presets.as_array() else {
+        return Err(format!("{plugin} preset table is not an array"));
+    };
+    let mut parsed = Vec::new();
+    for preset in presets {
+        let id = field(preset, "id")?;
+        let mut config = Vec::new();
+        if let Some(table) = preset.get("config") {
+            let Some(table) = table.as_table() else {
+                return Err(format!("{plugin} preset {id} config is not a table"));
+            };
+            for (key, value) in table {
+                let Some(text) = value.as_str() else {
+                    return Err(format!("{plugin} preset {id} config {key} is not a string"));
+                };
+                if key.is_empty() || key.contains(['"', '\\']) || text.contains(['"', '\\', '\n']) {
+                    return Err(format!(
+                        "{plugin} preset {id} config {key} is not plain text"
+                    ));
+                }
+                config.push((key.clone(), text.to_owned()));
+            }
+            config.sort_by(|left, right| left.0.cmp(&right.0));
+        }
+        parsed.push(Preset { id, config });
+    }
+    let ids: Vec<&str> = parsed.iter().map(|preset| preset.id.as_str()).collect();
+    if let Some(id) = duplicate_id(&ids) {
+        return Err(format!("{plugin} repeats preset {id}"));
+    }
+    if !strictly_sorted(&ids) {
+        return Err(format!("{plugin} presets are not sorted by id"));
     }
     Ok(parsed)
 }
@@ -240,6 +306,7 @@ fn check_features(listed: &[Listed]) -> Result<(), String> {
 fn emit(listed: &[Listed]) -> String {
     let mut routes = String::new();
     let mut calls = String::new();
+    let mut presets = String::new();
     for plugin in listed {
         let rust_name = plugin.package.replace('-', "_");
         calls.push_str(&format!(
@@ -250,6 +317,16 @@ fn emit(listed: &[Listed]) -> String {
             routes.push_str(&format!(
                 "        #[cfg(feature = \"{}\")]\n        CompiledRoute {{ plugin: \"{}\", method: \"{}\", prefix: \"{}\" }},\n",
                 plugin.feature, route.plugin, route.method, route.prefix
+            ));
+        }
+        for preset in &plugin.presets {
+            let mut pairs = String::new();
+            for (key, value) in &preset.config {
+                pairs.push_str(&format!("(\"{key}\", \"{value}\"), "));
+            }
+            presets.push_str(&format!(
+                "        #[cfg(feature = \"{}\")]\n        CompiledPreset {{ id: \"{}\", plugin: \"{}\", config: &[{pairs}] }},\n",
+                plugin.feature, preset.id, plugin.id
             ));
         }
     }
@@ -267,11 +344,29 @@ pub struct CompiledRoute {{
     pub prefix: &'static str,
 }}
 
+/// One preset id compiled from `plugin.toml`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompiledPreset {{
+    /// Preset id.
+    pub id: &'static str,
+    /// Plugin that serves this preset.
+    pub plugin: &'static str,
+    /// Static config entries, in key order.
+    pub config: &'static [(&'static str, &'static str)],
+}}
+
 /// Routes for the features enabled on this build.
 #[must_use]
 pub fn compiled_routes() -> &'static [CompiledRoute] {{
     &[
 {routes}    ]
+}}
+
+/// Presets for the features enabled on this build.
+#[must_use]
+pub fn compiled_presets() -> &'static [CompiledPreset] {{
+    &[
+{presets}    ]
 }}
 
 /// Contributions for the features enabled on this build.

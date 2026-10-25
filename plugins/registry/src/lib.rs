@@ -4,7 +4,9 @@
 //! register through [`hofund_plugin_sdk::Contribution`]. This crate is the only
 //! one that depends on plugin implementation crates.
 //!
-//! Lookup is by plugin id. Preset-id lookup is later.
+//! [`factory`] resolves a plugin id, including the built-in Chat, Responses,
+//! Messages, and Generative factories. [`preset`] resolves a preset id to the
+//! plugin and its static config.
 
 #![deny(missing_docs)]
 
@@ -12,6 +14,7 @@ use std::sync::Arc;
 
 use hofund_plugin_api::{DynUpstreamFactory, InboundSurface};
 
+mod builtin;
 #[allow(dead_code)]
 mod check;
 
@@ -21,7 +24,34 @@ mod generated {
 
 use check::path_matches;
 
-pub use generated::{CompiledRoute, compiled_routes, contributions};
+pub use generated::{
+    CompiledPreset, CompiledRoute, compiled_presets, compiled_routes, contributions,
+};
+
+/// The factory for `id`.
+///
+/// A linked plugin wins. Otherwise a built-in factory is returned. Pull
+/// request E adds the plugin and this lookup keeps the same id.
+#[must_use]
+pub fn factory(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
+    upstream(id).or_else(|| builtin::factory(id))
+}
+
+/// The preset record for `id`, when a linked plugin declares it.
+#[must_use]
+pub fn preset(id: &str) -> Option<&'static CompiledPreset> {
+    compiled_presets().iter().find(|preset| preset.id == id)
+}
+
+/// Every inbound surface the linked plugins contribute.
+#[must_use]
+pub fn surfaces() -> Vec<Arc<dyn InboundSurface>> {
+    let mut found = Vec::new();
+    for (_, contribution) in contributions() {
+        found.extend(contribution.surfaces().iter().cloned());
+    }
+    found
+}
 
 /// The upstream factory for `id`, when that plugin is linked and contributes one.
 #[must_use]
@@ -98,5 +128,21 @@ mod tests {
         assert!(surface("relay").is_none());
         assert!(upstream("missing").is_none());
         assert!(match_route("GET", "/missing").is_none());
+        let record = super::preset("relay").expect("relay preset");
+        assert_eq!(record.plugin, "relay");
+        assert!(record.config.is_empty());
+        assert!(super::preset("openai").is_none());
+        assert_eq!(
+            super::factory("openai-compat")
+                .expect("builtin")
+                .spec()
+                .plugin()
+                .as_str(),
+            "openai-compat"
+        );
+        assert!(super::factory("anthropic").is_some());
+        assert!(super::factory("generative").is_some());
+        assert!(super::factory("missing").is_none());
+        assert!(super::factory("relay").is_some());
     }
 }

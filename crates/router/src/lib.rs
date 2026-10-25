@@ -145,6 +145,21 @@ impl Router {
         }
     }
 
+    /// Member ids on the current routes, in first-seen order.
+    #[must_use]
+    pub fn member_ids(&self) -> Vec<MemberId> {
+        let mut seen = BTreeSet::new();
+        let mut ids = Vec::new();
+        for hops in self.routes.values() {
+            for hop in hops {
+                if seen.insert(hop.member.id().to_string()) {
+                    ids.push(hop.member.id().clone());
+                }
+            }
+        }
+        ids
+    }
+
     /// Model names that have at least one upstream, in order.
     #[must_use]
     pub fn models(&self) -> Vec<String> {

@@ -16,10 +16,13 @@ echo = ["dep:hofund-plugin-echo"]
 relay = ["dep:hofund-plugin-relay"]
 
 [dependencies]
+futures-util = "0.3.32"
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
 hofund-plugin-echo = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }
+hofund-provider = { workspace = true }
+hofund-quirks = { workspace = true }
 
 [build-dependencies]
 toml = "0.8.2"

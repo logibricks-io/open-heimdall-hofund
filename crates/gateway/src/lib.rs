@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
@@ -26,14 +26,18 @@ use endpoints::{GENERATIVE_CATCHALL, inject_target, match_count, match_generate,
 use futures_util::{Stream, StreamExt};
 use hofund_codec::{Codec, StreamEncoder};
 use hofund_ir::{Request as ModelRequest, StreamEvent};
-use hofund_plugin_api::{BodyStream, PluginErrorKind};
-use hofund_router::{Completion, PluginError, RouterError, Snapshot};
+use hofund_plugin_api::{
+    BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
+};
+use hofund_router::{Completion, RouterError, Snapshot};
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
+const SURFACE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The HTTP server and the state it shares across requests.
 pub struct Gateway {
@@ -48,6 +52,7 @@ struct Inner {
     token_file: Option<PathBuf>,
     codecs: HashMap<String, Arc<dyn Codec>>,
     usage: Arc<Ledger>,
+    surfaces: Vec<Arc<dyn InboundSurface>>,
 }
 
 /// A bound server.
@@ -116,8 +121,22 @@ impl Gateway {
                 token_file,
                 codecs,
                 usage,
+                surfaces: Vec::new(),
             }),
         }
+    }
+
+    /// Mounts inbound surfaces. A request that matches one is authenticated,
+    /// then handled inside the inbound span with a 60 second deadline.
+    ///
+    /// Codec routes stay on their own paths. A surface is reached from the
+    /// fallback, so a codec path wins when both could match.
+    #[must_use]
+    pub fn with_surfaces(mut self, surfaces: Vec<Arc<dyn InboundSurface>>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .surfaces = surfaces;
+        self
     }
 
     /// The axum router. `/health` is open. Every other route requires a token.
@@ -146,6 +165,9 @@ impl Gateway {
             routes = routes
                 .route(GENERATIVE_CATCHALL, post(complete))
                 .route(GENERATIVE_LIST, get(generative_models));
+        }
+        if !self.inner.surfaces.is_empty() {
+            routes = routes.fallback(dispatch_surface);
         }
         routes.with_state(Arc::clone(&self.inner))
     }
@@ -197,6 +219,116 @@ impl Drop for Running {
             let _ = shutdown.send(());
         }
     }
+}
+
+async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let Some(surface) = app.surfaces.iter().find(|surface| {
+        surface
+            .routes()
+            .iter()
+            .any(|route| method_is(route.method(), &method) && path_matches(route.prefix(), &path))
+    }) else {
+        return text_response(StatusCode::NOT_FOUND, "not found");
+    };
+    let surface = Arc::clone(surface);
+    let uri = request.uri().clone();
+    let headers = request.headers().clone();
+    if let Some(response) = reject(&current_token(&app), &headers, &uri, None) {
+        return response;
+    }
+    let Some(route) =
+        surface.routes().iter().copied().find(|route| {
+            method_is(route.method(), &method) && path_matches(route.prefix(), &path)
+        })
+    else {
+        return text_response(StatusCode::NOT_FOUND, "not found");
+    };
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => return text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
+    };
+    let inbound =
+        axum::http::Request::from_parts(parts, hofund_plugin_api::Body::from_bytes(bytes));
+    let host = hofund_plugin_host::surface_host(
+        app.snapshot.load().member_ids(),
+        protocols_of(&app.codecs),
+        true,
+    );
+    let plugin_id = surface.id().as_str().to_owned();
+    let span = tracing::info_span!(
+        "inbound",
+        "plugin.id" = plugin_id,
+        "http.method" = method.as_str(),
+        "http.route" = route.prefix(),
+    );
+    match tokio::time::timeout(
+        SURFACE_TIMEOUT,
+        async move { surface.handle(&route, inbound, &host).await }.instrument(span),
+    )
+    .await
+    {
+        Ok(Ok(response)) => surface_response(response),
+        Ok(Err(error)) => surface_error(error),
+        Err(_) => text_response(StatusCode::GATEWAY_TIMEOUT, "kernel deadline exceeded"),
+    }
+}
+
+fn protocols_of(codecs: &HashMap<String, Arc<dyn Codec>>) -> Vec<ProtocolId> {
+    let mut ids = Vec::new();
+    for codec in codecs.values() {
+        if let Ok(id) = ProtocolId::try_from(codec.id())
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+fn method_is(route: Method, method: &axum::http::Method) -> bool {
+    let name = match route {
+        Method::Get => "GET",
+        Method::Post => "POST",
+        Method::Put => "PUT",
+        Method::Patch => "PATCH",
+        Method::Delete => "DELETE",
+        _ => return false,
+    };
+    method.as_str().eq_ignore_ascii_case(name)
+}
+
+fn path_matches(prefix: &str, path: &str) -> bool {
+    path == prefix
+        || prefix == "/"
+        || (path.len() > prefix.len()
+            && path.starts_with(prefix)
+            && path.as_bytes()[prefix.len()] == b'/')
+}
+
+fn surface_response(response: axum::http::Response<BodyStream>) -> Response {
+    let (parts, body) = response.into_parts();
+    let stream = futures_util::stream::unfold(body, |mut body| async move {
+        match body.next_chunk().await {
+            Some(Ok(bytes)) => Some((Ok::<Bytes, std::io::Error>(bytes), body)),
+            Some(Err(error)) => Some((Err(std::io::Error::other(error.to_string())), body)),
+            None => None,
+        }
+    });
+    let mut out = Response::new(Body::from_stream(stream));
+    *out.status_mut() = parts.status;
+    *out.headers_mut() = parts.headers;
+    out
+}
+
+fn surface_error(error: PluginError) -> Response {
+    let status = error
+        .status()
+        .and_then(|code| StatusCode::from_u16(code).ok())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    text_response(status, error.message())
 }
 
 async fn health() -> Response {

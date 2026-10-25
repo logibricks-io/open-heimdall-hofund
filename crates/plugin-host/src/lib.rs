@@ -9,8 +9,9 @@
 //! `0600` JSON file. Secrets are [`SecretString`] values in memory and
 //! plaintext on disk. `hofund-secrets` has no keychain backend, so encrypted
 //! storage is a prerequisite of RFC 0001 pull request H. The scheduler records
-//! jobs and does not spawn tasks. The daemon does not call any of this yet,
-//! so gateway behavior is unchanged.
+//! jobs and does not spawn tasks. The daemon builds one context per provider
+//! with [`runtime_host`]. The gateway builds a [`SurfaceHost`] per inbound
+//! request.
 
 #![deny(missing_docs, unreachable_pub, rust_2018_idioms)]
 
@@ -59,14 +60,63 @@ pub fn host_context(
     )
 }
 
-/// Builds a [`SurfaceHost`]. The gateway mount that fills the live snapshot is later work.
+/// Builds a [`SurfaceHost`]. `accepted` is the gateway's auth result for this request.
 #[must_use]
 pub fn surface_host(
     members: Vec<MemberId>,
     protocols: Vec<ProtocolId>,
-    auth: AuthResult,
+    accepted: bool,
 ) -> SurfaceHost {
-    SurfaceHost::from_parts(members, protocols, auth)
+    SurfaceHost::from_parts(members, protocols, AuthResult::new(accepted))
+}
+
+/// A [`HostContext`] for one configured provider.
+///
+/// The HTTP handle is the pooled direct client. `api_key` is the secret
+/// `api_key` for this plugin. Accounts live at `root/accounts.json`. The
+/// scheduler records jobs and does not run them.
+///
+/// # Errors
+///
+/// Returns [`StoreError`] when the account file cannot be created.
+pub fn runtime_host(
+    plugin: PluginId,
+    api_key: impl Into<String>,
+    root: impl Into<PathBuf>,
+) -> Result<HostContext, StoreError> {
+    let root = root.into();
+    let accounts = PlaintextFileAccountStore::open(root.join("accounts.json"))?;
+    Ok(host_context(
+        plugin.clone(),
+        Arc::new(PooledHttp::direct()),
+        Arc::new(KeySecrets {
+            plugin,
+            api_key: api_key.into(),
+        }),
+        Arc::new(accounts),
+        Arc::new(SystemClock),
+        Arc::new(RecordingScheduler::default()),
+        Arc::new(StdProcess::default()),
+        Arc::new(RootDirs { root }),
+        Arc::new(RecordingObserve::default()),
+    ))
+}
+
+/// One `api_key` secret. [`Debug`] is not implemented.
+struct KeySecrets {
+    plugin: PluginId,
+    api_key: String,
+}
+
+#[async_trait]
+impl SecretsBackend for KeySecrets {
+    async fn get(&self, plugin: &PluginId, id: &str) -> Result<Option<SecretString>, PluginError> {
+        if plugin.as_str() == self.plugin.as_str() && id == "api_key" && !self.api_key.is_empty() {
+            Ok(Some(SecretString::from(self.api_key.clone())))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 /// A context whose HTTP handle is `http`. Tests use this to drive the pooled client.
@@ -893,11 +943,12 @@ mod tests {
         assert_eq!(second.get(), 2);
         scheduler.shutdown();
         assert!(scheduler.jobs().is_empty());
-        let _ = surface_host(
+        let host = surface_host(
             Vec::new(),
             vec![hofund_plugin_api::ProtocolId::OPENAI_CHAT],
-            hofund_plugin_api::AuthResult::new(true),
+            true,
         );
+        assert!(host.auth().accepted());
         let _ = SystemClock.monotonic();
     }
 

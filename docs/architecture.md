@@ -70,6 +70,8 @@ flowchart BT
   pluginRegistry --> pluginSdk
   pluginRegistry --> pluginRelay
   pluginRegistry --> pluginEcho
+  pluginRegistry --> provider
+  pluginRegistry --> quirks
   pluginRelay --> pluginApi
   pluginRelay --> pluginSdk
   pluginEcho --> pluginApi
@@ -81,6 +83,7 @@ flowchart BT
   gateway --> ir
   gateway --> usage
   gateway --> pluginApi
+  gateway --> pluginHost
   daemon --> gateway
   daemon --> config
   daemon --> secrets
@@ -89,6 +92,8 @@ flowchart BT
   daemon --> quirks
   daemon --> router
   daemon --> pluginApi
+  daemon --> pluginHost
+  daemon --> pluginRegistry
   daemon --> usage
   agent --> config
   agent --> pluginApi
@@ -106,11 +111,15 @@ depends on `plugin-api` so it can adapt a provider into a router member.
 `desktop` sits beside `cli` and depends on the same two crates as `cli`.
 `plugin-api` depends on `ir`. `plugin-sdk` depends on `plugin-api` and
 `quirks`. `plugin-host` depends on `plugin-api`. Its tests also depend on
-`plugin-sdk` so the retry contract runs against the pooled client. The pooled HTTP client
-lives in `plugin-host`. `plugin-registry` depends on `plugin-api`,
-`plugin-sdk`, and the plugin crates it composes. The three kits depend
-only on `plugin-host` and are not on the diagram. `plugin-relay` dev-depends
-on `kit-upstream` so its tests can build a host.
+`plugin-sdk` so the retry contract runs against the pooled client. The pooled
+HTTP client lives in `plugin-host`. `plugin-registry` depends on `plugin-api`,
+`plugin-sdk`, the plugin crates it composes, and, until pull request E,
+`provider` and `quirks` for the built-in Chat, Responses, Messages, and
+Generative factories. `daemon` depends on `plugin-registry` and
+`plugin-host` so it can call `factory` and build a `HostContext`.
+`gateway` depends on `plugin-host` so it can build a `SurfaceHost`.
+The three kits depend only on `plugin-host` and are not on the diagram.
+`plugin-relay` dev-depends on `kit-upstream` so its tests can build a host.
 
 | Package | May depend on |
 | --- | --- |
@@ -122,19 +131,19 @@ on `kit-upstream` so its tests can build a host.
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay` |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-provider`, `hofund-quirks` |
 | `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
 | `hofund-kit-upstream` | `hofund-plugin-host` |
 | `hofund-kit-subscription` | `hofund-plugin-host` |
 | `hofund-kit-agent` | `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
 | `hofund-router` | `hofund-ir`, `hofund-plugin-api` |
-| `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-router`, `hofund-usage` |
+| `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-usage` |
 | `hofund-config` | — |
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
-| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
@@ -153,8 +162,9 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 
 - `agent` depends on `config` and `plugin-api`. It must never depend on
   `gateway`, `router`, `provider`, or the daemon.
-- Only the three kits depend on `plugin-host`. A plugin does not. The kits
-  are unpublished and exist so a plugin test can build a `HostContext`.
+- A plugin does not depend on `plugin-host`. The daemon and the gateway do,
+  because they construct `HostContext` and `SurfaceHost`. The three kits do,
+  and they are unpublished so a plugin test can build a `HostContext`.
 - `plugin-sdk` re-exports `tracing`. `plugin-api` does not depend on it.
 - `gateway` and `router` must not depend on `quirks`. They must not name a
   vendor or branch on vendor-specific behavior. Capability gaps and protocol
@@ -179,7 +189,7 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | `plugin-api` | Plugin traits, `PluginError`, newtypes, and `HostContext` handles. |
 | `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. Re-exports `tracing` and `async_trait`. |
 | `plugin-host` | The `HostContext` constructor, the pooled HTTP client, and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
-| `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate ids and route-prefix conflicts. |
+| `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` also serves the built-in Chat, Responses, Messages, and Generative adapters until pull request E. |
 | `plugin-relay` | Sample upstream plugin. The kit dependency is tests only. |
 | `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
 | `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |
