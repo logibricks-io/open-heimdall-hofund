@@ -83,6 +83,8 @@ Aliases (both magpie `presets.go` around line 672 and hofund `[[alias]]`): qianf
 
 ## Cross-cutting provider gaps in hofund
 
+The list and probe behavior that closes the two gaps below is planned in [models.md](../plugins/models.md). This inventory stays partial until that code lands.
+
 - No scheduled upstream model listing (magpie: `/models` per protocol, models.dev catalog via the `catalog` field, `noList` presets use static lists; `internal/provider/models.go`, `autolist.go`). Azure is the exception: `list_deployments` reads the deployment list, then `/openai/v1/models`, verified with mocks only (CI run 40178604119). The gateway does not call it on a schedule (feature-parity row 2.9).
 - No connectivity test / probe (magpie: `internal/provider/test.go`, `translated_probe.go`, `test_as.go`).
 - No auth-header learning (magpie retries with one header when both are refused: `RetryOneAuth`, `authheader.go`).
