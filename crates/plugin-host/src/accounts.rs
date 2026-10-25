@@ -224,9 +224,11 @@ fn file_id(meta: &fs::Metadata) -> u64 {
 }
 
 #[cfg(windows)]
-fn file_id(meta: &fs::Metadata) -> u64 {
-    use std::os::windows::fs::MetadataExt;
-    meta.file_index().unwrap_or(0)
+fn file_id(_meta: &fs::Metadata) -> u64 {
+    // `MetadataExt::file_index` is still unstable (`windows_by_handle`,
+    // rust-lang/rust#63010). The stamp still changes when the mtime or the
+    // length changes, which a rewrite of this file does.
+    0
 }
 
 #[cfg(not(any(unix, windows)))]

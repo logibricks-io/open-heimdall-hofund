@@ -728,7 +728,7 @@ mod tests {
         let process = StdProcess::default();
         let id = process
             .spawn(
-                std::path::PathBuf::from("/bin/true"),
+                std::path::PathBuf::from("/usr/bin/true"),
                 Vec::new(),
                 Vec::new(),
                 std::path::PathBuf::from("/tmp"),
