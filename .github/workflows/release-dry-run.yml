@@ -89,7 +89,6 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Install dist
-        shell: ${{ matrix.install_dist.shell }}
         run: ${{ matrix.install_dist.run }}
       - name: Install Linux host libraries
         if: runner.os == 'Linux'
