@@ -2,7 +2,7 @@
 //!
 //! This module builds requests and reads responses. It does not construct a
 //! client. [`Call::send`] uses [`HttpHandle::send`](hofund_plugin_api::HttpHandle::send).
-//! A status of 400 or higher becomes [`PluginErrorKind::Status`](hofund_plugin_api::PluginErrorKind::Status).
+//! A status of 400 or higher becomes [`PluginErrorKind::Status`].
 //! Connect and timeout failures are the only ones [`Call::send_with_retry`] repeats.
 
 use std::fmt;
@@ -167,7 +167,7 @@ impl Call {
 
     /// Sends the call up to `attempts` times, including the first try.
     ///
-    /// The cap is [`MAX_ATTEMPTS`]. Only connect and timeout errors are retried.
+    /// The cap is three attempts. Only connect and timeout errors are retried.
     ///
     /// # Errors
     ///

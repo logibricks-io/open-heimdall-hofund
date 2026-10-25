@@ -2,7 +2,7 @@
 //!
 //! [`transport::Call`] sends on the host's pooled client. The client itself
 //! lives in `hofund-plugin-host`. This crate re-exports [`tracing`],
-//! [`async_trait`], and [`apply_quirks`] so a plugin does not name those
+//! [`macro@async_trait`], and [`apply_quirks`] so a plugin does not name those
 //! crates. The API does not depend on quirks.
 //!
 //! `SigV4`, OAuth, and paging are not here yet.
