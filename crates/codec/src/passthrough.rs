@@ -18,8 +18,8 @@ use hofund_ir::{StreamEvent, Usage};
 
 use crate::StreamDecoder;
 
-/// Bytes of one event the tap will hold before falling back to a literal
-/// replacement. A larger event is forwarded as it arrives.
+/// Bytes of one event the tap will hold before scanning the prefix for the
+/// model path. A larger unfinished event is forwarded as it arrives.
 pub(crate) const DEFAULT_EVENT_CAP: usize = 1 << 20;
 
 /// Incremental read of a raw response body.
@@ -31,7 +31,7 @@ pub trait RawTap: Send {
     /// Observes `chunk` and returns the bytes to forward.
     fn push(&mut self, chunk: &[u8]) -> Vec<u8>;
 
-    /// Flushes a trailing partial frame and any unfinished model field.
+    /// Flushes a trailing partial frame unchanged and closes it.
     fn finish(&mut self) -> Vec<u8>;
 
     /// Input and output tokens seen so far.
