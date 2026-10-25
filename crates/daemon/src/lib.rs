@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
-use hofund_config::{Config, Kind, PresetWire, Protocol, load_path};
+use hofund_config::{Config, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 use hofund_plugin_api::{DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue};
 use hofund_plugin_host::HttpLimits;
@@ -53,6 +53,7 @@ impl std::error::Error for DaemonError {}
 /// Returns [`DaemonError`] at the first structural or provider error.
 pub fn check(path: &Path) -> Result<(), DaemonError> {
     let config = load_path(path).map_err(show)?;
+    warn(&config);
     let _ = providers(&config, path)?;
     Ok(())
 }
@@ -150,6 +151,7 @@ pub fn usage_report(path: &Path) -> Result<String, DaemonError> {
 /// the server task.
 pub async fn start(path: &Path) -> Result<Running, DaemonError> {
     let config = load_path(path).map_err(show)?;
+    warn(&config);
     let token_path = beside(path, &config.token_file);
     let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
     let usage = Arc::new(Ledger::open(&beside(path, &config.usage_file)).map_err(show)?);
@@ -262,23 +264,28 @@ fn providers(
                 Arc::new(build_plugin(provider, &planned, &endpoint, path, limits)?)
             }
             Wire::Vertex => Arc::new(
-                Vertex::new(endpoint, &provider.credentials, &provider.impersonate)
-                    .map_err(show)?,
+                Vertex::new(
+                    endpoint,
+                    option(provider, "credentials"),
+                    option(provider, "impersonate"),
+                )
+                .map_err(show)?,
             ),
             Wire::Converse => {
                 let access_key_id =
-                    hofund_secrets::resolve(&provider.access_key_id).map_err(show)?;
+                    hofund_secrets::resolve(option(provider, "access_key_id")).map_err(show)?;
                 let secret_access_key =
-                    hofund_secrets::resolve(&provider.secret_access_key).map_err(show)?;
-                let session_token = if provider.session_token.is_empty() {
+                    hofund_secrets::resolve(option(provider, "secret_access_key")).map_err(show)?;
+                let session_token = option(provider, "session_token");
+                let session_token = if session_token.is_empty() {
                     String::new()
                 } else {
-                    hofund_secrets::resolve(&provider.session_token).map_err(show)?
+                    hofund_secrets::resolve(session_token).map_err(show)?
                 };
                 Arc::new(
                     Bedrock::new(
                         endpoint,
-                        provider.region.as_deref().unwrap_or(""),
+                        option(provider, "region"),
                         &access_key_id,
                         &secret_access_key,
                         &session_token,
@@ -422,29 +429,36 @@ struct Planned {
 }
 
 fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
+    let selected = match provider.protocol.as_deref() {
+        Some(protocol) => Some(wire_of_protocol(protocol)?),
+        None => None,
+    };
     if let Some(preset) = &provider.preset
         && let Some(compiled) = hofund_plugin_registry::preset(preset)
     {
+        let wire = wire_of_plugin(compiled.plugin)?;
+        if let Some(selected) = selected
+            && selected != wire
+        {
+            return Err(DaemonError::new(format!(
+                "provider `{}` protocol does not match plugin `{}`",
+                provider.id, compiled.plugin
+            )));
+        }
         return Ok(Planned {
             base_url: provider.base_url.clone(),
-            wire: wire_of_plugin(compiled.plugin)?,
+            wire,
             credential: Credential::Default,
         });
     }
     if let Some(preset) = &provider.preset {
         let resolved = resolve(&hofund_provider::Resolve {
             id: preset,
-            region: provider.region.as_deref(),
-            wire: provider.preset_wire.map(|wire| match wire {
-                PresetWire::Chat => Wire::Chat,
-                PresetWire::Responses => Wire::Responses,
-                PresetWire::Messages => Wire::Messages,
-                PresetWire::Generative => Wire::Generative,
-                PresetWire::Converse => Wire::Converse,
-            }),
+            region: option_present(provider, "region"),
+            wire: selected,
             base_url: &provider.base_url,
-            project: &provider.project,
-            location: &provider.location,
+            project: option(provider, "project"),
+            location: option(provider, "location"),
         })
         .map_err(show)?;
         return Ok(Planned {
@@ -453,29 +467,54 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
             credential: resolved.credential,
         });
     }
-    let kind = provider.kind.ok_or_else(|| {
+    let wire = selected.ok_or_else(|| {
         DaemonError::new(format!(
-            "provider `{}` needs a kind or a preset",
+            "provider `{}` needs a protocol or a preset",
             provider.id
         ))
     })?;
-    let (wire, credential) = match kind {
-        Kind::OpenAiCompat { protocol } => {
-            let wire = match protocol {
-                Protocol::Chat => Wire::Chat,
-                Protocol::Responses => Wire::Responses,
-            };
-            (wire, Credential::Default)
-        }
-        Kind::Anthropic => (Wire::Messages, Credential::Default),
-        Kind::Generative => (Wire::Generative, Credential::Default),
-        Kind::Converse => (Wire::Converse, Credential::Default),
-    };
     Ok(Planned {
         base_url: provider.base_url.clone(),
         wire,
-        credential,
+        credential: Credential::Default,
     })
+}
+
+/// Option keys the unmigrated Vertex and Bedrock constructors still read.
+/// Config does not name them. E deletes this once those plugins validate
+/// `options` themselves.
+fn option<'a>(provider: &'a hofund_config::Provider, key: &str) -> &'a str {
+    provider.options.get(key).map(String::as_str).unwrap_or("")
+}
+
+fn option_present<'a>(provider: &'a hofund_config::Provider, key: &str) -> Option<&'a str> {
+    match option(provider, key) {
+        "" => None,
+        value => Some(value),
+    }
+}
+
+fn wire_of_protocol(protocol: &str) -> Result<Wire, DaemonError> {
+    let id = ProtocolId::try_from(protocol)
+        .map_err(|_| DaemonError::new(format!("unknown protocol id `{protocol}`")))?;
+    Ok(match id {
+        ProtocolId::OPENAI_CHAT => Wire::Chat,
+        ProtocolId::OPENAI_RESPONSES => Wire::Responses,
+        ProtocolId::ANTHROPIC_MESSAGES => Wire::Messages,
+        ProtocolId::GENERATIVE_LANGUAGE => Wire::Generative,
+        ProtocolId::BEDROCK_CONVERSE => Wire::Converse,
+        _ => {
+            return Err(DaemonError::new(format!(
+                "unknown protocol id `{protocol}`"
+            )));
+        }
+    })
+}
+
+fn warn(config: &Config) {
+    for warning in &config.warnings {
+        eprintln!("warning: {warning}");
+    }
 }
 
 fn wire_of_plugin(plugin: &str) -> Result<Wire, DaemonError> {
@@ -569,7 +608,7 @@ mod tests {
         check(&path).expect("google");
         std::fs::write(
             &path,
-            "[[providers]]\nid = \"gemini\"\npreset = \"google\"\nprotocol = \"chat\"\napi_key = \"test\"\n",
+            "[[providers]]\nid = \"gemini\"\npreset = \"google\"\nprotocol = \"openai-chat\"\napi_key = \"test\"\n",
         )
         .expect("write");
         check(&path).expect("google chat");

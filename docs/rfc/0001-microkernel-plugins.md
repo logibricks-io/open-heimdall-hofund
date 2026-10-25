@@ -905,6 +905,15 @@ D2 follows the review answers on D1. Shared protocol helpers stay in the SDK and
 - The gateway fallback authenticates, then calls `InboundSurface::handle` inside an `inbound` span and a 60 second timeout. `echo` is mounted, including a path under its prefix. Codec routes stay on their own axum paths.
 - The daemon config supplies `connect_timeout_ms` and `read_timeout_ms` to `HttpLimits`. Omitted keys use the 10 second connect and 60 second idle-read defaults. These are the socket budgets. The kernel idle deadline stays the endpoint timeout.
 
+### PR B2 notes
+
+B2 is the config shape from section 2.1. It does not add a plugin.
+
+- `Kind` is deleted. `protocol` is a string. The daemon converts it with `ProtocolId::try_from`. Config does not name that type, so a string that is not a codec id still loads and fails when the factory is resolved.
+- `project`, `location`, `credentials`, `impersonate`, `access_key_id`, `secret_access_key`, `session_token`, and `region` load from `[providers.options]`. The same keys at the top of a provider still parse for this release: they are copied into `options` and the load records a warning. The next release rejects them. Config does not check which preset they belong to.
+- Until E, the daemon still reads those option keys to construct `Vertex` and `Bedrock`. E deletes that read when the plugins validate `options`.
+- `[[subscriptions]]` has `id`, `accounts` (`*` or one account id), and `[subscriptions.options]`. The daemon stores the table and does not build members. That is H.
+
 ### Parallel work plan
 
 B is alone. After B, B2 and C can proceed together. D starts after C, because both edit `providers` and C lands the snapshot those calls publish. K waits for C and must merge before H. L waits for D. H does not wait for L: until L, subscription commands stay on the in-process CLI path. H does wait for encrypted account storage. `PlaintextFileAccountStore` is not the store those plugins persist to.

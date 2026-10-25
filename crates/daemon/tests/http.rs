@@ -12,8 +12,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Upstream {
-    kind: &'static str,
-    protocol: Option<&'static str>,
+    protocol: &'static str,
     quirks: Option<&'static str>,
     wire_path: &'static str,
     body: &'static str,
@@ -29,24 +28,21 @@ struct Inbound {
 
 const UPSTREAMS: &[Upstream] = &[
     Upstream {
-        kind: "openai_compat",
-        protocol: Some("chat"),
+        protocol: "openai-chat",
         quirks: None,
         wire_path: "/chat/completions",
         body: r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
         stream: "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
     },
     Upstream {
-        kind: "openai_compat",
-        protocol: Some("responses"),
+        protocol: "openai-responses",
         quirks: None,
         wire_path: "/responses",
         body: r#"{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}"#,
         stream: "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"ok\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n",
     },
     Upstream {
-        kind: "anthropic",
-        protocol: None,
+        protocol: "anthropic-messages",
         quirks: Some("messages-default"),
         wire_path: "/v1/messages",
         body: r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}"#,
@@ -91,10 +87,6 @@ fn scratch() -> PathBuf {
 }
 
 fn config_text(base_url: &str, upstream: &Upstream, failover_statuses: &str) -> String {
-    let protocol = upstream
-        .protocol
-        .map(|protocol| format!("protocol = \"{protocol}\"\n"))
-        .unwrap_or_default();
     let quirks = upstream
         .quirks
         .map(|quirks| format!("quirks = \"{quirks}\"\n"))
@@ -108,14 +100,14 @@ usage_file = "usage.sqlite"
 statuses = {failover_statuses}
 [[providers]]
 id = "primary"
-kind = "{kind}"
+protocol = "{protocol}"
 base_url = "{base_url}"
 api_key = "test-key"
-{protocol}{quirks}[[routes]]
+{quirks}[[routes]]
 model = "demo"
 upstreams = ["primary"]
 "#,
-        kind = upstream.kind,
+        protocol = upstream.protocol,
     )
 }
 
@@ -223,14 +215,12 @@ token_file = "token"
 usage_file = "usage.sqlite"
 [[providers]]
 id = "primary"
-kind = "openai_compat"
+protocol = "openai-chat"
 base_url = "{}"
-protocol = "chat"
 [[providers]]
 id = "backup"
-kind = "openai_compat"
+protocol = "openai-chat"
 base_url = "{}"
-protocol = "chat"
 [[routes]]
 model = "demo"
 upstreams = ["primary", "backup"]
@@ -301,25 +291,22 @@ async fn generative_inbound_carries_a_tool_call() {
         .expect("client");
     let cases = [
         (
-            "openai_compat",
-            Some("chat"),
+            "openai-chat",
             None,
             "/chat/completions",
             r#"{"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}]}"#,
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{}}]}\n\ndata: [DONE]\n\n",
         ),
         (
-            "anthropic",
-            None,
+            "anthropic-messages",
             Some("messages-default"),
             "/v1/messages",
             r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Paris"}}],"stop_reason":"tool_use"}"#,
             "",
         ),
     ];
-    for (kind, protocol, quirks, wire_path, body, stream) in cases {
+    for (protocol, quirks, wire_path, body, stream) in cases {
         let upstream = Upstream {
-            kind,
             protocol,
             quirks,
             wire_path,
@@ -367,11 +354,11 @@ async fn generative_inbound_carries_a_tool_call() {
             assert_eq!(status.as_u16(), 200, "{text}");
             assert!(
                 text.contains("get_weather"),
-                "{kind} stream={stream_call}: {text}"
+                "{protocol} stream={stream_call}: {text}"
             );
             assert!(
                 text.contains("Paris"),
-                "{kind} stream={stream_call}: {text}"
+                "{protocol} stream={stream_call}: {text}"
             );
             running.shutdown().await;
             fs::remove_dir_all(dir).ok();
@@ -408,8 +395,7 @@ async fn cross_protocol_fields_do_not_reach_the_client_or_the_upstream() {
         .await;
 
     let upstream = Upstream {
-        kind: "openai_compat",
-        protocol: Some("chat"),
+        protocol: "openai-chat",
         quirks: None,
         wire_path: "/chat/completions",
         body: "",
@@ -513,8 +499,7 @@ async fn codex_responses_tools_are_accepted() {
         .mount(&responses)
         .await;
     let responses_upstream = Upstream {
-        kind: "openai_compat",
-        protocol: Some("responses"),
+        protocol: "openai-responses",
         quirks: None,
         wire_path: "/responses",
         body: "",
@@ -549,8 +534,7 @@ async fn codex_responses_tools_are_accepted() {
         .mount(&chat)
         .await;
     let chat_upstream = Upstream {
-        kind: "openai_compat",
-        protocol: Some("chat"),
+        protocol: "openai-chat",
         quirks: None,
         wire_path: "/chat/completions",
         body: "",
