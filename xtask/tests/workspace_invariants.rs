@@ -96,7 +96,9 @@ const INSPIRATION_ALLOWLIST: &[&str] = &[
     "README.zh-CN.md",
     "THIRD_PARTY_NOTICES.md",
     "docs/architecture.md",
+    "docs/feature-parity.md",
     "docs/magpie-comparison.md",
+    "docs/roadmap.md",
     "xtask/tests/workspace_invariants.rs",
 ];
 
