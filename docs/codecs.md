@@ -16,6 +16,34 @@ There is no HTTP server here. The codec crate does not open sockets, and its
 tests do not use the network. `GenerativeLanguage` is an inbound client
 protocol. This version has no upstream adapter that posts it.
 
+## Reasoning effort
+
+`GenerationParams.effort` is the shared level. A codec reads its own field
+and, on encode, writes that field only when the extension bag does not
+already hold it. A same-protocol request therefore keeps the caller's object,
+including a Messages `thinking.budget_tokens` value, which is not turned into
+a level. Official lists were checked on 2026-10-25.
+
+| Level | Chat and Responses | Messages | Generative Language |
+| --- | --- | --- | --- |
+| none | `none` | `thinking.type = disabled` | `thinkingBudget: 0` |
+| minimal | `minimal` | `low` | `minimal` |
+| low | `low` | `low` | `low` |
+| medium | `medium` | `medium` | `medium` |
+| high | `high` | `high` | `high` |
+| xhigh | `xhigh` | `xhigh` | `high` |
+| max | `max` | `max` | `high` |
+
+Chat and Responses publish all seven labels
+(<https://developers.openai.com/api/docs/guides/reasoning>).
+Messages `output_config.effort` publishes `low` through `max`
+(<https://platform.claude.com/docs/en/build-with-claude/effort>).
+Generative Language `thinkingConfig.thinkingLevel` publishes `minimal`
+through `high`
+(<https://ai.google.dev/gemini-api/docs/thinking>).
+`ultra` is read as `max` and written as `max`. Levels are not clamped to a
+model; this version has no catalog.
+
 ## Trait
 
 ```text

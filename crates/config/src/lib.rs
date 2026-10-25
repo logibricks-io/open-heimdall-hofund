@@ -89,8 +89,20 @@ pub enum Protocol {
 pub struct Route {
     /// Model name the client sends.
     pub model: String,
-    /// Provider ids, tried in order.
-    pub upstreams: Vec<String>,
+    /// Providers tried in order, each with an optional upstream model name.
+    pub upstreams: Vec<Upstream>,
+}
+
+/// One provider on a route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Upstream {
+    /// Provider id.
+    pub provider: String,
+    /// Model name sent to this provider.
+    ///
+    /// Absent means the name the client used, after `provider/model` is
+    /// reduced to the model portion.
+    pub model: Option<String>,
 }
 
 /// The first structural problem in a configuration file.
@@ -261,17 +273,14 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
                 route.model
             )));
         }
-        for upstream in &route.upstreams {
-            if !seen.contains(upstream) {
-                return Err(ConfigError::Invalid(format!(
-                    "route `{}` names unknown provider `{upstream}`",
-                    route.model
-                )));
-            }
+        let mut upstreams = Vec::new();
+        for upstream in route.upstreams {
+            let upstream = upstream_of(&route.model, upstream, &seen)?;
+            upstreams.push(upstream);
         }
         routes.push(Route {
             model: route.model,
-            upstreams: route.upstreams,
+            upstreams,
         });
     }
     Ok(Config {
@@ -285,6 +294,33 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         providers,
         routes,
     })
+}
+
+fn upstream_of(
+    route: &str,
+    upstream: RawUpstream,
+    providers: &BTreeSet<String>,
+) -> Result<Upstream, ConfigError> {
+    let (provider, model) = match upstream {
+        RawUpstream::Id(provider) => (provider, None),
+        RawUpstream::Mapped(mapped) => (mapped.provider, mapped.model),
+    };
+    if provider.is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "route `{route}` names an empty provider"
+        )));
+    }
+    if !providers.contains(&provider) {
+        return Err(ConfigError::Invalid(format!(
+            "route `{route}` names unknown provider `{provider}`"
+        )));
+    }
+    if model.as_ref().is_some_and(|model| model.is_empty()) {
+        return Err(ConfigError::Invalid(format!(
+            "route `{route}` has an empty model for provider `{provider}`"
+        )));
+    }
+    Ok(Upstream { provider, model })
 }
 
 fn kind_of(provider: &RawProvider) -> Result<Kind, ConfigError> {
@@ -393,7 +429,22 @@ struct RawProvider {
 #[serde(deny_unknown_fields)]
 struct RawRoute {
     model: String,
-    upstreams: Vec<String>,
+    upstreams: Vec<RawUpstream>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawUpstream {
+    Id(String),
+    Mapped(RawMappedUpstream),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMappedUpstream {
+    provider: String,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[cfg(test)]
@@ -425,6 +476,49 @@ mod tests {
                 protocol: Protocol::Responses
             }
         ));
+        assert_eq!(config.routes[0].upstreams[0].provider, "primary");
+        assert_eq!(config.routes[0].upstreams[0].model, None);
+    }
+
+    #[test]
+    fn a_route_member_can_name_its_upstream_model() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "anthropic"
+            base_url = "https://example.test"
+            [[providers]]
+            id = "backup"
+            kind = "openai_compat"
+            base_url = "http://127.0.0.1:9/v1"
+            [[routes]]
+            model = "demo"
+            upstreams = [
+              { provider = "primary", model = "claude-sonnet" },
+              "backup",
+            ]
+            "#,
+        )
+        .expect("config");
+        assert_eq!(
+            config.routes[0].upstreams[0].model.as_deref(),
+            Some("claude-sonnet")
+        );
+        assert_eq!(config.routes[0].upstreams[1].model, None);
+        let error = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "anthropic"
+            base_url = "https://example.test"
+            [[routes]]
+            model = "demo"
+            upstreams = [{ provider = "primary", model = "" }]
+            "#,
+        )
+        .expect_err("empty model");
+        assert!(error.to_string().contains("empty model"));
     }
 
     #[test]

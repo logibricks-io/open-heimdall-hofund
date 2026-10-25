@@ -11,7 +11,8 @@ use crate::Completion;
 
 pub(crate) type Prepare = fn(&[u8]) -> Result<Vec<u8>, CodecError>;
 use crate::error::ProviderError;
-use crate::stream::{SseEvents, map_transport, message_from};
+use crate::stream::SseEvents;
+pub(crate) use crate::stream::{map_transport, message_from};
 
 /// Connection settings for one upstream endpoint.
 #[derive(Clone, Debug)]
@@ -106,36 +107,59 @@ impl Upstream {
     }
 }
 
-pub(crate) async fn execute(
+pub(crate) fn messages_url(upstream: &Upstream) -> &str {
+    &upstream.url
+}
+
+pub(crate) fn prepare_body(
     upstream: &Upstream,
     codec: &dyn Codec,
     mut request: Request,
     prepare: Option<Prepare>,
     inbound_protocol: &str,
-) -> Result<Completion, ProviderError> {
+) -> Result<Vec<u8>, ProviderError> {
     if let Some(profile) = upstream.quirks {
         hofund_quirks::apply(profile, &mut request);
     }
-    let cross_protocol = codec.id() != inbound_protocol;
-    if cross_protocol {
+    if codec.id() != inbound_protocol {
         request.strip_extensions();
     }
-    let streaming = request.stream;
     let mut body = codec
         .encode_request(&request)
         .map_err(|error| ProviderError::decode(error.to_string()))?;
     if let Some(prepare) = prepare {
         body = prepare(&body).map_err(|error| ProviderError::decode(error.to_string()))?;
     }
-    let response = upstream
+    Ok(body)
+}
+
+pub(crate) async fn post_json(
+    upstream: &Upstream,
+    url: &str,
+    body: Vec<u8>,
+) -> Result<reqwest::Response, ProviderError> {
+    upstream
         .client
-        .post(&upstream.url)
+        .post(url)
         .headers(upstream.headers.clone())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body)
         .send()
         .await
-        .map_err(map_transport)?;
+        .map_err(map_transport)
+}
+
+pub(crate) async fn execute(
+    upstream: &Upstream,
+    codec: &dyn Codec,
+    request: Request,
+    prepare: Option<Prepare>,
+    inbound_protocol: &str,
+) -> Result<Completion, ProviderError> {
+    let cross_protocol = codec.id() != inbound_protocol;
+    let streaming = request.stream;
+    let body = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
+    let response = post_json(upstream, &upstream.url, body).await?;
     let status = response.status();
     if !status.is_success() {
         let bytes = response.bytes().await.unwrap_or_default();

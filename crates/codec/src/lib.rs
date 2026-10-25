@@ -104,6 +104,14 @@ pub trait Codec: Send + Sync {
             b"{\"error\":{\"type\":\"api_error\",\"message\":\"request failed\"}}".to_vec()
         })
     }
+
+    /// Encodes an input-token count.
+    ///
+    /// `estimated` is true when no upstream counted and the number is a
+    /// character estimate. The default field is `input_tokens`.
+    fn encode_token_count(&self, tokens: u64, estimated: bool) -> Vec<u8> {
+        format!(r#"{{"input_tokens":{tokens},"estimated":{estimated}}}"#).into_bytes()
+    }
 }
 
 /// Incremental SSE decode for one response stream.

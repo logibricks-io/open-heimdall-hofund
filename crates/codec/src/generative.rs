@@ -14,10 +14,10 @@
 use std::collections::BTreeMap;
 
 use hofund_ir::{
-    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Extensions, GenerationParams,
-    ImagePart, ImageSource, Message, MessageDelta, MessageStart, MessageStop, Request, Response,
-    Role, SignatureDelta, Stop, StopReason, StreamEvent, TextDelta, TextPart, ThinkingDelta,
-    ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
+    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Effort, Extensions,
+    GenerationParams, ImagePart, ImageSource, Message, MessageDelta, MessageStart, MessageStop,
+    Request, Response, Role, SignatureDelta, Stop, StopReason, StreamEvent, TextDelta, TextPart,
+    ThinkingDelta, ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
     ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
 };
 use serde_json::Value;
@@ -76,6 +76,10 @@ impl Codec for GenerativeLanguage {
 
     fn stream_encoder(&self) -> Box<dyn StreamEncoder> {
         Box::new(Encoder::default())
+    }
+
+    fn encode_token_count(&self, tokens: u64, estimated: bool) -> Vec<u8> {
+        format!(r#"{{"totalTokens":{tokens},"estimated":{estimated}}}"#).into_bytes()
     }
 
     fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
@@ -774,6 +778,7 @@ fn encode_mode(choice: &ToolChoice) -> String {
 }
 
 fn decode_generation(mut object: Object) -> Result<GenerationParams, CodecError> {
+    let effort = generative_effort(&object);
     Ok(GenerationParams {
         temperature: take_f64(&mut object, "temperature")?,
         top_p: take_f64(&mut object, "topP")?,
@@ -783,8 +788,28 @@ fn decode_generation(mut object: Object) -> Result<GenerationParams, CodecError>
         seed: take_i64(&mut object, "seed")?,
         presence_penalty: None,
         frequency_penalty: None,
+        effort,
         extensions: Extensions::from_map(object),
     })
+}
+
+fn generative_effort(object: &Object) -> Option<Effort> {
+    if let Some(level) = object.get("thinking_level").and_then(Value::as_str) {
+        return Effort::from_label(level);
+    }
+    let config = object.get("thinkingConfig").and_then(Value::as_object)?;
+    if let Some(level) = config
+        .get("thinkingLevel")
+        .or_else(|| config.get("thinking_level"))
+        .and_then(Value::as_str)
+    {
+        return Effort::from_label(level);
+    }
+    let budget = config
+        .get("thinkingBudget")
+        .and_then(Value::as_u64)
+        .or_else(|| config.get("thinking_budget").and_then(Value::as_u64));
+    (budget == Some(0)).then_some(Effort::None)
 }
 
 fn encode_generation(params: &GenerationParams) -> Result<Option<Value>, CodecError> {
@@ -800,12 +825,29 @@ fn encode_generation(params: &GenerationParams) -> Result<Option<Value>, CodecEr
         );
     }
     insert_i64(&mut object, "seed", params.seed);
+    write_generative_effort(&mut object, params);
     params.extensions.merge_into(&mut object);
     if object.is_empty() {
         Ok(None)
     } else {
         Ok(Some(Value::Object(object)))
     }
+}
+
+fn write_generative_effort(object: &mut Object, params: &GenerationParams) {
+    let Some(effort) = params.effort else {
+        return;
+    };
+    if params.extensions.get("thinkingConfig").is_some()
+        || params.extensions.get("thinking_level").is_some()
+    {
+        return;
+    }
+    let value = match effort.generative_level() {
+        Some(level) => serde_json::json!({"thinkingLevel": level}),
+        None => serde_json::json!({"thinkingBudget": 0}),
+    };
+    object.insert("thinkingConfig".to_owned(), value);
 }
 
 fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {

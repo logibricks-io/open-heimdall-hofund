@@ -7,10 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hofund_ir::{
-    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Extensions, GenerationParams,
-    ImageDetail, ImagePart, ImageSource, Message, MessageDelta, MessageStart, MessageStop, Ping,
-    Request, Response, Role, Stop, StopReason, StreamEvent, TextDelta, TextPart, ThinkingDelta,
-    ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
+    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Effort, Extensions,
+    GenerationParams, ImageDetail, ImagePart, ImageSource, Message, MessageDelta, MessageStart,
+    MessageStop, Ping, Request, Response, Role, Stop, StopReason, StreamEvent, TextDelta, TextPart,
+    ThinkingDelta, ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
     ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
 };
 use serde_json::Value;
@@ -116,6 +116,12 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
     let temperature = take_f64(&mut object, "temperature")?;
     let top_p = take_f64(&mut object, "top_p")?;
     let stream = take_bool(&mut object, "stream")?.unwrap_or(false);
+    let effort = object
+        .get("reasoning")
+        .and_then(Value::as_object)
+        .and_then(|reasoning| reasoning.get("effort"))
+        .and_then(Value::as_str)
+        .and_then(Effort::from_label);
     Ok(Request {
         model,
         messages,
@@ -125,6 +131,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
             max_tokens,
             temperature,
             top_p,
+            effort,
             ..GenerationParams::default()
         },
         stream,
@@ -527,8 +534,22 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     if request.stream {
         object.insert("stream".to_owned(), Value::Bool(true));
     }
+    write_responses_effort(&mut object, request);
     request.extensions.merge_into(&mut object);
     to_bytes(&Value::Object(object))
+}
+
+fn write_responses_effort(object: &mut Object, request: &Request) {
+    let Some(effort) = request.params.effort else {
+        return;
+    };
+    if request.extensions.get("reasoning").is_some() {
+        return;
+    }
+    object.insert(
+        "reasoning".to_owned(),
+        serde_json::json!({ "effort": effort.openai_label() }),
+    );
 }
 
 fn split_instructions(messages: &[Message]) -> (Option<&str>, &[Message]) {

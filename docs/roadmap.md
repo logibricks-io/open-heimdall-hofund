@@ -22,10 +22,12 @@ stage 1 has merged.
    as #10 (`695860d`). Per-upstream model names are not a blocker.
 2. **This document set.** The matrix, this roadmap, and the parity rule in
    `AGENTS.md` and `.cursor/rules/hofund.mdc`.
-3. **Model mapping.** A route member names the upstream model. Clients may
-   send `provider/model` or a bare id. Reasoning effort maps across wires.
-   `count_tokens` is forwarded or marked as an estimate. Rows 2.13, 1.20,
-   1.14, and 1.5.
+3. **Model mapping.** Pull request #12. A route member names the upstream
+   model (`crates/config/src/lib.rs:98`). Clients may send the route name,
+   `provider/model`, or a bare wire name that exactly one hop serves.
+   Reasoning effort is one IR enum mapped by each codec. `count_tokens` asks
+   a Messages upstream and otherwise returns a character estimate with
+   `estimated` set. Rows 2.13, 1.20, 1.14, and 1.5 are Done in that change.
 4. **Upstream coverage, including every subscription magpie supports.**
    Presets are data. Native adapters cover every non-OpenAI-compatible
    protocol magpie implements (Generative Language, Vertex, Bedrock, Azure,
@@ -58,11 +60,11 @@ stage 1 has merged.
 9. **Gateway keys.** Hashed, scoped keys, and a LAN allow-list. Rows 10.4
    and 10.5.
 
-Near-term code after this document, still inside stage 1, follows the audit
-order for the first four phases: model mapping, usage v2, catalog and presets
-and cost, then the routing tree. Subscriptions, the full agent list, the
-management API, the terminal UI, and gateway keys stay in stage 1 and follow
-those four. One or two reviewable pull requests per phase.
+Model mapping is pull request #12. The next stage 1 code, still in the audit
+order, is usage v2, then catalog, presets and cost, then the routing tree.
+Subscriptions, the full agent list, the management API, the terminal UI, and
+gateway keys stay in stage 1 and follow those. One or two reviewable pull
+requests per phase.
 
 ## Stage 2 — auxiliary
 

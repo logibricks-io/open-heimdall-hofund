@@ -61,6 +61,32 @@ Update this table in the same change that adds or changes a subsystem.
 | Usage table | Rows carry a timestamp and the UI can sum them. | Adopt the readable form. | `hofund usage` prints each row's time in the local timezone (`YYYY-MM-DD HH:MM:SS`) and a totals line with the request count and the summed input and output tokens. | A unix second is hard to read in a terminal. The totals are the sum of the same columns. |
 | OpenCode path | The integration uses the home config directory it was given. | Adopt | When `XDG_CONFIG_HOME` is set, OpenCode's files are `$XDG_CONFIG_HOME/opencode`. When it is unset, the path stays `~/.config/opencode` on every platform, which is what the v2 docs describe (checked 2026-10-25). The v2 page does not name `XDG_CONFIG_HOME`. | The variable is the platform config root. Leaving it unset preserves the documented path, including on Windows. |
 
+## Model names, effort, and token counts
+
+Read from yetone/magpie `e57e785` (`internal/gateway/unknown_model.go`,
+`internal/gateway/wire_effort.go`, `internal/gateway/effort_update.go`,
+`internal/provider/bare.go`, `internal/gateway/count_tokens_test.go`).
+`usagealias.go` and `rename.go` are a usage display alias and a provider-id
+rename, not the wire model. The wire model is a hofund route field.
+
+Official level lists, checked 2026-10-25:
+
+- Chat and Responses: <https://developers.openai.com/api/docs/guides/reasoning>
+  (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
+- Messages: <https://platform.claude.com/docs/en/build-with-claude/effort>
+  (`output_config.effort`: `low`, `medium`, `high`, `xhigh`, `max`).
+  `thinking.type = disabled` is how a request asks for no thinking, and some
+  models reject it.
+- Generative Language: <https://ai.google.dev/gemini-api/docs/thinking>
+  (`thinkingLevel`: `minimal`, `low`, `medium`, `high`).
+
+| Subsystem | magpie approach | Verdict | hofund approach | Rationale |
+| --- | --- | --- | --- | --- |
+| Wire model | A client model and the vendor's model are different strings, resolved inside the large provider object. A usage alias only changes how a row is labeled. | Redesign | A route member is `{ provider, model }`. A string is still a provider id and keeps the client model. The reply's model is the name the client sent. | Failover across vendors needs a name per hop. The client should not observe the vendor's id. |
+| Model id forms | `provider/model`, a group id, or a bare id. A bare id served by several providers goes to a discovered group, or to the first provider. | Adopt the three forms. Redesign the tie. | An exact route name wins. `provider/model` selects that one hop. A bare wire name is used only when one provider serves it. More than one is an error that names the candidates. | Silently picking the first provider hides a routing choice. |
+| Effort | A process-global map remembers a thread's effort and rewrites Responses history with `configuration_update` items, behind `MAGPIE_EFFORT_UPDATES=on`. The map is lost on restart. | Redesign | `GenerationParams.effort` is one enum. Each codec has a mapping table. A same-protocol request keeps the original field in the extension bag. `minimal` is `low` on Messages. `xhigh` and `max` are `high` on Generative Language, and `none` is `thinkingBudget: 0`. `ultra` is read as `max` and written as `max`. Levels are not clamped; there is no model catalog yet. | The global map is unsound. The official APIs already carry the level on the request. Clamping waits for the catalog. |
+| Count tokens | Messages `count_tokens` is forwarded. An unsupported endpoint becomes a local estimate. A long list of English and Chinese phrases decides which 400 is "unsupported". | Adopt the outcome. Redesign the classifier. | `POST /v1/messages/count_tokens` and `POST /v1beta/models/{model}:countTokens`. A Messages upstream is asked at `{base}/v1/messages/count_tokens`. 404, 405, 501, and a 400 whose English message says the endpoint is missing, are unsupported. An unsupported image or tool stays an error. When every hop is unsupported, the count is `ceil(characters / 4)` and the body sets `estimated` to true. | The phrase list mixes endpoint absence with bad inputs, and it special-cases relay translations. A short English check keeps those apart. A real tokenizer waits for the catalog. |
+
 ## Not in this version
 
 Routing strategies other than ordered failover, and sessions, are not compared

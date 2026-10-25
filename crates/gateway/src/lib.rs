@@ -22,7 +22,7 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 
 use axum::response::Response;
 use axum::routing::{get, post};
-use endpoints::{GENERATIVE_CATCHALL, inject_target, match_generate, query_key};
+use endpoints::{GENERATIVE_CATCHALL, inject_target, match_count, match_generate, query_key};
 use futures_util::{Stream, StreamExt};
 use hofund_codec::{Codec, StreamEncoder};
 use hofund_ir::{Request as ModelRequest, StreamEvent};
@@ -128,11 +128,15 @@ impl Gateway {
         let generative = self.inner.codecs.contains_key(GENERATIVE_UNARY)
             || self.inner.codecs.contains_key(GENERATIVE_STREAM);
         let paths: Vec<String> = self.inner.codecs.keys().cloned().collect();
+        let messages = paths.iter().any(|path| path == "/v1/messages");
         for path in paths {
             if path.contains('{') {
                 continue;
             }
             routes = routes.route(&path, post(complete));
+        }
+        if messages {
+            routes = routes.route("/v1/messages/count_tokens", post(complete));
         }
         if generative {
             routes = routes
@@ -249,6 +253,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let path = request.uri().path().to_owned();
     let uri = request.uri().clone();
     let headers = request.headers().clone();
+    if path == "/v1/messages/count_tokens" {
+        return count_tokens(app, headers, uri, request, "/v1/messages", None).await;
+    }
+    if let Some(model) = match_count(&path) {
+        return count_tokens(app, headers, uri, request, GENERATIVE_UNARY, Some(model)).await;
+    }
     let matched = match_generate(&path);
     let codec_key = matched
         .as_ref()
@@ -303,6 +313,55 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             .await
         }
         Err(error) => failure(app, codec.as_ref(), &model_request, error, started),
+    }
+}
+
+async fn count_tokens(
+    app: Arc<Inner>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request,
+    codec_key: &str,
+    path_model: Option<String>,
+) -> Response {
+    let Some(codec) = app.codecs.get(codec_key).cloned() else {
+        return text_response(StatusCode::NOT_FOUND, "not found");
+    };
+    if let Some(response) = reject(&current_token(&app), &headers, &uri, Some(codec.as_ref())) {
+        return response;
+    }
+    let bytes = match axum::body::to_bytes(request.into_body(), BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return coded(
+                codec.as_ref(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body is too large",
+            );
+        }
+    };
+    let bytes = if let Some(model) = &path_model {
+        Bytes::from(inject_target(&bytes, model, false))
+    } else {
+        bytes
+    };
+    let model_request = match codec.decode_request(&bytes) {
+        Ok(model_request) => model_request,
+        Err(error) => return coded(codec.as_ref(), StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    match app.router.count(model_request, codec.id()).await {
+        Ok(count) => json_response(
+            StatusCode::OK,
+            codec.encode_token_count(count.tokens, count.estimated),
+        ),
+        Err(error) => {
+            let (status, message) = match error {
+                RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string()),
+                RouterError::Ambiguous { .. } => (StatusCode::BAD_REQUEST, error.to_string()),
+                RouterError::Upstream { error, .. } => (status_of(&error), error.message),
+            };
+            coded(codec.as_ref(), status, &message)
+        }
     }
 }
 
@@ -453,6 +512,9 @@ fn failure(
 ) -> Response {
     let (status, upstream, message) = match error {
         RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, String::new(), error.to_string()),
+        RouterError::Ambiguous { .. } => {
+            (StatusCode::BAD_REQUEST, String::new(), error.to_string())
+        }
         RouterError::Upstream { upstream_id, error } => {
             (status_of(&error), upstream_id, error.message)
         }
