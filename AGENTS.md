@@ -42,7 +42,8 @@ Present:
 - a Tauri v2 menu-bar app at `apps/desktop` (`hofund-desktop`) that starts and
   stops the gateway, lists agents from the catalog, and shows the usage table
 
-Planned behavior, not present yet:
+Planned behavior is the stage plan in [docs/roadmap.md](docs/roadmap.md).
+Not present yet:
 
 - further routing strategies, and i18n language packs
 
@@ -90,6 +91,18 @@ redesign, hofund approach, rationale). Update that table in the same change
 that adds or changes the subsystem. The name of the upstream project belongs
 in that document and in the acknowledgement files, not in gateway or router
 code, and not as hofund branding.
+
+## Feature parity
+
+hofund reimplements every core capability of yetone/magpie in Rust, and each
+one should be better than the original where that original is unsound. The
+matrix is [docs/feature-parity.md](docs/feature-parity.md). The execution
+order is [docs/roadmap.md](docs/roadmap.md). Stage 2 (auxiliary) waits until
+stage 1 has merged.
+
+Every phase pull request updates the matrix rows it touches: status,
+evidence, and why the hofund behavior is better. The adopt-or-redesign
+verdict still goes in `docs/magpie-comparison.md` in the same change.
 
 ## Build and verify
 

@@ -29,8 +29,8 @@ Spine, dependencies point downward only:
   in `codec`.
 - Only `gateway` may depend on axum, tower, or hyper.
 - No runtime crate depends on `xtask`.
-- Do not create `apps/desktop` unless the task asks. It is reserved for a
-  future Tauri v2 menu-bar app.
+- The menu-bar app lives at `apps/desktop`. Do not add a second UI shell
+  unless the task asks.
 - Do not use the magpie name or logo as hofund branding. Credit stays in
   `README.md`, `README.zh-CN.md`, and `THIRD_PARTY_NOTICES.md`.
 
@@ -47,6 +47,14 @@ Redesign what is unsound: small types, trait boundaries, explicit constructor
 state, no globals, testable units. Record each choice in
 `docs/magpie-comparison.md` and update that table when the subsystem changes.
 Do not use that project's name as hofund branding.
+
+## Feature parity
+
+Reimplement every core capability of yetone/magpie, and do each one better
+where the original is unsound. The matrix is `docs/feature-parity.md`. The
+order is `docs/roadmap.md`. Every phase pull request updates the rows it
+touches (status, evidence, and why hofund is better) and the verdict in
+`docs/magpie-comparison.md`. Stage 2 waits until stage 1 has merged.
 
 ## Verify
 
