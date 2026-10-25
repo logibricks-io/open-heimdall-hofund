@@ -51,7 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon, and CLI behavior is unchanged. Account rows are plaintext in
   `PlaintextFileAccountStore` (mode `0600`); encrypted storage is a
   prerequisite of subscription pull request H. A `HostContext` is bound to
-  one plugin id.
+  one plugin id. Secret reads are limited to that plugin. `StdProcess::kill`
+  signals the child and reaps it on a background thread.
+- Plugin manifests are parsed as TOML, including a renamed dependency and a
+  `[features]` entry that turns on `hofund-plugin-api/kernel`. CI runs
+  `cargo check -p` for each plugin package on its own, so the workspace
+  cannot unify that feature in.
 - The Kernel Hilt is the hofund mark: an upright sword seated in an amber
   kernel, with plugin modules as the crossguard. README heroes, the desktop
   bundle icons, and the tray icon use `assets/brand`.

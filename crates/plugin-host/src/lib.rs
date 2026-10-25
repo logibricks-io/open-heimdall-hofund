@@ -222,8 +222,9 @@ impl ClockBackend for SystemClock {
 /// Spawns with [`Command::new`]. It never invokes a shell.
 ///
 /// Standard input, output, and error are [`Stdio::null`]. The child is kept
-/// until [`ProcessBackend::wait`] or [`ProcessBackend::kill`], and any child
-/// still held is killed and reaped when the last handle is dropped.
+/// until [`ProcessBackend::wait`] or [`ProcessBackend::kill`]. `kill` signals
+/// the child and reaps it on a background thread, so the caller does not wait.
+/// Any child still held is killed and reaped when the last handle is dropped.
 #[derive(Clone, Default)]
 pub struct StdProcess {
     children: Arc<ChildSet>,
@@ -331,9 +332,13 @@ impl ProcessBackend for StdProcess {
     fn kill(&self, id: u32) -> Result<(), PluginError> {
         let mut child = self.take(id)?;
         let killed = child.kill();
-        let waited = child.wait();
+        let reaped = std::thread::Builder::new()
+            .name("hofund-reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
         killed.map_err(|error| PluginError::io(error.to_string()))?;
-        waited.map_err(|error| PluginError::io(error.to_string()))?;
+        reaped.map_err(|error| PluginError::io(error.to_string()))?;
         Ok(())
     }
 }
@@ -403,30 +408,31 @@ impl HttpBackend for RecordingHttp {
     }
 }
 
-/// Secrets a test inserts. [`Debug`] is not implemented: the map holds secret text.
+/// Secrets a test inserts, keyed by plugin. [`Debug`] is not implemented:
+/// the map holds secret text.
 #[derive(Default)]
 pub struct RecordingSecrets {
-    values: Mutex<BTreeMap<String, String>>,
+    values: Mutex<BTreeMap<(String, String), String>>,
 }
 
 impl RecordingSecrets {
-    /// Stores `secret` at `id`, replacing a previous value.
-    pub fn insert(&self, id: impl Into<String>, secret: impl Into<String>) {
+    /// Stores `secret` for `plugin` at `id`, replacing a previous value.
+    pub fn insert(&self, plugin: &PluginId, id: impl Into<String>, secret: impl Into<String>) {
         self.values
             .lock()
             .expect("secrets lock")
-            .insert(id.into(), secret.into());
+            .insert((plugin.as_str().to_owned(), id.into()), secret.into());
     }
 }
 
 #[async_trait]
 impl SecretsBackend for RecordingSecrets {
-    async fn get(&self, id: &str) -> Result<Option<SecretString>, PluginError> {
+    async fn get(&self, plugin: &PluginId, id: &str) -> Result<Option<SecretString>, PluginError> {
         Ok(self
             .values
             .lock()
             .expect("secrets lock")
-            .get(id)
+            .get(&(plugin.as_str().to_owned(), id.to_owned()))
             .cloned()
             .map(SecretString::from))
     }
@@ -590,7 +596,7 @@ mod tests {
 
     use futures_util::FutureExt;
     use hofund_plugin_api::kernel::{
-        self, AccountBackend, ClockBackend, ProcessBackend, SchedulerBackend,
+        self, AccountBackend, ClockBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
     };
     use hofund_plugin_api::{Account, AccountId, JobSpec, PluginId, SecretString, SpawnRequest};
 
@@ -748,6 +754,32 @@ mod tests {
         assert!(ProcessBackend::wait(&process, id).await.is_err());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn std_process_kill_does_not_wait_for_the_child() {
+        let process = StdProcess::default();
+        // macOS keeps `sleep` in `/bin`. A merged `/usr` keeps it in `/usr/bin`.
+        // The macOS GitHub image has `/usr/bin/true` and not `/bin/true`.
+        let program = ["/usr/bin/sleep", "/bin/sleep"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|path| path.is_file())
+            .expect("sleep");
+        let id = process
+            .spawn(
+                program,
+                vec!["30".into()],
+                Vec::new(),
+                std::path::PathBuf::from("/tmp"),
+            )
+            .await
+            .expect("spawn");
+        let started = std::time::Instant::now();
+        ProcessBackend::kill(&process, id).expect("kill");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(ProcessBackend::kill(&process, id).is_err());
+    }
+
     #[tokio::test]
     async fn cancel_rejects_a_foreign_job_and_ids_stay_stable() {
         let scheduler = std::sync::Arc::new(RecordingScheduler::default());
@@ -795,7 +827,8 @@ mod tests {
     #[tokio::test]
     async fn test_host_seeds_and_records() {
         let host = super::TestHost::open(plugin(), root());
-        host.secrets().insert("token", "value");
+        host.secrets()
+            .insert(host.context().plugin(), "token", "value");
         let secret = host
             .context()
             .secrets()
@@ -832,5 +865,43 @@ mod tests {
         let clock =
             FixedClock::new(SystemTime::UNIX_EPOCH).with_monotonic(Duration::from_millis(5));
         assert_eq!(clock.monotonic(), Duration::from_millis(5));
+    }
+
+    #[tokio::test]
+    async fn a_plugin_cannot_read_another_plugins_secret() {
+        let secrets = std::sync::Arc::new(super::RecordingSecrets::default());
+        let plugin_a = plugin();
+        let plugin_b = PluginId::from_static("other-plugin");
+        secrets.insert(&plugin_a, "token", "value");
+        let build = |plugin: PluginId| {
+            host_context(
+                plugin,
+                std::sync::Arc::new(super::RecordingHttp::default()),
+                std::sync::Arc::clone(&secrets) as std::sync::Arc<dyn SecretsBackend>,
+                std::sync::Arc::new(
+                    PlaintextFileAccountStore::open(root().join("accounts.json")).expect("store"),
+                ),
+                std::sync::Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+                std::sync::Arc::new(super::RecordingScheduler::default()),
+                std::sync::Arc::new(super::RecordingProcess::default()),
+                std::sync::Arc::new(super::RootDirs { root: root() }),
+                std::sync::Arc::new(super::RecordingObserve::default()),
+            )
+        };
+        let owned = build(plugin_a)
+            .secrets()
+            .get("token")
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(kernel::expose_secret(&owned), "value");
+        assert!(
+            build(plugin_b)
+                .secrets()
+                .get("token")
+                .await
+                .expect("get")
+                .is_none()
+        );
     }
 }

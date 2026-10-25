@@ -39,18 +39,21 @@ impl HttpHandle {
     }
 }
 
-/// A view of the secret store. Cloning the handle does not clone a secret.
+/// A view of this plugin's secrets. Cloning the handle does not clone a secret.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct SecretsHandle {
+    plugin: PluginId,
     inner: Arc<dyn SecretsBackend>,
 }
 
 impl SecretsHandle {
-    /// The current secret for `id`.
+    /// The current secret for `id` in this context's plugin.
     ///
-    /// Read this on each call. A refresh is then visible without rebuilding
-    /// the member. Do not store the returned value in a `Debug` field.
+    /// The id is not global. Another plugin's secret is not returned, even
+    /// when the same string is stored for that plugin. Read this on each
+    /// call. A refresh is then visible without rebuilding the member. Do not
+    /// store the returned value in a `Debug` field.
     ///
     /// # Errors
     ///
@@ -59,7 +62,7 @@ impl SecretsHandle {
         if id.is_empty() {
             return Err(PluginError::config("secret id is empty"));
         }
-        self.inner.get(id).await
+        self.inner.get(&self.plugin, id).await
     }
 }
 
@@ -374,7 +377,10 @@ impl ProcessHandle {
         self.inner.wait(spawned.id()).await
     }
 
-    /// Kills `spawned` and reaps it.
+    /// Kills `spawned` and reaps it without waiting on the caller.
+    ///
+    /// The signal is sent here. The host reaps the child on a background
+    /// thread, so this call does not block until the process exits.
     ///
     /// # Errors
     ///
@@ -463,8 +469,8 @@ pub struct HostContext {
 impl HostContext {
     /// Kernel-only. Plugins do not call this.
     ///
-    /// `plugin` is stored in the handles. Account, directory, and observation
-    /// calls use it. A plugin cannot pass a different id.
+    /// `plugin` is stored in the handles. Account, secret, directory, and
+    /// observation calls use it. A plugin cannot pass a different id.
     #[cfg(feature = "kernel")]
     #[doc(hidden)]
     #[must_use]
@@ -483,7 +489,10 @@ impl HostContext {
         Self {
             plugin: plugin.clone(),
             http: HttpHandle { inner: http },
-            secrets: SecretsHandle { inner: secrets },
+            secrets: SecretsHandle {
+                plugin: plugin.clone(),
+                inner: secrets,
+            },
             accounts: AccountsHandle {
                 plugin: plugin.clone(),
                 inner: accounts,

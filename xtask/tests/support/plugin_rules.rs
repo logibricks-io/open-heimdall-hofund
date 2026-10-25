@@ -1,10 +1,11 @@
 //! Syn and cargo-metadata checks for the plugin seam.
 //!
-//! Text search misses a spaced call, a renamed import, a grouped `kernel`
-//! import, a comment that merely contains `unreachable_pub`, a target-specific
-//! or build dependency, and `use std::{process, ...}`.
+//! The scan follows crate aliases, globs, type aliases, angle-bracket calls,
+//! and paths inside macros. Plugin manifests are parsed as TOML, including a
+//! renamed dependency, a `[dependencies.name]` table, a multi-line `features`
+//! array, and `[features]` that forwards `hofund-plugin-api/kernel`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -55,20 +56,19 @@ fn plugin_seam_matches_the_contract() {
         "hofund-kit-subscription",
         "hofund-kit-upstream",
     ];
-    let declared = cargo_dependencies();
-    for (package, deps) in &declared {
-        let uses_host = deps.iter().any(|dep| dep.name == "hofund-plugin-host");
+    let declared = cargo_packages();
+    for (package, facts) in &declared {
+        let uses_host = facts
+            .dependencies
+            .iter()
+            .any(|dep| dep.name == "hofund-plugin-host");
         if uses_host {
             assert!(
                 host_users.contains(&package.as_str()),
                 "{package} must not depend on hofund-plugin-host"
             );
         }
-        let enables_kernel = deps.iter().any(|dep| {
-            dep.name == "hofund-plugin-api"
-                && dep.features.iter().any(|feature| feature == "kernel")
-        });
-        if enables_kernel {
+        if facts.kernel_feature {
             assert!(
                 package == "hofund-plugin-host",
                 "{package} must not enable the plugin-api kernel feature"
@@ -191,6 +191,71 @@ fn plugin_rules_reject_a_bad_tree() {
             .iter()
             .any(|hit| hit.contains("tokio::process"))
     );
+    assert!(
+        runtime_hits("use std as s;\nfn sneak() { let _ = s::process::Command::new(\"true\"); }\n")
+            .iter()
+            .any(|hit| hit.contains("std::process")),
+        "a renamed std crate must still be std::process"
+    );
+    assert!(
+        runtime_hits("fn sneak() { let _ = vec![std::process::id()]; }\n")
+            .iter()
+            .any(|hit| hit.contains("std::process")),
+        "a path inside a macro must count"
+    );
+
+    assert!(
+        seam_hits("use hofund_plugin_api as api;\nfn sneak(value: api::kernel::HttpBackend) {}\n")
+            .iter()
+            .any(|hit| hit.contains("kernel")),
+        "a crate alias must still see kernel"
+    );
+    assert!(
+        seam_hits(
+            "extern crate hofund_plugin_api as api;\nfn sneak(value: api::kernel::HttpBackend) {}\n"
+        )
+        .iter()
+        .any(|hit| hit.contains("kernel")),
+        "extern crate alias"
+    );
+    assert!(
+        seam_hits("use hofund_plugin_api::*;\nfn sneak(value: kernel::HttpBackend) {}\n")
+            .iter()
+            .any(|hit| hit.contains("kernel")),
+        "a glob must bring kernel into scope"
+    );
+    assert!(
+        seam_hits(
+            "fn sneak() { let _ = vec![hofund_plugin_api::HostContext::from_backends()]; }\n"
+        )
+        .iter()
+        .any(|hit| hit.contains("from_backends")),
+        "a call inside a macro must count"
+    );
+    assert!(
+        seam_hits("fn sneak() { assert!(hofund_plugin_api::AuthResult::new(true)); }\n")
+            .iter()
+            .any(|hit| hit.contains("AuthResult::new")),
+        "AuthResult::new inside a macro must count"
+    );
+    assert!(
+        seam_hits("type Door = SurfaceHost;\nfn sneak() { let _ = Door::from_parts(); }\n")
+            .iter()
+            .any(|hit| hit.contains("SurfaceHost::from_parts")),
+        "a type alias must count"
+    );
+    assert!(
+        seam_hits("fn sneak() { let _ = <SurfaceHost>::from_parts(); }\n")
+            .iter()
+            .any(|hit| hit.contains("SurfaceHost::from_parts")),
+        "an angle-bracket call must count"
+    );
+    assert!(
+        seam_hits("fn sneak() { let _ = <hofund_plugin_api::AuthResult>::new(true); }\n")
+            .iter()
+            .any(|hit| hit.contains("AuthResult::new")),
+        "an angle-bracket AuthResult::new must count"
+    );
 
     let manifest = r#"
 [package]
@@ -236,6 +301,56 @@ workspace = false
     assert!(
         manifest_enables_kernel(manifest),
         "the kernel feature on a target or normal dependency must be visible"
+    );
+
+    let renamed = r#"
+[package]
+name = "hofund-plugin-renamed"
+[dependencies]
+api = { package = "hofund-plugin-api", features = [
+  "kernel",
+] }
+host = { package = "hofund-plugin-host" }
+[dependencies.reqwest]
+version = "0.12"
+[features]
+default = ["hofund-plugin-api/kernel"]
+extra = ["dep:hofund-plugin-api/kernel"]
+"#;
+    let renamed_deps = manifest_dependencies(renamed);
+    assert!(
+        renamed_deps
+            .iter()
+            .any(|dep| dep.name == "hofund-plugin-api"
+                && dep.features.iter().any(|feature| feature == "kernel")),
+        "renamed dependency and multi-line features: {renamed_deps:?}"
+    );
+    assert!(
+        renamed_deps
+            .iter()
+            .any(|dep| dep.name == "hofund-plugin-host"),
+        "package = must win over the manifest key: {renamed_deps:?}"
+    );
+    assert!(
+        renamed_deps.iter().any(|dep| dep.name == "reqwest"),
+        "[dependencies.reqwest] was ignored: {renamed_deps:?}"
+    );
+    let forwarded = r#"
+[package]
+name = "hofund-plugin-forward"
+[dependencies]
+hofund-plugin-api = { workspace = true }
+[features]
+default = ["extra"]
+extra = ["hofund-plugin-api/kernel"]
+"#;
+    assert!(
+        manifest_enables_kernel(forwarded),
+        "[features] forwarding hofund-plugin-api/kernel must count"
+    );
+    assert!(
+        manifest_enables_kernel(renamed),
+        "a renamed dependency's kernel feature must count"
     );
 
     let root = std::env::temp_dir().join(format!("hofund-plugin-rules-{}", std::process::id()));
@@ -330,9 +445,11 @@ fn runtime_hits(source: &str) -> Vec<String> {
     let Ok(file) = syn::parse_file(source) else {
         return vec!["does not parse".to_owned()];
     };
+    let mut aliases = RuntimeAliases::default();
+    collect_runtime_aliases(&file.items, &mut aliases);
     let mut hits = Vec::new();
-    collect_runtime(&file.items, &mut hits);
-    let mut finder = RuntimeFinder { hits };
+    collect_runtime(&file.items, &aliases, &mut hits);
+    let mut finder = RuntimeFinder { aliases, hits };
     finder.visit_file(&file);
     finder.hits.sort();
     finder.hits.dedup();
@@ -343,6 +460,8 @@ fn runtime_hits(source: &str) -> Vec<String> {
 struct Aliases {
     functions: BTreeMap<String, String>,
     types: BTreeMap<String, String>,
+    crates: BTreeMap<String, String>,
+    kernel_glob: bool,
 }
 
 struct Finder {
@@ -351,24 +470,62 @@ struct Finder {
 }
 
 impl<'ast> Visit<'ast> for Finder {
+    fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
+        if let Some(qself) = &expr.qself
+            && let syn::Type::Path(ty) = qself.ty.as_ref()
+        {
+            let mut segs = segments(&ty.path);
+            segs.extend(segments(&expr.path));
+            self.note_path(&segs);
+        }
+        syn::visit::visit_expr_path(self, expr);
+    }
+
     fn visit_path(&mut self, path: &'ast syn::Path) {
         self.note_path(&segments(path));
         syn::visit::visit_path(self, path);
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        note_type_alias(item, &mut self.aliases);
+        syn::visit::visit_item_type(self, item);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        for expr in macro_exprs(mac.tokens.clone()) {
+            self.visit_expr(&expr);
+        }
     }
 }
 
 impl Finder {
     fn note_path(&mut self, segs: &[String]) {
+        let mut segs = canonical_segments(segs, &self.aliases.crates);
+        if segs.len() >= 2 {
+            let index = segs.len() - 2;
+            let ty = segs[index].clone();
+            if let Some(canonical) = self.aliases.types.get(&ty) {
+                segs[index] = canonical.clone();
+            }
+        }
+        if self.aliases.kernel_glob && segs.first().map(String::as_str) == Some("kernel") {
+            self.hits
+                .push("names kernel from a hofund_plugin_api glob".to_owned());
+        }
         if segs.iter().any(|segment| segment == "from_backends") {
             self.hits.push("calls from_backends".to_owned());
         }
-        if kernel_under_plugin_api(segs) {
+        if kernel_under_plugin_api(&segs) {
             self.hits.push("names hofund_plugin_api::kernel".to_owned());
         }
         if segs.len() >= 2 {
             let ty = &segs[segs.len() - 2];
             let method = &segs[segs.len() - 1];
-            let canonical = self.aliases.types.get(ty).unwrap_or(ty);
+            let canonical = self
+                .aliases
+                .types
+                .get(ty)
+                .map_or(ty.as_str(), String::as_str);
             if canonical == "SurfaceHost" && method == "from_parts" {
                 self.hits.push("calls SurfaceHost::from_parts".to_owned());
             }
@@ -384,17 +541,58 @@ impl Finder {
     }
 }
 
+#[derive(Default)]
+struct RuntimeAliases {
+    crates: BTreeMap<String, String>,
+}
+
 struct RuntimeFinder {
+    aliases: RuntimeAliases,
     hits: Vec<String>,
 }
 
 impl<'ast> Visit<'ast> for RuntimeFinder {
     fn visit_path(&mut self, path: &'ast syn::Path) {
-        if let Some(hit) = forbidden_runtime(&segments(path)) {
+        let segs = canonical_segments(&segments(path), &self.aliases.crates);
+        if let Some(hit) = forbidden_runtime(&segs) {
             self.hits.push(hit.to_owned());
         }
         syn::visit::visit_path(self, path);
     }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        for expr in macro_exprs(mac.tokens.clone()) {
+            self.visit_expr(&expr);
+        }
+    }
+}
+
+struct CommaExprs(Vec<syn::Expr>);
+
+impl syn::parse::Parse for CommaExprs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut exprs = Vec::new();
+        while !input.is_empty() {
+            exprs.push(input.parse()?);
+            if input.peek(syn::Token![,]) {
+                let _ = input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(Self(exprs))
+    }
+}
+
+fn macro_exprs(tokens: proc_macro2::TokenStream) -> Vec<syn::Expr> {
+    if let Ok(parsed) = syn::parse2::<CommaExprs>(tokens.clone()) {
+        return parsed.0;
+    }
+    let mut exprs = Vec::new();
+    for tree in tokens {
+        if let proc_macro2::TokenTree::Group(group) = tree {
+            exprs.extend(macro_exprs(group.stream()));
+        }
+    }
+    exprs
 }
 
 fn segments(path: &syn::Path) -> Vec<String> {
@@ -404,10 +602,28 @@ fn segments(path: &syn::Path) -> Vec<String> {
         .collect()
 }
 
+fn canonical_segments(segs: &[String], crates: &BTreeMap<String, String>) -> Vec<String> {
+    let mut out = segs.to_vec();
+    for _ in 0..4 {
+        let Some(first) = out.first().cloned() else {
+            break;
+        };
+        let Some(real) = crates.get(&first) else {
+            break;
+        };
+        if real == &first {
+            break;
+        }
+        out[0] = real.clone();
+    }
+    out
+}
+
 fn collect_uses(items: &[syn::Item], aliases: &mut Aliases, hits: &mut Vec<String>) {
     for item in items {
         match item {
             syn::Item::Use(item) => walk_use(&[], &item.tree, aliases, hits),
+            syn::Item::ExternCrate(item) => note_extern_crate(item, aliases),
             syn::Item::Mod(module) => {
                 if let Some((_, nested)) = &module.content {
                     collect_uses(nested, aliases, hits);
@@ -416,19 +632,64 @@ fn collect_uses(items: &[syn::Item], aliases: &mut Aliases, hits: &mut Vec<Strin
             _ => {}
         }
     }
-}
-
-fn collect_runtime(items: &[syn::Item], hits: &mut Vec<String>) {
     for item in items {
         match item {
-            syn::Item::Use(item) => walk_runtime(&[], &item.tree, hits),
+            syn::Item::Type(item) => note_type_alias(item, aliases),
             syn::Item::Mod(module) => {
                 if let Some((_, nested)) = &module.content {
-                    collect_runtime(nested, hits);
+                    note_type_aliases(nested, aliases);
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn note_type_aliases(items: &[syn::Item], aliases: &mut Aliases) {
+    for item in items {
+        match item {
+            syn::Item::Type(item) => note_type_alias(item, aliases),
+            syn::Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    note_type_aliases(nested, aliases);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn note_extern_crate(item: &syn::ItemExternCrate, aliases: &mut Aliases) {
+    let original = item.ident.to_string();
+    if original != "hofund_plugin_api" {
+        return;
+    }
+    let local = item
+        .rename
+        .as_ref()
+        .map(|(_, name)| name.to_string())
+        .unwrap_or(original.clone());
+    aliases.crates.insert(local, original);
+}
+
+fn note_type_alias(item: &syn::ItemType, aliases: &mut Aliases) {
+    let syn::Type::Path(path) = item.ty.as_ref() else {
+        return;
+    };
+    let segs = canonical_segments(&segments(&path.path), &aliases.crates);
+    let Some(last) = segs.last() else {
+        return;
+    };
+    let canonical = aliases
+        .types
+        .get(last)
+        .cloned()
+        .unwrap_or_else(|| last.clone());
+    if matches!(
+        canonical.as_str(),
+        "SurfaceHost" | "AuthResult" | "HostContext"
+    ) {
+        aliases.types.insert(item.ident.to_string(), canonical);
     }
 }
 
@@ -458,7 +719,12 @@ fn walk_use(prefix: &[String], tree: &syn::UseTree, aliases: &mut Aliases, hits:
             );
         }
         syn::UseTree::Glob(_) => {
-            if kernel_under_plugin_api(prefix) {
+            let resolved = canonical_segments(prefix, &aliases.crates);
+            if resolved == ["hofund_plugin_api"] {
+                aliases.kernel_glob = true;
+                hits.push("globs hofund_plugin_api".to_owned());
+            }
+            if kernel_under_plugin_api(&resolved) {
                 hits.push("globs hofund_plugin_api::kernel".to_owned());
             }
         }
@@ -477,8 +743,14 @@ fn note_import(
     aliases: &mut Aliases,
     hits: &mut Vec<String>,
 ) {
+    if prefix.is_empty() && name == "hofund_plugin_api" {
+        aliases
+            .crates
+            .insert(local.to_owned(), "hofund_plugin_api".to_owned());
+    }
     let mut full = prefix.to_vec();
     full.push(name.to_owned());
+    let full = canonical_segments(&full, &aliases.crates);
     if kernel_under_plugin_api(&full) {
         hits.push(format!("imports kernel as {local}"));
     }
@@ -505,16 +777,83 @@ fn note_import(
     }
 }
 
-fn walk_runtime(prefix: &[String], tree: &syn::UseTree, hits: &mut Vec<String>) {
+fn collect_runtime_aliases(items: &[syn::Item], aliases: &mut RuntimeAliases) {
+    for item in items {
+        match item {
+            syn::Item::Use(item) => note_runtime_crate(&[], &item.tree, aliases),
+            syn::Item::ExternCrate(item) => {
+                let original = item.ident.to_string();
+                if matches!(original.as_str(), "std" | "tokio") {
+                    let local = item
+                        .rename
+                        .as_ref()
+                        .map(|(_, name)| name.to_string())
+                        .unwrap_or(original.clone());
+                    aliases.crates.insert(local, original);
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    collect_runtime_aliases(nested, aliases);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn note_runtime_crate(prefix: &[String], tree: &syn::UseTree, aliases: &mut RuntimeAliases) {
     match tree {
         syn::UseTree::Path(path) => {
             let mut next = prefix.to_vec();
             next.push(path.ident.to_string());
-            walk_runtime(&next, &path.tree, hits);
+            note_runtime_crate(&next, &path.tree, aliases);
+        }
+        syn::UseTree::Rename(name) if prefix.is_empty() => {
+            let original = name.ident.to_string();
+            if matches!(original.as_str(), "std" | "tokio") {
+                aliases.crates.insert(name.rename.to_string(), original);
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                note_runtime_crate(prefix, item, aliases);
+            }
+        }
+        syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn collect_runtime(items: &[syn::Item], aliases: &RuntimeAliases, hits: &mut Vec<String>) {
+    for item in items {
+        match item {
+            syn::Item::Use(item) => walk_runtime(&[], &item.tree, aliases, hits),
+            syn::Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    collect_runtime(nested, aliases, hits);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn walk_runtime(
+    prefix: &[String],
+    tree: &syn::UseTree,
+    aliases: &RuntimeAliases,
+    hits: &mut Vec<String>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let mut next = prefix.to_vec();
+            next.push(path.ident.to_string());
+            walk_runtime(&next, &path.tree, aliases, hits);
         }
         syn::UseTree::Name(name) => {
             let mut full = prefix.to_vec();
             full.push(name.ident.to_string());
+            let full = canonical_segments(&full, &aliases.crates);
             if let Some(hit) = forbidden_runtime(&full) {
                 hits.push(hit.to_owned());
             }
@@ -522,18 +861,20 @@ fn walk_runtime(prefix: &[String], tree: &syn::UseTree, hits: &mut Vec<String>) 
         syn::UseTree::Rename(name) => {
             let mut full = prefix.to_vec();
             full.push(name.ident.to_string());
+            let full = canonical_segments(&full, &aliases.crates);
             if let Some(hit) = forbidden_runtime(&full) {
                 hits.push(hit.to_owned());
             }
         }
         syn::UseTree::Glob(_) => {
-            if let Some(hit) = forbidden_runtime(prefix) {
+            let resolved = canonical_segments(prefix, &aliases.crates);
+            if let Some(hit) = forbidden_runtime(&resolved) {
                 hits.push(hit.to_owned());
             }
         }
         syn::UseTree::Group(group) => {
             for item in &group.items {
-                walk_runtime(prefix, item, hits);
+                walk_runtime(prefix, item, aliases, hits);
             }
         }
     }
@@ -593,6 +934,9 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                 continue;
             }
             let manifest = read_to_string(&manifest_path);
+            if toml::from_str::<toml::Value>(&manifest).is_err() {
+                violations.push(format!("{kind}/{id} manifest is not valid toml"));
+            }
             if !super::lints_follow_workspace(&manifest) {
                 violations.push(format!("{kind}/{id} must set [lints] workspace = true"));
             }
@@ -646,87 +990,135 @@ fn forbidden_dep(dep: &str) -> bool {
 }
 
 fn manifest_enables_kernel(manifest: &str) -> bool {
-    manifest_dependencies(manifest).iter().any(|dep| {
+    let dependency = manifest_dependencies(manifest).iter().any(|dep| {
         dep.name == "hofund-plugin-api" && dep.features.iter().any(|feature| feature == "kernel")
-    })
+    });
+    dependency || feature_forwards_kernel(manifest)
+}
+
+fn feature_forwards_kernel(manifest: &str) -> bool {
+    let Ok(value) = toml::from_str::<toml::Value>(manifest) else {
+        return false;
+    };
+    let Some(features) = value.get("features").and_then(toml::Value::as_table) else {
+        return false;
+    };
+    features
+        .keys()
+        .any(|name| feature_list_enables_kernel(name, features, &mut BTreeSet::new()))
+}
+
+fn feature_list_enables_kernel(
+    name: &str,
+    features: &toml::map::Map<String, toml::Value>,
+    seen: &mut BTreeSet<String>,
+) -> bool {
+    if !seen.insert(name.to_owned()) {
+        return false;
+    }
+    let Some(items) = features.get(name).and_then(toml::Value::as_array) else {
+        return false;
+    };
+    for item in items {
+        let Some(text) = item.as_str() else {
+            continue;
+        };
+        if is_kernel_forward(text)
+            || (!text.contains('/') && feature_list_enables_kernel(text, features, seen))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_kernel_forward(text: &str) -> bool {
+    text == "hofund-plugin-api/kernel" || text == "dep:hofund-plugin-api/kernel"
 }
 
 fn manifest_dependencies(manifest: &str) -> Vec<DeclaredDep> {
+    let Ok(value) = toml::from_str::<toml::Value>(manifest) else {
+        return Vec::new();
+    };
     let mut deps = Vec::new();
-    let mut kind: Option<DepKind> = None;
-    for line in manifest.lines() {
-        let trimmed = super::strip_comment(line).trim();
-        if let Some(header) = trimmed.strip_prefix('[') {
-            let header = header.trim_end_matches(']').trim();
-            if let Some(name) = dep_name_in_header(header) {
-                deps.push(DeclaredDep {
-                    name,
-                    kind: dep_kind(header).unwrap_or(DepKind::Normal),
-                    features: Vec::new(),
-                });
-                kind = None;
-                continue;
-            }
-            kind = dep_kind(header);
-            continue;
-        }
-        let Some(kind) = kind else {
-            continue;
-        };
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        if key.is_empty() || key.starts_with('[') {
-            continue;
-        }
-        deps.push(DeclaredDep {
-            name: key.to_owned(),
-            kind,
-            features: feature_names(value),
-        });
-    }
+    collect_dep_tables(&value, &mut deps);
     deps
 }
 
+fn collect_dep_tables(value: &toml::Value, deps: &mut Vec<DeclaredDep>) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for (key, child) in table {
+        if let Some(kind) = dep_kind(key) {
+            push_dep_table(child, kind, deps);
+        } else {
+            collect_dep_tables(child, deps);
+        }
+    }
+}
+
+fn push_dep_table(value: &toml::Value, kind: DepKind, deps: &mut Vec<DeclaredDep>) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for (key, spec) in table {
+        match spec {
+            toml::Value::String(_) => deps.push(DeclaredDep {
+                name: key.clone(),
+                kind,
+                features: Vec::new(),
+            }),
+            toml::Value::Table(body) => {
+                let name = body
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key)
+                    .to_owned();
+                let features = body
+                    .get("features")
+                    .and_then(toml::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(toml::Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                deps.push(DeclaredDep {
+                    name,
+                    kind,
+                    features,
+                });
+            }
+            toml::Value::Array(_)
+            | toml::Value::Integer(_)
+            | toml::Value::Float(_)
+            | toml::Value::Boolean(_)
+            | toml::Value::Datetime(_) => {}
+        }
+    }
+}
+
 fn dep_kind(section: &str) -> Option<DepKind> {
-    if section == "dev-dependencies" || section.ends_with(".dev-dependencies") {
+    if section == "dev-dependencies" {
         Some(DepKind::Dev)
-    } else if section == "build-dependencies" || section.ends_with(".build-dependencies") {
+    } else if section == "build-dependencies" {
         Some(DepKind::Build)
-    } else if section == "dependencies" || section.ends_with(".dependencies") {
+    } else if section == "dependencies" {
         Some(DepKind::Normal)
     } else {
         None
     }
 }
 
-fn dep_name_in_header(section: &str) -> Option<String> {
-    for kind in ["dev-dependencies", "build-dependencies", "dependencies"] {
-        let marker = format!(".{kind}.");
-        if let Some(index) = section.find(&marker) {
-            let name = &section[index + marker.len()..];
-            if !name.is_empty() && !name.contains('.') && !name.contains('\'') {
-                return Some(name.to_owned());
-            }
-        }
-    }
-    None
+struct WorkspacePackage {
+    dependencies: Vec<DeclaredDep>,
+    kernel_feature: bool,
 }
 
-fn feature_names(value: &str) -> Vec<String> {
-    let Some(start) = value.find("features") else {
-        return Vec::new();
-    };
-    let rest = &value[start..];
-    let mut names = Vec::new();
-    for quoted in rest.split('"').skip(1).step_by(2) {
-        names.push(quoted.to_owned());
-    }
-    names
-}
-
-fn cargo_dependencies() -> BTreeMap<String, Vec<DeclaredDep>> {
+fn cargo_packages() -> BTreeMap<String, WorkspacePackage> {
     let output = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .current_dir(workspace_root())
@@ -750,38 +1142,76 @@ fn cargo_dependencies() -> BTreeMap<String, Vec<DeclaredDep>> {
         let Some(name) = package.get("name").and_then(|name| name.as_str()) else {
             continue;
         };
-        let mut deps = Vec::new();
-        let Some(dependencies) = package.get("dependencies").and_then(|deps| deps.as_array())
-        else {
-            packages.insert(name.to_owned(), deps);
-            continue;
-        };
-        for dep in dependencies {
-            let Some(dep_name) = dep.get("name").and_then(|name| name.as_str()) else {
-                continue;
-            };
-            let kind = match dep.get("kind").and_then(|kind| kind.as_str()) {
-                Some("dev") => DepKind::Dev,
-                Some("build") => DepKind::Build,
-                _ => DepKind::Normal,
-            };
-            let features = dep
-                .get("features")
-                .and_then(|features| features.as_array())
-                .map(|features| {
-                    features
-                        .iter()
-                        .filter_map(|feature| feature.as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default();
-            deps.push(DeclaredDep {
-                name: dep_name.to_owned(),
-                kind,
-                features,
-            });
+        let mut dependencies = Vec::new();
+        if let Some(deps) = package.get("dependencies").and_then(|deps| deps.as_array()) {
+            for dep in deps {
+                let Some(dep_name) = dep.get("name").and_then(|name| name.as_str()) else {
+                    continue;
+                };
+                let kind = match dep.get("kind").and_then(|kind| kind.as_str()) {
+                    Some("dev") => DepKind::Dev,
+                    Some("build") => DepKind::Build,
+                    _ => DepKind::Normal,
+                };
+                let features = dep
+                    .get("features")
+                    .and_then(|features| features.as_array())
+                    .map(|features| {
+                        features
+                            .iter()
+                            .filter_map(|feature| feature.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                dependencies.push(DeclaredDep {
+                    name: dep_name.to_owned(),
+                    kind,
+                    features,
+                });
+            }
         }
-        packages.insert(name.to_owned(), deps);
+        let direct = dependencies.iter().any(|dep| {
+            dep.name == "hofund-plugin-api"
+                && dep.features.iter().any(|feature| feature == "kernel")
+        });
+        let forwarded = package
+            .get("features")
+            .and_then(|features| features.as_object())
+            .is_some_and(json_features_enable_kernel);
+        packages.insert(
+            name.to_owned(),
+            WorkspacePackage {
+                dependencies,
+                kernel_feature: direct || forwarded,
+            },
+        );
     }
     packages
+}
+
+fn json_features_enable_kernel(features: &serde_json::Map<String, serde_json::Value>) -> bool {
+    fn enables(
+        name: &str,
+        features: &serde_json::Map<String, serde_json::Value>,
+        seen: &mut BTreeSet<String>,
+    ) -> bool {
+        if !seen.insert(name.to_owned()) {
+            return false;
+        }
+        let Some(items) = features.get(name).and_then(|value| value.as_array()) else {
+            return false;
+        };
+        for item in items {
+            let Some(text) = item.as_str() else {
+                continue;
+            };
+            if is_kernel_forward(text) || (!text.contains('/') && enables(text, features, seen)) {
+                return true;
+            }
+        }
+        false
+    }
+    features
+        .keys()
+        .any(|name| enables(name, features, &mut BTreeSet::new()))
 }

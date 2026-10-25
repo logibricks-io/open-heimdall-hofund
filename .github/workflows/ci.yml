@@ -221,6 +221,23 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  plugin-check:
+    name: plugin-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/rust-toolchain
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Check each plugin without feature unification
+        run: cargo run -p xtask -- check-plugins
+
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
