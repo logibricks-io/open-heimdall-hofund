@@ -29,6 +29,60 @@ pub const CLIPPY_ARGS: &[&str] = &[
     "clippy::disallowed_methods",
 ];
 
+/// Clippy invocations for one plugin.
+///
+/// Dev and release each run with `--all-features`. A package that defines
+/// features also runs both profiles with `--no-default-features`, so a
+/// `cfg(feature)` splice is compiled on and off.
+#[must_use]
+pub fn clippy_passes(defines_features: bool) -> Vec<(&'static str, &'static str)> {
+    let mut passes = vec![("dev", "--all-features"), ("release", "--all-features")];
+    if defines_features {
+        passes.push(("dev", "--no-default-features"));
+        passes.push(("release", "--no-default-features"));
+    }
+    passes
+}
+
+/// Whether `[features]` names at least one feature.
+#[must_use]
+pub fn manifest_defines_features(text: &str) -> bool {
+    let Ok(value) = toml::from_str::<toml::Value>(text) else {
+        return false;
+    };
+    value
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|features| !features.is_empty())
+}
+
+/// Whether the manifest sets `[lints] workspace = true`.
+///
+/// The workspace forbids `unsafe_code`. A plugin that drops the table can
+/// compile an FFI block the boundary lints never see.
+#[must_use]
+pub fn lints_follow_workspace(manifest: &str) -> bool {
+    let mut in_lints = false;
+    for line in manifest.lines() {
+        let trimmed = strip_manifest_comment(line).trim();
+        if trimmed.starts_with('[') {
+            in_lints = trimmed == "[lints]";
+            continue;
+        }
+        if in_lints && trimmed == "workspace = true" {
+            return true;
+        }
+    }
+    false
+}
+
+fn strip_manifest_comment(line: &str) -> &str {
+    match line.split_once('#') {
+        Some((code, _)) => code,
+        None => line,
+    }
+}
+
 /// Why a dependency is outside the plugin allow-list, if it is.
 #[must_use]
 pub fn dependency_error(
@@ -314,8 +368,11 @@ impl<'ast> Visit<'ast> for SourceFinder<'_> {
         for lint in suppressed_lints(&attr.meta) {
             self.hits.push(format!("suppresses {lint}"));
         }
-        if attribute_cfg_clippy(attr) {
+        if attribute_cfg_word(attr, "clippy") {
             self.hits.push("cfg(clippy)".to_owned());
+        }
+        if attribute_cfg_word(attr, "debug_assertions") {
+            self.hits.push("cfg(debug_assertions)".to_owned());
         }
         if cfg_attr_sets_path(&attr.meta) {
             self.hits.push("cfg_attr path attribute".to_owned());
@@ -342,9 +399,13 @@ impl<'ast> Visit<'ast> for SourceFinder<'_> {
             }
             if name == "cfg"
                 && let Ok(meta) = syn::parse2::<syn::Meta>(mac.tokens.clone())
-                && mentions_clippy_cfg(&meta)
             {
-                self.hits.push("cfg(clippy)".to_owned());
+                if mentions_cfg_word(&meta, "clippy") {
+                    self.hits.push("cfg(clippy)".to_owned());
+                }
+                if mentions_cfg_word(&meta, "debug_assertions") {
+                    self.hits.push("cfg(debug_assertions)".to_owned());
+                }
             }
         }
         // A body that parses as Rust is scanned. A `$` splice does not parse,
@@ -560,6 +621,7 @@ fn lint_label(meta: &syn::Meta) -> String {
 fn is_boundary_lint(label: &str) -> bool {
     label == "clippy::all"
         || label == "clippy::restriction"
+        || label == "clippy::style"
         || label
             .strip_prefix("clippy::")
             .is_some_and(|rest| rest.starts_with("disallowed_"))
@@ -594,17 +656,19 @@ fn suppressed_lints(meta: &syn::Meta) -> Vec<String> {
     }
 }
 
-fn mentions_clippy_cfg(meta: &syn::Meta) -> bool {
-    if meta.path().is_ident("clippy") {
+fn mentions_cfg_word(meta: &syn::Meta, word: &str) -> bool {
+    if meta.path().is_ident(word) {
         return true;
     }
     let syn::Meta::List(list) = meta else {
         return false;
     };
-    nested_metas(list).iter().any(mentions_clippy_cfg)
+    nested_metas(list)
+        .iter()
+        .any(|meta| mentions_cfg_word(meta, word))
 }
 
-fn attribute_cfg_clippy(attr: &syn::Attribute) -> bool {
+fn attribute_cfg_word(attr: &syn::Attribute, word: &str) -> bool {
     let Some(name) = attr.path().get_ident() else {
         return false;
     };
@@ -612,12 +676,14 @@ fn attribute_cfg_clippy(attr: &syn::Attribute) -> bool {
         "cfg" => attr
             .parse_args::<syn::Meta>()
             .ok()
-            .is_some_and(|meta| mentions_clippy_cfg(&meta)),
+            .is_some_and(|meta| mentions_cfg_word(&meta, word)),
         "cfg_attr" => {
             let syn::Meta::List(list) = &attr.meta else {
                 return false;
             };
-            nested_metas(list).first().is_some_and(mentions_clippy_cfg)
+            nested_metas(list)
+                .first()
+                .is_some_and(|meta| mentions_cfg_word(meta, word))
         }
         _ => false,
     }
@@ -1065,6 +1131,18 @@ cc = "1"
                 "suppresses clippy::restriction",
             ),
             (
+                "#[allow(clippy::style)]\nfn sneak() {}\n",
+                "suppresses clippy::style",
+            ),
+            (
+                "#[cfg(not(debug_assertions))]\nmacro_rules! spawn { ($m:ident) => { std::$m::Command::new(\"true\").status() }; }\n#[cfg(not(debug_assertions))]\npub fn sneak() { let _ = spawn!(process); }\n#[cfg(debug_assertions)]\npub fn sneak() {}\n",
+                "cfg(debug_assertions)",
+            ),
+            (
+                "fn sneak() { if cfg!(not(debug_assertions)) { let _ = std::process::id(); } }\n",
+                "cfg(debug_assertions)",
+            ),
+            (
                 "#[cfg_attr(all(), allow(clippy::disallowed_types))]\nfn sneak() {}\n",
                 "suppresses clippy::disallowed_types",
             ),
@@ -1129,6 +1207,91 @@ cc = "1"
                 "{banned} is a dev-dependency and must stay out of the closure: {ids:?}"
             );
         }
+    }
+
+    #[test]
+    fn clippy_passes_cover_dev_release_and_features() {
+        assert_eq!(
+            super::clippy_passes(false),
+            [("dev", "--all-features"), ("release", "--all-features")]
+        );
+        assert_eq!(
+            super::clippy_passes(true),
+            [
+                ("dev", "--all-features"),
+                ("release", "--all-features"),
+                ("dev", "--no-default-features"),
+                ("release", "--no-default-features"),
+            ]
+        );
+        assert!(!super::lints_follow_workspace("[package]\nname = \"x\"\n"));
+        assert!(super::lints_follow_workspace("[lints]\nworkspace = true\n"));
+        assert!(super::manifest_defines_features("[features]\nextra = []\n"));
+        assert!(!super::manifest_defines_features(
+            "[package]\nname = \"x\"\n"
+        ));
+    }
+
+    #[test]
+    fn release_and_feature_fixtures_fail_clippy() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace")
+            .to_path_buf();
+        let release =
+            std::env::temp_dir().join(format!("hofund-plugin-release-{}", std::process::id()));
+        let feature =
+            std::env::temp_dir().join(format!("hofund-plugin-feature-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&release);
+        let _ = std::fs::remove_dir_all(&feature);
+        write_fixture(
+            &release,
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            "#[cfg(not(debug_assertions))]\nmacro_rules! spawn { ($m:ident) => { std::$m::Command::new(\"true\").status() }; }\n#[cfg(not(debug_assertions))]\npub fn sneak() { let _ = spawn!(process); }\n#[cfg(debug_assertions)]\npub fn sneak() {}\n",
+        );
+        assert!(
+            !clippy_fixture(&release, &workspace, &["--profile", "release"]),
+            "a release-only splice must fail clippy"
+        );
+        write_fixture(
+            &feature,
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\nextra = []\n",
+            "#[cfg(feature = \"extra\")]\nmacro_rules! spawn { ($m:ident) => { std::$m::Command::new(\"true\").status() }; }\n#[cfg(feature = \"extra\")]\npub fn sneak() { let _ = spawn!(process); }\n#[cfg(not(feature = \"extra\"))]\npub fn sneak() {}\n",
+        );
+        assert!(
+            !clippy_fixture(&feature, &workspace, &["--all-features"]),
+            "a feature-gated splice must fail when the feature is on"
+        );
+        assert!(
+            clippy_fixture(&feature, &workspace, &["--no-default-features"]),
+            "the same crate without the feature is clean"
+        );
+        let _ = std::fs::remove_dir_all(&release);
+        let _ = std::fs::remove_dir_all(&feature);
+    }
+
+    fn write_fixture(root: &std::path::Path, manifest: &str, source: &str) {
+        std::fs::create_dir_all(root.join("src")).expect("src");
+        std::fs::write(root.join("Cargo.toml"), manifest).expect("manifest");
+        std::fs::write(root.join("src/lib.rs"), source).expect("source");
+    }
+
+    fn clippy_fixture(root: &std::path::Path, workspace: &std::path::Path, extra: &[&str]) -> bool {
+        let mut args = vec!["clippy", "--offline", "--manifest-path"];
+        let manifest = root.join("Cargo.toml");
+        let manifest = manifest.to_str().expect("utf-8");
+        args.push(manifest);
+        args.extend(extra);
+        args.push("--");
+        args.extend(super::CLIPPY_ARGS);
+        std::process::Command::new("cargo")
+            .args(&args)
+            .env("CLIPPY_CONF_DIR", super::clippy_conf_dir(workspace))
+            .env("CARGO_TARGET_DIR", root.join("target"))
+            .env_remove("CARGO_MANIFEST_DIR")
+            .status()
+            .expect("clippy")
+            .success()
     }
 
     use std::path::PathBuf;

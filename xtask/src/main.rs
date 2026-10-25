@@ -155,6 +155,9 @@ fn audit_manifest(package: &str, text: &str, own_kit: Option<&str>) -> Result<()
             "{package} enables the hofund-plugin-api kernel feature"
         ));
     }
+    if !boundary::lints_follow_workspace(text) {
+        return Err(format!("{package} must set [lints] workspace = true"));
+    }
     Ok(())
 }
 
@@ -332,7 +335,7 @@ fn check_plugins() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
-        if let Err(error) = clippy_plugin(package) {
+        if let Err(error) = clippy_plugin(package, dir) {
             eprintln!("{error}");
             return ExitCode::from(1);
         }
@@ -355,25 +358,37 @@ fn check_plugins() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn clippy_plugin(package: &str) -> Result<(), String> {
-    println!("cargo clippy -p {package}");
-    let status = Command::new("cargo")
-        .args(["clippy", "-p", package, "--all-targets", "--"])
-        .args(boundary::CLIPPY_ARGS)
-        .env(
-            "CLIPPY_CONF_DIR",
-            boundary::clippy_conf_dir(&workspace_root()),
-        )
-        .current_dir(workspace_root())
-        .status()
-        .map_err(|error| format!("could not run cargo clippy -p {package}: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "cargo clippy -p {package} failed the plugin boundary ({status})"
-        ))
+fn clippy_plugin(package: &str, dir: &std::path::Path) -> Result<(), String> {
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
+    let defines_features = boundary::manifest_defines_features(&manifest);
+    for (profile, features) in boundary::clippy_passes(defines_features) {
+        println!("cargo clippy -p {package} --profile {profile} {features}");
+        let status = Command::new("cargo")
+            .args([
+                "clippy",
+                "-p",
+                package,
+                "--all-targets",
+                "--profile",
+                profile,
+                features,
+                "--",
+            ])
+            .args(boundary::CLIPPY_ARGS)
+            .env(
+                "CLIPPY_CONF_DIR",
+                boundary::clippy_conf_dir(&workspace_root()),
+            )
+            .current_dir(workspace_root())
+            .status()
+            .map_err(|error| format!("could not run cargo clippy -p {package}: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "cargo clippy -p {package} --profile {profile} {features} failed the plugin boundary ({status})"
+            ));
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -389,10 +404,22 @@ mod tests {
         std::fs::create_dir_all(&plugin).expect("dir");
         std::fs::write(
             plugin.join("Cargo.toml"),
-            "[package]\nname = \"hofund-plugin-example\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n",
+            "[package]\nname = \"hofund-plugin-example\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n",
         )
         .expect("manifest");
         let names = load_plugin_packages(&root.join("plugins")).expect("packages");
+        let bare = root.join("plugins-bare");
+        std::fs::create_dir_all(bare.join("providers/bare")).expect("bare");
+        std::fs::write(
+            bare.join("providers/bare/Cargo.toml"),
+            "[package]\nname = \"bare\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n",
+        )
+        .expect("bare manifest");
+        let bare_error = load_plugin_packages(&bare).expect_err("lints");
+        assert!(
+            bare_error.contains("must set [lints] workspace = true"),
+            "{bare_error}"
+        );
         assert_eq!(
             names
                 .iter()

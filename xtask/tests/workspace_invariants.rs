@@ -377,21 +377,6 @@ fn note_plugin_api_name(
     }
 }
 
-fn lints_follow_workspace(manifest: &str) -> bool {
-    let mut in_lints = false;
-    for line in manifest.lines() {
-        let trimmed = strip_comment(line).trim();
-        if trimmed.starts_with('[') {
-            in_lints = trimmed == "[lints]";
-            continue;
-        }
-        if in_lints && trimmed == "workspace = true" {
-            return true;
-        }
-    }
-    false
-}
-
 fn contains_word(text: &str, word: &str) -> bool {
     let bytes = text.as_bytes();
     let needle = word.as_bytes();

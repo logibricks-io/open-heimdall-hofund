@@ -1231,7 +1231,7 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
             if toml::from_str::<toml::Value>(&manifest).is_err() {
                 violations.push(format!("{kind}/{id} manifest is not valid toml"));
             }
-            if !super::lints_follow_workspace(&manifest) {
+            if !xtask::boundary::lints_follow_workspace(&manifest) {
                 violations.push(format!("{kind}/{id} must set [lints] workspace = true"));
             }
             if manifest_enables_kernel(&manifest) {
@@ -1274,14 +1274,14 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                 for source in rust_files(&path.join("src")) {
                     let file = source.file_name().unwrap_or_default().to_string_lossy();
                     for hit in runtime_hits_file(&source, &mut BTreeSet::new()) {
-                        violations.push(format!("{kind}/{id} uses {hit} in {file}"));
+                        violations.push(format!("{kind}/{id} {hit} in {file}"));
                     }
                 }
             }
             let build = path.join("build.rs");
             if build.is_file() {
                 for hit in runtime_hits_file(&build, &mut BTreeSet::new()) {
-                    violations.push(format!("{kind}/{id} uses {hit} in build.rs"));
+                    violations.push(format!("{kind}/{id} {hit} in build.rs"));
                 }
                 for hit in seam_hits_file(&build, &mut BTreeSet::new()) {
                     violations.push(format!("{kind}/{id} {hit} in build.rs"));
