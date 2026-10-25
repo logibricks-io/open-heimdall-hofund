@@ -9,14 +9,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
-use hofund_config::{Config, Kind, Protocol, load_path};
+use hofund_config::{Config, Kind, PresetWire, Protocol, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 
 pub use hofund_gateway::Running;
-use hofund_provider::{Anthropic, Endpoint, OpenAiCompat, OpenAiProtocol, Provider};
+use hofund_provider::{
+    Anthropic, Credential, Endpoint, OpenAiCompat, OpenAiProtocol, Provider, Wire, resolve,
+};
 use hofund_quirks::named;
 use hofund_router::{FailoverPolicy, Hop, Router};
-use hofund_secrets::{TokenFile, resolve};
+use hofund_secrets::TokenFile;
 use hofund_usage::Ledger;
 
 /// A configuration, credential, or startup failure.
@@ -228,8 +230,10 @@ fn router(config: &Config) -> Result<Router, DaemonError> {
 fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, DaemonError> {
     let mut built = BTreeMap::new();
     for provider in &config.providers {
-        let mut endpoint = Endpoint::new(provider.id.clone(), provider.base_url.clone());
-        endpoint.api_key = resolve(&provider.api_key).map_err(show)?;
+        let planned = plan(provider)?;
+        let mut endpoint = Endpoint::new(provider.id.clone(), planned.base_url);
+        endpoint.api_key = hofund_secrets::resolve(&provider.api_key).map_err(show)?;
+        endpoint.credential = planned.credential;
         endpoint.headers = provider
             .headers
             .iter()
@@ -243,19 +247,66 @@ fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, Dae
                 ))
             })?);
         }
-        let adapter: Arc<dyn Provider> = match provider.kind {
-            Kind::OpenAiCompat { protocol } => {
-                let protocol = match protocol {
-                    Protocol::Chat => OpenAiProtocol::Chat,
-                    Protocol::Responses => OpenAiProtocol::Responses,
-                };
-                Arc::new(OpenAiCompat::new(protocol, endpoint).map_err(show)?)
+        let adapter: Arc<dyn Provider> = match planned.wire {
+            Wire::Chat => {
+                Arc::new(OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).map_err(show)?)
             }
-            Kind::Anthropic => Arc::new(Anthropic::new(endpoint).map_err(show)?),
+            Wire::Responses => {
+                Arc::new(OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).map_err(show)?)
+            }
+            Wire::Messages => Arc::new(Anthropic::new(endpoint).map_err(show)?),
         };
         built.insert(provider.id.clone(), adapter);
     }
     Ok(built)
+}
+
+struct Planned {
+    base_url: String,
+    wire: Wire,
+    credential: Credential,
+}
+
+fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
+    if let Some(preset) = &provider.preset {
+        let resolved = resolve(&hofund_provider::Resolve {
+            id: preset,
+            region: provider.region.as_deref(),
+            wire: provider.preset_wire.map(|wire| match wire {
+                PresetWire::Chat => Wire::Chat,
+                PresetWire::Responses => Wire::Responses,
+                PresetWire::Messages => Wire::Messages,
+            }),
+            base_url: &provider.base_url,
+        })
+        .map_err(show)?;
+        return Ok(Planned {
+            base_url: resolved.base_url,
+            wire: resolved.wire,
+            credential: resolved.credential,
+        });
+    }
+    let kind = provider.kind.ok_or_else(|| {
+        DaemonError::new(format!(
+            "provider `{}` needs a kind or a preset",
+            provider.id
+        ))
+    })?;
+    let (wire, credential) = match kind {
+        Kind::OpenAiCompat { protocol } => {
+            let wire = match protocol {
+                Protocol::Chat => Wire::Chat,
+                Protocol::Responses => Wire::Responses,
+            };
+            (wire, Credential::Default)
+        }
+        Kind::Anthropic => (Wire::Messages, Credential::Default),
+    };
+    Ok(Planned {
+        base_url: provider.base_url.clone(),
+        wire,
+        credential,
+    })
 }
 
 fn inbound_codecs() -> HashMap<String, Arc<dyn Codec>> {
@@ -285,4 +336,43 @@ fn beside(config_path: &Path, value: &str) -> PathBuf {
 
 fn show<E: std::fmt::Display>(error: E) -> DaemonError {
     DaemonError::new(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check;
+
+    #[test]
+    fn a_preset_builds_and_an_unfinished_adapter_does_not() {
+        let dir = std::env::temp_dir().join(format!("hofund-preset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("hofund.toml");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"openai\"\npreset = \"openai\"\napi_key = \"test\"\n",
+        )
+        .expect("write");
+        check(&path).expect("openai");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"local\"\npreset = \"ollama\"\n",
+        )
+        .expect("write");
+        check(&path).expect("ollama");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"azure\"\npreset = \"azure\"\nbase_url = \"my-resource\"\napi_key = \"test\"\n",
+        )
+        .expect("write");
+        check(&path).expect("azure");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n",
+        )
+        .expect("write");
+        let error = check(&path).expect_err("vertex");
+        assert!(error.to_string().contains("Google credentials"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

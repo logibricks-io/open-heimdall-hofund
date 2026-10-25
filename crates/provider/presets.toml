@@ -1,0 +1,1079 @@
+# Provider presets. Version 1.
+# Endpoints recorded from the upstream preset list at commit
+# 5b2b3d3f50959735403dff6b77a85eec65772218.
+# Icons are not shipped. Sponsored partner feeds are not part of this file.
+version = 1
+source_commit = "5b2b3d3f50959735403dff6b77a85eec65772218"
+
+[[alias]]
+id = "qianfan-token-plan"
+preset = "baidu-qianfan"
+
+[[alias]]
+id = "tencent-token-plan"
+preset = "tencent-cloud"
+region = "plan"
+
+[[alias]]
+id = "tencent-tokenhub-cn"
+preset = "tencent-cloud"
+region = "cn"
+
+[[alias]]
+id = "tencent-tokenhub"
+preset = "tencent-cloud"
+region = "intl"
+
+[[preset]]
+id = "anthropic"
+name = "Anthropic"
+kind = "vendor"
+catalog = "anthropic"
+anthropic = "https://api.anthropic.com"
+website = "https://console.anthropic.com"
+keys_url = "https://console.anthropic.com/settings/keys"
+header_hints = ["anthropic-workspace-id"]
+
+[[preset]]
+id = "openai"
+name = "OpenAI"
+kind = "vendor"
+catalog = "openai"
+chat = "https://api.openai.com/v1"
+responses = "https://api.openai.com/v1"
+website = "https://platform.openai.com"
+keys_url = "https://platform.openai.com/api-keys"
+
+[[preset]]
+id = "google"
+name = "Google Gemini"
+kind = "vendor"
+catalog = "google"
+note = "Gemini Developer API"
+chat = "https://generativelanguage.googleapis.com/v1beta/openai"
+website = "https://aistudio.google.com"
+keys_url = "https://aistudio.google.com/apikey"
+
+[[preset]]
+id = "google-vertex"
+name = "Google Vertex AI"
+short = "Vertex AI"
+kind = "vendor"
+note = "your Google Cloud project, with gcloud's sign-in"
+website = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models"
+no_list = true
+models = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-4-argon", "gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+header_hints = ["X-Vertex-AI-LLM-Request-Type", "X-Vertex-AI-LLM-Shared-Request-Type"]
+
+[[preset]]
+id = "deepseek"
+name = "DeepSeek"
+kind = "vendor"
+catalog = "deepseek"
+chat = "https://api.deepseek.com/v1"
+responses = "https://api.deepseek.com/v1"
+anthropic = "https://api.deepseek.com/anthropic"
+website = "https://platform.deepseek.com"
+keys_url = "https://platform.deepseek.com/api_keys"
+
+[[preset]]
+id = "xai"
+name = "xAI"
+kind = "vendor"
+catalog = "xai"
+chat = "https://api.x.ai/v1"
+responses = "https://api.x.ai/v1"
+anthropic = "https://api.x.ai"
+website = "https://console.x.ai"
+keys_url = "https://console.x.ai"
+
+[[preset]]
+id = "moonshot"
+name = "Kimi"
+kind = "vendor"
+catalog = "moonshotai"
+chat = "https://api.moonshot.ai/v1"
+anthropic = "https://api.moonshot.ai/anthropic"
+website = "https://platform.moonshot.ai"
+keys_url = "https://platform.moonshot.ai/console/api-keys"
+
+[[preset]]
+id = "moonshot-cn"
+name = "Kimi (China)"
+kind = "vendor"
+catalog = "moonshotai"
+chat = "https://api.moonshot.cn/v1"
+anthropic = "https://api.moonshot.cn/anthropic"
+website = "https://platform.moonshot.cn"
+keys_url = "https://platform.moonshot.cn/console/api-keys"
+
+[[preset]]
+id = "kimi-code"
+name = "Kimi Code"
+kind = "vendor"
+catalog = "kimi-code-plan-global"
+note = "Membership"
+chat = "https://api.kimi.ai/coding/v1"
+anthropic = "https://api.kimi.ai/coding"
+website = "https://www.kimi.com/code"
+keys_url = "https://www.kimi.com/code/console"
+
+[[preset]]
+id = "kimi-code-cn"
+name = "Kimi Code (China)"
+kind = "vendor"
+catalog = "kimi-code-plan-cn"
+note = "Membership"
+chat = "https://api.kimi.com/coding/v1"
+anthropic = "https://api.kimi.com/coding"
+website = "https://www.kimi.com/code"
+keys_url = "https://www.kimi.com/code/console"
+
+[[preset]]
+id = "zhipu"
+name = "Zhipu GLM"
+kind = "vendor"
+catalog = "zhipuai"
+chat = "https://open.bigmodel.cn/api/paas/v4"
+anthropic = "https://open.bigmodel.cn/api/anthropic"
+website = "https://open.bigmodel.cn"
+keys_url = "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys"
+region_label = "Plan"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://open.bigmodel.cn/api/paas/v4"
+anthropic = "https://open.bigmodel.cn/api/anthropic"
+
+[[preset.region]]
+id = "coding"
+name = "Coding Plan"
+chat = "https://open.bigmodel.cn/api/coding/paas/v4"
+responses = "https://open.bigmodel.cn/api/v1"
+anthropic = "https://open.bigmodel.cn/api/anthropic"
+
+[[preset]]
+id = "zai"
+name = "Z.ai"
+kind = "vendor"
+catalog = "zhipuai"
+chat = "https://api.z.ai/api/paas/v4"
+anthropic = "https://api.z.ai/api/anthropic"
+website = "https://z.ai"
+keys_url = "https://z.ai/manage-apikey/apikey-list"
+region_label = "Plan"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.z.ai/api/paas/v4"
+anthropic = "https://api.z.ai/api/anthropic"
+
+[[preset.region]]
+id = "coding"
+name = "Coding Plan"
+chat = "https://api.z.ai/api/coding/paas/v4"
+responses = "https://api.z.ai/api/v1"
+anthropic = "https://api.z.ai/api/anthropic"
+
+[[preset]]
+id = "minimax"
+name = "MiniMax"
+kind = "vendor"
+catalog = "minimax"
+chat = "https://api.minimax.io/v1"
+anthropic = "https://api.minimax.io/anthropic"
+website = "https://platform.minimax.io"
+keys_url = "https://platform.minimax.io/user-center/basic-information/interface-key"
+
+[[preset]]
+id = "minimax-cn"
+name = "MiniMax (China)"
+kind = "vendor"
+catalog = "minimax"
+chat = "https://api.minimaxi.com/v1"
+anthropic = "https://api.minimaxi.com/anthropic"
+website = "https://platform.minimaxi.com"
+keys_url = "https://platform.minimaxi.com/user-center/basic-information/interface-key"
+
+[[preset]]
+id = "stepfun"
+name = "StepFun"
+kind = "vendor"
+catalog = "stepfun-ai-step-plan, stepfun-ai"
+chat = "https://api.stepfun.ai/step_plan/v1"
+anthropic = "https://api.stepfun.ai/step_plan"
+website = "https://platform.stepfun.ai"
+keys_url = "https://platform.stepfun.ai/interface-key"
+region_label = "Plan"
+
+[[preset.region]]
+id = "plan"
+name = "Step Plan"
+chat = "https://api.stepfun.ai/step_plan/v1"
+anthropic = "https://api.stepfun.ai/step_plan"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.stepfun.ai/v1"
+anthropic = "https://api.stepfun.ai"
+
+[[preset]]
+id = "stepfun-cn"
+name = "StepFun (China)"
+kind = "vendor"
+catalog = "stepfun-step-plan, stepfun"
+chat = "https://api.stepfun.com/step_plan/v1"
+anthropic = "https://api.stepfun.com/step_plan"
+website = "https://platform.stepfun.com"
+keys_url = "https://platform.stepfun.com/interface-key"
+region_label = "Plan"
+
+[[preset.region]]
+id = "plan"
+name = "Step Plan"
+chat = "https://api.stepfun.com/step_plan/v1"
+anthropic = "https://api.stepfun.com/step_plan"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.stepfun.com/v1"
+anthropic = "https://api.stepfun.com"
+
+[[preset]]
+id = "xiaomi"
+name = "Xiaomi MiMo"
+kind = "vendor"
+catalog = "xiaomi-token-plan-cn, xiaomi"
+note = "Token Plan - pay as you go"
+chat = "https://token-plan-cn.xiaomimimo.com/v1"
+responses = "https://token-plan-cn.xiaomimimo.com/v1"
+anthropic = "https://token-plan-cn.xiaomimimo.com/anthropic"
+website = "https://platform.xiaomimimo.com"
+keys_url = "https://platform.xiaomimimo.com/token-plan"
+
+[[preset.region]]
+id = "plan-cn"
+name = "Plan - China"
+chat = "https://token-plan-cn.xiaomimimo.com/v1"
+responses = "https://token-plan-cn.xiaomimimo.com/v1"
+anthropic = "https://token-plan-cn.xiaomimimo.com/anthropic"
+catalog = "xiaomi-token-plan-cn, xiaomi"
+
+[[preset.region]]
+id = "plan-sgp"
+name = "Plan - Singapore"
+chat = "https://token-plan-sgp.xiaomimimo.com/v1"
+responses = "https://token-plan-sgp.xiaomimimo.com/v1"
+anthropic = "https://token-plan-sgp.xiaomimimo.com/anthropic"
+catalog = "xiaomi-token-plan-sgp, xiaomi"
+
+[[preset.region]]
+id = "plan-ams"
+name = "Plan - Europe"
+chat = "https://token-plan-ams.xiaomimimo.com/v1"
+responses = "https://token-plan-ams.xiaomimimo.com/v1"
+anthropic = "https://token-plan-ams.xiaomimimo.com/anthropic"
+catalog = "xiaomi-token-plan-ams, xiaomi"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.xiaomimimo.com/v1"
+responses = "https://api.xiaomimimo.com/v1"
+anthropic = "https://api.xiaomimimo.com/anthropic"
+catalog = "xiaomi"
+
+[[preset]]
+id = "baidu-qianfan"
+name = "Baidu Qianfan"
+kind = "vendor"
+note = "Token Plan - pay as you go"
+chat = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+responses = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+anthropic = "https://qianfan.baidubce.com/anthropic/tokenplan/personal"
+website = "https://cloud.baidu.com/doc/qianfan/s/Dmrabu8b6"
+keys_url = "https://console.bce.baidu.com/qianfan/resource/token-plan"
+no_list = true
+models = ["qianfan-code-latest", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash", "deepseek-v4-flash-0731", "deepseek-v3.2", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5"]
+region_label = "Plan"
+
+[[preset.region]]
+id = "personal"
+name = "Token Plan Personal"
+chat = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+responses = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+anthropic = "https://qianfan.baidubce.com/anthropic/tokenplan/personal"
+
+[[preset.region]]
+id = "team"
+name = "Token Plan Enterprise"
+chat = "https://qianfan.baidubce.com/v2/tokenplan/team"
+responses = "https://qianfan.baidubce.com/v2/tokenplan/team"
+anthropic = "https://qianfan.baidubce.com/anthropic/tokenplan/team"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://qianfan.baidubce.com/v2"
+responses = "https://qianfan.baidubce.com/v2"
+anthropic = "https://qianfan.baidubce.com/anthropic"
+lists = true
+keys_url = "https://console.bce.baidu.com/iam/#/iam/apikey/list"
+
+[[preset]]
+id = "tencent-cloud"
+name = "Tencent Cloud"
+kind = "vendor"
+note = "Token Plan - pay as you go"
+chat = "https://api.lkeap.cloud.tencent.com/plan/v3"
+anthropic = "https://api.lkeap.cloud.tencent.com/plan/anthropic"
+website = "https://cloud.tencent.com/document/product/1823/130060"
+keys_url = "https://console.cloud.tencent.com/tokenhub/tokenplan"
+hosts = true
+
+[[preset.region]]
+id = "plan"
+name = "Plan - China"
+chat = "https://api.lkeap.cloud.tencent.com/plan/v3"
+anthropic = "https://api.lkeap.cloud.tencent.com/plan/anthropic"
+keys_url = "https://console.cloud.tencent.com/tokenhub/tokenplan"
+website = "https://cloud.tencent.com/document/product/1823/130060"
+models = ["tc-code-latest", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "kimi-k3", "kimi-k2.7-code", "deepseek-v4-pro-202606", "deepseek-v4-flash-202605", "minimax-m3", "minimax-m2.7", "hy4-preview", "hy3"]
+
+[[preset.region]]
+id = "cn"
+name = "Pay as you go - China"
+chat = "https://tokenhub.tencentmaas.com/v1"
+responses = "https://tokenhub.tencentmaas.com/v1"
+anthropic = "https://tokenhub.tencentmaas.com"
+keys_url = "https://console.cloud.tencent.com/tokenhub/apikey"
+website = "https://cloud.tencent.com/document/product/1823/130078"
+catalog = "tencent-tokenhub"
+
+[[preset.region]]
+id = "intl"
+name = "Pay as you go - Global"
+chat = "https://tokenhub-intl.tencentmaas.com/v1"
+responses = "https://tokenhub-intl.tencentmaas.com/v1"
+anthropic = "https://tokenhub-intl.tencentmaas.com"
+keys_url = "https://console.tencentcloud.com/tokenhub/apikey"
+website = "https://www.tencentcloud.com/document/product/1300/78939"
+catalog = "tencent-tokenhub"
+
+[[preset.region]]
+id = "enterprise"
+name = "Enterprise plan - China"
+chat = "https://tokenhub.tencentmaas.com/plan/v3"
+responses = "https://tokenhub.tencentmaas.com/plan/v3"
+anthropic = "https://tokenhub.tencentmaas.com/plan/anthropic"
+keys_url = "https://console.cloud.tencent.com/tokenhub/tokenplan"
+website = "https://cloud.tencent.com/document/product/1823/130659"
+models = ["auto", "hy4-preview", "glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6", "minimax-m3", "minimax-m2.7", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "deepseek-v4-pro-202606", "deepseek-v4-flash-202605", "mimo-v2.6-pro", "mimo-v2.6-flash"]
+
+[[preset.region]]
+id = "enterprise-intl"
+name = "Enterprise plan - Global"
+chat = "https://tokenhub-intl.tencentmaas.com/plan/v3"
+responses = "https://tokenhub-intl.tencentmaas.com/plan/v3"
+anthropic = "https://tokenhub-intl.tencentmaas.com/plan/anthropic"
+keys_url = "https://console.tencentcloud.com/tokenhub/tokenplan"
+website = "https://cloud.tencent.com/document/product/1823/130659"
+models = ["auto", "hy4-preview", "glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "minimax-m3", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "deepseek-v4-pro-202606", "deepseek-v4-flash-202605", "mimo-v2.6-pro", "mimo-v2.6-flash"]
+
+[[preset]]
+id = "huaweicloud"
+name = "Huawei Cloud MaaS"
+short = "Huawei Cloud"
+kind = "vendor"
+note = "Token Plan, southwest China (Guiyang)"
+chat = "https://api.modelarts-maas.com/plan/v2"
+anthropic = "https://api.modelarts-maas.com/plan/anthropic"
+website = "https://support.huaweicloud.com/Token-plan-maas/tokenplan-maas-0001.html"
+keys_url = "https://console.huaweicloud.com/modelarts/?#/model-studio/authmanage"
+models = ["glm-5.3", "glm-5.1", "kimi-k2.6", "deepseek-v4.1-flash", "deepseek-v4-flash"]
+region_label = "Plan"
+
+[[preset.region]]
+id = "plan"
+name = "Token Plan"
+chat = "https://api.modelarts-maas.com/plan/v2"
+anthropic = "https://api.modelarts-maas.com/plan/anthropic"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.modelarts-maas.com/openai/v1"
+anthropic = "https://api.modelarts-maas.com/anthropic"
+
+[[preset]]
+id = "volcengine"
+name = "Volcengine Ark"
+kind = "vendor"
+note = "Coding plan, agent plan, and pay as you go"
+chat = "https://ark.cn-beijing.volces.com/api/coding/v3"
+responses = "https://ark.cn-beijing.volces.com/api/coding/v3"
+anthropic = "https://ark.cn-beijing.volces.com/api/coding"
+website = "https://www.volcengine.com/docs/82379/1925114"
+keys_url = "https://ark.volcengine.com/region:cn-beijing/apikey"
+no_list = true
+region_label = "Plan"
+
+[[preset.region]]
+id = "coding"
+name = "Coding Plan"
+chat = "https://ark.cn-beijing.volces.com/api/coding/v3"
+responses = "https://ark.cn-beijing.volces.com/api/coding/v3"
+anthropic = "https://ark.cn-beijing.volces.com/api/coding"
+models = ["ark-code-latest", "doubao-seed-evolving", "doubao-seed-2.1-pro", "doubao-seed-2.1-lite", "doubao-seed-2.1-turbo", "doubao-seed-2.0-mini", "minimax-m3", "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.7-code", "kimi-k2.8-preview", "kimi-k3"]
+embeddings = ["doubao-embedding-vision"]
+
+[[preset.region]]
+id = "agent"
+name = "Agent Plan"
+chat = "https://ark.cn-beijing.volces.com/api/plan/v3"
+responses = "https://ark.cn-beijing.volces.com/api/plan/v3"
+anthropic = "https://ark.cn-beijing.volces.com/api/plan"
+models = ["ark-code-latest", "doubao-seed-evolving", "doubao-seed-2.1-pro", "doubao-seed-2.1-lite", "doubao-seed-2.1-turbo", "doubao-seed-2.0-mini", "minimax-m3", "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.7-code", "kimi-k2.8-preview", "kimi-k3"]
+embeddings = ["doubao-embedding-vision"]
+drawers = ["doubao-seedream-5-0-pro"]
+videos = ["doubao-seedance-2.0", "doubao-seedance-2.0-fast", "doubao-seedance-2.0-mini", "doubao-seedance-2.5"]
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://ark.cn-beijing.volces.com/api/v3"
+responses = "https://ark.cn-beijing.volces.com/api/v3"
+lists = true
+
+[[preset]]
+id = "qwen"
+name = "Qwen"
+kind = "vendor"
+catalog = "alibaba"
+note = "DashScope - intl"
+chat = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+anthropic = "https://dashscope-intl.aliyuncs.com/apps/anthropic"
+website = "https://modelstudio.console.alibabacloud.com"
+keys_url = "https://modelstudio.console.alibabacloud.com/?tab=playground#/api-key"
+
+[[preset]]
+id = "qwen-cn"
+name = "Qwen (China)"
+kind = "vendor"
+catalog = "alibaba"
+note = "DashScope - China"
+chat = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+anthropic = "https://dashscope.aliyuncs.com/apps/anthropic"
+website = "https://bailian.console.aliyun.com"
+keys_url = "https://bailian.console.aliyun.com/?tab=model#/api-key"
+
+[[preset]]
+id = "qwen-token-plan"
+name = "Qwen Token Plan"
+short = "Qwen Plan"
+kind = "vendor"
+note = "Qwen AI platform - subscription"
+chat = "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+anthropic = "https://token-plan.maas.qianwenaiapi.com/apps/anthropic"
+website = "https://platform.qianwenai.com/docs/token-plan/overview"
+keys_url = "https://platform.qianwenai.com/home/analytics/token-plan/individual"
+models = ["auto", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "glm-5.3", "glm-5.2"]
+
+[[preset]]
+id = "bailian-token-plan"
+name = "Bailian Token Plan"
+short = "Bailian Plan"
+kind = "vendor"
+note = "Alibaba Cloud Bailian - subscription"
+chat = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+anthropic = "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic"
+decide = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+website = "https://help.aliyun.com/zh/model-studio/token-plan-overview"
+keys_url = "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal"
+models = ["auto", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "glm-5.3", "glm-5.2"]
+
+[[preset]]
+id = "mistral"
+name = "Mistral"
+kind = "vendor"
+catalog = "mistral"
+chat = "https://api.mistral.ai/v1"
+website = "https://console.mistral.ai"
+keys_url = "https://console.mistral.ai/api-keys"
+
+[[preset]]
+id = "groq"
+name = "Groq"
+kind = "vendor"
+catalog = "groq"
+chat = "https://api.groq.com/openai/v1"
+responses = "https://api.groq.com/openai/v1"
+website = "https://console.groq.com"
+keys_url = "https://console.groq.com/keys"
+hosts = true
+
+[[preset]]
+id = "bedrock"
+name = "Amazon Bedrock"
+kind = "vendor"
+note = "Bedrock API key"
+chat = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic"
+website = "https://aws.amazon.com/bedrock/"
+keys_url = "https://console.aws.amazon.com/bedrock/home#/api-keys"
+no_list = true
+models = ["global.anthropic.claude-opus-5-5", "global.anthropic.claude-sonnet-5-5", "global.anthropic.claude-sonnet-5", "global.anthropic.claude-opus-5", "global.anthropic.claude-fable-5-1", "global.anthropic.claude-opus-4-8", "global.anthropic.claude-opus-4-7", "global.anthropic.claude-haiku-4-5-20251001-v1:0", "global.openai.gpt-6-astra", "global.openai.gpt-6-sol", "global.openai.gpt-6-luna", "openai.gpt-oss-120b-1:0", "openai.gpt-oss-20b-1:0", "qwen.qwen3-coder-480b-a35b-v1:0", "deepseek.v3.2", "moonshotai.kimi-k2.5", "zai.glm-5", "minimax.minimax-m2.5"]
+
+[[preset.region]]
+id = "us-east-1"
+name = "us-east-1"
+chat = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "us-east-2"
+name = "us-east-2"
+chat = "https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.us-east-2.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "us-west-2"
+name = "us-west-2"
+chat = "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.us-west-2.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "eu-central-1"
+name = "eu-central-1"
+chat = "https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.eu-central-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "eu-west-1"
+name = "eu-west-1"
+chat = "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.eu-west-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "eu-west-3"
+name = "eu-west-3"
+chat = "https://bedrock-runtime.eu-west-3.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.eu-west-3.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.eu-west-3.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "ap-northeast-1"
+name = "ap-northeast-1"
+chat = "https://bedrock-runtime.ap-northeast-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.ap-northeast-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.ap-northeast-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "ap-southeast-1"
+name = "ap-southeast-1"
+chat = "https://bedrock-runtime.ap-southeast-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.ap-southeast-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.ap-southeast-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "ap-southeast-2"
+name = "ap-southeast-2"
+chat = "https://bedrock-runtime.ap-southeast-2.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.ap-southeast-2.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.ap-southeast-2.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "ap-south-1"
+name = "ap-south-1"
+chat = "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.ap-south-1.amazonaws.com/anthropic"
+
+[[preset]]
+id = "bedrock-mantle"
+name = "Amazon Bedrock (Mantle)"
+short = "Bedrock Mantle"
+kind = "vendor"
+note = "Bedrock API key"
+chat = "https://bedrock-mantle.us-east-1.api.aws/v1"
+responses = "https://bedrock-mantle.us-east-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+website = "https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html"
+keys_url = "https://console.aws.amazon.com/bedrock/home#/api-keys"
+hosts = true
+
+[[preset.region]]
+id = "us-east-1"
+name = "us-east-1"
+chat = "https://bedrock-mantle.us-east-1.api.aws/v1"
+responses = "https://bedrock-mantle.us-east-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+
+[[preset.region]]
+id = "us-east-2"
+name = "us-east-2"
+chat = "https://bedrock-mantle.us-east-2.api.aws/v1"
+responses = "https://bedrock-mantle.us-east-2.api.aws/v1"
+anthropic = "https://bedrock-mantle.us-east-2.api.aws/anthropic"
+
+[[preset.region]]
+id = "us-west-2"
+name = "us-west-2"
+chat = "https://bedrock-mantle.us-west-2.api.aws/v1"
+responses = "https://bedrock-mantle.us-west-2.api.aws/v1"
+anthropic = "https://bedrock-mantle.us-west-2.api.aws/anthropic"
+
+[[preset.region]]
+id = "eu-central-1"
+name = "eu-central-1"
+chat = "https://bedrock-mantle.eu-central-1.api.aws/v1"
+responses = "https://bedrock-mantle.eu-central-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.eu-central-1.api.aws/anthropic"
+
+[[preset.region]]
+id = "eu-central-2"
+name = "eu-central-2"
+chat = "https://bedrock-mantle.eu-central-2.api.aws/v1"
+responses = "https://bedrock-mantle.eu-central-2.api.aws/v1"
+anthropic = "https://bedrock-mantle.eu-central-2.api.aws/anthropic"
+
+[[preset.region]]
+id = "eu-north-1"
+name = "eu-north-1"
+chat = "https://bedrock-mantle.eu-north-1.api.aws/v1"
+responses = "https://bedrock-mantle.eu-north-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.eu-north-1.api.aws/anthropic"
+
+[[preset.region]]
+id = "eu-south-1"
+name = "eu-south-1"
+chat = "https://bedrock-mantle.eu-south-1.api.aws/v1"
+responses = "https://bedrock-mantle.eu-south-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.eu-south-1.api.aws/anthropic"
+
+[[preset.region]]
+id = "eu-west-1"
+name = "eu-west-1"
+chat = "https://bedrock-mantle.eu-west-1.api.aws/v1"
+responses = "https://bedrock-mantle.eu-west-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.eu-west-1.api.aws/anthropic"
+
+[[preset.region]]
+id = "eu-west-2"
+name = "eu-west-2"
+chat = "https://bedrock-mantle.eu-west-2.api.aws/v1"
+responses = "https://bedrock-mantle.eu-west-2.api.aws/v1"
+anthropic = "https://bedrock-mantle.eu-west-2.api.aws/anthropic"
+
+[[preset.region]]
+id = "ap-northeast-1"
+name = "ap-northeast-1"
+chat = "https://bedrock-mantle.ap-northeast-1.api.aws/v1"
+responses = "https://bedrock-mantle.ap-northeast-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.ap-northeast-1.api.aws/anthropic"
+
+[[preset.region]]
+id = "ap-northeast-2"
+name = "ap-northeast-2"
+chat = "https://bedrock-mantle.ap-northeast-2.api.aws/v1"
+responses = "https://bedrock-mantle.ap-northeast-2.api.aws/v1"
+anthropic = "https://bedrock-mantle.ap-northeast-2.api.aws/anthropic"
+
+[[preset.region]]
+id = "ap-south-1"
+name = "ap-south-1"
+chat = "https://bedrock-mantle.ap-south-1.api.aws/v1"
+responses = "https://bedrock-mantle.ap-south-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.ap-south-1.api.aws/anthropic"
+
+[[preset.region]]
+id = "ap-southeast-1"
+name = "ap-southeast-1"
+chat = "https://bedrock-mantle.ap-southeast-1.api.aws/v1"
+responses = "https://bedrock-mantle.ap-southeast-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.ap-southeast-1.api.aws/anthropic"
+
+[[preset.region]]
+id = "ap-southeast-2"
+name = "ap-southeast-2"
+chat = "https://bedrock-mantle.ap-southeast-2.api.aws/v1"
+responses = "https://bedrock-mantle.ap-southeast-2.api.aws/v1"
+anthropic = "https://bedrock-mantle.ap-southeast-2.api.aws/anthropic"
+
+[[preset.region]]
+id = "ap-southeast-3"
+name = "ap-southeast-3"
+chat = "https://bedrock-mantle.ap-southeast-3.api.aws/v1"
+responses = "https://bedrock-mantle.ap-southeast-3.api.aws/v1"
+anthropic = "https://bedrock-mantle.ap-southeast-3.api.aws/anthropic"
+
+[[preset.region]]
+id = "ap-southeast-4"
+name = "ap-southeast-4"
+chat = "https://bedrock-mantle.ap-southeast-4.api.aws/v1"
+responses = "https://bedrock-mantle.ap-southeast-4.api.aws/v1"
+anthropic = "https://bedrock-mantle.ap-southeast-4.api.aws/anthropic"
+
+[[preset.region]]
+id = "sa-east-1"
+name = "sa-east-1"
+chat = "https://bedrock-mantle.sa-east-1.api.aws/v1"
+responses = "https://bedrock-mantle.sa-east-1.api.aws/v1"
+anthropic = "https://bedrock-mantle.sa-east-1.api.aws/anthropic"
+
+[[preset]]
+id = "azure"
+name = "Azure OpenAI"
+kind = "vendor"
+catalog = "azure, openai"
+note = "your resource's endpoint and key"
+website = "https://ai.azure.com"
+keys_url = "https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/OpenAI"
+hosts = true
+endpoint = "https://<resource>.openai.azure.com"
+endpoint_hint = "Your resource's endpoint, from Keys and Endpoint in the Azure portal. Once added, the gateway asks the resource for its deployments with this key, over its v1 API; the deployments' names are the model ids."
+
+[[preset]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+kind = "vendor"
+catalog = "ollama-cloud"
+note = "cloud models, with an API key"
+chat = "https://ollama.com/v1"
+anthropic = "https://ollama.com"
+decide = "https://ollama.com/v1"
+website = "https://docs.ollama.com/cloud"
+keys_url = "https://ollama.com/settings/keys"
+hosts = true
+
+[[preset]]
+id = "nous"
+name = "Nous Portal"
+kind = "vendor"
+note = "Nous Research - Hermes and other models"
+chat = "https://inference-api.nousresearch.com/v1"
+website = "https://portal.nousresearch.com"
+keys_url = "https://portal.nousresearch.com"
+hosts = true
+
+[[preset]]
+id = "openrouter"
+name = "OpenRouter"
+kind = "relay"
+catalog = "openrouter"
+chat = "https://openrouter.ai/api/v1"
+anthropic = "https://openrouter.ai/api"
+decide = "https://openrouter.ai/api/v1"
+website = "https://openrouter.ai"
+keys_url = "https://openrouter.ai/keys"
+header_hints = ["HTTP-Referer", "X-OpenRouter-Title"]
+
+[[preset]]
+id = "opencode-go"
+name = "OpenCode Go"
+kind = "relay"
+catalog = "opencode-go"
+note = "open coding models, $10/month"
+chat = "https://opencode.ai/zen/go/v1"
+responses = "https://opencode.ai/zen/go/v1"
+anthropic = "https://opencode.ai/zen/go"
+website = "https://opencode.ai/docs/go"
+keys_url = "https://opencode.ai/auth"
+
+[[preset]]
+id = "clinepass"
+name = "ClinePass"
+kind = "relay"
+note = "open coding models, $9.99/month"
+chat = "https://api.cline.bot/api/v1"
+website = "https://docs.cline.bot/getting-started/clinepass"
+keys_url = "https://app.cline.bot"
+only = "cline-pass/"
+models = ["cline-pass/glm-5.3", "cline-pass/glm-5.3-flash", "cline-pass/kimi-k3", "cline-pass/deepseek-v4-pro", "cline-pass/deepseek-v4.1-flash", "cline-pass/mimo-v2.5", "cline-pass/mimo-v2.5-pro", "cline-pass/minimax-m3", "cline-pass/muse-spark-1.3-contributor", "cline-pass/qwen3.8-max", "cline-pass/qwen3.7-max", "cline-pass/qwen3.7-plus"]
+
+[[preset]]
+id = "opencode-zen"
+name = "OpenCode Zen"
+kind = "relay"
+catalog = "opencode"
+chat = "https://opencode.ai/zen/v1"
+responses = "https://opencode.ai/zen/v1"
+anthropic = "https://opencode.ai/zen"
+decide = "https://opencode.ai/zen/v1"
+website = "https://opencode.ai/docs/zen"
+keys_url = "https://opencode.ai/auth"
+no_key = true
+key_hint = "optional: free models need no key"
+
+[[preset]]
+id = "kilo"
+name = "Kilo Gateway"
+kind = "relay"
+note = "free models with no key"
+chat = "https://api.kilo.ai/api/openrouter"
+website = "https://kilo.ai/docs/gateway"
+keys_url = "https://app.kilo.ai"
+no_key = true
+key_hint = "optional: free models need no key"
+
+[[preset]]
+id = "commandcode"
+name = "Command Code"
+kind = "relay"
+chat = "https://api.commandcode.ai/provider/v1"
+responses = "https://api.commandcode.ai/provider/v1"
+anthropic = "https://api.commandcode.ai/provider"
+website = "https://commandcode.ai/docs/provider"
+keys_url = "https://commandcode.ai/settings/keys"
+
+[[preset]]
+id = "together"
+name = "Together AI"
+kind = "relay"
+catalog = "togetherai"
+chat = "https://api.together.xyz/v1"
+website = "https://api.together.ai"
+keys_url = "https://api.together.ai/settings/api-keys"
+
+[[preset]]
+id = "fireworks"
+name = "Fireworks"
+kind = "relay"
+catalog = "fireworks-ai"
+chat = "https://api.fireworks.ai/inference/v1"
+website = "https://fireworks.ai"
+keys_url = "https://app.fireworks.ai/settings/users/api-keys"
+
+[[preset]]
+id = "siliconflow"
+name = "SiliconFlow"
+kind = "relay"
+catalog = "siliconflow"
+chat = "https://api.siliconflow.cn/v1"
+website = "https://cloud.siliconflow.cn"
+keys_url = "https://cloud.siliconflow.cn/account/ak"
+
+[[preset.region]]
+id = "cn"
+name = "China"
+chat = "https://api.siliconflow.cn/v1"
+
+[[preset.region]]
+id = "intl"
+name = "Global"
+chat = "https://api.siliconflow.com/v1"
+keys_url = "https://cloud.siliconflow.com/account/ak"
+website = "https://cloud.siliconflow.com"
+
+[[preset]]
+id = "nvidia"
+name = "NVIDIA NIM"
+kind = "relay"
+catalog = "nvidia"
+chat = "https://integrate.api.nvidia.com/v1"
+website = "https://build.nvidia.com"
+keys_url = "https://build.nvidia.com/settings/api-keys"
+
+[[preset]]
+id = "modelscope"
+name = "ModelScope"
+kind = "relay"
+catalog = "modelscope"
+note = "API-Inference. Not the DashScope endpoints."
+chat = "https://api-inference.modelscope.cn/v1"
+responses = "https://api-inference.modelscope.cn/v1"
+website = "https://modelscope.cn/docs/model-service/API-Inference/intro"
+keys_url = "https://modelscope.cn/my/myaccesstoken"
+
+[[preset]]
+id = "aihubmix"
+name = "AiHubMix"
+kind = "relay"
+chat = "https://aihubmix.com/v1"
+anthropic = "https://aihubmix.com"
+website = "https://aihubmix.com"
+keys_url = "https://console.aihubmix.com/token"
+
+[[preset]]
+id = "pipellm"
+name = "PipeLLM"
+kind = "relay"
+chat = "https://api.pipellm.ai/openai/v1"
+responses = "https://api.pipellm.ai/v1"
+anthropic = "https://api.pipellm.ai"
+website = "https://www.pipellm.ai"
+keys_url = "https://console.pipellm.ai"
+
+[[preset]]
+id = "302ai"
+name = "302.AI"
+kind = "relay"
+chat = "https://api.302.ai/v1"
+anthropic = "https://api.302.ai"
+website = "https://302.ai"
+keys_url = "https://302.ai/api-keys/list"
+
+[[preset]]
+id = "cherryin"
+name = "CherryIN"
+kind = "relay"
+chat = "https://open.cherryin.ai/v1"
+responses = "https://open.cherryin.ai/v1"
+anthropic = "https://open.cherryin.ai"
+website = "https://open.cherryin.ai"
+keys_url = "https://open.cherryin.ai/console/token"
+
+[[preset]]
+id = "yylx"
+name = "Yylx"
+kind = "relay"
+chat = "https://app.yylx.io/v1"
+anthropic = "https://app.yylx.io"
+website = "https://yylx.io"
+keys_url = "https://app.yylx.io/keys"
+
+[[preset.region]]
+id = "auto"
+name = "Auto"
+chat = "https://app.yylx.io/v1"
+anthropic = "https://app.yylx.io"
+
+[[preset.region]]
+id = "global"
+name = "Global"
+chat = "https://global.yylx.io/v1"
+anthropic = "https://global.yylx.io"
+
+[[preset.region]]
+id = "cn"
+name = "China Mainland"
+chat = "https://cn.yylx.io/v1"
+anthropic = "https://cn.yylx.io"
+
+[[preset]]
+id = "typesafe"
+name = "TypeSafe Jev"
+kind = "vendor"
+note = "routes groups - picks model and effort"
+decide = "https://api.typesafe.ai/v1"
+website = "https://typesafe.ai"
+keys_url = "https://console.typesafe.ai/keys"
+
+[[preset]]
+id = "vercel-jev"
+name = "Jev - Vercel AI Gateway"
+kind = "relay"
+note = "routes groups - picks model and effort"
+decide = "https://ai-gateway.vercel.sh/typesafe"
+website = "https://vercel.com/ai-gateway/models/jev"
+keys_url = "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys"
+
+[[preset]]
+id = "cloudflare-jev"
+name = "Cloudflare Workers AI - Jev, Clef"
+kind = "relay"
+note = "routes groups - picks model and effort"
+decide = "https://api.cloudflare.com/client/v4"
+website = "https://developers.cloudflare.com/ai/models/typesafe/jev/"
+keys_url = "https://dash.cloudflare.com/profile/api-tokens"
+
+[[preset]]
+id = "bailian-decision"
+name = "Bailian Decision Model"
+short = "Bailian Decision"
+kind = "vendor"
+note = "routes groups - picks model and effort"
+decide = "https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+website = "https://help.aliyun.com/zh/model-studio/decision-model-preview"
+keys_url = "https://bailian.console.aliyun.com/?tab=model#/api-key"
+region_label = "Plan"
+
+[[preset.region]]
+id = "cn-beijing"
+name = "Workspace - Beijing"
+decide = "https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+
+[[preset.region]]
+id = "ap-southeast-1"
+name = "Workspace - Singapore"
+decide = "https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+keys_url = "https://modelstudio.console.alibabacloud.com/?tab=playground#/api-key"
+
+[[preset.region]]
+id = "token-plan"
+name = "Token Plan - Beijing"
+decide = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+keys_url = "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal"
+
+[[preset]]
+id = "qwen-decision"
+name = "Qwen Decision Model"
+short = "Qwen Decision"
+kind = "vendor"
+note = "routes groups - picks model and effort"
+decide = "https://maas.qianwenaiapi.com/compatible-mode/v1"
+website = "https://www.qianwenai.com/models/decision-model-preview"
+keys_url = "https://platform.qianwenai.com/home/api-keys"
+
+[[preset]]
+id = "ollama"
+name = "Ollama"
+kind = "local"
+note = "your local models"
+chat = "http://localhost:11434/v1"
+anthropic = "http://localhost:11434"
+decide = "http://localhost:11434/v1"
+website = "https://ollama.com"
+no_key = true
+
+[[preset]]
+id = "lmstudio"
+name = "LM Studio"
+kind = "local"
+note = "local server, port 1234 by default"
+chat = "http://localhost:1234/v1"
+website = "https://lmstudio.ai"
+no_key = true
+
+[[preset]]
+id = "omlx"
+name = "oMLX"
+kind = "local"
+note = "local server, port 8000 by default"
+chat = "http://localhost:8000/v1"
+responses = "http://localhost:8000/v1"
+anthropic = "http://localhost:8000"
+decide = "http://localhost:8000/v1"
+website = "https://omlx.ai"
+no_key = true
+
+[[preset]]
+id = "mlx-serve"
+name = "MLX-Serve"
+kind = "local"
+note = "local server, port 11234 by default"
+chat = "http://localhost:11234/v1"
+responses = "http://localhost:11234/v1"
+anthropic = "http://localhost:11234"
+decide = "http://localhost:11234/v1"
+website = "https://github.com/ddalcu/mlx-serve"
+no_key = true
+
+[[preset]]
+id = "remote-gateway"
+name = "Remote gateway"
+kind = "remote"
+note = "Another computer's gateway, shared on its network"
+endpoint = "http://192.168.1.20:3425"
+endpoint_hint = "The address and API key the other computer shows for sharing on the local network. Its models stay there. Each request continues in the protocol the client spoke."
+endpoint_needed = "The other gateway's address is needed"

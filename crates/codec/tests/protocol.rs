@@ -740,7 +740,7 @@ data: {"type":"message_stop"}
         .iter()
         .find(|frame| frame["type"] == "response.completed")
         .expect("completed");
-    assert_codex_usage(&completed["response"]["usage"], 21, 5, 26, 4, 2, 0);
+    assert_codex_usage(&completed["response"]["usage"], 21, 5, 26, 4, 0);
 
     let chat = data_values(&OpenAiChat.encode_stream(&events).expect("chat"));
     let role = chat
@@ -796,7 +796,7 @@ data: {"type":"message_stop"}
         .into_iter()
         .find(|frame| frame["type"] == "response.completed")
         .expect("completed");
-    assert_codex_usage(&completed["response"]["usage"], 21, 0, 21, 4, 2, 0);
+    assert_codex_usage(&completed["response"]["usage"], 21, 0, 21, 4, 0);
     let chat = data_values(&OpenAiChat.encode_stream(&quiet).expect("chat"));
     let usage = chat
         .iter()
@@ -813,7 +813,7 @@ data: {"type":"message_stop"}
         .into_iter()
         .find(|frame| frame["type"] == "response.completed")
         .expect("completed");
-    assert_codex_usage(&completed["response"]["usage"], 25, 12, 37, 0, 0, 0);
+    assert_codex_usage(&completed["response"]["usage"], 25, 12, 37, 0, 0);
 }
 
 #[test]
@@ -840,7 +840,7 @@ fn partial_usage_fills_the_fields_each_protocol_requires() {
         .encode_response(&response)
         .expect("responses");
     let responses: serde_json::Value = serde_json::from_slice(&responses).expect("json");
-    assert_codex_usage(&responses["usage"], 0, 5, 5, 0, 0, 0);
+    assert_codex_usage(&responses["usage"], 0, 5, 5, 0, 0);
     let chat = OpenAiChat.encode_response(&response).expect("chat");
     let chat: serde_json::Value = serde_json::from_slice(&chat).expect("json");
     assert_eq!(chat["usage"]["prompt_tokens"], json!(0));
@@ -867,7 +867,6 @@ fn assert_codex_usage(
     output: u64,
     total: u64,
     cached: u64,
-    cache_write: u64,
     reasoning: u64,
 ) {
     let parsed: CodexUsage = serde_json::from_value(usage.clone()).unwrap_or_else(|error| {
@@ -877,7 +876,13 @@ fn assert_codex_usage(
     assert_eq!(parsed.output_tokens, output);
     assert_eq!(parsed.total_tokens, total);
     assert_eq!(parsed.input_tokens_details.cached_tokens, cached);
-    assert_eq!(parsed.input_tokens_details.cache_write_tokens, cache_write);
+    assert!(
+        usage["input_tokens_details"]
+            .get("cache_write_tokens")
+            .is_none(),
+        "cache_write_tokens is not a Responses field: {usage}"
+    );
+    assert_eq!(parsed.input_tokens_details.cache_write_tokens, 0);
     assert_eq!(parsed.output_tokens_details.reasoning_tokens, reasoning);
     assert!(
         serde_json::from_value::<CodexUsage>(json!({

@@ -51,9 +51,17 @@ impl Default for Failover {
 pub struct Provider {
     /// Stable id used by routes.
     pub id: String,
-    /// How the endpoint speaks.
-    pub kind: Kind,
+    /// How an explicit endpoint speaks. Absent when [`Self::preset`] is set.
+    pub kind: Option<Kind>,
+    /// Preset id. The daemon fills the endpoint from the preset catalog.
+    pub preset: Option<String>,
+    /// Preset region. Absent uses the preset's own endpoints.
+    pub region: Option<String>,
+    /// Protocol selected inside a preset. Absent lets the preset pick.
+    pub preset_wire: Option<PresetWire>,
     /// API root. The adapter appends its protocol path.
+    ///
+    /// Empty when a preset supplies the URL.
     pub base_url: String,
     /// Credential spec. `env:NAME` reads that variable. Any other value is the key.
     pub api_key: String,
@@ -87,6 +95,17 @@ pub enum Protocol {
     Chat,
     /// `POST {base}/responses`.
     Responses,
+}
+
+/// Protocol selected inside a preset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresetWire {
+    /// Chat Completions.
+    Chat,
+    /// The Responses API.
+    Responses,
+    /// The Messages API.
+    Messages,
 }
 
 /// One model route.
@@ -248,13 +267,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
                 provider.id
             )));
         }
-        if provider.base_url.is_empty() {
-            return Err(ConfigError::Invalid(format!(
-                "provider `{}` has an empty base_url",
-                provider.id
-            )));
-        }
-        let kind = kind_of(&provider)?;
+        let source = source_of(&provider)?;
         if provider.max_output_tokens == Some(0) {
             return Err(ConfigError::Invalid(format!(
                 "provider `{}` has max_output_tokens 0",
@@ -263,8 +276,11 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         }
         providers.push(Provider {
             id: provider.id,
-            kind,
-            base_url: provider.base_url,
+            kind: source.kind,
+            preset: source.preset,
+            region: source.region,
+            preset_wire: source.preset_wire,
+            base_url: source.base_url,
             api_key: provider.api_key,
             quirks: provider.quirks,
             headers: provider.headers,
@@ -348,8 +364,84 @@ fn upstream_of(
     })
 }
 
-fn kind_of(provider: &RawProvider) -> Result<Kind, ConfigError> {
-    match provider.kind.as_str() {
+struct Source {
+    kind: Option<Kind>,
+    preset: Option<String>,
+    region: Option<String>,
+    preset_wire: Option<PresetWire>,
+    base_url: String,
+}
+
+fn source_of(provider: &RawProvider) -> Result<Source, ConfigError> {
+    match (&provider.preset, &provider.kind) {
+        (Some(_), Some(_)) => Err(ConfigError::Invalid(format!(
+            "provider `{}` sets both preset and kind",
+            provider.id
+        ))),
+        (None, None) => Err(ConfigError::Invalid(format!(
+            "provider `{}` needs a kind or a preset",
+            provider.id
+        ))),
+        (None, Some(kind)) => {
+            if provider.region.is_some() {
+                return Err(ConfigError::Invalid(format!(
+                    "provider `{}` sets region without a preset",
+                    provider.id
+                )));
+            }
+            if provider.base_url.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "provider `{}` has an empty base_url",
+                    provider.id
+                )));
+            }
+            Ok(Source {
+                kind: Some(kind_of(provider, kind)?),
+                preset: None,
+                region: None,
+                preset_wire: None,
+                base_url: provider.base_url.clone(),
+            })
+        }
+        (Some(preset), None) => {
+            if preset.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "provider `{}` has an empty preset",
+                    provider.id
+                )));
+            }
+            if provider.region.as_ref().is_some_and(String::is_empty) {
+                return Err(ConfigError::Invalid(format!(
+                    "provider `{}` has an empty region",
+                    provider.id
+                )));
+            }
+            Ok(Source {
+                kind: None,
+                preset: Some(preset.clone()),
+                region: provider.region.clone(),
+                preset_wire: preset_wire_of(provider)?,
+                base_url: provider.base_url.clone(),
+            })
+        }
+    }
+}
+
+fn preset_wire_of(provider: &RawProvider) -> Result<Option<PresetWire>, ConfigError> {
+    match provider.protocol.as_deref() {
+        None => Ok(None),
+        Some("chat") => Ok(Some(PresetWire::Chat)),
+        Some("responses") => Ok(Some(PresetWire::Responses)),
+        Some("messages") => Ok(Some(PresetWire::Messages)),
+        Some(other) => Err(ConfigError::Invalid(format!(
+            "provider `{}` has unknown protocol `{other}`",
+            provider.id
+        ))),
+    }
+}
+
+fn kind_of(provider: &RawProvider, kind: &str) -> Result<Kind, ConfigError> {
+    match kind {
         "openai_compat" => {
             let protocol = match provider.protocol.as_deref() {
                 None | Some("chat") => Protocol::Chat,
@@ -438,7 +530,13 @@ fn default_statuses() -> BTreeSet<u16> {
 #[serde(deny_unknown_fields)]
 struct RawProvider {
     id: String,
-    kind: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    preset: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
     base_url: String,
     #[serde(default)]
     api_key: String,
@@ -501,10 +599,11 @@ mod tests {
         assert_eq!(config.failover.statuses, [429, 500, 502, 503, 504].into());
         assert!(matches!(
             config.providers[0].kind,
-            Kind::OpenAiCompat {
+            Some(Kind::OpenAiCompat {
                 protocol: Protocol::Responses
-            }
+            })
         ));
+        assert!(config.providers[0].preset.is_none());
         assert_eq!(config.routes[0].upstreams[0].provider, "primary");
         assert_eq!(config.routes[0].upstreams[0].model, None);
         assert_eq!(config.providers[0].max_output_tokens, None);
@@ -597,6 +696,36 @@ mod tests {
 
         let error = load("listen = \"not-an-address\"\n").expect_err("listen");
         assert!(error.to_string().contains("listen"));
+    }
+
+    #[test]
+    fn a_preset_does_not_require_a_kind_or_a_base_url() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "openai"
+            preset = "openai"
+            protocol = "responses"
+            "#,
+        )
+        .expect("preset");
+        assert!(config.providers[0].kind.is_none());
+        assert_eq!(config.providers[0].preset.as_deref(), Some("openai"));
+        assert_eq!(
+            config.providers[0].preset_wire,
+            Some(super::PresetWire::Responses)
+        );
+        let error = load(
+            r#"
+            [[providers]]
+            id = "both"
+            kind = "anthropic"
+            preset = "anthropic"
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect_err("both");
+        assert!(error.to_string().contains("both preset and kind"));
     }
 
     #[test]

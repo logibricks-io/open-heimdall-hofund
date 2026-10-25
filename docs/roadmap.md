@@ -60,8 +60,12 @@ stage 1 has merged.
 9. **Gateway keys.** Hashed, scoped keys, and a LAN allow-list. Rows 10.4
    and 10.5.
 
-Model mapping is pull request #12. The next stage 1 code, still in the audit
-order, is usage v2, then catalog, presets and cost, then the routing tree.
+Model mapping is pull request #12. Preset endpoints for Chat, Responses, and
+Messages, including Azure's v1 root and Bedrock's API-key headers, are the
+start of item 4. Still open in that item: the native generative upstream,
+Vertex credentials, SigV4, live model lists, a connectivity test, and every
+subscription provider. The audit order after that remains usage v2, then the
+catalog and cost, then the routing tree.
 Subscriptions, the full agent list, the management API, the terminal UI, and
 gateway keys stay in stage 1 and follow those. One or two reviewable pull
 requests per phase.

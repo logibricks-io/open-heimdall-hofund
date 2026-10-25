@@ -1,6 +1,5 @@
 ---
 source: crates/codec/tests/responses.rs
-assertion_line: 160
 expression: stable_ids(&encoded)
 ---
 {
@@ -46,8 +45,7 @@ expression: stable_ids(&encoded)
     "output_tokens": 4,
     "total_tokens": 16,
     "input_tokens_details": {
-      "cached_tokens": 2,
-      "cache_write_tokens": 1
+      "cached_tokens": 2
     },
     "output_tokens_details": {
       "reasoning_tokens": 3

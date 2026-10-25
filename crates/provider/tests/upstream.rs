@@ -5,8 +5,8 @@ use hofund_ir::{
     ContentPart, Extensions, Message, Request, Role, StreamEvent, ToolArguments, ToolCallPart,
 };
 use hofund_provider::{
-    Anthropic, Completion, CountOutcome, Endpoint, OpenAiCompat, OpenAiProtocol, Provider,
-    ProviderErrorKind,
+    Anthropic, Completion, CountOutcome, Credential, Endpoint, OpenAiCompat, OpenAiProtocol,
+    Provider, ProviderErrorKind,
 };
 use hofund_quirks::named;
 use serde_json::{Value, json};
@@ -92,6 +92,42 @@ async fn chat_unary_sends_bearer_and_decodes_text() {
         .to_str()
         .expect("text");
     assert_eq!(authorization, "Bearer secret");
+}
+
+#[tokio::test]
+async fn chat_sends_an_azure_api_key_without_a_bearer_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hello"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let mut endpoint = Endpoint::new("azure", server.uri());
+    endpoint.api_key = "secret".to_owned();
+    endpoint.credential = Credential::ApiKey;
+    let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+    provider
+        .execute(user_request(false), "openai-chat")
+        .await
+        .expect("call");
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("api-key")
+            .expect("api-key")
+            .to_str()
+            .expect("text"),
+        "secret"
+    );
+    assert!(requests[0].headers.get("authorization").is_none());
 }
 
 #[tokio::test]
@@ -254,6 +290,52 @@ async fn messages_unary_sends_version_and_key() {
             .to_str()
             .expect("text"),
         "2023-06-01"
+    );
+    assert!(requests[0].headers.get("authorization").is_none());
+}
+
+#[tokio::test]
+async fn messages_can_send_both_key_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn"
+        })))
+        .mount(&server)
+        .await;
+    let mut endpoint = Endpoint::new("relay", server.uri());
+    endpoint.api_key = "secret".to_owned();
+    endpoint.credential = Credential::MessagesBoth;
+    let provider = Anthropic::new(endpoint).expect("provider");
+    let mut request = user_request(false);
+    request.params.max_tokens = Some(16);
+    provider
+        .execute(request, "anthropic-messages")
+        .await
+        .expect("call");
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("x-api-key")
+            .expect("key")
+            .to_str()
+            .expect("text"),
+        "secret"
+    );
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("authorization")
+            .expect("bearer")
+            .to_str()
+            .expect("text"),
+        "Bearer secret"
     );
 }
 
