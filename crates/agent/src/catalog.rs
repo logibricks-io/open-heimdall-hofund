@@ -5,8 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::edit::{Assignment, FileKind, get, render};
-use crate::store::{backup_once, read_optional, revert_path, unified_diff, write_atomic};
+use crate::edit::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
+use crate::store::{
+    backup_once, clear_markers, created_here, delete_file, marker_present, read_optional,
+    remove_empty_parents, revert_path, unified_diff, write_atomic,
+};
 use crate::{
     AgentAdapter, AgentError, ConfigFile, ConnectionStatus, FileChange, GatewayTarget, Plan,
     Session,
@@ -22,7 +25,9 @@ use crate::{
 ///
 /// `env.ANTHROPIC_BASE_URL` is the gateway origin. The Claude SDK appends
 /// `/v1/messages`, so the value has no `/v1` suffix. `env.ANTHROPIC_AUTH_TOKEN`
-/// is sent as `Authorization: Bearer`. The model is left alone.
+/// is sent as `Authorization: Bearer`. The model is left alone. When settings
+/// contain a string `model`, connect compares it with route names.
+/// Checked 2026-10-25: <https://code.claude.com/docs/en/model-config>.
 ///
 /// Sources: <https://code.claude.com/docs/en/settings>,
 /// <https://code.claude.com/docs/en/llm-gateway-connect>,
@@ -49,6 +54,10 @@ const CLAUDE_CODE: Description = Description {
             slot: Slot::Token,
         },
     ],
+    model: Some(ModelKey {
+        file: "settings",
+        key: "model",
+    }),
 };
 
 /// OpenAI Codex CLI user config.
@@ -64,7 +73,8 @@ const CLAUDE_CODE: Description = Description {
 /// not be combined with `env_key` or `requires_openai_auth`. The hofund token
 /// lives in a file, not in the shell, so this is the documented field that
 /// connects without a separate export. `requires_openai_auth` is not set.
-/// The user's `model` key is left alone.
+/// The user's `model` key is left alone. Connect compares that string with
+/// route names when it is set.
 ///
 /// Source: <https://developers.openai.com/codex/config-reference>.
 const CODEX: Description = Description {
@@ -104,6 +114,10 @@ const CODEX: Description = Description {
             slot: Slot::Token,
         },
     ],
+    model: Some(ModelKey {
+        file: "config",
+        key: "model",
+    }),
 };
 
 /// Gemini CLI user settings and env file.
@@ -120,6 +134,9 @@ const CODEX: Description = Description {
 ///
 /// `.env` sets `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` (the origin; HTTP
 /// to localhost is allowed), and `GEMINI_API_KEY_AUTH_MECHANISM=bearer`.
+/// A string `model` in settings is compared with route names and is not
+/// rewritten. Checked 2026-10-25:
+/// <https://geminicli.com/docs/reference/configuration/>.
 ///
 /// `GEMINI_API_KEY_AUTH_MECHANISM` is real. It is not listed on the public
 /// configuration page. In `contentGenerator.ts` the default is
@@ -184,6 +201,10 @@ const GEMINI: Description = Description {
             slot: Slot::Literal("bearer"),
         },
     ],
+    model: Some(ModelKey {
+        file: "settings",
+        key: "model",
+    }),
 };
 
 /// OpenCode v2 global config.
@@ -198,8 +219,11 @@ const GEMINI: Description = Description {
 /// `provider.<id>.options` / `npm` shape. The package is
 /// `@opencode/ai/providers/openai-compatible`. `settings.baseURL` includes
 /// `/v1` because the package appends `/chat/completions`. `settings.apiKey`
-/// is the gateway token. No model id is invented. v2 does not document an
-/// environment variable that relocates this global file.
+/// is the gateway token. No model id is invented. A string `model` is compared
+/// with route names and is not rewritten. v2 documents `~/.config` and does
+/// not name an override (checked 2026-10-25). When `XDG_CONFIG_HOME` is set
+/// this adapter uses `$XDG_CONFIG_HOME/opencode`. Unset, the path stays
+/// `~/.config/opencode`, including on Windows.
 ///
 /// Sources: <https://opencode.ai/v2/docs/config/>,
 /// <https://opencode.ai/v2/docs/providers/>.
@@ -243,6 +267,10 @@ const OPENCODE: Description = Description {
             slot: Slot::Token,
         },
     ],
+    model: Some(ModelKey {
+        file: "config",
+        key: "model",
+    }),
 };
 
 struct Description {
@@ -251,6 +279,14 @@ struct Description {
     binary: &'static str,
     locations: &'static [Location],
     sets: &'static [Set],
+    /// File id and key holding the tool's selected model, when it has one.
+    model: Option<ModelKey>,
+}
+
+#[derive(Clone, Copy)]
+struct ModelKey {
+    file: &'static str,
+    key: &'static str,
 }
 
 struct Location {
@@ -303,6 +339,7 @@ pub fn find(name: &str) -> Option<&'static dyn AgentAdapter> {
 }
 
 struct Chosen<'a> {
+    file: &'a str,
     path: PathBuf,
     kind: FileKind,
     sets: Vec<&'a Set>,
@@ -338,7 +375,10 @@ impl AgentAdapter for Described {
 
     fn plan(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, AgentError> {
         let mut changes = Vec::new();
-        for Chosen { path, kind, sets } in self.chosen(session)? {
+        for Chosen {
+            path, kind, sets, ..
+        } in self.chosen(session)?
+        {
             let before = read_optional(&path)?;
             let text = match &before {
                 Some(bytes) => Some(std::str::from_utf8(bytes).map_err(|_| {
@@ -400,7 +440,9 @@ impl AgentAdapter for Described {
         let mut paths = Vec::new();
         for chosen in self.chosen(session)? {
             paths.push(chosen.path.clone());
-            let Chosen { path, kind, sets } = chosen;
+            let Chosen {
+                path, kind, sets, ..
+            } = chosen;
             if !connected {
                 continue;
             }
@@ -426,6 +468,88 @@ impl AgentAdapter for Described {
             paths,
         })
     }
+
+    fn disconnect(&self, session: &Session, force: bool) -> Result<bool, AgentError> {
+        let mut changed = false;
+        let preserve = preserve_dirs(session);
+        for location in self.description.locations {
+            let path = (location.resolve)(session);
+            if !marker_present(&path) {
+                continue;
+            }
+            if force {
+                if revert_path(&path)? {
+                    changed = true;
+                    if !path.exists() {
+                        remove_empty_parents(&path, &preserve)?;
+                    }
+                }
+                continue;
+            }
+            release_owned_keys(
+                &path,
+                location.kind,
+                owned_keys(self.description, location.file),
+                &preserve,
+                self.description.id,
+            )?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    fn refresh_token(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+    ) -> Result<Vec<PathBuf>, AgentError> {
+        let mut updated = Vec::new();
+        for chosen in self.chosen(session)? {
+            let token_sets: Vec<&Set> = chosen
+                .sets
+                .iter()
+                .copied()
+                .filter(|set| matches!(set.slot, Slot::Token))
+                .collect();
+            if token_sets.is_empty() {
+                continue;
+            }
+            let Some(before) = read_optional(&chosen.path)? else {
+                continue;
+            };
+            let text = std::str::from_utf8(&before).map_err(|_| {
+                AgentError::message(format!("{} is not UTF-8", chosen.path.display()))
+            })?;
+            let assignments = assignments_for(token_sets, target);
+            let after = render(chosen.kind, Some(text), &assignments)
+                .map_err(|error| annotate(&chosen.path, error))?;
+            if before != after {
+                write_atomic(&chosen.path, &after)?;
+                updated.push(chosen.path);
+            }
+        }
+        Ok(updated)
+    }
+
+    fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError> {
+        let Some(model) = self.description.model else {
+            return Ok(None);
+        };
+        for chosen in self.chosen(session)? {
+            if chosen.file != model.file {
+                continue;
+            }
+            let Some(bytes) = read_optional(&chosen.path)? else {
+                return Ok(None);
+            };
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                AgentError::message(format!("{} is not UTF-8", chosen.path.display()))
+            })?;
+            return string_at(chosen.kind, text, model.key)
+                .map_err(|error| annotate(&chosen.path, error));
+        }
+        Ok(None)
+    }
 }
 
 impl Described {
@@ -441,6 +565,7 @@ impl Described {
                 .filter(|set| set.file == file)
                 .collect();
             chosen.push(Chosen {
+                file,
                 path: (location.resolve)(session),
                 kind: location.kind,
                 sets,
@@ -503,6 +628,59 @@ fn origin(base_url: &str) -> String {
     base_url.trim_end_matches('/').to_owned()
 }
 
+fn owned_keys<'a>(description: &'a Description, file: &str) -> Vec<&'a str> {
+    description
+        .sets
+        .iter()
+        .filter(|set| set.file == file)
+        .map(|set| set.key)
+        .collect()
+}
+
+fn release_owned_keys(
+    path: &Path,
+    kind: FileKind,
+    keys: Vec<&str>,
+    preserve: &[PathBuf],
+    id: &str,
+) -> Result<(), AgentError> {
+    let Some(before) = read_optional(path)? else {
+        clear_markers(path)?;
+        return Ok(());
+    };
+    let text = std::str::from_utf8(&before).map_err(|_| refused(id, path, "file is not UTF-8"))?;
+    let after =
+        remove_keys(kind, text, &keys).map_err(|error| refused(id, path, &error.to_string()))?;
+    let remove_file = created_here(path)
+        && is_empty_document(kind, &after)
+            .map_err(|error| refused(id, path, &error.to_string()))?;
+    if remove_file {
+        delete_file(path)?;
+    } else if before.as_slice() != after.as_slice() {
+        write_atomic(path, &after)?;
+    }
+    clear_markers(path)?;
+    if remove_file {
+        remove_empty_parents(path, preserve)?;
+    }
+    Ok(())
+}
+
+fn refused(id: &str, path: &Path, detail: &str) -> AgentError {
+    AgentError::message(format!(
+        "{detail}: {}. Re-run `hofund agent disconnect {id} --force` to restore the connect-time backup.",
+        path.display()
+    ))
+}
+
+fn preserve_dirs(session: &Session) -> Vec<PathBuf> {
+    let mut dirs = vec![session.home.clone()];
+    if let Some(path) = &session.xdg_config_home {
+        dirs.push(rooted(session, path));
+    }
+    dirs
+}
+
 fn annotate(path: &Path, error: AgentError) -> AgentError {
     AgentError::message(format!("{}: {error}", path.display()))
 }
@@ -563,7 +741,10 @@ fn gemini_env(session: &Session) -> PathBuf {
 }
 
 fn opencode_dir(session: &Session) -> PathBuf {
-    session.home.join(".config").join("opencode")
+    match &session.xdg_config_home {
+        Some(path) => rooted(session, path).join("opencode"),
+        None => session.home.join(".config").join("opencode"),
+    }
 }
 
 fn opencode_json(session: &Session) -> PathBuf {

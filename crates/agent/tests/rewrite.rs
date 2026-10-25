@@ -234,6 +234,146 @@ fn codex_points_at_v1_responses_and_keeps_the_user_model() {
     assert!(!text.contains("requires_openai_auth"));
 }
 
+#[test]
+fn disconnect_keeps_a_key_added_while_connected() {
+    let home = scratch();
+    let path = home.join(".codex").join("config.toml");
+    write(&path, "model = \"gpt-5\"\n");
+    let session = Session::new(&home);
+    let adapter = find("codex").expect("codex");
+    adapter.apply(&session, &target()).expect("apply");
+    let text = format!("sandbox_mode = \"workspace-write\"\n{}", read(&path));
+    fs::write(&path, text).expect("edit");
+    assert!(adapter.disconnect(&session, false).expect("disconnect"));
+    let after = read(&path);
+    assert!(
+        after.contains("sandbox_mode = \"workspace-write\""),
+        "{after}"
+    );
+    assert!(after.contains("model = \"gpt-5\""), "{after}");
+    assert!(!after.contains("experimental_bearer_token"), "{after}");
+    assert!(!after.contains("model_provider"), "{after}");
+    assert!(!after.contains("hofund"), "{after}");
+    assert!(!sibling(&path, ".hofund.bak").exists());
+    assert!(!adapter.disconnect(&session, false).expect("second"));
+}
+
+#[test]
+fn disconnect_refuses_a_broken_file_until_force() {
+    let home = scratch();
+    let path = home.join(".codex").join("config.toml");
+    write(&path, "model = \"gpt-5\"\n");
+    let session = Session::new(&home);
+    let adapter = find("codex").expect("codex");
+    adapter.apply(&session, &target()).expect("apply");
+    fs::write(&path, "model_provider = [\n").expect("break");
+    let error = adapter
+        .disconnect(&session, false)
+        .expect_err("refuse")
+        .to_string();
+    assert!(error.contains("--force"), "{error}");
+    assert!(error.contains("codex"), "{error}");
+    assert_eq!(read(&path), "model_provider = [\n");
+    assert!(sibling(&path, ".hofund.bak").is_file());
+    assert!(adapter.disconnect(&session, true).expect("force"));
+    let restored = read(&path);
+    assert!(restored.contains("model = \"gpt-5\""));
+    assert!(!restored.contains("model_provider"));
+    assert!(!sibling(&path, ".hofund.bak").exists());
+}
+
+#[test]
+fn disconnect_removes_an_empty_directory_it_created() {
+    let home = scratch();
+    let session = Session::new(&home);
+    let adapter = find("claude-code").expect("claude");
+    adapter.apply(&session, &target()).expect("apply");
+    let path = home.join(".claude").join("settings.json");
+    assert!(path.is_file());
+    assert!(adapter.disconnect(&session, false).expect("disconnect"));
+    assert!(!path.exists());
+    assert!(!home.join(".claude").exists());
+    assert!(!adapter.disconnect(&session, false).expect("second"));
+}
+
+#[test]
+fn disconnect_keeps_a_directory_that_still_holds_a_file() {
+    let home = scratch();
+    let session = Session::new(&home);
+    let adapter = find("codex").expect("codex");
+    adapter.apply(&session, &target()).expect("apply");
+    let path = home.join(".codex").join("config.toml");
+    let extra = home.join(".codex").join("notes.txt");
+    write(&extra, "stay\n");
+    assert!(adapter.disconnect(&session, false).expect("disconnect"));
+    assert!(!path.exists());
+    assert!(extra.is_file());
+    assert!(home.join(".codex").is_dir());
+}
+
+#[test]
+fn opencode_honors_xdg_config_home() {
+    let home = scratch();
+    let xdg = scratch();
+    let session = Session::new(&home).with_xdg_config_home(&xdg);
+    let adapter = find("opencode").expect("opencode");
+    adapter.apply(&session, &target()).expect("apply");
+    let json = xdg.join("opencode").join("opencode.json");
+    assert!(json.is_file());
+    assert!(!home.join(".config").exists());
+    assert!(adapter.disconnect(&session, false).expect("disconnect"));
+    assert!(!json.exists());
+    assert!(!xdg.join("opencode").exists());
+    assert!(xdg.is_dir());
+}
+
+#[test]
+fn refresh_token_rewrites_the_token_and_keeps_the_backup() {
+    let home = scratch();
+    let path = home.join(".codex").join("config.toml");
+    write(&path, "model = \"gpt-5\"\n");
+    let session = Session::new(&home);
+    let adapter = find("codex").expect("codex");
+    adapter.apply(&session, &target()).expect("apply");
+    let backup = fs::read(sibling(&path, ".hofund.bak")).expect("bak");
+    let mut rotated = target();
+    rotated.token = "rotated-token".to_owned();
+    let updated = adapter.refresh_token(&session, &rotated).expect("refresh");
+    assert_eq!(updated, vec![path.clone()]);
+    let text = read(&path);
+    assert!(text.contains("rotated-token"));
+    assert!(!text.contains("local-token"));
+    assert!(text.contains("model = \"gpt-5\""));
+    assert_eq!(
+        fs::read(sibling(&path, ".hofund.bak")).expect("bak stays"),
+        backup
+    );
+}
+
+#[test]
+fn configured_model_reads_the_tool_model() {
+    let home = scratch();
+    let path = home.join(".codex").join("config.toml");
+    write(&path, "model = \"gpt-5\"\n");
+    let session = Session::new(&home);
+    let adapter = find("codex").expect("codex");
+    assert_eq!(
+        adapter
+            .configured_model(&session)
+            .expect("model")
+            .as_deref(),
+        Some("gpt-5")
+    );
+    adapter.apply(&session, &target()).expect("apply");
+    assert_eq!(
+        adapter
+            .configured_model(&session)
+            .expect("model")
+            .as_deref(),
+        Some("gpt-5")
+    );
+}
+
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().expect("name").to_os_string();
     name.push(suffix);

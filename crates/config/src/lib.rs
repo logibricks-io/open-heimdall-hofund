@@ -459,6 +459,16 @@ mod tests {
     }
 
     #[test]
+    fn the_example_config_loads() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/hofund.toml");
+        let text = std::fs::read_to_string(&path).expect("example");
+        let config = load(&text).expect("load");
+        assert!(config.providers.len() >= 2);
+        assert!(!config.routes.is_empty());
+        assert!(config.routes.iter().any(|route| route.upstreams.len() >= 2));
+    }
+
+    #[test]
     fn ensure_config_file_writes_once() {
         let dir = std::env::temp_dir().join(format!("hofund-config-{}", std::process::id()));
         let path = dir.join("hofund.toml");

@@ -1,0 +1,29 @@
+# Example hofund configuration.
+#
+# Copy this file to the platform config path (hofund/hofund.toml under
+# XDG_CONFIG_HOME or ~/.config on Unix, ~/Library/Application Support on
+# macOS, %APPDATA% on Windows), or pass it with --config.
+#
+#   hofund config check --config examples/hofund.toml
+#
+# api_key may be a literal or env:NAME. env:NAME reads that variable when
+# the gateway starts. token_file and usage_file are relative to this file.
+
+listen = "127.0.0.1:3425"
+
+[[providers]]
+id = "primary"
+kind = "openai_compat"
+protocol = "chat"
+base_url = "http://127.0.0.1:4000/v1"
+api_key = "replace-me"
+
+[[providers]]
+id = "backup"
+kind = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "replace-me-too"
+
+[[routes]]
+model = "demo"
+upstreams = ["primary", "backup"]

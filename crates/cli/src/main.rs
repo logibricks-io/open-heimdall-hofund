@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use hofund_agent::{GatewayTarget, Session, adapters, find};
-use hofund_daemon::{check, local_gateway, serve_blocking, token_rotate, token_show, usage_report};
+use hofund_daemon::{
+    check, local_gateway, route_models, serve_blocking, token_rotate, token_show, usage_report,
+    user_config_path,
+};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -24,9 +27,13 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Command::Serve => serve_blocking(&config),
-        Command::Check => check(&config),
+        Command::Help(topic) => {
+            println!("{}", help_text(topic));
+            return ExitCode::SUCCESS;
+        }
+        Command::Check => return finish(check_config(&config)),
         Command::TokenShow => token_show(&config).map(|token| println!("{token}")),
-        Command::TokenRotate => token_rotate(&config).map(|token| println!("{token}")),
+        Command::TokenRotate => return finish(rotate_token(&config)),
         Command::Usage => usage_report(&config).map(|table| print!("{table}")),
         Command::AgentList => {
             print_agent_list();
@@ -35,8 +42,8 @@ fn main() -> ExitCode {
         Command::AgentConnect { name, dry_run } => {
             return agent_command(&name, |adapter| connect(adapter, &config, dry_run));
         }
-        Command::AgentDisconnect { name } => {
-            return agent_command(&name, |adapter| disconnect(adapter));
+        Command::AgentDisconnect { name, force } => {
+            return agent_command(&name, |adapter| disconnect(adapter, force));
         }
         Command::AgentStatus => {
             return finish(agent_status(&config));
@@ -47,6 +54,7 @@ fn main() -> ExitCode {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
+    Help(HelpTopic),
     Version,
     Serve,
     Check,
@@ -55,28 +63,62 @@ enum Command {
     Usage,
     AgentList,
     AgentConnect { name: String, dry_run: bool },
-    AgentDisconnect { name: String },
+    AgentDisconnect { name: String, force: bool },
+    AgentStatus,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HelpTopic {
+    Overview,
+    Serve,
+    ConfigCheck,
+    Token,
+    TokenShow,
+    TokenRotate,
+    Usage,
+    Agent,
+    AgentList,
+    AgentConnect,
+    AgentDisconnect,
     AgentStatus,
 }
 
 fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
-    let mut config = PathBuf::from("hofund.toml");
+    let mut config = None;
     let mut dry_run = false;
+    let mut force = false;
+    let mut help = false;
     let mut words = Vec::new();
     let mut iter = arguments.iter();
     while let Some(argument) = iter.next() {
-        if argument == "--config" {
-            let path = iter
-                .next()
-                .ok_or_else(|| "--config needs a path".to_owned())?;
-            config = PathBuf::from(path);
-        } else if argument == "--dry-run" {
-            dry_run = true;
-        } else if argument.starts_with('-') && argument != "--version" && argument != "-V" {
-            return Err(format!("unknown flag `{argument}`"));
-        } else {
-            words.push(argument.as_str());
+        match argument.as_str() {
+            "--config" => {
+                let path = iter
+                    .next()
+                    .ok_or_else(|| "--config needs a path".to_owned())?;
+                config = Some(PathBuf::from(path));
+            }
+            "--dry-run" => dry_run = true,
+            "--force" => force = true,
+            "-h" | "--help" => help = true,
+            "--version" | "-V" => words.push(argument.as_str()),
+            other if other.starts_with('-') => {
+                return Err(format!("unknown flag `{other}`"));
+            }
+            other => words.push(other),
         }
+    }
+    let config = config.unwrap_or_else(user_config_path);
+    if help || words.first() == Some(&"help") {
+        let topic_words: Vec<&str> = if words.first() == Some(&"help") {
+            words[1..].to_vec()
+        } else {
+            words.clone()
+        };
+        return match help_topic(&topic_words) {
+            Ok(topic) => Ok((config, Command::Help(topic))),
+            Err(message) => Err(message),
+        };
     }
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
@@ -92,20 +134,170 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         },
         ["agent", "disconnect", name] => Command::AgentDisconnect {
             name: (*name).to_owned(),
+            force,
         },
         ["agent", "status"] => Command::AgentStatus,
-        _ => {
-            return Err(
-                "usage: hofund [version] | serve | config check | token show | token rotate | usage | agent list | agent connect <name> [--dry-run] | agent disconnect <name> | agent status [--config PATH]"
-                    .to_owned(),
-            );
-        }
+        _ => return Err(help_text(HelpTopic::Overview)),
     };
     if dry_run && !matches!(command, Command::AgentConnect { .. }) {
         return Err("--dry-run is only valid with agent connect".to_owned());
     }
+    if force && !matches!(command, Command::AgentDisconnect { .. }) {
+        return Err("--force is only valid with agent disconnect".to_owned());
+    }
     Ok((config, command))
 }
+
+fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
+    let topic = match words {
+        [] | ["version"] => HelpTopic::Overview,
+        ["serve", ..] => HelpTopic::Serve,
+        ["config", ..] => HelpTopic::ConfigCheck,
+        ["token", "show", ..] => HelpTopic::TokenShow,
+        ["token", "rotate", ..] => HelpTopic::TokenRotate,
+        ["token", ..] => HelpTopic::Token,
+        ["usage", ..] => HelpTopic::Usage,
+        ["agent", "list", ..] => HelpTopic::AgentList,
+        ["agent", "connect", ..] => HelpTopic::AgentConnect,
+        ["agent", "disconnect", ..] => HelpTopic::AgentDisconnect,
+        ["agent", "status", ..] => HelpTopic::AgentStatus,
+        ["agent", ..] => HelpTopic::Agent,
+        _ => {
+            return Err(format!(
+                "{}\nunknown command `{}`",
+                help_text(HelpTopic::Overview),
+                words.join(" ")
+            ));
+        }
+    };
+    Ok(topic)
+}
+
+fn help_text(topic: HelpTopic) -> String {
+    let body = match topic {
+        HelpTopic::Overview => OVERVIEW,
+        HelpTopic::Serve => SERVE_HELP,
+        HelpTopic::ConfigCheck => CHECK_HELP,
+        HelpTopic::Token => TOKEN_HELP,
+        HelpTopic::TokenShow => TOKEN_SHOW_HELP,
+        HelpTopic::TokenRotate => TOKEN_ROTATE_HELP,
+        HelpTopic::Usage => USAGE_HELP,
+        HelpTopic::Agent => AGENT_HELP,
+        HelpTopic::AgentList => AGENT_LIST_HELP,
+        HelpTopic::AgentConnect => AGENT_CONNECT_HELP,
+        HelpTopic::AgentDisconnect => AGENT_DISCONNECT_HELP,
+        HelpTopic::AgentStatus => AGENT_STATUS_HELP,
+    };
+    body.to_owned()
+}
+
+const OVERVIEW: &str = "\
+hofund — local LLM gateway
+
+usage: hofund [--config PATH] <command>
+
+The default config is hofund/hofund.toml under the platform config directory
+(XDG_CONFIG_HOME or ~/.config on Unix, ~/Library/Application Support on macOS,
+%APPDATA% on Windows). HOFUND_CONFIG overrides that path. --config overrides both.
+
+commands:
+  version                         print the version
+  serve                           bind the listen address and serve
+  config check                    load the config and build its providers
+  token show                      print the bearer token
+  token rotate                    replace the bearer token
+  usage                           print the usage table
+  agent list                      list coding-agent adapters
+  agent connect <name> [--dry-run]
+  agent disconnect <name> [--force]
+  agent status
+
+hofund <command> --help prints that command.
+examples/hofund.toml is a documented config with [[providers]] and [[routes]].
+";
+
+const SERVE_HELP: &str = "\
+usage: hofund serve [--config PATH]
+
+Bind the listen address in the config and serve until Ctrl-C.
+The default config path is the platform config directory. --config overrides it.
+";
+
+const CHECK_HELP: &str = "\
+usage: hofund config check [--config PATH]
+
+Load the config and build the providers it names. On success the command
+prints `config ok:` and the path it read. On failure the message starts
+with that path.
+";
+
+const TOKEN_HELP: &str = "\
+usage: hofund token show [--config PATH]
+       hofund token rotate [--config PATH]
+
+`show` prints the bearer token, creating the token file on first use.
+`rotate` replaces the token. A running gateway reads the new file on the
+next request. Agents that are already connected have their token keys
+rewritten. When that edit fails, the command prints `hofund agent connect <name>`.
+";
+
+const TOKEN_SHOW_HELP: &str = "\
+usage: hofund token show [--config PATH]
+
+Print the bearer token. The token file is created on first use.
+";
+
+const TOKEN_ROTATE_HELP: &str = "\
+usage: hofund token rotate [--config PATH]
+
+Replace the bearer token. A running gateway reads the token file on the
+next request. Connected agents have their token keys rewritten. When an
+agent file cannot be updated, the command prints `hofund agent connect <name>`.
+";
+
+const USAGE_HELP: &str = "\
+usage: hofund usage [--config PATH]
+
+Print one row per recorded request, with local time, plus a totals line.
+";
+
+const AGENT_HELP: &str = "\
+usage: hofund agent list
+       hofund agent connect <name> [--dry-run] [--config PATH]
+       hofund agent disconnect <name> [--force]
+       hofund agent status [--config PATH]
+
+Adapters: claude-code, codex, gemini-cli, opencode.
+";
+
+const AGENT_LIST_HELP: &str = "\
+usage: hofund agent list
+
+Print each adapter id, display name, and whether it is installed.
+";
+
+const AGENT_CONNECT_HELP: &str = "\
+usage: hofund agent connect <name> [--dry-run] [--config PATH]
+
+Point <name> at the local gateway. --dry-run prints the diff and writes
+nothing. The bearer token is shown as [redacted] in that diff. When the
+tool's configured model has no route, a warning is printed.
+";
+
+const AGENT_DISCONNECT_HELP: &str = "\
+usage: hofund agent disconnect <name> [--force]
+
+Remove the keys connect wrote, on the files as they are now. Edits made
+while connected stay. --force restores the connect-time backup instead.
+A second disconnect prints a note and exits 0.
+";
+
+const AGENT_STATUS_HELP: &str = "\
+usage: hofund agent status [--config PATH]
+
+Print whether each adapter is installed and whether its files match the
+current gateway token.
+";
 
 fn finish<E: std::fmt::Display>(result: Result<(), E>) -> ExitCode {
     match result {
@@ -141,6 +333,62 @@ fn print_agent_list() {
     }
 }
 
+fn check_config(config: &Path) -> Result<(), String> {
+    match check(config) {
+        Ok(()) => {
+            println!("config ok: {}", config.display());
+            Ok(())
+        }
+        Err(error) => Err(format!("{}: {error}", config.display())),
+    }
+}
+
+fn rotate_token(config: &Path) -> Result<(), String> {
+    let session = Session::from_process_env();
+    let local = local_gateway(config).map_err(|error| error.to_string())?;
+    let previous = GatewayTarget {
+        base_url: local.base_url.clone(),
+        token: local.token,
+    };
+    let mut connected = Vec::new();
+    let mut failed = Vec::new();
+    for adapter in adapters() {
+        match adapter.status(&session, &previous) {
+            Ok(status) if status.connected => connected.push(adapter.id()),
+            Ok(_) => {}
+            Err(error) => failed.push((adapter.id(), error.to_string())),
+        }
+    }
+    let token = token_rotate(config).map_err(|error| error.to_string())?;
+    println!("{token}");
+    eprintln!("a running gateway reads the token file on the next request");
+    let updated = GatewayTarget {
+        base_url: local.base_url,
+        token,
+    };
+    for id in connected {
+        let Some(adapter) = find(id) else {
+            continue;
+        };
+        match adapter.refresh_token(&session, &updated) {
+            Ok(paths) => {
+                for path in paths {
+                    println!("{id}: updated {}", path.display());
+                }
+            }
+            Err(error) => failed.push((id, error.to_string())),
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    for (id, error) in &failed {
+        eprintln!("{id}: {error}");
+        eprintln!("run: hofund agent connect {id}");
+    }
+    Err("the token file was rotated; a connected agent still needs `hofund agent connect`".into())
+}
+
 fn connect(
     adapter: &dyn hofund_agent::AgentAdapter,
     config: &Path,
@@ -160,24 +408,58 @@ fn connect(
     .map_err(|error| error.to_string())?;
     if plan.changes.is_empty() {
         println!("{}: already matches", adapter.id());
-        return Ok(());
-    }
-    for change in &plan.changes {
-        if dry_run {
-            print!("{}", change.diff);
-        } else {
-            println!("{}: wrote {}", adapter.id(), change.path.display());
+    } else {
+        for change in &plan.changes {
+            if dry_run {
+                print!("{}", redact_diff(&change.diff, &target.token));
+            } else {
+                println!("{}: wrote {}", adapter.id(), change.path.display());
+            }
         }
+    }
+    warn_unrouted_model(adapter, &session, config)
+}
+
+fn redact_diff(diff: &str, token: &str) -> String {
+    if token.is_empty() {
+        diff.to_owned()
+    } else {
+        diff.replace(token, "[redacted]")
+    }
+}
+
+fn warn_unrouted_model(
+    adapter: &dyn hofund_agent::AgentAdapter,
+    session: &Session,
+    config: &Path,
+) -> Result<(), String> {
+    let Some(model) = adapter
+        .configured_model(session)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let routes = route_models(config).map_err(|error| error.to_string())?;
+    if routes.iter().all(|route| route != &model) {
+        eprintln!(
+            "warning: {} model `{model}` has no route in {}",
+            adapter.id(),
+            config.display()
+        );
     }
     Ok(())
 }
 
-fn disconnect(adapter: &dyn hofund_agent::AgentAdapter) -> Result<(), String> {
+fn disconnect(adapter: &dyn hofund_agent::AgentAdapter, force: bool) -> Result<(), String> {
     let session = Session::from_process_env();
-    adapter
-        .revert(&session)
-        .map_err(|error| error.to_string())?;
-    println!("{}: restored", adapter.id());
+    if adapter
+        .disconnect(&session, force)
+        .map_err(|error| error.to_string())?
+    {
+        println!("{}: restored", adapter.id());
+    } else {
+        println!("{}: nothing to restore", adapter.id());
+    }
     Ok(())
 }
 
@@ -202,7 +484,7 @@ fn agent_status(config: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, parse};
+    use super::{Command, HelpTopic, parse, redact_diff};
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -244,13 +526,52 @@ mod tests {
                 .1,
             Command::AgentDisconnect {
                 name: "opencode".to_owned(),
+                force: false,
+            }
+        );
+        assert_eq!(
+            parse(&words(&["agent", "disconnect", "codex", "--force"]))
+                .expect("parse")
+                .1,
+            Command::AgentDisconnect {
+                name: "codex".to_owned(),
+                force: true,
             }
         );
         assert_eq!(
             parse(&words(&["agent", "status"])).expect("parse").1,
             Command::AgentStatus
         );
+        assert_eq!(
+            parse(&words(&[])).expect("parse").0,
+            hofund_daemon::user_config_path()
+        );
+        assert_eq!(
+            parse(&words(&["--help"])).expect("parse").1,
+            Command::Help(HelpTopic::Overview)
+        );
+        assert_eq!(
+            parse(&words(&["serve", "-h"])).expect("parse").1,
+            Command::Help(HelpTopic::Serve)
+        );
+        assert_eq!(
+            parse(&words(&["help", "agent", "connect"]))
+                .expect("parse")
+                .1,
+            Command::Help(HelpTopic::AgentConnect)
+        );
+        assert_eq!(
+            parse(&words(&["config", "check", "--help"]))
+                .expect("parse")
+                .1,
+            Command::Help(HelpTopic::ConfigCheck)
+        );
         assert!(parse(&words(&["nope"])).is_err());
         assert!(parse(&words(&["agent", "status", "--dry-run"])).is_err());
+        assert!(parse(&words(&["serve", "--force"])).is_err());
+        assert_eq!(
+            redact_diff("token = \"local-token\"\n", "local-token"),
+            "token = \"[redacted]\"\n"
+        );
     }
 }

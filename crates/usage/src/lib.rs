@@ -166,7 +166,7 @@ pub fn format_table(rows: &[Row]) -> String {
                 token(row.output_tokens),
                 row.latency_ms.to_string(),
                 row.status.clone(),
-                row.created_unix.to_string(),
+                local_stamp(row.created_unix),
             ]
         })
         .collect();
@@ -181,7 +181,23 @@ pub fn format_table(rows: &[Row]) -> String {
     for cells in body {
         push_line(&mut out, &cells, &widths);
     }
+    let input: i64 = rows.iter().filter_map(|row| row.input_tokens).sum();
+    let output: i64 = rows.iter().filter_map(|row| row.output_tokens).sum();
+    out.push_str(&format!(
+        "totals  requests={}  in={input}  out={output}\n",
+        rows.len()
+    ));
     out
+}
+
+fn local_stamp(unix: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| unix.to_string())
 }
 
 fn token(value: Option<i64>) -> String {
@@ -229,9 +245,25 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].input_tokens, Some(3));
         assert_eq!(rows[0].output_tokens, None);
+        ledger
+            .record(&Row {
+                created_unix: 20,
+                model: "other".to_owned(),
+                upstream: "backup".to_owned(),
+                input_tokens: Some(2),
+                output_tokens: Some(4),
+                latency_ms: 1,
+                status: "200".to_owned(),
+            })
+            .expect("second");
         let table = ledger.table().expect("table");
         assert!(table.contains("demo"));
         assert!(table.contains("primary"));
+        assert!(
+            table.contains("1969-") || table.contains("1970-"),
+            "{table}"
+        );
+        assert!(table.contains("totals  requests=2  in=5  out=4"), "{table}");
         fs::remove_dir_all(dir).ok();
     }
 }

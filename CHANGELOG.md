@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `GET /health` returns `{"status":"ok"}` with no authentication and no secrets.
+- `hofund --help`, `-h`, and `help` print usage for each command.
+- `examples/hofund.toml` documents `[[providers]]` and `[[routes]]`.
+- The gateway accepts `x-api-key`, compared in constant time, on every routed request.
+
+### Changed
+
+- The CLI default config path matches the menu-bar app: the platform config
+  directory, then `HOFUND_CONFIG`, then `--config`.
+- `hofund config check` prints the path it read, and `config ok: <path>` on success.
+- `hofund token rotate` is picked up by a running gateway on the next request.
+  Connected agents have their token keys rewritten. When that edit fails, the
+  command prints `hofund agent connect <id>`.
+- `hofund agent disconnect` removes the keys connect wrote and keeps later
+  edits. `--force` restores the connect-time backup. A second disconnect exits 0.
+- `hofund usage` prints local time and a totals line.
+- `hofund agent connect --dry-run` redacts the bearer token in the diff.
+- Connect warns when the tool's configured model has no route.
+- OpenCode follows `XDG_CONFIG_HOME` when that variable is set.
+- Disconnect removes empty directories that connect created.
+
 ### Fixed
 
 - The extension bag is forwarded only when the inbound and outbound protocols
@@ -22,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `response.content_part.done`, a `response.output_item.done` item with `id`
   and `content`, a terminal `output` array, and `sequence_number` on every
   event.
+- `token rotate` updates a running gateway, which previously kept accepting
+  the previous token until restart.
+- Disconnect keeps edits the user made while connected, such as a Codex
+  `sandbox_mode` key.
 
 ## [0.1.0] - 2026-10-25
 

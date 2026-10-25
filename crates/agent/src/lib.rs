@@ -3,9 +3,11 @@
 //! Each adapter is a declarative description: which files it owns, and which
 //! keys those files must contain. [`AgentAdapter::plan`] previews the edit.
 //! [`AgentAdapter::apply`] backs up each original file once, then replaces it
-//! by writing a temporary file and renaming it. [`AgentAdapter::revert`] puts
-//! the original bytes back. Unrelated keys are left in place. TOML comments
-//! stay. JSON comments do not survive an apply; revert restores them.
+//! by writing a temporary file and renaming it. [`AgentAdapter::disconnect`]
+//! removes only the keys that apply wrote, on the file as it is now, so an
+//! edit made while connected stays. [`AgentAdapter::revert`] puts the original
+//! bytes back. Unrelated keys are left in place on apply. TOML comments stay.
+//! JSON comments do not survive an apply; revert restores them.
 //!
 //! This crate depends only on `config`. It does not read the token file and
 //! it does not start the gateway. The daemon resolves the listen address and
@@ -31,6 +33,7 @@
 //!   <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.ts>.
 //! - OpenCode: `~/.config/opencode/opencode.json` (or `opencode.jsonc` when
 //!   that file already exists), using the v2 `providers` object.
+//!   `XDG_CONFIG_HOME` replaces `~/.config` when it is set.
 //!   <https://opencode.ai/v2/docs/config/>,
 //!   <https://opencode.ai/v2/docs/providers/>.
 
@@ -66,6 +69,7 @@ pub struct Session {
     claude_config_dir: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     gemini_cli_home: Option<PathBuf>,
+    xdg_config_home: Option<PathBuf>,
 }
 
 impl Session {
@@ -78,11 +82,12 @@ impl Session {
             claude_config_dir: None,
             codex_home: None,
             gemini_cli_home: None,
+            xdg_config_home: None,
         }
     }
 
     /// Reads `HOME` or `USERPROFILE`, `PATH`, `CLAUDE_CONFIG_DIR`,
-    /// `CODEX_HOME`, and `GEMINI_CLI_HOME`.
+    /// `CODEX_HOME`, `GEMINI_CLI_HOME`, and `XDG_CONFIG_HOME`.
     #[must_use]
     pub fn from_process_env() -> Self {
         Self {
@@ -91,6 +96,9 @@ impl Session {
             claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
             gemini_cli_home: std::env::var_os("GEMINI_CLI_HOME").map(PathBuf::from),
+            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
         }
     }
 
@@ -119,6 +127,16 @@ impl Session {
     #[must_use]
     pub fn with_gemini_cli_home(mut self, path: impl Into<PathBuf>) -> Self {
         self.gemini_cli_home = Some(path.into());
+        self
+    }
+
+    /// Sets `XDG_CONFIG_HOME`. A relative path is joined to the home directory.
+    ///
+    /// OpenCode reads `$XDG_CONFIG_HOME/opencode` when this is set. Other
+    /// agents ignore it.
+    #[must_use]
+    pub fn with_xdg_config_home(mut self, path: impl Into<PathBuf>) -> Self {
+        self.xdg_config_home = Some(path.into());
         self
     }
 }
@@ -223,10 +241,43 @@ pub trait AgentAdapter: Sync {
 
     /// Restores every managed file that has a backup or an absent marker.
     ///
+    /// This replaces the current file with the connect-time bytes. Prefer
+    /// [`Self::disconnect`] when the user may have edited the file since.
+    ///
     /// # Errors
     ///
     /// Returns [`AgentError`] when nothing was backed up, or a write fails.
     fn revert(&self, session: &Session) -> Result<(), AgentError>;
+
+    /// Removes the keys [`Self::apply`] wrote, from the files as they are now.
+    ///
+    /// A key added after connect stays. `force` restores the connect-time
+    /// backup instead, which discards those edits. When no backup exists the
+    /// call returns `Ok(false)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when a managed file cannot be parsed. The backup
+    /// is left in place so a later `force` call can still restore it.
+    fn disconnect(&self, session: &Session, force: bool) -> Result<bool, AgentError>;
+
+    /// Writes the token slots in `target` without taking a new backup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when a present file cannot be parsed or written.
+    fn refresh_token(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+    ) -> Result<Vec<PathBuf>, AgentError>;
+
+    /// The model string the tool stored, when that key exists and is a string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when the file exists but cannot be parsed.
+    fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError>;
 
     /// Reports install and connection state for `target`.
     ///

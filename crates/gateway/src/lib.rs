@@ -11,8 +11,9 @@ pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
@@ -40,7 +41,10 @@ pub struct Gateway {
 
 struct Inner {
     router: Router,
-    token: String,
+    /// Last token read from [`Self::token_file`], or the token passed to
+    /// [`Gateway::new`] when that file cannot be read.
+    token: Mutex<String>,
+    token_file: Option<PathBuf>,
     codecs: HashMap<String, Arc<dyn Codec>>,
     usage: Arc<Ledger>,
 }
@@ -76,23 +80,51 @@ impl Gateway {
         codecs: HashMap<String, Arc<dyn Codec>>,
         usage: Arc<Ledger>,
     ) -> Self {
+        Self::build(router, token, None, codecs, usage)
+    }
+
+    /// Like [`Self::new`], and re-reads `token_file` on each request.
+    ///
+    /// A failed or empty read keeps the last token that was read. The file is
+    /// replaced by rename, so a reader sees the previous token or the new one.
+    #[must_use]
+    pub fn with_token_file(
+        router: Router,
+        token: String,
+        token_file: PathBuf,
+        codecs: HashMap<String, Arc<dyn Codec>>,
+        usage: Arc<Ledger>,
+    ) -> Self {
+        Self::build(router, token, Some(token_file), codecs, usage)
+    }
+
+    fn build(
+        router: Router,
+        token: String,
+        token_file: Option<PathBuf>,
+        codecs: HashMap<String, Arc<dyn Codec>>,
+        usage: Arc<Ledger>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 router,
-                token,
+                token: Mutex::new(token),
+                token_file,
                 codecs,
                 usage,
             }),
         }
     }
 
-    /// The axum router, including authentication on every routed request.
+    /// The axum router. `/health` is open. Every other route requires a token.
     ///
     /// Codec paths that contain `{` are map keys, not routable patterns. When
     /// a Generative Language codec is registered, the process binds the
     /// catch-all generate route and the model list instead.
     pub fn into_router(self) -> axum::Router {
-        let mut routes = axum::Router::new().route("/v1/models", get(models));
+        let mut routes = axum::Router::new()
+            .route("/health", get(health))
+            .route("/v1/models", get(models));
         let generative = self.inner.codecs.contains_key(GENERATIVE_UNARY)
             || self.inner.codecs.contains_key(GENERATIVE_STREAM);
         let paths: Vec<String> = self.inner.codecs.keys().cloned().collect();
@@ -159,8 +191,12 @@ impl Drop for Running {
     }
 }
 
+async fn health() -> Response {
+    json_response(StatusCode::OK, br#"{"status":"ok"}"#.to_vec())
+}
+
 async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
-    if let Some(response) = reject(&app.token, request.headers(), request.uri(), None) {
+    if let Some(response) = reject(&current_token(&app), request.headers(), request.uri(), None) {
         return response;
     }
     let data: Vec<_> = app
@@ -182,7 +218,12 @@ async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> R
         .get(GENERATIVE_UNARY)
         .or_else(|| app.codecs.get(GENERATIVE_STREAM))
         .map(AsRef::as_ref);
-    if let Some(response) = reject(&app.token, request.headers(), request.uri(), codec) {
+    if let Some(response) = reject(
+        &current_token(&app),
+        request.headers(),
+        request.uri(),
+        codec,
+    ) {
         return response;
     }
     let models: Vec<_> = app
@@ -216,7 +257,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let Some(codec) = app.codecs.get(codec_key).cloned() else {
         return text_response(StatusCode::NOT_FOUND, "not found");
     };
-    if let Some(response) = reject(&app.token, &headers, &uri, Some(codec.as_ref())) {
+    if let Some(response) = reject(&current_token(&app), &headers, &uri, Some(codec.as_ref())) {
         return response;
     }
     let started = Instant::now();
@@ -281,7 +322,23 @@ fn reject(
     Some(json_response(StatusCode::UNAUTHORIZED, body))
 }
 
-/// Accepts the bearer token, `x-goog-api-key`, or a `key` query value.
+fn current_token(app: &Inner) -> String {
+    let mut known = app
+        .token
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(path) = &app.token_file
+        && let Ok(text) = std::fs::read_to_string(path)
+    {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            *known = trimmed.to_owned();
+        }
+    }
+    known.clone()
+}
+
+/// Accepts the bearer token, `x-api-key`, `x-goog-api-key`, or a `key` query value.
 ///
 /// Each presented secret is compared in constant time. One match is enough.
 /// A request with no secret is still rejected.
@@ -289,6 +346,10 @@ fn authorized(expected: &str, headers: &HeaderMap, uri: &Uri) -> bool {
     let mut saw = false;
     let mut matched = false;
     if let Some(token) = bearer(headers) {
+        saw = true;
+        matched |= tokens_match(expected, token);
+    }
+    if let Some(token) = header_secret(headers, "x-api-key") {
         saw = true;
         matched |= tokens_match(expected, token);
     }
