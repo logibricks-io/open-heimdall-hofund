@@ -222,9 +222,13 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   plugin-check:
-    name: plugin-check
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: plugin-check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v7

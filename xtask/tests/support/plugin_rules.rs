@@ -6,7 +6,8 @@
 //! `hofund-plugin-api` is rejected, and a feature forward enables `kernel`
 //! under the dependency's package name, including `api/kernel` and `?/kernel`.
 //! Macro fragments that splice `std::$m` are denied by Clippy after expansion,
-//! not by matching `$` in the source.
+//! not by matching `$` in the source. Runtime paths, lint suppression, and
+//! `cfg(clippy)` go through `xtask::boundary`, the same scan `check-plugins` runs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -661,6 +662,51 @@ fast = ["dep:api/kernel"]
         assert!(found.contains(needle), "missing {needle} in:\n{found}");
     }
     let _ = fs::remove_dir_all(&bypass);
+
+    let round3 = [
+        (
+            "#![allow(clippy::disallowed_methods, clippy::disallowed_types)]\nfn sneak() {}\n",
+            "disallowed_methods",
+        ),
+        ("#[allow(clippy::all)]\nfn sneak() {}\n", "clippy::all"),
+        (
+            "#[expect(clippy::disallowed_methods)]\nfn sneak() {}\n",
+            "disallowed_methods",
+        ),
+        (
+            "#[cfg_attr(all(), allow(clippy::disallowed_types))]\nfn sneak() {}\n",
+            "disallowed_types",
+        ),
+        ("#[cfg(not(clippy))]\nfn sneak() {}\n", "cfg(clippy)"),
+        (
+            "#[cfg_attr(all(), path = \"../hidden.rs\")]\nmod net;\n",
+            "cfg_attr path",
+        ),
+        (
+            "extern crate std as s;\nfn sneak() { let _ = s::process::Command::new(\"true\"); }\n",
+            "std::process",
+        ),
+    ];
+    for (source, needle) in round3 {
+        let hits = runtime_hits(source).join("\n");
+        assert!(hits.contains(needle), "{needle} missing in:\n{hits}");
+    }
+    let fake = std::env::temp_dir().join(format!("hofund-plugin-round3-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&fake);
+    let pkg = fake.join("plugins/providers/fakeapi");
+    fs::create_dir_all(pkg.join("src")).expect("dir");
+    fs::write(
+        pkg.join("Cargo.toml"),
+        "[package]\nname = \"fakeapi\"\n[dependencies]\nhofund-plugin-api = { path = \"/tmp/fakeapi\" }\n[lints]\nworkspace = true\n",
+    )
+    .expect("manifest");
+    fs::write(pkg.join("src/lib.rs"), "fn clean() {}\n").expect("source");
+    let found = plugin_tree_violations(&fake.join("plugins")).join("\n");
+    assert!(
+        found.contains("hofund-plugin-api must be workspace = true"),
+        "{found}"
+    );
+    let _ = fs::remove_dir_all(&fake);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -737,18 +783,7 @@ fn seam_hits_file(path: &Path, seen: &mut BTreeSet<PathBuf>) -> Vec<String> {
 }
 
 fn runtime_hits(source: &str) -> Vec<String> {
-    let Ok(file) = syn::parse_file(source) else {
-        return vec!["does not parse".to_owned()];
-    };
-    let aliases = collect_runtime_aliases_in(&file);
-    let mut finder = RuntimeFinder {
-        aliases,
-        hits: Vec::new(),
-    };
-    finder.visit_file(&file);
-    finder.hits.sort();
-    finder.hits.dedup();
-    finder.hits
+    xtask::boundary::scan_source(source)
 }
 
 fn runtime_hits_file(path: &Path, seen: &mut BTreeSet<PathBuf>) -> Vec<String> {
@@ -829,37 +864,6 @@ struct TypeCollector<'a> {
 impl<'ast> Visit<'ast> for TypeCollector<'_> {
     fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
         note_type_alias(item, self.aliases);
-    }
-}
-
-fn collect_runtime_aliases_in(file: &syn::File) -> RuntimeAliases {
-    let mut aliases = RuntimeAliases::default();
-    RuntimeAliasCollector {
-        aliases: &mut aliases,
-    }
-    .visit_file(file);
-    aliases
-}
-
-struct RuntimeAliasCollector<'a> {
-    aliases: &'a mut RuntimeAliases,
-}
-
-impl<'ast> Visit<'ast> for RuntimeAliasCollector<'_> {
-    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        note_runtime_crate(&[], &item.tree, self.aliases);
-    }
-
-    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
-        let original = ident_str(&item.ident);
-        if matches!(original.as_str(), "std" | "tokio" | "libc" | "nix") {
-            let local = item
-                .rename
-                .as_ref()
-                .map(|(_, name)| ident_str(name))
-                .unwrap_or_else(|| original.clone());
-            self.aliases.crates.insert(local, original);
-        }
     }
 }
 
@@ -957,46 +961,6 @@ impl Finder {
     }
 }
 
-#[derive(Default)]
-struct RuntimeAliases {
-    crates: BTreeMap<String, String>,
-    globs: BTreeSet<String>,
-}
-
-struct RuntimeFinder {
-    aliases: RuntimeAliases,
-    hits: Vec<String>,
-}
-
-impl<'ast> Visit<'ast> for RuntimeFinder {
-    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        walk_runtime(&[], &item.tree, &self.aliases, &mut self.hits);
-    }
-
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        let segs = expand_runtime(&segments(path), &self.aliases);
-        if let Some(hit) = forbidden_runtime(&segs) {
-            self.hits.push(hit.to_owned());
-        }
-        syn::visit::visit_path(self, path);
-    }
-
-    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        for stmt in parsed_macro_stmts(mac.tokens.clone()) {
-            self.visit_stmt(&stmt);
-        }
-    }
-
-    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
-        if let syn::Meta::List(list) = &attr.meta {
-            for stmt in parsed_macro_stmts(list.tokens.clone()) {
-                self.visit_stmt(&stmt);
-            }
-        }
-        syn::visit::visit_attribute(self, attr);
-    }
-}
-
 struct CommaExprs(Vec<syn::Expr>);
 
 impl syn::parse::Parse for CommaExprs {
@@ -1046,30 +1010,6 @@ fn block_stmts(tokens: proc_macro2::TokenStream) -> Option<Vec<syn::Stmt>> {
     syn::parse2::<syn::Block>(wrapped)
         .ok()
         .map(|block| block.stmts)
-}
-
-fn expand_runtime(segs: &[String], aliases: &RuntimeAliases) -> Vec<String> {
-    let segs = canonical_segments(segs, &aliases.crates);
-    if matches!(
-        segs.first().map(String::as_str),
-        Some("std" | "tokio" | "libc" | "nix")
-    ) {
-        return segs;
-    }
-    let Some(first) = segs.first() else {
-        return segs;
-    };
-    if aliases.globs.contains("std") && matches!(first.as_str(), "process" | "net" | "os") {
-        let mut out = vec!["std".to_owned()];
-        out.extend(segs);
-        return out;
-    }
-    if aliases.globs.contains("tokio") && matches!(first.as_str(), "process" | "net") {
-        let mut out = vec!["tokio".to_owned()];
-        out.extend(segs);
-        return out;
-    }
-    segs
 }
 
 fn ident_str(ident: &syn::Ident) -> String {
@@ -1237,127 +1177,10 @@ fn note_import(
     }
 }
 
-fn note_runtime_crate(prefix: &[String], tree: &syn::UseTree, aliases: &mut RuntimeAliases) {
-    match tree {
-        syn::UseTree::Path(path) => {
-            let mut next = prefix.to_vec();
-            next.push(ident_str(&path.ident));
-            note_runtime_crate(&next, &path.tree, aliases);
-        }
-        syn::UseTree::Rename(name) => {
-            let original = ident_str(&name.ident);
-            let crate_name = if original == "self" {
-                prefix.first().cloned()
-            } else if prefix.is_empty() {
-                Some(original)
-            } else {
-                None
-            };
-            if let Some(crate_name) = crate_name.filter(|name| {
-                matches!(name.as_str(), "std" | "tokio" | "libc" | "nix") && prefix.len() <= 1
-            }) {
-                aliases.crates.insert(ident_str(&name.rename), crate_name);
-            }
-        }
-        syn::UseTree::Glob(_) => {
-            let resolved = canonical_segments(prefix, &aliases.crates);
-            if resolved.len() == 1
-                && let Some(name) = resolved.first().cloned()
-                && matches!(name.as_str(), "std" | "tokio" | "libc" | "nix")
-            {
-                aliases.globs.insert(name);
-            }
-        }
-        syn::UseTree::Group(group) => {
-            for item in &group.items {
-                note_runtime_crate(prefix, item, aliases);
-            }
-        }
-        syn::UseTree::Name(_) => {}
-    }
-}
-
-fn walk_runtime(
-    prefix: &[String],
-    tree: &syn::UseTree,
-    aliases: &RuntimeAliases,
-    hits: &mut Vec<String>,
-) {
-    match tree {
-        syn::UseTree::Path(path) => {
-            let mut next = prefix.to_vec();
-            next.push(ident_str(&path.ident));
-            walk_runtime(&next, &path.tree, aliases, hits);
-        }
-        syn::UseTree::Name(name) => {
-            let mut full = prefix.to_vec();
-            full.push(ident_str(&name.ident));
-            let full = expand_runtime(&full, aliases);
-            if let Some(hit) = forbidden_runtime(&full) {
-                hits.push(hit.to_owned());
-            }
-        }
-        syn::UseTree::Rename(name) => {
-            let mut full = prefix.to_vec();
-            full.push(ident_str(&name.ident));
-            let full = expand_runtime(&full, aliases);
-            if let Some(hit) = forbidden_runtime(&full) {
-                hits.push(hit.to_owned());
-            }
-        }
-        syn::UseTree::Glob(_) => {
-            let resolved = expand_runtime(prefix, aliases);
-            if let Some(hit) = forbidden_runtime(&resolved) {
-                hits.push(hit.to_owned());
-            }
-        }
-        syn::UseTree::Group(group) => {
-            for item in &group.items {
-                walk_runtime(prefix, item, aliases, hits);
-            }
-        }
-    }
-}
-
 fn kernel_under_plugin_api(segments: &[String]) -> bool {
     segments
         .windows(2)
         .any(|pair| pair[0] == "hofund_plugin_api" && pair[1] == "kernel")
-}
-
-fn forbidden_runtime(segments: &[String]) -> Option<&'static str> {
-    if segments.len() >= 2 && segments[0] == "std" && segments[1] == "process" {
-        return Some("std::process");
-    }
-    if segments.len() >= 2 && segments[0] == "std" && segments[1] == "net" {
-        return Some("std::net");
-    }
-    if segments.len() >= 4 && segments[0] == "std" && segments[1] == "os" {
-        let family = segments[2].as_str();
-        let module = segments[3].as_str();
-        if matches!(family, "unix" | "windows") && matches!(module, "process" | "net") {
-            return Some(match (family, module) {
-                ("unix", "process") => "std::os::unix::process",
-                ("unix", "net") => "std::os::unix::net",
-                ("windows", "process") => "std::os::windows::process",
-                _ => "std::os::windows::net",
-            });
-        }
-    }
-    if segments.len() >= 2 && segments[0] == "tokio" && segments[1] == "process" {
-        return Some("tokio::process");
-    }
-    if segments.len() >= 2 && segments[0] == "tokio" && segments[1] == "net" {
-        return Some("tokio::net");
-    }
-    match segments.first().map(String::as_str) {
-        Some("reqwest") => Some("reqwest"),
-        Some("hyper") => Some("hyper"),
-        Some("axum") => Some("axum"),
-        Some("libc") => Some("libc"),
-        Some("nix") => Some("nix"),
-        _ => None,
-    }
 }
 
 fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
@@ -1438,6 +1261,13 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                     own_kit(kind.as_ref()),
                 ) {
                     violations.push(format!("{kind}/{id} {hit}"));
+                }
+            }
+            if let Ok(errors) =
+                xtask::boundary::manifest_dependency_errors(&manifest, own_kit(kind.as_ref()))
+            {
+                for error in errors {
+                    violations.push(format!("{kind}/{id} {error}"));
                 }
             }
             if path.join("src").is_dir() {

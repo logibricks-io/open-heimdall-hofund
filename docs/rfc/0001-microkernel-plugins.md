@@ -779,6 +779,8 @@ PR B adds the checker next to `dependency_graph_matches_architecture`. It runs e
 
 ### Lints and feature checks
 
+`check-plugins` is the mechanical gate for plugin crates. It is not a sandbox. The threat model, what the gate enforces, and the known limits are in [the plugin boundary note](../plugins/boundary.md).
+
 Workspace lints stay `missing_docs = "warn"` and `clippy::pedantic = "allow"`. `hofund-plugin-api` and `hofund-plugin-sdk` additionally set `#![deny(missing_docs, unreachable_pub, rust_2018_idioms)]`, `clippy::pedantic` at warn, and `missing_errors_doc` plus `must_use_candidate` on.
 
 CI on the API crate stores a `cargo-public-api` snapshot (or `cargo-semver-checks` against the merge base). Surface growth is a reviewed diff.

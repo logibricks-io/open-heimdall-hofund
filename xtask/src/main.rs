@@ -309,6 +309,8 @@ fn check_plugins() -> ExitCode {
         }
     };
     for (package, dir) in &packages {
+        // Scan before any Cargo command. `cargo check` and Clippy both run
+        // `build.rs`, so a script must be rejected here or it executes.
         let hits = boundary::source_violations(dir);
         if !hits.is_empty() {
             eprintln!("{package} {}", hits.join("; "));
@@ -356,19 +358,8 @@ fn check_plugins() -> ExitCode {
 fn clippy_plugin(package: &str) -> Result<(), String> {
     println!("cargo clippy -p {package}");
     let status = Command::new("cargo")
-        .args([
-            "clippy",
-            "-p",
-            package,
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-            "-D",
-            "clippy::disallowed_types",
-            "-D",
-            "clippy::disallowed_methods",
-        ])
+        .args(["clippy", "-p", package, "--all-targets", "--"])
+        .args(boundary::CLIPPY_ARGS)
         .env(
             "CLIPPY_CONF_DIR",
             boundary::clippy_conf_dir(&workspace_root()),
@@ -461,7 +452,7 @@ mod tests {
         std::fs::create_dir_all(weak.join("providers/weak")).expect("weak");
         std::fs::write(
             weak.join("providers/weak/Cargo.toml"),
-            "[package]\nname = \"weak\"\n[dependencies]\nhofund-plugin-api = { optional = true }\n[features]\nfast = [\"hofund-plugin-api?/kernel\"]\n",
+            "[package]\nname = \"weak\"\n[dependencies]\nhofund-plugin-api = { workspace = true, optional = true }\n[features]\nfast = [\"hofund-plugin-api?/kernel\"]\n",
         )
         .expect("weak manifest");
         let weak_error = load_plugin_packages(&weak).expect_err("weak");
