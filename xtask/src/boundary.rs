@@ -31,18 +31,34 @@ pub const CLIPPY_ARGS: &[&str] = &[
 
 /// Clippy invocations for one plugin.
 ///
-/// Dev and release each run with `--all-features`. A package that defines
-/// features also runs both profiles with `--no-default-features`, so a
-/// `cfg(feature)` splice is compiled on and off.
+/// Each entry is `(profile, feature_flag)`. An empty flag is the default
+/// feature set, the one that ships. Dev and release both run. A package that
+/// defines `[features]` is also linted with `--all-features` and
+/// `--no-default-features`. A package with no features is linted once per
+/// profile, because those three sets compile the same crate. Other feature
+/// combinations are not compiled.
 #[must_use]
 pub fn clippy_passes(defines_features: bool) -> Vec<(&'static str, &'static str)> {
-    let mut passes = vec![("dev", "--all-features"), ("release", "--all-features")];
-    if defines_features {
-        passes.push(("dev", "--no-default-features"));
-        passes.push(("release", "--no-default-features"));
+    let sets: &[&str] = if defines_features {
+        &["", "--all-features", "--no-default-features"]
+    } else {
+        &[""]
+    };
+    let mut passes = Vec::with_capacity(sets.len() * 2);
+    for profile in ["dev", "release"] {
+        for features in sets {
+            passes.push((profile, *features));
+        }
     }
     passes
 }
+
+/// Plugin package names allowed to ship a `build.rs`.
+///
+/// Empty. A build script runs before Clippy and can set `cfg`, so a plugin
+/// does not get one until the name is added here after review. An allow-listed
+/// script is still scanned, and it still may not emit `rustc-cfg`.
+pub const BUILD_SCRIPT_ALLOW: &[&str] = &[];
 
 /// Whether `[features]` names at least one feature.
 #[must_use]
@@ -243,6 +259,10 @@ pub fn source_violations(package_dir: &Path) -> Vec<String> {
     }
     let build = package_dir.join("build.rs");
     if build.is_file() {
+        let name = manifest_package_name(package_dir);
+        if !BUILD_SCRIPT_ALLOW.contains(&name.as_str()) {
+            hits.push("build.rs is not allowed".to_owned());
+        }
         hits.extend(scan_file(&build, package_dir, &mut seen));
     }
     hits.sort();
@@ -270,8 +290,13 @@ fn scan_file(file: &Path, root: &Path, seen: &mut BTreeSet<PathBuf>) -> Vec<Stri
 }
 
 fn scan_parsed(file: &Path, root: &Path, text: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    if file.file_name().and_then(|name| name.to_str()) == Some("build.rs") {
+        hits.extend(build_script_cfg_hits(text));
+    }
     let Ok(parsed) = syn::parse_file(text) else {
-        return vec![format!("{} does not parse", file.display())];
+        hits.push(format!("{} does not parse", file.display()));
+        return hits;
     };
     let mut aliases = Aliases::default();
     AliasPass {
@@ -285,7 +310,35 @@ fn scan_parsed(file: &Path, root: &Path, text: &str) -> Vec<String> {
         hits: Vec::new(),
     };
     finder.visit_file(&parsed);
-    finder.hits
+    hits.extend(finder.hits);
+    hits
+}
+
+fn manifest_package_name(dir: &Path) -> String {
+    let Ok(text) = fs::read_to_string(dir.join("Cargo.toml")) else {
+        return String::new();
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return String::new();
+    };
+    value
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// `cargo:rustc-cfg`, `cargo::rustc-cfg`, and `rustc-check-cfg`.
+fn build_script_cfg_hits(text: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    if text.contains("rustc-check-cfg") {
+        hits.push("build.rs emits rustc-check-cfg".to_owned());
+    }
+    if text.contains("rustc-cfg") {
+        hits.push("build.rs emits rustc-cfg".to_owned());
+    }
+    hits
 }
 
 fn literal_includes(text: &str) -> Vec<String> {
@@ -386,6 +439,9 @@ impl<'ast> Visit<'ast> for SourceFinder<'_> {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if mac.path.is_ident("macro_rules") {
+            scan_cfg_tokens(mac.tokens.clone(), &mut self.hits);
+        }
         if let Some(name) = mac
             .path
             .segments
@@ -668,6 +724,53 @@ fn mentions_cfg_word(meta: &syn::Meta, word: &str) -> bool {
         .any(|meta| mentions_cfg_word(meta, word))
 }
 
+/// `cfg` / `cfg_attr` / `cfg!` inside a `macro_rules!` body. The body often
+/// does not parse as Rust because of `$` splices, so this walks tokens.
+fn scan_cfg_tokens(tokens: proc_macro2::TokenStream, hits: &mut Vec<String>) {
+    let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+    let mut index = 0;
+    while index < trees.len() {
+        match &trees[index] {
+            proc_macro2::TokenTree::Group(group) => {
+                scan_cfg_tokens(group.stream(), hits);
+                index += 1;
+            }
+            proc_macro2::TokenTree::Ident(ident) if ident == "cfg" || ident == "cfg_attr" => {
+                let mut next = index + 1;
+                if let Some(proc_macro2::TokenTree::Punct(punct)) = trees.get(next)
+                    && punct.as_char() == '!'
+                {
+                    next += 1;
+                }
+                if let Some(proc_macro2::TokenTree::Group(group)) = trees.get(next)
+                    && group.delimiter() == proc_macro2::Delimiter::Parenthesis
+                {
+                    let inner = group.stream();
+                    if tokens_mention(&inner, "clippy") {
+                        hits.push("cfg(clippy)".to_owned());
+                    }
+                    if tokens_mention(&inner, "debug_assertions") {
+                        hits.push("cfg(debug_assertions)".to_owned());
+                    }
+                    scan_cfg_tokens(inner, hits);
+                    index = next + 1;
+                } else {
+                    index += 1;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+}
+
+fn tokens_mention(tokens: &proc_macro2::TokenStream, word: &str) -> bool {
+    tokens.clone().into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(ident) => ident == word,
+        proc_macro2::TokenTree::Group(group) => tokens_mention(&group.stream(), word),
+        _ => false,
+    })
+}
+
 fn attribute_cfg_word(attr: &syn::Attribute, word: &str) -> bool {
     let Some(name) = attr.path().get_ident() else {
         return false;
@@ -681,9 +784,11 @@ fn attribute_cfg_word(attr: &syn::Attribute, word: &str) -> bool {
             let syn::Meta::List(list) = &attr.meta else {
                 return false;
             };
+            // The predicate and every attribute it applies. `cfg(not(clippy))`
+            // is an attribute, not the predicate, in `cfg_attr(all(), cfg(...))`.
             nested_metas(list)
-                .first()
-                .is_some_and(|meta| mentions_cfg_word(meta, word))
+                .iter()
+                .any(|meta| mentions_cfg_word(meta, word))
         }
         _ => false,
     }
@@ -1163,6 +1268,22 @@ cc = "1"
                 "fn sneak() { if cfg!(not(clippy)) { let _ = std::process::Command::new(\"true\"); } }\n",
                 "cfg(clippy)",
             ),
+            (
+                "#[cfg_attr(all(), cfg(not(clippy)))]\nmacro_rules! spawn { ($m:ident) => { std::$m::Command::new(\"true\").status() }; }\n#[cfg_attr(all(), cfg(not(clippy)))]\npub fn sneak() { let _ = spawn!(process); }\n",
+                "cfg(clippy)",
+            ),
+            (
+                "#[cfg_attr(all(), cfg_attr(all(), cfg(not(clippy))))]\nfn sneak() {}\n",
+                "cfg(clippy)",
+            ),
+            (
+                "macro_rules! spawn { ($m:ident) => { #[cfg(not(clippy))] { std::$m::Command::new(\"true\").status() } }; }\n",
+                "cfg(clippy)",
+            ),
+            (
+                "macro_rules! spawn { ($m:ident) => { #[cfg(not(debug_assertions))] { std::$m::Command::new(\"true\").status() } }; }\n",
+                "cfg(debug_assertions)",
+            ),
         ];
         for (source, needle) in cases {
             let hits = super::scan_source(source).join("\n");
@@ -1211,19 +1332,19 @@ cc = "1"
 
     #[test]
     fn clippy_passes_cover_dev_release_and_features() {
-        assert_eq!(
-            super::clippy_passes(false),
-            [("dev", "--all-features"), ("release", "--all-features")]
-        );
+        assert_eq!(super::clippy_passes(false), [("dev", ""), ("release", "")]);
         assert_eq!(
             super::clippy_passes(true),
             [
+                ("dev", ""),
                 ("dev", "--all-features"),
-                ("release", "--all-features"),
                 ("dev", "--no-default-features"),
+                ("release", ""),
+                ("release", "--all-features"),
                 ("release", "--no-default-features"),
             ]
         );
+        assert!(super::BUILD_SCRIPT_ALLOW.is_empty());
         assert!(!super::lints_follow_workspace("[package]\nname = \"x\"\n"));
         assert!(super::lints_follow_workspace("[lints]\nworkspace = true\n"));
         assert!(super::manifest_defines_features("[features]\nextra = []\n"));
@@ -1268,6 +1389,63 @@ cc = "1"
         );
         let _ = std::fs::remove_dir_all(&release);
         let _ = std::fs::remove_dir_all(&feature);
+    }
+
+    #[test]
+    fn the_default_feature_set_is_linted() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace")
+            .to_path_buf();
+        let root =
+            std::env::temp_dir().join(format!("hofund-plugin-default-feat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_fixture(
+            &root,
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\ndefault = [\"a\"]\na = []\nb = []\n",
+            "#[cfg(all(feature = \"a\", not(feature = \"b\")))]\nmacro_rules! spawn { ($m:ident) => { std::$m::Command::new(\"true\").status() }; }\n#[cfg(all(feature = \"a\", not(feature = \"b\")))]\npub fn sneak() { let _ = spawn!(process); }\n#[cfg(not(all(feature = \"a\", not(feature = \"b\"))))]\npub fn sneak() {}\n",
+        );
+        assert!(
+            !clippy_fixture(&root, &workspace, &[]),
+            "the default feature set must compile the splice"
+        );
+        assert!(
+            clippy_fixture(&root, &workspace, &["--all-features"]),
+            "every feature turns the splice off"
+        );
+        assert!(
+            clippy_fixture(&root, &workspace, &["--no-default-features"]),
+            "no features turns the splice off"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_build_script_cannot_set_cfg() {
+        let root =
+            std::env::temp_dir().join(format!("hofund-plugin-buildrs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("src");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"evil\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "#[cfg(fast_path)]\nfn sneak() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            root.join("build.rs"),
+            "fn main() {\n    println!(\"cargo::rustc-check-cfg=cfg(fast_path)\");\n    if !std::env::var(\"RUSTC_WORKSPACE_WRAPPER\").unwrap_or_default().contains(\"clippy\") {\n        println!(\"cargo::rustc-cfg=fast_path\");\n        println!(\"cargo:rustc-cfg=fast_path\");\n    }\n}\n",
+        )
+        .expect("build");
+        let hits = source_violations(&root).join("\n");
+        assert!(hits.contains("build.rs is not allowed"), "{hits}");
+        assert!(hits.contains("build.rs emits rustc-cfg"), "{hits}");
+        assert!(hits.contains("build.rs emits rustc-check-cfg"), "{hits}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn write_fixture(root: &std::path::Path, manifest: &str, source: &str) {

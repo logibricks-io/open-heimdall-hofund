@@ -362,18 +362,26 @@ fn clippy_plugin(package: &str, dir: &std::path::Path) -> Result<(), String> {
     let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
     let defines_features = boundary::manifest_defines_features(&manifest);
     for (profile, features) in boundary::clippy_passes(defines_features) {
-        println!("cargo clippy -p {package} --profile {profile} {features}");
-        let status = Command::new("cargo")
-            .args([
-                "clippy",
-                "-p",
-                package,
-                "--all-targets",
-                "--profile",
-                profile,
-                features,
-                "--",
-            ])
+        let feature_label = if features.is_empty() {
+            "default features"
+        } else {
+            features
+        };
+        println!("cargo clippy -p {package} --profile {profile} ({feature_label})");
+        let mut command = Command::new("cargo");
+        command.args([
+            "clippy",
+            "-p",
+            package,
+            "--all-targets",
+            "--profile",
+            profile,
+        ]);
+        if !features.is_empty() {
+            command.arg(features);
+        }
+        let status = command
+            .arg("--")
             .args(boundary::CLIPPY_ARGS)
             .env(
                 "CLIPPY_CONF_DIR",
@@ -384,7 +392,7 @@ fn clippy_plugin(package: &str, dir: &std::path::Path) -> Result<(), String> {
             .map_err(|error| format!("could not run cargo clippy -p {package}: {error}"))?;
         if !status.success() {
             return Err(format!(
-                "cargo clippy -p {package} --profile {profile} {features} failed the plugin boundary ({status})"
+                "cargo clippy -p {package} --profile {profile} ({feature_label}) failed the plugin boundary ({status})"
             ));
         }
     }

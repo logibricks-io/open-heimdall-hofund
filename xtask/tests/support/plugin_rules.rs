@@ -686,6 +686,18 @@ fast = ["dep:api/kernel"]
             "extern crate std as s;\nfn sneak() { let _ = s::process::Command::new(\"true\"); }\n",
             "std::process",
         ),
+        (
+            "#[cfg_attr(all(), cfg(not(clippy)))]\nfn sneak() {}\n",
+            "cfg(clippy)",
+        ),
+        (
+            "#[cfg_attr(all(), cfg_attr(all(), cfg(not(debug_assertions))))]\nfn sneak() {}\n",
+            "cfg(debug_assertions)",
+        ),
+        (
+            "macro_rules! spawn { ($m:ident) => { #[cfg(not(clippy))] { std::$m::Command::new(\"true\").status() } }; }\n",
+            "cfg(clippy)",
+        ),
     ];
     for (source, needle) in round3 {
         let hits = runtime_hits(source).join("\n");
@@ -707,6 +719,27 @@ fast = ["dep:api/kernel"]
         "{found}"
     );
     let _ = fs::remove_dir_all(&fake);
+
+    let scripted =
+        std::env::temp_dir().join(format!("hofund-plugin-buildrs-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scripted);
+    let pkg = scripted.join("plugins/providers/scripted");
+    fs::create_dir_all(pkg.join("src")).expect("dir");
+    fs::write(
+        pkg.join("Cargo.toml"),
+        "[package]\nname = \"scripted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n",
+    )
+    .expect("manifest");
+    fs::write(pkg.join("src/lib.rs"), "fn clean() {}\n").expect("source");
+    fs::write(
+        pkg.join("build.rs"),
+        "fn main() { println!(\"cargo::rustc-cfg=fast_path\"); }\n",
+    )
+    .expect("build");
+    let found = plugin_tree_violations(&scripted.join("plugins")).join("\n");
+    assert!(found.contains("build.rs is not allowed"), "{found}");
+    assert!(found.contains("build.rs emits rustc-cfg"), "{found}");
+    let _ = fs::remove_dir_all(&scripted);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
