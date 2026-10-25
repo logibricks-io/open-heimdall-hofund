@@ -7,9 +7,9 @@
 //! every other byte, including large integers and escape sequences, stays as
 //! the upstream sent it.
 //!
-//! An event is scanned once. More than [`DEFAULT_EVENT_CAP`] bytes, a leading
-//! BOM, or a value the scanner cannot read, is forwarded after a literal
-//! replacement of the quoted upstream model name.
+//! An event is scanned once. More than 1 MiB, a leading BOM, or a value the
+//! scanner cannot read, is forwarded after a literal replacement of the
+//! quoted upstream model name.
 
 use hofund_ir::{StreamEvent, Usage};
 
@@ -23,7 +23,7 @@ pub(crate) const DEFAULT_EVENT_CAP: usize = 1 << 20;
 ///
 /// `push` returns the bytes the client should see. A chunk may end inside a
 /// frame or a model string; the unfinished tail is held until a later `push`
-/// or `finish`, up to [`DEFAULT_EVENT_CAP`].
+/// or `finish`, up to 1 MiB.
 pub trait RawTap: Send {
     /// Observes `chunk` and returns the bytes to forward.
     fn push(&mut self, chunk: &[u8]) -> Vec<u8>;
