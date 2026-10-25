@@ -13,7 +13,11 @@ The local gateway is implemented: codecs, quirk profiles, provider adapters,
 ordered failover, configuration, a bearer token, usage rows, the `hofund`
 commands, coding-agent adapters, and the menu-bar app. The codec field
 mapping is in [codecs.md](codecs.md). The adopt-or-redesign record is in
-[magpie-comparison.md](magpie-comparison.md).
+[magpie-comparison.md](magpie-comparison.md). A proposal to split upstream
+providers, subscriptions, and coding-agent integrations into plugins is in
+[rfc/0001-microkernel-plugins.md](rfc/0001-microkernel-plugins.md). That
+proposal is not the build. The dependency table in this document stays
+normative until the proposal is accepted.
 
 Sibling repositories:
 

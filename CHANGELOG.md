@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An architecture proposal for a microkernel and plugins is in
+  `docs/rfc/0001-microkernel-plugins.md`. No code moves until that proposal
+  is accepted.
 - Coverage inventories for the 65 coding agents, the 58 provider presets,
   and the 33 subscription rows are in `docs/coverage/`. The preset catalog
   pin is commit `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`.
