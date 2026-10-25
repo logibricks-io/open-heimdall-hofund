@@ -1,10 +1,10 @@
 # RFC 0001: Microkernel and plugins
 
-- Status: **Proposed**. This document is not the build. The dependency table in [architecture.md](../architecture.md) stays normative until the owner accepts this proposal. No crate moves in this pull request.
-- Date: 2026-10-25. Amended the same day from the architecture review (appendix).
+- Status: **Accepted**. Owner sign-off on 2026-10-25 is conditional on the architecture review (appendix), including wording fixes F1, F2, and F3. This document is the design. It is not the build. The dependency table in [architecture.md](../architecture.md) stays normative until the migration pull requests land. No crate moves in this pull request.
+- Date: 2026-10-25. Amended the same day from the architecture review (appendix), and accepted the same day under that review.
 - hofund pin: `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4` (main after pull request #26)
 - Upstream pin: yetone/magpie `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`. `internal/provider/presets.go` is byte-identical at `5b2b3d3f50959735403dff6b77a85eec65772218`. The preset file records that pin at `crates/provider/presets.toml` line 8.
-- Workspace version: `0.1.0` (`xtask/tests/workspace_invariants.rs` asserts the manifest). The plugin API below is a design, not a semver promise, until this proposal is accepted. The semver policy is in section 1.
+- Workspace version: `0.1.0` (`xtask/tests/workspace_invariants.rs` asserts the manifest). The plugin API below is the accepted design. It is not a published semver promise until PR B lands the crate. The semver policy is in section 1.
 
 ## Summary
 
@@ -12,7 +12,7 @@ Upstream providers, subscription sign-in, and coding-agent integrations are the 
 
 This proposal keeps the spine as a kernel. The kernel owns mechanism: pooled HTTP, secrets, the account store, the clock, the scheduler, process spawn, tracing, the router snapshot, and a layer chain around every upstream call. Plugins own policy: vendor URLs, signatures, sign-in, and file layouts. They receive a `HostContext` and talk HTTP only through the SDK.
 
-`hofund-plugin-api` is the small contract. `hofund-plugin-sdk` holds helpers. A plugin depends only on those two crates. Plugins do not depend on each other, and they do not open sockets or spawn processes themselves. Stage 1 links plugins at compile time through an explicit registry. The `hofundd` binary is the only composition root. Desktop and TUI are clients of a versioned local API. A process host for community JavaScript auth plugins is a later stage.
+`hofund-plugin-api` is the small contract. `hofund-plugin-sdk` holds helpers. A plugin depends only on those two crates. Plugins do not depend on each other, and they do not open sockets or spawn processes themselves. Stage 1 links plugins at compile time through an explicit registry. In the end state the `hofundd` binary is the only composition root. Desktop and TUI are clients of a versioned local API. A process host for community JavaScript auth plugins is a later stage.
 
 The trait blocks in this document are the proposed contract. This pull request does not compile them.
 
@@ -86,7 +86,7 @@ Kernel paths, after adapters have moved, are covered by the vendor-name scan tha
 
 ### Host context
 
-Every `build` and every subscription call receives `&HostContext`. `HostContext` and its handles are concrete types in `hofund-plugin-api`. Each handle wraps an `Arc<dyn ...Backend>`. The backend traits, and the only public constructor of `HostContext`, live in a new kernel-only crate, `hofund-plugin-host`, which depends on the API. A plugin can call the handle methods. It cannot construct a handle, and it cannot implement a backend, because it cannot name that crate. `xtask` rejects a dependency on `hofund-plugin-host` from `plugins/` or from `kits/`, including dev-dependencies. A kit ships its own fake backend for tests. The word "sealed" is not used for these handles. Sealing (`mod sealed`) is only for a trait that `hofund-plugin-api` both declares and implements. This contract has no such trait.
+Every `build` and every subscription call receives `&HostContext`. `HostContext` and its handles are concrete types in `hofund-plugin-api`. Each handle wraps an `Arc<dyn ...Backend>`. The backend traits, and the only public constructor of `HostContext`, live in a new kernel-only crate, `hofund-plugin-host`, which depends on the API. A plugin can call the handle methods. It cannot construct a handle, and it cannot implement a backend, because it cannot name that crate as a normal dependency. `xtask` rejects a normal dependency on `hofund-plugin-host` from `plugins/`. A plugin reaches the host crate only through its kit dev-dependency. Kits (`publish = false`, test-only, only ever plugin dev-dependencies) may depend on `hofund-plugin-host` and expose `test_host(...) -> HostContext` with fake backends. The word "sealed" is not used for these handles. Sealing (`mod sealed`) is only for a trait that `hofund-plugin-api` both declares and implements. This contract has no such trait.
 
 - `http()` is the kernel-owned client. One pooled client exists per `(proxy, TLS)` profile, so members that share a host reuse connections and the OS trust store is loaded once per profile. The vocabulary is `http::Request<Body>` and `http::Response<BodyStream>`, plus `bytes::Bytes`. The client applies the proxy, TLS, and User-Agent profile, and the kernel's tracing layer. A plugin does not build a client, pick a timeout, or load roots.
 - `secrets()` returns `secrecy::SecretString`, re-exported by the API. The value is zeroized on drop and its `Debug` is redacted. `hofund_secrets::resolve` stops returning `String`. The SDK transport sets `HeaderValue::set_sensitive(true)` when it inserts the header. A plugin must not clone the secret into a struct field that derives `Debug`, and must not log it.
@@ -146,7 +146,7 @@ One error type. `PluginError` is a `thiserror` struct, `#[non_exhaustive]`, with
 
 `CountOutcome::Unsupported` stays a successful "this endpoint has no count method". It is not `PluginErrorKind::Unsupported`. The error kind means the call was rejected. The outcome means the feature is absent and the caller should continue.
 
-These types are specified in this document and implemented in PR B: `ListQuery`, `ProbeQuery`, `QuotaQuery`, `ModelList`, `ProbeReport`, `SignInCtx`, `SignInProof`, `SignInFlow`, `SignInChallenge`, `Account`, `QuotaWindow`, `QuotaObservation`, `Plan`, `GatewayTarget`, `DisconnectOutcome`, `ConnectionStatus`, `Schema`, `RawTable`, `ValidConfig`, `ConfigError`, `BuildError`, `WriteCtx`, `ImportCtx`, `ImportedProvider`, `ModelSpec`, `RouteSpec`, `SurfaceHost`, `Body`, and `BodyStream`. `Plan` moves out of `crates/agent/src/lib.rs` line 174. `GatewayTarget` moves out of line 67, and its token field is a `SecretString`. `AccountPool` is not a plugin type. The account store on `HostContext` replaces it.
+These types are specified in this document and implemented in PR B: `ListQuery`, `ProbeQuery`, `QuotaQuery`, `ModelList`, `ProbeReport`, `SignInCtx`, `SignInProof`, `SignInFlow`, `SignInChallenge`, `SubscriptionSpec`, `Account`, `QuotaWindow`, `QuotaObservation`, `Plan`, `GatewayTarget`, `DisconnectOutcome`, `ConnectionStatus`, `Schema`, `RawTable`, `ValidConfig`, `ConfigError`, `BuildError`, `WriteCtx`, `ImportCtx`, `ImportedProvider`, `ModelSpec`, `RouteSpec`, `SurfaceHost`, `Body`, and `BodyStream`. `Plan` moves out of `crates/agent/src/lib.rs` line 174. `GatewayTarget` moves out of line 67, and its token field is a `SecretString`. `AccountPool` is not a plugin type. The account store on `HostContext` replaces it. PR B implements `From<ConfigError> for BuildError`, because `validate` returns `ConfigError` and `validate_and_build` returns `BuildError`.
 
 ### Lifecycle, isolation, and reload
 
@@ -190,7 +190,7 @@ A usage tap still records token counts when the bytes expose them, and records "
 
 ### Kernel `Member`
 
-`hofund-router` defines `Member`. The daemon implements it for an adapter that holds `Arc<dyn UpstreamProvider>`, the `MemberId`, and the failed-or-cooled state. `Member` stays an `#[async_trait]` trait so the plugin API does not depend on `tower`. The daemon adapts each `Member` into a `tower::Service`, and the layer chain wraps that service. Router evolution does not change the plugin contract.
+`hofund-router` defines `Member`. The daemon implements it for an adapter that holds `Arc<dyn UpstreamProvider>`, the `MemberId`, and the failed-or-cooled state. `Member` stays an `#[async_trait]` trait so the router does not depend on `tower`. The daemon adapts each `Member` into a `tower::Service`, and the layer chain wraps that service. Router evolution does not change the plugin contract.
 
 ```rust
 /// Proposed. Not compiled by this pull request.
@@ -232,10 +232,13 @@ Static metadata lives on the factory, not on the instance. There is no `Upstream
 
 ```rust
 /// Proposed. Not compiled by this pull request.
-/// `ValidConfig: Any + Send + Sync + 'static`, defined in PR B.
+/// `ValidConfig: Send + Sync + 'static`, defined in PR B. It does not need `Any`.
 /// The associated type is what the plugin validates. The registry stores
-/// `Box<dyn DynUpstreamFactory>`. The blanket impl is the only downcast,
-/// via `hofund_plugin_sdk::downcast_ref`, so a plugin never guesses a type.
+/// `Box<dyn DynUpstreamFactory>`. The blanket
+/// `impl<F: UpstreamFactory> DynUpstreamFactory for F` calls `validate` and
+/// then `build` on the typed value, so there is no downcast.
+/// `validate` returns `ConfigError`. `validate_and_build` returns `BuildError`.
+/// PR B implements `From<ConfigError> for BuildError`.
 pub trait UpstreamFactory: Send + Sync + 'static {
     type Config: ValidConfig;
 
@@ -524,7 +527,7 @@ pub enum Slot {
 }
 ```
 
-`AgentFactory` is the same associated-type shape. A data-only agent has no crate. The registry synthesizes a factory whose schema is empty and whose `build` returns the compiled description. `AgentDescription` fields (private, `const` constructor in PR B) are: id, display name, binary, files, sets, optional model key, optional effort key, `visible`, `route` (`Gateway` or `None`), and `requires: &'static [SurfaceId]`.
+`AgentFactory` is the same associated-type shape, erased as `DynAgentFactory`. A data-only agent has no crate. The registry synthesizes a factory whose schema is empty and whose `build` returns the compiled description. `AgentDescription` fields (private, `const` constructor in PR B) are: id, display name, binary, files, sets, optional model key, optional effort key, `visible`, `route` (`Gateway` or `None`), and `requires: &'static [SurfaceId]`.
 
 ```rust
 /// Proposed. Not compiled by this pull request.
@@ -537,6 +540,19 @@ pub trait AgentFactory: Send + Sync + 'static {
     fn build(
         &self,
         cfg: &Self::Config,
+        host: &HostContext,
+    ) -> Result<Arc<dyn AgentIntegration>, BuildError>;
+}
+
+/// Erased factory stored by the registry. The blanket
+/// `impl<F: AgentFactory> DynAgentFactory for F` calls `validate` and then
+/// `build` on the typed value. `BuildError: From<ConfigError>`.
+pub trait DynAgentFactory: Send + Sync + 'static {
+    fn description(&self) -> &'static AgentDescription;
+    fn config_schema(&self) -> Schema;
+    fn validate_and_build(
+        &self,
+        raw: &RawTable,
         host: &HostContext,
     ) -> Result<Arc<dyn AgentIntegration>, BuildError>;
 }
@@ -660,9 +676,9 @@ The set of plugins is visible in review, which matches how `MEMBERS` and `expect
 
 Feature flags live on `hofund-plugin-registry`, one per implementation crate, default features naming all of them so the daemon links every in-tree plugin. Features are additive. A developer builds a subset with `--no-default-features --features azure`. Data-only presets and data-only agents have no feature, because they have no crate. The registry's generated code calls the SDK transport for those ids.
 
-`plugins/registry` is the only crate allowed to depend on plugin crates. The composition root is the `hofundd` binary in `apps/hofundd` (package `hofund-daemon-bin`). It is the only package that links the registry. `hofund-daemon` the library takes the registry as an argument and does not name plugin crates, so a plugin pull request does not edit the daemon manifest. The CLI does not link the registry. Desktop and TUI do not link the registry.
+`plugins/registry` is the only crate allowed to depend on plugin implementation crates (packages under `plugins/<kind>/`). The composition root in the end state is the `hofundd` binary in `apps/hofundd` (package `hofund-daemon-bin`). After L it is the only package that links the registry directly. After L, `hofund-daemon` the library takes the registry as an argument and does not name plugin crates, so a plugin pull request does not edit the daemon manifest. The CLI does not depend on the registry directly. Until L it links it transitively through `hofund-daemon`, and rule 3's ban (including transitive links via `cargo metadata`) turns on in L. Desktop and TUI do not depend on the registry directly. Until L the desktop links it the same way, through the embedded daemon.
 
-Today the only binary is `hofund`, from `crates/cli/Cargo.toml` lines 14-16, and `hofund serve` is `Command::Serve` at `crates/cli/src/main.rs` line 29. That call runs the daemon in-process. In the end state, `hofund serve` in `apps/cli` execs `hofundd` with the same config path and does not link the registry. `hofundd` is the process that listens.
+Today the only binary is `hofund`, from `crates/cli/Cargo.toml` lines 14-16, and `hofund serve` is `Command::Serve` at `crates/cli/src/main.rs` line 29. That call runs the daemon in-process. In the end state, `hofund serve` in `apps/cli` execs `hofundd` with the same config path and does not link the registry, directly or transitively. `hofundd` is the process that listens.
 
 Until PR L, provider commands, subscription commands, and `hofund serve` may still run in-process through the daemon library, which is what the current binary does. Pull request #28 and batch H use that path. They do not wait for L. L is what switches those commands onto the control client and what makes `hofund serve` the exec. The desktop rework that drops the embedded daemon is the same pull request's follower, and it waits on L.
 
@@ -679,7 +695,7 @@ One daemon process serves both the model gateway and the management API. Desktop
 - An event stream (SSE or WebSocket) carries usage, quota, routing decisions, and sign-in progress. The tray, the window, the TUI, and a future web UI render from it. They do not poll and they do not restart the gateway to see a new account.
 - `config_schema()` and `SignInChallenge` are the only vendor-shaped data a client needs. The UI builds a form from the schema. It does not match on `google-vertex`.
 - `hofund-desktop` and the future TUI depend only on `hofund-control-client` and `hofund-control-proto`. They do not depend on `daemon`, `registry`, or a plugin. A UI crash does not drop an in-flight model request. Socket handoff on update (row 16.3) is this boundary: the new UI connects to the running daemon.
-- The CLI binary moves to `apps/cli` and stays named `hofund`. Commands that only touch local files (config check, a dry-run agent plan) may link `hofund-config` and `hofund-agent`. After L, commands that talk to a provider, a subscription, or the running gateway go through the control client, and `hofund serve` execs `hofundd`. Until L those commands may run in-process through the daemon library. The CLI does not link the registry in either phase.
+- The CLI binary moves to `apps/cli` and stays named `hofund`. Commands that only touch local files (config check, a dry-run agent plan) may link `hofund-config` and `hofund-agent`. After L, commands that talk to a provider, a subscription, or the running gateway go through the control client, and `hofund serve` execs `hofundd`. Until L those commands may run in-process through the daemon library. The CLI does not depend on the registry directly. Until L it links it transitively through `hofund-daemon`, and rule 3's ban (including transitive links via `cargo metadata`) turns on in L.
 
 PR L adds the proto, the client, the loopback listener, and the event stream (rows 12.3 and 11.2). The desktop rework that drops the in-process daemon is a later pull request that depends on L. This proposal does not do that rework.
 
@@ -724,7 +740,7 @@ Until that move, paths stay `crates/<name>` and the new crates are `crates/plugi
 
 ### Names
 
-- Plugin id: kebab-case ASCII, equal to the coverage inventory id when one exists (`codex`, `claude-code`, `google-vertex`, `remote-gateway`). The type is `PluginId`.
+- Plugin id: kebab-case ASCII, equal to the coverage inventory id when one exists (`codex`, `claude-code`, `google-vertex`, `remote-gateway`). The type is `PluginId`. The ids `api`, `sdk`, `host`, and `registry` are reserved and are not plugin ids. The crates `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-host`, and `hofund-plugin-registry` are infrastructure.
 - Crate name: `hofund-plugin-<id>`. Package path: `plugins/<kind>/<id>`.
 - Kit package name: `hofund-kit-<kind>`, `publish = false`.
 - One implementation crate may own many preset ids. The fragment lists them. The id of the crate is the implementation id (`openai-compat`), and each `[[preset]]` id is the catalog id (`openai`, `deepseek`, and the other URL-only rows that share it).
@@ -735,9 +751,9 @@ Until that move, paths stay `crates/<name>` and the new crates are `crates/plugi
 
 This pull request does not add these checks. The pull request that adds `plugins/` adds them next to `dependency_graph_matches_architecture`.
 
-1. A package whose path starts with `plugins/` may name `hofund-plugin-api` and, when it uses a helper, `hofund-plugin-sdk`. No other workspace dependency. Pure third-party crates (`ring`, `serde`, and similar) are allowed. `hofund-gateway`, `hofund-daemon`, `hofund-router`, `hofund-provider`, `hofund-ir`, and any other `hofund-plugin-*` are rejected.
+1. A package under `plugins/<kind>/` (`providers`, `subscriptions`, `agents`, `inbound`) may name `hofund-plugin-api` and, when it uses a helper, `hofund-plugin-sdk`. No other workspace dependency. Pure third-party crates (`ring`, `serde`, and similar) are allowed. `hofund-gateway`, `hofund-daemon`, `hofund-router`, `hofund-provider`, `hofund-ir`, `hofund-plugin-host`, `hofund-plugin-registry`, and any implementation crate `hofund-plugin-<id>` are rejected. `plugins/registry` is rule 3, not this rule. The reserved ids in the Names section are not plugin ids.
 2. No plugin depends on another plugin. This is the rule `TestPluginsImportOnlyCore` enforces for Go imports (`internal/pluginrt/pluginrt_test.go` line 94, described at `pluginrt.go` lines 8-10). Here it is a Cargo dependency check plus a walk of `use` paths.
-3. `plugins/registry` is the only package that may depend on `hofund-plugin-*` crates. Its dependency list and its feature list are sorted and equal to the `plugin.toml` files on disk. The end state is that `hofund-daemon-bin` (`apps/hofundd`) is the only package that depends on the registry. `hofund-cli`, `hofund-desktop`, and `hofund-control-client` are rejected if they do. That ban turns on in PR L. From D until L the desktop still embeds `hofund-daemon` and the CLI may run provider and subscription commands in-process, so the library's registry edge is temporary and L removes it.
+3. The rule is by path, not by the name prefix `hofund-plugin-*`. Packages under `plugins/<kind>/` depend only on the API and the SDK (rule 1). `plugins/registry` is the only package under `plugins/` that may depend on implementation crates, meaning `hofund-plugin-<id>` for a real plugin id. The ids `api`, `sdk`, `host`, and `registry` are reserved, so `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-host`, and `hofund-plugin-registry` are infrastructure. `hofund-router` depending on `hofund-plugin-api`, and `hofund-daemon-bin` depending on `hofund-plugin-registry`, are legal. The registry's dependency list and its feature list are sorted and equal to the `plugin.toml` files on disk. After L, `hofund-daemon-bin` (`apps/hofundd`) is the only package that depends on the registry directly. The CLI does not depend on the registry directly. Until L it links it transitively through `hofund-daemon`, and this ban (including transitive links via `cargo metadata`) turns on in L. The desktop does the same until L. `hofund-control-client` never depends on the registry. From D until L the library's registry edge is temporary and L removes it.
 4. Preset ids are unique across fragments. The 58-id assertion that the catalog tests encode today moves to this check. Aliases stay aliases (the four `[[alias]]` tables at `presets.toml` lines 10-27).
 5. The vendor-name scan grows from `crates/gateway` and `crates/router` to every kernel crate after the adapters have left `crates/provider`. There is no allowlist. Turning the scan on earlier fails the build on the adapters that are still there on purpose.
 6. A plugin's dev-dependencies may include the kit for its own kind and ordinary test crates. A provider plugin does not depend on the agent kit. A runtime dependency on any `hofund-kit-*` is rejected.
@@ -747,18 +763,18 @@ This pull request does not add these checks. The pull request that adds `plugins
 10. Every plugin manifest contains `[lints] workspace = true`.
 11. Every code plugin has `tests/conformance.rs` calling `hofund_kit_<kind>::conformance`. A data-only plugin is covered by the registry fragment test instead.
 12. `hofund-router` does not name `UpstreamProvider`, `Subscription`, or `HostContext`.
-13. No package under `plugins/` or `kits/` depends on `hofund-plugin-host`, as a normal dependency or a dev-dependency. Kits build their fake backend inside the kit crate.
+13. No package under `plugins/` depends on `hofund-plugin-host` as a normal dependency. A plugin reaches it only through its kit dev-dependency. Kits (`publish = false`, test-only) may depend on `hofund-plugin-host` and expose `test_host(...) -> HostContext` with fake backends.
 
-`docs/architecture.md`, the crate manifest, and `expected_deps` still change together for every new edge. The edges this proposal adds, once accepted, are:
+`docs/architecture.md`, the crate manifest, and `expected_deps` still change together for every new edge. The edges this design adds, when the migration pull requests land, are:
 
 - `hofund-plugin-sdk` depends on `hofund-plugin-api`
-- `hofund-plugin-host` depends on `hofund-plugin-api`. Nothing under `plugins/` or `kits/` depends on `hofund-plugin-host`
+- `hofund-plugin-host` depends on `hofund-plugin-api`. Nothing under `plugins/` depends on `hofund-plugin-host` as a normal dependency. Kits may depend on it and expose `test_host(...) -> HostContext`
 - `hofund-plugin-api` depends on `hofund-ir` and re-exports three types by name
 - `hofund-router` depends on `hofund-plugin-api` only for `PluginError`, `Request`, `Completion`, and `MemberId`, or on `hofund-kernel-types` if PR C splits those four out. It does not depend on the provider trait
 - `hofund-daemon-bin` (`apps/hofundd`) depends on `hofund-plugin-registry` and on `hofund-plugin-host`
 - `hofund-control-client` depends on `hofund-control-proto`
 - `apps/desktop` and `apps/tui` depend on `hofund-control-client` only
-- `apps/cli` depends on `hofund-control-client` after L, and may depend on `hofund-config` and `hofund-agent` for offline commands. Until L it may depend on `hofund-daemon` for the in-process provider and subscription commands. It does not depend on the registry
+- `apps/cli` depends on `hofund-control-client` after L, and may depend on `hofund-config` and `hofund-agent` for offline commands. Until L it may depend on `hofund-daemon` for the in-process provider and subscription commands. It does not depend on the registry directly. Until L it links it transitively through `hofund-daemon`, and rule 3's ban (including transitive links via `cargo metadata`) turns on in L
 - plugin packages depend on `hofund-plugin-api` and may depend on `hofund-plugin-sdk`
 
 ### Lints and feature checks
@@ -805,7 +821,7 @@ Required CI has no vendor secrets and does not log in to a browser. Acceptance i
 
 ## 6. Migration and parallel work
 
-No step below starts until the owner accepts this proposal. This pull request does not add a plugin, a `CODEOWNERS` file, or a crate.
+No step below starts in this pull request. PR B starts only after this RFC is merged. This pull request does not add a plugin, a `CODEOWNERS` file, or a crate.
 
 In flight, and not part of the proposal:
 
@@ -886,7 +902,7 @@ The only shared file in a batch is `plugins/registry/Cargo.toml` (features and d
 
 Kernel globs, `plugins/registry`, the control crates, and `fuzz/` belong to whoever the owner assigns to the kernel. Each plugin batch's pull request adds the lines for the directories it introduces. A plugin agent does not need write access to another plugin's directory.
 
-`docs/magpie-comparison.md` gains the adopt-or-redesign rows for this seam in pull request B, after acceptance. This proposal does not edit that table, so an unaccepted design is not recorded as a decision.
+`docs/magpie-comparison.md` gains the adopt-or-redesign rows for this seam in pull request B. This pull request does not edit that table. The comparison is recorded when the seam lands.
 
 ## 7. Comparison with magpie at `cbbf316`
 
@@ -896,7 +912,7 @@ Pins: hofund `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4`, magpie `cbbf3163cb3c87e
 
 | Magpie | Where | Hofund |
 | --- | --- | --- |
-| The runtime never imports a plugin, and a plugin never imports another. They meet through services. | `internal/pluginrt/pluginrt.go` lines 8-10. Test: `internal/pluginrt/pluginrt_test.go` line 94. `main.go` and `plugins/all` are the only gatherers (test comment, line 91). | The registry crate is the only gatherer. `xtask` rejects a plugin-to-plugin dependency. `hofundd` is the only composition root. Plugins meet the kernel through `HostContext`. |
+| The runtime never imports a plugin, and a plugin never imports another. They meet through services. | `internal/pluginrt/pluginrt.go` lines 8-10. Test: `internal/pluginrt/pluginrt_test.go` line 94. `main.go` and `plugins/all` are the only gatherers (test comment, line 91). | The registry crate is the only gatherer. `xtask` rejects a plugin-to-plugin dependency. In the end state `hofundd` is the only composition root. Plugins meet the kernel through `HostContext`. |
 | One plugin per provider id, and a recorded clash when two claim it. The host runs the user's choice, otherwise the last one listed. | `internal/plugin/host.go` `Loaded.Provides` line 499, `Clash` lines 509-517, `Clashes` line 521. | The registry rejects a duplicate preset id at build time. Stage 1 has no user-installed overlay, so a duplicate is a hard error rather than a runtime preference. |
 | A plugin agent declares the file, the format, the model key, and the prefix. The host performs every write and stashes the user's previous values. | `internal/agentplug/agentplug.go` `Desc` lines 65-83, `Formats` lines 57-63. `internal/agent/plugged.go` lines 3-10 and `pluggedStash` line 48. A plugin id that collides with a built-in is the built-in (`plugged.go` lines 31-34). | `agent.toml` compiled by `build.rs`, plus the engine in `hofund-agent`. A data plugin does not write files itself. A colliding id fails the registry check. |
 | An API version constant on the manifest. | `internal/pluginrt/pluginrt.go` line 27, `const API = "1.0"`. | `API = "1"` is the future process-host handshake. In-tree compatibility is `#[non_exhaustive]` plus the public-API diff (section 1). |
@@ -928,9 +944,9 @@ These are not required before acceptance. They have homes so they are not forgot
 
 ## Sign-off
 
-Acceptance means the owner agrees to the kernel boundary, `HostContext`, the factories, the four kinds, the lifecycle and snapshot rules, the control plane, the placement table, and the migration order. It does not merge any of the migration pull requests by itself.
+Accepted on 2026-10-25. Owner sign-off is conditional on the architecture review (appendix), including wording fixes F1, F2, and F3. Acceptance means the owner agrees to the kernel boundary, `HostContext`, the factories, the four kinds, the lifecycle and snapshot rules, the control plane, the placement table, and the migration order. It does not merge any of the migration pull requests by itself. PR B starts only after this pull request is merged.
 
-Until then:
+Until the migration pull requests land:
 
 - `docs/architecture.md` is the build.
 - Coverage cells and feature-parity statuses stay as they are.
@@ -938,12 +954,12 @@ Until then:
 
 ## Appendix: Review resolution
 
-Review file: architecture review of head `b93d1c2488c7b29ee7af5ea7dd0c4b955d37f732`. Each id points at the section that resolves it.
+Review file: architecture review of head `b93d1c2488c7b29ee7af5ea7dd0c4b955d37f732`, the re-review of `f372e4c`, and the final check of `a9fc60f`. Each id points at the section that resolves it. F1, F2, and F3 are the wording fixes from that final check.
 
 | Id | Where it is resolved |
 | --- | --- |
 | M1 | Section 1, "Host context". Handles: `http`, `secrets` (`SecretString`), `accounts`, `clock`, `scheduler`, `spawn_process`, `cache_dir`, `state_dir`, `observe`. Construction is R2. |
-| M2 | Section 2.1 `UpstreamFactory` (associated `Config`, erased `DynUpstreamFactory`). Section 2.1 "Config shape" and PR B2, including `[subscriptions]`. `SubscriptionFactory` and `AgentFactory` signatures in sections 2.2 and 2.3. Instance-level `spec` removed. `protocol` stays a `String` (R3). |
+| M2 | Section 2.1 `UpstreamFactory` (associated `Config`, erased `DynUpstreamFactory`, no downcast, `From<ConfigError> for BuildError`). Section 2.1 "Config shape" and PR B2, including `[subscriptions]`. `SubscriptionFactory`, `AgentFactory`, and `DynAgentFactory` in sections 2.2 and 2.3. `SubscriptionSpec` is in the type list. Instance-level `spec` removed. `protocol` stays a `String` (R3). |
 | M3 | Section 1 pooled client. Section 4 rules 1 and 9: no `reqwest`, `hyper`, `axum`, `tokio` net or process, `std::process`. SDK only. |
 | M4 | Section 2.3. API trait is `description`, `custom_write`, and `import_providers`. `GatewayTarget` and `Plan` live in the API. `TierId` is defined. Engine stays in `hofund-agent`. `Slot::ModelTier`. `build.rs` static data. PR F wording in section 6. |
 | M5 | Section 1, "Contract types" and "Semver policy". `#[non_exhaustive]`, private fields, newtypes, `SurfaceId` instead of `KernelRoute`, `ProtocolId`, `Send + Sync + 'static`, named IR re-exports. `const fn` constructors are R7. Handle construction is R2. |
@@ -952,22 +968,25 @@ Review file: architecture review of head `b93d1c2488c7b29ee7af5ea7dd0c4b955d37f7
 | M8 | Section 1, `ArcSwap` snapshot, stable `MemberId`. Section 2.2 membership "at startup and on every membership change". Secret read per call, not captured. |
 | M9 | Section 1 `observe` and `retry_after`. Section 2.2 corrects the cooldown claim against `architecture.md` line 151. PR K before H. |
 | M10 | Section 1, "Observability". Kernel spans and metrics. `tracing` only via the SDK. Redaction at the layer. `tracing` added in B and wrapped in C. |
-| M11 | Section 3, "Control plane", and section 4. `apps/hofundd` (`hofund-daemon-bin`, binary `hofundd`) is the only registry linker. `hofund serve` execs it after L. Desktop and TUI use `hofund-control-client`. `config_schema` and `SignInChallenge`. CLI at `apps/cli`. Until L, provider and subscription commands stay in-process (R6). PR L before the desktop rework. |
+| M11 | Section 3, "Control plane", and section 4. After L, `apps/hofundd` (`hofund-daemon-bin`, binary `hofundd`) is the only direct registry linker, and the library takes the registry as an argument. The CLI does not depend on the registry directly. Until L it links it transitively through `hofund-daemon` (F1). `hofund serve` execs `hofundd` after L. Desktop and TUI use `hofund-control-client`. `config_schema` and `SignInChallenge`. CLI at `apps/cli`. Until L, provider and subscription commands stay in-process (R6). PR L before the desktop rework. |
 | M12 | Section 2.4, one row per capability in the review table, plus the `InboundSurface` trait and the PR D mount (R1). |
 | N1 | Section 1, "Same-protocol passthrough". `Completion::Raw`, usage tap, no `model_request.clone()`, `criterion` benches, magpie baseline as a goal. Lands in PR C. |
 | N2 | Section 8. Not required for acceptance. |
 | N3 | Section 5. Mandatory `hofund_kit_*::conformance`, `xtask` check, cancellation, deadline, mid-stream error, redaction, concurrency, per-OS goldens, `fuzz/` targets. |
 | N4 | Section 4, "Lints and feature checks". `deny(missing_docs, unreachable_pub)`, pedantic warn, public-API snapshot, `cargo hack --each-feature`. |
 | N5 | Section 8. The privilege statement is in section 1 so the gap is not silent. |
-| N6 | Section 1, "Kernel `Member`". Router does not depend on `UpstreamProvider`. It does depend on `MemberId` as well as `PluginError`, `Request`, and `Completion`. The daemon adapts `Member` into a `tower::Service` for the layer chain. PR C. |
+| N6 | Section 1, "Kernel `Member`". Router does not depend on `UpstreamProvider` or on `tower`. `Member` stays `#[async_trait]` for that reason. It does depend on `MemberId` as well as `PluginError`, `Request`, and `Completion`. The daemon adapts `Member` into a `tower::Service` for the layer chain. PR C. |
 | N7 | Section 1, "Semver policy". In-tree `#[non_exhaustive]` plus public-API diff. `API = "1"` is the process-host handshake only. |
 | N8 | Section 8. Also the on/off row in section 2.4. |
 | N9 | Section 8. Must merge before Copilot in batch H. GHE lives in `options` until that enum change (section 2.2). |
-| N10 | Workspace version assertion kept in the header. `Wire` rationale stated once (section 1, coupled paragraph points at `ProtocolId`). Types left to PR B are listed in section 1, "Errors", including `GatewayTarget`, `Plan`, `TierId`, `ModelSpec`, `Body`, `BodyStream`, `SignInFlow`, `SignInChallenge`, `RouteSpec`, and `SurfaceHost`. `AccountPool` is removed in favor of the account store. |
+| N10 | Workspace version assertion kept in the header. `Wire` rationale stated once (section 1, coupled paragraph points at `ProtocolId`). Types left to PR B are listed in section 1, "Errors", including `GatewayTarget`, `Plan`, `TierId`, `ModelSpec`, `Body`, `BodyStream`, `SignInFlow`, `SignInChallenge`, `SubscriptionSpec`, `RouteSpec`, and `SurfaceHost`. `AccountPool` is removed in favor of the account store. `From<ConfigError> for BuildError` is stated there. |
 | R1 | Section 2.4, `InboundSurface` (`id`, `routes`, `handle`, `health`, `shutdown`). PR D mounts routes (conflict check, auth, spans, timeout). PR S depends on that mount. `SurfaceId` replaces `KernelRoute`. `requires` is checked by `build.rs`. No vendor-scan allowlist (rules 5 and section 1). |
-| R2 | Section 1, "Host context". Handles wrap `Arc<dyn Backend>`. Backends and the only constructor live in `hofund-plugin-host`. Rule 13 forbids `plugins/` and `kits/` from depending on it. Kits ship a fake backend. "Sealed" is not used for handles. |
+| R2 | Section 1, "Host context". Handles wrap `Arc<dyn Backend>`. Backends and the only constructor live in `hofund-plugin-host`. Rule 13 forbids a normal dependency from `plugins/`. Kits may depend on the host crate and expose `test_host` (F2). "Sealed" is not used for handles. |
 | R3 | Section 2.1, "Config shape", and rule 7. Config stores `protocol` as a `String`. The daemon uses `ProtocolId::try_from`. `Kind` is deleted rather than turned into a config type. |
 | R4 | Section 3 and section 4. Package `hofund-daemon-bin` at `apps/hofundd`, binary `hofundd`. `hofund serve` execs it. Rule 3 and the edge list name that package. |
 | R5 | Section 2.3. `GatewayTarget` and `Plan` move into the API (from `crates/agent/src/lib.rs` lines 67 and 174). `import_providers` is on the trait. `TierId` is defined in section 1. |
 | R6 | Section 6. Until L, provider and subscription CLI commands, including #28, stay in-process and do not wait for L. `[subscriptions]` and `[subscriptions.options]` are PR B2. C is ordered before D. C marks a member failed; K adds the timer. |
 | R7 | Section 1, "Contract types". `#[doc(hidden)] pub const fn` constructors for every `static` the registry emits. |
+| F1 | Section 3 (composition root and the CLI bullet), rule 3, and the CLI edge. The CLI and the desktop do not depend on the registry directly. Until L they link it transitively through `hofund-daemon`. After L the library takes the registry as an argument. The ban, including transitive links via `cargo metadata`, turns on in L. |
+| F2 | Section 1, "Host context", rule 13, and the host edge. Kits (`publish = false`, test-only) may depend on `hofund-plugin-host` and expose `test_host(...) -> HostContext`. Rule 13 restricts only normal dependencies from `plugins/`. |
+| F3 | Section 4, Names and rule 3. The rule is by path (`plugins/<kind>/`). Plugin ids `api`, `sdk`, `host`, and `registry` are reserved, so `hofund-router` depending on `hofund-plugin-api` and `hofund-daemon-bin` depending on `hofund-plugin-registry` are legal. |
