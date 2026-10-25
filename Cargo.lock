@@ -1733,6 +1733,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "hofund-plugin-api",
+ "hofund-plugin-sdk",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

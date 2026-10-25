@@ -72,7 +72,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-kit-subscription" => &["hofund-plugin-host"],
         "hofund-kit-upstream" => &["hofund-plugin-host"],
         "hofund-plugin-api" => &["hofund-ir"],
-        "hofund-plugin-host" => &["hofund-plugin-api"],
+        "hofund-plugin-host" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-echo" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-fixture" => &["hofund-plugin-api"],
         "hofund-plugin-registry" => &[

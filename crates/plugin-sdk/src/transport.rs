@@ -3,9 +3,16 @@
 //! This module builds requests and reads responses. It does not construct a
 //! client. [`Call::send`] uses [`HttpHandle::send`](hofund_plugin_api::HttpHandle::send).
 //! A status of 400 or higher becomes [`PluginErrorKind::Status`].
-//! Connect and timeout failures are the only ones [`Call::send_with_retry`] repeats.
+//!
+//! [`Call::send_with_retry`] retries at most three times. [`PluginErrorKind::Connect`]
+//! (the request was not sent) is retried for every method. [`PluginErrorKind::Timeout`]
+//! and [`PluginErrorKind::Transport`] are retried only for an idempotent method,
+//! or when [`Call::idempotent`] is set. The wait between attempts is full-jitter
+//! exponential backoff, and dropping the future cancels it.
 
 use std::fmt;
+use std::hash::{BuildHasher, Hasher};
+use std::time::Duration;
 
 use hofund_plugin_api::{
     Body, BodyStream, CredentialStyle, HttpHandle, PluginError, PluginErrorKind, SecretString,
@@ -20,6 +27,8 @@ pub type HttpResponse = http::Response<BodyStream>;
 
 const MAX_ATTEMPTS: u8 = 3;
 const STATUS_SNIPPET: usize = 256;
+const BACKOFF_BASE: Duration = Duration::from_millis(20);
+const BACKOFF_CAP: Duration = Duration::from_millis(200);
 
 /// A buffered HTTP response.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +64,7 @@ pub struct Call {
     uri: String,
     headers: Vec<Header>,
     body: Vec<u8>,
+    idempotent: bool,
 }
 
 #[derive(Clone)]
@@ -83,7 +93,21 @@ impl Call {
             uri: uri.into(),
             headers: Vec::new(),
             body: Vec::new(),
+            idempotent: false,
         }
+    }
+
+    /// Marks whether a non-idempotent method may be retried after the body was sent.
+    ///
+    /// `POST` and `PATCH` retry only [`PluginErrorKind::Connect`] unless this
+    /// is `true`. Set it when the upstream treats the call as idempotent, for
+    /// example because the request carries an idempotency key. `GET`, `HEAD`,
+    /// `OPTIONS`, `PUT`, and `DELETE` already retry timeout and transport
+    /// failures. The default is `false`.
+    #[must_use]
+    pub fn idempotent(mut self, idempotent: bool) -> Self {
+        self.idempotent = idempotent;
+        self
     }
 
     /// Adds a header. The value is not marked sensitive.
@@ -167,27 +191,39 @@ impl Call {
 
     /// Sends the call up to `attempts` times, including the first try.
     ///
-    /// The cap is three attempts. Only connect and timeout errors are retried.
+    /// The cap is three attempts. [`PluginErrorKind::Connect`] is retried for
+    /// every method, because the request was not sent. [`PluginErrorKind::Timeout`]
+    /// and [`PluginErrorKind::Transport`] are retried for `GET`, `HEAD`,
+    /// `OPTIONS`, `PUT`, and `DELETE`, and for a call marked
+    /// [`Call::idempotent`]. `POST` and `PATCH` are not retried on those two
+    /// kinds: the body may already have been processed.
+    ///
+    /// Between attempts the call waits a full-jitter exponential backoff,
+    /// starting at 20ms and capped at 200ms. The wait is a normal sleep.
+    /// Dropping this future cancels the sleep and does not start another attempt.
     ///
     /// # Errors
     ///
     /// Returns the last [`PluginError`] when every attempt fails, or the first
-    /// error that is not connect or timeout.
+    /// error that this call must not retry.
     pub async fn send_with_retry(
         self,
         http: &HttpHandle,
         attempts: u8,
     ) -> Result<Reply, PluginError> {
         let attempts = attempts.clamp(1, MAX_ATTEMPTS);
-        let call = self;
         let mut attempt = 1_u8;
         loop {
-            if attempt == attempts {
-                return call.send(http).await;
-            }
-            match call.clone().send(http).await {
+            match self.clone().send(http).await {
                 Ok(reply) => return Ok(reply),
-                Err(error) if retriable(error.kind()) => attempt += 1,
+                Err(error)
+                    if attempt < attempts
+                        && retries(self.method, self.idempotent, error.kind()) =>
+                {
+                    let failed = u32::from(attempt);
+                    attempt += 1;
+                    tokio::time::sleep(backoff(failed)).await;
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -217,6 +253,7 @@ impl fmt::Debug for Call {
             .field("uri", &self.uri)
             .field("header_names", &names)
             .field("body_len", &self.body.len())
+            .field("idempotent", &self.idempotent)
             .finish()
     }
 }
@@ -228,8 +265,36 @@ fn header_value(header: &Header) -> Result<http::HeaderValue, PluginError> {
     Ok(value)
 }
 
-fn retriable(kind: PluginErrorKind) -> bool {
-    matches!(kind, PluginErrorKind::Connect | PluginErrorKind::Timeout)
+fn retries(method: &str, idempotent: bool, kind: PluginErrorKind) -> bool {
+    match kind {
+        PluginErrorKind::Connect => true,
+        PluginErrorKind::Timeout | PluginErrorKind::Transport => {
+            idempotent || method_is_idempotent(method)
+        }
+        _ => false,
+    }
+}
+
+fn method_is_idempotent(method: &str) -> bool {
+    matches!(method, "GET" | "HEAD" | "OPTIONS" | "PUT" | "DELETE")
+}
+
+/// Full jitter: uniform in `0..cap`. `failed_attempts` is 1 after the first try.
+fn backoff(failed_attempts: u32) -> Duration {
+    let shift = failed_attempts.saturating_sub(1).min(4);
+    let factor = 1_u32 << shift;
+    let grown = BACKOFF_BASE.saturating_mul(factor);
+    full_jitter(grown.min(BACKOFF_CAP))
+}
+
+fn full_jitter(cap: Duration) -> Duration {
+    let cap_nanos = u64::try_from(cap.as_nanos()).unwrap_or(u64::MAX);
+    if cap_nanos == 0 {
+        return Duration::ZERO;
+    }
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(cap_nanos);
+    Duration::from_nanos(hasher.finish() % cap_nanos)
 }
 
 fn classify(status: u16, body: Vec<u8>) -> Result<Reply, PluginError> {
@@ -269,7 +334,7 @@ pub fn text_response(status: u16, body: impl AsRef<[u8]>) -> HttpResponse {
 mod tests {
     use hofund_plugin_api::{CredentialStyle, HeaderName, PluginErrorKind, SecretString};
 
-    use super::{Call, classify, retriable, text_response};
+    use super::{Call, backoff, classify, retries, text_response};
 
     fn secret(value: &str) -> SecretString {
         SecretString::from(value)
@@ -324,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn status_400_is_an_error_and_only_connect_and_timeout_retry() {
+    fn status_400_is_an_error_and_retry_follows_the_method() {
         let error = classify(401, b"nope".to_vec()).expect_err("status");
         assert_eq!(error.kind(), PluginErrorKind::Status);
         assert_eq!(error.status(), Some(401));
@@ -332,10 +397,41 @@ mod tests {
         let ok = classify(200, b"pong".to_vec()).expect("ok");
         assert_eq!(ok.status(), 200);
         assert_eq!(ok.body(), b"pong");
-        assert!(retriable(PluginErrorKind::Connect));
-        assert!(retriable(PluginErrorKind::Timeout));
-        assert!(!retriable(PluginErrorKind::Status));
-        assert!(!retriable(PluginErrorKind::Auth));
+        for method in ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"] {
+            assert!(retries(method, false, PluginErrorKind::Connect));
+            assert!(retries(method, false, PluginErrorKind::Timeout));
+            assert!(retries(method, false, PluginErrorKind::Transport));
+        }
+        for method in ["POST", "PATCH"] {
+            assert!(retries(method, false, PluginErrorKind::Connect));
+            assert!(!retries(method, false, PluginErrorKind::Timeout));
+            assert!(!retries(method, false, PluginErrorKind::Transport));
+            assert!(retries(method, true, PluginErrorKind::Timeout));
+            assert!(retries(method, true, PluginErrorKind::Transport));
+        }
+        assert!(!retries("POST", true, PluginErrorKind::Status));
+        assert!(!retries("GET", true, PluginErrorKind::Auth));
+        let marked = Call::post("https://example.test").idempotent(true);
+        assert!(marked.idempotent);
+        let plain = Call::post("https://example.test");
+        assert!(!plain.idempotent);
+        assert!(!format!("{plain:?}").contains("secret"));
+    }
+
+    #[test]
+    fn backoff_stays_inside_the_cap_and_is_not_constant() {
+        let mut samples = Vec::new();
+        for _ in 0..24 {
+            let delay = backoff(1);
+            assert!(delay <= super::BACKOFF_BASE);
+            samples.push(delay);
+        }
+        assert!(
+            samples.iter().any(|delay| *delay != samples[0]),
+            "full jitter"
+        );
+        assert!(backoff(2) <= super::BACKOFF_BASE.saturating_mul(2));
+        assert!(backoff(8) <= super::BACKOFF_CAP);
     }
 
     #[tokio::test]

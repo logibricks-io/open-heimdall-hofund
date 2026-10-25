@@ -15,6 +15,7 @@ pub use hofund_plugin_host::{
 /// Plugin tests use this so the plugin crate does not depend on tokio.
 pub fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
+        .enable_time()
         .build()
         .expect("test runtime")
         .block_on(future)

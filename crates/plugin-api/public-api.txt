@@ -274,6 +274,7 @@ PluginError::fn message (& self) -> & str
 PluginError::fn quota (message : impl Into < String >) -> Self
 PluginError::fn status_error (status : u16 , message : impl Into < String >) -> Self
 PluginError::fn timeout (message : impl Into < String >) -> Self
+PluginError::fn transport (message : impl Into < String >) -> Self
 PluginError::fn unsupported (message : impl Into < String >) -> Self
 PluginError::fn with_retry_after (mut self , after : Duration) -> Self
 PluginError::fn with_source (mut self , source : impl Error + Send + Sync + 'static) -> Self
@@ -289,6 +290,7 @@ PluginErrorKind::Io
 PluginErrorKind::Quota
 PluginErrorKind::Status
 PluginErrorKind::Timeout
+PluginErrorKind::Transport
 PluginErrorKind::Unsupported
 PluginId
 PluginId::as_str

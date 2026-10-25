@@ -35,7 +35,7 @@ use hofund_plugin_api::{
 };
 
 pub use accounts::{PlaintextFileAccountStore, StoreError};
-pub use pool::{HttpProfile, PooledHttp};
+pub use pool::{HttpLimits, HttpProfile, PooledHttp};
 
 /// Builds a [`HostContext`] bound to `plugin`.
 ///
@@ -67,6 +67,32 @@ pub fn surface_host(
     auth: AuthResult,
 ) -> SurfaceHost {
     SurfaceHost::from_parts(members, protocols, auth)
+}
+
+/// A context whose HTTP handle is `http`. Tests use this to drive the pooled client.
+#[cfg(test)]
+pub(crate) fn context_for_http(http: Arc<dyn HttpBackend>) -> HostContext {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "hofund-pool-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).expect("root");
+    let accounts =
+        PlaintextFileAccountStore::open(root.join("accounts.json")).expect("test accounts");
+    host_context(
+        PluginId::from_static("relay"),
+        http,
+        Arc::new(RecordingSecrets::default()),
+        Arc::new(accounts),
+        Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+        Arc::new(RecordingScheduler::default()),
+        Arc::new(RecordingProcess::default()),
+        Arc::new(RootDirs { root }),
+        Arc::new(RecordingObserve::default()),
+    )
 }
 
 /// A [`HostContext`] plus the recording backends a plugin test seeds.

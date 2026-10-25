@@ -174,8 +174,13 @@ fn check_package(dir: &Path, package: &str) -> Result<(), String> {
 }
 
 fn discover(workspace: &Path) -> Result<Vec<String>, String> {
+    // The plugins directory itself, so a new unlisted plugin directory reruns
+    // the on-disk bijection check. A new plugin is created inside a kind
+    // directory, and that directory's mtime is what Cargo sees.
+    println!("cargo:rerun-if-changed=../../plugins");
     let mut ids = Vec::new();
     for kind in ["providers", "subscriptions", "agents", "inbound"] {
+        println!("cargo:rerun-if-changed=../../plugins/{kind}");
         let dir = workspace.join("plugins").join(kind);
         if !dir.is_dir() {
             continue;

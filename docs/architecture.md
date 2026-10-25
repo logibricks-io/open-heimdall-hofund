@@ -105,7 +105,8 @@ as "depends on". `gateway` depends on `plugin-api` for the raw body and
 depends on `plugin-api` so it can adapt a provider into a router member.
 `desktop` sits beside `cli` and depends on the same two crates as `cli`.
 `plugin-api` depends on `ir`. `plugin-sdk` depends on `plugin-api` and
-`quirks`. `plugin-host` depends only on `plugin-api`. The pooled HTTP client
+`quirks`. `plugin-host` depends on `plugin-api`. Its tests also depend on
+`plugin-sdk` so the retry contract runs against the pooled client. The pooled HTTP client
 lives in `plugin-host`. `plugin-registry` depends on `plugin-api`,
 `plugin-sdk`, and the plugin crates it composes. The three kits depend
 only on `plugin-host` and are not on the diagram. `plugin-relay` dev-depends
@@ -122,7 +123,7 @@ on `kit-upstream` so its tests can build a host.
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` |
 | `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay` |
-| `hofund-plugin-host` | `hofund-plugin-api` |
+| `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
 | `hofund-kit-upstream` | `hofund-plugin-host` |
 | `hofund-kit-subscription` | `hofund-plugin-host` |
 | `hofund-kit-agent` | `hofund-plugin-host` |
