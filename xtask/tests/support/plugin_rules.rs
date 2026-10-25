@@ -698,6 +698,15 @@ fast = ["dep:api/kernel"]
             "macro_rules! spawn { ($m:ident) => { #[cfg(not(clippy))] { std::$m::Command::new(\"true\").status() } }; }\n",
             "cfg(clippy)",
         ),
+        (
+            "macro_rules! pass { (@ $($t:tt)*) => { $($t)* }; }\npass! { @ #[cfg(not(clippy))] pub fn sneak() {} }\n",
+            "cfg(clippy)",
+        ),
+        ("#[cfg(not(r#clippy))]\nfn sneak() {}\n", "cfg(clippy)"),
+        (
+            "#[cfg(not(r#debug_assertions))]\nfn sneak() {}\n",
+            "cfg(debug_assertions)",
+        ),
     ];
     for (source, needle) in round3 {
         let hits = runtime_hits(source).join("\n");
@@ -740,6 +749,26 @@ fast = ["dep:api/kernel"]
     assert!(found.contains("build.rs is not allowed"), "{found}");
     assert!(found.contains("build.rs emits rustc-cfg"), "{found}");
     let _ = fs::remove_dir_all(&scripted);
+
+    let renamed = std::env::temp_dir().join(format!("hofund-plugin-a25-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&renamed);
+    let pkg = renamed.join("plugins/providers/renamed");
+    fs::create_dir_all(pkg.join("src")).expect("dir");
+    fs::write(
+        pkg.join("Cargo.toml"),
+        "[package]\nname = \"renamed\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"src/gen.rs\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n",
+    )
+    .expect("manifest");
+    fs::write(pkg.join("src/lib.rs"), "fn clean() {}\n").expect("source");
+    fs::write(
+        pkg.join("src/gen.rs"),
+        "fn main() { println!(\"cargo::rustc-cfg=fast_path\"); }\n",
+    )
+    .expect("gen");
+    let found = plugin_tree_violations(&renamed.join("plugins")).join("\n");
+    assert!(found.contains("package.build is not allowed"), "{found}");
+    assert!(found.contains("build.rs emits rustc-cfg"), "{found}");
+    let _ = fs::remove_dir_all(&renamed);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
