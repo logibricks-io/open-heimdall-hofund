@@ -346,9 +346,11 @@ fn check_config(config: &Path) -> Result<(), String> {
 fn rotate_token(config: &Path) -> Result<(), String> {
     let session = Session::from_process_env();
     let local = local_gateway(config).map_err(|error| error.to_string())?;
+    let models = route_models(config).map_err(|error| error.to_string())?;
     let previous = GatewayTarget {
         base_url: local.base_url.clone(),
         token: local.token,
+        models: models.clone(),
     };
     let mut connected = Vec::new();
     let mut failed = Vec::new();
@@ -365,6 +367,7 @@ fn rotate_token(config: &Path) -> Result<(), String> {
     let updated = GatewayTarget {
         base_url: local.base_url,
         token,
+        models,
     };
     for id in connected {
         let Some(adapter) = find(id) else {
@@ -395,11 +398,7 @@ fn connect(
     dry_run: bool,
 ) -> Result<(), String> {
     let session = Session::from_process_env();
-    let local = local_gateway(config).map_err(|error| error.to_string())?;
-    let target = GatewayTarget {
-        base_url: local.base_url,
-        token: local.token,
-    };
+    let target = gateway_target(config)?;
     let plan = if dry_run {
         adapter.plan(&session, &target)
     } else {
@@ -418,17 +417,30 @@ fn connect(
         }
     }
     if adapter.id() == "opencode" {
-        println!("{}", opencode_models_note());
+        println!("{}", opencode_models_note(target.models.len()));
     }
     warn_unrouted_model(adapter, &session, config)
 }
 
-/// OpenCode's `models` object stays empty.
-///
-/// A catalog would supply name, modalities, context, and reasoning. This
-/// build does not ship one, and connect does not copy route names in its place.
-fn opencode_models_note() -> &'static str {
-    "opencode: models stays {}. This build does not ship a model catalog, and connect does not copy route names into the provider entry."
+/// What `hofund agent connect opencode` prints about the models object.
+fn opencode_models_note(model_count: usize) -> String {
+    if model_count == 0 {
+        "opencode: models stays {}. The config has no routes, and this build does not invent a model catalog.".to_owned()
+    } else {
+        format!(
+            "opencode: models lists {model_count} route name(s), each with name and an empty variants object. Modalities, context limits, and reasoning levels are not invented."
+        )
+    }
+}
+
+fn gateway_target(config: &Path) -> Result<GatewayTarget, String> {
+    let local = local_gateway(config).map_err(|error| error.to_string())?;
+    let models = route_models(config).map_err(|error| error.to_string())?;
+    Ok(GatewayTarget {
+        base_url: local.base_url,
+        token: local.token,
+        models,
+    })
 }
 
 fn redact_diff(diff: &str, token: &str) -> String {
@@ -479,11 +491,7 @@ fn disconnect(adapter: &dyn hofund_agent::AgentAdapter, force: bool) -> Result<(
 
 fn agent_status(config: &Path) -> Result<(), String> {
     let session = Session::from_process_env();
-    let local = local_gateway(config).map_err(|error| error.to_string())?;
-    let target = GatewayTarget {
-        base_url: local.base_url,
-        token: local.token,
-    };
+    let target = gateway_target(config)?;
     println!("id\tinstalled\tconnected");
     for adapter in adapters() {
         let status = adapter
@@ -587,9 +595,11 @@ mod tests {
             redact_diff("token = \"local-token\"\n", "local-token"),
             "token = \"[redacted]\"\n"
         );
-        let note = opencode_models_note();
+        let note = opencode_models_note(0);
         assert!(note.contains("models stays {}"));
         assert!(note.contains("catalog"));
-        assert!(note.contains("route names"));
+        let listed = opencode_models_note(2);
+        assert!(listed.contains("2 route"));
+        assert!(listed.contains("variants"));
     }
 }

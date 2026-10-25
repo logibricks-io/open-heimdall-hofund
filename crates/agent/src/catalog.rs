@@ -26,9 +26,17 @@ use crate::{
 ///
 /// `env.ANTHROPIC_BASE_URL` is the gateway origin. The Claude SDK appends
 /// `/v1/messages`, so the value has no `/v1` suffix. `env.ANTHROPIC_AUTH_TOKEN`
-/// is sent as `Authorization: Bearer`. The model is left alone. When settings
-/// contain a string `model`, connect compares it with route names.
-/// Checked 2026-10-25: <https://code.claude.com/docs/en/model-config>.
+/// is sent as `Authorization: Bearer`. A string `model` already in the file
+/// stays. When the file has none and the gateway has one route, connect
+/// writes that route as `model`. Opus, Sonnet, Haiku, and
+/// `ANTHROPIC_SMALL_FAST_MODEL` then name that same model. Fable is written
+/// only when the model id contains `claude-fable-`; a non-Fable id in
+/// `ANTHROPIC_DEFAULT_FABLE_MODEL` makes Claude Code treat the main model as
+/// Fable. `CLAUDE_CODE_SUBAGENT_MODEL` stays unset so a subagent that names
+/// no model keeps the session model. `effortLevel` and
+/// `CLAUDE_CODE_EFFORT_LEVEL` stay unset because connect does not pick a
+/// level. Checked 2026-10-25: <https://code.claude.com/docs/en/model-config>,
+/// <https://code.claude.com/docs/en/env-vars>.
 ///
 /// Sources: <https://code.claude.com/docs/en/settings>,
 /// <https://code.claude.com/docs/en/llm-gateway-connect>,
@@ -53,6 +61,36 @@ const CLAUDE_CODE: Description = Description {
             file: "settings",
             key: "env.ANTHROPIC_AUTH_TOKEN",
             slot: Slot::Token,
+        },
+        Set {
+            file: "settings",
+            key: "model",
+            slot: Slot::ClaudeModel,
+        },
+        Set {
+            file: "settings",
+            key: "env.ANTHROPIC_DEFAULT_OPUS_MODEL",
+            slot: Slot::ClaudeTier("opus"),
+        },
+        Set {
+            file: "settings",
+            key: "env.ANTHROPIC_DEFAULT_SONNET_MODEL",
+            slot: Slot::ClaudeTier("sonnet"),
+        },
+        Set {
+            file: "settings",
+            key: "env.ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            slot: Slot::ClaudeTier("haiku"),
+        },
+        Set {
+            file: "settings",
+            key: "env.ANTHROPIC_DEFAULT_FABLE_MODEL",
+            slot: Slot::ClaudeTier("fable"),
+        },
+        Set {
+            file: "settings",
+            key: "env.ANTHROPIC_SMALL_FAST_MODEL",
+            slot: Slot::ClaudeTier("fast"),
         },
     ],
     model: Some(ModelKey {
@@ -135,8 +173,10 @@ const CODEX: Description = Description {
 ///
 /// `.env` sets `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` (the origin; HTTP
 /// to localhost is allowed), and `GEMINI_API_KEY_AUTH_MECHANISM=bearer`.
-/// A string `model` in settings is compared with route names and is not
-/// rewritten. Checked 2026-10-25:
+/// The selected model is `model.name`. A string `model` is moved there.
+/// An existing `model.name` is left as the user wrote it. When neither is
+/// set and the gateway has one route, connect writes that route.
+/// Checked 2026-10-25:
 /// <https://geminicli.com/docs/reference/configuration/>.
 ///
 /// `GEMINI_API_KEY_AUTH_MECHANISM` is real. It is not listed on the public
@@ -201,10 +241,15 @@ const GEMINI: Description = Description {
             key: "GEMINI_API_KEY_AUTH_MECHANISM",
             slot: Slot::Literal("bearer"),
         },
+        Set {
+            file: "settings",
+            key: "model.name",
+            slot: Slot::GeminiModel,
+        },
     ],
     model: Some(ModelKey {
         file: "settings",
-        key: "model",
+        key: "model.name",
     }),
 };
 
@@ -219,10 +264,13 @@ const GEMINI: Description = Description {
 /// The provider entry is `provider.<id>` with `npm`
 /// `@ai-sdk/openai-compatible`, `options.baseURL`, `options.apiKey`, and
 /// `models`. `options.baseURL` includes `/v1` because that package appends
-/// `/chat/completions`. No model id is invented. `models` stays `{}` because
-/// this build does not ship a model catalog, and connect does not copy route
-/// names into that object. `hofund agent connect opencode` says so. A
-/// string `model` is compared with route names and is not rewritten. The
+/// `/chat/completions`. `models` has one entry per route: `name` is the
+/// route id and `variants` is `{}`. Modalities, context, output limits, and
+/// a reasoning flag are omitted; this build has no catalog values for them.
+/// An empty variants object keeps OpenCode from adding low, medium, and high
+/// on its own. A string `model` is compared with route names and is not
+/// rewritten. `hofund agent connect opencode` says how many routes were
+/// written. The
 /// v2 docs describe `providers` plus `package` and `settings`; this adapter
 /// follows the current providers page instead. Both pages document
 /// `~/.config` and do not name an override (checked 2026-10-25). When
@@ -274,7 +322,7 @@ const OPENCODE: Description = Description {
         Set {
             file: "config",
             key: "provider.hofund.models",
-            slot: Slot::Json("{}"),
+            slot: Slot::OpenCodeModels,
         },
     ],
     model: Some(ModelKey {
@@ -317,8 +365,14 @@ enum Slot {
     V1,
     Token,
     Literal(&'static str),
-    /// JSON text written as a value, not as a string.
-    Json(&'static str),
+    /// Gemini CLI `model.name`, when this connect has a model to write.
+    GeminiModel,
+    /// OpenCode `models` object built from [`GatewayTarget::models`].
+    OpenCodeModels,
+    /// Claude Code `model`, when the file has none and one route is configured.
+    ClaudeModel,
+    /// Claude Code tier env value. `fable` is skipped unless the model id is Fable.
+    ClaudeTier(&'static str),
 }
 
 struct Described {
@@ -398,7 +452,7 @@ impl AgentAdapter for Described {
                 })?),
                 None => None,
             };
-            let assignments = assignments_for(sets, target);
+            let assignments = assignments_for(&sets, target, text);
             let after = render(kind, text, &assignments).map_err(|error| annotate(&path, error))?;
             let before_bytes = before.unwrap_or_default();
             if before_bytes != after {
@@ -419,13 +473,13 @@ impl AgentAdapter for Described {
         for change in &plan.changes {
             backup_once(&change.path)?;
         }
+        let snapshots = self.snapshot_inputs(session, target)?;
         for change in &plan.changes {
             write_atomic(&change.path, &change.after)?;
         }
-        for chosen in self.chosen(session)? {
-            if marker_present(&chosen.path) {
-                let assignments = assignments_for(chosen.sets, target);
-                snapshot_wrote(&chosen.path, chosen.kind, &assignments)?;
+        for (path, kind, assignments) in snapshots {
+            if marker_present(&path) {
+                snapshot_wrote(&path, kind, &assignments)?;
             }
         }
         Ok(plan)
@@ -471,8 +525,11 @@ impl AgentAdapter for Described {
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| AgentError::message(format!("{} is not UTF-8", path.display())))?;
             for set in sets {
+                let Some(expected) = slot_value(&set.slot, target, Some(text)) else {
+                    continue;
+                };
                 let current = get(kind, text, set.key).map_err(|error| annotate(&path, error))?;
-                if current.as_deref() != Some(slot_value(&set.slot, target).as_str()) {
+                if current.as_deref() != Some(expected.as_str()) {
                     connected = false;
                     break;
                 }
@@ -539,7 +596,7 @@ impl AgentAdapter for Described {
             let text = std::str::from_utf8(&before).map_err(|_| {
                 AgentError::message(format!("{} is not UTF-8", chosen.path.display()))
             })?;
-            let assignments = assignments_for(token_sets, target);
+            let assignments = assignments_for(&token_sets, target, Some(text));
             let after = render(chosen.kind, Some(text), &assignments)
                 .map_err(|error| annotate(&chosen.path, error))?;
             if before != after {
@@ -573,6 +630,26 @@ impl AgentAdapter for Described {
 }
 
 impl Described {
+    fn snapshot_inputs(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+    ) -> Result<Vec<(PathBuf, FileKind, Vec<Assignment>)>, AgentError> {
+        let mut snapshots = Vec::new();
+        for chosen in self.chosen(session)? {
+            let bytes = read_optional(&chosen.path)?;
+            let text = match &bytes {
+                Some(bytes) => Some(std::str::from_utf8(bytes).map_err(|_| {
+                    AgentError::message(format!("{} is not UTF-8", chosen.path.display()))
+                })?),
+                None => None,
+            };
+            let assignments = assignments_for(&chosen.sets, target, text);
+            snapshots.push((chosen.path, chosen.kind, assignments));
+        }
+        Ok(snapshots)
+    }
+
     fn chosen(&self, session: &Session) -> Result<Vec<Chosen<'_>>, AgentError> {
         let mut chosen = Vec::new();
         for file in file_ids(self.description) {
@@ -626,23 +703,105 @@ fn choose<'a>(description: &'a Description, session: &Session, file: &str) -> Op
     creator.or(fallback)
 }
 
-fn assignments_for(sets: Vec<&Set>, target: &GatewayTarget) -> Vec<Assignment> {
-    sets.into_iter()
-        .map(|set| Assignment {
-            key: set.key,
-            value: slot_value(&set.slot, target),
-            raw_json: matches!(set.slot, Slot::Json(_)),
+fn assignments_for(
+    sets: &[&Set],
+    target: &GatewayTarget,
+    existing: Option<&str>,
+) -> Vec<Assignment> {
+    sets.iter()
+        .filter_map(|set| {
+            let value = slot_value(&set.slot, target, existing)?;
+            Some(Assignment {
+                key: set.key,
+                value,
+                raw_json: matches!(set.slot, Slot::OpenCodeModels),
+            })
         })
         .collect()
 }
 
-fn slot_value(slot: &Slot, target: &GatewayTarget) -> String {
+fn slot_value(slot: &Slot, target: &GatewayTarget, existing: Option<&str>) -> Option<String> {
     match slot {
-        Slot::Origin => origin(&target.base_url),
-        Slot::V1 => format!("{}/v1", origin(&target.base_url)),
-        Slot::Token => target.token.clone(),
-        Slot::Literal(text) | Slot::Json(text) => (*text).to_owned(),
+        Slot::Origin => Some(origin(&target.base_url)),
+        Slot::V1 => Some(format!("{}/v1", origin(&target.base_url))),
+        Slot::Token => Some(target.token.clone()),
+        Slot::Literal(text) => Some((*text).to_owned()),
+        Slot::GeminiModel => gemini_model(existing, &target.models),
+        Slot::OpenCodeModels => Some(opencode_models_json(&target.models)),
+        Slot::ClaudeModel => claude_model_to_write(existing, &target.models),
+        Slot::ClaudeTier(tier) => claude_tier(existing, &target.models, tier),
     }
+}
+
+fn gemini_model(existing: Option<&str>, models: &[String]) -> Option<String> {
+    if let Some(text) = existing
+        && json_string_at(text, "model.name").is_some()
+    {
+        return None;
+    }
+    if let Some(text) = existing
+        && let Some(name) = json_string_at(text, "model")
+    {
+        return Some(name);
+    }
+    single_model(models)
+}
+
+fn claude_model_to_write(existing: Option<&str>, models: &[String]) -> Option<String> {
+    if existing
+        .is_some_and(|text| json_string_at(text, "model").is_some_and(|name| !name.is_empty()))
+    {
+        return None;
+    }
+    single_model(models)
+}
+
+fn claude_tier(existing: Option<&str>, models: &[String], tier: &str) -> Option<String> {
+    let main = claude_main(existing, models)?;
+    if tier == "fable" && !main.to_ascii_lowercase().contains("claude-fable-") {
+        return None;
+    }
+    Some(main)
+}
+
+fn claude_main(existing: Option<&str>, models: &[String]) -> Option<String> {
+    if let Some(text) = existing
+        && let Some(name) = json_string_at(text, "model")
+    {
+        return Some(name);
+    }
+    single_model(models)
+}
+
+fn single_model(models: &[String]) -> Option<String> {
+    let mut ids = models.iter().filter(|id| !id.is_empty()).cloned();
+    let first = ids.next()?;
+    ids.next().is_none().then_some(first)
+}
+
+fn json_string_at(text: &str, key: &str) -> Option<String> {
+    let root = crate::edit::json_root(text).ok()?;
+    crate::edit::json_string(&root, key)
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty())
+}
+
+fn opencode_models_json(models: &[String]) -> String {
+    let mut root = serde_json::Map::new();
+    for id in models {
+        if id.is_empty() || root.contains_key(id) {
+            continue;
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert("name".to_owned(), serde_json::Value::String(id.clone()));
+        entry.insert(
+            "variants".to_owned(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
+        root.insert(id.clone(), serde_json::Value::Object(entry));
+    }
+    serde_json::Value::Object(root).to_string()
 }
 
 fn origin(base_url: &str) -> String {

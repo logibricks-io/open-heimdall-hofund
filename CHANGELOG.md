@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Gemini CLI connect writes `model.name`. A string `model` is moved there.
+- OpenCode `models` lists each gateway route, with `name` and an empty
+  `variants` object. Modalities, limits, and reasoning levels are not
+  invented.
+- Claude Code connect writes the Opus, Sonnet, and Haiku tier model env
+  vars, and the small-fast model, from the selected model. The Fable tier
+  is written only for a Fable model id. The subagent model and effort stay
+  unset.
+
 ### Added
 
 - Coverage inventories for the 65 coding agents, the 58 provider presets,

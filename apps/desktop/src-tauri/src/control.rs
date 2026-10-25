@@ -8,7 +8,9 @@
 use std::path::PathBuf;
 
 use hofund_agent::{GatewayTarget, Session, adapters, find};
-use hofund_daemon::{Running, configured_listen, ensure_config_file, local_gateway, usage_report};
+use hofund_daemon::{
+    Running, configured_listen, ensure_config_file, local_gateway, route_models, usage_report,
+};
 use serde::Serialize;
 
 use crate::open::open_config_file;
@@ -195,9 +197,11 @@ impl Control {
             };
             if connect {
                 let local = local_gateway(&self.config_path).map_err(|error| error.to_string())?;
+                let models = route_models(&self.config_path).map_err(|error| error.to_string())?;
                 let target = GatewayTarget {
                     base_url: local.base_url,
                     token: local.token,
+                    models,
                 };
                 adapter
                     .apply(session, &target)
@@ -237,6 +241,7 @@ impl Control {
             .map(|local| GatewayTarget {
                 base_url: local.base_url,
                 token: local.token,
+                models: route_models(&self.config_path).unwrap_or_default(),
             });
         let mut agents = Vec::new();
         for adapter in adapters() {

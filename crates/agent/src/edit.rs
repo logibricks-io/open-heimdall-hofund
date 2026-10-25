@@ -84,6 +84,12 @@ pub(crate) fn is_empty_document(kind: FileKind, bytes: &[u8]) -> Result<bool, Ag
 
 fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
     let mut root = json_root(original)?;
+    if assignments
+        .iter()
+        .any(|assignment| assignment.key == "model.name")
+    {
+        promote_string_model(&mut root);
+    }
     for assignment in assignments {
         set_json(
             &mut root,
@@ -145,7 +151,7 @@ fn render_env(original: &str, assignments: &[Assignment]) -> String {
     text
 }
 
-fn json_root(text: &str) -> Result<Value, AgentError> {
+pub(crate) fn json_root(text: &str) -> Result<Value, AgentError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(Value::Object(Map::new()));
@@ -163,6 +169,15 @@ fn remove_json(original: &str, keys: &[&str]) -> Result<String, AgentError> {
         unset_json(&mut root, &split_key(key))?;
     }
     pretty_json(&root)
+}
+
+fn promote_string_model(root: &mut Value) {
+    let Some(object) = root.as_object_mut() else {
+        return;
+    };
+    if object.get("model").is_some_and(Value::is_string) {
+        object.remove("model");
+    }
 }
 
 fn pretty_json(root: &Value) -> Result<String, AgentError> {
@@ -203,7 +218,7 @@ fn unset_json(value: &mut Value, path: &[&str]) -> Result<(), AgentError> {
     Ok(())
 }
 
-fn json_string(value: &Value, key: &str) -> Result<Option<String>, AgentError> {
+pub(crate) fn json_string(value: &Value, key: &str) -> Result<Option<String>, AgentError> {
     let mut cursor = value;
     for part in split_key(key) {
         let Some(object) = cursor.as_object() else {
