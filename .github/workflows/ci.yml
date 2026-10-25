@@ -141,9 +141,13 @@ jobs:
             exit 1
           fi
           npm install --global "${pins[0]}"
-          expected="${pins[0]#*@}"
+          expected="${pins[0]##*@}"
           actual="$(tauri --version | awk '{ print $NF }')"
-          test "$actual" = "$expected"
+          echo "tauri --version: ${actual} (pin ${expected})"
+          if [ "$actual" != "$expected" ]; then
+            echo "installed Tauri CLI ${actual} does not match ${expected}" >&2
+            exit 1
+          fi
 
   cargo-deny:
     name: cargo-deny
