@@ -67,8 +67,9 @@ Messages, including Azure's v1 root and Bedrock's API-key headers, are on
 (row 2.3). `protocol = "chat"` on that preset keeps the OpenAI-compatible
 root. Vertex credentials (row 2.4) are in. Bedrock Converse is signed with SigV4,
 and Mantle chat and Responses pick `/openai/v1` or `/v1` from the model id
-(row 2.5). Still open in item 4: Azure deployment listing, live model lists,
-a connectivity test, and every subscription provider.
+(row 2.5). Azure deployment names are read from the resource (row 2.6).
+Still open in item 4: live model lists, a connectivity test, and every
+subscription provider.
 Usage v2, the catalog
 and cost, and the routing tree stay in stage 1 after that. Subscriptions,
 the full agent list, the management API, the terminal UI, and gateway keys

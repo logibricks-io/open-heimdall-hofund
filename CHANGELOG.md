@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `/openai/v1`, and every other chat or Responses model under `/v1`.
   A refusal that the model is not supported on that route is tried once at
   the other prefix. Messages stay on `/anthropic`.
+- Azure OpenAI deployment names are listed from the resource. The
+  data-plane list `GET /openai/deployments?api-version=2022-12-01` is asked
+  with `api-key`. A refusal falls back to `GET /openai/v1/models`. Those
+  names are the model ids.
 - `protocol = "converse"` on preset `bedrock`, or `kind = "converse"`, posts
   Bedrock Converse and ConverseStream. The call is signed with SigV4
   (`access_key_id`, `secret_access_key`, optional `session_token`). No API
