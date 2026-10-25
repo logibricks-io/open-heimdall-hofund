@@ -147,12 +147,17 @@ pub trait Codec: Send + Sync {
         }
     }
 
-    /// Reads tokens from a raw stream and rewrites [`Codec::model_paths`].
-    fn raw_tap(&self, model: &str) -> Box<dyn RawTap> {
+    /// Reads tokens from a raw stream.
+    ///
+    /// When `client_model` and `upstream_model` differ, the bytes of each
+    /// [`Codec::model_paths`] string are spliced. Equal names are forwarded
+    /// without parsing the body for a rewrite.
+    fn raw_tap(&self, client_model: &str, upstream_model: &str) -> Box<dyn RawTap> {
         Box::new(passthrough::DecoderTap::new(
             self.stream_decoder(),
             self.model_paths(),
-            model,
+            client_model,
+            upstream_model,
         ))
     }
 
@@ -175,8 +180,11 @@ pub trait Codec: Send + Sync {
     }
 
     /// Replaces model fields in a complete unary body.
-    fn rewrite_model(&self, bytes: &[u8], model: &str) -> Vec<u8> {
-        passthrough::rewrite_all(bytes, self.model_paths(), model)
+    ///
+    /// Equal names are returned unchanged. Differing names splice the model
+    /// string and leave every other byte as it arrived.
+    fn rewrite_model(&self, bytes: &[u8], client_model: &str, upstream_model: &str) -> Vec<u8> {
+        passthrough::rewrite_all(bytes, self.model_paths(), client_model, upstream_model)
     }
 
     /// Encodes a stream error as a protocol frame, not a clean end of stream.

@@ -27,15 +27,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a stream, omits that member from the next snapshot. The body deadline is
   idle time since the last chunk. A stream that keeps sending is not cut
   off at twice the endpoint timeout. Same-protocol responses are forwarded
-  as bytes. The codec reads token usage across chunk boundaries and rewrites
-  only that protocol's model field, parsed per SSE event or JSON value, so
-  the client still sees the name it requested and tool arguments are left
-  alone. A leading in-band failure still fails over. A later stream error
-  is that protocol's error frame. Bytes still held by the rewriter are
-  flushed and closed as an event first. A frame that already ends in
-  `\r\n\r\n` does not gain an extra blank event. The stream content type
-  comes from the codec. Gateway routes, status codes, and usage provider
-  ids are unchanged.
+  as bytes. The codec reads token usage across chunk boundaries. When the
+  name the client asked for is the name sent upstream, the body is forwarded
+  without parsing it for a rewrite. When the names differ, only the bytes of
+  that protocol's model string are spliced, so numbers, escapes, and tool
+  arguments stay byte-exact. An event larger than 1 MiB, or one that cannot
+  be scanned, is forwarded after a literal replacement of the quoted upstream
+  model name. A partial event flushed on an upstream error takes that same
+  path, so the upstream name is not sent to the client. A leading in-band
+  failure still fails over. A later stream error is that protocol's error
+  frame. Bytes still held by the rewriter are flushed and closed as an event
+  first. A frame that already ends in `\r\n\r\n` or `\r\r` does not gain an
+  extra blank event. The stream content type comes from the codec. Gateway
+  routes, status codes, and usage provider ids are unchanged.
 - The plugin seam from RFC 0001 is in `hofund-plugin-api`,
   `hofund-plugin-sdk`, and `hofund-plugin-host`, plus the three test kits.
   `hofund-provider` and `hofund-agent` re-export the new traits. Gateway,

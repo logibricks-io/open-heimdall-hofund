@@ -1,21 +1,29 @@
 //! Same-protocol passthrough helpers.
 //!
-//! The gateway forwards raw bytes. It asks the codec to read token usage and
-//! to patch the model name, so protocol field names stay in this crate.
+//! The gateway forwards raw bytes. It asks the codec to read token usage and,
+//! when the client-requested model differs from the upstream model, to splice
+//! that protocol's model field. Equal names are copied through with no JSON
+//! parse. A differing name replaces only the bytes of the model string, so
+//! every other byte, including large integers and escape sequences, stays as
+//! the upstream sent it.
 //!
-//! Model names are rewritten per complete SSE event or JSON value. A quote on
-//! a comment line cannot change the next event, and only the codec's model
-//! path is replaced.
+//! An event is scanned once. More than [`DEFAULT_EVENT_CAP`] bytes, a leading
+//! BOM, or a value the scanner cannot read, is forwarded after a literal
+//! replacement of the quoted upstream model name.
 
 use hofund_ir::{StreamEvent, Usage};
 
 use crate::StreamDecoder;
 
+/// Bytes of one event the tap will hold before falling back to a literal
+/// replacement. A larger event is forwarded as it arrives.
+pub(crate) const DEFAULT_EVENT_CAP: usize = 1 << 20;
+
 /// Incremental read of a raw response body.
 ///
 /// `push` returns the bytes the client should see. A chunk may end inside a
 /// frame or a model string; the unfinished tail is held until a later `push`
-/// or `finish`.
+/// or `finish`, up to [`DEFAULT_EVENT_CAP`].
 pub trait RawTap: Send {
     /// Observes `chunk` and returns the bytes to forward.
     fn push(&mut self, chunk: &[u8]) -> Vec<u8>;
@@ -29,9 +37,8 @@ pub trait RawTap: Send {
 
 pub(crate) struct DecoderTap {
     decoder: Box<dyn StreamDecoder>,
-    paths: &'static [&'static [&'static str]],
-    model: String,
-    pending: Vec<u8>,
+    rewrite: bool,
+    events: EventBuf<'static>,
     input: Option<i64>,
     output: Option<i64>,
 }
@@ -40,13 +47,24 @@ impl DecoderTap {
     pub(crate) fn new(
         decoder: Box<dyn StreamDecoder>,
         paths: &'static [&'static [&'static str]],
-        model: &str,
+        client: &str,
+        upstream: &str,
     ) -> Self {
+        Self::with_cap(decoder, paths, client, upstream, DEFAULT_EVENT_CAP)
+    }
+
+    pub(crate) fn with_cap(
+        decoder: Box<dyn StreamDecoder>,
+        paths: &'static [&'static [&'static str]],
+        client: &str,
+        upstream: &str,
+        cap: usize,
+    ) -> Self {
+        let rewrite = client != upstream && !paths.is_empty();
         Self {
             decoder,
-            paths,
-            model: model.to_owned(),
-            pending: Vec::new(),
+            rewrite,
+            events: EventBuf::new(paths, client, upstream, cap),
             input: None,
             output: None,
         }
@@ -62,16 +80,6 @@ impl DecoderTap {
             note_usage(usage, &mut self.input, &mut self.output);
         }
     }
-
-    fn emit(&mut self, chunk: &[u8]) -> Vec<u8> {
-        if self.paths.is_empty() {
-            return chunk.to_vec();
-        }
-        self.pending.extend_from_slice(chunk);
-        let (ready, consumed) = rewrite_ready(&self.pending, self.paths, &self.model);
-        self.pending.drain(..consumed);
-        ready
-    }
 }
 
 impl RawTap for DecoderTap {
@@ -79,20 +87,20 @@ impl RawTap for DecoderTap {
         if let Ok(events) = self.decoder.push(chunk) {
             self.note(&events);
         }
-        self.emit(chunk)
+        if !self.rewrite {
+            return chunk.to_vec();
+        }
+        self.events.push(chunk)
     }
 
     fn finish(&mut self) -> Vec<u8> {
         if let Ok(events) = self.decoder.finish() {
             self.note(&events);
         }
-        let tail = std::mem::take(&mut self.pending);
-        if tail.is_empty() || self.paths.is_empty() {
-            return tail;
+        if !self.rewrite {
+            return Vec::new();
         }
-        let mut out = rewrite_all(&tail, self.paths, &self.model);
-        terminate_event(&mut out);
-        out
+        self.events.finish()
     }
 
     fn tokens(&self) -> (Option<i64>, Option<i64>) {
@@ -100,18 +108,323 @@ impl RawTap for DecoderTap {
     }
 }
 
-pub(crate) fn rewrite_all(bytes: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
-    if paths.is_empty() {
+pub(crate) fn rewrite_all(
+    bytes: &[u8],
+    paths: &[&[&str]],
+    client: &str,
+    upstream: &str,
+) -> Vec<u8> {
+    if paths.is_empty() || client == upstream || bytes.is_empty() {
         return bytes.to_vec();
     }
-    if starts_like_sse(bytes) {
-        let (mut out, consumed) = rewrite_ready(bytes, paths, model);
-        if consumed < bytes.len() {
-            out.extend(rewrite_event(&bytes[consumed..], paths, model));
+    let mut events = EventBuf::new(paths, client, upstream, usize::MAX);
+    let mut out = events.push(bytes);
+    out.extend(events.finish());
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Undecided,
+    Sse,
+    Json,
+    BomSse,
+    BomJson,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// The byte belongs to the current event.
+    Keep,
+    /// The byte closed the event.
+    End,
+    /// The previous byte closed the event. This byte starts the next one.
+    Replay,
+}
+
+struct EventBuf<'p> {
+    paths: &'p [&'p [&'p str]],
+    quoted_from: Vec<u8>,
+    quoted_to: Vec<u8>,
+    cap: usize,
+    kind: Kind,
+    overflowing: bool,
+    pending: Vec<u8>,
+    cursor: usize,
+    at_line_start: bool,
+    saw_content_line: bool,
+    cr_held: bool,
+    overlap: Vec<u8>,
+}
+
+impl<'p> EventBuf<'p> {
+    fn new(paths: &'p [&'p [&'p str]], client: &str, upstream: &str, cap: usize) -> Self {
+        Self {
+            paths,
+            quoted_from: json_quote(upstream),
+            quoted_to: json_quote(client),
+            cap,
+            kind: Kind::Undecided,
+            overflowing: false,
+            pending: Vec::new(),
+            cursor: 0,
+            at_line_start: true,
+            saw_content_line: false,
+            cr_held: false,
+            overlap: Vec::new(),
         }
-        return out;
     }
-    rewrite_json_document(bytes, paths, model)
+
+    fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+        if self.overflowing {
+            return self.push_overflow(chunk);
+        }
+        self.pending.extend_from_slice(chunk);
+        self.classify_if_needed();
+        match self.kind {
+            Kind::Sse | Kind::BomSse => self.drain_events(),
+            Kind::Json | Kind::BomJson | Kind::Undecided if self.pending.len() > self.cap => {
+                self.overflow_pending()
+            }
+            Kind::Json | Kind::BomJson | Kind::Undecided => Vec::new(),
+        }
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        if self.overflowing {
+            self.cr_held = false;
+            let mut tail = self.finish_literal_window();
+            if !matches!(self.kind, Kind::Json | Kind::BomJson) {
+                terminate_event(&mut tail);
+            }
+            self.overflowing = false;
+            self.reset_line();
+            return tail;
+        }
+        self.classify_if_needed();
+        let mut out = Vec::new();
+        if matches!(self.kind, Kind::Sse | Kind::BomSse) && self.finish_held_cr() {
+            out.extend(self.take_ready_event());
+        }
+        if matches!(self.kind, Kind::Sse | Kind::BomSse) {
+            out.extend(self.drain_events());
+        }
+        if self.pending.is_empty() {
+            return out;
+        }
+        let rest = std::mem::take(&mut self.pending);
+        self.reset_line();
+        match self.kind {
+            Kind::Json => out.extend(splice_document(
+                &rest,
+                self.paths,
+                &self.quoted_to,
+                &self.quoted_from,
+            )),
+            Kind::BomJson => out.extend(literal_replace(
+                &rest,
+                &self.quoted_from,
+                &self.quoted_to,
+                true,
+            )),
+            Kind::Sse | Kind::BomSse | Kind::Undecided => {
+                let mut replaced = literal_replace(&rest, &self.quoted_from, &self.quoted_to, true);
+                terminate_event(&mut replaced);
+                out.extend(replaced);
+            }
+        }
+        out
+    }
+
+    fn classify_if_needed(&mut self) {
+        if self.kind != Kind::Undecided {
+            return;
+        }
+        if let Some(kind) = classify(&self.pending) {
+            self.kind = kind;
+        }
+    }
+
+    fn drain_events(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let Some(end) = self.poll_event() else {
+                if self.pending.len() > self.cap {
+                    out.extend(self.overflow_pending());
+                }
+                return out;
+            };
+            out.extend(self.take_event(end));
+        }
+    }
+
+    fn take_ready_event(&mut self) -> Vec<u8> {
+        let end = self.cursor;
+        self.take_event(end)
+    }
+
+    fn take_event(&mut self, end: usize) -> Vec<u8> {
+        let event: Vec<u8> = self.pending.drain(..end).collect();
+        self.reset_line();
+        self.rewrite_event(&event)
+    }
+
+    fn rewrite_event(&self, event: &[u8]) -> Vec<u8> {
+        if self.kind == Kind::BomSse {
+            return literal_replace(event, &self.quoted_from, &self.quoted_to, true);
+        }
+        splice_sse_event(event, self.paths, &self.quoted_to)
+            .unwrap_or_else(|| literal_replace(event, &self.quoted_from, &self.quoted_to, true))
+    }
+
+    fn overflow_pending(&mut self) -> Vec<u8> {
+        self.overflowing = true;
+        let bytes = std::mem::take(&mut self.pending);
+        self.cursor = 0;
+        self.stream_literal(&bytes)
+    }
+
+    fn push_overflow(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if !matches!(self.kind, Kind::Sse | Kind::BomSse) {
+            return self.stream_literal(chunk);
+        }
+        let mut out = Vec::new();
+        let start = 0;
+        let mut index = 0;
+        while index < chunk.len() {
+            match self.feed_one(chunk[index]) {
+                Step::Keep => index += 1,
+                Step::End => {
+                    let end = index + 1;
+                    out.extend(self.stream_literal(&chunk[start..end]));
+                    out.extend(self.finish_literal_window());
+                    self.overflowing = false;
+                    self.reset_line();
+                    self.pending.extend_from_slice(&chunk[end..]);
+                    out.extend(self.drain_events());
+                    return out;
+                }
+                Step::Replay => {
+                    out.extend(self.stream_literal(&chunk[start..index]));
+                    out.extend(self.finish_literal_window());
+                    self.overflowing = false;
+                    self.reset_line();
+                    self.pending.extend_from_slice(&chunk[index..]);
+                    out.extend(self.drain_events());
+                    return out;
+                }
+            }
+        }
+        out.extend(self.stream_literal(&chunk[start..]));
+        out
+    }
+
+    fn poll_event(&mut self) -> Option<usize> {
+        while self.cursor < self.pending.len() {
+            let byte = self.pending[self.cursor];
+            match self.feed_one(byte) {
+                Step::Keep => self.cursor += 1,
+                Step::End => {
+                    self.cursor += 1;
+                    return Some(self.cursor);
+                }
+                Step::Replay => return Some(self.cursor),
+            }
+        }
+        None
+    }
+
+    fn finish_held_cr(&mut self) -> bool {
+        if !self.cr_held {
+            return false;
+        }
+        self.cr_held = false;
+        self.close_line()
+    }
+
+    fn feed_one(&mut self, byte: u8) -> Step {
+        if self.cr_held {
+            self.cr_held = false;
+            if byte != b'\n' {
+                if self.close_line() {
+                    return Step::Replay;
+                }
+                return self.feed_one(byte);
+            }
+            if self.close_line() {
+                return Step::End;
+            }
+            return Step::Keep;
+        }
+        if byte == b'\r' {
+            self.cr_held = true;
+            return Step::Keep;
+        }
+        if byte == b'\n' {
+            if self.close_line() {
+                return Step::End;
+            }
+            return Step::Keep;
+        }
+        self.at_line_start = false;
+        Step::Keep
+    }
+
+    fn close_line(&mut self) -> bool {
+        let empty = self.at_line_start;
+        self.at_line_start = true;
+        if empty && self.saw_content_line {
+            self.saw_content_line = false;
+            true
+        } else {
+            self.saw_content_line = true;
+            false
+        }
+    }
+
+    fn reset_line(&mut self) {
+        self.cursor = 0;
+        self.at_line_start = true;
+        self.saw_content_line = false;
+        self.cr_held = false;
+    }
+
+    /// Forwards `bytes`, keeping a suffix long enough that a quoted model name
+    /// split on this boundary is still replaced with the next chunk.
+    fn stream_literal(&mut self, bytes: &[u8]) -> Vec<u8> {
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+        let mut window = std::mem::take(&mut self.overlap);
+        window.extend_from_slice(bytes);
+        let needle = self.quoted_from.len();
+        if needle < 3 {
+            self.overlap.clear();
+            return window;
+        }
+        let safe = window.len().saturating_sub(needle - 1);
+        let mut out = Vec::with_capacity(window.len());
+        let mut index = 0;
+        while index < safe {
+            if window[index..].starts_with(&self.quoted_from) {
+                out.extend_from_slice(&self.quoted_to);
+                index += needle;
+            } else {
+                out.push(window[index]);
+                index += 1;
+            }
+        }
+        self.overlap = window[index..].to_vec();
+        out
+    }
+
+    fn finish_literal_window(&mut self) -> Vec<u8> {
+        let window = std::mem::take(&mut self.overlap);
+        literal_replace(&window, &self.quoted_from, &self.quoted_to, true)
+    }
 }
 
 fn note_usage(usage: Option<&Usage>, input: &mut Option<i64>, output: &mut Option<i64>) {
@@ -130,197 +443,607 @@ fn as_i64(value: Option<u64>) -> Option<i64> {
     value.and_then(|value| i64::try_from(value).ok())
 }
 
-/// Rewrites complete SSE events and JSON values. The `usize` is how much of
-/// `input` was consumed. An unfinished event stays unconsumed.
-pub(crate) fn rewrite_ready(input: &[u8], paths: &[&[&str]], model: &str) -> (Vec<u8>, usize) {
-    if paths.is_empty() || input.is_empty() {
-        return (input.to_vec(), input.len());
-    }
-    if !starts_like_sse(input) {
-        return match json_value_len(input) {
-            Some(len) => (rewrite_one_json(&input[..len], paths, model), len),
-            None => (Vec::new(), 0),
-        };
-    }
-    let mut out = Vec::new();
-    let mut offset = 0;
-    while let Some(end) = event_end(&input[offset..]) {
-        out.extend(rewrite_event(&input[offset..offset + end], paths, model));
-        offset += end;
-    }
-    (out, offset)
+enum Prefix {
+    Yes,
+    No,
+    More,
 }
 
-fn rewrite_json_document(bytes: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
-    let mut out = Vec::new();
+enum Bom {
+    NeedMore,
+    Absent(usize),
+    Present(usize),
+}
+
+fn classify(bytes: &[u8]) -> Option<Kind> {
+    let (bom, index) = match bom_index(bytes) {
+        Bom::NeedMore => return None,
+        Bom::Absent(index) => (false, index),
+        Bom::Present(index) => (true, index),
+    };
+    if index >= bytes.len() {
+        return None;
+    }
+    match sse_prefix(&bytes[index..]) {
+        Prefix::More => None,
+        Prefix::Yes => Some(if bom { Kind::BomSse } else { Kind::Sse }),
+        Prefix::No => Some(if bom { Kind::BomJson } else { Kind::Json }),
+    }
+}
+
+fn bom_index(bytes: &[u8]) -> Bom {
+    let mut index = 0;
+    while index < bytes.len() && is_ws(bytes[index]) {
+        index += 1;
+    }
+    if index >= bytes.len() {
+        return Bom::NeedMore;
+    }
+    if bytes[index] != 0xEF {
+        return Bom::Absent(index);
+    }
+    if bytes.len() - index < 3 {
+        if [0xEF, 0xBB, 0xBF].starts_with(&bytes[index..]) {
+            return Bom::NeedMore;
+        }
+        return Bom::Absent(index);
+    }
+    if bytes[index..index + 3] != [0xEF, 0xBB, 0xBF] {
+        return Bom::Absent(index);
+    }
+    index += 3;
+    while index < bytes.len() && is_ws(bytes[index]) {
+        index += 1;
+    }
+    if index >= bytes.len() {
+        Bom::NeedMore
+    } else {
+        Bom::Present(index)
+    }
+}
+
+fn sse_prefix(rest: &[u8]) -> Prefix {
+    const KEYS: &[&[u8]] = &[b"data:", b"event:", b"id:", b"retry:", b":"];
+    if rest.is_empty() {
+        return Prefix::More;
+    }
+    if KEYS.iter().any(|key| rest.starts_with(key)) {
+        return Prefix::Yes;
+    }
+    if KEYS.iter().any(|key| key.starts_with(rest)) {
+        return Prefix::More;
+    }
+    Prefix::No
+}
+
+fn splice_document(bytes: &[u8], paths: &[&[&str]], replacement: &[u8], needle: &[u8]) -> Vec<u8> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(bytes.len());
     let mut offset = 0;
     while offset < bytes.len() {
         if bytes[offset..].iter().all(|byte| is_ws(*byte)) {
             out.extend_from_slice(&bytes[offset..]);
             break;
         }
-        match json_value_len(&bytes[offset..]) {
-            Some(len) => {
-                out.extend(rewrite_one_json(&bytes[offset..offset + len], paths, model));
-                offset += len;
+        match scan_json(&bytes[offset..], paths) {
+            Ok((end, spans)) if spans.is_empty() => {
+                out.extend_from_slice(&bytes[offset..offset + end]);
+                offset += end;
             }
-            None => {
-                out.extend_from_slice(&bytes[offset..]);
-                break;
+            Ok((end, spans)) => match apply_spans(&bytes[offset..offset + end], spans, replacement)
+            {
+                Some(piece) => {
+                    out.extend(piece);
+                    offset += end;
+                }
+                None => {
+                    out.extend(literal_replace(&bytes[offset..], needle, replacement, true));
+                    return out;
+                }
+            },
+            Err(()) => {
+                out.extend(literal_replace(&bytes[offset..], needle, replacement, true));
+                return out;
             }
         }
     }
     out
 }
 
-fn rewrite_one_json(bytes: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
-    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return bytes.to_vec();
-    };
-    if !value.is_object() {
-        return bytes.to_vec();
-    }
-    rewrite_paths(&mut value, paths, model);
-    serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
-}
-
-fn rewrite_paths(value: &mut serde_json::Value, paths: &[&[&str]], model: &str) {
-    for path in paths {
-        rewrite_path(value, path, model);
-    }
-}
-
-fn rewrite_path(value: &mut serde_json::Value, path: &[&str], model: &str) {
-    let Some((head, tail)) = path.split_first() else {
-        return;
-    };
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    let Some(child) = object.get_mut(*head) else {
-        return;
-    };
-    if tail.is_empty() {
-        if child.is_string() {
-            *child = serde_json::Value::String(model.to_owned());
+fn splice_sse_event(event: &[u8], paths: &[&[&str]], replacement: &[u8]) -> Option<Vec<u8>> {
+    let mut joined = Vec::new();
+    let mut origin = Vec::new();
+    let mut saw_data = false;
+    for (start, end) in content_lines(event) {
+        let Some(payload) = data_payload_index(&event[start..end]) else {
+            continue;
+        };
+        if saw_data {
+            joined.push(b'\n');
+            origin.push(usize::MAX);
         }
-        return;
-    }
-    rewrite_path(child, tail, model);
-}
-
-fn rewrite_event(event: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(event.len());
-    let mut start = 0;
-    let mut index = 0;
-    while index < event.len() {
-        if event[index] == b'\n' {
-            out.extend(rewrite_line(&event[start..=index], paths, model));
-            start = index + 1;
+        saw_data = true;
+        let absolute = start + payload;
+        for (offset, byte) in event[absolute..end].iter().copied().enumerate() {
+            joined.push(byte);
+            origin.push(absolute + offset);
         }
-        index += 1;
     }
-    if start < event.len() {
-        out.extend(rewrite_line(&event[start..], paths, model));
+    if !saw_data || joined.iter().all(|byte| is_ws(*byte)) {
+        return Some(event.to_vec());
     }
-    out
-}
-
-fn rewrite_line(line: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
-    let (content, ending) = split_ending(line);
-    let Some(payload) = data_payload(content) else {
-        return line.to_vec();
-    };
-    let Some(rewritten) = rewrite_payload(payload, paths, model) else {
-        return line.to_vec();
-    };
-    let mut out = Vec::with_capacity(line.len());
-    let payload_at = content.len() - payload.len();
-    out.extend_from_slice(&content[..payload_at]);
-    out.extend(rewritten);
-    out.extend_from_slice(ending);
-    out
-}
-
-fn rewrite_payload(payload: &[u8], paths: &[&[&str]], model: &str) -> Option<Vec<u8>> {
-    let trimmed = payload.iter().position(|byte| !is_ws(*byte))?;
-    let body = &payload[trimmed..];
-    let len = json_value_len(body)?;
-    if body[len..].iter().any(|byte| !is_ws(*byte)) {
+    let (end, spans) = scan_json(&joined, paths).ok()?;
+    if joined[end..].iter().any(|byte| !is_ws(*byte)) {
         return None;
     }
-    let mut out = payload[..trimmed].to_vec();
-    out.extend(rewrite_one_json(&body[..len], paths, model));
-    out.extend_from_slice(&body[len..]);
-    Some(out)
-}
-
-fn data_payload(content: &[u8]) -> Option<&[u8]> {
-    let rest = content.strip_prefix(b"data:")?;
-    Some(rest.strip_prefix(b" ").unwrap_or(rest))
-}
-
-fn split_ending(line: &[u8]) -> (&[u8], &[u8]) {
-    if line.ends_with(b"\r\n") {
-        (&line[..line.len() - 2], &line[line.len() - 2..])
-    } else if let Some(stripped) = line.strip_suffix(b"\n") {
-        (stripped, &line[line.len() - 1..])
-    } else {
-        (line, &[])
+    if spans.is_empty() {
+        return Some(event.to_vec());
     }
+    let mut mapped = Vec::with_capacity(spans.len());
+    for (start, stop) in spans {
+        mapped.push(map_span(&origin, start, stop)?);
+    }
+    apply_spans(event, mapped, replacement)
 }
 
-fn event_end(input: &[u8]) -> Option<usize> {
+fn content_lines(event: &[u8]) -> Vec<(usize, usize)> {
+    let mut lines = Vec::new();
     let mut index = 0;
     let mut line_start = 0;
-    let mut saw_line = false;
-    while index < input.len() {
-        if input[index] == b'\n' {
-            let mut content_end = index;
-            if content_end > line_start && input[content_end - 1] == b'\r' {
-                content_end -= 1;
+    while index < event.len() {
+        if event[index] == b'\r' {
+            let content_end = index;
+            index += 1;
+            if index < event.len() && event[index] == b'\n' {
+                index += 1;
             }
-            let end = index + 1;
-            if content_end == line_start && saw_line {
-                return Some(end);
-            }
-            saw_line = true;
-            line_start = end;
-            index = end;
+            lines.push((line_start, content_end));
+            line_start = index;
+            continue;
+        }
+        if event[index] == b'\n' {
+            lines.push((line_start, index));
+            index += 1;
+            line_start = index;
             continue;
         }
         index += 1;
     }
-    None
+    if line_start < event.len() {
+        lines.push((line_start, event.len()));
+    }
+    lines
 }
 
-fn starts_like_sse(input: &[u8]) -> bool {
-    let trimmed = trim_ws(input);
-    trimmed.starts_with(b"data:")
-        || trimmed.starts_with(b"event:")
-        || trimmed.starts_with(b"id:")
-        || trimmed.starts_with(b"retry:")
-        || trimmed.starts_with(b":")
+fn data_payload_index(content: &[u8]) -> Option<usize> {
+    let rest = content.strip_prefix(b"data:")?;
+    let skip = usize::from(rest.first() == Some(&b' '));
+    Some(content.len() - rest.len() + skip)
 }
 
-fn trim_ws(input: &[u8]) -> &[u8] {
-    let start = input
-        .iter()
-        .position(|byte| !is_ws(*byte))
-        .unwrap_or(input.len());
-    &input[start..]
+fn map_span(origin: &[usize], start: usize, end: usize) -> Option<(usize, usize)> {
+    if start >= end || end > origin.len() {
+        return None;
+    }
+    let first = *origin.get(start)?;
+    if first == usize::MAX {
+        return None;
+    }
+    let mut previous = first;
+    for at in origin.iter().take(end).skip(start + 1).copied() {
+        if at != previous + 1 {
+            return None;
+        }
+        previous = at;
+    }
+    Some((first, previous + 1))
+}
+
+fn apply_spans(
+    bytes: &[u8],
+    mut spans: Vec<(usize, usize)>,
+    replacement: &[u8],
+) -> Option<Vec<u8>> {
+    spans.sort_unstable_by_key(|span| span.0);
+    let mut out = Vec::with_capacity(bytes.len() + replacement.len());
+    let mut cursor = 0;
+    for (start, end) in spans {
+        if start < cursor || end < start || end > bytes.len() {
+            return None;
+        }
+        out.extend_from_slice(&bytes[cursor..start]);
+        out.extend_from_slice(replacement);
+        cursor = end;
+    }
+    out.extend_from_slice(&bytes[cursor..]);
+    Some(out)
+}
+
+fn scan_json(bytes: &[u8], paths: &[&[&str]]) -> Result<(usize, Vec<(usize, usize)>), ()> {
+    let mut scanner = Scanner { bytes, index: 0 };
+    scanner.skip_ws();
+    if scanner.index >= bytes.len() {
+        return Err(());
+    }
+    let mut stack = Vec::new();
+    let mut spans = Vec::new();
+    scanner.value(paths, &mut stack, 0, &mut spans)?;
+    Ok((scanner.index, spans))
+}
+
+struct Scanner<'a> {
+    bytes: &'a [u8],
+    index: usize,
+}
+
+enum StackKey {
+    Raw(usize, usize),
+    Owned(String),
+}
+
+impl<'a> Scanner<'a> {
+    fn skip_ws(&mut self) {
+        while self.index < self.bytes.len() && is_ws(self.bytes[self.index]) {
+            self.index += 1;
+        }
+    }
+
+    fn value(
+        &mut self,
+        paths: &[&[&str]],
+        stack: &mut Vec<StackKey>,
+        depth: usize,
+        spans: &mut Vec<(usize, usize)>,
+    ) -> Result<(), ()> {
+        if depth > 64 {
+            return Err(());
+        }
+        self.skip_ws();
+        let Some(byte) = self.bytes.get(self.index).copied() else {
+            return Err(());
+        };
+        match byte {
+            b'{' => self.object(paths, stack, depth, spans),
+            b'[' => self.array(paths, stack, depth, spans),
+            b'"' => {
+                let (start, end, _) = self.string_span()?;
+                if path_matches(self.bytes, stack, paths) {
+                    spans.push((start, end));
+                }
+                Ok(())
+            }
+            b't' => self.literal(b"true"),
+            b'f' => self.literal(b"false"),
+            b'n' => self.literal(b"null"),
+            b'-' | b'0'..=b'9' => self.number(),
+            _ => Err(()),
+        }
+    }
+
+    fn object(
+        &mut self,
+        paths: &[&[&str]],
+        stack: &mut Vec<StackKey>,
+        depth: usize,
+        spans: &mut Vec<(usize, usize)>,
+    ) -> Result<(), ()> {
+        self.index += 1;
+        loop {
+            self.skip_ws();
+            if self.bytes.get(self.index) == Some(&b'}') {
+                self.index += 1;
+                return Ok(());
+            }
+            let (start, end, escaped) = self.string_span()?;
+            let key = if escaped {
+                StackKey::Owned(decode_string(&self.bytes[start + 1..end - 1])?)
+            } else {
+                StackKey::Raw(start + 1, end - 1)
+            };
+            self.skip_ws();
+            if self.bytes.get(self.index) != Some(&b':') {
+                return Err(());
+            }
+            self.index += 1;
+            stack.push(key);
+            self.value(paths, stack, depth + 1, spans)?;
+            stack.pop();
+            self.skip_ws();
+            match self.bytes.get(self.index).copied() {
+                Some(b',') => self.index += 1,
+                Some(b'}') => {
+                    self.index += 1;
+                    return Ok(());
+                }
+                _ => return Err(()),
+            }
+        }
+    }
+
+    fn array(
+        &mut self,
+        paths: &[&[&str]],
+        stack: &mut Vec<StackKey>,
+        depth: usize,
+        spans: &mut Vec<(usize, usize)>,
+    ) -> Result<(), ()> {
+        self.index += 1;
+        loop {
+            self.skip_ws();
+            if self.bytes.get(self.index) == Some(&b']') {
+                self.index += 1;
+                return Ok(());
+            }
+            self.value(paths, stack, depth + 1, spans)?;
+            self.skip_ws();
+            match self.bytes.get(self.index).copied() {
+                Some(b',') => self.index += 1,
+                Some(b']') => {
+                    self.index += 1;
+                    return Ok(());
+                }
+                _ => return Err(()),
+            }
+        }
+    }
+
+    fn string_span(&mut self) -> Result<(usize, usize, bool), ()> {
+        let start = self.index;
+        if self.bytes.get(self.index) != Some(&b'"') {
+            return Err(());
+        }
+        self.index += 1;
+        let mut escaped = false;
+        while self.index < self.bytes.len() {
+            let byte = self.bytes[self.index];
+            if byte == b'\\' {
+                escaped = true;
+                self.index += 1;
+                let Some(mark) = self.bytes.get(self.index).copied() else {
+                    return Err(());
+                };
+                if mark == b'u' {
+                    if self.index + 4 >= self.bytes.len() {
+                        return Err(());
+                    }
+                    if !self.bytes[self.index + 1..self.index + 5]
+                        .iter()
+                        .all(u8::is_ascii_hexdigit)
+                    {
+                        return Err(());
+                    }
+                    self.index += 5;
+                    continue;
+                }
+                if !matches!(mark, b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') {
+                    return Err(());
+                }
+                self.index += 1;
+                continue;
+            }
+            if byte == b'"' {
+                self.index += 1;
+                return Ok((start, self.index, escaped));
+            }
+            if byte < 0x20 {
+                return Err(());
+            }
+            self.index += 1;
+        }
+        Err(())
+    }
+
+    fn literal(&mut self, text: &[u8]) -> Result<(), ()> {
+        if self.bytes[self.index..].starts_with(text) {
+            self.index += text.len();
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn number(&mut self) -> Result<(), ()> {
+        if self.bytes.get(self.index) == Some(&b'-') {
+            self.index += 1;
+        }
+        if self.bytes.get(self.index) == Some(&b'0') {
+            self.index += 1;
+        } else if self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
+            while self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
+                self.index += 1;
+            }
+        } else {
+            return Err(());
+        }
+        if self.bytes.get(self.index) == Some(&b'.') {
+            self.index += 1;
+            if !self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
+                return Err(());
+            }
+            while self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
+                self.index += 1;
+            }
+        }
+        if matches!(self.bytes.get(self.index), Some(b'e' | b'E')) {
+            self.index += 1;
+            if matches!(self.bytes.get(self.index), Some(b'+' | b'-')) {
+                self.index += 1;
+            }
+            if !self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
+                return Err(());
+            }
+            while self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
+                self.index += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn path_matches(bytes: &[u8], stack: &[StackKey], paths: &[&[&str]]) -> bool {
+    paths.iter().any(|path| {
+        path.len() == stack.len()
+            && path
+                .iter()
+                .zip(stack.iter())
+                .all(|(segment, key)| match key {
+                    StackKey::Raw(start, end) => &bytes[*start..*end] == segment.as_bytes(),
+                    StackKey::Owned(text) => text == segment,
+                })
+    })
+}
+
+fn decode_string(content: &[u8]) -> Result<String, ()> {
+    let mut out = String::new();
+    let mut index = 0;
+    while index < content.len() {
+        if content[index] != b'\\' {
+            let start = index;
+            while index < content.len() && content[index] != b'\\' {
+                index += 1;
+            }
+            let text = std::str::from_utf8(&content[start..index]).map_err(|_| ())?;
+            out.push_str(text);
+            continue;
+        }
+        index += 1;
+        let Some(mark) = content.get(index).copied() else {
+            return Err(());
+        };
+        match mark {
+            b'"' => out.push('"'),
+            b'\\' => out.push('\\'),
+            b'/' => out.push('/'),
+            b'b' => out.push('\u{0008}'),
+            b'f' => out.push('\u{000c}'),
+            b'n' => out.push('\n'),
+            b'r' => out.push('\r'),
+            b't' => out.push('\t'),
+            b'u' => push_unicode(content, &mut index, &mut out)?,
+            _ => return Err(()),
+        }
+        if mark != b'u' {
+            index += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn push_unicode(content: &[u8], index: &mut usize, out: &mut String) -> Result<(), ()> {
+    *index += 1;
+    let unit = hex4(&content[*index..])?;
+    *index += 4;
+    if (0xD800..=0xDBFF).contains(&unit) {
+        if content.get(*index) != Some(&b'\\') || content.get(*index + 1) != Some(&b'u') {
+            return Err(());
+        }
+        *index += 2;
+        let low = hex4(&content[*index..])?;
+        *index += 4;
+        if !(0xDC00..=0xDFFF).contains(&low) {
+            return Err(());
+        }
+        let code = 0x1_0000 + (((u32::from(unit) - 0xD800) << 10) | (u32::from(low) - 0xDC00));
+        out.push(char::from_u32(code).ok_or(())?);
+        return Ok(());
+    }
+    if (0xDC00..=0xDFFF).contains(&unit) {
+        return Err(());
+    }
+    out.push(char::from_u32(u32::from(unit)).ok_or(())?);
+    Ok(())
+}
+
+fn hex4(bytes: &[u8]) -> Result<u16, ()> {
+    if bytes.len() < 4 {
+        return Err(());
+    }
+    let mut value = 0u16;
+    for byte in &bytes[..4] {
+        value = (value << 4) | hex_value(*byte)?;
+    }
+    Ok(value)
+}
+
+fn hex_value(byte: u8) -> Result<u16, ()> {
+    match byte {
+        b'0'..=b'9' => Ok(u16::from(byte - b'0')),
+        b'a'..=b'f' => Ok(u16::from(byte - b'a' + 10)),
+        b'A'..=b'F' => Ok(u16::from(byte - b'A' + 10)),
+        _ => Err(()),
+    }
+}
+
+fn literal_replace(bytes: &[u8], from: &[u8], to: &[u8], partial: bool) -> Vec<u8> {
+    let mut out = if from.len() < 3 {
+        bytes.to_vec()
+    } else {
+        replace_exact(bytes, from, to)
+    };
+    if !partial || from.len() < 2 {
+        return out;
+    }
+    let max = (from.len() - 1).min(out.len());
+    let mut len = max;
+    while len >= 2 {
+        if out.ends_with(&from[..len]) {
+            out.truncate(out.len() - len);
+            out.extend_from_slice(to);
+            break;
+        }
+        len -= 1;
+    }
+    out
+}
+
+fn replace_exact(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut index = 0;
+    while index < haystack.len() {
+        if haystack[index..].starts_with(needle) {
+            out.extend_from_slice(replacement);
+            index += needle.len();
+        } else {
+            out.push(haystack[index]);
+            index += 1;
+        }
+    }
+    out
+}
+
+fn json_quote(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + 2);
+    out.push(b'"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.extend_from_slice(b"\\\""),
+            '\\' => out.extend_from_slice(b"\\\\"),
+            '\u{0008}' => out.extend_from_slice(b"\\b"),
+            '\u{000c}' => out.extend_from_slice(b"\\f"),
+            '\n' => out.extend_from_slice(b"\\n"),
+            '\r' => out.extend_from_slice(b"\\r"),
+            '\t' => out.extend_from_slice(b"\\t"),
+            other if (other as u32) < 0x20 => {
+                let code = other as u32;
+                out.extend_from_slice(b"\\u00");
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                out.push(HEX[((code >> 4) & 0xf) as usize]);
+                out.push(HEX[(code & 0xf) as usize]);
+            }
+            other => {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+    }
+    out.push(b'"');
+    out
 }
 
 fn is_ws(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
-}
-
-fn json_value_len(input: &[u8]) -> Option<usize> {
-    let mut stream = serde_json::Deserializer::from_slice(input).into_iter::<serde_json::Value>();
-    match stream.next() {
-        Some(Ok(_)) => Some(stream.byte_offset()),
-        _ => None,
-    }
 }
 
 /// Ends a partial event so the next frame is not glued to it.
@@ -332,10 +1055,22 @@ fn terminate_event(bytes: &mut Vec<u8>) {
     if crlf {
         if bytes.ends_with(b"\r\n") {
             bytes.extend_from_slice(b"\r\n");
+        } else if bytes.ends_with(b"\r") {
+            bytes.extend_from_slice(b"\n\r\n");
         } else {
             bytes.extend_from_slice(b"\r\n\r\n");
         }
-    } else if bytes.ends_with(b"\n") {
+        return;
+    }
+    if bytes.contains(&b'\r') {
+        if bytes.ends_with(b"\r") {
+            bytes.push(b'\r');
+        } else {
+            bytes.extend_from_slice(b"\r\r");
+        }
+        return;
+    }
+    if bytes.ends_with(b"\n") {
         bytes.push(b'\n');
     } else {
         bytes.extend_from_slice(b"\n\n");
@@ -343,27 +1078,171 @@ fn terminate_event(bytes: &mut Vec<u8>) {
 }
 
 pub(crate) fn frame_closed(bytes: &[u8]) -> bool {
-    bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n")
+    bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n") || bytes.ends_with(b"\r\r")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_all;
+    use super::{DecoderTap, RawTap, rewrite_all};
     use crate::{
         AnthropicMessages, Codec, Converse, GenerativeLanguage, OpenAiChat, OpenAiResponses,
     };
 
     #[test]
     fn a_split_json_object_is_rewritten_when_it_completes() {
-        let paths: &[&[&str]] = &[&["model"]];
-        let head = br#"{"model":"up"#;
-        let (first, consumed) = super::rewrite_ready(head, paths, "demo");
-        assert!(first.is_empty(), "{first:?}");
-        assert_eq!(consumed, 0);
-        let mut pending = head.to_vec();
-        pending.extend_from_slice(br#"stream","n":1}"#);
-        let text = String::from_utf8(rewrite_all(&pending, paths, "demo")).expect("utf-8");
+        let mut tap = OpenAiChat.raw_tap("demo", "upstream");
+        assert!(tap.push(br#"{"model":"up"#).is_empty());
+        assert!(tap.push(br#"stream","n":1}"#).is_empty());
+        let text = String::from_utf8(tap.finish()).expect("utf-8");
         assert_eq!(text, r#"{"model":"demo","n":1}"#);
+    }
+
+    #[test]
+    fn numbers_and_escapes_round_trip_byte_for_byte() {
+        let raw = br#"{"model":"upstream","big":123456789012345678901234567890,"f":10.10,"e":1e2,"s":"\u00e9\/"}"#;
+        let want = br#"{"model":"demo","big":123456789012345678901234567890,"f":10.10,"e":1e2,"s":"\u00e9\/"}"#;
+        let paths: &[&[&str]] = &[&["model"]];
+        assert_eq!(rewrite_all(raw, paths, "demo", "upstream"), want);
+        assert_eq!(rewrite_all(raw, paths, "upstream", "upstream"), raw);
+        let untouched = br#"{"id":"c","created":1.50,"big":123456789012345678901234567890,"e":1e2,"s":"\u00e9\/"}"#;
+        assert_eq!(rewrite_all(untouched, paths, "demo", "upstream"), untouched);
+        let tool = br#"{"model":"upstream","content":[{"type":"tool_use","input":{"account":123456789012345678901234567890,"amount":10.10,"exp":1e2,"model":"tesla-3"}}]}"#;
+        let tool_out = rewrite_all(tool, paths, "demo", "upstream");
+        assert_eq!(&tool_out[..tool_out.len()], &{
+            let mut expected = tool.to_vec();
+            let from = br#""model":"upstream""#;
+            let to = br#""model":"demo""#;
+            let at = expected
+                .windows(from.len())
+                .position(|window| window == from)
+                .unwrap();
+            expected.splice(at..at + from.len(), to.iter().copied());
+            expected
+        });
+        assert!(
+            tool_out
+                .windows(14)
+                .any(|window| window == br#""model":"demo""#)
+        );
+        assert!(
+            tool_out
+                .windows(17)
+                .any(|window| window == br#""model":"tesla-3""#)
+        );
+        assert!(tool_out.windows(5).any(|window| window == b"10.10"));
+        assert!(tool_out.windows(3).any(|window| window == b"1e2"));
+    }
+
+    #[test]
+    fn equal_names_are_not_parsed() {
+        let frame = b"data: {\"model\":\"demo\",\"big\":123456789012345678901234567890,\"f\":10.10,\"e\":1e2,\"s\":\"\\u00e9\\/\"}\n\n";
+        let mut tap = OpenAiChat.raw_tap("demo", "demo");
+        let mid = frame.len() / 2;
+        let first = tap.push(&frame[..mid]);
+        assert_eq!(first, &frame[..mid]);
+        let mut out = first;
+        out.extend(tap.push(&frame[mid..]));
+        out.extend(tap.finish());
+        assert_eq!(out, frame);
+        assert_eq!(tap.tokens(), (None, None));
+    }
+
+    #[test]
+    fn a_multiline_data_field_and_a_cr_event_are_spliced() {
+        let paths: &[&[&str]] = &[&["model"]];
+        let split = b"data: {\"model\":\ndata: \"upstream\",\"n\":1}\n\n";
+        assert_eq!(
+            rewrite_all(split, paths, "demo", "upstream"),
+            b"data: {\"model\":\ndata: \"demo\",\"n\":1}\n\n"
+        );
+        let cr = b"data: {\"model\":\"upstream\",\"n\":1}\r\r";
+        assert_eq!(
+            rewrite_all(cr, paths, "demo", "upstream"),
+            b"data: {\"model\":\"demo\",\"n\":1}\r\r"
+        );
+        let done = b"data: [DONE]\n\n";
+        assert_eq!(rewrite_all(done, paths, "demo", "upstream"), done);
+    }
+
+    #[test]
+    fn unreadable_events_do_not_leak_the_upstream_name() {
+        let paths: &[&[&str]] = &[&["model"]];
+        let mut odd = b"data: {\"model\":\"upstream\",\"x\":\"".to_vec();
+        odd.push(0xff);
+        odd.extend_from_slice(b"\"}\n\n");
+        let rewritten = rewrite_all(&odd, paths, "demo", "upstream");
+        assert!(
+            rewritten
+                .windows(14)
+                .any(|window| window == b"\"model\":\"demo\"")
+        );
+        assert!(!rewritten.windows(8).any(|window| window == b"upstream"));
+        assert!(rewritten.contains(&0xff));
+
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice(b"data: {\"model\":\"upstream\"}\n\n");
+        let rewritten = rewrite_all(&bom, paths, "demo", "upstream");
+        assert!(rewritten.starts_with(&[0xEF, 0xBB, 0xBF]));
+        assert!(
+            rewritten
+                .windows(14)
+                .any(|window| window == b"\"model\":\"demo\"")
+        );
+        assert!(!rewritten.windows(8).any(|window| window == b"upstream"));
+    }
+
+    #[test]
+    fn an_event_over_the_cap_is_forwarded_before_finish() {
+        let mut body = br#"data: {"model":"upstream","pad":""#.to_vec();
+        body.resize((1 << 20) + 64, b'q');
+        let mut tap = DecoderTap::with_cap(
+            OpenAiChat.stream_decoder(),
+            OpenAiChat.model_paths(),
+            "demo",
+            "upstream",
+            1 << 20,
+        );
+        let forwarded = tap.push(&body);
+        assert!(forwarded.len() > (1 << 20) - 64, "held {}", forwarded.len());
+        assert!(!forwarded.windows(8).any(|window| window == b"upstream"));
+        assert!(forwarded.windows(4).any(|window| window == b"demo"));
+        let tail = tap.finish();
+        let mut all = forwarded;
+        all.extend(tail);
+        assert!(!all.windows(8).any(|window| window == b"upstream"));
+    }
+
+    #[test]
+    fn one_byte_chunks_of_a_long_event_stay_exact() {
+        let mut event = br#"data: {"model":"upstream","big":123456789012345678901234567890,"f":10.10,"e":1e2,"s":"\u00e9\/","pad":""#.to_vec();
+        event.extend(std::iter::repeat_n(b'a', 8 * 1024));
+        event.extend_from_slice(br#""}"#);
+        event.extend_from_slice(b"\n\n");
+        let mut tap = OpenAiChat.raw_tap("demo", "upstream");
+        let mut out = Vec::new();
+        for byte in &event {
+            out.extend(tap.push(std::slice::from_ref(byte)));
+        }
+        out.extend(tap.finish());
+        assert!(
+            out.windows(14)
+                .any(|window| window == b"\"model\":\"demo\"")
+        );
+        assert!(!out.windows(8).any(|window| window == b"upstream"));
+        assert!(out.windows(5).any(|window| window == b"10.10"));
+        assert!(out.windows(3).any(|window| window == b"1e2"));
+        assert!(
+            out.windows(30)
+                .any(|window| window == b"123456789012345678901234567890")
+        );
+        let same = OpenAiChat.raw_tap("upstream", "upstream");
+        let mut copied = Vec::new();
+        let mut same = same;
+        for byte in &event {
+            copied.extend(same.push(std::slice::from_ref(byte)));
+        }
+        copied.extend(same.finish());
+        assert_eq!(copied, event);
     }
 
     #[test]
@@ -373,8 +1252,8 @@ mod tests {
             let body = format!(
                 "{prefix}data: {{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream-x\",\"choices\":[]}}\n\n"
             );
-            let text =
-                String::from_utf8(rewrite_all(body.as_bytes(), paths, "demo")).expect("utf-8");
+            let text = rewrite_all(body.as_bytes(), paths, "demo", "upstream");
+            let text = String::from_utf8(text).expect("utf-8");
             assert!(text.contains("\"model\":\"demo\""), "{prefix}: {text}");
             assert!(!text.contains("upstream-x"), "{prefix}: {text}");
             assert!(text.contains(prefix.trim_end()), "{prefix}");
@@ -385,7 +1264,8 @@ mod tests {
     fn tool_arguments_keep_their_own_model_field() {
         let anthropic = br#"{"id":"m","type":"message","role":"assistant","model":"upstream-x","content":[{"type":"tool_use","id":"t","name":"car","input":{"model":"tesla-3"}}],"stop_reason":"end_turn"}"#;
         let anthropic_text =
-            String::from_utf8(AnthropicMessages.rewrite_model(anthropic, "demo")).expect("utf-8");
+            String::from_utf8(AnthropicMessages.rewrite_model(anthropic, "demo", "upstream"))
+                .expect("utf-8");
         assert!(
             anthropic_text.contains("\"model\":\"demo\""),
             "{anthropic_text}"
@@ -401,7 +1281,7 @@ mod tests {
             "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"upstream-x\",",
             "\"content\":[{\"type\":\"tool_use\",\"input\":{\"model\":\"tesla-3\"}}]}}\n\n",
         );
-        let mut tap = AnthropicMessages.raw_tap("demo");
+        let mut tap = AnthropicMessages.raw_tap("demo", "upstream");
         let mut forwarded = tap.push(nested.as_bytes());
         forwarded.extend(tap.finish());
         let text = String::from_utf8(forwarded).expect("utf-8");
@@ -409,26 +1289,28 @@ mod tests {
         assert!(text.contains("\"model\":\"tesla-3\""), "{text}");
         assert!(!text.contains("upstream-x"), "{text}");
 
-        let gemini = br#"{"responseId":"g","modelVersion":"upstream-x","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"car","args":{"model":"tesla-3"}}}]}}]}"#;
-        let gemini_text =
-            String::from_utf8(GenerativeLanguage.rewrite_model(gemini, "demo")).expect("utf-8");
+        let language = br#"{"responseId":"g","modelVersion":"upstream-x","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"car","args":{"model":"tesla-3"}}}]}}]}"#;
+        let language_text =
+            String::from_utf8(GenerativeLanguage.rewrite_model(language, "demo", "upstream"))
+                .expect("utf-8");
         assert!(
-            gemini_text.contains("\"modelVersion\":\"demo\""),
-            "{gemini_text}"
+            language_text.contains("\"modelVersion\":\"demo\""),
+            "{language_text}"
         );
         assert!(
-            gemini_text.contains("\"model\":\"tesla-3\""),
-            "{gemini_text}"
+            language_text.contains("\"model\":\"tesla-3\""),
+            "{language_text}"
         );
-        assert!(!gemini_text.contains("upstream-x"), "{gemini_text}");
+        assert!(!language_text.contains("upstream-x"), "{language_text}");
     }
 
     #[test]
     fn a_partial_event_is_terminated_when_the_tap_finishes() {
-        let mut tap = OpenAiChat.raw_tap("demo");
+        let mut tap = OpenAiChat.raw_tap("demo", "upstream");
         assert!(tap.push(br#"data: {"model":"upstream"#).is_empty());
         let tail = String::from_utf8(tap.finish()).expect("utf-8");
-        assert_eq!(tail, "data: {\"model\":\"upstream\n\n");
+        assert_eq!(tail, "data: {\"model\":\"demo\"\n\n");
+        assert!(!tail.contains("upstream"));
     }
 
     #[test]
@@ -462,19 +1344,19 @@ mod tests {
             responses.as_bytes(),
             br#"{"id":"r","model":"upstream","status":"completed","output":[],"usage":{"input_tokens":11,"output_tokens":7}}"#,
         );
-        let gemini = concat!(
+        let language = concat!(
             "data: {\"responseId\":\"g\",\"modelVersion\":\"upstream\",",
             "\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":7}}\n\n",
         );
         assert_tokens(
             &GenerativeLanguage,
-            gemini.as_bytes(),
+            language.as_bytes(),
             br#"{"responseId":"g","modelVersion":"upstream","candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7}}"#,
         );
     }
 
     fn assert_tokens(codec: &dyn Codec, stream: &[u8], unary: &[u8]) {
-        let mut tap = codec.raw_tap("demo");
+        let mut tap = codec.raw_tap("demo", "upstream");
         let mut forwarded = Vec::new();
         for byte in stream {
             forwarded.extend(tap.push(std::slice::from_ref(byte)));
@@ -493,7 +1375,7 @@ mod tests {
             "{}",
             codec.id()
         );
-        let rewritten = codec.rewrite_model(unary, "demo");
+        let rewritten = codec.rewrite_model(unary, "demo", "upstream");
         let unary_text = String::from_utf8(rewritten).expect("utf-8");
         assert!(
             unary_text.contains("demo") && !unary_text.contains("upstream"),
@@ -508,7 +1390,7 @@ mod tests {
             "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream\",",
             "\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
         );
-        let mut tap = OpenAiChat.raw_tap("demo");
+        let mut tap = OpenAiChat.raw_tap("demo", "upstream");
         let split = frame.find("prompt_tokens").expect("field");
         let bytes = frame.as_bytes();
         let _ = tap.push(&bytes[..split]);
@@ -539,10 +1421,10 @@ mod tests {
         assert!(chat.starts_with("data: {\"error\":"), "{chat}");
         assert!(!chat.contains("event:"), "{chat}");
 
-        let gemini =
+        let language =
             String::from_utf8(GenerativeLanguage.encode_stream_error(503, "later")).expect("utf-8");
-        assert!(gemini.starts_with("data: {\"error\":"), "{gemini}");
-        assert!(!gemini.contains("event:"), "{gemini}");
+        assert!(language.starts_with("data: {\"error\":"), "{language}");
+        assert!(!language.contains("event:"), "{language}");
 
         let anthropic =
             String::from_utf8(AnthropicMessages.encode_stream_error(429, "slow")).expect("utf-8");

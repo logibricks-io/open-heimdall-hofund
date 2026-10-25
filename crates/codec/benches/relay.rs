@@ -58,24 +58,88 @@ fn stream_relay(criterion: &mut Criterion) {
     });
 }
 
-fn passthrough(criterion: &mut Criterion) {
-    let frame = concat!(
+fn frame() -> &'static str {
+    concat!(
         "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream\",",
         "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":",
         "{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
-    );
-    let bytes = frame.as_bytes();
+    )
+}
+
+fn relay_tap(client: &str, upstream: &str, bytes: &[u8]) -> usize {
     let split = bytes.len() / 2;
-    criterion.bench_function("passthrough", |bencher| {
+    let mut tap = OpenAiChat.raw_tap(client, upstream);
+    let mut out = tap.push(std::hint::black_box(&bytes[..split]));
+    out.extend(tap.push(std::hint::black_box(&bytes[split..])));
+    out.extend(tap.finish());
+    std::hint::black_box(out).len()
+}
+
+fn passthrough_equal(criterion: &mut Criterion) {
+    let bytes = frame().as_bytes();
+    criterion.bench_function("passthrough_equal", |bencher| {
+        bencher.iter(|| relay_tap("upstream", "upstream", bytes))
+    });
+}
+
+fn passthrough_differ(criterion: &mut Criterion) {
+    let bytes = frame().as_bytes();
+    criterion.bench_function("passthrough_differ", |bencher| {
+        bencher.iter(|| relay_tap("demo", "upstream", bytes))
+    });
+}
+
+fn wide_frame() -> Vec<u8> {
+    let mut frame = br#"data: {"model":"upstream","pad":""#.to_vec();
+    frame.resize(frame.len() + 8 * 1024 * 1024, b'x');
+    frame.extend_from_slice(br#""}"#);
+    frame.extend_from_slice(b"\n\n");
+    frame
+}
+
+fn push_chunks(client: &str, upstream: &str, frame: &[u8], chunk: usize) -> usize {
+    let mut tap = OpenAiChat.raw_tap(client, upstream);
+    let mut forwarded = 0;
+    for piece in frame.chunks(chunk) {
+        forwarded += tap.push(std::hint::black_box(piece)).len();
+    }
+    forwarded += tap.finish().len();
+    forwarded
+}
+
+fn passthrough_8mib(criterion: &mut Criterion) {
+    let frame = wide_frame();
+    criterion.bench_function("passthrough_8mib_equal", |bencher| {
+        bencher.iter(|| push_chunks("upstream", "upstream", &frame, 16 * 1024))
+    });
+    criterion.bench_function("passthrough_8mib_differ", |bencher| {
+        bencher.iter(|| push_chunks("demo", "upstream", &frame, 16 * 1024))
+    });
+}
+
+fn passthrough_bytes(criterion: &mut Criterion) {
+    let bytes = frame().as_bytes();
+    criterion.bench_function("passthrough_bytes", |bencher| {
         bencher.iter(|| {
-            let mut tap = OpenAiChat.raw_tap("demo");
-            let mut out = tap.push(std::hint::black_box(&bytes[..split]));
-            out.extend(tap.push(std::hint::black_box(&bytes[split..])));
-            out.extend(tap.finish());
-            std::hint::black_box(out)
+            let mut tap = OpenAiChat.raw_tap("demo", "upstream");
+            let mut forwarded = 0;
+            for piece in bytes.chunks(1) {
+                forwarded += tap.push(std::hint::black_box(piece)).len();
+            }
+            forwarded += tap.finish().len();
+            std::hint::black_box(forwarded)
         })
     });
 }
 
-criterion_group!(relay, decode, encode, stream_relay, passthrough);
+criterion_group!(
+    relay,
+    decode,
+    encode,
+    stream_relay,
+    passthrough_equal,
+    passthrough_differ,
+    passthrough_8mib,
+    passthrough_bytes
+);
 criterion_main!(relay);

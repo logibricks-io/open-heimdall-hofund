@@ -312,6 +312,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 codec,
                 &model_request,
                 &routed.upstream_id,
+                &routed.upstream_model,
                 routed.completion,
                 started,
             )
@@ -462,6 +463,7 @@ async fn success(
     codec: Arc<dyn Codec>,
     request: &ModelRequest,
     upstream: &str,
+    upstream_model: &str,
     completion: Completion,
     started: Instant,
 ) -> Response {
@@ -507,7 +509,7 @@ async fn success(
                 .body(Body::from_stream(body))
                 .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
         }
-        Completion::Raw(body) => raw_body(app, codec, request, meta, body).await,
+        Completion::Raw(body) => raw_body(app, codec, request, upstream_model, meta, body).await,
         _ => text_response(StatusCode::BAD_GATEWAY, "unsupported completion"),
     }
 }
@@ -516,13 +518,14 @@ async fn raw_body(
     app: Arc<Inner>,
     codec: Arc<dyn Codec>,
     request: &ModelRequest,
+    upstream_model: &str,
     mut meta: UsageMeta,
     mut body: BodyStream,
 ) -> Response {
     let content_type = codec.response_content_type(request.stream);
     if request.stream {
         let usage = Arc::clone(&app.usage);
-        let tap = codec.raw_tap(&request.model);
+        let tap = codec.raw_tap(&request.model, upstream_model);
         let on_error = {
             let codec = Arc::clone(&codec);
             move |error: &PluginError| {
@@ -631,7 +634,7 @@ async fn raw_body(
     meta.input = input;
     meta.output = output;
     write_usage(&app.usage, &meta, Some((input, output)), StatusCode::OK);
-    let body = codec.rewrite_model(&bytes, &request.model);
+    let body = codec.rewrite_model(&bytes, &request.model, upstream_model);
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, codec.response_content_type(false))
@@ -773,7 +776,7 @@ fn sse_body(
 }
 
 fn frame_closed(bytes: &[u8]) -> bool {
-    bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n")
+    bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n") || bytes.ends_with(b"\r\r")
 }
 
 fn note_usage(event: &StreamEvent, input: &mut Option<i64>, output: &mut Option<i64>) {

@@ -181,11 +181,13 @@ impl Router {
         for (index, hop) in resolved.hops.iter().enumerate() {
             let mut attempt = request.clone();
             apply_wire(&mut attempt, hop, &resolved.bare);
+            let upstream_model = attempt.model.clone();
             let result = call_member(hop, index, inbound_protocol, attempt).await;
             match result {
                 Ok(completion) => {
                     return Ok(Routed {
                         upstream_id: hop.member.route_id().to_owned(),
+                        upstream_model,
                         completion: label_model(completion, asked),
                     });
                 }
@@ -347,6 +349,9 @@ impl Router {
 pub struct Routed {
     /// Id of the provider that produced the completion.
     pub upstream_id: String,
+    /// Model name sent to that provider. The gateway compares it with the
+    /// name the client asked for before touching a raw body.
+    pub upstream_model: String,
     /// The completion. A stream or raw body has already produced its first
     /// chunk, or ended empty. A failure before that is not returned here.
     pub completion: Completion,

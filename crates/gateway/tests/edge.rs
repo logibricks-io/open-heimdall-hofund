@@ -20,7 +20,7 @@ use hofund_ir::{
     TextDelta,
 };
 use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PresetId};
-use hofund_router::{Completion, FailoverPolicy, Member, Router, Snapshot};
+use hofund_router::{Completion, FailoverPolicy, Hop, Member, Router, Snapshot};
 use hofund_usage::Ledger;
 use tower::ServiceExt;
 
@@ -627,11 +627,15 @@ fn raw_app(
     let mut routes = BTreeMap::new();
     routes.insert(
         "demo".to_owned(),
-        vec![Arc::new(RawReply {
-            member_id: member_id("primary"),
-            parts,
-            then_error,
-        }) as Arc<dyn Member>],
+        vec![Hop {
+            member: Arc::new(RawReply {
+                member_id: member_id("primary"),
+                parts,
+                then_error,
+            }) as Arc<dyn Member>,
+            wire_model: Some("upstream".to_owned()),
+            max_output_tokens: None,
+        }],
     );
     let mut codecs = HashMap::new();
     codecs.insert(
@@ -643,7 +647,7 @@ fn raw_app(
     codecs.insert(GENERATIVE_UNARY.to_owned(), Arc::new(GenerativeLanguage));
     codecs.insert(GENERATIVE_STREAM.to_owned(), Arc::new(GenerativeLanguage));
     let app = Gateway::new(
-        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
+        Snapshot::new(Router::from_hops(routes, FailoverPolicy::default())),
         "secret".to_owned(),
         codecs,
         Arc::clone(&usage),
@@ -901,8 +905,9 @@ async fn held_rewriter_bytes_are_flushed_before_the_error_frame() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
-        body.starts_with("data: {\"model\":\"upstream\n\ndata: {\"error\":"),
+        body.starts_with("data: {\"model\":\"demo\"\n\ndata: {\"error\":"),
         "{body}"
     );
+    assert!(!body.contains("upstream"), "{body}");
     let _ = std::fs::remove_dir_all(dir);
 }
