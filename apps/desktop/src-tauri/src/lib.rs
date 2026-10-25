@@ -73,13 +73,28 @@ pub fn run() -> Result<(), String> {
 
 fn install_tray(app: &tauri::AppHandle, snapshot: &Snapshot) -> tauri::Result<()> {
     let menu = build_menu(app, snapshot)?;
-    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
-    TrayIconBuilder::with_id("hofund")
-        .icon(icon)
+    let builder = TrayIconBuilder::with_id("hofund")
+        .icon(tray_icon()?)
         .menu(&menu)
-        .show_menu_on_left_click(true)
-        .build(app)?;
+        .show_menu_on_left_click(true);
+    // macOS treats a template image as a mask and tints it for the menu bar.
+    #[cfg(target_os = "macos")]
+    let builder = builder.icon_as_template(true);
+    builder.build(app)?;
     Ok(())
+}
+
+/// Menu-bar image. macOS uses the black template set. Windows and Linux use the colour set.
+fn tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    #[cfg(target_os = "macos")]
+    {
+        // 44 px source. `tray-icon` draws it at 18 pt, so the retina pixels stay sharp.
+        tauri::image::Image::from_bytes(include_bytes!("../icons/tray/tray-template-22@2x.png"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        tauri::image::Image::from_bytes(include_bytes!("../icons/tray/tray-color-32.png"))
+    }
 }
 
 fn build_menu(app: &tauri::AppHandle, snapshot: &Snapshot) -> tauri::Result<Menu<tauri::Wry>> {

@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Kernel Hilt is the hofund mark: an upright sword seated in an amber
+  kernel, with plugin modules as the crossguard. README heroes, the desktop
+  bundle icons, and the tray icon use `assets/brand`.
 - RFC 0001, a microkernel and plugin design, is accepted in
   `docs/rfc/0001-microkernel-plugins.md` (2026-10-25, owner sign-off
   conditional on the architecture review). No crate moves in that pull

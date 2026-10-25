@@ -2,6 +2,13 @@
 
 **English** | [Simplified Chinese](README.zh-CN.md)
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.svg">
+    <img alt="hofund" src="assets/brand/lockup-light.svg" width="320">
+  </picture>
+</p>
+
 hofund is a local LLM gateway in the LogiBricks Heimdall series. It translates
 between LLM API protocols, points coding agents at any model, and fails over
 across providers and accounts.
