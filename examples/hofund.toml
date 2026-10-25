@@ -54,6 +54,9 @@ api_key = "replace-me-too"
 # Google Vertex AI. No API key. The plugin reads project, location,
 # credentials, and impersonate from [providers.options]. The old top-level
 # keys still load for one release and are copied into that table.
+# A credentials path may start with `~/`. Leave it empty, or omit it, to use
+# Application Default Credentials. impersonate is the service-account email.
+# Do not paste a key or a service-account JSON here.
 # [[providers]]
 # id = "vertex"
 # preset = "google-vertex"
@@ -61,6 +64,7 @@ api_key = "replace-me-too"
 # project = "my-project"
 # location = "global"
 # credentials = "~/adc.json"
+# impersonate = "worker@example.iam.gserviceaccount.com"
 # Bedrock Converse. SigV4, not a Bedrock API key. region selects the runtime
 # host and is the signing region. Chat and Messages on this preset still use
 # api_key and do not set these options.

@@ -10,8 +10,9 @@
 //! # Semver
 //!
 //! Public structs and enums are `#[non_exhaustive]` and their fields are
-//! private. A change to this surface updates `public-api.txt` in the same
-//! pull request.
+//! private, except [`ProtocolId`]. That codec set is closed so a new id fails
+//! the daemon's match. A change to this surface updates `public-api.txt` in
+//! the same pull request.
 
 #![deny(missing_docs, unreachable_pub, rust_2018_idioms)]
 #![warn(

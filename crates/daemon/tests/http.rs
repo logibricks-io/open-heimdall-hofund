@@ -562,6 +562,88 @@ async fn codex_responses_tools_are_accepted() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[tokio::test]
+async fn bedrock_converse_from_options_is_signed() {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("client");
+    let converse = r#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}}}"#;
+    let chat = r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#;
+    for legacy in [false, true] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/demo/converse"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(converse, "application/json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let keys = if legacy {
+            "\
+region = \"us-east-1\"
+access_key_id = \"AKIDEXAMPLE\"
+secret_access_key = \"secret\"
+session_token = \"SESSTOKEN\"
+"
+        } else {
+            "\
+[providers.options]
+region = \"us-east-1\"
+access_key_id = \"AKIDEXAMPLE\"
+secret_access_key = \"secret\"
+session_token = \"SESSTOKEN\"
+"
+        };
+        let text = format!(
+            "\
+listen = \"127.0.0.1:0\"
+token_file = \"token\"
+usage_file = \"usage.sqlite\"
+[[providers]]
+id = \"primary\"
+protocol = \"bedrock-converse\"
+base_url = \"{base}\"
+{keys}[[routes]]
+model = \"demo\"
+upstreams = [\"primary\"]
+",
+            base = server.uri(),
+        );
+        let dir = scratch();
+        let (running, token) = listen(&dir, &text).await;
+        let body = post_text(&client, &running, "/v1/chat/completions", &token, chat).await;
+        assert!(body.contains("ok"), "legacy={legacy}: {body}");
+        let seen = server.received_requests().await.expect("requests");
+        let authorization = seen[0]
+            .headers
+            .get("authorization")
+            .expect("authorization")
+            .to_str()
+            .expect("authorization text");
+        assert!(
+            authorization.starts_with("AWS4-HMAC-SHA256 "),
+            "{authorization}"
+        );
+        assert!(
+            authorization.contains("Credential=AKIDEXAMPLE/"),
+            "{authorization}"
+        );
+        assert!(
+            authorization.contains("/us-east-1/bedrock/aws4_request"),
+            "{authorization}"
+        );
+        let session = seen[0]
+            .headers
+            .get("x-amz-security-token")
+            .expect("session token")
+            .to_str()
+            .expect("session text");
+        assert_eq!(session, "SESSTOKEN");
+        running.shutdown().await;
+        fs::remove_dir_all(&dir).ok();
+    }
+}
+
 async fn post_text(
     client: &reqwest::Client,
     running: &hofund_daemon::Running,

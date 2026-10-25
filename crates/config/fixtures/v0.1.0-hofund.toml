@@ -1,0 +1,58 @@
+# Example hofund configuration.
+#
+# Copy this file to the platform config path (hofund/hofund.toml under
+# XDG_CONFIG_HOME or ~/.config on Unix, ~/Library/Application Support on
+# macOS, %APPDATA% on Windows), or pass it with --config.
+#
+#   hofund config check --config examples/hofund.toml
+#
+# api_key may be a literal or env:NAME. env:NAME reads that variable when
+# the gateway starts. token_file and usage_file are relative to this file.
+
+listen = "127.0.0.1:3425"
+
+[[providers]]
+id = "primary"
+kind = "openai_compat"
+protocol = "chat"
+base_url = "http://127.0.0.1:4000/v1"
+api_key = "replace-me"
+
+# Point base_url at a local mock. A placeholder key must not be paired with
+# a real vendor host, or a check of this file can send traffic.
+# max_output_tokens is optional. It fills max_tokens when the client omits
+# one. A route member can set a smaller cap. Messages still sends 16384 when
+# neither is set. Zero is rejected.
+# A preset fills the endpoint from crates/provider/presets.toml.
+# Omit kind. protocol is chat, responses, messages, or generative.
+# preset = "google" speaks generateContent. protocol = "chat" on that
+# preset keeps the OpenAI-compatible root.
+# [[providers]]
+# id = "openai"
+# preset = "openai"
+# protocol = "responses"
+# api_key = "env:OPENAI_API_KEY"
+
+[[providers]]
+id = "backup"
+kind = "anthropic"
+base_url = "http://127.0.0.1:4001"
+api_key = "replace-me-too"
+
+# Generative Language (`generateContent`). The key is sent as
+# `x-goog-api-key`, not as a bearer token. A bare host is completed with
+# `/v1beta`. A pasted `:generateContent` URL is cut back to that base.
+# The model is a path segment, so it is not a field of the JSON body.
+# [[providers]]
+# id = "studio"
+# kind = "generative"
+# base_url = "https://generativelanguage.googleapis.com"
+# api_key = "env:GEMINI_API_KEY"
+# [[providers]]
+# id = "gemini"
+# preset = "google"
+# api_key = "env:GEMINI_API_KEY"
+
+[[routes]]
+model = "demo"
+upstreams = ["primary", "backup"]

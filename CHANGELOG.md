@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `[providers.options]` and `[subscriptions.options]` are opaque TOML tables.
+  A value may be a string, an integer, a boolean, an array, or a nested
+  table. Vertex and Bedrock still read strings. A value of another type
+  names the provider and the key.
+
+### Deprecated
+
+- `kind` and the short protocol names `chat`, `responses`, `messages`,
+  `generative`, and `converse` still load for this release. They are rewritten
+  to the codec ids `openai-chat`, `openai-responses`, `anthropic-messages`,
+  `generative-language`, and `bedrock-converse`. The load warning names the
+  replacement. `kind = "openai_compat"` may still select Responses. A `kind`
+  that disagrees with `protocol` is an error. The next release rejects the
+  old names.
+- The provider keys `project`, `location`, `credentials`, `impersonate`,
+  `access_key_id`, `secret_access_key`, `session_token`, and `region` still
+  load at the top of a provider for this release. A non-empty value is copied
+  into `[providers.options]` and the load warning names the key. The next
+  release rejects the old keys.
+- An empty or whitespace-only string is absent, both for those legacy keys
+  and for string values in `[providers.options]` and `[subscriptions.options]`.
+  It is not copied, and it is not an error. `0`, `false`, an empty array, and
+  an empty table are kept. A blank string inside an array is kept.
+
 ### Fixed
 
 - Gemini CLI connect writes `model.name`. A string `model` is moved there.

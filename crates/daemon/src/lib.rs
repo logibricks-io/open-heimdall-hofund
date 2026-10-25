@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
-use hofund_config::{Config, load_path};
+use hofund_config::{Config, Value, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 use hofund_plugin_api::{DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue};
 use hofund_plugin_host::HttpLimits;
@@ -266,17 +266,18 @@ fn providers(
             Wire::Vertex => Arc::new(
                 Vertex::new(
                     endpoint,
-                    option(provider, "credentials"),
-                    option(provider, "impersonate"),
+                    option(provider, "credentials")?,
+                    option(provider, "impersonate")?,
                 )
                 .map_err(show)?,
             ),
             Wire::Converse => {
-                let access_key_id =
-                    hofund_secrets::resolve(option(provider, "access_key_id")).map_err(show)?;
+                let access_key_id = option(provider, "access_key_id")?;
+                let access_key_id = hofund_secrets::resolve(access_key_id.trim()).map_err(show)?;
+                let secret_access_key = option(provider, "secret_access_key")?;
                 let secret_access_key =
-                    hofund_secrets::resolve(option(provider, "secret_access_key")).map_err(show)?;
-                let session_token = option(provider, "session_token");
+                    hofund_secrets::resolve(secret_access_key.trim()).map_err(show)?;
+                let session_token = option(provider, "session_token")?.trim();
                 let session_token = if session_token.is_empty() {
                     String::new()
                 } else {
@@ -285,7 +286,7 @@ fn providers(
                 Arc::new(
                     Bedrock::new(
                         endpoint,
-                        option(provider, "region"),
+                        option(provider, "region")?,
                         &access_key_id,
                         &secret_access_key,
                         &session_token,
@@ -430,7 +431,7 @@ struct Planned {
 
 fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
     let selected = match provider.protocol.as_deref() {
-        Some(protocol) => Some(wire_of_protocol(protocol)?),
+        Some(protocol) => Some(wire_of_protocol(&provider.id, protocol)?),
         None => None,
     };
     if let Some(preset) = &provider.preset
@@ -454,11 +455,11 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
     if let Some(preset) = &provider.preset {
         let resolved = resolve(&hofund_provider::Resolve {
             id: preset,
-            region: option_present(provider, "region"),
+            region: option_present(provider, "region")?,
             wire: selected,
             base_url: &provider.base_url,
-            project: option(provider, "project"),
-            location: option(provider, "location"),
+            project: option(provider, "project")?,
+            location: option(provider, "location")?,
         })
         .map_err(show)?;
         return Ok(Planned {
@@ -483,32 +484,56 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
 /// Option keys the unmigrated Vertex and Bedrock constructors still read.
 /// Config does not name them. E deletes this once those plugins validate
 /// `options` themselves.
-fn option<'a>(provider: &'a hofund_config::Provider, key: &str) -> &'a str {
-    provider.options.get(key).map(String::as_str).unwrap_or("")
-}
-
-fn option_present<'a>(provider: &'a hofund_config::Provider, key: &str) -> Option<&'a str> {
-    match option(provider, key) {
-        "" => None,
-        value => Some(value),
+///
+/// A missing key is an empty string. Any other shape is an error that names
+/// the provider and the key. Vertex and Bedrock require strings.
+fn option<'a>(provider: &'a hofund_config::Provider, key: &str) -> Result<&'a str, DaemonError> {
+    match provider.options.get(key) {
+        None => Ok(""),
+        Some(Value::String(value)) => Ok(value.as_str()),
+        Some(_) => Err(DaemonError::new(format!(
+            "provider `{}` option `{key}` must be a string",
+            provider.id
+        ))),
     }
 }
 
-fn wire_of_protocol(protocol: &str) -> Result<Wire, DaemonError> {
-    let id = ProtocolId::try_from(protocol)
-        .map_err(|_| DaemonError::new(format!("unknown protocol id `{protocol}`")))?;
+fn option_present<'a>(
+    provider: &'a hofund_config::Provider,
+    key: &str,
+) -> Result<Option<&'a str>, DaemonError> {
+    match option(provider, key)? {
+        "" => Ok(None),
+        value => Ok(Some(value)),
+    }
+}
+
+fn wire_of_protocol(provider_id: &str, protocol: &str) -> Result<Wire, DaemonError> {
+    let id = ProtocolId::try_from(protocol).map_err(|_| {
+        DaemonError::new(format!(
+            "provider `{provider_id}` has unknown protocol id `{protocol}`; expected {}",
+            expected_protocols()
+        ))
+    })?;
+    // `ProtocolId` is exhaustive. A new codec id fails this match.
     Ok(match id {
         ProtocolId::OPENAI_CHAT => Wire::Chat,
         ProtocolId::OPENAI_RESPONSES => Wire::Responses,
         ProtocolId::ANTHROPIC_MESSAGES => Wire::Messages,
         ProtocolId::GENERATIVE_LANGUAGE => Wire::Generative,
         ProtocolId::BEDROCK_CONVERSE => Wire::Converse,
-        _ => {
-            return Err(DaemonError::new(format!(
-                "unknown protocol id `{protocol}`"
-            )));
-        }
     })
+}
+
+fn expected_protocols() -> String {
+    let ids: Vec<&str> = ProtocolId::ALL.iter().map(|id| id.as_str()).collect();
+    let Some((last, rest)) = ids.split_last() else {
+        return String::new();
+    };
+    if rest.is_empty() {
+        return (*last).to_owned();
+    }
+    format!("{}, or {last}", rest.join(", "))
 }
 
 fn warn(config: &Config) {
@@ -529,17 +554,13 @@ fn wire_of_plugin(plugin: &str) -> Result<Wire, DaemonError> {
             "plugin `{plugin}` declares no protocol"
         )));
     };
+    // Same closed set as `wire_of_protocol`. The wildcard would be unreachable.
     Ok(match protocol {
         ProtocolId::OPENAI_CHAT => Wire::Chat,
         ProtocolId::OPENAI_RESPONSES => Wire::Responses,
         ProtocolId::ANTHROPIC_MESSAGES => Wire::Messages,
         ProtocolId::GENERATIVE_LANGUAGE => Wire::Generative,
         ProtocolId::BEDROCK_CONVERSE => Wire::Converse,
-        _ => {
-            return Err(DaemonError::new(format!(
-                "plugin `{plugin}` speaks an unknown protocol"
-            )));
-        }
     })
 }
 
@@ -664,6 +685,106 @@ mod tests {
         .expect("write");
         check(&path).expect("pooled timeouts");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_protocol_names_the_provider_and_the_codec_ids() {
+        let dir = std::env::temp_dir().join(format!("hofund-protocol-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("hofund.toml");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"primary\"\nprotocol = \"nope\"\nbase_url = \"http://127.0.0.1:9\"\n",
+        )
+        .expect("write");
+        let error = check(&path).expect_err("protocol");
+        let text = error.to_string();
+        assert!(text.contains("provider `primary`"), "{text}");
+        assert!(text.contains("unknown protocol id `nope`"), "{text}");
+        assert!(text.contains("openai-chat, openai-responses"), "{text}");
+        assert!(text.contains("or bedrock-converse"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_non_string_option_names_the_provider_and_the_key() {
+        let dir = std::env::temp_dir().join(format!("hofund-option-type-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("hofund.toml");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n[providers.options]\nproject = 1\n",
+        )
+        .expect("write");
+        let error = check(&path).expect_err("project type");
+        assert!(
+            error
+                .to_string()
+                .contains("provider `vertex` option `project` must be a string"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn aws_key_specs_are_trimmed_before_lookup() {
+        let dir = std::env::temp_dir().join(format!("hofund-aws-trim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("hofund.toml");
+        let base = "protocol = \"bedrock-converse\"\nbase_url = \"https://bedrock-runtime.us-east-1.amazonaws.com\"\nregion = \"us-east-1\"\n";
+        std::fs::write(
+            &path,
+            format!(
+                "[[providers]]\nid = \"aws\"\n{base}access_key_id = \" env:HOFUND_CONFIG_AWS_KEY_UNSET_692A\"\nsecret_access_key = \"secret\"\n"
+            ),
+        )
+        .expect("write");
+        let error = check(&path).expect_err("access key");
+        assert!(
+            error
+                .to_string()
+                .contains("environment variable `HOFUND_CONFIG_AWS_KEY_UNSET_692A` is unset"),
+            "{error}"
+        );
+        std::fs::write(
+            &path,
+            format!(
+                "[[providers]]\nid = \"aws\"\n{base}access_key_id = \"AKIDEXAMPLE\"\nsecret_access_key = \" env:HOFUND_CONFIG_AWS_SECRET_UNSET_692A\"\n"
+            ),
+        )
+        .expect("write");
+        let error = check(&path).expect_err("secret key");
+        assert!(
+            error
+                .to_string()
+                .contains("environment variable `HOFUND_CONFIG_AWS_SECRET_UNSET_692A` is unset"),
+            "{error}"
+        );
+        std::fs::write(
+            &path,
+            format!(
+                "[[providers]]\nid = \"aws\"\n{base}access_key_id = \"AKIDEXAMPLE\"\nsecret_access_key = \"secret\"\nsession_token = \" env:HOFUND_CONFIG_AWS_TOKEN_UNSET_692A\"\n"
+            ),
+        )
+        .expect("write");
+        let error = check(&path).expect_err("session token");
+        assert!(
+            error
+                .to_string()
+                .contains("environment variable `HOFUND_CONFIG_AWS_TOKEN_UNSET_692A` is unset"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_v0_1_0_example_checks_with_warnings_only() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../config/fixtures/v0.1.0-hofund.toml");
+        check(&path).expect("v0.1.0");
     }
 
     #[tokio::test]
