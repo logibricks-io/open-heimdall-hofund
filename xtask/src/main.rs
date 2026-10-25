@@ -339,6 +339,14 @@ fn check_plugins() -> ExitCode {
             eprintln!("{error}");
             return ExitCode::from(1);
         }
+        if let Err(error) = boundary::target_roots_under_src(&workspace_root(), dir) {
+            eprintln!("{package} {error}");
+            return ExitCode::from(1);
+        }
+        if let Err(error) = boundary::scan_compiled_sources(&workspace_root(), dir) {
+            eprintln!("{package} {error}");
+            return ExitCode::from(1);
+        }
         match resolved_kernel_feature(package) {
             Ok(false) => {}
             Ok(true) => {

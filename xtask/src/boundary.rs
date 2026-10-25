@@ -243,13 +243,18 @@ fn workspace_dependency_error(name: &str, spec: &toml::Value) -> Option<String> 
 /// The seam tests and `check-plugins` both call this.
 #[must_use]
 pub fn scan_source(text: &str) -> Vec<String> {
-    let mut hits = scan_parsed(Path::new("src/lib.rs"), Path::new("src"), text);
+    let (mut hits, _) = scan_parsed(Path::new("src/lib.rs"), Path::new("src"), text);
     hits.sort();
     hits.dedup();
     hits
 }
 
-/// `#[path]` escapes and non-literal includes under a plugin package.
+/// `#[path]` escapes, target `path` keys, and non-literal includes under a plugin package.
+///
+/// The file set is every `.rs` file under `src/`, plus literal `include!` targets and
+/// in-root `#[path]` targets (any extension). That walk is a superset of one build:
+/// a `cfg` branch Cargo did not compile is still scanned. Dep-info is a second pass,
+/// after Cargo, in [`scan_compiled_sources`].
 #[must_use]
 pub fn source_violations(package_dir: &Path) -> Vec<String> {
     let mut hits = Vec::new();
@@ -259,6 +264,9 @@ pub fn source_violations(package_dir: &Path) -> Vec<String> {
         for file in rust_files(&src) {
             hits.extend(scan_file(&file, &src, &mut seen));
         }
+    }
+    if let Ok(text) = fs::read_to_string(package_dir.join("Cargo.toml")) {
+        hits.extend(explicit_target_paths(&text));
     }
     let name = manifest_package_name(package_dir);
     let allowed = BUILD_SCRIPT_ALLOW.contains(&name.as_str());
@@ -293,13 +301,18 @@ fn scan_file(file: &Path, root: &Path, seen: &mut BTreeSet<PathBuf>) -> Vec<Stri
     let Ok(text) = fs::read_to_string(file) else {
         return vec![format!("unreadable {}", file.display())];
     };
-    let mut hits = scan_parsed(file, root, &text);
+    let (mut hits, extra) = scan_parsed(file, root, &text);
     if let Some(dir) = file.parent() {
         for included in literal_includes(&text) {
             let next = dir.join(included);
             if next.is_file() {
                 hits.extend(scan_file(&next, root, seen));
             }
+        }
+    }
+    for next in extra {
+        if next.is_file() {
+            hits.extend(scan_file(&next, root, seen));
         }
     }
     hits
@@ -351,11 +364,11 @@ fn build_script_path(package_dir: &Path, rel: &str) -> Option<PathBuf> {
     joined.starts_with(&root).then_some(joined)
 }
 
-fn scan_parsed(file: &Path, root: &Path, text: &str) -> Vec<String> {
+fn scan_parsed(file: &Path, root: &Path, text: &str) -> (Vec<String>, Vec<PathBuf>) {
     let mut hits = lex_cfg_hits(text);
     let Ok(parsed) = syn::parse_file(text) else {
         hits.push(format!("{} does not parse", file.display()));
-        return hits;
+        return (hits, Vec::new());
     };
     let mut aliases = Aliases::default();
     AliasPass {
@@ -367,9 +380,41 @@ fn scan_parsed(file: &Path, root: &Path, text: &str) -> Vec<String> {
         root,
         aliases,
         hits: Vec::new(),
+        extra: Vec::new(),
     };
     finder.visit_file(&parsed);
     hits.extend(finder.hits);
+    (hits, finder.extra)
+}
+
+const TARGET_KINDS: &[&str] = &["lib", "bin", "test", "example", "bench"];
+
+/// `[lib]`, `[[bin]]`, `[[test]]`, `[[example]]`, and `[[bench]]` must not set `path`.
+fn explicit_target_paths(text: &str) -> Vec<String> {
+    let Ok(value) = toml::from_str::<toml::Value>(text) else {
+        return Vec::new();
+    };
+    let mut hits = Vec::new();
+    for kind in TARGET_KINDS {
+        match value.get(*kind) {
+            Some(toml::Value::Table(table)) => {
+                if table.contains_key("path") {
+                    hits.push(format!("{kind} target sets path"));
+                }
+            }
+            Some(toml::Value::Array(items)) => {
+                for item in items {
+                    let sets_path = item
+                        .as_table()
+                        .is_some_and(|table| table.contains_key("path"));
+                    if sets_path {
+                        hits.push(format!("{kind} target sets path"));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     hits
 }
 
@@ -457,17 +502,25 @@ struct SourceFinder<'a> {
     root: &'a Path,
     aliases: Aliases,
     hits: Vec<String>,
+    /// In-root `#[path]` targets. Scanned whatever the extension is.
+    extra: Vec<PathBuf>,
 }
 
 impl<'ast> Visit<'ast> for SourceFinder<'_> {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         for attr in &item.attrs {
-            if let Some(rel) = path_attribute(attr)
-                && (rel.is_empty() || escapes(self.file, &rel, self.root))
-            {
+            let Some(rel) = path_attribute(attr) else {
+                continue;
+            };
+            if rel.is_empty() || escapes(self.file, &rel, self.root) {
                 self.hits
                     .push(format!("#[path] = \"{rel}\" leaves the package source"));
+                continue;
             }
+            let Some(parent) = self.file.parent() else {
+                continue;
+            };
+            self.extra.push(parent.join(rel));
         }
         syn::visit::visit_item_mod(self, item);
     }
@@ -788,7 +841,7 @@ fn mentions_cfg_word(meta: &syn::Meta, word: &str) -> bool {
         .any(|meta| mentions_cfg_word(meta, word))
 }
 
-/// Every `.rs` file, lexed as tokens. Parsing is not required: a `cfg` inside
+/// One scanned file, lexed as tokens. Parsing is not required: a `cfg` inside
 /// a macro argument that is not Rust is still visible here.
 fn lex_cfg_hits(text: &str) -> Vec<String> {
     let mut hits = Vec::new();
@@ -1041,6 +1094,8 @@ fn extra_list(names: &[&String]) -> String {
 struct Metadata {
     nodes: BTreeMap<String, Vec<(String, bool)>>,
     ids_by_manifest: Vec<(String, String, String)>,
+    /// Manifest directory, target crate name, and `src_path`.
+    targets: Vec<(PathBuf, String, PathBuf)>,
 }
 
 fn cargo_metadata(workspace: &Path) -> Result<Metadata, String> {
@@ -1089,6 +1144,7 @@ fn cargo_metadata(workspace: &Path) -> Result<Metadata, String> {
         }
     }
     let mut ids_by_manifest = Vec::new();
+    let mut targets = Vec::new();
     if let Some(packages) = value.get("packages").and_then(serde_json::Value::as_array) {
         for package in packages {
             let Some(name) = package.get("name").and_then(serde_json::Value::as_str) else {
@@ -1104,6 +1160,28 @@ fn cargo_metadata(workspace: &Path) -> Result<Metadata, String> {
                 continue;
             };
             ids_by_manifest.push((name.to_owned(), id.to_owned(), manifest.to_owned()));
+            let manifest_dir = Path::new(manifest)
+                .parent()
+                .unwrap_or(Path::new(manifest))
+                .to_path_buf();
+            let Some(list) = package.get("targets").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            for target in list {
+                let Some(target_name) = target.get("name").and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let Some(src_path) = target.get("src_path").and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                targets.push((
+                    manifest_dir.clone(),
+                    target_name.to_owned(),
+                    PathBuf::from(src_path),
+                ));
+            }
         }
     }
     if nodes.is_empty() {
@@ -1112,7 +1190,384 @@ fn cargo_metadata(workspace: &Path) -> Result<Metadata, String> {
     Ok(Metadata {
         nodes,
         ids_by_manifest,
+        targets,
     })
+}
+
+/// Every Cargo target root for this package must sit under its `src/` directory.
+///
+/// An explicit `[lib]` / `[[bin]]` / `[[test]]` / `[[example]]` / `[[bench]]`
+/// `path` is already rejected by [`source_violations`]. This is the backstop:
+/// `cargo metadata` `targets[].src_path` is what rustc will compile.
+///
+/// # Errors
+///
+/// Returns an error when Cargo metadata fails, the package has no targets, or
+/// a target root is outside `src/`.
+pub fn target_roots_under_src(workspace: &Path, package_dir: &Path) -> Result<(), String> {
+    let meta = cargo_metadata(workspace)?;
+    let errors = target_root_errors(&meta, package_dir);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn target_root_errors(meta: &Metadata, package_dir: &Path) -> Vec<String> {
+    let package = host_path(package_dir);
+    let src = package.join("src");
+    let roots: Vec<&Path> = meta
+        .targets
+        .iter()
+        .filter(|(dir, _, _)| host_path(dir) == package)
+        .map(|(_, _, src_path)| src_path.as_path())
+        .collect();
+    if roots.is_empty() {
+        return vec![format!(
+            "cargo metadata listed no targets for {}",
+            package_dir.display()
+        )];
+    }
+    let mut errors = Vec::new();
+    for src_path in roots {
+        if !host_path(src_path).starts_with(&src) {
+            errors.push(format!(
+                "target root {} is outside {}",
+                src_path.display(),
+                src.display()
+            ));
+        }
+    }
+    errors
+}
+
+/// Scan every source file rustc listed for this package.
+///
+/// Runs after `cargo check` and the plugin Clippy passes. Dep-info (`.d`) for
+/// each target is parsed, and every listed file inside the package is lexed,
+/// whatever its extension. A file that will not lex is rejected. A listed file
+/// outside the package is rejected, except workspace-allowed crates and the
+/// build directories rustc records.
+///
+/// # Errors
+///
+/// Returns an error when metadata or dep-info cannot be read, no source was
+/// listed, a listed file will not lex, the scan finds a boundary hit, or a
+/// listed file lies outside the package.
+pub fn scan_compiled_sources(workspace: &Path, package_dir: &Path) -> Result<(), String> {
+    scan_dep_info(workspace, package_dir, &cargo_target_dir(workspace))
+}
+
+fn cargo_target_dir(workspace: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| workspace.join("target"))
+}
+
+fn scan_dep_info(workspace: &Path, package_dir: &Path, target_dir: &Path) -> Result<(), String> {
+    let meta = cargo_metadata(workspace)?;
+    let package = host_path(package_dir);
+    let names: Vec<String> = meta
+        .targets
+        .iter()
+        .filter(|(dir, _, _)| host_path(dir) == package)
+        .map(|(_, name, _)| name.clone())
+        .collect();
+    if names.is_empty() {
+        return Err(format!(
+            "cargo metadata listed no targets for {}",
+            package_dir.display()
+        ));
+    }
+    let mut dep_files = Vec::new();
+    for profile in ["debug", "release"] {
+        let profile_dir = target_dir.join(profile);
+        dep_files.extend(matching_dep_info(&profile_dir, &names));
+        dep_files.extend(matching_dep_info(&profile_dir.join("deps"), &names));
+    }
+    let mut listed = BTreeSet::new();
+    for dep in &dep_files {
+        let text =
+            fs::read_to_string(dep).map_err(|error| format!("read {}: {error}", dep.display()))?;
+        for raw in dep_info_prerequisites(&text) {
+            listed.insert(resolve_listed(workspace, &raw));
+        }
+    }
+    if listed.is_empty() {
+        return Err(format!(
+            "dep-info listed no sources for {}",
+            package_dir.display()
+        ));
+    }
+    let sysroot = rustc_sysroot();
+    let cargo_home = cargo_home_dir();
+    let src = package.join("src");
+    let mut hits = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut saw_package_source = false;
+    for path in listed {
+        if !path.exists() {
+            // An older dep-info can name a file a later build removed.
+            continue;
+        }
+        match listed_outside(
+            &path,
+            &package,
+            workspace,
+            target_dir,
+            sysroot.as_deref(),
+            cargo_home.as_deref(),
+        ) {
+            Listed::Inside => {
+                saw_package_source = true;
+                hits.extend(scan_listed(&path, &src, &mut seen));
+            }
+            Listed::Allowed => {}
+            Listed::Outside => hits.push(format!(
+                "dep-info lists {} outside the package",
+                path.display()
+            )),
+        }
+    }
+    if !saw_package_source {
+        hits.push(format!(
+            "dep-info listed no sources for {}",
+            package_dir.display()
+        ));
+    }
+    if hits.is_empty() {
+        Ok(())
+    } else {
+        hits.sort();
+        hits.dedup();
+        Err(hits.join("; "))
+    }
+}
+
+enum Listed {
+    Inside,
+    Allowed,
+    Outside,
+}
+
+fn listed_outside(
+    path: &Path,
+    package: &Path,
+    workspace: &Path,
+    target_dir: &Path,
+    sysroot: Option<&Path>,
+    cargo_home: Option<&Path>,
+) -> Listed {
+    let path = host_path(path);
+    if path.starts_with(package) {
+        return Listed::Inside;
+    }
+    let allowed = [
+        host_path(&workspace.join("crates/plugin-api")),
+        host_path(&workspace.join("crates/plugin-sdk")),
+        host_path(target_dir),
+    ];
+    if allowed.iter().any(|root| path.starts_with(root)) {
+        return Listed::Allowed;
+    }
+    if cargo_home.is_some_and(|root| path.starts_with(host_path(root))) {
+        return Listed::Allowed;
+    }
+    if sysroot.is_some_and(|root| path.starts_with(host_path(root))) {
+        return Listed::Allowed;
+    }
+    // Clippy records these rebuild inputs. They are not crate source.
+    if path == host_path(&workspace.join("Cargo.toml"))
+        || path == host_path(&workspace.join("Cargo.lock"))
+        || path == host_path(&workspace.join("xtask/plugin-boundary/clippy.toml"))
+    {
+        return Listed::Allowed;
+    }
+    Listed::Outside
+}
+
+fn scan_listed(file: &Path, root: &Path, seen: &mut BTreeSet<PathBuf>) -> Vec<String> {
+    let text = match fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(_) => return vec!["source does not lex".to_owned()],
+    };
+    let is_rs = file.extension().and_then(|ext| ext.to_str()) == Some("rs");
+    if is_rs || syn::parse_file(&text).is_ok() {
+        return scan_file(file, root, seen);
+    }
+    if !seen.insert(normalize(file)) {
+        return Vec::new();
+    }
+    lex_cfg_hits(&text)
+}
+
+fn matching_dep_info(dir: &Path, crate_names: &[String]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("d") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if crate_names.iter().any(|name| dep_stem_matches(stem, name)) {
+            found.push(path);
+        }
+    }
+    found
+}
+
+fn dep_stem_matches(stem: &str, crate_name: &str) -> bool {
+    let bare = format!("{crate_name}-");
+    let lib = format!("lib{crate_name}-");
+    stem.starts_with(&bare) || stem.starts_with(&lib)
+}
+
+/// Makefile prerequisites from a rustc dep-info file.
+///
+/// The separator is the first colon followed by whitespace or the end of the
+/// line. A colon followed by `\` or `/` is a Windows drive, not the separator.
+/// `\` escapes a space, `#`, `$`, or another backslash. Full-line `#` comments
+/// and blank lines are skipped.
+fn dep_info_prerequisites(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in logical_dep_lines(text) {
+        let Some((_, deps)) = split_dep_rule(&line) else {
+            continue;
+        };
+        found.extend(split_make_words(deps));
+    }
+    found
+}
+
+fn logical_dep_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for line in text.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if current.is_empty() && line.starts_with('#') {
+            continue;
+        }
+        let (body, cont) = split_continuation(line);
+        current.push_str(body);
+        if cont {
+            continue;
+        }
+        if !current.trim().is_empty() {
+            lines.push(std::mem::take(&mut current));
+        } else {
+            current.clear();
+        }
+    }
+    if !current.trim().is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn split_continuation(line: &str) -> (&str, bool) {
+    let bytes = line.as_bytes();
+    let mut count = 0;
+    while count < bytes.len() && bytes[bytes.len() - 1 - count] == b'\\' {
+        count += 1;
+    }
+    if count % 2 == 1 {
+        (&line[..bytes.len() - 1], true)
+    } else {
+        (line, false)
+    }
+}
+
+fn split_dep_rule(line: &str) -> Option<(&str, &str)> {
+    let mut chars = line.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch != ':' {
+            continue;
+        }
+        let next = chars.peek().map(|(_, next)| *next);
+        if matches!(next, None | Some(' ') | Some('\t')) {
+            let deps = line[index + ch.len_utf8()..].trim_start_matches([' ', '\t']);
+            return Some((&line[..index], deps));
+        }
+    }
+    None
+}
+
+fn split_make_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some(' ') => current.push(' '),
+                Some('#') => current.push('#'),
+                Some('$') => current.push('$'),
+                Some('\\') => current.push('\\'),
+                Some(other) => {
+                    current.push('\\');
+                    current.push(other);
+                }
+                None => current.push('\\'),
+            }
+            continue;
+        }
+        if ch == ' ' || ch == '\t' {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn resolve_listed(workspace: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        host_path(&path)
+    } else {
+        host_path(&workspace.join(path))
+    }
+}
+
+fn host_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let stripped = text.strip_prefix(r"\\?\").unwrap_or(text.as_ref());
+    normalize(Path::new(stripped))
+}
+
+fn rustc_sysroot() -> Option<PathBuf> {
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| PathBuf::from(line))
+}
+
+fn cargo_home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CARGO_HOME")
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".cargo"))
 }
 
 fn workspace_package_id(meta: &Metadata, name: &str, workspace: &Path) -> Result<String, String> {
@@ -1583,6 +2038,210 @@ cc = "1"
         );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&off);
+    }
+
+    #[test]
+    fn a_non_rs_path_module_is_scanned() {
+        let root = std::env::temp_dir().join(format!("hofund-plugin-a34-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("src");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"probe-a34\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(root.join("src/lib.rs"), "#[path = \"m.txt\"]\nmod m;\n").expect("lib");
+        std::fs::write(
+            root.join("src/m.txt"),
+            "#[cfg(not(clippy))]\npub fn sneak() { let _ = std::process::Command::new(\"true\"); }\n#[cfg(clippy)]\npub fn sneak() {}\n",
+        )
+        .expect("module");
+        let hits = source_violations(&root).join("\n");
+        assert!(hits.contains("cfg(clippy)"), "{hits}");
+        let target = root.join("target");
+        let status = std::process::Command::new("cargo")
+            .args(["check", "--offline", "--manifest-path"])
+            .arg(root.join("Cargo.toml"))
+            .current_dir(&root)
+            .env("CARGO_TARGET_DIR", &target)
+            .env_remove("CARGO_MANIFEST_DIR")
+            .status()
+            .expect("cargo check");
+        assert!(status.success(), "cargo check of the path module");
+        let scanned = super::scan_dep_info(&root, &root, &target).expect_err("m.txt is a source");
+        assert!(scanned.contains("cfg(clippy)"), "{scanned}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn explicit_target_paths_are_rejected() {
+        let lib = std::env::temp_dir().join(format!("hofund-plugin-a35-{}", std::process::id()));
+        let bin =
+            std::env::temp_dir().join(format!("hofund-plugin-a35-bin-{}", std::process::id()));
+        let clean =
+            std::env::temp_dir().join(format!("hofund-plugin-a35-ok-{}", std::process::id()));
+        for dir in [&lib, &bin, &clean] {
+            let _ = std::fs::remove_dir_all(dir);
+            std::fs::create_dir_all(dir.join("src")).expect("src");
+            std::fs::write(dir.join("src/lib.rs"), "fn clean() {}\n").expect("lib");
+        }
+        std::fs::write(
+            lib.join("Cargo.toml"),
+            "[package]\nname = \"moved\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib/lib.rs\"\n",
+        )
+        .expect("lib manifest");
+        let lib_hits = source_violations(&lib).join("\n");
+        assert!(lib_hits.contains("lib target sets path"), "{lib_hits}");
+        std::fs::write(
+            bin.join("Cargo.toml"),
+            "[package]\nname = \"moved-bin\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[[bin]]\nname = \"x\"\npath = \"bins/main.rs\"\n",
+        )
+        .expect("bin manifest");
+        let bin_hits = source_violations(&bin).join("\n");
+        assert!(bin_hits.contains("bin target sets path"), "{bin_hits}");
+        for (kind, body) in [
+            ("test", "[[test]]\nname = \"t\"\npath = \"tests/t.rs\"\n"),
+            (
+                "example",
+                "[[example]]\nname = \"e\"\npath = \"examples/e.rs\"\n",
+            ),
+            (
+                "bench",
+                "[[bench]]\nname = \"b\"\npath = \"benches/b.rs\"\n",
+            ),
+        ] {
+            let hits = super::explicit_target_paths(body).join("\n");
+            assert!(hits.contains(&format!("{kind} target sets path")), "{hits}");
+        }
+        let explicit_src = super::explicit_target_paths("[lib]\npath = \"src/lib.rs\"\n");
+        assert!(
+            explicit_src.iter().any(|hit| hit == "lib target sets path"),
+            "{explicit_src:?}"
+        );
+        std::fs::write(
+            clean.join("Cargo.toml"),
+            "[package]\nname = \"quiet\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = false\n[[bin]]\nname = \"demo\"\n",
+        )
+        .expect("clean manifest");
+        let clean_hits = source_violations(&clean).join("\n");
+        assert!(
+            !clean_hits.contains("target sets path") && !clean_hits.contains("package.build"),
+            "{clean_hits}"
+        );
+        for dir in [&lib, &bin, &clean] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn dep_info_rejects_files_outside_the_package() {
+        let root =
+            std::env::temp_dir().join(format!("hofund-plugin-depinfo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let package = root.join("plugins/providers/probe");
+        std::fs::create_dir_all(package.join("src")).expect("src");
+        std::fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"probe-dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(package.join("src/lib.rs"), "fn clean() {}\n").expect("lib");
+        let allowed = root.join("crates/plugin-api/sneak.txt");
+        std::fs::create_dir_all(allowed.parent().expect("parent")).expect("api");
+        std::fs::write(&allowed, "#[cfg(not(clippy))]\nfn sneak() {}\n").expect("allowed");
+        let clippy_toml = root.join("xtask/plugin-boundary/clippy.toml");
+        std::fs::create_dir_all(clippy_toml.parent().expect("parent")).expect("clippy dir");
+        std::fs::write(&clippy_toml, "#[cfg(not(clippy))]\nfn sneak() {}\n").expect("clippy.toml");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"plugins/providers/probe\"]\n",
+        )
+        .expect("workspace");
+        let outside =
+            std::env::temp_dir().join(format!("hofund-not-allowed-{}.rs", std::process::id()));
+        std::fs::write(&outside, "#[cfg(not(clippy))]\nfn sneak() {}\n").expect("outside");
+        let bad = package.join("src/bad.txt");
+        std::fs::write(&bad, "\"unterminated").expect("bad");
+        let target = root.join("target/debug/deps");
+        std::fs::create_dir_all(&target).expect("deps");
+        let listed = format!(
+            "probe_dep-abc.d: {} {} {} {} {}\n",
+            package.join("src/lib.rs").display(),
+            allowed.display(),
+            clippy_toml.display(),
+            outside.display(),
+            bad.display(),
+        );
+        std::fs::write(target.join("probe_dep-abc.d"), listed).expect("dep-info");
+        let err =
+            super::scan_dep_info(&root, &package, &root.join("target")).expect_err("outside file");
+        assert!(err.contains("outside the package"), "{err}");
+        assert!(err.contains(&outside.display().to_string()), "{err}");
+        assert!(err.contains("source does not lex"), "{err}");
+        assert!(!err.contains("cfg(clippy)"), "{err}");
+        assert!(!err.contains("does not parse"), "{err}");
+        assert!(!err.contains("sneak.txt"), "{err}");
+        assert!(!err.contains("clippy.toml"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn dep_info_parser_keeps_drives_escapes_and_crate_stems() {
+        let text = "C:\\out\\lib.d: C:\\pkg\\src\\lib.rs C:\\pkg\\my\\ src\\m.txt \\\n C:\\pkg\\src\\more.rs\n\nC:\\pkg\\src\\lib.rs:\n# env-dep:CLIPPY_ARGS=-D\n";
+        let got = super::dep_info_prerequisites(text);
+        assert_eq!(
+            got,
+            vec![
+                "C:\\pkg\\src\\lib.rs".to_owned(),
+                "C:\\pkg\\my src\\m.txt".to_owned(),
+                "C:\\pkg\\src\\more.rs".to_owned(),
+            ]
+        );
+        let clippy = "\
+/tmp/out/foo.d: /tmp/ws/xtask/plugin-boundary/clippy.toml plugins/providers/fixture/src/lib.rs Cargo.toml\n\
+\n\
+/tmp/out/libfoo.rmeta: /tmp/ws/xtask/plugin-boundary/clippy.toml plugins/providers/fixture/src/lib.rs Cargo.toml\n\
+\n\
+plugins/providers/fixture/src/lib.rs:\n\
+# env-dep:CLIPPY_ARGS=-D__CLIPPY_HACKERY__\n";
+        let listed = super::dep_info_prerequisites(clippy);
+        assert!(listed.contains(&"plugins/providers/fixture/src/lib.rs".to_owned()));
+        assert!(listed.contains(&"Cargo.toml".to_owned()));
+        assert!(
+            listed
+                .iter()
+                .all(|path| !path.ends_with(".d") && !path.ends_with(".rmeta"))
+        );
+        assert!(super::dep_stem_matches(
+            "hofund_plugin_fixture-9521719d10da3640",
+            "hofund_plugin_fixture"
+        ));
+        assert!(super::dep_stem_matches(
+            "libhofund_plugin_fixture-9521719d10da3640",
+            "hofund_plugin_fixture"
+        ));
+        assert!(!super::dep_stem_matches(
+            "hofund_plugin_fixture_extra-9521719d10da3640",
+            "hofund_plugin_fixture"
+        ));
+    }
+
+    #[test]
+    fn target_roots_must_sit_under_src() {
+        let package = std::path::Path::new("/tmp/pkg");
+        let src = std::path::PathBuf::from("/tmp/pkg/src/lib.rs");
+        assert!(super::host_path(&src).starts_with(super::host_path(&package.join("src"))));
+        let moved = std::path::PathBuf::from("/tmp/pkg/lib/lib.rs");
+        assert!(!super::host_path(&moved).starts_with(super::host_path(&package.join("src"))));
+        let tests = std::path::PathBuf::from("/tmp/pkg/tests/t.rs");
+        assert!(!super::host_path(&tests).starts_with(super::host_path(&package.join("src"))));
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace")
+            .to_path_buf();
+        super::target_roots_under_src(&workspace, &workspace.join("plugins/providers/fixture"))
+            .expect("fixture roots stay under src");
     }
 
     fn write_fixture(root: &std::path::Path, manifest: &str, source: &str) {

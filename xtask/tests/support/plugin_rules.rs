@@ -769,6 +769,43 @@ fast = ["dep:api/kernel"]
     assert!(found.contains("package.build is not allowed"), "{found}");
     assert!(found.contains("build.rs emits rustc-cfg"), "{found}");
     let _ = fs::remove_dir_all(&renamed);
+
+    let paths = std::env::temp_dir().join(format!("hofund-plugin-a34-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&paths);
+    let txt = paths.join("plugins/providers/pathtxt");
+    fs::create_dir_all(txt.join("src")).expect("dir");
+    fs::write(
+        txt.join("Cargo.toml"),
+        "[package]\nname = \"pathtxt\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n",
+    )
+    .expect("manifest");
+    fs::write(txt.join("src/lib.rs"), "#[path = \"m.txt\"]\nmod m;\n").expect("lib");
+    fs::write(
+        txt.join("src/m.txt"),
+        "#[cfg(not(clippy))]\npub fn sneak() {}\n#[cfg(clippy)]\npub fn sneak() {}\n",
+    )
+    .expect("module");
+    let moved = paths.join("plugins/providers/moved");
+    fs::create_dir_all(moved.join("src")).expect("moved");
+    fs::write(
+        moved.join("Cargo.toml"),
+        "[package]\nname = \"moved\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n[lib]\npath = \"lib/lib.rs\"\n",
+    )
+    .expect("moved manifest");
+    fs::write(moved.join("src/lib.rs"), "fn clean() {}\n").expect("moved lib");
+    let moved_bin = paths.join("plugins/providers/movedbin");
+    fs::create_dir_all(moved_bin.join("src")).expect("bin");
+    fs::write(
+        moved_bin.join("Cargo.toml"),
+        "[package]\nname = \"movedbin\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n[[bin]]\nname = \"x\"\npath = \"bins/main.rs\"\n",
+    )
+    .expect("bin manifest");
+    fs::write(moved_bin.join("src/lib.rs"), "fn clean() {}\n").expect("bin lib");
+    let found = plugin_tree_violations(&paths.join("plugins")).join("\n");
+    assert!(found.contains("cfg(clippy)"), "{found}");
+    assert!(found.contains("lib target sets path"), "{found}");
+    assert!(found.contains("bin target sets path"), "{found}");
+    let _ = fs::remove_dir_all(&paths);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
