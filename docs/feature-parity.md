@@ -5,12 +5,11 @@ This document compares every user-facing capability of
 hofund, the Rust rewrite. Each row cites a source path in each repository.
 
 - **magpie snapshot:** `641b121` (shallow clone, October 2026).
-- **hofund snapshot:** `main` at `48dbd71` ("desktop tray app and release pipeline", #8).
+- **hofund snapshot:** `main` at `695860d` ("Keep later agent edits on disconnect and honor a rotated token", #10).
   Hofund line citations below were checked against that commit on 2026-10-25.
-- **Blocker pull requests, not yet merged:** [#9](https://github.com/logibricks-io/open-heimdall-hofund/pull/9)
-  (`4f7b3c0`, codec correctness) and [#10](https://github.com/logibricks-io/open-heimdall-hofund/pull/10)
-  (`408ca18`, CLI and agent UX). Rows those pull requests finish are marked Done and cite the pull request.
-  `main` does not contain that code until the pull requests merge.
+  [#9](https://github.com/logibricks-io/open-heimdall-hofund/pull/9) is `ac6325a` and
+  [#10](https://github.com/logibricks-io/open-heimdall-hofund/pull/10) is `695860d`.
+  Both are on this snapshot. Rows they finish are Done and cite the code on `main`.
 - **Goal:** rebuild every core magpie capability in Rust and do each one better.
   Copy designs that are good, stable, and efficient. Redesign the parts that are unsound.
   `docs/magpie-comparison.md` records each adopt-or-redesign verdict.
@@ -68,7 +67,7 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
    (`crates/secrets/src/lib.rs`). magpie keeps keys in `providers.json` (`ref.md:2998`, "Files").
 6. **Backpressure.** Streams are pulled through the codec, not buffered (`crates/provider/src/stream.rs`).
 7. **Agent backup markers.** Backups use their own markers (`*.hofund.bak`, `*.hofund.absent`)
-   and live beside the file (`crates/agent/src/catalog.rs`). PR #10 disconnects by deleting
+   and live beside the file (`crates/agent/src/catalog.rs`). Disconnect deletes
    only the keys connect wrote, so a later edit stays. `--force` restores the backup bytes.
 8. **One config file.** A single TOML file (`crates/config/src/lib.rs`) replaces about 20
    JSON and YAML state files (`ref.md:2998`). It can be reviewed, diffed and checked
@@ -83,26 +82,26 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 | # | magpie feature | magpie evidence | Stage | hofund status | hofund evidence | Plan to do better than magpie |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1.1 | OpenAI Chat Completions endpoint `/v1/chat/completions` | `internal/gateway/chat.go`; `ref.md:1880` | core | Done | `crates/codec/src/openai_chat.rs`; PR #9 sets `stream_options.include_usage` on streamed Chat requests | PR #9 sends `stream_options.include_usage` so a streamed Chat upstream reports usage. Next: golden stream tests per vendor. |
-| 1.2 | OpenAI Responses endpoint `/v1/responses` (SSE) | `internal/gateway/responses.go`; `ref.md:1882` | core | Done | `crates/codec/src/openai_responses.rs`; PR #9 | PR #9 emits `output_text.done` and `content_part.done`, puts `id` and `content` on `output_item.done`, puts the full `output` array on `response.completed`, and sets `sequence_number` on every event. |
-| 1.3 | Anthropic Messages endpoint `/v1/messages` | `internal/gateway/anthropic.go`; `ref.md:1883` | core | Done | `crates/codec/src/anthropic.rs`; `crates/provider/src/http.rs`; PR #9 | PR #9 puts usage on `message_start`, emits `content_block_stop` before a single `message_delta`, and prefixes message ids with `msg_`. Extension fields pass through only when the inbound and outbound protocols match, so `metadata.user_id` and `cache_control` do not cross protocols. |
+| 1.1 | OpenAI Chat Completions endpoint `/v1/chat/completions` | `internal/gateway/chat.go`; `ref.md:1880` | core | Done | `crates/codec/src/openai_chat.rs:51` (`include_usage`) | Streamed Chat requests set `stream_options.include_usage`, so the upstream reports usage. Next: golden stream tests per vendor. |
+| 1.2 | OpenAI Responses endpoint `/v1/responses` (SSE) | `internal/gateway/responses.go`; `ref.md:1882` | core | Done | `crates/codec/src/openai_responses.rs` | Streams emit `output_text.done` and `content_part.done`, put `id` and `content` on `output_item.done`, put the full `output` array on `response.completed`, and set `sequence_number` on every event. |
+| 1.3 | Anthropic Messages endpoint `/v1/messages` | `internal/gateway/anthropic.go`; `ref.md:1883` | core | Done | `crates/codec/src/anthropic.rs`; `crates/provider/src/http.rs` | Usage is on `message_start`. `content_block_stop` comes before a single `message_delta`. Message ids start with `msg_`. Extension fields pass through only when the inbound and outbound protocols match, so `metadata.user_id` and `cache_control` do not cross protocols. |
 | 1.4 | Gemini `generateContent` and `streamGenerateContent` | `internal/gateway/gemini.go`; `ref.md:1885` | core | Done | `crates/codec/src/generative.rs`; `crates/gateway/src/endpoints.rs` | Keep. Add `countTokens` (row 1.5). |
 | 1.5 | Token counting: `/v1/messages/count_tokens` and Gemini `:countTokens` | `ref.md:1884-1885` | core | Missing | none | Forward to the upstream when it supports counting. Otherwise estimate with a tokenizer chosen by model family and mark the result as an estimate. |
-| 1.6 | Model list `/v1/models` and `/v1beta/models`, with reasoning levels and context sizes | `ref.md:1887`, `ref.md:1890` | core | Partial | `crates/gateway/src/lib.rs:162` (ids only) | Add context window, output limit, modalities and reasoning levels from the model catalog (row 2.8). |
+| 1.6 | Model list `/v1/models` and `/v1beta/models`, with reasoning levels and context sizes | `ref.md:1887`, `ref.md:1890` | core | Partial | `crates/gateway/src/lib.rs:198` (ids only) | Add context window, output limit, modalities and reasoning levels from the model catalog (row 2.8). |
 | 1.7 | Codex model catalog `/v1/codex/models` | `internal/gateway/codex_catalog.go`; `ref.md:1888` | core | Missing | none | Render from the same catalog as row 1.6, in one codec-side formatter. |
 | 1.8 | Ollama-compatible listing `/api/version`, `/api/tags`, `/api/show` | `internal/gateway/ollama.go`; `ref.md:1889` | auxiliary | Missing | none | Low cost. Add as an optional listing codec. |
 | 1.9 | Speech to text passthrough `/v1/audio/transcriptions` and `/translations` | `internal/gateway/transcribe.go`; `ref.md:1886` | auxiliary | Missing | none | Multipart passthrough with model rewrite only. Stream the body instead of buffering it. |
 | 1.10 | Embeddings | `internal/gateway/embeddings.go` | auxiliary | Missing | none | Add an `/v1/embeddings` codec over the same router. |
-| 1.11 | Routes without the `/v1` prefix and behind a path-prefixed reverse proxy | `ref.md:1864-1866` | auxiliary | Missing | `crates/gateway/src/lib.rs:95` | Add a configurable base path. Never guess from headers. |
+| 1.11 | Routes without the `/v1` prefix and behind a path-prefixed reverse proxy | `ref.md:1864-1866` | auxiliary | Missing | `crates/gateway/src/lib.rs:127` | Add a configurable base path. Never guess from headers. |
 | 1.12 | Cross-protocol translation with tools, reasoning and images | `internal/gateway/ir.go`, `chat_tool_shape.go`, `image_input.go` | core | Done | `crates/ir/src/content.rs`; `crates/codec` | Already better (hub IR). Add a translation conformance suite over every pair. |
 | 1.13 | Streaming with flow control | `internal/gateway/sse.go`, `whole_stream.go` | core | Done | `crates/provider/src/stream.rs` | Already better (backpressure). |
 | 1.14 | Reasoning effort mapped between wires (`effort`, `reasoning_effort`, `thinking.budget_tokens`) | `internal/gateway/wire_effort.go`, `effort_update.go`; `ref.md:1291` | core | Missing | `crates/ir` holds thinking parts only; no effort field | Add an IR effort enum with one mapping table per codec. Clamp to the levels the model catalog lists. |
-| 1.15 | Prompt cache handling (Anthropic `cache_control`, cache stays on one account) | `internal/gateway/claude_cache.go`; `ref.md:1600-1616` | core | Partial | cache tokens are parsed in `crates/codec/src/*.rs` but not stored | Same-protocol requests keep `cache_control` on the extension bag. PR #9 drops it when the outbound protocol differs. Store cache tokens (row 9.2) and keep a session on one upstream (row 4.6). |
+| 1.15 | Prompt cache handling (Anthropic `cache_control`, cache stays on one account) | `internal/gateway/claude_cache.go`; `ref.md:1600-1616` | core | Partial | cache tokens are parsed in `crates/codec/src/*.rs` but not stored | Same-protocol requests keep `cache_control` on the extension bag. A different outbound protocol drops it. Store cache tokens (row 9.2) and keep a session on one upstream (row 4.6). |
 | 1.16 | Context compaction for Codex (native and summary) | `internal/gateway/native_compaction.go`, `compacting.go`; `internal/codexsummary` | auxiliary | Missing | none | Pass native compaction through. Add summary compaction only behind a flag. |
 | 1.17 | Vendor JSON-schema fixes for tools | `internal/gateway/deepseek_schema.go`, `kimi_schema.go`, `grok_schema.go`, `oneof_schema.go` | auxiliary | Partial | `crates/quirks/src/lib.rs` (5 rules, none for schemas) | Add schema-rewrite quirk rules as data, with one fixture per vendor. |
 | 1.18 | `max_tokens` default when a client omits it | `internal/gateway/maxoutput.go`; `ref.md:1420` | core | Done | `crates/quirks/src/lib.rs` (`DefaultMaxTokens`) | Take the default from the model's output limit in the catalog instead of a fixed number. |
 | 1.19 | Tool-call repair: text tool calls, undeclared tools, tool loop guard | `internal/gateway/textcalls.go`, `undeclared_tools.go`, `loop_guard.go`, `tool_loop.go` | auxiliary | Missing | none | Add as opt-in quirk rules, with metrics for how often each one fires. |
-| 1.20 | Bare model ids and `provider/model` names | `internal/gateway/unknown_model.go`; `internal/provider/bare.go`; `ref.md:1924` | core | Partial | `crates/router/src/lib.rs:81` (exact model name only) | Accept `provider/model`, a route alias, or a bare id that exactly one provider serves. Give a clear error naming candidates otherwise. |
+| 1.20 | Bare model ids and `provider/model` names | `internal/gateway/unknown_model.go`; `internal/provider/bare.go`; `ref.md:1924` | core | Partial | `crates/router/src/lib.rs:88` (exact model name only) | Accept `provider/model`, a route alias, or a bare id that exactly one provider serves. Give a clear error naming candidates otherwise. |
 | 1.21 | CORS for browser clients | `internal/gateway/cors.go` | auxiliary | Missing | none | Off by default. Allow listed origins only. |
 
 ### 2. Upstream providers and models
@@ -173,10 +172,10 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 | # | magpie feature | magpie evidence | Stage | hofund status | hofund evidence | Plan to do better than magpie |
 | --- | --- | --- | --- | --- | --- | --- |
-| 5.1 | Supported agents (about 56 adapters; the README says 65+) | `internal/agent`; `ref.md:88` | core | Partial | `crates/agent/src/catalog.rs` (claude-code, codex, gemini-cli, opencode) | Describe each adapter as data (file, format, keys), so most agents need no code. Add the next 10 by usage. |
-| 5.2 | Connect and disconnect with backup and restore | `docs/subsystems/agent-wiring.md`; `internal/agent` | core | Done | `crates/agent/src/catalog.rs` (`disconnect`); PR #10 | PR #10 removes only the keys connect wrote, on the current file, so a later edit such as Codex `sandbox_mode` stays. `--force` restores the connect-time backup. A second disconnect exits 0. Empty directories connect created are removed. |
+| 5.1 | Supported agents (about 56 adapters; the README says 65+) | `internal/agent`; `ref.md:88` | core | Partial | `crates/agent/src/catalog.rs` (claude-code, codex, gemini-cli, opencode). OpenCode follows `XDG_CONFIG_HOME` when set (`catalog.rs:224`). Connect warns when the configured model has no route. | Describe each adapter as data (file, format, keys), so most agents need no code. Add the next 10 by usage. |
+| 5.2 | Connect and disconnect with backup and restore | `docs/subsystems/agent-wiring.md`; `internal/agent` | core | Done | `crates/agent/src/catalog.rs:472` (`disconnect`) | Disconnect removes only the keys connect wrote, on the current file, so a later edit such as Codex `sandbox_mode` stays. `--force` restores the connect-time backup. A second disconnect exits 0. Empty directories connect created are removed. |
 | 5.3 | Format-preserving edits (TOML, JSONC, YAML) | `internal/edit` | core | Partial | TOML keeps comments; JSONC comments are dropped until revert (`crates/agent/src/catalog.rs`) | Use a lossless JSONC editor that keeps comments. |
-| 5.4 | Drift detection | `docs/subsystems/agent-wiring.md` | core | Partial | `crates/agent/src/lib.rs:157` (`ConnectionStatus`) | Report which keys drifted, and offer to fix them. |
+| 5.4 | Drift detection | `docs/subsystems/agent-wiring.md` | core | Partial | `crates/agent/src/lib.rs:175` (`ConnectionStatus`) | Report which keys drifted, and offer to fix them. |
 | 5.5 | Set an agent's model and effort from the CLI (`magpie claude opus`) | `internal/cli/main.go:38`; `ref.md:2597` | core | Missing | none | `hofund agent set <agent> model=<id> effort=<level>`, checked against the catalog. |
 | 5.6 | Profiles: save and switch every agent's settings | `internal/profile`; `ref.md:2597` | core | Missing | none | Snapshots stored as TOML that are easy to diff. |
 | 5.7 | Visible model list per agent | `internal/provider/visible.go`; `ref.md:340` | core | Missing | none | A per-agent filter in config. |
@@ -223,7 +222,7 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | 9.1 | Ledger of every request | `internal/usage`; `usage.jsonl` (`ref.md:2998`) | core | Partial | `crates/usage/src/lib.rs` (SQLite: model, upstream, tokens, latency, status) | Already a better store (SQLite instead of JSONL). Add the fields below, with migrations. |
 | 9.2 | Cache read and write tokens (5-minute and 1-hour split), reasoning tokens | `ref.md:1220`; `internal/usage/block_price.go` | core | Missing | `crates/usage/src/lib.rs` has no cache columns | Carry them through IR usage (`crates/ir/src/usage.rs`) into the ledger. |
 | 9.3 | Cost at effective prices: custom, provider catalog, models.dev; USD or CNY | `internal/catalog`; `internal/fx`; `ref.md:1150` | core | Missing | none | Store the price used in each row, so totals do not change when prices change. Mark calls with no price as unpriced, as magpie does. |
-| 9.4 | Usage report by period and CSV export | `internal/usageapi`; `internal/cli/main.go:38` | core | Partial | `crates/cli/src/main.rs` (`usage`); `crates/daemon/src/lib.rs` (`usage_report`) | Add `--since`, `--group-by`, `--csv` and `--json`. |
+| 9.4 | Usage report by period and CSV export | `internal/usageapi`; `internal/cli/main.go:38` | core | Partial | `crates/cli/src/main.rs:261` (local time and a totals line); `crates/usage/src/lib.rs:169` | Add `--since`, `--group-by`, `--csv` and `--json`. |
 | 9.5 | Attribution by agent, provider key and gateway key | `internal/usage/client_agents.go`; `ref.md:340` | core | Missing | none | Detect the agent from the path, headers and gateway key. Record it per row. |
 | 9.6 | Sessions with cost and title; grouping of subagents | `internal/sessions`; `docs/subsystems/gateway-sessions.md` | auxiliary | Missing | none | A session id from each protocol, stored in the ledger. |
 | 9.7 | Read usage from agents' own session files | `internal/sessions/calls_*.go` | auxiliary | Missing | none | Later phase. |
@@ -237,9 +236,9 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 | # | magpie feature | magpie evidence | Stage | hofund status | hofund evidence | Plan to do better than magpie |
 | --- | --- | --- | --- | --- | --- | --- |
-| 10.1 | Gateway authentication | `internal/gateway/lan.go`; `ref.md:1920` | core | Done | `crates/gateway/src/lib.rs:288` (`authorized`); `crates/secrets/src/lib.rs` (`TokenFile`, mode 0600) | Already better: a token is required on loopback too. |
-| 10.2 | Accept Bearer, `x-api-key`, `x-goog-api-key` or `?key=` | `ref.md:1440` | core | Done | `crates/gateway/src/lib.rs` (`authorized`); PR #10 | PR #10 accepts `x-api-key` and compares it in constant time, with the bearer token, `x-goog-api-key`, and a `key` query value. |
-| 10.3 | Token rotation | `internal/access` | core | Done | `crates/gateway/src/lib.rs` (`current_token`); `crates/cli/src/main.rs` (`token rotate`); PR #10 | PR #10 re-reads the token file on each request and keeps the last good token when the read fails. Connected agents have their token keys rewritten. A failed rewrite prints `hofund agent connect <id>`. |
+| 10.1 | Gateway authentication | `internal/gateway/lan.go`; `ref.md:1920` | core | Done | `crates/gateway/src/lib.rs:345` (`authorized`); `crates/secrets/src/lib.rs` (`TokenFile`, mode 0600) | Already better: a token is required on loopback too. |
+| 10.2 | Accept Bearer, `x-api-key`, `x-goog-api-key` or `?key=` | `ref.md:1440` | core | Done | `crates/gateway/src/lib.rs:352` (`x-api-key`) | `x-api-key` is compared in constant time, together with the bearer token, `x-goog-api-key`, and a `key` query value. Every presented secret is checked. |
+| 10.3 | Token rotation | `internal/access` | core | Done | `crates/gateway/src/lib.rs:325` (`current_token`); `crates/cli/src/main.rs` (`token rotate`) | The gateway re-reads the token file on each request and keeps the last good token when the read fails. Connected agents have their token keys rewritten. A failed rewrite prints `hofund agent connect <id>`. |
 | 10.4 | Named gateway keys with model and account limits | `internal/access`; `caller-keys.json` (`ref.md:2998`) | core | Missing | `crates/secrets/src/lib.rs` (one token) | Store hashed keys only (magpie stores them readable), with scopes and limits. |
 | 10.5 | LAN sharing, allowed IPs (`MAGPIE_ALLOW_IPS`), trusted proxy (`MAGPIE_TRUST_PROXY`) | `internal/gateway/lan.go`, `allow.go`; `ref.md:1850` | core | Partial | `crates/config/src/lib.rs` (`listen` can be any address) | Require named keys for any address other than loopback, plus a CIDR allow-list. |
 | 10.6 | Failed-auth throttling | `internal/gateway/auththrottle.go` | auxiliary | Missing | none | Throttle per IP with a `tower` layer. |
@@ -253,7 +252,7 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 | # | magpie feature | magpie evidence | Stage | hofund status | hofund evidence | Plan to do better than magpie |
 | --- | --- | --- | --- | --- | --- | --- |
-| 11.1 | Starter config and validation | `internal/appdir`; `internal/settings` | core | Done | `examples/hofund.toml`; `crates/cli/src/main.rs`; PR #10 | PR #10 adds `--help`, `-h`, and `help`, prints the config path from `config check`, and ships `examples/hofund.toml` with `[[providers]]` and `[[routes]]`. Next: point a validation error at the exact key. |
+| 11.1 | Starter config and validation | `internal/appdir`; `internal/settings` | core | Done | `examples/hofund.toml`; `crates/cli/src/main.rs:230` (`config check`), `:339` | `--help`, `-h`, and `help` print usage. `config check` prints `config ok:` and the path it read. `examples/hofund.toml` has `[[providers]]` and `[[routes]]`. Next: point a validation error at the exact key. |
 | 11.2 | Changes apply without a restart | `internal/filememo`; app edits apply live | core | Missing | none | Watch the config file and swap the router atomically (`arc-swap`). Keep running requests on the old config. |
 | 11.3 | Atomic writes, cross-process file locks, last-good fallback | `internal/filelock`, `internal/steady`, `internal/lastgood` | auxiliary | Partial | atomic writes in `crates/agent` and `crates/secrets` | Add advisory locks and keep the last good config. |
 | 11.4 | Environment overrides (`MAGPIE_ADDR` and others) | `ref.md:1843` | auxiliary | Partial | `crates/cli/src/main.rs` (`--config` only) | `HOFUND_` variables for listen, config and log level. |
@@ -266,7 +265,7 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | 12.1 | Recent request inspection with bodies | `internal/gateway/reqlog.go`, `capture.go`; `docs/subsystems/gui-shell.md` ("Recent-call bodies") | auxiliary | Missing | none | A bounded ring buffer, off by default, with secrets redacted before storage. |
 | 12.2 | OTLP traces and metrics export | `internal/otlp`; `plugins/otel`; `ref.md:2782` | auxiliary | Missing | no `tracing` dependency | Use `tracing` with `opentelemetry-otlp` behind a feature. Follow the GenAI semantic conventions. |
 | 12.3 | Local management API (`/v1/magpie/*`: quotas, usage, route, concurrency) | `ref.md:1855-1870` | core | Missing | none | One versioned `/hofund/v1` API, used by the desktop app, the TUI and the CLI. |
-| 12.4 | Runtime profiling (heap, CPU, goroutines; `healthcheck`) | `internal/gateway/heap.go`, `cpu.go`, `goroutines.go`; `internal/cli/main.go:38` | core | Partial | PR #10 `GET /health` (no auth, body `{"status":"ok"}`) | PR #10 adds `GET /health` with no auth and no secrets. Still open: `hofund healthcheck` and `tokio-console` behind a feature. |
+| 12.4 | Runtime profiling (heap, CPU, goroutines; `healthcheck`) | `internal/gateway/heap.go`, `cpu.go`, `goroutines.go`; `internal/cli/main.go:38` | core | Partial | `crates/gateway/src/lib.rs:126` (`GET /health`, no auth, body `{"status":"ok"}`) | Health is open and contains no secrets. Still open: `hofund healthcheck` and `tokio-console` behind a feature. |
 | 12.5 | Structured logs | `internal/probelog`; `internal/gateway/trace.go` | auxiliary | Missing | none | `tracing` with JSON output and a request id on every line. |
 
 ### 13. Privacy masking
@@ -318,25 +317,25 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 Ranked by how much each one blocks real daily use.
 
-1. **v0.1 protocol and wiring blockers.** The code is in open pull requests #9 and #10
-   (not merged). It covers stream event order and done events (rows 1.1 to 1.3),
-   field leakage across protocols (row 1.3), edits kept on disconnect (row 5.2),
-   token rotation reaching the running gateway (row 10.3), `--help` and
-   `examples/hofund.toml` (row 11.1), and `x-api-key` (row 10.2).
-   Per-upstream model names (row 2.13) stay in stage 1 and are not a blocker.
-2. **Model name per upstream (row 2.13).** Without it, failover between vendors that name a
+1. **Model name per upstream (row 2.13).** The v0.1 blockers are on `main`
+   (`ac6325a` #9, `695860d` #10) and are no longer gaps: stream event order
+   (rows 1.1 to 1.3), field leakage across protocols (row 1.3), edits kept on
+   disconnect (row 5.2), token rotation (row 10.3), `--help` and
+   `examples/hofund.toml` (row 11.1), and constant-time `x-api-key` (row 10.2).
+   Without a per-upstream model name, failover between vendors that name a
    model differently is impossible. That is the main reason to run a router.
-3. **Usage cost and cache tokens (rows 9.2, 9.3, 9.5).** These are what users look at every day.
-4. **Routing strategies, stickiness and cooldown (rows 4.5 to 4.7).** Prompt-cache stickiness
+2. **Usage cost and cache tokens (rows 9.2, 9.3, 9.5).** These are what users look at every day.
+3. **Routing strategies, stickiness and cooldown (rows 4.5 to 4.7).** Prompt-cache stickiness
    and backoff decide both cost and reliability.
-5. **Provider presets, model catalog and live model lists (rows 2.7 to 2.9, 2.14).**
+4. **Provider presets, model catalog and live model lists (rows 2.7 to 2.9, 2.14).**
    Every routing, pricing and UI feature depends on these.
-6. **Upstreams: Gemini, Vertex, Bedrock and Azure (rows 2.3 to 2.6).**
-7. **Named gateway keys, LAN and TLS (rows 10.4, 10.5, 10.7).** `x-api-key` (row 10.2) is in PR #10.
-8. **Hot reload, CLI config editing and a local management API (rows 11.2, 11.5, 12.3).**
-   The UI is blocked on these.
-9. **Subscriptions and quota windows (rows 3.1, 3.3, 3.8).** This is magpie's most used feature.
-10. **More agent adapters, profiles and per-agent model setting (rows 5.1, 5.5, 5.6).**
+5. **Upstreams: Gemini, Vertex, Bedrock and Azure (rows 2.3 to 2.6).**
+6. **Named gateway keys, LAN and TLS (rows 10.4, 10.5, 10.7).** Constant-time `x-api-key` (row 10.2) is on `main`.
+7. **Hot reload, CLI config editing and a local management API (rows 11.2, 11.5, 12.3).**
+   The UI is blocked on these. `GET /health` (row 12.4) is only the status body.
+8. **Subscriptions and quota windows (rows 3.1, 3.3, 3.8).** This is magpie's most used feature.
+9. **More agent adapters, profiles and per-agent model setting (rows 5.1, 5.5, 5.6).**
+10. **Reasoning effort and token counts (rows 1.14, 1.5).** Effort is not mapped across wires, and neither count endpoint exists.
 
 ## Phase plan
 
@@ -348,7 +347,7 @@ A phase pull request updates the rows it touches.
 
 | Phase | Scope (rows) | PRs | Outcome |
 | --- | --- | --- | --- |
-| 0 | v0.1 blockers: 1.1, 1.2, 1.3, 5.2, 10.3, 11.1, and `x-api-key` from 10.2 | #9 and #10 (open) | Real agents work end to end through hofund. |
+| 0 | v0.1 blockers: 1.1, 1.2, 1.3, 5.2, 10.3, 11.1, and `x-api-key` from 10.2 | #9 (`ac6325a`) and #10 (`695860d`), merged | Real agents work end to end through hofund. |
 | 1 | Model name per upstream (2.13), `provider/model` and bare ids (1.20), effort mapping (1.14), `count_tokens` (1.5) | 1 to 2 | Cross-vendor failover works. |
 | 2 | Ledger schema v2: cache and reasoning tokens, agent, session id, time to first byte (9.1, 9.2, 9.5, 9.9) and a richer `usage` command (9.4) | 1 | Accurate usage. |
 | 3 | Model catalog (2.8, 2.14, 2.15), provider presets as data (2.7), cost with stored prices (9.3), model metadata in `/v1/models` (1.6) | 2 | Cost in USD, plus presets and catalog data. |

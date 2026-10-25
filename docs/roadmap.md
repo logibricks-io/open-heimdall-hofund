@@ -17,9 +17,9 @@ pull request to merge. Independent work may proceed on its own branch.
 Stage 1 is the product a person can run every day. Do not start stage 2 until
 stage 1 has merged.
 
-1. **v0.1 blockers.** Codec stream correctness is pull request #9. CLI and
-   agent behavior, including constant-time `x-api-key`, is pull request #10.
-   Per-upstream model names are not a blocker.
+1. **v0.1 blockers.** Codec stream correctness is on `main` as #9 (`ac6325a`).
+   CLI and agent behavior, including constant-time `x-api-key`, is on `main`
+   as #10 (`695860d`). Per-upstream model names are not a blocker.
 2. **This document set.** The matrix, this roadmap, and the parity rule in
    `AGENTS.md` and `.cursor/rules/hofund.mdc`.
 3. **Model mapping.** A route member names the upstream model. Clients may
