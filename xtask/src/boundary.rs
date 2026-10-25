@@ -1544,7 +1544,15 @@ fn resolve_listed(workspace: &Path, raw: &str) -> PathBuf {
 fn host_path(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     let stripped = text.strip_prefix(r"\\?\").unwrap_or(text.as_ref());
-    normalize(Path::new(stripped))
+    let path = Path::new(stripped);
+    // macOS temp dirs are `/var`, which is a symlink to `/private/var`. Cargo
+    // metadata returns the canonical path, so a lexical compare misses the package.
+    if let Ok(canonical) = fs::canonicalize(path) {
+        let text = canonical.to_string_lossy();
+        let stripped = text.strip_prefix(r"\\?\").unwrap_or(text.as_ref());
+        return normalize(Path::new(stripped));
+    }
+    normalize(path)
 }
 
 fn rustc_sysroot() -> Option<PathBuf> {
@@ -2225,6 +2233,23 @@ plugins/providers/fixture/src/lib.rs:\n\
             "hofund_plugin_fixture_extra-9521719d10da3640",
             "hofund_plugin_fixture"
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_path_follows_a_directory_symlink() {
+        let root =
+            std::env::temp_dir().join(format!("hofund-plugin-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("src")).expect("real");
+        std::os::unix::fs::symlink(&real, root.join("link")).expect("symlink");
+        assert_eq!(
+            super::host_path(&root.join("link")),
+            super::host_path(&real)
+        );
+        assert!(super::host_path(&root.join("link/src")).starts_with(super::host_path(&real)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
