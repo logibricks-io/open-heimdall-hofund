@@ -711,10 +711,7 @@ mod tests {
             "#,
         )
         .expect("config");
-        assert!(matches!(
-            config.providers[0].kind,
-            Some(Kind::Generative)
-        ));
+        assert!(matches!(config.providers[0].kind, Some(Kind::Generative)));
         let error = load(
             r#"
             [[providers]]
