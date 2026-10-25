@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A release dry-run builds local cargo-dist artifacts and the desktop
+  bundles, then writes checksums, without creating a GitHub release. Pull
+  requests that change the release config build the Linux x86_64 CLI.
+  `workflow_dispatch` builds every local target.
 - `preset = "google-vertex"` posts Vertex AI `generateContent` with an OAuth
   token minted from Application Default Credentials. `project` is required.
   `location`, `credentials`, and `impersonate` are optional. No API key is
@@ -25,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `dist build` uses Cargo profile `dist`. `[profile.dist]` inherits
+  `release` and sets thin LTO, which is what `dist init` writes. Without
+  that profile the tag build stops with `profile dist is not defined`.
+- Desktop checksums and Windows signing read the bundle directory from
+  `cargo metadata`. A workspace build writes bundles under the workspace
+  target directory.
 - A version tag can get past `dist host --steps=create`. `allow-dirty = ["ci"]`
   keeps the hand-edited release workflow (macOS repack, Windows signing, and
   the universal archive). The desktop workflow installs `@tauri-apps/cli`

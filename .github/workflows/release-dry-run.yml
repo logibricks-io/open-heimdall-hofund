@@ -1,0 +1,141 @@
+# Proves the release build without publishing.
+#
+# A pull request that touches the release config builds the Linux x86_64 CLI
+# with `dist build` and the desktop bundles on all three runners. A manual
+# run builds every local cargo-dist target as well. Nothing here calls
+# `dist host` or `gh release`.
+
+name: Release dry-run
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/scripts/**"
+      - ".github/actions/**"
+      - ".github/dist-release.patch"
+      - "dist-workspace.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "apps/desktop/**"
+      - "rust-toolchain.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dry-run-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: dist plan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F'"' '/^cargo-dist-version[[:space:]]*=/ { print $2; exit }' dist-workspace.toml)"
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${version}/cargo-dist-installer.sh" | sh
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - id: matrix
+        name: Select local targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist plan --output-format=json > plan.json
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            include="$(jq -c '.ci.github.artifacts_matrix.include' plan.json)"
+          else
+            include="$(jq -c '[.ci.github.artifacts_matrix.include[] | select(.targets[] == "x86_64-unknown-linux-gnu")]' plan.json)"
+          fi
+          if [ "$include" = "[]" ] || [ "$include" = "null" ]; then
+            echo "no local dist targets were selected" >&2
+            exit 1
+          fi
+          echo "include<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$include" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+  dist-build:
+    name: dist (${{ join(matrix.targets, ', ') }})
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.include) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install dist
+        shell: ${{ matrix.install_dist.shell }}
+        run: ${{ matrix.install_dist.run }}
+      - name: Install Linux host libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Dpkg::Options::="--force-confold" \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev
+      - name: Build artifacts
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Local artifacts only. No tag publish and no dist host.
+          dist build --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          test -s dist-manifest.json
+          grep -q '${{ matrix.host }}' dist-manifest.json
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-${{ matrix.host }}
+          path: ${{ steps.build.outputs.paths }}
+          if-no-files-found: error
+
+  desktop:
+    name: desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bundles: dmg,app
+          - os: ubuntu-latest
+            bundles: deb,appimage
+          - os: windows-latest
+            bundles: nsis,msi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Build bundles and checksums
+        uses: ./.github/actions/desktop-bundle
+        with:
+          bundles: ${{ matrix.bundles }}

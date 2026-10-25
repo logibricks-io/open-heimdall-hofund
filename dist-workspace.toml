@@ -1,30 +1,37 @@
 [workspace]
 members = ["cargo:."]
 
-# cargo-dist builds the hofund CLI. The menu-bar app is a separate workflow.
-# Signing is not cargo-dist's macos-sign: an empty GitHub secret is the empty
-# string, and cargo-dist 0.32 then tries to decode it. The release workflow
-# signs after a successful build, and only when the secrets are non-empty.
+# Config for 'dist'
 [dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
-# release.yml keeps steps that `dist generate` deletes: the macOS repack,
-# Windows signing, and the universal archive job. Without "ci" here, cargo-dist
-# 0.32 stops in `dist host --steps=create` and never opens a GitHub release.
+# release.yml keeps the macOS repack, Windows signing, and the universal
+# archive job. `dist host --steps=create` rejects that file unless "ci" is
+# listed here. `dist generate` still has to be re-applied by hand; see
+# docs/release.md.
+# Skip checking whether the specified configuration files are up to date
 allow-dirty = ["ci"]
+# CI backends to support
 ci = "github"
+# The installers to generate for each app
 installers = ["shell", "powershell"]
-targets = [
-  "aarch64-apple-darwin",
-  "x86_64-apple-darwin",
-  "x86_64-unknown-linux-gnu",
-  "aarch64-unknown-linux-gnu",
-  "x86_64-pc-windows-msvc",
-]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Which actions to run on pull requests
 pr-run-mode = "skip"
+# Checksums to generate for each App
 checksum = "sha256"
+# Whether to sign macOS executables
 macos-sign = false
+# Where to host releases
 hosting = "github"
+# Whether to install an updater program
 install-updater = false
+# Whether to enable GitHub Attestations
 github-attestations = false
+# The archive format to use for non-windows builds (defaults .tar.xz)
 unix-archive = ".tar.gz"
+# The archive format to use for windows builds (defaults .zip)
 windows-archive = ".zip"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"

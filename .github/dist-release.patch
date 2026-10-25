@@ -1,0 +1,121 @@
+--- release.generated.yml
++++ release.yml
+@@ -138,11 +138,43 @@
+       - name: Install dependencies
+         run: |
+           ${{ matrix.packages_install }}
++      # hofund: keep the steps below when regenerating this file.
++      # `dist generate` overwrites them. Signing runs only when the secret
++      # group is non-empty, and the checksum is rewritten before installers
++      # are built. dist builds the whole workspace, so Linux also needs the
++      # menu-bar host libraries. See docs/release.md.
++      - name: Install Linux host libraries
++        if: runner.os == 'Linux'
++        run: |
++          sudo DEBIAN_FRONTEND=noninteractive apt-get update
++          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
++            -o Dpkg::Options::="--force-confold" \
++            libwebkit2gtk-4.1-dev \
++            libayatana-appindicator3-dev \
++            librsvg2-dev \
++            patchelf \
++            libxdo-dev
+       - name: Build artifacts
++        shell: bash
++        env:
++          CODESIGN_CERTIFICATE: ${{ secrets.CODESIGN_CERTIFICATE }}
++          CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
++          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
++          APPLE_ID: ${{ secrets.APPLE_ID }}
++          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
++          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+         run: |
+-          # Actually do builds and make zips and whatnot
++          set -euo pipefail
+           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+           echo "dist ran successfully"
++          .github/scripts/repack-macos-cli.sh
++      - name: Sign Windows archives
++        if: runner.os == 'Windows'
++        shell: pwsh
++        env:
++          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
++          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
++        run: ./.github/scripts/sign-windows-cli.ps1
+       - id: cargo-dist
+         name: Post-build
+         # We force bash here just because github makes it really hard to get values up
+@@ -210,14 +242,55 @@
+           path: |
+             ${{ steps.cargo-dist.outputs.paths }}
+             ${{ env.BUILD_MANIFEST_NAME }}
++
++  # hofund: cargo-dist 0.32 has no universal2 target. This job publishes one
++  # extra archive. `dist generate` removes the job; put it back, and keep it
++  # in the host job's needs list. See docs/release.md.
++  universal-macos:
++    name: universal macOS archive
++    needs:
++      - plan
++      - build-local-artifacts
++    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-local-artifacts.result == 'success' }}
++    runs-on: macos-latest
++    steps:
++      - uses: actions/checkout@v6
++        with:
++          persist-credentials: false
++          submodules: recursive
++      - name: Fetch macOS archives
++        uses: actions/download-artifact@v8
++        with:
++          pattern: artifacts-build-local-*apple*
++          path: dist-archives
++          merge-multiple: true
++      - name: Build the universal archive
++        shell: bash
++        env:
++          CODESIGN_CERTIFICATE: ${{ secrets.CODESIGN_CERTIFICATE }}
++          CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
++          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
++          APPLE_ID: ${{ secrets.APPLE_ID }}
++          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
++          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
++        run: .github/scripts/universal-macos-cli.sh dist-archives universal-out
++      - name: Upload the universal archive
++        uses: actions/upload-artifact@v7
++        with:
++          name: universal2-apple-darwin
++          path: universal-out
++          if-no-files-found: error
++
+   # Determines if we should publish/announce
+   host:
+     needs:
+       - plan
+       - build-local-artifacts
+       - build-global-artifacts
+-    # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
+-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
++      - universal-macos
++    # Only run if we're "publishing", and only if plan, local, global, and
++    # the universal archive didn't fail (skipped is fine)
++    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.universal-macos.result == 'skipped' || needs.universal-macos.result == 'success') }}
+     env:
+       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+     runs-on: "ubuntu-22.04"
+@@ -265,6 +338,15 @@
+         run: |
+           # Remove the granular manifests
+           rm -f artifacts/*-dist-manifest.json
++      - name: Download the universal archive
++        if: needs.universal-macos.result == 'success'
++        uses: actions/download-artifact@v8
++        with:
++          name: universal2-apple-darwin
++          path: universal-out
++      - name: Stage the universal archive
++        if: needs.universal-macos.result == 'success'
++        run: cp universal-out/* artifacts/
+       - name: Create GitHub Release
+         env:
+           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"

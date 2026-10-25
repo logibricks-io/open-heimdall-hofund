@@ -103,6 +103,7 @@ jobs:
           set -euo pipefail
           grep -F -q 'allow-dirty = ["ci"]' dist-workspace.toml
           for marker in \
+            'Install Linux host libraries' \
             '.github/scripts/repack-macos-cli.sh' \
             '.github/scripts/sign-windows-cli.ps1' \
             'universal-macos:' \
@@ -127,16 +128,41 @@ jobs:
           esac
           curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${version}/cargo-dist-installer.sh" | sh
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Require the dist profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '^\[profile.dist\]' Cargo.toml
+          profile="$(awk '/^\[profile.dist\]/{f=1;next} /^\[/{f=0} f' Cargo.toml)"
+          printf '%s\n' "$profile" | grep -q 'inherits = "release"'
+          printf '%s\n' "$profile" | grep -q 'lto = "thin"'
+          if grep -n 'apps/desktop/src-tauri/target' \
+            .github/actions/desktop-bundle/action.yml \
+            .github/workflows/release-desktop.yml \
+            .github/workflows/release-dry-run.yml \
+            .github/scripts/*; then
+            echo "desktop bundles are in the workspace target directory" >&2
+            exit 1
+          fi
+          if grep -E -n '^[^#]*dist host|^[^#]*gh release' \
+            .github/workflows/release-dry-run.yml \
+            .github/actions/desktop-bundle/action.yml; then
+            echo "the dry-run must not publish a release" >&2
+            exit 1
+          fi
       - name: Plan the release
         shell: bash
-        run: dist plan
+        run: |
+          set -euo pipefail
+          dist plan
+          .github/scripts/check-dist-generate.sh
       - name: Install the pinned Tauri CLI
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t pins < <(grep -oE '@tauri-apps/cli@[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/release-desktop.yml)
+          mapfile -t pins < <(grep -oE '@tauri-apps/cli@[0-9]+\.[0-9]+\.[0-9]+' .github/actions/desktop-bundle/action.yml)
           if [ "${#pins[@]}" -ne 1 ]; then
-            echo "release-desktop.yml must pin @tauri-apps/cli exactly once" >&2
+            echo "desktop-bundle action must pin @tauri-apps/cli exactly once" >&2
             printf '%s\n' "${pins[@]:-}" >&2
             exit 1
           fi
