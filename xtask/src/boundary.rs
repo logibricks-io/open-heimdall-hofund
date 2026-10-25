@@ -2184,7 +2184,11 @@ cc = "1"
         let err =
             super::scan_dep_info(&root, &package, &root.join("target")).expect_err("outside file");
         assert!(err.contains("outside the package"), "{err}");
-        assert!(err.contains(&outside.display().to_string()), "{err}");
+        // The report uses the canonical path. Windows temp dirs are `RUNNER~1`.
+        assert!(
+            err.contains(&super::host_path(&outside).display().to_string()),
+            "{err}"
+        );
         assert!(err.contains("source does not lex"), "{err}");
         assert!(!err.contains("cfg(clippy)"), "{err}");
         assert!(!err.contains("does not parse"), "{err}");
