@@ -347,16 +347,12 @@ fn rotate_token(config: &Path) -> Result<(), String> {
     let session = Session::from_process_env();
     let local = local_gateway(config).map_err(|error| error.to_string())?;
     let models = route_models(config).map_err(|error| error.to_string())?;
-    let previous = GatewayTarget {
-        base_url: local.base_url.clone(),
-        token: local.token,
-        models: models.clone(),
-    };
+    let previous = GatewayTarget::new(local.base_url.clone(), local.token, models.clone());
     let mut connected = Vec::new();
     let mut failed = Vec::new();
     for adapter in adapters() {
         match adapter.status(&session, &previous) {
-            Ok(status) if status.connected => connected.push(adapter.id()),
+            Ok(status) if status.connected() => connected.push(adapter.id()),
             Ok(_) => {}
             Err(error) => failed.push((adapter.id(), error.to_string())),
         }
@@ -364,11 +360,7 @@ fn rotate_token(config: &Path) -> Result<(), String> {
     let token = token_rotate(config).map_err(|error| error.to_string())?;
     println!("{token}");
     eprintln!("a running gateway reads the token file on the next request");
-    let updated = GatewayTarget {
-        base_url: local.base_url,
-        token,
-        models,
-    };
+    let updated = GatewayTarget::new(local.base_url, token, models);
     for id in connected {
         let Some(adapter) = find(id) else {
             continue;
@@ -405,19 +397,19 @@ fn connect(
         adapter.apply(&session, &target)
     }
     .map_err(|error| error.to_string())?;
-    if plan.changes.is_empty() {
+    if plan.changes().is_empty() {
         println!("{}: already matches", adapter.id());
     } else {
-        for change in &plan.changes {
+        for change in plan.changes() {
             if dry_run {
-                print!("{}", redact_diff(&change.diff, &target.token));
+                print!("{}", redact_diff(change.diff(), target.token()));
             } else {
-                println!("{}: wrote {}", adapter.id(), change.path.display());
+                println!("{}: wrote {}", adapter.id(), change.path().display());
             }
         }
     }
     if adapter.id() == "opencode" {
-        println!("{}", opencode_models_note(target.models.len()));
+        println!("{}", opencode_models_note(target.models().len()));
     }
     warn_unrouted_model(adapter, &session, config)
 }
@@ -436,11 +428,7 @@ fn opencode_models_note(model_count: usize) -> String {
 fn gateway_target(config: &Path) -> Result<GatewayTarget, String> {
     let local = local_gateway(config).map_err(|error| error.to_string())?;
     let models = route_models(config).map_err(|error| error.to_string())?;
-    Ok(GatewayTarget {
-        base_url: local.base_url,
-        token: local.token,
-        models,
-    })
+    Ok(GatewayTarget::new(local.base_url, local.token, models))
 }
 
 fn redact_diff(diff: &str, token: &str) -> String {
@@ -478,10 +466,10 @@ fn disconnect(adapter: &dyn hofund_agent::AgentAdapter, force: bool) -> Result<(
     let outcome = adapter
         .disconnect(&session, force)
         .map_err(|error| error.to_string())?;
-    for warning in &outcome.warnings {
+    for warning in outcome.warnings() {
         eprintln!("{warning}");
     }
-    if outcome.changed {
+    if outcome.changed() {
         println!("{}: restored", adapter.id());
     } else {
         println!("{}: nothing to restore", adapter.id());
@@ -497,9 +485,9 @@ fn agent_status(config: &Path) -> Result<(), String> {
         let status = adapter
             .status(&session, &target)
             .map_err(|error| error.to_string())?;
-        let installed = if status.installed { "yes" } else { "no" };
-        let connected = if status.connected { "yes" } else { "no" };
-        println!("{}\t{installed}\t{connected}", status.id);
+        let installed = if status.installed() { "yes" } else { "no" };
+        let connected = if status.connected() { "yes" } else { "no" };
+        println!("{}\t{installed}\t{connected}", status.id());
     }
     Ok(())
 }

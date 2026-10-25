@@ -133,15 +133,13 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
     if !decoded_tools.wrapper.is_empty() {
         extensions.insert("declarationWrapper", Value::Object(decoded_tools.wrapper));
     }
-    Ok(Request {
-        model,
-        messages,
-        tools: decoded_tools.tools,
-        tool_choice,
-        params,
-        stream,
-        extensions,
-    })
+    Ok(Request::new(model)
+        .with_messages(messages)
+        .with_tools(decoded_tools.tools)
+        .with_tool_choice(tool_choice)
+        .with_params(params)
+        .with_stream(stream)
+        .with_extensions(extensions))
 }
 
 fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
@@ -198,14 +196,12 @@ fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> {
     if !extra.is_empty() {
         extensions.insert("extraCandidates", Value::Array(extra));
     }
-    Ok(Response {
-        id,
-        model,
-        message,
-        stop,
-        usage,
-        extensions,
-    })
+    Ok(Response::new(message)
+        .with_id(id)
+        .with_model(model)
+        .with_stop(stop)
+        .with_usage(usage)
+        .with_extensions(extensions))
 }
 
 fn encode_response(response: &Response) -> Result<Vec<u8>, CodecError> {

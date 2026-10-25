@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The plugin seam from RFC 0001 is in `hofund-plugin-api`,
+  `hofund-plugin-sdk`, and `hofund-plugin-host`, plus the three test kits.
+  `hofund-provider` and `hofund-agent` re-export the new traits. Gateway,
+  daemon, and CLI behavior is unchanged. Account rows are plaintext in
+  `PlaintextFileAccountStore` (mode `0600`); encrypted storage is a
+  prerequisite of subscription pull request H. A `HostContext` is bound to
+  one plugin id.
 - The Kernel Hilt is the hofund mark: an upright sword seated in an amber
   kernel, with plugin modules as the crossguard. README heroes, the desktop
   bundle icons, and the tray icon use `assets/brand`.

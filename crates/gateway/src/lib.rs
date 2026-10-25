@@ -3,7 +3,7 @@
 //! The process authenticates a request, decodes it with the codec it was
 //! given for that path, asks the router, and writes the encoded body. Vendor
 //! names do not belong in this crate. Generative Language paths are matched
-//! in [`endpoints`].
+//! in `endpoints`.
 
 mod endpoints;
 

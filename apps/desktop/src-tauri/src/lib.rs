@@ -1,6 +1,6 @@
 //! Menu-bar application for the local gateway.
 //!
-//! The window and the tray render a [`control::Snapshot`]. Start, stop,
+//! The window and the tray render a `control::Snapshot`. Start, stop,
 //! connect, disconnect, usage, and open-config call `hofund-daemon` and
 //! `hofund-agent`. The agent rows come from the catalog, in catalog order.
 

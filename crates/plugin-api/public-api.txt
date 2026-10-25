@@ -1,0 +1,535 @@
+Account
+Account #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+Account::fn from_stored (plugin : PluginId , id : AccountId , label : impl Into < String > ,) -> Result < Self , PluginError >
+Account::fn id (& self) -> & AccountId
+Account::fn label (& self) -> & str
+Account::fn plugin (& self) -> & PluginId
+AccountId
+AccountId::as_str
+AccountId::from_static
+AccountsHandle
+AccountsHandle #[non_exhaustive] derives(Clone)
+AccountsHandle::async fn list (& self) -> Result < Vec < Account > , PluginError >
+AccountsHandle::async fn remove (& self , id : & AccountId) -> Result < () , PluginError >
+AccountsHandle::async fn secret (& self , id : & AccountId) -> Result < Option < SecretString > , PluginError >
+AccountsHandle::async fn upsert (& self , account : Account , secret : SecretString) -> Result < () , PluginError >
+AccountsHandle::fn account (& self , id : AccountId , label : impl Into < String >) -> Result < Account , PluginError >
+AgentDescription
+AgentDescription #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+AgentDescription::const fn binary (& self) -> & 'static str
+AgentDescription::const fn display_name (& self) -> & 'static str
+AgentDescription::const fn effort_key (& self) -> Option < & 'static str >
+AgentDescription::const fn files (& self) -> & 'static [AgentFile]
+AgentDescription::const fn from_static (id : PluginId , display_name : & 'static str , binary : & 'static str , files : & 'static [AgentFile] , sets : & 'static [AgentSet] , model_key : Option < & 'static str > , effort_key : Option < & 'static str > , visible : Visible , route : AgentRoute , requires : & 'static [crate :: id :: SurfaceId] ,) -> Self
+AgentDescription::const fn id (& self) -> & PluginId
+AgentDescription::const fn model_key (& self) -> Option < & 'static str >
+AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: SurfaceId]
+AgentDescription::const fn route (& self) -> AgentRoute
+AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
+AgentDescription::const fn visible (& self) -> Visible
+AgentFactory
+AgentFactory::Config
+AgentFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn AgentIntegration > , BuildError >
+AgentFactory::fn config_schema (& self) -> Schema
+AgentFactory::fn description (& self) -> & 'static AgentDescription
+AgentFactory::fn validate (& self , raw : & RawTable) -> Result < Self :: Config , ConfigError >
+AgentFile
+AgentFile #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentFile::const fn env_override (& self) -> Option < & 'static str >
+AgentFile::const fn from_static (id : & 'static str , kind : FileKind , linux : & 'static str , macos : & 'static str , windows : & 'static str , env_override : Option < & 'static str > ,) -> Self
+AgentFile::const fn id (& self) -> & 'static str
+AgentFile::const fn kind (& self) -> FileKind
+AgentFile::const fn linux (& self) -> & 'static str
+AgentFile::const fn macos (& self) -> & 'static str
+AgentFile::const fn windows (& self) -> & 'static str
+AgentIntegration
+AgentIntegration::fn custom_write (& self , ctx : & WriteCtx , target : & GatewayTarget ,) -> Result < Option < Plan > , PluginError >
+AgentIntegration::fn description (& self) -> & 'static AgentDescription
+AgentIntegration::fn import_providers (& self , ctx : & ImportCtx) -> Result < Vec < ImportedProvider > , PluginError >
+AgentRoute
+AgentRoute #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentRoute::Gateway
+AgentRoute::None
+AgentSet
+AgentSet #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+AgentSet::const fn file (& self) -> & 'static str
+AgentSet::const fn from_static (file : & 'static str , key : & 'static str , slot : Slot) -> Self
+AgentSet::const fn key (& self) -> & 'static str
+AgentSet::const fn slot (& self) -> & Slot
+AuthResult
+AuthResult #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AuthResult::const fn accepted (self) -> bool
+AuthResult::const fn new (accepted : bool) -> Self
+BinaryName
+BinaryName #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+BinaryName::const fn as_str (self) -> & 'static str
+BinaryName::const fn new (value : & 'static str) -> Self
+Body
+Body #[non_exhaustive] derives(Clone, PartialEq, Eq)
+Body::fn bytes (& self) -> & Bytes
+Body::fn empty () -> Self
+Body::fn from_bytes (bytes : impl Into < Bytes >) -> Self
+Body::fn is_empty (& self) -> bool
+BodyStream
+BodyStream #[non_exhaustive]
+BodyStream::async fn next_chunk (& mut self) -> Option < Result < Bytes , PluginError > >
+BodyStream::fn from_bytes (bytes : impl Into < Bytes >) -> Self
+BodyStream::fn from_stream (stream : impl Stream < Item = Result < Bytes , PluginError > > + Send + 'static ,) -> Self
+BuildError
+BuildError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Error)
+BuildError::fn message (& self) -> & str
+BuildError::fn new (message : impl Into < String >) -> Self
+ClockHandle
+ClockHandle #[non_exhaustive] derives(Clone)
+ClockHandle::fn monotonic (& self) -> Duration
+ClockHandle::fn now (& self) -> SystemTime
+Completion
+Completion #[non_exhaustive]
+Completion::Raw
+Completion::Stream
+Completion::Unary
+ConfigError
+ConfigError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ConfigError::fn message (& self) -> & str
+ConfigError::fn new (message : impl Into < String >) -> Self
+ConfigError::fn path (& self) -> & str
+ConfigError::fn with_path (mut self , path : impl Into < String >) -> Self
+ConnectionStatus
+ConnectionStatus #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ConnectionStatus::const fn connected (& self) -> bool
+ConnectionStatus::const fn display_name (& self) -> & 'static str
+ConnectionStatus::const fn id (& self) -> & 'static str
+ConnectionStatus::const fn installed (& self) -> bool
+ConnectionStatus::fn new (id : & 'static str , display_name : & 'static str , installed : bool , connected : bool , paths : Vec < PathBuf > ,) -> Self
+ConnectionStatus::fn paths (& self) -> & [PathBuf]
+CountOutcome
+CountOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+CountOutcome::Counted
+CountOutcome::Unsupported
+CredentialStyle
+CredentialStyle #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+CredentialStyle::ApiKey
+CredentialStyle::Bearer
+CredentialStyle::MessagesBoth
+CredentialStyle::NamedHeader
+CredentialStyle::XApiKey
+DirHandle
+DirHandle #[non_exhaustive] derives(Clone)
+DirHandle::fn cache_dir (& self) -> Result < PathBuf , PluginError >
+DirHandle::fn state_dir (& self) -> Result < PathBuf , PluginError >
+DisconnectOutcome
+DisconnectOutcome #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+DisconnectOutcome::const fn changed (& self) -> bool
+DisconnectOutcome::fn new (changed : bool , warnings : Vec < String >) -> Self
+DisconnectOutcome::fn warnings (& self) -> & [String]
+DynAgentFactory
+DynAgentFactory::fn config_schema (& self) -> Schema
+DynAgentFactory::fn description (& self) -> & 'static AgentDescription
+DynAgentFactory::fn validate_and_build (& self , raw : & RawTable , host : & HostContext ,) -> Result < Arc < dyn AgentIntegration > , BuildError >
+DynSubscriptionFactory
+DynSubscriptionFactory::fn config_schema (& self) -> Schema
+DynSubscriptionFactory::fn spec (& self) -> & 'static SubscriptionSpec
+DynSubscriptionFactory::fn validate_and_build (& self , raw : & RawTable , host : & HostContext ,) -> Result < Arc < dyn Subscription > , BuildError >
+DynUpstreamFactory
+DynUpstreamFactory::fn config_schema (& self) -> Schema
+DynUpstreamFactory::fn spec (& self) -> & 'static UpstreamSpec
+DynUpstreamFactory::fn validate_and_build (& self , raw : & RawTable , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
+FileChange
+FileChange #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+FileChange::fn after (& self) -> & [u8]
+FileChange::fn before (& self) -> & [u8]
+FileChange::fn diff (& self) -> & str
+FileChange::fn new (path : impl Into < PathBuf > , before : Vec < u8 > , after : Vec < u8 > , diff : impl Into < String > ,) -> Self
+FileChange::fn path (& self) -> & Path
+FileKind
+FileKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+FileKind::Json
+FileKind::Toml
+GatewayTarget
+GatewayTarget #[non_exhaustive] derives(Clone)
+GatewayTarget::fn base_url (& self) -> & str
+GatewayTarget::fn models (& self) -> & [String]
+GatewayTarget::fn new (base_url : impl Into < String > , token : impl Into < String > , models : Vec < String >) -> Self
+GatewayTarget::fn token (& self) -> & str
+GatewayTarget::fn with_models (mut self , models : Vec < String >) -> Self
+GatewayTarget::fn with_token (mut self , token : impl Into < String >) -> Self
+HeaderName
+HeaderName #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+HeaderName::const fn as_str (self) -> & 'static str
+HeaderName::const fn new (value : & 'static str) -> Self
+HostContext
+HostContext #[non_exhaustive] derives(Clone)
+HostContext::fn accounts (& self) -> & AccountsHandle
+HostContext::fn clock (& self) -> & ClockHandle
+HostContext::fn dirs (& self) -> & DirHandle
+HostContext::fn from_backends (plugin : PluginId , http : Arc < dyn HttpBackend > , secrets : Arc < dyn SecretsBackend > , accounts : Arc < dyn AccountBackend > , clock : Arc < dyn ClockBackend > , scheduler : Arc < dyn SchedulerBackend > , process : Arc < dyn ProcessBackend > , dirs : Arc < dyn DirBackend > , observe : Arc < dyn ObserveBackend > ,) -> Self
+HostContext::fn http (& self) -> & HttpHandle
+HostContext::fn observe (& self) -> & ObserveHandle
+HostContext::fn plugin (& self) -> & PluginId
+HostContext::fn scheduler (& self) -> & SchedulerHandle
+HostContext::fn secrets (& self) -> & SecretsHandle
+HostContext::fn spawn_process (& self) -> & ProcessHandle
+HttpHandle
+HttpHandle #[non_exhaustive] derives(Clone)
+HttpHandle::async fn send (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
+IdError
+IdError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Error)
+IdError::const fn reason (self) -> & 'static str
+ImportCtx
+ImportCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ImportCtx::fn link (& self) -> & str
+ImportCtx::fn new (link : impl Into < String >) -> Self
+ImportedProvider
+ImportedProvider #[non_exhaustive] derives(Clone)
+ImportedProvider::const fn protocol (& self) -> ProtocolId
+ImportedProvider::fn api_key (& self) -> Option < & SecretString >
+ImportedProvider::fn base_url (& self) -> & str
+ImportedProvider::fn id (& self) -> & PluginId
+ImportedProvider::fn new (id : PluginId , base_url : impl Into < String > , protocol : ProtocolId , api_key : Option < SecretString > ,) -> Result < Self , PluginError >
+InboundSurface
+InboundSurface::async fn handle (& self , route : & RouteSpec , request : http :: Request < Body > , host : & SurfaceHost ,) -> Result < http :: Response < BodyStream > , PluginError >
+InboundSurface::async fn health (& self) -> Result < () , PluginError >
+InboundSurface::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
+InboundSurface::fn id (& self) -> & SurfaceId
+InboundSurface::fn routes (& self) -> & 'static [RouteSpec]
+Job
+JobId
+JobId #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Hash)
+JobId::const fn get (self) -> u64
+JobSpec
+JobSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+JobSpec::const fn every (& self) -> Duration
+JobSpec::fn name (& self) -> & str
+JobSpec::fn new (name : impl Into < String > , every : Duration) -> Result < Self , PluginError >
+ListKind
+ListKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+ListKind::Catalog
+ListKind::Live
+ListKind::Unsupported
+ListQuery
+ListQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ListQuery::const fn limit (& self) -> Option < u32 >
+ListQuery::fn new () -> Self
+ListQuery::fn page (& self) -> Option < & str >
+ListQuery::fn with_limit (mut self , limit : u32) -> Self
+ListQuery::fn with_page (mut self , page : impl Into < String >) -> Self
+MatchNeedle
+MatchNeedle #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+MatchNeedle::const fn as_str (self) -> & 'static str
+MatchNeedle::const fn new (value : & 'static str) -> Self
+MemberId
+MemberId #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Hash)
+MemberId::fn account (& self) -> Option < & AccountId >
+MemberId::fn from_parts (subscription : PluginId , account : AccountId) -> Self
+MemberId::fn from_preset (preset : PresetId , key : MemberKey) -> Self
+MemberId::fn member_key (& self) -> Option < & MemberKey >
+MemberId::fn preset (& self) -> Option < & PresetId >
+MemberId::fn subscription (& self) -> Option < & PluginId >
+MemberKey
+MemberKey #[non_exhaustive] derives(Clone, Debug)
+MemberKey::const fn from_static (value : & 'static str) -> Self
+MemberKey::fn as_str (& self) -> & str
+Method
+Method #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+Method::Delete
+Method::Get
+Method::Patch
+Method::Post
+Method::Put
+ModelList
+ModelList #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ModelList::fn models (& self) -> & [ModelSpec]
+ModelList::fn new (models : Vec < ModelSpec > , next : Option < String >) -> Self
+ModelList::fn next (& self) -> Option < & str >
+ModelSpec
+ModelSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ModelSpec::fn display_name (& self) -> Option < & str >
+ModelSpec::fn id (& self) -> & str
+ModelSpec::fn new (id : impl Into < String > , display_name : Option < String >) -> Result < Self , PluginError >
+ObserveHandle
+ObserveHandle #[non_exhaustive] derives(Clone)
+ObserveHandle::fn observation (& self) -> QuotaObservation
+ObserveHandle::fn observe (& self , observation : QuotaObservation) -> Result < () , PluginError >
+PROBE_CAP
+Plan
+Plan #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+Plan::fn changes (& self) -> & [FileChange]
+Plan::fn is_empty (& self) -> bool
+Plan::fn new (changes : Vec < FileChange >) -> Self
+PluginError
+PluginError #[non_exhaustive] derives(Debug, Error)
+PluginError::const fn kind (& self) -> PluginErrorKind
+PluginError::const fn retry_after (& self) -> Option < Duration >
+PluginError::const fn status (& self) -> Option < u16 >
+PluginError::fn auth (message : impl Into < String >) -> Self
+PluginError::fn cancelled (message : impl Into < String >) -> Self
+PluginError::fn cause (& self) -> Option < & (dyn Error + 'static) >
+PluginError::fn config (message : impl Into < String >) -> Self
+PluginError::fn connect (message : impl Into < String >) -> Self
+PluginError::fn decode (message : impl Into < String >) -> Self
+PluginError::fn internal (message : impl Into < String >) -> Self
+PluginError::fn io (message : impl Into < String >) -> Self
+PluginError::fn message (& self) -> & str
+PluginError::fn quota (message : impl Into < String >) -> Self
+PluginError::fn status_error (status : u16 , message : impl Into < String >) -> Self
+PluginError::fn timeout (message : impl Into < String >) -> Self
+PluginError::fn unsupported (message : impl Into < String >) -> Self
+PluginError::fn with_retry_after (mut self , after : Duration) -> Self
+PluginError::fn with_source (mut self , source : impl Error + Send + Sync + 'static) -> Self
+PluginErrorKind
+PluginErrorKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+PluginErrorKind::Auth
+PluginErrorKind::Cancelled
+PluginErrorKind::Config
+PluginErrorKind::Connect
+PluginErrorKind::Decode
+PluginErrorKind::Internal
+PluginErrorKind::Io
+PluginErrorKind::Quota
+PluginErrorKind::Status
+PluginErrorKind::Timeout
+PluginErrorKind::Unsupported
+PluginId
+PluginId::as_str
+PluginId::from_static
+PresetId
+PresetId::as_str
+PresetId::from_static
+ProbeQuery
+ProbeQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ProbeQuery::const fn protocol (& self) -> ProtocolId
+ProbeQuery::fn minimal_request (& self) -> Request
+ProbeQuery::fn new (protocol : ProtocolId , model : impl Into < String >) -> Result < Self , PluginError >
+ProbeReport
+ProbeReport #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ProbeReport::async fn from_completion (completion : Completion) -> Result < Self , PluginError >
+ProbeReport::const fn truncated (& self) -> bool
+ProbeReport::fn new (snippet : impl Into < String >) -> Self
+ProbeReport::fn snippet (& self) -> & str
+ProcessHandle
+ProcessHandle #[non_exhaustive] derives(Clone)
+ProcessHandle::async fn spawn (& self , request : & SpawnRequest) -> Result < Spawned , PluginError >
+ProcessHandle::async fn wait (& self , spawned : Spawned) -> Result < i32 , PluginError >
+ProcessHandle::fn kill (& self , spawned : Spawned) -> Result < () , PluginError >
+ProtocolId
+ProtocolId #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Hash)
+ProtocolId::ALL
+ProtocolId::ANTHROPIC_MESSAGES
+ProtocolId::AnthropicMessages
+ProtocolId::BEDROCK_CONVERSE
+ProtocolId::BedrockConverse
+ProtocolId::GENERATIVE_LANGUAGE
+ProtocolId::GenerativeLanguage
+ProtocolId::OPENAI_CHAT
+ProtocolId::OPENAI_RESPONSES
+ProtocolId::OpenAiChat
+ProtocolId::OpenAiResponses
+ProtocolId::const fn as_str (self) -> & 'static str
+ProtocolId::const fn from_static (value : & 'static str) -> Self
+QuotaObservation
+QuotaObservation #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+QuotaObservation::const fn remaining (& self) -> Option < u64 >
+QuotaObservation::const fn retry_after (& self) -> Option < Duration >
+QuotaObservation::fn from_stored (plugin : PluginId) -> Self
+QuotaObservation::fn plugin (& self) -> & PluginId
+QuotaObservation::fn window (& self) -> Option < & str >
+QuotaObservation::fn with_remaining (mut self , remaining : u64) -> Self
+QuotaObservation::fn with_retry_after (mut self , after : Duration) -> Self
+QuotaQuery
+QuotaQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+QuotaQuery::fn account (& self) -> Option < & AccountId >
+QuotaQuery::fn for_account (account : AccountId) -> Self
+QuotaQuery::fn new () -> Self
+QuotaWindow
+QuotaWindow #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+QuotaWindow::const fn limit (& self) -> Option < u64 >
+QuotaWindow::const fn resets_at (& self) -> Option < SystemTime >
+QuotaWindow::const fn used (& self) -> u64
+QuotaWindow::fn name (& self) -> & str
+QuotaWindow::fn new (name : impl Into < String > , used : u64 , limit : Option < u64 > , resets_at : Option < SystemTime > ,) -> Result < Self , PluginError >
+RawTable
+RawTable #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+RawTable::fn get (& self , key : & str) -> Option < & RawValue >
+RawTable::fn insert (& mut self , key : impl Into < String > , value : RawValue)
+RawTable::fn is_empty (& self) -> bool
+RawTable::fn iter (& self) -> impl Iterator < Item = (& str , & RawValue) >
+RawTable::fn keys (& self) -> impl Iterator < Item = & str >
+RawTable::fn new () -> Self
+RawValue
+RawValue #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+RawValue::Array
+RawValue::Boolean
+RawValue::Integer
+RawValue::String
+RawValue::Table
+Request
+Response
+RouteSpec
+RouteSpec #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+RouteSpec::const fn from_static (method : Method , prefix : & 'static str) -> Self
+RouteSpec::const fn method (& self) -> Method
+RouteSpec::const fn prefix (& self) -> & 'static str
+SchedulerHandle
+SchedulerHandle #[non_exhaustive] derives(Clone)
+SchedulerHandle::fn cancel (& self , id : JobId) -> Result < () , PluginError >
+SchedulerHandle::fn register (& self , spec : & JobSpec , job : Job) -> Result < JobId , PluginError >
+Schema
+Schema #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+Schema::fn array (item : Self) -> Self
+Schema::fn boolean () -> Self
+Schema::fn empty () -> Self
+Schema::fn field_names (& self) -> Vec < & str >
+Schema::fn integer () -> Self
+Schema::fn object (fields : Vec < (String , Schema) > , required : & [& str]) -> Result < Self , ConfigError >
+Schema::fn string () -> Self
+SecretString
+SecretsHandle
+SecretsHandle #[non_exhaustive] derives(Clone)
+SecretsHandle::async fn get (& self , id : & str) -> Result < Option < SecretString > , PluginError >
+SignInChallenge
+SignInChallenge #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+SignInChallenge::DeviceCode
+SignInChallenge::Instructions
+SignInChallenge::OpenUrl
+SignInChallenge::fn device_code (user_code : impl Into < String > , verification_url : impl Into < String > ,) -> Result < Self , PluginError >
+SignInChallenge::fn instructions (text : impl Into < String >) -> Result < Self , PluginError >
+SignInChallenge::fn open_url (url : impl Into < String >) -> Result < Self , PluginError >
+SignInCtx
+SignInCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+SignInCtx::fn new (plugin : PluginId) -> Self
+SignInCtx::fn plugin (& self) -> & PluginId
+SignInFlow
+SignInFlow #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+SignInFlow::Bridge
+SignInFlow::Device
+SignInFlow::Pkce
+SignInFlow::TokenFile
+SignInProof
+SignInProof #[non_exhaustive] derives(Clone)
+SignInProof::Callback
+SignInProof::Device
+SignInProof::Token
+SignInProof::fn callback (code : impl Into < SecretString > , state : impl Into < String >) -> Self
+SignInProof::fn device (user_code : impl Into < SecretString >) -> Self
+SignInProof::fn token (token : impl Into < SecretString >) -> Self
+Slot
+Slot #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+Slot::CatalogModels
+Slot::Literal
+Slot::ModelTier
+Slot::Origin
+Slot::Token
+Slot::V1
+SpawnRequest
+SpawnRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+SpawnRequest::fn args (& self) -> & [OsString]
+SpawnRequest::fn cwd (& self) -> & Path
+SpawnRequest::fn env (& self) -> & [(OsString , OsString)]
+SpawnRequest::fn new (program : impl Into < PathBuf > , args : Vec < OsString > , env : Vec < (OsString , OsString) > , cwd : impl Into < PathBuf > ,) -> Result < Self , PluginError >
+SpawnRequest::fn program (& self) -> & Path
+Spawned
+Spawned #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+Spawned::const fn id (self) -> u32
+StaticUrl
+StaticUrl #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+StaticUrl::const fn as_str (self) -> & 'static str
+StaticUrl::const fn new (value : & 'static str) -> Self
+StreamEvent
+Subscription
+Subscription::async fn complete_sign_in (& self , ctx : & SignInCtx , proof : SignInProof , host : & HostContext ,) -> Result < AccountId , PluginError >
+Subscription::async fn health (& self) -> Result < () , PluginError >
+Subscription::async fn list_models (& self , account : & AccountId , host : & HostContext ,) -> Result < ModelList , PluginError >
+Subscription::async fn quota (& self , account : & AccountId , host : & HostContext ,) -> Result < Vec < QuotaWindow > , PluginError >
+Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >
+Subscription::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
+Subscription::async fn start_sign_in (& self , ctx : & SignInCtx , host : & HostContext ,) -> Result < SignInChallenge , PluginError >
+Subscription::fn flow (& self) -> & SignInFlow
+Subscription::fn id (& self) -> & PluginId
+Subscription::fn upstream (& self , account : & AccountId , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , PluginError >
+SubscriptionFactory
+SubscriptionFactory::Config
+SubscriptionFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn Subscription > , BuildError >
+SubscriptionFactory::fn config_schema (& self) -> Schema
+SubscriptionFactory::fn spec (& self) -> & 'static SubscriptionSpec
+SubscriptionFactory::fn validate (& self , raw : & RawTable) -> Result < Self :: Config , ConfigError >
+SubscriptionSpec
+SubscriptionSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+SubscriptionSpec::const fn display_name (& self) -> & 'static str
+SubscriptionSpec::const fn flow (& self) -> SignInFlow
+SubscriptionSpec::const fn from_static (plugin : PluginId , display_name : & 'static str , flow : SignInFlow ,) -> Self
+SubscriptionSpec::const fn plugin (& self) -> & PluginId
+SurfaceHost
+SurfaceHost #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+SurfaceHost::const fn auth (& self) -> AuthResult
+SurfaceHost::fn from_parts (members : Vec < MemberId > , protocols : Vec < ProtocolId > , auth : AuthResult ,) -> Self
+SurfaceHost::fn members (& self) -> & [MemberId]
+SurfaceHost::fn protocols (& self) -> & [ProtocolId]
+SurfaceId
+SurfaceId::as_str
+SurfaceId::from_static
+TierId
+TierId #[non_exhaustive] derives(Clone, Debug)
+TierId::const fn from_static (value : & 'static str) -> Self
+TierId::fn as_str (& self) -> & str
+UpstreamFactory
+UpstreamFactory::Config
+UpstreamFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
+UpstreamFactory::fn config_schema (& self) -> Schema
+UpstreamFactory::fn spec (& self) -> & 'static UpstreamSpec
+UpstreamFactory::fn validate (& self , raw : & RawTable) -> Result < Self :: Config , ConfigError >
+UpstreamProvider
+UpstreamProvider::async fn count_input (& self , request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
+UpstreamProvider::async fn execute (& self , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
+UpstreamProvider::async fn health (& self) -> Result < () , PluginError >
+UpstreamProvider::async fn list_models (& self , query : & ListQuery) -> Result < ModelList , PluginError >
+UpstreamProvider::async fn probe (& self , query : & ProbeQuery) -> Result < ProbeReport , PluginError >
+UpstreamProvider::async fn quota (& self , query : & QuotaQuery) -> Result < Vec < QuotaWindow > , PluginError >
+UpstreamProvider::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
+UpstreamSpec
+UpstreamSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+UpstreamSpec::const fn credential (& self) -> CredentialStyle
+UpstreamSpec::const fn from_static (plugin : PluginId , protocols : & 'static [ProtocolId] , credential : CredentialStyle , list : ListKind ,) -> Self
+UpstreamSpec::const fn list_kind (& self) -> ListKind
+UpstreamSpec::const fn plugin (& self) -> & PluginId
+UpstreamSpec::const fn protocols (& self) -> & 'static [ProtocolId]
+ValidConfig
+Visible
+Visible #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+Visible::All
+Visible::Only
+WriteCtx
+WriteCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+WriteCtx::fn home (& self) -> & Path
+WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
+const API
+const PROBE_CAP
+kernel::AccountBackend
+kernel::AccountBackend::async fn list (& self , plugin : & PluginId) -> Result < Vec < Account > , PluginError >
+kernel::AccountBackend::async fn remove (& self , plugin : & PluginId , id : & AccountId) -> Result < () , PluginError >
+kernel::AccountBackend::async fn secret (& self , plugin : & PluginId , id : & AccountId ,) -> Result < Option < SecretString > , PluginError >
+kernel::AccountBackend::async fn upsert (& self , account : Account , secret : SecretString) -> Result < () , PluginError >
+kernel::ClockBackend
+kernel::ClockBackend::fn monotonic (& self) -> Duration
+kernel::ClockBackend::fn now (& self) -> SystemTime
+kernel::DirBackend
+kernel::DirBackend::fn cache_dir (& self , plugin : & PluginId) -> Result < PathBuf , PluginError >
+kernel::DirBackend::fn state_dir (& self , plugin : & PluginId) -> Result < PathBuf , PluginError >
+kernel::HttpBackend
+kernel::HttpBackend::async fn send (& self , request : HttpRequest < Body > ,) -> Result < HttpResponse < BodyStream > , PluginError >
+kernel::HttpRequest
+kernel::HttpResponse
+kernel::Job
+kernel::ObserveBackend
+kernel::ObserveBackend::fn observe (& self , observation : QuotaObservation) -> Result < () , PluginError >
+kernel::ProcessBackend
+kernel::ProcessBackend::async fn spawn (& self , program : PathBuf , args : Vec < std :: ffi :: OsString > , env : Vec < (std :: ffi :: OsString , std :: ffi :: OsString) > , cwd : PathBuf ,) -> Result < u32 , PluginError >
+kernel::ProcessBackend::async fn wait (& self , id : u32) -> Result < i32 , PluginError >
+kernel::ProcessBackend::fn kill (& self , id : u32) -> Result < () , PluginError >
+kernel::SchedulerBackend
+kernel::SchedulerBackend::fn cancel (& self , id : u64)
+kernel::SchedulerBackend::fn register (& self , name : & str , every_ms : u64 , job : Job) -> Result < u64 , PluginError >
+kernel::SchedulerBackend::fn shutdown (& self)
+kernel::SecretsBackend
+kernel::SecretsBackend::async fn get (& self , id : & str) -> Result < Option < SecretString > , PluginError >
+kernel::fn expose_secret (secret : & SecretString) -> & str
+mod kernel

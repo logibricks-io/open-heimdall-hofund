@@ -45,8 +45,8 @@ Present:
 Planned behavior is the stage plan in [docs/roadmap.md](docs/roadmap.md).
 RFC 0001, the accepted microkernel and plugin design, is in
 [docs/rfc/0001-microkernel-plugins.md](docs/rfc/0001-microkernel-plugins.md).
-The dependency table in `docs/architecture.md` is still the build until the
-migration pull requests land.
+The dependency table in `docs/architecture.md` includes the plugin seam.
+Later migration pull requests update that table when they add an edge.
 Not present yet:
 
 - further routing strategies, and i18n language packs
@@ -63,8 +63,9 @@ Spine, each crate depending only downward:
 `apps/desktop` (`hofund-desktop`) sits beside `cli` and depends only on
 `daemon` and `agent`. Nothing in `crates/` depends on it.
 
-- `agent` depends only on `config`. Never on `gateway`, `router`, `provider`,
-  `codec`, `ir`, or `daemon`.
+- `agent` depends on `config` and `plugin-api`. Never on `gateway`, `router`,
+  `provider`, `codec`, or `daemon`. Only the three kits depend on
+  `plugin-host`.
 - Vendor names must never appear in `crates/gateway` or `crates/router`.
   Quirks live in `quirks` data and in provider adapters. Protocol names belong
   in `codec`.

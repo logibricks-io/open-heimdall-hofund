@@ -16,17 +16,11 @@ fn scratch() -> PathBuf {
 }
 
 fn target() -> GatewayTarget {
-    GatewayTarget {
-        base_url: "http://127.0.0.1:3425/".to_owned(),
-        token: "local-token".to_owned(),
-        models: Vec::new(),
-    }
+    GatewayTarget::new("http://127.0.0.1:3425/", "local-token", Vec::new())
 }
 
 fn target_with(models: &[&str]) -> GatewayTarget {
-    let mut gateway = target();
-    gateway.models = models.iter().map(|model| (*model).to_owned()).collect();
-    gateway
+    target().with_models(models.iter().map(|model| (*model).to_owned()).collect())
 }
 
 fn write(path: &Path, bytes: &str) {
@@ -97,7 +91,7 @@ fn apply_is_idempotent_and_revert_restores_the_original_bytes() {
         let adapter = find(case.id).expect(case.id);
 
         let preview = adapter.plan(&session, &gateway).expect("plan");
-        assert!(!preview.changes.is_empty(), "{}", case.id);
+        assert!(!preview.changes().is_empty(), "{}", case.id);
         assert!(!path.with_file_name(backup_name(&path)).exists());
         assert_eq!(read(&path), case.original, "plan writes nothing");
 
@@ -109,7 +103,7 @@ fn apply_is_idempotent_and_revert_restores_the_original_bytes() {
             adapter
                 .status(&session, &gateway)
                 .expect("status")
-                .connected
+                .connected()
         );
         assert_eq!(read(&untouched), "leave me\n");
 
@@ -130,7 +124,7 @@ fn apply_is_idempotent_and_revert_restores_the_original_bytes() {
             !adapter
                 .status(&session, &gateway)
                 .expect("status")
-                .connected
+                .connected()
         );
     }
 }
@@ -256,7 +250,7 @@ fn disconnect_keeps_a_key_added_while_connected() {
     adapter.apply(&session, &target()).expect("apply");
     let text = format!("sandbox_mode = \"workspace-write\"\n{}", read(&path));
     fs::write(&path, text).expect("edit");
-    assert!(disconnect(adapter, &session, false).changed);
+    assert!(disconnect(adapter, &session, false).changed());
     let after = read(&path);
     assert!(
         after.contains("sandbox_mode = \"workspace-write\""),
@@ -267,7 +261,7 @@ fn disconnect_keeps_a_key_added_while_connected() {
     assert!(!after.contains("model_provider"), "{after}");
     assert!(!after.contains("hofund"), "{after}");
     assert!(!sibling(&path, ".hofund.bak").exists());
-    assert!(!disconnect(adapter, &session, false).changed);
+    assert!(!disconnect(adapter, &session, false).changed());
 }
 
 #[test]
@@ -287,7 +281,7 @@ fn disconnect_refuses_a_broken_file_until_force() {
     assert!(error.contains("codex"), "{error}");
     assert_eq!(read(&path), "model_provider = [\n");
     assert!(sibling(&path, ".hofund.bak").is_file());
-    assert!(disconnect(adapter, &session, true).changed);
+    assert!(disconnect(adapter, &session, true).changed());
     let restored = read(&path);
     assert!(restored.contains("model = \"gpt-5\""));
     assert!(!restored.contains("model_provider"));
@@ -302,10 +296,10 @@ fn disconnect_removes_an_empty_directory_it_created() {
     adapter.apply(&session, &target()).expect("apply");
     let path = home.join(".claude").join("settings.json");
     assert!(path.is_file());
-    assert!(disconnect(adapter, &session, false).changed);
+    assert!(disconnect(adapter, &session, false).changed());
     assert!(!path.exists());
     assert!(!home.join(".claude").exists());
-    assert!(!disconnect(adapter, &session, false).changed);
+    assert!(!disconnect(adapter, &session, false).changed());
 }
 
 #[test]
@@ -317,7 +311,7 @@ fn disconnect_keeps_a_directory_that_still_holds_a_file() {
     let path = home.join(".codex").join("config.toml");
     let extra = home.join(".codex").join("notes.txt");
     write(&extra, "stay\n");
-    assert!(disconnect(adapter, &session, false).changed);
+    assert!(disconnect(adapter, &session, false).changed());
     assert!(!path.exists());
     assert!(extra.is_file());
     assert!(home.join(".codex").is_dir());
@@ -333,7 +327,7 @@ fn opencode_honors_xdg_config_home() {
     let json = xdg.join("opencode").join("opencode.json");
     assert!(json.is_file());
     assert!(!home.join(".config").exists());
-    assert!(disconnect(adapter, &session, false).changed);
+    assert!(disconnect(adapter, &session, false).changed());
     assert!(!json.exists());
     assert!(!xdg.join("opencode").exists());
     assert!(xdg.is_dir());
@@ -348,8 +342,7 @@ fn refresh_token_rewrites_the_token_and_keeps_the_backup() {
     let adapter = find("codex").expect("codex");
     adapter.apply(&session, &target()).expect("apply");
     let backup = fs::read(sibling(&path, ".hofund.bak")).expect("bak");
-    let mut rotated = target();
-    rotated.token = "rotated-token".to_owned();
+    let rotated = target().with_token("rotated-token");
     let updated = adapter.refresh_token(&session, &rotated).expect("refresh");
     assert_eq!(updated, vec![path.clone()]);
     let text = read(&path);
@@ -360,7 +353,7 @@ fn refresh_token_rewrites_the_token_and_keeps_the_backup() {
         fs::read(sibling(&path, ".hofund.bak")).expect("bak stays"),
         backup
     );
-    assert!(disconnect(adapter, &session, false).changed);
+    assert!(disconnect(adapter, &session, false).changed());
     assert_eq!(read(&path), "model = \"gpt-5\"\n");
     assert!(!sibling(&path, ".hofund.bak").exists());
 }
@@ -404,8 +397,12 @@ fn clean_disconnect_restores_the_sha256_of_every_managed_file() {
         adapter.apply(&session, &target()).expect("apply");
         assert_ne!(sha256(&fs::read(&path).expect("connected")), before);
         let outcome = disconnect(adapter, &session, false);
-        assert!(outcome.changed, "{id}");
-        assert!(outcome.warnings.is_empty(), "{id}: {:?}", outcome.warnings);
+        assert!(outcome.changed(), "{id}");
+        assert!(
+            outcome.warnings().is_empty(),
+            "{id}: {:?}",
+            outcome.warnings()
+        );
         let restored = fs::read(&path).unwrap_or_else(|_| panic!("{id} missing"));
         assert_eq!(
             sha256(&restored),
@@ -432,21 +429,21 @@ fn disconnect_keeps_a_value_the_user_changed() {
     let edited = read(&path).replace("local-token", "user-edited-token");
     fs::write(&path, edited).expect("edit");
     let outcome = disconnect(adapter, &session, false);
-    assert!(outcome.changed);
+    assert!(outcome.changed());
     assert!(
         outcome
-            .warnings
+            .warnings()
             .iter()
             .any(|warning| warning.contains("ANTHROPIC_AUTH_TOKEN")),
         "{:?}",
-        outcome.warnings
+        outcome.warnings()
     );
     let after = read(&path);
     assert!(after.contains("user-edited-token"), "{after}");
     assert!(after.contains("https://my-proxy.example"), "{after}");
     assert!(!after.contains("127.0.0.1"), "{after}");
     assert!(!sibling(&path, ".hofund.bak").exists());
-    assert!(!disconnect(adapter, &session, true).changed);
+    assert!(!disconnect(adapter, &session, true).changed());
 }
 
 #[test]

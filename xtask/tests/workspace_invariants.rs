@@ -6,6 +6,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "support/plugin_rules.rs"]
+mod plugin_rules;
+
 /// Workspace-relative paths of every Cargo package, in the same order as the
 /// root `[workspace] members` list is asserted below.
 const MEMBERS: &[&str] = &[
@@ -17,7 +20,13 @@ const MEMBERS: &[&str] = &[
     "crates/daemon",
     "crates/gateway",
     "crates/ir",
+    "crates/plugin-api",
+    "crates/plugin-host",
+    "crates/plugin-sdk",
     "crates/provider",
+    "kits/agent",
+    "kits/subscription",
+    "kits/upstream",
     "crates/quirks",
     "crates/router",
     "crates/secrets",
@@ -29,7 +38,7 @@ const MEMBERS: &[&str] = &[
 /// Update `docs/architecture.md` in the same change.
 fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
-        "hofund-agent" => &["hofund-config"],
+        "hofund-agent" => &["hofund-config", "hofund-plugin-api"],
         "hofund-cli" => &["hofund-agent", "hofund-daemon"],
         "hofund-codec" => &["hofund-ir"],
         "hofund-config" => &[],
@@ -46,7 +55,18 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         ],
         "hofund-gateway" => &["hofund-codec", "hofund-ir", "hofund-router", "hofund-usage"],
         "hofund-ir" => &[],
-        "hofund-provider" => &["hofund-codec", "hofund-ir", "hofund-quirks"],
+        "hofund-kit-agent" => &["hofund-plugin-host"],
+        "hofund-kit-subscription" => &["hofund-plugin-host"],
+        "hofund-kit-upstream" => &["hofund-plugin-host"],
+        "hofund-plugin-api" => &["hofund-ir"],
+        "hofund-plugin-host" => &["hofund-plugin-api"],
+        "hofund-plugin-sdk" => &["hofund-plugin-api", "hofund-quirks"],
+        "hofund-provider" => &[
+            "hofund-codec",
+            "hofund-ir",
+            "hofund-plugin-api",
+            "hofund-quirks",
+        ],
         "hofund-quirks" => &["hofund-ir"],
         "hofund-router" => &["hofund-ir", "hofund-provider"],
         "hofund-secrets" => &[],
@@ -176,6 +196,12 @@ fn dependency_graph_matches_architecture() {
         "hofund-desktop",
         "hofund-gateway",
         "hofund-ir",
+        "hofund-kit-agent",
+        "hofund-kit-subscription",
+        "hofund-kit-upstream",
+        "hofund-plugin-api",
+        "hofund-plugin-host",
+        "hofund-plugin-sdk",
         "hofund-provider",
         "hofund-quirks",
         "hofund-router",
@@ -213,6 +239,38 @@ fn gateway_and_router_do_not_name_vendors() {
         "vendor names belong in quirks data and provider adapters, not in gateway or router:\n{}",
         violations.join("\n")
     );
+}
+
+fn lints_follow_workspace(manifest: &str) -> bool {
+    let mut in_lints = false;
+    for line in manifest.lines() {
+        let trimmed = strip_comment(line).trim();
+        if trimmed.starts_with('[') {
+            in_lints = trimmed == "[lints]";
+            continue;
+        }
+        if in_lints && trimmed == "workspace = true" {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_word(text: &str, word: &str) -> bool {
+    let bytes = text.as_bytes();
+    let needle = word.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = text[start..].find(word) {
+        let index = start + offset;
+        let before_ok = index == 0 || !is_ident_byte(bytes[index - 1]);
+        let after = index + needle.len();
+        let after_ok = after == bytes.len() || !is_ident_byte(bytes[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = index + word.len();
+    }
+    false
 }
 
 #[test]

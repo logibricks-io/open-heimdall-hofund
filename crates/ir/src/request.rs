@@ -11,6 +11,7 @@ use crate::tools::{Tool, ToolChoice};
 ///
 /// This type performs no I/O. Codecs translate protocol payloads into it and
 /// back out of it.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     /// Model identifier, as the caller named it.
@@ -48,6 +49,9 @@ fn is_false(value: &bool) -> bool {
 
 impl Request {
     /// A request with no messages and default parameters.
+    ///
+    /// Add the other parts with the `with_*` methods. A new field can take a
+    /// default here without breaking callers. A positional constructor cannot.
     #[must_use]
     pub fn new(model: impl Into<String>) -> Self {
         Self {
@@ -59,6 +63,48 @@ impl Request {
             stream: false,
             extensions: Extensions::new(),
         }
+    }
+
+    /// Replaces the conversation.
+    #[must_use]
+    pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
+        self.messages = messages;
+        self
+    }
+
+    /// Replaces the tool list.
+    #[must_use]
+    pub fn with_tools(mut self, tools: Vec<Tool>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Sets the tool choice.
+    #[must_use]
+    pub fn with_tool_choice(mut self, tool_choice: Option<ToolChoice>) -> Self {
+        self.tool_choice = tool_choice;
+        self
+    }
+
+    /// Replaces the generation parameters.
+    #[must_use]
+    pub fn with_params(mut self, params: GenerationParams) -> Self {
+        self.params = params;
+        self
+    }
+
+    /// Sets whether the caller asked for a stream.
+    #[must_use]
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// Replaces the extension bag.
+    #[must_use]
+    pub fn with_extensions(mut self, extensions: Extensions) -> Self {
+        self.extensions = extensions;
+        self
     }
 
     /// Drops every extension bag on the request.

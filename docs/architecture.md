@@ -16,9 +16,9 @@ mapping is in [codecs.md](codecs.md). The adopt-or-redesign record is in
 [magpie-comparison.md](magpie-comparison.md). The accepted design for
 splitting upstream providers, subscriptions, and coding-agent integrations
 into plugins is [rfc/0001-microkernel-plugins.md](rfc/0001-microkernel-plugins.md)
-(RFC 0001, accepted 2026-10-25). That document is the design. It is not the
-build. The dependency table in this document stays normative until the
-migration pull requests land.
+(RFC 0001, accepted 2026-10-25). The plugin API, the SDK skeleton, and the
+host constructor have landed. The rest of that RFC is still the design.
+The dependency table in this document includes the edges that have landed.
 
 Sibling repositories:
 
@@ -45,6 +45,9 @@ flowchart BT
   secrets["secrets<br/>credentials"]
   usage["usage<br/>consumption records"]
   agent["agent<br/>config adapters"]
+  pluginApi["plugin-api<br/>plugin contract"]
+  pluginSdk["plugin-sdk<br/>helpers"]
+  pluginHost["plugin-host<br/>HostContext"]
   gateway["gateway<br/>HTTP server"]
   daemon["daemon<br/>composition root"]
   cli["cli<br/>hofund binary"]
@@ -55,6 +58,11 @@ flowchart BT
   provider --> codec
   provider --> ir
   provider --> quirks
+  provider --> pluginApi
+  pluginApi --> ir
+  pluginSdk --> pluginApi
+  pluginSdk --> quirks
+  pluginHost --> pluginApi
   router --> provider
   router --> ir
   gateway --> router
@@ -70,6 +78,7 @@ flowchart BT
   daemon --> router
   daemon --> usage
   agent --> config
+  agent --> pluginApi
   cli --> daemon
   cli --> agent
   desktop --> daemon
@@ -77,21 +86,30 @@ flowchart BT
 ```
 
 The spine is `ir ← codec ← provider ← router ← gateway ← daemon ← cli`. Read
-each arrow as "depends on". `agent` is a side branch that depends only on
-`config`. `desktop` sits beside `cli` and depends on the same two crates.
+each arrow as "depends on". `agent` depends on `config` and `plugin-api`.
+`desktop` sits beside `cli` and depends on the same two crates as `cli`.
+`plugin-api` depends on `ir`. `plugin-sdk` depends on `plugin-api` and
+`quirks`. `plugin-host` depends only on `plugin-api`. The three kits depend
+only on `plugin-host` and are not on the diagram.
 
 | Package | May depend on |
 | --- | --- |
 | `hofund-ir` | — |
 | `hofund-codec` | `hofund-ir` |
 | `hofund-quirks` | `hofund-ir` |
-| `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-quirks` |
+| `hofund-plugin-api` | `hofund-ir` |
+| `hofund-plugin-sdk` | `hofund-plugin-api`, `hofund-quirks` |
+| `hofund-plugin-host` | `hofund-plugin-api` |
+| `hofund-kit-upstream` | `hofund-plugin-host` |
+| `hofund-kit-subscription` | `hofund-plugin-host` |
+| `hofund-kit-agent` | `hofund-plugin-host` |
+| `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
 | `hofund-router` | `hofund-ir`, `hofund-provider` |
 | `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-router`, `hofund-usage` |
 | `hofund-config` | — |
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
-| `hofund-agent` | `hofund-config` |
+| `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
@@ -109,8 +127,11 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 
 ### Rules that the table is there to protect
 
-- `agent` depends only on `config`. It must never depend on `gateway`, `router`,
-  `provider`, or the daemon.
+- `agent` depends on `config` and `plugin-api`. It must never depend on
+  `gateway`, `router`, `provider`, or the daemon.
+- Only the three kits depend on `plugin-host`. A plugin does not. The kits
+  are unpublished and exist so a plugin test can build a `HostContext`.
+- `plugin-sdk` re-exports `tracing`. `plugin-api` does not depend on it.
 - `gateway` and `router` must not depend on `quirks`. They must not name a
   vendor or branch on vendor-specific behavior. Capability gaps and protocol
   deviations live in `quirks` data and in provider adapters.
@@ -129,6 +150,10 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | Crate | Responsibility |
 | --- | --- |
 | `ir` | Canonical request, response, and stream-event types. No I/O. |
+| `plugin-api` | Plugin traits, `PluginError`, newtypes, and `HostContext` handles. |
+| `plugin-sdk` | Helpers a plugin may use. Transports land later. Re-exports `tracing`. |
+| `plugin-host` | The `HostContext` constructor and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
+| `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |
 | `codec` | Per-protocol encode and decode to and from the IR. Hub-and-spoke, so N protocols do not become an N-by-M matrix. |
 | `quirks` | Data-driven vendor capability and quirk descriptions. |
 | `provider` | `Provider` trait and upstream adapters. |

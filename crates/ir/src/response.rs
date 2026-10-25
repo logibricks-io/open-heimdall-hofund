@@ -40,6 +40,7 @@ pub struct Stop {
 }
 
 /// One completed assistant turn.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     /// Response identifier.
@@ -62,6 +63,57 @@ pub struct Response {
 }
 
 impl Response {
+    /// A response with `message` and no id, model, stop, usage, or extensions.
+    ///
+    /// Add the other parts with the `with_*` methods. A new field can take a
+    /// default here without breaking callers.
+    #[must_use]
+    pub fn new(message: Message) -> Self {
+        Self {
+            id: None,
+            model: None,
+            message,
+            stop: None,
+            usage: None,
+            extensions: Extensions::new(),
+        }
+    }
+
+    /// Sets the response id.
+    #[must_use]
+    pub fn with_id(mut self, id: Option<String>) -> Self {
+        self.id = id;
+        self
+    }
+
+    /// Sets the model name.
+    #[must_use]
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Sets the stop reason.
+    #[must_use]
+    pub fn with_stop(mut self, stop: Option<Stop>) -> Self {
+        self.stop = stop;
+        self
+    }
+
+    /// Sets the usage counters.
+    #[must_use]
+    pub fn with_usage(mut self, usage: Option<Usage>) -> Self {
+        self.usage = usage;
+        self
+    }
+
+    /// Replaces the extension bag.
+    #[must_use]
+    pub fn with_extensions(mut self, extensions: Extensions) -> Self {
+        self.extensions = extensions;
+        self
+    }
+
     /// Drops extension bags on the response, its usage, and its message.
     pub fn strip_extensions(&mut self) {
         self.extensions.clear();
