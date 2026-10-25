@@ -1,16 +1,18 @@
 # RFC 0001: Microkernel and plugins
 
 - Status: **Proposed**. This document is not the build. The dependency table in [architecture.md](../architecture.md) stays normative until the owner accepts this proposal. No crate moves in this pull request.
-- Date: 2026-10-25
+- Date: 2026-10-25. Amended the same day from the architecture review (appendix).
 - hofund pin: `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4` (main after pull request #26)
 - Upstream pin: yetone/magpie `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`. `internal/provider/presets.go` is byte-identical at `5b2b3d3f50959735403dff6b77a85eec65772218`. The preset file records that pin at `crates/provider/presets.toml` line 8.
-- Workspace version: `0.1.0` (`xtask/tests/workspace_invariants.rs` asserts the manifest). The plugin API below is a design, not a semver promise, until this proposal is accepted.
+- Workspace version: `0.1.0` (`xtask/tests/workspace_invariants.rs` asserts the manifest). The plugin API below is a design, not a semver promise, until this proposal is accepted. The semver policy is in section 1.
 
 ## Summary
 
 Upstream providers, subscription sign-in, and coding-agent integrations are the three surfaces that several agents need to extend at once. Today they share crates with the gateway spine, so those agents edit the same files.
 
-This proposal keeps the spine as a kernel with a small stable plugin API, a separate helper SDK, and each extension in its own directory. A plugin depends only on the API and, when it needs a helper, the SDK. Plugins do not depend on each other. Kernel source does not name vendors. Stage 1 links plugins at compile time through an explicit registry. A process host for community JavaScript auth plugins is a later stage.
+This proposal keeps the spine as a kernel. The kernel owns mechanism: pooled HTTP, secrets, the account store, the clock, the scheduler, process spawn, tracing, the router snapshot, and a layer chain around every upstream call. Plugins own policy: vendor URLs, signatures, sign-in, and file layouts. They receive a `HostContext` and talk HTTP only through the SDK.
+
+`hofund-plugin-api` is the small contract. `hofund-plugin-sdk` holds helpers. A plugin depends only on those two crates. Plugins do not depend on each other, and they do not open sockets or spawn processes themselves. Stage 1 links plugins at compile time through an explicit registry. The daemon binary is the only composition root. Desktop and TUI are clients of a versioned local API. A process host for community JavaScript auth plugins is a later stage.
 
 The trait blocks in this document are the proposed contract. This pull request does not compile them.
 
@@ -25,64 +27,189 @@ The spine, from [architecture.md](../architecture.md), is `ir <- codec <- provid
 | IR | `crates/ir`. No I/O. | Every codec and every plugin speaks these types. |
 | Codecs | `crates/codec`. `Codec::id` at `crates/codec/src/lib.rs` line 38. Ids in tree: `anthropic-messages`, `openai-chat`, `openai-responses`, `generative-language`, `bedrock-converse` (`crates/codec/src/converse.rs` line 36). | Protocol encode and decode are hub-and-spoke. A vendor adapter calls a codec. It does not own one. |
 | Quirks engine | `crates/quirks/src/lib.rs`. `Profile` line 12, `Rule` line 23, `named` line 44, `apply` line 49. Profiles: `responses-default`, `messages-default`, `no-sampling`. | Rules remove or fill canonical fields. Gateway and router do not read profiles (crate header, lines 1-6). |
-| Router | `crates/router`. Re-exports `Provider` from `hofund-provider` at `crates/router/src/lib.rs` line 13. Ordered failover. | Routing is product behavior shared by every upstream. |
+| Router | `crates/router`. Re-exports `Provider` from `hofund-provider` at `crates/router/src/lib.rs` line 13. Ordered failover. `Router::from_hops` (line 108) freezes membership. | Routing is product behavior shared by every upstream. |
 | Gateway | `crates/gateway/src/lib.rs` lines 1-6. Authenticates, decodes, asks the router, writes the body, records usage (`record` at line 627). | The HTTP edge. Vendor names are forbidden here by `gateway_and_router_do_not_name_vendors` (`xtask/tests/workspace_invariants.rs` line 190), which scans only `crates/gateway` and `crates/router`. |
 | Config loader | `crates/config/src/lib.rs`. `Config` line 16, `Provider` line 51, `load` line 281. Raw structs use `deny_unknown_fields` from line 667. Zero workspace dependencies (`expected_deps` returns `&[]`). | Settings stay a leaf. Preset ids stay strings. |
-| Secrets | `crates/secrets/src/lib.rs`. `resolve` line 34 (`env:NAME` or a literal). `TokenFile` line 49. | `architecture.md` lines 119-120: the daemon resolves secrets and passes material down. `provider` must not read the store. |
+| Secrets | `crates/secrets/src/lib.rs`. `resolve` line 34 (`env:NAME` or a literal). `TokenFile` line 49. The value is a plain `String`. | `architecture.md` lines 119-120: the daemon resolves secrets and passes material down. `provider` must not read the store. |
 | Usage ledger | `crates/usage/src/lib.rs`. SQLite `requests` table at line 58. `Ledger::record` line 80. | `gateway` records one row per request. `usage` does not depend on `ir`. |
 | Daemon | `crates/daemon/src/lib.rs`. `providers` line 231 matches `planned.wire` and constructs `OpenAiCompat`, `Anthropic`, `Generative`, `Vertex::new` (line 261), and `Bedrock::new` (line 275). `plan` line 297 calls `resolve`. | Process wiring. After the seam it accepts a registry and stops naming those types. |
 | CLI shell | `crates/cli/src/main.rs` `Command` line 56: `serve`, `config check`, token show and rotate, `usage`, `agent list`, `connect`, `disconnect`, `status`. | A shell. It does not own vendor behavior. |
-| Menu-bar shell | `apps/desktop` (`hofund-desktop`). Depends on `daemon` and `agent`. | Same rule as the CLI. |
-| TUI shell | Not in the tree. [roadmap.md](../roadmap.md) lines 51-60 describe a future terminal UI as a thin client, with a design doc `docs/tui-design.md` that does not exist yet. | Another shell with the same dependency rule. It is not a plugin. |
+| Menu-bar shell | `apps/desktop` (`hofund-desktop`). Depends on `daemon` and `agent`. It embeds the daemon (`apps/desktop/src-tauri/src/control.rs` lines 11-13). | A shell. After section 3 it is a client, not a composition root. |
+| TUI shell | Not in the tree. [roadmap.md](../roadmap.md) lines 51-60 describe a future terminal UI as a thin client of the management API, with a design doc `docs/tui-design.md` that does not exist yet. | Another shell. It is not a plugin. |
 
 ### What is coupled today, and therefore leaves the kernel
 
 `Provider` (`crates/provider/src/lib.rs` lines 60-101) has `id`, `count_input` (default `CountOutcome::Unsupported`, line 73), and `execute` (line 96). The same crate also contains every vendor adapter (`anthropic`, `azure`, `bedrock`, `generative`, `mantle`, `openai_compat`, `sigv4`, `vertex`), the HTTP transport (`http.rs`), and the 58-preset catalog (`presets.rs`, `presets.toml`).
 
-`Credential` (`crates/provider/src/http.rs` lines 24-44) includes `GoogApiKey`, documented as the `x-goog-api-key` header the Generative Language API requires. That is a vendor rule living next to the shared transport.
+`Credential` (`crates/provider/src/http.rs` lines 24-44) includes `GoogApiKey`, documented as the `x-goog-api-key` header the Generative Language API requires. That is a vendor rule living next to the shared transport. `Endpoint` (lines 46-62) stores `api_key: String` and derives `Debug`, so a debug print shows the key. `Client::builder` runs in every `Upstream::open` (line 128) and again for Vertex tokens (`vertex.rs` line 172).
 
-`Wire` (`crates/provider/src/presets.rs` lines 18-32) mixes protocol selection (`Chat`, `Responses`, `Messages`, `Generative`) with vendor URL shapes (`Vertex`, `Converse`). `resolve` (line 103) special-cases `google-vertex` (line 106) and returns an error for `remote-gateway` (line 109).
+`Wire` (`crates/provider/src/presets.rs` lines 18-32) mixes protocol selection with vendor URL shapes. `resolve` (line 103) special-cases `google-vertex` (line 106) and returns an error for `remote-gateway` (line 109). The replacement is `ProtocolId` in the contract below, stated once.
+
+`hofund_config::Provider` carries vendor fields: `region` (line 59), Vertex `project`, `location`, `credentials`, `impersonate` (lines 77-89), and Bedrock `access_key_id`, `secret_access_key`, `session_token` (lines 90-101). `Kind` (line 105) names `Anthropic`, `Generative`, and `Converse`. `deny_unknown_fields` means a new plugin setting is a kernel edit.
 
 The daemon match at `crates/daemon/src/lib.rs` lines 251-285 is the composition root, and it names `Vertex` and `Bedrock`. That is why a provider change and a kernel change collide.
 
-`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. The four adapters are Rust constants in `crates/agent/src/catalog.rs` (`adapters` line 397). `Slot` (line 363) is `Origin`, `V1`, `Token`, `Literal`, `GeminiModel`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier`. `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
+`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape for the engine: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. The four adapters are Rust constants in `crates/agent/src/catalog.rs` (`adapters` line 397). `Slot` (line 363) is `Origin`, `V1`, `Token`, `Literal`, `GeminiModel`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier`. `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
+
+Streaming is already pull-based (`crates/provider/src/lib.rs` lines 5-7, `stream.rs` lines 3-4). That stays. What is missing is the host, the factory, and failure isolation.
 
 ### Stable plugin API and helper SDK
 
 Two crates. `hofund-plugin-api` is the contract and stays small. `hofund-plugin-sdk` holds helpers that can change without a trait change. A plugin may depend on the API, and on the SDK when it uses a helper. It may depend on nothing else in the workspace.
 
+On Rust 1.99 a trait that uses native `async fn` is not dyn-compatible. The contract uses `#[async_trait]` and `Arc<dyn ...>`. One boxed future per call is negligible next to network I/O. A later MSRV may switch the same traits to `dynosaur` or `trait-variant`. That switch is a new API version, not a silent edit.
+
 `hofund-plugin-api` owns:
 
-- the three traits in section 2
-- `ProviderError`, `ProviderErrorKind`, `Completion`, and `CountOutcome`, which today sit beside the trait in `crates/provider/src/lib.rs` (lines 43-56) and `crates/provider/src/error.rs`
-- protocol ids and a `Wire` enum limited to `Chat`, `Responses`, `Messages`, `Generative`, and `Converse` (the codec's protocol, not a vendor URL builder)
-- a credential placement of `Bearer`, `ApiKey`, `XApiKey`, `MessagesBoth`, or `NamedHeader(&'static str)`. The current `Credential::GoogApiKey` arm becomes `NamedHeader("x-goog-api-key")` supplied by the generative plugin. The header bytes on the wire stay the same.
-- the account, quota-window, and agent-description types the traits take
-- re-exports of the IR request and response types those methods take, so a plugin does not name `hofund-ir`
-- `const API: &str = "1"` once this proposal is accepted. A breaking trait change updates every in-tree plugin in the same pull request. There is no out-of-tree plugin in stage 1, and no caret range until a second API version exists. Magpie's lesson is `internal/pluginrt/pluginrt.go` lines 24-27 (`API = "1.0"`, caret ranges on `Manifest.API`).
+- the traits in section 2, including `HostContext`'s handles
+- `PluginError` (section 1, Errors). `ProviderError` is folded into it. PR B may keep `type ProviderError = PluginError` until callers move, and PR C deletes the alias
+- `Completion` and `CountOutcome`, which today sit in `crates/provider/src/lib.rs` (lines 43-56). `Completion` gains `Raw` (section 1, Passthrough)
+- `ProtocolId`, the five codec protocols, and `CredentialStyle`: `Bearer`, `ApiKey`, `XApiKey`, `MessagesBoth`, or `NamedHeader`. The current `Credential::GoogApiKey` arm becomes `NamedHeader("x-goog-api-key")` supplied by the generative plugin. The header bytes on the wire stay the same
+- the newtypes and the agent-description types the traits take
+- named re-exports of `hofund_ir::Request`, `hofund_ir::Response`, and the stream event type. Not a glob. PR B marks those IR structs `#[non_exhaustive]`
+- `const API: &str = "1"` for the future process host's handshake. It has no compile-time consumer in stage 1
 
 `hofund-plugin-sdk` depends on `hofund-plugin-api` and owns:
 
-- generic HTTP transports for the five protocols, moved out of `crates/provider/src/http.rs`, `openai_compat.rs` (the non-Mantle path), `anthropic.rs`, and the generative call path. Azure listing and any other plugin call this transport. They do not depend on an OpenAI plugin.
-- the SigV4 helper that today is `crates/provider/src/sigv4.rs`. Bedrock is the caller. The kernel does not sign.
-- OAuth helpers shared by subscription plugins: PKCE, loopback callback, and device-flow polling. Vendor URLs stay in the plugin.
-- retry and paging helpers used by `list_models` and `probe`.
+- generic HTTP transports for the five protocols, moved out of `crates/provider/src/http.rs`, `openai_compat.rs` (the non-Mantle path), `anthropic.rs`, and the generative call path. They call `HostContext::http()`. They do not build a `reqwest` client. Azure listing and any other plugin call this transport. They do not depend on an OpenAI plugin
+- the SigV4 helper that today is `crates/provider/src/sigv4.rs`. Bedrock is the caller. The kernel does not sign
+- OAuth helpers shared by subscription plugins: PKCE, loopback callback, and device-flow polling. Vendor URLs stay in the plugin. The helper binds `127.0.0.1` only, checks `state`, uses a one-shot timeout, fails cleanly when the port is busy (Codex uses fixed port 1455), and does not log codes
+- the process spawner used by `HostContext::spawn_process`: absolute path, no shell, an explicit environment, and a hofund-owned config directory
+- retry and paging helpers used by `list_models` and `probe`
+- a re-export of `tracing`. A plugin that needs a span uses that re-export. It does not depend on the `tracing` crate
 
 `quirks::apply` is re-exported by the SDK so a plugin can pass a profile id. Adding a `Rule` variant stays a kernel change. The quirks crate continues to carry no vendor name (`crates/quirks/src/lib.rs` lines 41-43). The API does not depend on quirks.
 
-`Request` stays defined in `hofund-ir`. The router depends on `hofund-plugin-api` for the trait and stops depending on `hofund-provider` for it (`crates/router/src/lib.rs` line 13 is the edge that moves). The router does not depend on the SDK. Config keeps preset ids as strings and does not learn the registry. The daemon asks `registry.factory(preset_id)` at startup and returns the existing class of error for an unknown id (`resolve` already errors on an unknown id).
+`Request` stays defined in `hofund-ir`. The router does not depend on `hofund-plugin-api`. It depends on a kernel-internal `Member` trait (below). The daemon adapts `Arc<dyn UpstreamProvider>` into `Member`. Config keeps preset ids as strings and does not learn the registry. Unknown ids fail when the factory is resolved, the same class of error `resolve` returns today.
 
-Kernel paths, after adapters have moved, are covered by the vendor-name scan that today covers only gateway and router. The scan stays off those paths while `crates/provider` still contains the adapters. Section 6 says when it turns on.
+Kernel paths, after adapters have moved, are covered by the vendor-name scan that today covers only gateway and router. The scan stays off those paths while `crates/provider` still contains the adapters. Section 6 says when it turns on. `KernelRoute` in the API is the one allowlisted exception, because those variants name inbound surfaces. The implementations are not in `crates/gateway`.
+
+### Host context
+
+Every `build` and every subscription call receives `&HostContext`. The kernel constructs it. Plugins cannot. The handles it returns are concrete types with private constructors, so a plugin cannot implement a second HTTP stack or a second secret store. Where a trait is clearer for tests, that trait is sealed (`mod sealed { pub trait Sealed {} }`) and implemented only in the kernel.
+
+- `http()` is the kernel-owned client. One pooled client exists per `(proxy, TLS)` profile, so members that share a host reuse connections and the OS trust store is loaded once per profile. The vocabulary is `http::Request<Body>` and `http::Response<BodyStream>`, plus `bytes::Bytes`. The client applies the proxy, TLS, and User-Agent profile, and the kernel's tracing layer. A plugin does not build a client, pick a timeout, or load roots.
+- `secrets()` returns `secrecy::SecretString`, re-exported by the API. The value is zeroized on drop and its `Debug` is redacted. `hofund_secrets::resolve` stops returning `String`. The SDK transport sets `HeaderValue::set_sensitive(true)` when it inserts the header. A plugin must not clone the secret into a struct field that derives `Debug`, and must not log it.
+- `accounts()` is the account store. Updates are atomic and take a cross-process lock, because the daemon and a CLI refresh can race (feature-parity row 11.3). The backing store is either the OS keychain or a file mode `0600` encrypted at rest. The choice is an implementation detail of PR B's store, recorded in that pull request. Plugins do not open the file.
+- `clock()` is the kernel clock. Plugins do not call `SystemTime::now` for quota windows or deadlines. Tests pass a fixed clock.
+- `scheduler()` runs tracked, cancellable periodic jobs (list refresh, warm-up, quota alerts). A plugin registers a job. It does not spawn an untracked task. Shutdown cancels the jobs.
+- `spawn_process()` is the only way to run a binary. No shell. The SDK resolves an absolute path, sets the environment, and uses a hofund-owned config directory. `Bridge { command: "claude" }` goes through this handle.
+- `cache_dir()` and `state_dir()` are per-plugin directories created by the kernel. A plugin does not invent a path under the user's home.
+- `observe()` accepts a `QuotaObservation` (rate-limit headers on a successful response). Combined with `PluginError::retry_after()`, this is how the kernel learns that a member should cool down. The plugin does not edit router state.
+
+`build` may clone handles. They are `Arc` clones. It must not snapshot secret bytes. `execute` reads the current secret from `secrets()` or `accounts()` on each call, so a refresh is visible without rebuilding the member.
+
+In-process plugins run with the daemon's privileges. That is accepted for reviewed in-tree code. A capability table in `plugin.toml` is follow-up N5. The future process host enforces it. Stage 1 reviewers check the table once that follow-up lands. Until then, review checks the crate's dependency list.
+
+`unsafe_code = "forbid"` stays in force. Every plugin manifest sets `[lints] workspace = true`. `xtask` rejects a plugin that does not.
+
+### Contract types
+
+Every public struct and enum in `hofund-plugin-api` is `#[non_exhaustive]`. Struct fields are private. Callers use a builder, a `TryFrom`, or an accessor. Invariants such as "non-empty", "kebab-case", and "ASCII" are checked in the constructor, not by a later string check.
+
+Newtypes, each with `TryFrom<&str>` that rejects anything other than kebab-case ASCII:
+
+- `PluginId`
+- `PresetId`
+- `ProtocolId`
+- `AccountId`
+- `MemberId`
+
+`MemberId` is built from a preset or subscription id plus a key or account id. It is stable across router snapshots, so cooldown and usage survive a reload. It is not a formatted `String` that plugins concatenate.
+
+`KernelRoute` is a `#[non_exhaustive]` enum: `Ollama`, `MuseModels`, `ModelCapabilities`, `CodexBackend`, `Embeddings`, `Audio`. Agent descriptions require a route by this enum, not by `&str`. The implementation of each variant is an `InboundSurface` plugin (section 2.4), not a function in `crates/gateway`.
+
+`AgentIntegration`, `UpstreamFactory`, `UpstreamProvider`, `SubscriptionFactory`, `Subscription`, and `InboundSurface` are `Send + Sync + 'static`, so instances can live in `Arc` across tasks.
+
+### Semver policy
+
+Two versions, kept separate:
+
+- In-tree Rust API. `#[non_exhaustive]`, private fields, and a `cargo-public-api` snapshot in CI are the compatibility tools. A pull request that changes the public surface of `hofund-plugin-api` includes the snapshot diff. A breaking change (removing a trait method, tightening a bound, or changing a documented default) updates every in-tree plugin in that same pull request. There is no caret range and no out-of-tree plugin in stage 1. `cargo-semver-checks` against the merge base is an acceptable substitute for the snapshot if it is wired on the API crate; the requirement is a reviewed diff of the surface, not a particular binary.
+- Process-host handshake. `API = "1"` is the string a future host and a plugin manifest compare. It is not consulted at compile time. Caret ranges wait until a second handshake version exists. Magpie's lesson is `internal/pluginrt/pluginrt.go` lines 24-27 (`API = "1.0"`, caret ranges on `Manifest.API`).
+
+### Errors
+
+One error type. `PluginError` is a `thiserror` struct, `#[non_exhaustive]`, with private fields and accessors:
+
+- `kind() -> PluginErrorKind`
+- `status() -> Option<u16>`
+- `retry_after() -> Option<Duration>`
+- `source() -> Option<&(dyn Error + 'static)>`
+
+`PluginErrorKind` is `#[non_exhaustive]`: `Connect`, `Timeout`, `Status`, `Decode`, `Unsupported`, `Auth`, `Quota`, `Config`, `Cancelled`. Constructors include `PluginError::unsupported(message)`. The router matches `kind()` with a wildcard arm, so a new kind does not break the router. Today `ProviderError` has public fields, no `source`, no `retry_after`, and no `#[non_exhaustive]` (`crates/provider/src/error.rs` lines 10-33), and the router matches `ProviderErrorKind` exhaustively (`crates/router/src/lib.rs` lines 39-43).
+
+`CountOutcome::Unsupported` stays a successful "this endpoint has no count method". It is not `PluginErrorKind::Unsupported`. The error kind means the call was rejected. The outcome means the feature is absent and the caller should continue.
+
+`ListQuery`, `ProbeQuery`, `QuotaQuery`, `ModelList`, `ProbeReport`, `SignInCtx`, `SignInProof`, `Account`, `QuotaWindow`, `QuotaObservation`, `Plan`, `DisconnectOutcome`, `ConnectionStatus`, `Schema`, `RawTable`, `ValidConfig`, `ConfigError`, `BuildError`, and `WriteCtx` are named here and defined in PR B. `AccountPool` is not a plugin type. The account store on `HostContext` replaces it.
+
+### Lifecycle, isolation, and reload
+
+Order for every plugin instance: `validate`, then `build`, then `health` (default `Ok(())`), then later `shutdown(&self, deadline)` (default no-op). `health` and `shutdown` live on the instance, because that is what owns background work. `shutdown` is called for token refresh loops, list refresh, and loopback listeners. The deadline is the kernel's drain budget.
+
+The kernel, not the plugin, wraps every plugin future:
+
+- `tokio::time::timeout` with the kernel deadline. The per-endpoint timeout on `Endpoint` (`crates/provider/src/http.rs` line 61) moves to that kernel deadline. A plugin does not run its own request timer.
+- `FutureExt::catch_unwind` around `AssertUnwindSafe`. A panic marks that member failed, starts the circuit-breaker cooldown from PR K, and leaves the gateway up.
+
+Plugin futures must be cancel-safe. Dropping the future cancels the upstream call, including closing the connection when the body is dropped mid-stream.
+
+A stream error after the first event is encoded as the client protocol's error event. It is not a clean EOF. Today `sse_body` returns `None` on `Some(Err(_))` (`crates/gateway/src/lib.rs` lines 573-576; the review cites line 577, the next arm). PR C changes that arm.
+
+The router holds an immutable snapshot behind `arc_swap::ArcSwap`. Config reload, sign-in, and sign-out build a new snapshot from the registry and store it. In-flight requests finish on the snapshot they started with. `MemberId` does not change across snapshots, so cooldown and usage state carry over. Membership is resolved at startup and on every membership change, not only at startup.
+
+[architecture.md](../architecture.md) line 148 says the running process does not reload configuration. This proposal changes that for provider, subscription, and route membership. The bearer-token re-read on each request stays as it is. Hot reload of the snapshot is PR L's config application, using the `ArcSwap` type introduced in PR C. PR C lands the type and the startup snapshot. PR L publishes a new snapshot when the control plane writes config or a sign-in completes.
+
+### Observability
+
+The kernel owns spans and metrics. The workspace has no `tracing` dependency today (rows 12.2 and 12.5 are Missing). PR B adds the dependency. PR C wraps the seam.
+
+The kernel wraps `execute`, `list_models`, `probe`, `quota`, `refresh`, and agent `apply` in spans. Fields: `plugin.id`, `preset.id`, `member.id`, `attempt`, `protocol.in`, `protocol.out`, `status`, `ttft_ms`. Metrics: requests, errors by kind, latency, time to first token, and tokens. Plugins may add child spans only through the SDK's `tracing` re-export. Redaction happens in the kernel layer, before a span field or a capture body is stored. A secret must not appear in a span.
+
+Request capture with bodies (row 12.1) is the kernel capture layer in section 2.4, with masking applied first. It is not a plugin.
+
+### Same-protocol passthrough
+
+When `protocol.in` equals `protocol.out`, the gateway forwards `bytes::Bytes` and only observes them. `Completion` gains:
+
+```rust
+/// Proposed. Not compiled by this pull request.
+Raw(BodyStream<Bytes>),
+```
+
+A usage tap still records token counts when the bytes expose them, and records "unknown" when they do not. The common case is Claude Code to the Messages API and Codex to the Responses API. Decode-then-encode remains the path when the protocols differ, and the path that applies quirks.
+
+`model_request.clone()` before dispatch (`crates/gateway/src/lib.rs` line 303) goes away. Usage is recorded from a small metadata struct (ids, token counts, member, timing). The per-attempt `Request` clone in the router (`crates/router/src/lib.rs` lines 154 and 206) stays acceptable until a later change to `Arc<Request>` with a copy-on-write model field. That later change is not part of this proposal.
+
+`criterion` benches for decode, encode, and stream relay live in the workspace and run in CI. A comparison against magpie is a goal: an operator records the baseline and the feature-parity note cites it. Magpie is not a crate dependency, and CI does not fetch it.
+
+### Kernel `Member`
+
+`hofund-router` defines `Member` and does not depend on `hofund-plugin-api`. The daemon implements `Member` for an adapter that holds `Arc<dyn UpstreamProvider>`, the `MemberId`, and the cooldown state. Router evolution does not change the plugin contract, and plugin API evolution does not recompile the router unless the adapter changes.
+
+```rust
+/// Proposed. Not compiled by this pull request.
+/// Kernel-internal. Not in hofund-plugin-api.
+#[async_trait]
+pub trait Member: Send + Sync {
+    fn id(&self) -> &MemberId;
+    async fn execute(&self, request: Request) -> Result<Completion, PluginError>;
+}
+```
+
+`PluginError` in that signature is the one shared type. The router crate may depend on `hofund-plugin-api` only for `PluginError`, `Request`, and `Completion`, not for `UpstreamProvider`. If that edge is still too wide, PR C moves those three types to a tinier `hofund-kernel-types` crate that both the router and the plugin API depend on. The default is the smaller edge: router depends on the API for those types only, and `xtask` rejects a router use of `UpstreamProvider` or `HostContext`. The inversion that matters is that the router does not name the plugin trait.
 
 ## 2. Plugin kinds and contracts
 
-Three kinds. Anything else (budget, routing strategies, middleware, the future TUI) stays in the kernel until a later RFC. Magpie's `plugins/` tree at `cbbf316` is product features (`budget`, `gateway`, `middleware`, `otel`, `routing`, `usage`, and the rest). Those are not the extension points that block parallel work here.
+Four kinds: upstream, subscription, coding-agent integration, and inbound surface. Anything else in magpie's `plugins/` tree is placed in section 2.4. It is not a fifth kind by default.
 
 A plugin is data when the behavior is a file write or a URL table. It is a crate when the behavior is a credential flow, a signature, a retry, or a write the slot language cannot express.
 
-### 2.1 UpstreamProvider
+The kernel calls an upstream through a layer chain (a Tower `Layer` around the `Member` service). Stage 1 layers are timeout, panic containment, tracing, and the cooldown gate from PR K. Later layers (masking, budgets, capture, tool repair) are kernel pull requests that append to that chain. They are not plugins. This is the mechanism that keeps policy out of `gateway` and `router` source.
 
-Covers one implementation, which may register many preset ids. The catalog is 58 `[[preset]]` tables in one file (`crates/provider/presets.toml`, loaded by `include_str!` at `crates/provider/src/presets.rs` line 14). `resolve` special-cases `google-vertex`, `remote-gateway`, and `azure` by id (lines 106, 109, and 128). Every other id selects a URL by wire. The plugin unit is that shared implementation, not one crate per preset id. Data-only presets are TOML fragments. Code plugins in stage 1 are the ones the daemon already special-cases:
+### 2.1 Upstream
+
+Covers one implementation, which may register many preset ids. The catalog is 58 `[[preset]]` tables in one file (`crates/provider/presets.toml`, loaded by `include_str!` at `crates/provider/src/presets.rs` line 14). `resolve` special-cases `google-vertex`, `remote-gateway`, and `azure` by id (lines 106, 109, and 128). Every other id selects a URL by wire. The plugin unit is that shared implementation, not one crate per preset id. Data-only presets are TOML fragments compiled into static data by `plugins/registry/build.rs`. Code plugins in stage 1 are the ones the daemon already special-cases:
 
 | Implementation | Why it is code | Where the behavior lives now |
 | --- | --- | --- |
@@ -94,85 +221,81 @@ Covers one implementation, which may register many preset ids. The catalog is 58
 | `bedrock` | SigV4 and the Converse path. The codec stays in the kernel (`bedrock-converse`). | `crates/provider/src/bedrock.rs`, `crates/provider/src/sigv4.rs` |
 | `mantle` | Prefix retry from the model id. | `crates/provider/src/openai_compat.rs` lines 3-5 and `crates/provider/src/mantle.rs` |
 
-`count_input` exists and defaults to unsupported. `list_models`, `probe`, and `quota` do not exist on main. Feature-parity rows 2.9 and 2.10 are Missing. Azure listing is the only live list, and it is a function rather than a trait method.
+`count_input` exists and defaults to unsupported. `list_models`, `probe`, and `quota` do not exist on main. Feature-parity rows 2.9 and 2.10 are Missing. Azure listing is the only live list, and it is a function rather than a trait method. Pull request #28 stays unmerged until these methods exist on the trait.
+
+Static metadata lives on the factory, not on the instance. There is no `UpstreamProvider::spec`.
 
 ```rust
 /// Proposed. Not compiled by this pull request.
 #[async_trait]
-pub trait UpstreamProvider: Send + Sync {
-    /// Static description. The registry keys factories by `spec().id`
-    /// and by each preset id in the plugin's TOML fragment.
-    fn spec(&self) -> &UpstreamSpec;
+pub trait UpstreamFactory: Send + Sync + 'static {
+    fn spec(&self) -> &'static UpstreamSpec;
+    fn config_schema(&self) -> Schema;
+    fn validate(&self, raw: &RawTable) -> Result<Box<dyn ValidConfig>, ConfigError>;
+    fn build(
+        &self,
+        cfg: &dyn ValidConfig,
+        host: &HostContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
+}
 
-    /// Same contract as `Provider::execute` (`crates/provider/src/lib.rs` line 96).
+#[async_trait]
+pub trait UpstreamProvider: Send + Sync + 'static {
     async fn execute(
         &self,
         request: Request,
-        inbound_protocol: &str,
-    ) -> Result<Completion, ProviderError>;
+        inbound: ProtocolId,
+    ) -> Result<Completion, PluginError>;
 
-    /// Same default as `Provider::count_input` (line 73).
     async fn count_input(
         &self,
         request: Request,
-        inbound_protocol: &str,
-    ) -> Result<CountOutcome, ProviderError> {
-        let _ = (request, inbound_protocol);
+        inbound: ProtocolId,
+    ) -> Result<CountOutcome, PluginError> {
+        let _ = (request, inbound);
         Ok(CountOutcome::Unsupported)
     }
 
-    /// Live or catalog model ids for this endpoint.
-    /// The default is unsupported, which is every preset on main except the
-    /// Azure function `list_deployments`.
-    async fn list_models(&self, query: &ListQuery) -> Result<ModelList, ProviderError> {
+    async fn list_models(&self, query: &ListQuery) -> Result<ModelList, PluginError> {
         let _ = query;
-        Err(ProviderError::unsupported("this upstream has no model list"))
+        Err(PluginError::unsupported("this upstream has no model list"))
     }
 
-    /// One minimal request per speakable protocol. `hofund provider test`
-    /// (feature-parity row 2.10, Missing) calls this.
-    /// The default builds that request and calls `execute` on the kernel transport.
-    async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, ProviderError>;
-
-    /// Account balance or key-plan windows, when the vendor publishes them.
-    /// The default is unsupported. No balance reader exists in the tree.
-    async fn quota(&self, query: &QuotaQuery) -> Result<Vec<QuotaWindow>, ProviderError> {
-        let _ = query;
-        Err(ProviderError::unsupported("this upstream has no quota endpoint"))
+    /// One minimal request per speakable protocol.
+    /// `ProbeQuery::minimal_request` and `ProbeReport::from_completion`
+    /// are defined in PR B. `hofund provider test` calls this.
+    async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
+        let completion = self.execute(query.minimal_request(), query.protocol()).await?;
+        Ok(ProbeReport::from_completion(completion))
     }
-}
 
-pub struct UpstreamSpec {
-    pub id: &'static str,
-    pub wires: &'static [Wire],
-    pub credential: CredentialStyle,
-    pub list: ListKind,
-}
+    async fn quota(&self, query: &QuotaQuery) -> Result<Vec<QuotaWindow>, PluginError> {
+        let _ = query;
+        Err(PluginError::unsupported("this upstream has no quota endpoint"))
+    }
 
-pub enum ListKind {
-    /// Ask the upstream. The plugin owns the URL and the page shape.
-    Live,
-    /// A static list shipped in the preset fragment. Vertex `models_for`
-    /// (`crates/provider/src/vertex.rs` line 195) is this kind.
-    Catalog,
-    /// `no_list` in `presets.toml` (Vertex sets it at line 67).
-    Unsupported,
-}
+    async fn health(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
 
-pub enum CredentialStyle {
-    Bearer,
-    ApiKey,
-    XApiKey,
-    MessagesBoth,
-    NamedHeader(&'static str),
-    /// The daemon has already resolved the secret. Vertex and Converse do this
-    /// today: `hofund_secrets::resolve` runs in `providers` before `Vertex::new`
-    /// and `Bedrock::new` (`crates/daemon/src/lib.rs` lines 236 and 266).
-    CallerSupplied,
+    async fn shutdown(&self, deadline: Duration) -> Result<(), PluginError> {
+        let _ = deadline;
+        Ok(())
+    }
 }
 ```
 
-A URL-only preset is a fragment, not a crate. The shape already in `presets.toml` (the `anthropic` and `openai` tables at lines 29-47) moves with the implementation that serves it:
+`UpstreamSpec` (defined in PR B, fields private) carries the plugin id, the protocols it speaks, the credential placement, and `ListKind` (`Live`, `Catalog`, `Unsupported`). A declarative capability set for the UI is follow-up N2. Until N2, `ListKind` is the only capability bit, and the others are discovered by the documented defaults above.
+
+`config_schema()` returns a JSON Schema (`schemars` in the API, or a small schema type defined in PR B if `schemars` is too heavy; PR B picks one and records it). The desktop renders it without a vendor match. `validate` runs before `build`. Invalid options never construct a provider.
+
+### Config shape
+
+`hofund-config` keeps kernel keys only: `id`, `preset`, `base_url`, `protocol` (`ProtocolId`), `api_key` (still an `env:NAME` spec, resolved by the kernel into a `SecretString`), `headers`, `quirks`, `max_output_tokens`, and the kernel request deadline. Plus an opaque `options` table (`[providers.options]`). `base_url` and `protocol` stay because they select a codec and an endpoint. They are not vendor settings. The whole `Kind` enum (`OpenAiCompat`, `Anthropic`, `Generative`, `Converse`, from line 105) becomes `ProtocolId`.
+
+These fields move into `options`: `project`, `location`, `credentials`, `impersonate`, `access_key_id`, `secret_access_key`, `session_token`, and `region` (`crates/config/src/lib.rs` lines 59 and 77-101). The plugin validates them. The kernel does not name them. PR B2 keeps the old keys working for one release: they load, they are copied into `options`, and the load warns. The next release rejects the old keys.
+
+A URL-only preset is a fragment, not a crate. The shape already in `presets.toml` (the `anthropic` and `openai` tables at lines 29-47) moves with the implementation that serves it. `plugins/registry/build.rs` compiles every fragment into a `'static` `UpstreamSpec`. Startup does not parse TOML. Validation fails the build, not the process.
 
 ```toml
 # plugins/providers/openai-compat/presets.toml
@@ -183,8 +306,6 @@ chat = "https://api.openai.com/v1"
 responses = "https://api.openai.com/v1"
 credential = "bearer"
 ```
-
-The kernel transport speaks `chat` and `responses` from that table. A plugin TOML file names the crate only when one exists:
 
 ```toml
 # plugins/providers/azure/plugin.toml
@@ -200,78 +321,95 @@ No trait and no sign-in code exist. The contract source is [subscriptions.md](..
 
 Magpie runs those from the provider package. `internal/provider/signin.go` lines 3-9 and 37-42: Codex OAuth at `https://auth.openai.com/oauth/authorize`, loopback `127.0.0.1:1455`, tokens in `logins.json`. Claude is signed in by Claude Code (`claude_signin.go`), which the coverage row states as `claude auth login` rather than a direct OAuth client. Copilot is a device flow. Gemini Code Assist is loopback OAuth. Quota windows are named per row (Codex rate-limit headers, Copilot entitlement, Claude ratelimit headers, Gemini `retrieveUserQuota`).
 
-Stage 1 implements those four as native Rust plugins, one directory each. Copilot on a GitHub Enterprise host is a host field of the Copilot plugin (the coverage table calls it a host variant), not a second crate. The 13 community plugins that magpie no longer serves from core (coverage lines 16 and 31-42) wait for the process host in section 3.
+Stage 1 implements those four as native Rust plugins, one directory each. Copilot on a GitHub Enterprise host is an `options` field of the Copilot plugin, validated by `SubscriptionFactory::validate`, not a second crate. The static `Device` URL in the sketch cannot express that host. Follow-up N9 changes the enum before the Copilot pull request. The 13 community plugins that magpie no longer serves from core (coverage lines 16 and 31-42) wait for the process host in section 3.
+
+`SubscriptionFactory` has the same shape as `UpstreamFactory`: `spec`, `config_schema`, `validate`, `build(cfg, host)`. The instance does not own the account list. The daemon asks `HostContext::accounts()` for the accounts of this `PluginId`.
 
 ```rust
 /// Proposed. Not compiled by this pull request.
 #[async_trait]
-pub trait Subscription: Send + Sync {
-    fn id(&self) -> &str;
+pub trait Subscription: Send + Sync + 'static {
+    fn id(&self) -> &PluginId;
 
-    /// PKCE, device code, a local token file, or a bridge that drives
-    /// another tool's own sign-in. Declarative where the coverage row
-    /// is a URL and a callback. The HTTP steps stay in the plugin.
-    fn flow(&self) -> SignInFlow;
+    /// Declarative description for the UI. The HTTP steps stay in the plugin
+    /// and use HostContext. `SignInFlow` is defined in PR B.
+    fn flow(&self) -> &SignInFlow;
 
-    async fn start_sign_in(&self, ctx: &SignInCtx) -> Result<SignInChallenge, PluginError>;
+    async fn start_sign_in(
+        &self,
+        ctx: &SignInCtx,
+        host: &HostContext,
+    ) -> Result<SignInChallenge, PluginError>;
 
     async fn complete_sign_in(
         &self,
         ctx: &SignInCtx,
         proof: SignInProof,
-    ) -> Result<Account, PluginError>;
+        host: &HostContext,
+    ) -> Result<AccountId, PluginError>;
 
-    async fn refresh(&self, account: &Account) -> Result<Account, PluginError>;
+    /// Writes the rotated secret through `host.accounts()`. Does not return
+    /// a snapshot for the caller to cache.
+    async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError>;
 
-    /// Windows such as five-hour and seven-day. Empty when the vendor
-    /// publishes none. The shared `QuotaWindow` type is the coverage row
-    /// "subscription usage core".
-    async fn quota(&self, account: &Account) -> Result<Vec<QuotaWindow>, PluginError>;
+    async fn quota(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<Vec<QuotaWindow>, PluginError>;
 
-    /// Models this account can see. Distinct from `UpstreamProvider::list_models`,
-    /// which lists a key-backed endpoint.
-    async fn list_models(&self, account: &Account) -> Result<Vec<String>, PluginError>;
+    async fn list_models(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<Vec<String>, PluginError>;
 
-    fn accounts(&self, pool: &AccountPool) -> Vec<AccountId>;
+    /// Builds the hop for this account. Reads the current secret from `host`
+    /// on each later `execute`. Infallible capture of an `Account` value is
+    /// not the contract.
+    fn upstream(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, PluginError>;
 
-    /// The hop the router calls for this signed-in account.
-    ///
-    /// Codex returns the ChatGPT backend client. Copilot returns the Copilot
-    /// API client. Gemini Code Assist returns the Code Assist client. Claude
-    /// returns the bridge client. The value is an ordinary `UpstreamProvider`.
-    /// The router never sees `Subscription`.
-    fn upstream(&self, account: &Account) -> Arc<dyn UpstreamProvider>;
-}
+    async fn health(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
 
-pub enum SignInFlow {
-    /// Codex: authorize URL, PKCE, loopback callback.
-    Pkce { authorize_url: &'static str, callback: Callback },
-    /// Copilot, including a GitHub Enterprise host.
-    Device { code_url: &'static str },
-    /// Read a token file the vendor's own tool already wrote.
-    /// Codex's `~/.codex/auth.json` (`CODEX_HOME`) is the coverage example.
-    TokenFile { path_env: &'static str, relative: &'static str },
-    /// Claude: `claude auth login` in a hofund-owned config dir.
-    /// The plugin does not speak Anthropic's OAuth token endpoint.
-    Bridge { command: &'static str },
+    async fn shutdown(&self, deadline: Duration) -> Result<(), PluginError> {
+        let _ = deadline;
+        Ok(())
+    }
 }
 ```
 
-`AccountPool` lives in the API. Plugins do not share a process-global login file. The daemon passes the pool in, the same way it passes resolved secrets into providers today.
+`SignInChallenge` is declarative so a UI can render it without a vendor match. The variants, defined fully in PR B, are at least: open a URL, show a device code, or show instructions for a bridge. `SignInFlow` variants are `Pkce`, `Device`, `TokenFile`, and `Bridge`. `Bridge` names a binary the spawner resolves. It is not a shell string.
+
+`complete_sign_in` stores the account through `host.accounts()` and returns the `AccountId`. Codex returns a ChatGPT-backend `UpstreamProvider`. Copilot returns the Copilot API client. Gemini Code Assist returns the Code Assist client. Claude returns the bridge client. The router never sees `Subscription`. It sees a `Member`.
 
 #### How an account becomes a router member
 
 Feature-parity row 2.12 models keys as router members. Row 3.7 does the same for accounts. The subscription plugin does not insert itself into the router.
 
-1. Config names a subscription id and which accounts to serve (one id, or every account in the pool). Preset ids stay strings.
-2. At startup the daemon loads the plugin, calls `accounts`, then `upstream` once per selected account.
-3. Each returned `Arc<dyn UpstreamProvider>` is one router member. The member id is `{subscription}/{account}`. Failover, order, and cooldown are the router's existing behavior. A plugin pull request does not edit `crates/router`.
+1. Config names a subscription id and which accounts to serve (one id, or every account in the store for that plugin). The selector is kernel config. The vendor host and client ids sit in `options`.
+2. At startup, and again on every membership change (sign-in, sign-out, config reload), the daemon loads the factory, calls `upstream` once per selected account, and adapts each result to a `Member`.
+3. The `MemberId` is `MemberId::from_parts(subscription, account)`. It is stable across snapshots.
 
-Row 3.8 is the shared quota model: windows, resets, and credits, one shape for routing, the CLI, and the UI. `Subscription::quota` fills that shape. The daemon reads it. An exhausted window is a cooldown on that member, which is how failover already skips a member. The plugin returns windows. It does not call the router, and it does not import `hofund-router`.
+Failover and order exist today (ordered failover). Cooldown does not. [architecture.md](../architecture.md) line 151: "There is no rest timer and no process-global route counter." Cooldown is a new kernel mechanism, PR K, and it merges before any subscription plugin. A plugin pull request does not edit `crates/router`.
 
-### 2.3 AgentIntegration
+Row 3.8 is the shared quota model: windows, resets, and credits. Two feeds, both kernel-owned:
 
-`Described` in `crates/agent/src/catalog.rs` already implements `AgentAdapter` from a const `Description`. Connect, disconnect, and drift are engine behavior (`disconnect` at `crates/agent/src/lib.rs` lines 263-278). A plugin that only names paths and keys supplies data. The engine performs every write, takes the `*.hofund.bak` backup, and restores user-edited keys.
+- Polled: `Subscription::quota` fills `QuotaWindow`. The scheduler refreshes it. An exhausted window cools that member down.
+- Passive: `PluginError::retry_after()` and `HostContext::observe(QuotaObservation)` report rate-limit headers seen on a call, including a successful response. PR K turns both into the same cooldown.
+
+The plugin returns observations. It does not call the router, and it does not import `hofund-router`.
+
+### 2.3 Agent integration
+
+`Described` in `crates/agent/src/catalog.rs` already implements `AgentAdapter` from a const `Description`. Connect, disconnect, and drift are engine behavior (`disconnect` at `crates/agent/src/lib.rs` lines 271-286). A plugin that only names paths and keys supplies data. The engine performs every write, takes the `*.hofund.bak` backup, and restores user-edited keys.
+
+The engine stays in `hofund-agent`, which depends on `hofund-plugin-api`. The API does not depend on the engine and does not call `engine::plan`. That call would be a cycle, or it would drag the engine into the API.
 
 `FileKind` has no YAML. Goose and Hermes need YAML ([agents.md](../coverage/agents.md) describes their files). That is one kernel change, `FileKind::Yaml`, not a crate per agent. Per-OS paths are data: `Session` already reads `HOME` or `USERPROFILE`, `PATH`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`, and `XDG_CONFIG_HOME` (`from_process_env`, lines 108-111).
 
@@ -287,110 +425,62 @@ A crate exists only when a slot cannot express the write. Known cases from the c
 - an OS environment store (cursor-local writes `launchctl`, `HKCU`, or `environment.d`; there is no file)
 - a sealed file (Hanako's AES-GCM catalog)
 
-Claude tiers are data: `Slot::ClaudeTier` already exists. OpenCode's models object is one engine slot, not a crate. Filling name, modalities, limits, and reasoning is that same slot once `GatewayTarget` carries a model spec. The spec comes from the kernel catalog (feature-parity rows 2.8 and 2.14). A plugin does not fetch models.dev.
+Those crates implement `custom_write`. Everything else is data. OpenCode's models object is `Slot::CatalogModels`, filled from the kernel model spec. Claude's tier env vars are `Slot::ModelTier`. The Fable rule moves into Claude's `agent.toml` as `when_model_matches = "claude-fable-"`. It is not a variant in the kernel enum.
+
+`plugins/registry/build.rs` compiles `agent.toml` and `presets.toml` into `'static` values. Validation runs at build time. The process does not parse those files at startup and does not leak strings to make them `'static`. During migration, an agent that has no compiled description yet still uses the Rust const in `hofund-agent`. The pull request that adds the toml deletes the const after the golden plan matches. There is no runtime "if the file exists" branch.
 
 #### Data, kernel commands, and code
 
 | Need | Row | Kind | Where it lives |
 | --- | --- | --- | --- |
-| Selected model key | 5.5, `magpie claude opus` | Data | `model` on `AgentDescription`. The CLI command `hofund agent set <agent> model=<id>` is a kernel shell. It checks the id against the catalog and then calls the engine. |
-| Effort key | 5.5 | Data | `effort` on `AgentDescription`, written by the same command. Claude's effort keys stay optional data. They are not a Claude crate. |
-| Visible model list | 5.7 | Data | `visible` on `AgentDescription`: all routes, or an allow-list. The engine skips other ids when it writes a models object. |
-| Profiles | 5.6 | Kernel | A profile is a TOML snapshot of every agent's files. It is not a plugin hook. One kernel command saves and restores the set. |
-| Model catalog in the agent file | 2.8, 2.14 | Data, one engine slot | `Slot::CatalogModels`. OpenCode is the first caller: `name`, modalities, context, output limit, and reasoning variants, taken from the kernel spec. Empty `variants` remains the fallback when the spec has no reasoning levels, which is what `catalog.rs` lines 268-270 do today. |
+| Selected model key | 5.5, `magpie claude opus` | Data | `model` on `AgentDescription`. `hofund agent set <agent> model=<id>` is a daemon command. It checks the id against the catalog and then calls the engine. |
+| Effort key | 5.5 | Data | `effort` on `AgentDescription`. Claude's effort keys are optional data, not a Claude crate. |
+| Visible model list | 5.7 | Data | `visible` on `AgentDescription`: all routes, or an allow-list. |
+| Profiles | 5.6 | Kernel | A TOML snapshot of every agent's files. One control-plane call saves and restores the set. |
+| Model catalog in the agent file | 2.8, 2.14 | Data, one engine slot | `Slot::CatalogModels`. OpenCode is the first caller. Empty `variants` remains the fallback when the spec has no reasoning levels (`catalog.rs` lines 268-270). The catalog service is section 2.4. A plugin does not fetch models.dev. |
 | Picker-only agents | [agents.md](../coverage/agents.md) line 102 | Data | `cursor`, `copilot`, and `devin` set `route = "none"` and write only the model id. No base URL. |
-| Special gateway routes | [agents.md](../coverage/agents.md) lines 104-109 | Kernel routes, named by data | The description may set `requires` to `ollama`, `muse-models`, or `model-capabilities`. The gateway implements them: Ollama `/api/version`, `/api/tags`, `/api/show`, `/api/chat`; `/muse-code/models`; `/v1/models` with `api_types` and `capabilities`. An agent plugin does not register an HTTP route. Codex `/backend-api/codex` is the same kind of kernel route (line 109). |
+| Import providers from another app | 2.17, 2.18 | Optional hook plus a kernel URL handler | `import_providers` on `AgentIntegration`. The `hofund://import` handler is kernel. |
+| Inbound surfaces an agent needs | [agents.md](../coverage/agents.md) lines 104-109 | `InboundSurface` plugins | `requires` is `&'static [KernelRoute]`. The agent plugin does not register an HTTP route. |
 
 ```rust
 /// Proposed. Not compiled by this pull request.
-pub trait AgentIntegration: Sync {
-    fn description(&self) -> &AgentDescription;
+pub trait AgentIntegration: Send + Sync + 'static {
+    fn description(&self) -> &'static AgentDescription;
 
-    /// Default: the kernel engine. Same steps as `Described`
-    /// (`crates/agent/src/catalog.rs`).
-    fn plan(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, PluginError> {
-        engine::plan(self.description(), session, target)
-    }
-    fn apply(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, PluginError> {
-        engine::apply(self.description(), session, target)
-    }
-    fn disconnect(
+    /// `Some` when this agent writes a credential store, an OS environment,
+    /// or a sealed file. The default is `None`, and the engine uses slots.
+    fn custom_write(
         &self,
-        session: &Session,
-        force: bool,
-    ) -> Result<DisconnectOutcome, PluginError> {
-        engine::disconnect(self.description(), session, force)
-    }
-    fn status(
-        &self,
-        session: &Session,
+        ctx: &WriteCtx,
         target: &GatewayTarget,
-    ) -> Result<ConnectionStatus, PluginError> {
-        engine::status(self.description(), session, target)
+    ) -> Result<Option<Plan>, PluginError> {
+        let _ = (ctx, target);
+        Ok(None)
     }
 }
 
-pub struct KeyPath {
-    pub file: &'static str,
-    pub key: &'static str,
-}
-
-pub struct AgentDescription {
-    pub id: &'static str,
-    pub display_name: &'static str,
-    pub binary: &'static str,
-    pub files: &'static [AgentFile],
-    pub sets: &'static [OwnedSet],
-    pub model: Option<KeyPath>,
-    pub effort: Option<KeyPath>,
-    /// Row 5.7. `All` writes every route. `Only` is the allow-list.
-    pub visible: VisibleModels,
-    /// `Gateway` writes the base URL. `None` is picker-only (cursor, copilot, devin).
-    pub route: AgentRoute,
-    /// Kernel routes this agent needs. The plugin does not serve them.
-    pub requires: &'static [&'static str],
-}
-
-pub struct AgentFile {
-    pub id: &'static str,
-    pub kind: FileKind,
-    pub paths: OsPaths,
-}
-
-pub struct OsPaths {
-    pub linux: &'static str,
-    pub macos: &'static str,
-    pub windows: &'static str,
-    /// Env var that replaces the directory, as `CODEX_HOME` does today.
-    pub env_override: Option<&'static str>,
-}
-
-pub struct OwnedSet {
-    pub file: &'static str,
-    pub key: &'static str,
-    pub slot: Slot,
-}
-
-pub enum FileKind { Json, Toml, Env, Yaml }
-
+#[non_exhaustive]
 pub enum Slot {
     Origin,
     V1,
     Token,
     Literal(&'static str),
-    /// Claude tier env. `fable` is skipped unless the model id is Fable.
-    /// Same rule as `Slot::ClaudeTier` at `catalog.rs` line 375.
-    ClaudeTier(&'static str),
+    /// Tier env var. `when_model_matches` skips the write unless the model
+    /// id contains that substring. Claude's Fable rule lives in agent.toml.
+    ModelTier {
+        tier: TierId,
+        when_model_matches: Option<&'static str>,
+    },
     /// One models object per visible route, filled from the kernel model spec.
     CatalogModels,
 }
-
-pub enum VisibleModels { All, Only(&'static [&'static str]) }
-
-pub enum AgentRoute { Gateway, None }
 ```
 
-The Codex const (`catalog.rs` from line 64) becomes:
+`AgentFactory` matches the other factories when the agent has options or code: `config_schema`, `validate`, `build`. A data-only agent has no crate. The registry synthesizes a factory whose schema is empty and whose `build` returns the compiled description. `AgentDescription` fields (private, builder in PR B) are: id, display name, binary, files, sets, optional model key, optional effort key, `visible`, `route` (`Gateway` or `None`), and `requires`.
+
+The engine in `hofund-agent` performs plan, apply, disconnect, status, and `refresh_token` by reading the description and, when `custom_write` returns `Some`, applying that plan with the same backup and drift rules.
+
+The Codex const (`catalog.rs` from line 102) becomes:
 
 ```toml
 # plugins/agents/codex/agent.toml
@@ -426,9 +516,34 @@ file = "config"
 key = "model"
 ```
 
-The first migration of this agent must produce a byte-identical plan against the Rust const. New agents are TOML only.
+The first migration of this agent must produce a byte-identical plan against the Rust const, with a golden file per OS. New agents are TOML only.
 
-## 3. Registration and loading
+### 2.4 Where magpie's other features live
+
+Each row is one of: plugin kind, kernel layer, kernel service, or a later RFC. This is the placement. It is not a promise to build them in stage 1.
+
+| Capability | Placement | What that means |
+| --- | --- | --- |
+| Inbound surfaces: Ollama `/api/version`, `/api/tags`, `/api/show`, `/api/chat`; `/muse-code/models`; Codex model catalog; `/backend-api/codex`; embeddings; audio (rows 1.7-1.10, [agents.md](../coverage/agents.md) lines 106-109) | Plugin kind `InboundSurface` | One directory each under `plugins/inbound/<id>`. The plugin owns the paths and the HTTP adapter. The codec stays in the kernel. `crates/gateway` does not name these vendors. `KernelRoute` is the allowlisted enum the agent descriptions use. |
+| Gateway middleware `onRequest`, `onEvent`, `onResponse` (rows 8.1-8.3) | Kernel layer chain | Tower layers. A later RFC may host JS or WASM middleware as a layer. Stage 1 does not. |
+| Routing strategies, stickiness, cooldown, `Retry-After`, RPM, and concurrency limits (rows 4.5-4.7, 4.14) | Kernel service | A strategy trait plus member state on `MemberId`. Ordered failover stays the only strategy until that trait grows. Cooldown is PR K, before H. Not a plugin. |
+| Rate-limit and quota headers on a response (row 3.8) | Kernel service | `PluginError::retry_after` and `HostContext::observe`. Polled `quota()` remains for a vendor that publishes a quota URL. |
+| Account discovery from an agent's own sign-in (row 3.6) and account import (row 3.7) | Kernel service `AccountSource` | Plugins cannot depend on each other. The service reads agent files through the agent engine and writes `HostContext::accounts()`. |
+| Import providers from other apps (row 2.17) and import links (row 2.18) | Optional `AgentIntegration::import_providers`, plus a kernel URL handler | The handler accepts the link and calls the hook. No plugin imports another plugin. |
+| models.dev catalog, names, prices, limits, reasoning (rows 2.8, 2.14) | Kernel catalog service | Fetches, caches with an ETag, and ships an offline snapshot so a build works without the network. Plugins and the agent engine read `ModelSpec`. They do not fetch. |
+| Warm-ups, check-ins, list refresh, quota alerts (rows 3.10-3.12, 2.9) | Kernel scheduler | `HostContext::scheduler`. Plugins register jobs. They do not spawn tasks. The 10 minute and 15 minute numbers from magpie are chosen in the plugin pull request that needs them, not in this document. |
+| Outbound proxy, insecure TLS per provider, User-Agent (rows 10.10, 2.21, 2.11) | Kernel HTTP profiles | `HostContext::http()` as specified in section 1. A plugin selects a profile id. |
+| Vendor JSON-schema fixes for DeepSeek, Kimi, and Grok (row 1.17) | Upstream plugin hook, or a quirk profile shipped inside that plugin | Not kernel code. `crates/quirks` stays free of vendor names. The plugin calls `quirks::apply` with its profile id. |
+| Tool-call repair (row 1.19) | Kernel layer | Protocol repair on the layer chain. |
+| Prompt cache on the Messages protocol (row 1.15) | Kernel layer, keyed by `ProtocolId` for `anthropic-messages` | Not a vendor branch in `crates/gateway`. |
+| Compaction on the Responses protocol (row 1.16) | Kernel layer, keyed by `ProtocolId` for `openai-responses` | Same rule. |
+| Privacy masking (rows 13.x), request capture (row 12.1), budgets and gateway-key limits (rows 9.12, 10.4) | Kernel layers | Masking runs before capture. Budgets and key limits are layers on the same chain. Stating this keeps them out of plugin crates. |
+| Built-in plugin on/off, Requires/Provides, UI `Parts` (`pluginrt.go` lines 29-60) | Not a runtime unlink in stage 1 | The registry links every in-tree plugin. Per-member enable in config is follow-up N8. UI forms are `config_schema()` and `SignInChallenge`, not a `Parts` tree. |
+| Live settings: `/api/settings`, `/api/agents/*`, `/api/profile/*` | Control plane, section 3 | The hofund paths are `/v1/hofund/*`. Same job: settings, agents, and profiles without restarting the UI. |
+| Library: instructions, MCP servers, skills, hooks (rows 6.x); web search and image MCP (rows 7.x) | Later RFC | A stage-2 `LibraryWriter` may reuse the agent engine's slot writes. Not a kind in this proposal. |
+| Backup, sync, self-update, autostart, awake, statusline, WSL (rows 14, 16.2-16.4, 15.8-15.9, 5.9-5.10) | Later RFC, shell and ops | Socket handoff and the background-service model are part of the control plane and land with PR L. The rest wait. |
+
+## 3. Registration, loading, and the control plane
 
 ### Compile time
 
@@ -436,7 +551,7 @@ Each plugin that has code is one crate. A feature on the registry crate selects 
 
 | Mechanism | What it gives | What it costs on this repo |
 | --- | --- | --- |
-| Explicit registry | `plugins/registry/build.rs` reads every `plugin.toml`, emits a `match` from id to factory, and the registry `Cargo.toml` lists one feature and one dependency per implementation. `xtask` fails the build when the list is unsorted, missing, or has a duplicate id. | One shared manifest. Two pull requests that append different lines conflict in one hunk. Resolution is to keep both lines and re-run the check. |
+| Explicit registry | `plugins/registry/build.rs` reads every `plugin.toml`, emits a `match` from id to factory, compiles preset and agent TOML into static data, and the registry `Cargo.toml` lists one feature and one dependency per implementation. `xtask` fails the build when the list is unsorted, missing, or has a duplicate id. | One shared manifest. Two pull requests that append different lines conflict in one hunk. Resolution is to keep both lines and re-run the check. |
 | `linkme` or `inventory` | Each crate registers itself through a distributed slice. No central list. | The workspace already treats an explicit member list as the review surface (`MEMBERS` at `xtask/tests/workspace_invariants.rs` line 11). A missing registration on one target is a silent omission. CI runs the test job on Windows (`desktop` and `test` matrix). Distributed slices depend on the platform linker. `cargo test -p <plugin>` passes when the plugin's tests pass even if the binary never linked it. |
 
 ### Runtime
@@ -451,11 +566,24 @@ Compile-time explicit registry, generated from `plugin.toml`.
 
 The set of plugins is visible in review, which matches how `MEMBERS` and `expected_deps` already work. A duplicate preset id fails in `xtask` on every OS, including the Windows test job. `cargo test -p hofund-plugin-azure` proves that plugin. The registry crate is the only package whose manifest grows, and it grows by sorted append-only lines.
 
-Feature flags live on `hofund-plugin-registry`, one per implementation crate, default features naming all of them so `hofund` links every in-tree plugin. A developer builds a subset with `--no-default-features --features azure`. Data-only presets and data-only agents have no feature, because they have no crate. The registry's generated code calls the kernel transport for those ids.
+Feature flags live on `hofund-plugin-registry`, one per implementation crate, default features naming all of them so the daemon links every in-tree plugin. Features are additive. A developer builds a subset with `--no-default-features --features azure`. Data-only presets and data-only agents have no feature, because they have no crate. The registry's generated code calls the SDK transport for those ids.
 
-`plugins/registry` is the only crate allowed to depend on plugin crates. `hofund-daemon` takes the registry as an argument and does not depend on plugin crates, so a plugin pull request does not edit the daemon manifest. `hofund-cli` and `hofund-desktop` depend on the registry and become the composition roots. Today the daemon is that root (`architecture.md` crate table, and `providers` at `crates/daemon/src/lib.rs` line 231). The migration pull request that introduces the registry updates the architecture table in the same change.
+`plugins/registry` is the only crate allowed to depend on plugin crates. The `hofund` daemon binary is the only composition root that links the registry. `hofund-daemon` the library takes the registry as an argument and does not name plugin crates, so a plugin pull request does not edit the daemon manifest. The CLI does not link the registry. Desktop and TUI do not link the registry. Today the desktop embeds the daemon, and the daemon function `providers` (`crates/daemon/src/lib.rs` line 231) is the composition root. PR L moves that root to the daemon binary and updates the architecture table in the same change.
 
-The process host for the 13 community subscriptions is a later RFC. It would be a program outside the kernel speaking a line protocol, following `internal/plugin/host.go`, and it would register through the same `Subscription` trait. Coverage priority P3 already says to choose a host or a native port before implementing that set.
+The process host for the 13 community subscriptions is a later RFC. It would be a program outside the kernel speaking a line protocol, following `internal/plugin/host.go`, and it would register through the same `Subscription` trait. Coverage priority P3 already says to choose a host or a native port before implementing that set. The handshake version is `API`.
+
+### Control plane
+
+One daemon process serves both the model gateway and the management API. Desktop, TUI, and the remote CLI commands are clients.
+
+- Transport: loopback HTTP, plus a Unix socket or a Windows named pipe. Authenticated by the same token file the gateway uses.
+- DTOs live in `hofund-control-proto`. Breaking that crate is a version bump of the local API (`/v1/hofund/*`).
+- An event stream (SSE or WebSocket) carries usage, quota, routing decisions, and sign-in progress. The tray, the window, the TUI, and a future web UI render from it. They do not poll and they do not restart the gateway to see a new account.
+- `config_schema()` and `SignInChallenge` are the only vendor-shaped data a client needs. The UI builds a form from the schema. It does not match on `google-vertex`.
+- `hofund-desktop` and the future TUI depend only on `hofund-control-client` and `hofund-control-proto`. They do not depend on `daemon`, `registry`, or a plugin. A UI crash does not drop an in-flight model request. Socket handoff on update (row 16.3) is this boundary: the new UI connects to the running daemon.
+- The CLI binary moves to `apps/cli`. Commands that only touch local files (config check, a dry-run agent plan) may link `hofund-config` and `hofund-agent`. Commands that talk to a provider, a subscription, or the running gateway go through the control client. The CLI does not link the registry.
+
+PR L adds the proto, the client, the loopback listener, and the event stream (rows 12.3 and 11.2). The desktop rework that drops the in-process daemon is a later pull request that depends on L. This proposal does not do that rework.
 
 ## 4. Target layout, names, and dependency rules
 
@@ -473,58 +601,91 @@ crates/kernel/config
 crates/kernel/secrets
 crates/kernel/usage
 crates/kernel/daemon
-crates/kernel/cli
 crates/kernel/plugin-api
 crates/kernel/plugin-sdk
+crates/control-proto
+crates/control-client
+apps/cli
 apps/desktop
+apps/tui
 plugins/providers/<id>          # plugin.toml, presets.toml, src/ when the plugin has code
 plugins/subscriptions/<id>
 plugins/agents/<id>             # agent.toml, src/ only when a slot is not enough
+plugins/inbound/<id>
 plugins/registry                # build.rs + the append-only manifest
-kits/upstream
+kits/upstream                   # package hofund-kit-upstream, publish = false
 kits/subscription
 kits/agent
+fuzz/                           # nightly targets, not a required CI job
 xtask
 ```
 
-Until that move, paths stay `crates/<name>` and the new crates are `crates/plugin-api` and `crates/plugin-sdk`. Plugins may land under `plugins/` before the kernel directory exists. `xtask` keys off the package name and the path prefix, not off the kernel directory.
+Until that move, paths stay `crates/<name>` and the new crates are `crates/plugin-api` and `crates/plugin-sdk`. Plugins may land under `plugins/` before the kernel directory exists. `xtask` keys off the package name and the path prefix, not off the kernel directory. The CLI leaves `crates/cli` for `apps/cli` in PR J. It is a shell, so it is not under `crates/kernel`.
 
 ### Names
 
-- Plugin id: kebab-case ASCII, equal to the coverage inventory id when one exists (`codex`, `claude-code`, `google-vertex`, `remote-gateway`).
+- Plugin id: kebab-case ASCII, equal to the coverage inventory id when one exists (`codex`, `claude-code`, `google-vertex`, `remote-gateway`). The type is `PluginId`.
 - Crate name: `hofund-plugin-<id>`. Package path: `plugins/<kind>/<id>`.
+- Kit package name: `hofund-kit-<kind>`, `publish = false`.
 - One implementation crate may own many preset ids. The fragment lists them. The id of the crate is the implementation id (`openai-compat`), and each `[[preset]]` id is the catalog id (`openai`, `deepseek`, and the other URL-only rows that share it).
 - `remote-gateway` stays a preset id that `resolve` rejects (line 109). It does not become a kernel type.
-- Protocol ids stay the codec ids. Vendor names do not appear in kernel paths or, after the scan widens, in kernel source.
+- Protocol ids stay the codec ids, as `ProtocolId`. Vendor names do not appear in kernel paths. After the scan widens, they do not appear in kernel source except the `KernelRoute` enum.
 
 ### Rules `xtask` enforces when the first plugin lands
 
 This pull request does not add these checks. The pull request that adds `plugins/` adds them next to `dependency_graph_matches_architecture`.
 
-1. A package whose path starts with `plugins/` may name `hofund-plugin-api` and, when it uses a helper, `hofund-plugin-sdk`. No other workspace dependency. Third-party crates (`reqwest`, `ring`, and the crates a signature needs) are allowed. `hofund-gateway`, `hofund-daemon`, `hofund-router`, `hofund-provider`, `hofund-ir`, and any other `hofund-plugin-*` are rejected.
+1. A package whose path starts with `plugins/` may name `hofund-plugin-api` and, when it uses a helper, `hofund-plugin-sdk`. No other workspace dependency. Pure third-party crates (`ring`, `serde`, and similar) are allowed. `hofund-gateway`, `hofund-daemon`, `hofund-router`, `hofund-provider`, `hofund-ir`, and any other `hofund-plugin-*` are rejected.
 2. No plugin depends on another plugin. This is the rule `TestPluginsImportOnlyCore` enforces for Go imports (`internal/pluginrt/pluginrt_test.go` line 94, described at `pluginrt.go` lines 8-10). Here it is a Cargo dependency check plus a walk of `use` paths.
-3. `plugins/registry` is the only package that may depend on `hofund-plugin-*` crates. Its dependency list and its feature list are sorted and equal to the `plugin.toml` files on disk.
+3. `plugins/registry` is the only package that may depend on `hofund-plugin-*` crates. Its dependency list and its feature list are sorted and equal to the `plugin.toml` files on disk. The end state is that the daemon binary is the only package that depends on the registry. `hofund-cli`, `hofund-desktop`, and `hofund-control-client` are rejected if they do. That ban turns on in PR L. From D until L the desktop still embeds `hofund-daemon`, so the library's registry edge is temporary and L removes it.
 4. Preset ids are unique across fragments. The 58-id assertion that the catalog tests encode today moves to this check. Aliases stay aliases (the four `[[alias]]` tables at `presets.toml` lines 10-27).
-5. The vendor-name scan grows from `crates/gateway` and `crates/router` to every kernel crate after the adapters have left `crates/provider`. Turning it on earlier fails the build on the adapters that are still there on purpose.
-6. A plugin's dev-dependencies may include the kit for its own kind (`kits/upstream`, `kits/subscription`, or `kits/agent`) and ordinary test crates. A provider plugin does not depend on the agent kit.
-7. `hofund-config` keeps zero workspace dependencies. Preset ids stay strings. Unknown ids fail at daemon startup, as `resolve` fails today.
+5. The vendor-name scan grows from `crates/gateway` and `crates/router` to every kernel crate after the adapters have left `crates/provider`. `KernelRoute` in `hofund-plugin-api` is allowlisted. Gateway and router source are not. Turning the scan on earlier fails the build on the adapters that are still there on purpose.
+6. A plugin's dev-dependencies may include the kit for its own kind and ordinary test crates. A provider plugin does not depend on the agent kit. A runtime dependency on any `hofund-kit-*` is rejected.
+7. `hofund-config` keeps zero workspace dependencies. Preset ids stay strings. Unknown ids fail when the factory is resolved, as `resolve` fails today.
 8. No runtime crate depends on `xtask`.
+9. Plugins may not depend on `reqwest`, `hyper`, `axum`, `tracing`, or on `tokio` features that include `net` or `process`. The `use` walk rejects `std::process`, `tokio::process`, `tokio::net`, `reqwest`, `hyper`, and `axum` anywhere under `plugins/`. HTTP and process spawn go through the SDK.
+10. Every plugin manifest contains `[lints] workspace = true`.
+11. Every code plugin has `tests/conformance.rs` calling `hofund_kit_<kind>::conformance`. A data-only plugin is covered by the registry fragment test instead.
+12. `hofund-router` does not name `UpstreamProvider`, `Subscription`, or `HostContext`.
 
-`docs/architecture.md`, the crate manifest, and `expected_deps` still change together for every new edge. The edges this proposal adds, once accepted, are: `hofund-plugin-sdk` depends on `hofund-plugin-api`; `hofund-provider` (while it still exists) and `hofund-router` depend on `hofund-plugin-api`; `hofund-cli` and `hofund-desktop` depend on `hofund-plugin-registry`; plugin packages depend on `hofund-plugin-api` and may depend on `hofund-plugin-sdk`.
+`docs/architecture.md`, the crate manifest, and `expected_deps` still change together for every new edge. The edges this proposal adds, once accepted, are:
+
+- `hofund-plugin-sdk` depends on `hofund-plugin-api`
+- `hofund-plugin-api` depends on `hofund-ir` and re-exports three types by name
+- `hofund-router` depends on `hofund-plugin-api` only for `PluginError`, `Request`, and `Completion`, or on `hofund-kernel-types` if PR C splits those out. It does not depend on the provider trait
+- the daemon binary depends on `hofund-plugin-registry`
+- `hofund-control-client` depends on `hofund-control-proto`
+- `apps/desktop` and `apps/tui` depend on `hofund-control-client` only
+- `apps/cli` depends on `hofund-control-client`, and may depend on `hofund-config` and `hofund-agent` for offline commands
+- plugin packages depend on `hofund-plugin-api` and may depend on `hofund-plugin-sdk`
+
+### Lints and feature checks
+
+Workspace lints stay `missing_docs = "warn"` and `clippy::pedantic = "allow"`. `hofund-plugin-api` and `hofund-plugin-sdk` additionally set `#![deny(missing_docs, unreachable_pub, rust_2018_idioms)]`, `clippy::pedantic` at warn, and `missing_errors_doc` plus `must_use_candidate` on.
+
+CI on the API crate stores a `cargo-public-api` snapshot (or `cargo-semver-checks` against the merge base). Surface growth is a reviewed diff.
+
+CI runs `cargo hack check -p hofund-plugin-registry --each-feature --no-dev-deps` once the registry exists, so a missing `#[cfg]` fails. Features must be additive.
 
 ## 5. Conformance kits and real-tool acceptance
 
-Each plugin pull request is self-verifying. The kit is shared so the plugin author does not copy the harness. The kit depends on the plugin API, the SDK, and test tools. It does not depend on a plugin.
+Each plugin pull request is self-verifying. The kit is shared so the plugin author does not copy the harness. The kit depends on the plugin API, the SDK, and test tools. It does not depend on a plugin. Calling the kit is mandatory.
+
+The entry points are `hofund_kit_upstream::conformance(factory, fixture)`, `hofund_kit_subscription::conformance(...)`, and `hofund_kit_agent::conformance(...)`. `xtask` fails when a code plugin has no `tests/conformance.rs` that calls the entry point for its kind. That is the same idea as an OpenTelemetry `componenttest`: one suite, every implementation.
 
 | Kind | Kit | Proves | Grown from |
 | --- | --- | --- | --- |
-| Upstream | `kits/upstream` | `execute` against wiremock, auth header placement, error class (`Connect`, `Timeout`, `Status`, `Decode`), `list_models` pagination when `ListKind::Live`, `probe` sends one minimal request and records a status, `quota` either returns windows or the unsupported error. | `crates/provider/tests/upstream.rs` (header: "Upstream adapters against a local mock. No real network.") and `crates/provider/tests/azure_deployments.rs`. |
-| Subscription | `kits/subscription` | Recorded HTTP fixtures for `start_sign_in`, `complete_sign_in`, `refresh`, and `quota`. No browser, no loopback to a vendor, no live OAuth in CI. | No hofund test exists yet. The fixture format is request and response files checked into the plugin directory. |
-| Agent | `kits/agent` | Temp `Session` (the pattern in `crates/agent/tests/rewrite.rs`), golden bytes before and after `plan`, `apply` backup, `disconnect` drift (user-edited keys kept, untouched keys restored), `refresh_token` without a new backup. | `crates/agent/tests/rewrite.rs`. |
+| Upstream | `kits/upstream` | `execute` against wiremock, auth header placement, error class (`Connect`, `Timeout`, `Status`, `Decode`), `list_models` pagination when `ListKind::Live`, `probe` sends one minimal request and records a status, `quota` either returns windows or `PluginErrorKind::Unsupported`. Also: drop mid-stream closes the upstream connection, a kernel deadline fires, a mid-stream error becomes a protocol error event, `Debug` of any secret-bearing value does not contain the key, cancel-safety, and N parallel `execute` calls on one instance. | `crates/provider/tests/upstream.rs` (header: "Upstream adapters against a local mock. No real network.") and `crates/provider/tests/azure_deployments.rs`. |
+| Subscription | `kits/subscription` | Recorded HTTP fixtures for `start_sign_in`, `complete_sign_in`, `refresh`, and `quota`. The account store sees an atomic update. No browser, no loopback to a vendor, no live OAuth in CI. | No hofund test exists yet. The fixture format is request and response files checked into the plugin directory. |
+| Agent | `kits/agent` | Temp `Session` (the pattern in `crates/agent/tests/rewrite.rs`), golden bytes before and after `plan` for each OS, `apply` backup, `disconnect` drift (user-edited keys kept, untouched keys restored), `refresh_token` without a new backup. | `crates/agent/tests/rewrite.rs`. |
 
-A plugin pull request runs `cargo test -p <crate>` for a code plugin, or the registry's fragment test for a data-only plugin, plus `cargo test -p xtask --test workspace_invariants`. The fragment test loads every `presets.toml` and `agent.toml` and checks ids, required keys, and duplicate detection.
+A plugin pull request runs `cargo test -p <crate>` for a code plugin, or the registry's fragment test for a data-only plugin, plus `cargo test -p xtask --test workspace_invariants`. The fragment test checks the compiled static ids, required keys, and duplicate detection. It does not re-parse TOML at runtime.
 
-Golden files live next to the plugin: `plugins/agents/codex/fixtures/`. Subscription recordings live at `plugins/subscriptions/codex/fixtures/`.
+Golden files live next to the plugin: `plugins/agents/codex/fixtures/<os>/`. Subscription recordings live at `plugins/subscriptions/codex/fixtures/`.
+
+### Fuzzing
+
+`fuzz/` holds `cargo-fuzz` targets for the SSE splitter, the AWS eventstream decoder (`crates/codec/src/eventstream.rs`), and `decode_request`. They run on nightly and are not a required CI job. Codec `proptest` round-trips stay (`crates/codec/Cargo.toml` lines 23-25). LAN clients are untrusted (row 10.5), so these parsers are the ones that get targets.
 
 ### How this meets the evidence rule
 
@@ -547,7 +708,7 @@ No step below starts until the owner accepts this proposal. This pull request do
 In flight, and not part of the proposal:
 
 - Pull request #26 was squash-merged as `dfb6e89`. This pin already writes Gemini `model.name`, OpenCode `models` entries, and the Claude tier env vars (section 2.3).
-- Pull request #28 (`cursor/provider-test-lists-692a`) is open and unmerged. It sketches `list_models`, `diff_ids`, `refresh_due`, and `run_probe`, and wires them through the daemon and the CLI ahead of this API. It stays unmerged until `UpstreamProvider::list_models` and `UpstreamProvider::probe` exist. After pull request B it rebases onto those methods. It is not the trait, and it is not a plugin.
+- Pull request #28 (`cursor/provider-test-lists-692a`) is open and unmerged. It sketches `list_models`, `diff_ids`, `refresh_due`, and `run_probe`, and wires them through the daemon and the CLI ahead of this API. It stays unmerged until `UpstreamProvider::list_models` and `probe` exist. After PR B it rebases onto those methods, `PluginError`, and `HostContext`. It does not add a plugin-owned HTTP client. It is not the trait, and it is not a plugin.
 
 ### Pull requests, in order
 
@@ -555,33 +716,42 @@ Each one is branched from latest `main`. Each one updates `docs/architecture.md`
 
 | Id | Change | Parallel with |
 | --- | --- | --- |
-| B | Add `hofund-plugin-api` (traits, types, errors, `API`) and `hofund-plugin-sdk` (empty of transports until D, so the dependency edge exists). `hofund-provider` and `hofund-agent` re-export the traits. No behavior change. Existing tests stay where they are. | Nothing. This is the seam. |
-| C | `hofund-router` depends on `hofund-plugin-api` for the trait. The daemon match on `Wire` stays. | Nothing. |
-| D | `plugins/registry`, and move the generic transports, SigV4, retry, and paging helpers into `hofund-plugin-sdk`. The daemon's Chat, Responses, Messages, and Generative arms call `registry.factory`. `Vertex` and `Bedrock` stay in the match until their plugins exist. `xtask` plugin rules turn on for the new path. | Nothing. |
-| E | One implementation per pull request: azure, vertex, bedrock, mantle, then the URL-only fragments that ride `openai-compat`, `anthropic`, and `generative`. Each pull request moves that code and its `[[preset]]` rows. `hofund-provider` keeps a re-export until the last caller is gone, so `crates/provider/tests/upstream.rs` keeps compiling during the move. The plugin itself depends only on the API. | The E pull requests touch disjoint directories. They share only the sorted registry manifest. |
-| F | Agent loader: if `plugins/agents/<id>/agent.toml` exists, build the description from it, otherwise use the Rust const. First file is `codex`, and its plan is byte-identical to the const. Then `claude-code`, `gemini-cli`, and `opencode` the same way, including `model.name`, `ClaudeTier`, and the OpenCode `models` object as they behave on this pin. | F starts once B has the `AgentDescription` type. It does not wait for E. `agent` does not depend on `provider` today. |
-| G | `FileKind::Yaml` in the kernel engine, with a kit test. Then the remaining P1 agents as TOML: pi, goose, zed, vscode, crush, hermes, kimi, qwen, droid, cline, grok. A crate is added only for a write the slots cannot express, in its own pull request. | G's TOML files are disjoint. The YAML change is one kernel pull request before goose and hermes. |
-| H | Subscription plugins, one directory each: `codex`, `claude`, `copilot` (host field covers the Enterprise variant), `gemini`. Each implements `upstream` so a signed-in account is a router member (rows 2.12 and 3.7). Quota windows feed member cooldown (row 3.8). | H starts once D has the SDK transports. The four directories do not overlap. Codex joined mode also waits on the kernel `/backend-api/codex` route. |
-| I | Delete `crates/provider/presets.toml` once every fragment loads through the registry. The catalog test concatenates fragments and still asserts the 58 ids and the four aliases. Widen the vendor-name scan to kernel crates in this pull request, when `crates/provider` no longer contains adapters. | After E. |
-| J | Move `crates/<name>` to `crates/kernel/<name>`. Mechanical. No behavior change. | After I, or earlier if the owner wants the paths sooner. It touches every import and should not run beside feature work. |
+| B | Add `hofund-plugin-api` and `hofund-plugin-sdk` (SDK has no transports yet). Traits, `PluginError`, newtypes, `#[non_exhaustive]`, sealed host handles, named IR re-exports, and `non_exhaustive` on those IR structs. Add `tracing`. API and SDK lints, and the public-API snapshot in CI. `hofund-provider` and `hofund-agent` re-export the traits. No behavior change. | Nothing. This is the seam. |
+| B2 | Move `project`, `location`, `credentials`, `impersonate`, `access_key_id`, `secret_access_key`, `session_token`, and `region` into `[providers.options]`. Replace vendor `Kind` variants with `ProtocolId`. Old keys still parse for one release. | After B. May proceed beside C. Must merge before E. |
+| C | Kernel `Member` and `ArcSwap` snapshot. Daemon adapts `UpstreamProvider` to `Member`. Router matches `PluginErrorKind` with a wildcard. Kernel timeout and `catch_unwind`. Stream errors become protocol error events (`gateway` lines 573-576). Tracing spans on the seam. Same-protocol `Completion::Raw`, drop `model_request.clone()` (gateway line 303), and `criterion` benches. | After B. Beside B2. |
+| D | `plugins/registry` and `build.rs` static presets and agent descriptions. Move transports, SigV4, OAuth helpers, retry, and paging into the SDK, on the pooled client. `xtask` rules, kits, mandatory `conformance`, `cargo hack --each-feature`, and `fuzz/` targets. Daemon Chat, Responses, Messages, and Generative arms call `registry.factory`. Vertex and Bedrock stay in the match until E. | After B. Beside C once the API types exist. The pooled client and the ban on `reqwest` land here. |
+| K | Kernel cooldown and passive rate-limit. `retry_after` and `observe` cool a `MemberId` down. Circuit-breaker state survives snapshot swaps. | After C. Must merge before H. May proceed beside D and E. |
+| L | Control plane: `hofund-control-proto`, `hofund-control-client`, `/v1/hofund/*`, loopback plus socket or named pipe, token auth, event stream. Move the registry link from the daemon library to the daemon binary and drop it from the desktop. Hot reload publishes a new `ArcSwap` snapshot. | After D. Before the desktop rework. Beside E, F, G, and S. |
+| E | One implementation per pull request: azure, vertex, bedrock, mantle, then the URL-only fragments that ride `openai-compat`, `anthropic`, and `generative`, including the six ids `resolve` still rejects. Each pull request moves that code and its `[[preset]]` rows. `hofund-provider` keeps a re-export until the last caller is gone. The plugin depends only on the API and the SDK, and uses `HostContext::http()`. | After D and B2. Disjoint directories. Shared file: the sorted registry manifest. |
+| S | `InboundSurface` plugins: Ollama, Muse, Codex backend, embeddings, audio. | After D. Codex subscription joined mode waits on the Codex surface. |
+| F | Four pull requests, one per existing agent (`codex`, `claude-code`, `gemini-cli`, `opencode`). Each adds `agent.toml`, compiles it in `build.rs`, and deletes the Rust const after the per-OS golden plan matches, including `model.name`, `ModelTier`, and the OpenCode `models` object as they behave on this pin. | After D. Does not wait for E. |
+| G | `FileKind::Yaml` in the kernel engine, with a kit test. Then the remaining P1 agents as TOML: pi, goose, zed, vscode, crush, hermes, kimi, qwen, droid, cline, grok. A crate is added only for `custom_write`, in its own pull request. | After D. Goose and hermes wait on the YAML pull request. Zed is code if the slot cannot write the OS credential store. |
+| H | Subscription plugins, one directory each: `codex`, `claude`, `copilot`, `gemini`. Each implements `upstream`. Accounts are router members (rows 2.12 and 3.7). Quota uses PR K. N9 merges before Copilot. | After D and K. Codex also after S. The four directories do not overlap. |
+| I | Delete `crates/provider/presets.toml` once every fragment is compiled in. The catalog test still asserts the 58 ids and the four aliases. Widen the vendor-name scan, with the `KernelRoute` allowlist. | After E and S. |
+| J | Move `crates/<name>` to `crates/kernel/<name>`, and `crates/cli` to `apps/cli`. Mechanical. | After I. Not beside feature work. |
 
 Quirks stay in the kernel for the whole sequence. A new `Rule` variant is a kernel pull request. Vendor behavior stays in the plugin that calls `quirks::apply` through the SDK.
 
 ### Parallel work plan
 
-B, C, and D are serial. After D, three batches run at the same time. Counts are pull requests, one directory each unless the row says otherwise.
+B is alone. After B, B2 and C can proceed together. D can start once B has merged and does not need to wait for C. K waits for C and must merge before H. L waits for D.
+
+After D, four batches run at the same time. H waits until K has also merged. Counts are pull requests, one directory each unless the row says otherwise.
 
 | Batch | Starts after | Pull requests | Concurrent agents | Merge constraint |
 | --- | --- | --- | --- | --- |
-| E providers | D | About 8. Four code plugins (azure, vertex, bedrock, mantle) and about four fragment batches (the URL-only presets on `openai-compat`, `anthropic`, and `generative`, plus the six ids `resolve` still rejects). | Up to 4, one directory each. | Each appends a sorted block to `plugins/registry`. Two merges conflict only in that hunk. Keep both lines and re-run `xtask`. I waits until every E pull request has merged. |
-| F and G agents | D for the loader. The loader is F's first pull request and is serial. | F is 5 (loader, then codex, claude-code, gemini-cli, opencode). G is about 12 (one `FileKind::Yaml` kernel change, then the P1 agents pi, goose, zed, vscode, crush, hermes, kimi, qwen, droid, cline, grok). | After the loader, the four F migrations and the non-YAML G files run together. Goose and hermes wait on the YAML pull request. Zed is a code plugin when the slot cannot write the OS credential store. | Agent directories are disjoint. The YAML change is the one shared kernel edit in this batch. `CatalogModels` is part of the loader, not a per-agent pull request. |
-| H subscriptions | D | 4: codex, claude, copilot, gemini. | 4. | Same registry-append rule as E. A plugin that needs a kernel route waits for that route: Codex `/backend-api/codex`, Muse `/muse-code/models`, Ollama emulation. Those routes are kernel pull requests, not rows in this batch. |
+| E providers | D and B2 | About 8. Four code plugins (azure, vertex, bedrock, mantle) and about four fragment batches (URL-only presets on `openai-compat`, `anthropic`, and `generative`, plus the six ids `resolve` still rejects). | Up to 4, one directory each. | Sorted append to `plugins/registry`. On conflict, keep both lines and re-run `xtask`. I waits until every E pull request has merged. |
+| S inbound surfaces | D | 5: Ollama, Muse, Codex backend, embeddings, audio. | Up to 5. | Same registry rule. The Codex subscription waits for the Codex surface. |
+| F and G agents | D. Codegen is in D, so F is the four migrations, not a loader. | F is 4. G is about 12 (one `FileKind::Yaml` change, then pi, goose, zed, vscode, crush, hermes, kimi, qwen, droid, cline, grok). | The four F migrations and the non-YAML G files together. Goose and hermes wait on YAML. Zed is code when `custom_write` is required. | Agent directories are disjoint. YAML is the one shared kernel edit. `CatalogModels` and `ModelTier` are in the engine from D, not a per-agent pull request. |
+| H subscriptions | D and K. Codex also after S. | 4: codex, claude, copilot, gemini. N9 is a fifth, kernel-API, pull request immediately before Copilot. | 4 plugin agents, after N9 for Copilot. | Same registry rule as E. They do not edit the router. Cooldown is already in K. |
 
-Pull request #28 does not join a batch. It rebases onto B once `list_models` and `probe` are on the trait, and it merges only after that.
+L runs beside E, F, G, and S. The desktop rework does not start until L has merged.
 
-Assign one agent per directory. Do not assign two agents to the registry crate. The kernel owner merges B, C, D, the YAML change, the special gateway routes, I, and J.
+Pull request #28 does not join a batch. It rebases onto B and merges only after the trait exists.
 
-The six presets that `resolve` still rejects (`typesafe`, `vercel-jev`, `cloudflare-jev`, `bailian-decision`, `qwen-decision`, `remote-gateway`, from [providers.md](../coverage/providers.md)) are fragment or code pull requests after D. They are not a reason to keep `presets.toml` inside the kernel.
+Assign one agent per directory. Do not assign two agents to the registry crate. The kernel owner merges B, B2, C, D, K, L, the YAML change, I, and J.
+
+The six presets that `resolve` still rejects (`typesafe`, `vercel-jev`, `cloudflare-jev`, `bailian-decision`, `qwen-decision`, `remote-gateway`, from [providers.md](../coverage/providers.md)) are fragment or code pull requests in E. They are not a reason to keep `presets.toml` inside the kernel.
 
 ### Who owns which path
 
@@ -594,18 +764,23 @@ The only shared file in a batch is `plugins/registry/Cargo.toml` (features and d
 ```text
 /crates/plugin-api/
 /crates/plugin-sdk/
+/crates/control-proto/
+/crates/control-client/
 /crates/kernel/
 /crates/daemon/
 /crates/router/
 /crates/gateway/
+/apps/cli/
 /plugins/registry/
 /plugins/providers/
 /plugins/subscriptions/
 /plugins/agents/
+/plugins/inbound/
 /kits/
+/fuzz/
 ```
 
-Kernel globs and `plugins/registry` belong to whoever the owner assigns to the kernel. Each plugin batch's pull request adds the lines for the directories it introduces, naming the people the owner assigns to that batch. A plugin agent does not need write access to another plugin's directory.
+Kernel globs, `plugins/registry`, the control crates, and `fuzz/` belong to whoever the owner assigns to the kernel. Each plugin batch's pull request adds the lines for the directories it introduces. A plugin agent does not need write access to another plugin's directory.
 
 `docs/magpie-comparison.md` gains the adopt-or-redesign rows for this seam in pull request B, after acceptance. This proposal does not edit that table, so an unaccepted design is not recorded as a decision.
 
@@ -617,30 +792,71 @@ Pins: hofund `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4`, magpie `cbbf3163cb3c87e
 
 | Magpie | Where | Hofund |
 | --- | --- | --- |
-| The runtime never imports a plugin, and a plugin never imports another. They meet through services. | `internal/pluginrt/pluginrt.go` lines 8-10. Test: `internal/pluginrt/pluginrt_test.go` line 94. `main.go` and `plugins/all` are the only gatherers (test comment, line 91). | The registry crate is the only gatherer. `xtask` rejects a plugin-to-plugin dependency. The daemon does not import plugins. |
+| The runtime never imports a plugin, and a plugin never imports another. They meet through services. | `internal/pluginrt/pluginrt.go` lines 8-10. Test: `internal/pluginrt/pluginrt_test.go` line 94. `main.go` and `plugins/all` are the only gatherers (test comment, line 91). | The registry crate is the only gatherer. `xtask` rejects a plugin-to-plugin dependency. The daemon binary is the only composition root. Plugins meet the kernel through `HostContext`. |
 | One plugin per provider id, and a recorded clash when two claim it. The host runs the user's choice, otherwise the last one listed. | `internal/plugin/host.go` `Loaded.Provides` line 499, `Clash` lines 509-517, `Clashes` line 521. | The registry rejects a duplicate preset id at build time. Stage 1 has no user-installed overlay, so a duplicate is a hard error rather than a runtime preference. |
-| A plugin agent declares the file, the format, the model key, and the prefix. The host performs every write and stashes the user's previous values. | `internal/agentplug/agentplug.go` `Desc` lines 65-83, `Formats` lines 57-63. `internal/agent/plugged.go` lines 3-10 and `pluggedStash` line 48. A plugin id that collides with a built-in is the built-in (`plugged.go` lines 31-34). | `agent.toml` plus the existing engine (`Described`, `disconnect` drift). A data plugin does not write files itself. A colliding id fails the registry check. |
-| An API version constant on the manifest. | `internal/pluginrt/pluginrt.go` line 27, `const API = "1.0"`. | `hofund_plugin_api::API = "1"` after acceptance. Helpers live in `hofund-plugin-sdk` and can change without a new `API` value. Caret ranges wait until a second version exists. |
-| Presets are data. | `internal/provider/presets.go`, recorded as `crates/provider/presets.toml` (58 presets, `source_commit` at line 8). | Preset fragments stay TOML. The implementation crate is shared. |
-| Built-in product plugins fail independently. | `pluginrt.go` lines 1-6: one that fails or panics is `FAILED` and the rest run. User toggles live in `plugins.yml`. | Out of scope for the three extension kinds. Noted so a later RFC can reuse it for optional product features. Stage 1 links every in-tree provider, subscription, and agent. |
-| Probe and list live next to the provider. | `internal/provider/test.go` `Provider.Test` line 37, `AuthHeaders` line 457, `probe` line 500. `internal/provider/autolist.go` `MinRefreshEvery` line 39 (10 minutes), `listRetry` line 231 (15 minutes), `KeepListsFresh` line 239. | The methods are `UpstreamProvider::probe` and `list_models`. The numbers and the URL rules are specified in the plugin pull request that implements them, not in this proposal. Pull request #28 is open and stays unmerged until those methods exist. |
+| A plugin agent declares the file, the format, the model key, and the prefix. The host performs every write and stashes the user's previous values. | `internal/agentplug/agentplug.go` `Desc` lines 65-83, `Formats` lines 57-63. `internal/agent/plugged.go` lines 3-10 and `pluggedStash` line 48. A plugin id that collides with a built-in is the built-in (`plugged.go` lines 31-34). | `agent.toml` compiled by `build.rs`, plus the engine in `hofund-agent`. A data plugin does not write files itself. A colliding id fails the registry check. |
+| An API version constant on the manifest. | `internal/pluginrt/pluginrt.go` line 27, `const API = "1.0"`. | `API = "1"` is the future process-host handshake. In-tree compatibility is `#[non_exhaustive]` plus the public-API diff (section 1). |
+| Presets are data. | `internal/provider/presets.go`, recorded as `crates/provider/presets.toml` (58 presets, `source_commit` at line 8). | Preset fragments stay TOML and are compiled to static data. The implementation crate is shared. |
+| A failed built-in does not take down the rest. | `pluginrt.go` lines 1-6. | `catch_unwind` per member (section 1). The member cools down. The process stays up. |
+| Probe and list live next to the provider. | `internal/provider/test.go` `Provider.Test` line 37, `AuthHeaders` line 457, `probe` line 500. `internal/provider/autolist.go` `MinRefreshEvery` line 39 (10 minutes), `listRetry` line 231 (15 minutes), `KeepListsFresh` line 239. | The methods are `UpstreamProvider::probe` and `list_models`. Timers go through `HostContext::scheduler`. Pull request #28 stays unmerged until the methods exist. |
+| Schema-driven UI parts. | `pluginrt.go` lines 29-60, `Parts`. | `config_schema()` and `SignInChallenge`. The client renders them. It does not link the plugin. |
 
 ### What we redesign
 
 | Magpie | Where | Hofund |
 | --- | --- | --- |
-| Product plugins under `plugins/` (budget, routing, otel, middleware, sessions, tools, usage, and the others listed by `git ls-tree` of `plugins` at the pin). | `plugins/*`, gathered by `plugins/all`. | Those stay kernel features until their own RFC. The plugin kinds in this document are only upstreams, subscriptions, and coding-agent integrations. |
-| Community auth plugins run in-process JavaScript (moejs for agent modules, Bun for OpenCode auth plugins). | `internal/agentplug/agentplug.go` lines 18-19 (`moejs`, no Node). Coverage line 16 for Bun. `internal/plugin/host.go` is the process-and-line-protocol host. | Stage 1 is native Rust, compiled in. The 13 community subscriptions are a later process host. WASM is the wrong vehicle for those JavaScript plugins. |
-| Sign-in, presets, probes, and every vendor client share `internal/provider`. | `internal/provider/signin.go`, `presets.go`, `test.go`, `autolist.go`, plus the per-vendor files named in the coverage tables. | Generic transports, SigV4, and OAuth helpers live in the plugin SDK. The API stays the traits. Vendor URL tables are fragments. Vendor credential code is a plugin crate. The kernel match in `crates/daemon/src/lib.rs` lines 251-285 goes away as those plugins land. `Subscription::upstream` is how a signed-in account becomes one of those clients. |
-| Agent plugins are JavaScript modules named by `package.json` `magpie.agent`, with a 1 second load limit and a 1 second connect limit. | `internal/agentplug/agentplug.go` lines 1-4, 119-120. | Declarative TOML loaded by the Rust engine. Limits are irrelevant because there is no embedded interpreter in stage 1. |
-| `plugins.yml` can turn a built-in off. | `pluginrt.go` lines 3-6 and 84. | Stage 1 links the in-tree set. A feature flag on the registry crate is how a developer builds a subset. Users do not disable a provider plugin in a config file in stage 1. |
+| Product plugins under `plugins/` (budget, routing, otel, middleware, sessions, tools, usage). | `plugins/*`, gathered by `plugins/all`. | Section 2.4 places each one: kernel layer, kernel service, inbound plugin, or a later RFC. They are not stage-1 plugin kinds, except inbound surfaces. |
+| Community auth plugins run in-process JavaScript. | `internal/agentplug/agentplug.go` lines 18-19. Coverage line 16. `internal/plugin/host.go`. | Stage 1 is native Rust, compiled in. The 13 community subscriptions are a later process host. WASM is the wrong vehicle for those JavaScript plugins. |
+| Sign-in, presets, probes, and every vendor client share `internal/provider`. | `internal/provider/signin.go`, `presets.go`, `test.go`, `autolist.go`. | Transports, SigV4, and OAuth helpers live in the SDK and call the kernel client. Vendor URL tables are compiled fragments. Vendor credential code is a plugin crate. The kernel match in `crates/daemon/src/lib.rs` lines 251-285 goes away as those plugins land. `Subscription::upstream` returns the client. The account store holds the secret. |
+| Agent plugins are JavaScript modules with a 1 second load limit. | `internal/agentplug/agentplug.go` lines 1-4, 119-120. | Declarative TOML compiled by `build.rs`. No embedded interpreter in stage 1. |
+| `plugins.yml` can turn a built-in off. | `pluginrt.go` lines 3-6 and 84. | Stage 1 links the in-tree set. A feature flag on the registry is how a developer builds a subset. Per-member enable in config is follow-up N8. Users do not unlink a crate. |
+
+## 8. Follow-ups
+
+These are not required before acceptance. They have homes so they are not forgotten.
+
+| Id | Follow-up | When |
+| --- | --- | --- |
+| N2 | Add a capability set on `UpstreamSpec`: `count`, `list`, `probe`, `quota`, `passthrough`. The UI reads it instead of calling the method. | With or just after B, before a settings UI depends on it. |
+| N5 | A `[capabilities]` table in `plugin.toml`: network hosts, filesystem paths, spawn. Reviewers check it. The future process host enforces it. | Before the process-host RFC, and earlier if the owner wants the review aid. |
+| N8 | Per-member `enabled` in config. A disabled member stays linked and is left out of the snapshot. This is the desktop equivalent of magpie's `plugins.yml` toggle, at member granularity. | With L, before the desktop settings form. |
+| N9 | `SignInFlow::Device` takes the host from validated options (`DeviceFlow { host: Url }`), not a `'static` URL, so GitHub Enterprise is expressible. Import and discovery stay the kernel `AccountSource` and the `import_providers` hook from section 2.4. | N9 merges before the Copilot pull request in H. |
 
 ## Sign-off
 
-Acceptance means the owner agrees to the kernel boundary, the three traits, the compile-time registry, and the migration order. It does not merge any of the migration pull requests by itself.
+Acceptance means the owner agrees to the kernel boundary, `HostContext`, the factories, the four kinds, the lifecycle and snapshot rules, the control plane, the placement table, and the migration order. It does not merge any of the migration pull requests by itself.
 
 Until then:
 
 - `docs/architecture.md` is the build.
 - Coverage cells and feature-parity statuses stay as they are.
 - Pull request #28 stays unmerged until the trait it implements exists.
+
+## Appendix: Review resolution
+
+Review file: architecture review of head `b93d1c2488c7b29ee7af5ea7dd0c4b955d37f732`. Each id points at the section that resolves it.
+
+| Id | Where it is resolved |
+| --- | --- |
+| M1 | Section 1, "Host context". Handles: `http`, `secrets` (`SecretString`), `accounts`, `clock`, `scheduler`, `spawn_process`, `cache_dir`, `state_dir`, `observe`. |
+| M2 | Section 2.1 `UpstreamFactory` (`spec`, `config_schema`, `validate`, `build`). Section 2.1 "Config shape" and PR B2. `SubscriptionFactory` and `AgentFactory` in sections 2.2 and 2.3. Instance-level `spec` removed. |
+| M3 | Section 1 pooled client. Section 4 rules 1 and 9: no `reqwest`, `hyper`, `axum`, `tokio` net or process, `std::process`. SDK only. |
+| M4 | Section 2.3. API trait is `description` plus `custom_write`. Engine stays in `hofund-agent`. `Slot::ModelTier`. `build.rs` static data. PR F wording in section 6. |
+| M5 | Section 1, "Contract types" and "Semver policy". `#[non_exhaustive]`, private fields, newtypes, `KernelRoute`, `ProtocolId`, `Send + Sync + 'static`, sealed handles, named IR re-exports. |
+| M6 | Section 1, "Errors". One `PluginError` with `kind`, `status`, `retry_after`, `source`. `unsupported` exists. `probe` has a default body in section 2.1. Router wildcard in PR C. |
+| M7 | Section 1, "Lifecycle, isolation, and reload". `validate`, `build`, `health`, `shutdown(deadline)`. Kernel timeout and `catch_unwind`. Cancel-safety. Protocol error event instead of EOF at gateway lines 573-576. |
+| M8 | Section 1, `ArcSwap` snapshot, stable `MemberId`. Section 2.2 membership "at startup and on every membership change". Secret read per call, not captured. |
+| M9 | Section 1 `observe` and `retry_after`. Section 2.2 corrects the cooldown claim against `architecture.md` line 151. PR K before H. |
+| M10 | Section 1, "Observability". Kernel spans and metrics. `tracing` only via the SDK. Redaction at the layer. `tracing` added in B and wrapped in C. |
+| M11 | Section 3, "Control plane". Daemon is the only registry linker. Desktop and TUI use `hofund-control-client`. `config_schema` and `SignInChallenge`. CLI at `apps/cli` (section 4). PR L before the desktop rework. |
+| M12 | Section 2.4, one row per capability in the review table. |
+| N1 | Section 1, "Same-protocol passthrough". `Completion::Raw`, usage tap, no `model_request.clone()`, `criterion` benches, magpie baseline as a goal. Lands in PR C. |
+| N2 | Section 8. Not required for acceptance. |
+| N3 | Section 5. Mandatory `hofund_kit_*::conformance`, `xtask` check, cancellation, deadline, mid-stream error, redaction, concurrency, per-OS goldens, `fuzz/` targets. |
+| N4 | Section 4, "Lints and feature checks". `deny(missing_docs, unreachable_pub)`, pedantic warn, public-API snapshot, `cargo hack --each-feature`. |
+| N5 | Section 8. The privilege statement is in section 1 so the gap is not silent. |
+| N6 | Section 1, "Kernel `Member`". Router does not depend on `UpstreamProvider`. Daemon adapts. PR C. |
+| N7 | Section 1, "Semver policy". In-tree `#[non_exhaustive]` plus public-API diff. `API = "1"` is the process-host handshake only. |
+| N8 | Section 8. Also the on/off row in section 2.4. |
+| N9 | Section 8. Must merge before Copilot in batch H. GHE lives in `options` until that enum change (section 2.2). |
+| N10 | Workspace version assertion kept in the header. `Wire` rationale stated once (section 1, coupled paragraph points at `ProtocolId`). Types left to PR B are listed in section 1, "Errors". `AccountPool` is removed in favor of the account store. |
