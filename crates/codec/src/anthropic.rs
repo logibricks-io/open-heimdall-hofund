@@ -137,11 +137,18 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
     })
 }
 
+/// Cap used when the client, the route, and the quirk profile all omit one.
+///
+/// Messages requires `max_tokens`. This is the unknown-model fallback from
+/// `internal/gateway/maxoutput.go` (`defaultMaxTokens`), checked 2026-10-25.
+/// A configured `max_output_tokens` or the `messages-default` quirk wins first.
+const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
+
 fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     let max_tokens = request
         .params
         .max_tokens
-        .ok_or(CodecError::MissingField("max_tokens"))?;
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
     let mut object = Object::new();
     object.insert("model".to_owned(), Value::String(request.model.clone()));
     object.insert("max_tokens".to_owned(), Value::from(max_tokens));

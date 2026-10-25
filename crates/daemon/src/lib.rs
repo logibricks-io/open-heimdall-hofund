@@ -189,6 +189,15 @@ fn token_file(path: &Path) -> Result<TokenFile, DaemonError> {
 
 fn router(config: &Config) -> Result<Router, DaemonError> {
     let built = providers(config)?;
+    let caps: BTreeMap<&str, u64> = config
+        .providers
+        .iter()
+        .filter_map(|provider| {
+            provider
+                .max_output_tokens
+                .map(|cap| (provider.id.as_str(), cap))
+        })
+        .collect();
     let mut routes = BTreeMap::new();
     for route in &config.routes {
         let mut list = Vec::new();
@@ -202,6 +211,9 @@ fn router(config: &Config) -> Result<Router, DaemonError> {
             list.push(Hop {
                 provider: Arc::clone(provider),
                 wire_model: upstream.model.clone(),
+                max_output_tokens: upstream
+                    .max_output_tokens
+                    .or_else(|| caps.get(upstream.provider.as_str()).copied()),
             });
         }
         routes.insert(route.model.clone(), list);

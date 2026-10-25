@@ -1,5 +1,7 @@
 //! Shared HTTP execution for the protocol adapters.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
@@ -127,9 +129,11 @@ pub(crate) fn prepare_body(
         crate::billing::strip_billing_header(&mut request);
         request.strip_extensions();
     }
-    let mut body = codec
-        .encode_request(&request)
-        .map_err(|error| ProviderError::decode(error.to_string()))?;
+    let mut body = codec.encode_request(&request).map_err(|error| {
+        // The client omitted or sent something this protocol cannot encode.
+        // That is a bad request, not an upstream failure.
+        ProviderError::status(400, error.to_string())
+    })?;
     if let Some(prepare) = prepare {
         body = prepare(&body).map_err(|error| ProviderError::decode(error.to_string()))?;
     }
@@ -200,6 +204,31 @@ fn warn_unmapped(request: &Request) {
         let Some(name) = item.as_str() else {
             continue;
         };
-        eprintln!("warning: dropped tool `{name}`; it has no mapping onto the upstream protocol");
+        if note_dropped(name) {
+            eprintln!(
+                "warning: dropped tool `{name}`; it has no mapping onto the upstream protocol"
+            );
+        }
+    }
+}
+
+/// `true` the first time `name` is dropped in this process.
+fn note_dropped(name: &str) -> bool {
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut seen = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    seen.insert(name.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::note_dropped;
+
+    #[test]
+    fn a_dropped_tool_is_noted_once() {
+        let name = format!("once-{}", std::process::id());
+        assert!(note_dropped(&name));
+        assert!(!note_dropped(&name));
+        assert!(note_dropped(&format!("{name}-other")));
     }
 }

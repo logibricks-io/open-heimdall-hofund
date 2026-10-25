@@ -475,7 +475,7 @@ async fn success(
                 started,
                 StatusCode::OK,
             );
-            match codec.encode_response(&response) {
+            match codec.encode_response_for(&request, &response) {
                 Ok(bytes) => json_response(StatusCode::OK, bytes),
                 Err(error) => coded(codec.as_ref(), StatusCode::BAD_GATEWAY, &error.to_string()),
             }

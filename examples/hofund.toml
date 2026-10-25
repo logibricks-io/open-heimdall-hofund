@@ -20,6 +20,9 @@ api_key = "replace-me"
 
 # Point base_url at a local mock. A placeholder key must not be paired with
 # a real vendor host, or a check of this file can send traffic.
+# max_output_tokens is optional. It fills max_tokens when the client omits
+# one. A route member can set a smaller cap. Messages still sends 16384 when
+# neither is set. Zero is rejected.
 [[providers]]
 id = "backup"
 kind = "anthropic"

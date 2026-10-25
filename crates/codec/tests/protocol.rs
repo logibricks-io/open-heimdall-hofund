@@ -383,7 +383,7 @@ fn cross_response_drops_protocol_only_usage_fields() {
     assert_eq!(usage.output_tokens, Some(12));
     assert_eq!(usage.cache_read_tokens, Some(4));
     assert!(usage.cache_write_tokens.is_none());
-    assert!(usage.total_tokens.is_none());
+    assert_eq!(usage.total_tokens, Some(37));
     match &via.message.content[0] {
         ContentPart::Thinking(part) => assert!(part.signature.is_none()),
         other => panic!("expected thinking, got {other:?}"),
@@ -583,7 +583,11 @@ fn malformed_input_is_an_error_and_does_not_panic() {
     });
     let mut request = Request::new("m");
     request.messages.push(hofund_ir::Message::new(Role::User));
-    assert!(AnthropicMessages.encode_request(&request).is_err());
+    let encoded = AnthropicMessages
+        .encode_request(&request)
+        .expect("default cap");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    assert_eq!(value["max_tokens"], json!(16_384));
     let mut call = hofund_ir::Message::new(Role::Assistant);
     call.content
         .push(ContentPart::ToolCall(hofund_ir::ToolCallPart {

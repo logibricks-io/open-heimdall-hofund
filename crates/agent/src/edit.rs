@@ -15,6 +15,8 @@ pub(crate) enum FileKind {
 pub(crate) struct Assignment {
     pub key: &'static str,
     pub value: String,
+    /// When set, `value` is JSON text and is written as that value, not as a string.
+    pub raw_json: bool,
 }
 
 pub(crate) fn render(
@@ -83,7 +85,12 @@ pub(crate) fn is_empty_document(kind: FileKind, bytes: &[u8]) -> Result<bool, Ag
 fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
     let mut root = json_root(original)?;
     for assignment in assignments {
-        set_json(&mut root, &split_key(assignment.key), &assignment.value)?;
+        set_json(
+            &mut root,
+            &split_key(assignment.key),
+            &assignment.value,
+            assignment.raw_json,
+        )?;
     }
     pretty_json(&root)
 }
@@ -231,7 +238,12 @@ fn json_get(value: &Value, key: &str) -> Result<Option<String>, AgentError> {
     }
 }
 
-fn set_json(value: &mut Value, path: &[&str], text: &str) -> Result<(), AgentError> {
+fn set_json(
+    value: &mut Value,
+    path: &[&str],
+    text: &str,
+    raw_json: bool,
+) -> Result<(), AgentError> {
     let Some((key, rest)) = path.split_first() else {
         return Err(AgentError::message("empty JSON key"));
     };
@@ -240,7 +252,13 @@ fn set_json(value: &mut Value, path: &[&str], text: &str) -> Result<(), AgentErr
     }
     let object = value.as_object_mut().expect("checked object");
     if rest.is_empty() {
-        object.insert((*key).to_owned(), Value::String(text.to_owned()));
+        let written = if raw_json {
+            serde_json::from_str(text)
+                .map_err(|error| AgentError::message(format!("`{key}` is not JSON: {error}")))?
+        } else {
+            Value::String(text.to_owned())
+        };
+        object.insert((*key).to_owned(), written);
         return Ok(());
     }
     if let Some(child) = object.get(*key) {
@@ -250,7 +268,7 @@ fn set_json(value: &mut Value, path: &[&str], text: &str) -> Result<(), AgentErr
     } else {
         object.insert((*key).to_owned(), Value::Object(Map::new()));
     }
-    set_json(object.get_mut(*key).expect("child"), rest, text)
+    set_json(object.get_mut(*key).expect("child"), rest, text, raw_json)
 }
 
 fn parse_toml(text: &str) -> Result<DocumentMut, AgentError> {
@@ -572,6 +590,7 @@ mod tests {
         let assignments = [Assignment {
             key: "env.ANTHROPIC_BASE_URL",
             value: "http://127.0.0.1:3425".to_owned(),
+            raw_json: false,
         }];
         let bytes = render(FileKind::Json, Some(original), &assignments).expect("render");
         let text = String::from_utf8(bytes).expect("utf8");
@@ -593,6 +612,7 @@ mod tests {
         let assignments = [Assignment {
             key: "model_provider",
             value: "hofund".to_owned(),
+            raw_json: false,
         }];
         let bytes = render(FileKind::Toml, Some(original), &assignments).expect("render");
         let text = String::from_utf8(bytes).expect("utf8");
@@ -616,14 +636,17 @@ mod tests {
             Assignment {
                 key: "GEMINI_API_KEY",
                 value: "local-token".to_owned(),
+                raw_json: false,
             },
             Assignment {
                 key: "GOOGLE_GEMINI_BASE_URL",
                 value: "http://127.0.0.1:3425".to_owned(),
+                raw_json: false,
             },
             Assignment {
                 key: "ODD",
                 value: "a b#c".to_owned(),
+                raw_json: false,
             },
         ];
         let bytes = render(FileKind::Env, Some(original), &assignments).expect("render");

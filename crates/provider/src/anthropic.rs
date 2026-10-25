@@ -55,17 +55,14 @@ impl Provider for Anthropic {
         mut request: Request,
         inbound_protocol: &str,
     ) -> Result<CountOutcome, ProviderError> {
-        if request.params.max_tokens.is_none() {
-            request.params.max_tokens = Some(16);
-        }
         request.stream = false;
-        let body = http::prepare_body(
+        let body = omit_max_tokens(http::prepare_body(
             &self.upstream,
             &AnthropicMessages,
             request,
             None,
             inbound_protocol,
-        )?;
+        )?);
         let url = format!("{}/count_tokens", http::messages_url(&self.upstream));
         let response = http::post_json(&self.upstream, &url, body).await?;
         let status = response.status().as_u16();
@@ -87,6 +84,22 @@ impl Provider for Anthropic {
         )
         .await
     }
+}
+
+/// The count endpoint rejects `max_tokens`. Create still requires it, so the
+/// codec fills a cap and this removes the field afterwards.
+///
+/// Allowed count fields, checked 2026-10-25:
+/// <https://platform.claude.com/docs/en/build-with-claude/token-counting>.
+fn omit_max_tokens(body: Vec<u8>) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body;
+    };
+    object.remove("max_tokens");
+    serde_json::to_vec(&value).unwrap_or(body)
 }
 
 fn classify_count(status: u16, bytes: &[u8]) -> Result<CountOutcome, ProviderError> {

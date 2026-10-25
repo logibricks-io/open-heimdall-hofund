@@ -208,7 +208,7 @@ const GEMINI: Description = Description {
     }),
 };
 
-/// OpenCode v2 global config.
+/// OpenCode global config.
 ///
 /// The documented global path is `~/.config/opencode/opencode.json` or
 /// `opencode.jsonc`, including on Windows (the docs say `~/.config`, not
@@ -216,17 +216,19 @@ const GEMINI: Description = Description {
 /// edited. Otherwise `opencode.json` is edited or created. A JSONC comment
 /// does not survive apply; revert puts the original bytes back.
 ///
-/// The v2 shape is `providers.<id>.package` plus `settings`, not the older
-/// `provider.<id>.options` / `npm` shape. The package is
-/// `@opencode/ai/providers/openai-compatible`. `settings.baseURL` includes
-/// `/v1` because the package appends `/chat/completions`. `settings.apiKey`
-/// is the gateway token. No model id is invented. A string `model` is compared
-/// with route names and is not rewritten. v2 documents `~/.config` and does
-/// not name an override (checked 2026-10-25). When `XDG_CONFIG_HOME` is set
-/// this adapter uses `$XDG_CONFIG_HOME/opencode`. Unset, the path stays
-/// `~/.config/opencode`, including on Windows.
+/// The provider entry is `provider.<id>` with `npm`
+/// `@ai-sdk/openai-compatible`, `options.baseURL`, `options.apiKey`, and
+/// `models`. `options.baseURL` includes `/v1` because that package appends
+/// `/chat/completions`. No model id is invented, so `models` is `{}`. A
+/// string `model` is compared with route names and is not rewritten. The
+/// v2 docs describe `providers` plus `package` and `settings`; this adapter
+/// follows the current providers page instead. Both pages document
+/// `~/.config` and do not name an override (checked 2026-10-25). When
+/// `XDG_CONFIG_HOME` is set this adapter uses `$XDG_CONFIG_HOME/opencode`.
+/// Unset, the path stays `~/.config/opencode`, including on Windows.
 ///
-/// Sources: <https://opencode.ai/v2/docs/config/>,
+/// Sources: <https://opencode.ai/docs/providers/>,
+/// <https://opencode.ai/docs/config/>. The v2 shape is
 /// <https://opencode.ai/v2/docs/providers/>.
 const OPENCODE: Description = Description {
     id: "opencode",
@@ -249,23 +251,28 @@ const OPENCODE: Description = Description {
     sets: &[
         Set {
             file: "config",
-            key: "providers.hofund.name",
+            key: "provider.hofund.name",
             slot: Slot::Literal("hofund"),
         },
         Set {
             file: "config",
-            key: "providers.hofund.package",
-            slot: Slot::Literal("@opencode/ai/providers/openai-compatible"),
+            key: "provider.hofund.npm",
+            slot: Slot::Literal("@ai-sdk/openai-compatible"),
         },
         Set {
             file: "config",
-            key: "providers.hofund.settings.baseURL",
+            key: "provider.hofund.options.baseURL",
             slot: Slot::V1,
         },
         Set {
             file: "config",
-            key: "providers.hofund.settings.apiKey",
+            key: "provider.hofund.options.apiKey",
             slot: Slot::Token,
+        },
+        Set {
+            file: "config",
+            key: "provider.hofund.models",
+            slot: Slot::Json("{}"),
         },
     ],
     model: Some(ModelKey {
@@ -308,6 +315,8 @@ enum Slot {
     V1,
     Token,
     Literal(&'static str),
+    /// JSON text written as a value, not as a string.
+    Json(&'static str),
 }
 
 struct Described {
@@ -620,6 +629,7 @@ fn assignments_for(sets: Vec<&Set>, target: &GatewayTarget) -> Vec<Assignment> {
         .map(|set| Assignment {
             key: set.key,
             value: slot_value(&set.slot, target),
+            raw_json: matches!(set.slot, Slot::Json(_)),
         })
         .collect()
 }
@@ -629,7 +639,7 @@ fn slot_value(slot: &Slot, target: &GatewayTarget) -> String {
         Slot::Origin => origin(&target.base_url),
         Slot::V1 => format!("{}/v1", origin(&target.base_url)),
         Slot::Token => target.token.clone(),
-        Slot::Literal(text) => (*text).to_owned(),
+        Slot::Literal(text) | Slot::Json(text) => (*text).to_owned(),
     }
 }
 
@@ -744,7 +754,12 @@ fn merge_owned_keys(
         };
         if current_value == wrote_value {
             match original {
-                Some(value) => restore.push(Assignment { key, value }),
+                Some(value) => restore.push(Assignment {
+                    key,
+                    raw_json: value.trim_start().starts_with('{')
+                        || value.trim_start().starts_with('['),
+                    value,
+                }),
                 None => remove.push(key),
             }
         } else {

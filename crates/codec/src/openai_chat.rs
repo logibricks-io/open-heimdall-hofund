@@ -1342,7 +1342,13 @@ fn encode_usage(usage: &Usage) -> Value {
     let mut object = Object::new();
     insert_u64(&mut object, "prompt_tokens", usage.input_tokens);
     insert_u64(&mut object, "completion_tokens", usage.output_tokens);
-    insert_u64(&mut object, "total_tokens", usage.total_tokens);
+    let total = usage
+        .total_tokens
+        .or(match (usage.input_tokens, usage.output_tokens) {
+            (Some(input), Some(output)) => Some(input.saturating_add(output)),
+            _ => None,
+        });
+    insert_u64(&mut object, "total_tokens", total);
     if let Some(cached) = usage.cache_read_tokens {
         object.insert(
             "prompt_tokens_details".to_owned(),

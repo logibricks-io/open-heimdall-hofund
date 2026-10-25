@@ -35,6 +35,11 @@ impl Extensions {
         self.0.insert(key.into(), value);
     }
 
+    /// Removes `key` and returns the previous value.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        self.0.remove(key)
+    }
+
     /// Removes every field.
     pub fn clear(&mut self) {
         self.0.clear();

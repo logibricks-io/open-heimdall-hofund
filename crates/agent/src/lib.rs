@@ -34,10 +34,10 @@
 //!   and the auth-type source in
 //!   <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.ts>.
 //! - OpenCode: `~/.config/opencode/opencode.json` (or `opencode.jsonc` when
-//!   that file already exists), using the v2 `providers` object.
-//!   `XDG_CONFIG_HOME` replaces `~/.config` when it is set.
-//!   <https://opencode.ai/v2/docs/config/>,
-//!   <https://opencode.ai/v2/docs/providers/>.
+//!   that file already exists), `provider.hofund` with npm
+//!   `@ai-sdk/openai-compatible`. `XDG_CONFIG_HOME` replaces `~/.config` when
+//!   it is set. <https://opencode.ai/docs/config/>,
+//!   <https://opencode.ai/docs/providers/>.
 
 use std::ffi::OsString;
 use std::path::PathBuf;

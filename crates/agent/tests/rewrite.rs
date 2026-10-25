@@ -180,9 +180,13 @@ fn opencode_without_jsonc_creates_json() {
     assert!(json.is_file());
     assert!(!jsonc.exists());
     let text = read(&json);
-    assert!(text.contains("@opencode/ai/providers/openai-compatible"));
-    assert!(text.contains("http://127.0.0.1:3425/v1"));
-    assert!(text.contains("local-token"));
+    let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let provider = &value["provider"]["hofund"];
+    assert_eq!(provider["npm"], "@ai-sdk/openai-compatible");
+    assert_eq!(provider["options"]["baseURL"], "http://127.0.0.1:3425/v1");
+    assert_eq!(provider["options"]["apiKey"], "local-token");
+    assert!(provider["models"].is_object());
+    assert!(value.get("providers").is_none());
 }
 
 #[test]

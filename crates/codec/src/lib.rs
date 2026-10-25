@@ -9,6 +9,7 @@
 //! vendor capability gaps belong in `quirks`.
 
 mod anthropic;
+mod custom_input;
 mod error;
 mod generative;
 mod jsonutil;
@@ -62,6 +63,24 @@ pub trait Codec: Send + Sync {
     ///
     /// Returns [`CodecError`] when the response role or content cannot be represented.
     fn encode_response(&self, response: &Response) -> Result<Vec<u8>, CodecError>;
+
+    /// Encodes a response for the client that sent `request`.
+    ///
+    /// The default ignores the request. A codec that has to restore names the
+    /// client used, such as a Responses namespace flattened on the way out,
+    /// overrides this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError`] when the response role or content cannot be represented.
+    fn encode_response_for(
+        &self,
+        request: &Request,
+        response: &Response,
+    ) -> Result<Vec<u8>, CodecError> {
+        let _ = request;
+        self.encode_response(response)
+    }
 
     /// Decodes a complete SSE byte buffer.
     ///
