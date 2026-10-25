@@ -89,16 +89,19 @@ the process.
 Record the choice in `docs/magpie-comparison.md` (magpie approach, adopt or
 redesign, hofund approach, rationale). Update that table in the same change
 that adds or changes the subsystem. The name of the upstream project belongs
-in that document and in the acknowledgement files, not in gateway or router
-code, and not as hofund branding.
+in that document, in `docs/coverage/`, and in the acknowledgement files, not
+in gateway or router code, and not as hofund branding.
 
 ## Feature parity
 
 hofund reimplements every core capability of yetone/magpie in Rust, and each
 one should be better than the original where that original is unsound. The
 matrix is [docs/feature-parity.md](docs/feature-parity.md). The execution
-order is [docs/roadmap.md](docs/roadmap.md). Stage 2 (auxiliary) waits until
-stage 1 has merged.
+order is [docs/roadmap.md](docs/roadmap.md). Item-by-item inventories are
+[docs/coverage/agents.md](docs/coverage/agents.md),
+[docs/coverage/providers.md](docs/coverage/providers.md), and
+[docs/coverage/subscriptions.md](docs/coverage/subscriptions.md). Stage 2
+(auxiliary) waits until stage 1 has merged.
 
 Every phase pull request updates the matrix rows it touches: status,
 evidence, and why the hofund behavior is better. The adopt-or-redesign

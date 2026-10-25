@@ -90,8 +90,9 @@ Official level lists, checked 2026-10-25:
 
 ## Provider presets
 
-Read from the upstream preset list at commit `5b2b3d3f50959735403dff6b77a85eec65772218`
-(`internal/provider/presets.go`, `azure.go`, `auth` headers in `test.go`).
+Read from the upstream preset list at commit `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`
+(`internal/provider/presets.go` is byte-identical to `5b2b3d3f50959735403dff6b77a85eec65772218`;
+also `azure.go` and the auth headers in `test.go`).
 Official references, checked 2026-10-25:
 
 - Responses usage: <https://platform.openai.com/docs/api-reference/responses/object>
