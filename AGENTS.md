@@ -35,7 +35,8 @@ Present:
 - ordered model routes and failover before the first stream event (`router`)
 - an axum HTTP server (`gateway`), TOML configuration (`config`), a bearer
   token file (`secrets`), SQLite usage rows (`usage`), and the `hofund`
-  commands `serve`, `config check`, `token show`, `token rotate`, and `usage`
+  commands `serve`, `config check`, `token show`, `token rotate`, `usage`,
+  `provider models`, and `provider test`
 - coding-agent config adapters (`agent`) for Claude Code, Codex CLI, Gemini
   CLI, and OpenCode, with `hofund agent list`, `hofund agent connect`,
   `hofund agent disconnect`, and `hofund agent status`

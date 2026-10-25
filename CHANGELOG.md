@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `hofund provider models <id>` lists the configured protocol, or the
+  catalog when a preset has no live list. A later list prints ids that
+  were added or removed. `refresh_every` (at least 10 minutes) repeats
+  the fetch from `hofund serve` and the menu-bar app. `hofund provider
+  test <id>` sends one minimal request per protocol and writes a usage
+  row when a request was sent. Verified with mocks only. Routes are not
+  auto-included, and endpoint detection is not implemented.
+
 ### Fixed
 
 - Gemini CLI connect writes `model.name`. A string `model` is moved there.

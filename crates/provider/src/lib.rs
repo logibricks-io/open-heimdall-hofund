@@ -13,9 +13,11 @@ mod billing;
 mod error;
 mod generative;
 mod http;
+mod list;
 mod mantle;
 mod openai_compat;
 mod presets;
+mod probe;
 mod sigv4;
 mod stream;
 mod vertex;
@@ -26,8 +28,13 @@ pub use bedrock::Bedrock;
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;
 pub use http::{Credential, Endpoint};
+pub use list::{IdDiff, LIST_RETRY, ListQuery, MIN_REFRESH, diff_ids, list_models, refresh_due};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
-pub use presets::{PresetError, Resolve, Resolved, Wire, catalog_commit, resolve};
+pub use presets::{
+    ModelListKind, PresetError, Resolve, Resolved, Wire, catalog_commit, model_list_kind,
+    probe_wires, resolve, wire_name,
+};
+pub use probe::{ProbeReport, probe_inbound, probe_request, run_probe};
 pub use vertex::Vertex;
 
 use std::pin::Pin;

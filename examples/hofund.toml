@@ -23,6 +23,10 @@ api_key = "replace-me"
 # max_output_tokens is optional. It fills max_tokens when the client omits
 # one. A route member can set a smaller cap. Messages still sends 16384 when
 # neither is set. Zero is rejected.
+# refresh_every asks `hofund serve` to repeat the model list. The shortest
+# value is 10m. off, never, and an empty value fetch only on
+# `hofund provider models`. A catalog preset is not fetched.
+# refresh_every = "6h"
 # A preset fills the endpoint from crates/provider/presets.toml.
 # Omit kind. protocol is chat, responses, messages, or generative.
 # preset = "google" speaks generateContent. protocol = "chat" on that

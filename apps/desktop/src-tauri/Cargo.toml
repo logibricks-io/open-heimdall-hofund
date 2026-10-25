@@ -18,7 +18,7 @@ hofund-agent = { workspace = true }
 hofund-daemon = { workspace = true }
 serde = { version = "1.0.229", features = ["derive"] }
 tauri = { version = "2.12.5", features = ["tray-icon", "image-png", "custom-protocol"] }
-tokio = { version = "1.54.1", features = ["sync"] }
+tokio = { version = "1.54.1", features = ["rt", "sync"] }
 
 [build-dependencies]
 tauri-build = { version = "2.7.4", features = [] }

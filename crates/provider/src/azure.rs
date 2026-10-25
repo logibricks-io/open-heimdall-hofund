@@ -12,8 +12,8 @@
 //! The key is the `api-key` header, never `Authorization`
 //! (<https://learn.microsoft.com/en-us/azure/ai-services/openai/reference>).
 //!
-//! The gateway does not call this on a schedule. That refresh is the live
-//! model list.
+//! `hofund serve` calls this when the provider sets `refresh_every`. That
+//! schedule is the live model list.
 
 use std::time::Duration;
 

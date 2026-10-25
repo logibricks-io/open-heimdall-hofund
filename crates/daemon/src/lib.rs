@@ -22,6 +22,13 @@ use hofund_router::{FailoverPolicy, Hop, Router};
 use hofund_secrets::TokenFile;
 use hofund_usage::Ledger;
 
+mod lists;
+
+pub use lists::{
+    TestReport, provider_models, provider_models_blocking, provider_test, provider_test_blocking,
+    refresh_scheduled, spawn_model_refresh,
+};
+
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
 pub struct DaemonError {
@@ -167,7 +174,9 @@ pub async fn start(path: &Path) -> Result<Running, DaemonError> {
 pub async fn serve(path: &Path) -> Result<(), DaemonError> {
     let running = start(path).await?;
     eprintln!("listening on http://{}", running.local_addr);
+    let refresh = spawn_model_refresh(path.to_path_buf());
     let _ = tokio::signal::ctrl_c().await;
+    refresh.abort();
     running.shutdown().await;
     Ok(())
 }
@@ -232,60 +241,64 @@ fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, Dae
     let mut built = BTreeMap::new();
     for provider in &config.providers {
         let planned = plan(provider)?;
-        let mut endpoint = Endpoint::new(provider.id.clone(), planned.base_url);
-        endpoint.api_key = hofund_secrets::resolve(&provider.api_key).map_err(show)?;
-        endpoint.credential = planned.credential;
-        endpoint.headers = provider
-            .headers
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        if let Some(profile) = &provider.quirks {
-            endpoint.quirks = Some(named(profile).ok_or_else(|| {
-                DaemonError::new(format!(
-                    "provider `{}` names unknown quirk profile `{profile}`",
-                    provider.id
-                ))
-            })?);
-        }
-        let adapter: Arc<dyn Provider> = match planned.wire {
-            Wire::Chat => {
-                Arc::new(OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).map_err(show)?)
-            }
-            Wire::Responses => {
-                Arc::new(OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).map_err(show)?)
-            }
-            Wire::Messages => Arc::new(Anthropic::new(endpoint).map_err(show)?),
-            Wire::Generative => Arc::new(Generative::new(endpoint).map_err(show)?),
-            Wire::Vertex => Arc::new(
-                Vertex::new(endpoint, &provider.credentials, &provider.impersonate)
-                    .map_err(show)?,
-            ),
-            Wire::Converse => {
-                let access_key_id =
-                    hofund_secrets::resolve(&provider.access_key_id).map_err(show)?;
-                let secret_access_key =
-                    hofund_secrets::resolve(&provider.secret_access_key).map_err(show)?;
-                let session_token = if provider.session_token.is_empty() {
-                    String::new()
-                } else {
-                    hofund_secrets::resolve(&provider.session_token).map_err(show)?
-                };
-                Arc::new(
-                    Bedrock::new(
-                        endpoint,
-                        provider.region.as_deref().unwrap_or(""),
-                        &access_key_id,
-                        &secret_access_key,
-                        &session_token,
-                    )
-                    .map_err(show)?,
-                )
-            }
-        };
+        let adapter = build_adapter(provider, &planned)?;
         built.insert(provider.id.clone(), adapter);
     }
     Ok(built)
+}
+
+fn build_adapter(
+    provider: &hofund_config::Provider,
+    planned: &Planned,
+) -> Result<Arc<dyn Provider>, DaemonError> {
+    let mut endpoint = Endpoint::new(provider.id.clone(), planned.base_url.clone());
+    endpoint.api_key = hofund_secrets::resolve(&provider.api_key).map_err(show)?;
+    endpoint.credential = planned.credential;
+    endpoint.headers = provider
+        .headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    if let Some(profile) = &provider.quirks {
+        endpoint.quirks = Some(named(profile).ok_or_else(|| {
+            DaemonError::new(format!(
+                "provider `{}` names unknown quirk profile `{profile}`",
+                provider.id
+            ))
+        })?);
+    }
+    let adapter: Arc<dyn Provider> = match planned.wire {
+        Wire::Chat => Arc::new(OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).map_err(show)?),
+        Wire::Responses => {
+            Arc::new(OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).map_err(show)?)
+        }
+        Wire::Messages => Arc::new(Anthropic::new(endpoint).map_err(show)?),
+        Wire::Generative => Arc::new(Generative::new(endpoint).map_err(show)?),
+        Wire::Vertex => Arc::new(
+            Vertex::new(endpoint, &provider.credentials, &provider.impersonate).map_err(show)?,
+        ),
+        Wire::Converse => {
+            let access_key_id = hofund_secrets::resolve(&provider.access_key_id).map_err(show)?;
+            let secret_access_key =
+                hofund_secrets::resolve(&provider.secret_access_key).map_err(show)?;
+            let session_token = if provider.session_token.is_empty() {
+                String::new()
+            } else {
+                hofund_secrets::resolve(&provider.session_token).map_err(show)?
+            };
+            Arc::new(
+                Bedrock::new(
+                    endpoint,
+                    provider.region.as_deref().unwrap_or(""),
+                    &access_key_id,
+                    &secret_access_key,
+                    &session_token,
+                )
+                .map_err(show)?,
+            )
+        }
+    };
+    Ok(adapter)
 }
 
 struct Planned {

@@ -174,6 +174,96 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
     Err(unavailable(preset))
 }
 
+/// Every protocol `request` can be probed on.
+///
+/// An explicit [`Resolve::wire`] returns that one protocol. With no wire, the
+/// protocol [`resolve`] would pick comes first, then every other protocol the
+/// preset has a URL for. Converse is included only when `wire` asks for it:
+/// that path signs with AWS keys, not the API key.
+///
+/// # Errors
+///
+/// Returns [`PresetError`] when no protocol can be built. The message is the
+/// one [`resolve`] returns for `request`.
+pub fn probe_wires(request: &Resolve<'_>) -> Result<Vec<Resolved>, PresetError> {
+    let primary = resolve(request)?;
+    if request.wire.is_some() {
+        return Ok(vec![primary]);
+    }
+    let mut out = vec![primary.clone()];
+    for wire in [
+        Wire::Chat,
+        Wire::Responses,
+        Wire::Messages,
+        Wire::Generative,
+    ] {
+        if wire == primary.wire {
+            continue;
+        }
+        let one = Resolve {
+            id: request.id,
+            region: request.region,
+            wire: Some(wire),
+            base_url: request.base_url,
+            project: request.project,
+            location: request.location,
+        };
+        if let Ok(resolved) = resolve(&one) {
+            out.push(resolved);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a provider's model list is asked live or read from the catalog.
+///
+/// A preset with `no_list` and no region that sets `lists` returns the
+/// recorded ids. `google-vertex` returns [`crate::Vertex::models_for`].
+/// Anything else is asked at the upstream. A provider with no preset is live.
+///
+/// # Errors
+///
+/// Returns [`PresetError`] when `preset_id` is not in the catalog, or the
+/// region is not on that preset.
+pub fn model_list_kind(
+    preset_id: Option<&str>,
+    region: Option<&str>,
+    location: &str,
+) -> Result<ModelListKind, PresetError> {
+    let Some(preset_id) = preset_id.filter(|id| !id.is_empty()) else {
+        return Ok(ModelListKind::Live);
+    };
+    let catalog = catalog();
+    let (preset, alias_region) = find(catalog, preset_id)?;
+    if preset.id == "google-vertex" {
+        return Ok(ModelListKind::Catalog(crate::vertex::Vertex::models_for(
+            location,
+        )));
+    }
+    let region_id = region.or(alias_region);
+    let region = match region_id {
+        Some(region_id) => Some(region_of(preset, region_id)?),
+        None => None,
+    };
+    if region.is_some_and(|region| region.lists) || !preset.no_list {
+        return Ok(ModelListKind::Live);
+    }
+    let ids = region
+        .map(|region| region.models.clone())
+        .filter(|ids| !ids.is_empty())
+        .unwrap_or_else(|| preset.models.clone());
+    Ok(ModelListKind::Catalog(ids))
+}
+
+/// Where [`model_list_kind`] says the ids come from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelListKind {
+    /// Ask the upstream.
+    Live,
+    /// Recorded ids. This preset has no list to ask.
+    Catalog(Vec<String>),
+}
+
 fn finish(preset: &Preset, wire: Wire, base_url: String) -> Resolved {
     Resolved {
         credential: credential(&preset.id, wire, &base_url),
@@ -364,7 +454,9 @@ fn host_of(url: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn wire_name(wire: Wire) -> &'static str {
+/// Short name of a protocol, used in command output.
+#[must_use]
+pub fn wire_name(wire: Wire) -> &'static str {
     match wire {
         Wire::Chat => "chat",
         Wire::Responses => "responses",
@@ -872,6 +964,116 @@ mod tests {
         })
         .expect_err("missing");
         assert!(error.to_string().contains("unknown preset"));
+    }
+
+    #[test]
+    fn every_preset_either_probes_or_explains_why_it_cannot() {
+        let mut live = 0;
+        let mut blocked = 0;
+        for preset in &catalog().preset {
+            let mut request = Resolve {
+                id: &preset.id,
+                region: None,
+                wire: None,
+                base_url: "",
+                project: "",
+                location: "",
+            };
+            let wires = match super::probe_wires(&request) {
+                Ok(wires) => wires,
+                Err(error) => {
+                    let message = error.to_string();
+                    if message.contains("base_url") {
+                        request.base_url = "http://127.0.0.1:9/v1";
+                        super::probe_wires(&request).unwrap_or_else(|error| {
+                            panic!("{} with a base URL: {error}", preset.id)
+                        })
+                    } else if message.contains("project") {
+                        request.project = "my-project";
+                        super::probe_wires(&request)
+                            .unwrap_or_else(|error| panic!("{} with a project: {error}", preset.id))
+                    } else {
+                        assert!(
+                            message.contains("classifies")
+                                || message.contains("forwards")
+                                || message.contains("no endpoint"),
+                            "{}: {message}",
+                            preset.id
+                        );
+                        blocked += 1;
+                        continue;
+                    }
+                }
+            };
+            assert!(!wires.is_empty(), "{}", preset.id);
+            live += 1;
+        }
+        assert_eq!(live, 52);
+        assert_eq!(blocked, 6);
+    }
+
+    #[test]
+    fn an_explicit_protocol_is_the_only_probe_and_openai_speaks_two() {
+        let openai = super::probe_wires(&Resolve {
+            id: "openai",
+            region: None,
+            wire: None,
+            base_url: "",
+            project: "",
+            location: "",
+        })
+        .expect("openai");
+        assert_eq!(
+            openai.iter().map(|wire| wire.wire).collect::<Vec<_>>(),
+            [Wire::Chat, Wire::Responses]
+        );
+        let chat = super::probe_wires(&Resolve {
+            id: "openai",
+            region: None,
+            wire: Some(Wire::Chat),
+            base_url: "",
+            project: "",
+            location: "",
+        })
+        .expect("chat");
+        assert_eq!(chat.len(), 1);
+        let converse = super::probe_wires(&Resolve {
+            id: "bedrock",
+            region: None,
+            wire: None,
+            base_url: "",
+            project: "",
+            location: "",
+        })
+        .expect("bedrock");
+        assert!(converse.iter().all(|wire| wire.wire != Wire::Converse));
+    }
+
+    #[test]
+    fn catalog_lists_stay_catalog_and_a_live_region_is_asked() {
+        let vertex = super::model_list_kind(Some("google-vertex"), None, "global").expect("vertex");
+        let super::ModelListKind::Catalog(ids) = vertex else {
+            panic!("vertex is a catalog");
+        };
+        assert!(ids.iter().any(|id| id == "gemini-2.5-flash"));
+        let coding =
+            super::model_list_kind(Some("volcengine"), Some("coding"), "").expect("coding");
+        let super::ModelListKind::Catalog(ids) = coding else {
+            panic!("coding plan is a catalog");
+        };
+        assert!(ids.iter().any(|id| id == "ark-code-latest"));
+        assert!(matches!(
+            super::model_list_kind(Some("volcengine"), Some("api"), "").expect("api"),
+            super::ModelListKind::Live
+        ));
+        assert!(matches!(
+            super::model_list_kind(Some("openai"), None, "").expect("openai"),
+            super::ModelListKind::Live
+        ));
+        assert!(matches!(
+            super::model_list_kind(None, None, "").expect("kind"),
+            super::ModelListKind::Live
+        ));
     }
 
     fn assert_url(owner: &str, url: &str) {

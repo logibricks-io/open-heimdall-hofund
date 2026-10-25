@@ -8,8 +8,8 @@ use std::process::ExitCode;
 
 use hofund_agent::{GatewayTarget, Session, adapters, find};
 use hofund_daemon::{
-    check, local_gateway, route_models, serve_blocking, token_rotate, token_show, usage_report,
-    user_config_path,
+    check, local_gateway, provider_models_blocking, provider_test_blocking, route_models,
+    serve_blocking, token_rotate, token_show, usage_report, user_config_path,
 };
 
 fn main() -> ExitCode {
@@ -35,6 +35,22 @@ fn main() -> ExitCode {
         Command::TokenShow => token_show(&config).map(|token| println!("{token}")),
         Command::TokenRotate => return finish(rotate_token(&config)),
         Command::Usage => usage_report(&config).map(|table| print!("{table}")),
+        Command::ProviderModels { id } => {
+            return finish(provider_models_blocking(&config, &id).map(|text| print!("{text}")));
+        }
+        Command::ProviderTest { id } => {
+            return match provider_test_blocking(&config, &id) {
+                Ok(report) => {
+                    print!("{}", report.text);
+                    if report.ok {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(1)
+                    }
+                }
+                Err(error) => finish(Err(error)),
+            };
+        }
         Command::AgentList => {
             print_agent_list();
             return ExitCode::SUCCESS;
@@ -61,6 +77,8 @@ enum Command {
     TokenShow,
     TokenRotate,
     Usage,
+    ProviderModels { id: String },
+    ProviderTest { id: String },
     AgentList,
     AgentConnect { name: String, dry_run: bool },
     AgentDisconnect { name: String, force: bool },
@@ -76,6 +94,9 @@ enum HelpTopic {
     TokenShow,
     TokenRotate,
     Usage,
+    Provider,
+    ProviderModels,
+    ProviderTest,
     Agent,
     AgentList,
     AgentConnect,
@@ -127,6 +148,12 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["token", "show"] => Command::TokenShow,
         ["token", "rotate"] => Command::TokenRotate,
         ["usage"] => Command::Usage,
+        ["provider", "models", id] => Command::ProviderModels {
+            id: (*id).to_owned(),
+        },
+        ["provider", "test", id] => Command::ProviderTest {
+            id: (*id).to_owned(),
+        },
         ["agent", "list"] => Command::AgentList,
         ["agent", "connect", name] => Command::AgentConnect {
             name: (*name).to_owned(),
@@ -157,6 +184,9 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["token", "rotate", ..] => HelpTopic::TokenRotate,
         ["token", ..] => HelpTopic::Token,
         ["usage", ..] => HelpTopic::Usage,
+        ["provider", "models", ..] => HelpTopic::ProviderModels,
+        ["provider", "test", ..] => HelpTopic::ProviderTest,
+        ["provider", ..] => HelpTopic::Provider,
         ["agent", "list", ..] => HelpTopic::AgentList,
         ["agent", "connect", ..] => HelpTopic::AgentConnect,
         ["agent", "disconnect", ..] => HelpTopic::AgentDisconnect,
@@ -182,6 +212,9 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::TokenShow => TOKEN_SHOW_HELP,
         HelpTopic::TokenRotate => TOKEN_ROTATE_HELP,
         HelpTopic::Usage => USAGE_HELP,
+        HelpTopic::Provider => PROVIDER_HELP,
+        HelpTopic::ProviderModels => PROVIDER_MODELS_HELP,
+        HelpTopic::ProviderTest => PROVIDER_TEST_HELP,
         HelpTopic::Agent => AGENT_HELP,
         HelpTopic::AgentList => AGENT_LIST_HELP,
         HelpTopic::AgentConnect => AGENT_CONNECT_HELP,
@@ -207,6 +240,8 @@ commands:
   token show                      print the bearer token
   token rotate                    replace the bearer token
   usage                           print the usage table
+  provider models <id>            list one provider's models
+  provider test <id>              send one minimal request per protocol
   agent list                      list coding-agent adapters
   agent connect <name> [--dry-run]
   agent disconnect <name> [--force]
@@ -259,6 +294,36 @@ const USAGE_HELP: &str = "\
 usage: hofund usage [--config PATH]
 
 Print one row per recorded request, with local time, plus a totals line.
+";
+
+const PROVIDER_HELP: &str = "\
+usage: hofund provider models <id> [--config PATH]
+       hofund provider test <id> [--config PATH]
+
+`models` lists the protocol the provider is configured to speak. A preset
+with no live list prints its catalog. Added and removed ids are printed
+only after a previous successful list. The cache is hofund-models.json
+beside the config file. `GET /v1/models` is unchanged: it lists route ids.
+
+`test` sends one request, the user text hi and max_tokens 16, on every
+protocol that provider can speak. A request that was sent is a usage row.
+The command exits 1 when any protocol fails, after printing every line.
+";
+
+const PROVIDER_MODELS_HELP: &str = "\
+usage: hofund provider models <id> [--config PATH]
+
+List the models for <id>. The id is the provider id in the config, not
+the preset name. `refresh_every` on that provider (10m or longer) makes
+`hofund serve` repeat the fetch. A catalog preset is not fetched.
+";
+
+const PROVIDER_TEST_HELP: &str = "\
+usage: hofund provider test <id> [--config PATH]
+
+Probe every protocol <id> can speak. The model is the first id from the
+last successful list, or from the catalog. A live provider with no cache
+is listed once first. Nothing is sent when the preset has no endpoint.
 ";
 
 const AGENT_HELP: &str = "\
@@ -563,6 +628,28 @@ mod tests {
         assert_eq!(
             parse(&words(&["agent", "status"])).expect("parse").1,
             Command::AgentStatus
+        );
+        assert_eq!(
+            parse(&words(&["provider", "models", "openai"]))
+                .expect("parse")
+                .1,
+            Command::ProviderModels {
+                id: "openai".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse(&words(&["provider", "test", "openai"]))
+                .expect("parse")
+                .1,
+            Command::ProviderTest {
+                id: "openai".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse(&words(&["help", "provider", "test"]))
+                .expect("parse")
+                .1,
+            Command::Help(HelpTopic::ProviderTest)
         );
         assert_eq!(
             parse(&words(&[])).expect("parse").0,

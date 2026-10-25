@@ -98,6 +98,11 @@ pub struct Provider {
     /// AWS session token for Bedrock Converse. Empty for a long-lived key.
     /// `env:NAME` reads that variable.
     pub session_token: String,
+    /// How often `hofund serve` fetches this provider's model list.
+    ///
+    /// `None` fetches only when `hofund provider models` is run. The shortest
+    /// interval is 10 minutes.
+    pub refresh_every: Option<std::time::Duration>,
 }
 
 /// Protocol family of one provider.
@@ -315,6 +320,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         }
         let vertex = vertex_of(&provider)?;
         let aws = aws_of(&provider)?;
+        let refresh_every = parse_refresh_every(&provider.id, &provider.refresh_every)?;
         providers.push(Provider {
             id: provider.id,
             kind: source.kind,
@@ -333,6 +339,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             access_key_id: aws.access_key_id,
             secret_access_key: aws.secret_access_key,
             session_token: aws.session_token,
+            refresh_every,
         });
     }
     let mut models = BTreeSet::new();
@@ -738,6 +745,75 @@ struct RawProvider {
     secret_access_key: String,
     #[serde(default)]
     session_token: String,
+    #[serde(default)]
+    refresh_every: String,
+}
+
+/// Reads a model-list interval.
+///
+/// `30m`, `6h`, `1d`, and `1h30m` are accepted. Empty, `off`, `never`, `no`,
+/// `none`, `0`, and `-` mean no schedule. Anything shorter than 10 minutes is
+/// rejected.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when `text` is not one of those forms, or it is
+/// shorter than 10 minutes.
+pub fn parse_refresh_every(
+    provider_id: &str,
+    text: &str,
+) -> Result<Option<std::time::Duration>, ConfigError> {
+    let text = text.trim().to_ascii_lowercase();
+    if matches!(
+        text.as_str(),
+        "" | "off" | "never" | "no" | "none" | "0" | "-"
+    ) {
+        return Ok(None);
+    }
+    let mut rest = text.as_str();
+    let mut total = std::time::Duration::ZERO;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if digits == 0 {
+            return Err(refresh_error(provider_id, &text));
+        }
+        let count: u64 = rest[..digits]
+            .parse()
+            .map_err(|_| refresh_error(provider_id, &text))?;
+        rest = &rest[digits..];
+        let unit = rest
+            .chars()
+            .next()
+            .ok_or_else(|| refresh_error(provider_id, &text))?;
+        rest = &rest[unit.len_utf8()..];
+        let unit = match unit {
+            'd' => std::time::Duration::from_secs(24 * 60 * 60),
+            'h' => std::time::Duration::from_secs(60 * 60),
+            'm' => std::time::Duration::from_secs(60),
+            's' => std::time::Duration::from_secs(1),
+            _ => return Err(refresh_error(provider_id, &text)),
+        };
+        let step = unit
+            .checked_mul(u32::try_from(count).map_err(|_| refresh_error(provider_id, &text))?)
+            .ok_or_else(|| refresh_error(provider_id, &text))?;
+        total = total
+            .checked_add(step)
+            .ok_or_else(|| refresh_error(provider_id, &text))?;
+    }
+    if total < std::time::Duration::from_secs(10 * 60) {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{provider_id}` refreshes its model list at most every 10m, not every {text}"
+        )));
+    }
+    Ok(Some(total))
+}
+
+fn refresh_error(provider_id: &str, text: &str) -> ConfigError {
+    ConfigError::Invalid(format!(
+        "provider `{provider_id}` refresh_every `{text}` is not a time this build reads: write 30m, 6h, or 1d"
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -797,6 +873,58 @@ mod tests {
         assert_eq!(config.routes[0].upstreams[0].provider, "primary");
         assert_eq!(config.routes[0].upstreams[0].model, None);
         assert_eq!(config.providers[0].max_output_tokens, None);
+        assert_eq!(config.providers[0].refresh_every, None);
+    }
+
+    #[test]
+    fn refresh_every_accepts_ten_minutes_and_rejects_shorter() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "openai_compat"
+            base_url = "http://127.0.0.1:9/v1"
+            refresh_every = "1h30m"
+            [[routes]]
+            model = "demo"
+            upstreams = ["primary"]
+            "#,
+        )
+        .expect("config");
+        assert_eq!(
+            config.providers[0].refresh_every,
+            Some(std::time::Duration::from_secs(90 * 60))
+        );
+        let off = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "openai_compat"
+            base_url = "http://127.0.0.1:9/v1"
+            refresh_every = "off"
+            [[routes]]
+            model = "demo"
+            upstreams = ["primary"]
+            "#,
+        )
+        .expect("off");
+        assert_eq!(off.providers[0].refresh_every, None);
+        let error = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "openai_compat"
+            base_url = "http://127.0.0.1:9/v1"
+            refresh_every = "5m"
+            [[routes]]
+            model = "demo"
+            upstreams = ["primary"]
+            "#,
+        )
+        .expect_err("short");
+        assert!(error.to_string().contains("10m"), "{error}");
+        let day = super::parse_refresh_every("primary", "1d").expect("day");
+        assert_eq!(day, Some(std::time::Duration::from_secs(24 * 60 * 60)));
         assert_eq!(config.routes[0].upstreams[0].max_output_tokens, None);
     }
 

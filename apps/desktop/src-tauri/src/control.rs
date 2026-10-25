@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 use hofund_agent::{GatewayTarget, Session, adapters, find};
 use hofund_daemon::{
-    Running, configured_listen, ensure_config_file, local_gateway, route_models, usage_report,
+    Running, configured_listen, ensure_config_file, local_gateway, route_models,
+    spawn_model_refresh, usage_report,
 };
 use serde::Serialize;
 
@@ -139,6 +140,7 @@ fn separator(id: &str) -> MenuEntry {
 pub(crate) struct Control {
     config_path: PathBuf,
     server: Option<Running>,
+    refresh: Option<tokio::task::JoinHandle<()>>,
     bound: Option<String>,
     message: String,
 }
@@ -149,6 +151,7 @@ impl Control {
         Self {
             config_path: config_path.into(),
             server: None,
+            refresh: None,
             bound: None,
             message: String::new(),
         }
@@ -167,6 +170,7 @@ impl Control {
             Ok(running) => {
                 self.bound = Some(running.local_addr.to_string());
                 self.server = Some(running);
+                self.refresh = Some(spawn_model_refresh(self.config_path.clone()));
                 self.message.clear();
                 Ok(())
             }
@@ -176,6 +180,9 @@ impl Control {
 
     /// Stops the gateway. Stopping when it is already stopped does nothing.
     pub(crate) async fn stop(&mut self) -> Result<(), String> {
+        if let Some(refresh) = self.refresh.take() {
+            refresh.abort();
+        }
         if let Some(server) = self.server.take() {
             server.shutdown().await;
         }
