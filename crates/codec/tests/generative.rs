@@ -241,6 +241,18 @@ fn a_tool_role_comes_back_as_user() {
 }
 
 #[test]
+fn prepare_upstream_body_drops_model_and_stream() {
+    let body = GenerativeLanguage::prepare_upstream_body(
+        br#"{"model":"demo","stream":true,"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+    )
+    .expect("prepare");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert!(value.get("model").is_none());
+    assert!(value.get("stream").is_none());
+    assert!(value.get("contents").is_some());
+}
+
+#[test]
 fn error_body_uses_the_protocol_status() {
     let body = GenerativeLanguage.encode_error(401, "unauthorized");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("json");

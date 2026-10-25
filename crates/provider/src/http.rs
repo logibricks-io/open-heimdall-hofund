@@ -36,6 +36,11 @@ pub enum Credential {
     /// Third-party Messages gateways disagree about which one they accept, so a
     /// preset that is not Anthropic's own host sends both.
     MessagesBoth,
+    /// `x-goog-api-key`.
+    ///
+    /// The Generative Language API treats `Authorization: Bearer` as an OAuth
+    /// access token and rejects an API key sent that way.
+    GoogApiKey,
 }
 
 /// Connection settings for one upstream endpoint.
@@ -181,6 +186,13 @@ pub(crate) fn insert_credential(
                 format!("Bearer {api_key}"),
             )?;
         }
+        Credential::GoogApiKey => {
+            insert_header(
+                headers,
+                HeaderName::from_static("x-goog-api-key"),
+                api_key.to_owned(),
+            )?;
+        }
     }
     Ok(())
 }
@@ -251,10 +263,26 @@ pub(crate) async fn execute(
     prepare: Option<Prepare>,
     inbound_protocol: &str,
 ) -> Result<Completion, ProviderError> {
+    let url = upstream.url.clone();
+    execute_at(upstream, &url, codec, request, prepare, inbound_protocol).await
+}
+
+/// Posts `request` to `url` with the upstream's headers.
+///
+/// The Generative Language adapter builds a URL per model. Chat, Responses,
+/// and Messages keep the URL fixed at [`Upstream::open`].
+pub(crate) async fn execute_at(
+    upstream: &Upstream,
+    url: &str,
+    codec: &dyn Codec,
+    request: Request,
+    prepare: Option<Prepare>,
+    inbound_protocol: &str,
+) -> Result<Completion, ProviderError> {
     let cross_protocol = codec.id() != inbound_protocol;
     let streaming = request.stream;
     let body = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
-    let response = post_json(upstream, &upstream.url, body).await?;
+    let response = post_json(upstream, url, body).await?;
     let status = response.status();
     if !status.is_success() {
         let bytes = response.bytes().await.unwrap_or_default();
@@ -279,7 +307,7 @@ pub(crate) async fn execute(
     }
 }
 
-/// Adapter identity used by both concrete providers.
+/// Adapter identity used by the concrete providers.
 pub(crate) fn id_of(upstream: &Upstream) -> &str {
     &upstream.id
 }

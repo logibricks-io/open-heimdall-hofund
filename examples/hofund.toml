@@ -24,7 +24,9 @@ api_key = "replace-me"
 # one. A route member can set a smaller cap. Messages still sends 16384 when
 # neither is set. Zero is rejected.
 # A preset fills the endpoint from crates/provider/presets.toml.
-# Omit kind. protocol is chat, responses, or messages.
+# Omit kind. protocol is chat, responses, messages, or generative.
+# preset = "google" speaks generateContent. protocol = "chat" on that
+# preset keeps the OpenAI-compatible root.
 # [[providers]]
 # id = "openai"
 # preset = "openai"
@@ -36,6 +38,20 @@ id = "backup"
 kind = "anthropic"
 base_url = "http://127.0.0.1:4001"
 api_key = "replace-me-too"
+
+# Generative Language (`generateContent`). The key is sent as
+# `x-goog-api-key`, not as a bearer token. A bare host is completed with
+# `/v1beta`. A pasted `:generateContent` URL is cut back to that base.
+# The model is a path segment, so it is not a field of the JSON body.
+# [[providers]]
+# id = "studio"
+# kind = "generative"
+# base_url = "https://generativelanguage.googleapis.com"
+# api_key = "env:GEMINI_API_KEY"
+# [[providers]]
+# id = "gemini"
+# preset = "google"
+# api_key = "env:GEMINI_API_KEY"
 
 [[routes]]
 model = "demo"

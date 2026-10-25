@@ -27,7 +27,8 @@ stage 1 has merged.
    `provider/model`, or a bare wire name that exactly one hop serves.
    Reasoning effort is one IR enum mapped by each codec. `count_tokens` asks
    a Messages upstream and otherwise returns a character estimate with
-   `estimated` set. Rows 2.13, 1.20, 1.14, and 1.5 are Done in that change.
+   `estimated` set. A Generative Language upstream is also asked, at
+   `:countTokens`. Rows 2.13, 1.20, 1.14, and 1.5 are Done in that change.
 4. **Upstream coverage, including every subscription magpie supports.**
    Presets are data. Native adapters cover every non-OpenAI-compatible
    protocol magpie implements (Generative Language, Vertex, Bedrock, Azure,
@@ -61,14 +62,14 @@ stage 1 has merged.
    and 10.5.
 
 Model mapping is pull request #12. Preset endpoints for Chat, Responses, and
-Messages, including Azure's v1 root and Bedrock's API-key headers, are the
-start of item 4. Still open in that item: the native generative upstream,
-Vertex credentials, SigV4, live model lists, a connectivity test, and every
-subscription provider. The audit order after that remains usage v2, then the
-catalog and cost, then the routing tree.
-Subscriptions, the full agent list, the management API, the terminal UI, and
-gateway keys stay in stage 1 and follow those. One or two reviewable pull
-requests per phase.
+Messages, including Azure's v1 root and Bedrock's API-key headers, are on
+`main`. `kind = "generative"` and `preset = "google"` post `generateContent`
+(row 2.3). `protocol = "chat"` on that preset keeps the OpenAI-compatible
+root. Still open in item 4: Vertex credentials, SigV4, live model lists, a
+connectivity test, and every subscription provider. Usage v2, the catalog
+and cost, and the routing tree stay in stage 1 after that. Subscriptions,
+the full agent list, the management API, the terminal UI, and gateway keys
+stay in stage 1 as well. One or two reviewable pull requests per phase.
 
 ## Stage 2 — auxiliary
 
