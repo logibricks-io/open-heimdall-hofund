@@ -138,10 +138,22 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
-      # hofund: keep the two steps below when regenerating this file.
+      # hofund: keep the steps below when regenerating this file.
       # `dist generate` overwrites them. Signing runs only when the secret
       # group is non-empty, and the checksum is rewritten before installers
-      # are built. See docs/release.md.
+      # are built. dist builds the whole workspace, so Linux also needs the
+      # menu-bar host libraries. See docs/release.md.
+      - name: Install Linux host libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Dpkg::Options::="--force-confold" \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev
       - name: Build artifacts
         shell: bash
         env:

@@ -5,7 +5,9 @@ and the changelog. Pushing a tag publishes a GitHub release. Do not push a
 tag until the changelog and the version agree.
 
 The CLI and the menu-bar app are two workflows. Both run on a tag that looks
-like `v0.1.0`. Neither runs on a pull request.
+like `v0.1.0`. Neither of those publish workflows runs on a pull request.
+`.github/workflows/release-dry-run.yml` does. It builds artifacts and
+checksums and does not create a GitHub release.
 
 ## Version
 
@@ -21,6 +23,19 @@ The crates stay `publish = false`. This process does not publish to crates.io.
 
 `dist-workspace.toml` configures cargo-dist 0.32.0. It builds the `hofund`
 binary only (`hofund-desktop` and `xtask` set `dist = false`).
+
+`dist build` passes `--profile dist`. Cargo rejects that profile unless
+`Cargo.toml` defines it. `dist init` writes:
+
+```toml
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+```
+
+`dist plan` does not compile with that profile, so a green plan is not a
+build. The dry-run below runs `dist build`.
 
 Targets cargo-dist accepts:
 
@@ -46,9 +61,23 @@ Installers are `hofund-cli-installer.sh` and `hofund-cli-installer.ps1`.
 Each archive has a SHA-256 checksum, and the global job also writes
 `sha256.sum`.
 
-`.github/workflows/release.yml` is generated, then adjusted. `dist generate`
-overwrites those adjustments. After generating, restore all of these:
+`.github/workflows/release.yml` is generated, then adjusted. Refresh it
+from the current dist config before editing:
 
+```sh
+# dist generate refuses to write CI while allow-dirty lists "ci".
+# Drop that one line, generate, then put the line back.
+dist generate --mode ci
+```
+
+`dist init --yes` is what wrote `[profile.dist]` and the current
+`dist-workspace.toml` keys, including `install-path = "CARGO_HOME"` (the
+default dist inlines for the shell and PowerShell installers). `dist
+generate` overwrites the adjustments below. After generating, restore all of
+these:
+
+- the `Install Linux host libraries` step (dist builds the whole workspace,
+  including the menu-bar crate, and Linux needs those libraries to compile it)
 - the `Build artifacts` step calls `.github/scripts/repack-macos-cli.sh`
 - the `Sign Windows archives` step calls `.github/scripts/sign-windows-cli.ps1`
 - the `universal-macos` job
@@ -70,12 +99,32 @@ The release workflow runs only when a version tag is pushed. It does not run
 on pull requests (`pr-run-mode = "skip"`). CI runs `dist plan` on every pull
 request, using the `cargo-dist-version` in `dist-workspace.toml`. That is the
 same integrity check the tag's plan job runs. The CI job also requires the
-adjustments above to still be present in `release.yml`.
+adjustments above to still be present in `release.yml`, requires
+`[profile.dist]`, and checks that `release.yml` is still `dist generate`
+plus `.github/dist-release.patch`.
+
+## Dry-run
+
+`.github/workflows/release-dry-run.yml` runs `dist build --artifacts=local`
+and the desktop bundle and checksum jobs. It does not pass a tag to `dist
+host` and it does not call `gh release`. The token is read-only.
+
+A pull request runs it when the change touches a release workflow, a release
+script, `dist-workspace.toml`, `Cargo.toml`, `Cargo.lock`, `apps/desktop`,
+or `rust-toolchain.toml`. That pull-request run builds
+`x86_64-unknown-linux-gnu` only, plus the desktop bundles on macOS, Linux,
+and Windows.
+
+`workflow_dispatch` builds every local target from `dist plan`
+(`aarch64-apple-darwin`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`,
+`x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`) and the same three
+desktop jobs. Trigger it on the branch you are about to tag.
 
 ## Menu bar
 
-`.github/workflows/release-desktop.yml` builds `hofund-desktop` with
-`@tauri-apps/cli` pinned to 2.12.4.
+`.github/workflows/release-desktop.yml` builds `hofund-desktop` through
+`.github/actions/desktop-bundle`. That action installs `@tauri-apps/cli`
+pinned to 2.12.4. The dry-run uses the same action.
 
 The Rust crate `tauri` is 2.12.5. The CLI package does not publish 2.12.5.
 2.12.4 is the CLI released with that crate on 2026-10-21 (`tauri-cli` 2.12.4
@@ -93,6 +142,12 @@ Linux needs WebKitGTK 4.1, Ayatana AppIndicator, librsvg, patchelf, and
 libxdo. The workflow installs them. The job writes `SHA256SUMS` next to the
 bundles and uploads them to the GitHub release for that tag after the CLI
 workflow has created it.
+
+The bundle directory comes from `cargo metadata`'s `target_directory`, plus
+`release/bundle` (`.github/scripts/desktop-bundle-dir.sh`). `hofund-desktop`
+is a workspace member, so that directory is the workspace target directory,
+including when `CARGO_TARGET_DIR` is set. Checksums and Windows signing both
+use it. The package directory's own `target/` is not the one Cargo writes.
 
 ## Signing and notarization
 
