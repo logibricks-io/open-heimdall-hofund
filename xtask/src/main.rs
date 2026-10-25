@@ -271,7 +271,7 @@ fn resolved_kernel_feature(package: &str) -> Result<bool, String> {
             "-p",
             package,
             "-e",
-            "features",
+            "normal,features",
             "-i",
             "hofund-plugin-api",
             "--prefix",
@@ -382,6 +382,7 @@ fn clippy_plugin(package: &str, dir: &std::path::Path) -> Result<(), String> {
             "-p",
             package,
             "--all-targets",
+            "--no-deps",
             "--profile",
             profile,
         ]);
@@ -523,6 +524,22 @@ mod tests {
             registry_error.contains("plugins/registry must not contain a package"),
             "{registry_error}"
         );
+
+        let composition = root.join("composition");
+        std::fs::create_dir_all(composition.join("registry")).expect("composition");
+        std::fs::write(
+            composition.join("registry/Cargo.toml"),
+            "[package]\nname = \"hofund-plugin-registry\"\n",
+        )
+        .expect("composition manifest");
+        std::fs::create_dir_all(composition.join("providers/ok")).expect("ok plugin");
+        std::fs::write(
+            composition.join("providers/ok/Cargo.toml"),
+            "[package]\nname = \"ok\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n",
+        )
+        .expect("ok manifest");
+        let names = load_plugin_packages(&composition).expect("registry root is not a plugin");
+        assert_eq!(names.len(), 1);
 
         assert!(
             workspace_root().join("plugins").is_absolute(),

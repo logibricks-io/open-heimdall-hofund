@@ -1,0 +1,6 @@
+id = "relay"
+kind = "provider"
+preset = "relay"
+protocol = "openai-chat"
+credential = "bearer"
+list = "unsupported"

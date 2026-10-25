@@ -1,0 +1,28 @@
+[package]
+name = "hofund-plugin-registry"
+description = "Compile-time composition of in-tree plugins."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["echo", "relay"]
+echo = ["dep:hofund-plugin-echo"]
+relay = ["dep:hofund-plugin-relay"]
+
+[dependencies]
+hofund-plugin-api = { workspace = true }
+hofund-plugin-sdk = { workspace = true }
+hofund-plugin-echo = { workspace = true, optional = true }
+hofund-plugin-relay = { workspace = true, optional = true }
+
+[build-dependencies]
+toml = "0.8.2"
+
+[lints]
+workspace = true

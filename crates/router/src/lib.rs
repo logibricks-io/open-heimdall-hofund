@@ -46,8 +46,10 @@ impl FailoverPolicy {
     /// member may be tried.
     ///
     /// Kinds other than connect, timeout, and a listed status do not fail
-    /// over. The wildcard is required because [`PluginErrorKind`] is
-    /// `#[non_exhaustive]`: a new kind does not break this match.
+    /// over. A transport failure means the request was already sent, so it
+    /// does not try another member. The wildcard is required because
+    /// [`PluginErrorKind`] is `#[non_exhaustive]`: a new kind does not break
+    /// this match.
     #[must_use]
     pub fn allows(&self, error: &PluginError) -> bool {
         match error.kind() {
@@ -55,7 +57,8 @@ impl FailoverPolicy {
             PluginErrorKind::Status => error
                 .status()
                 .is_some_and(|code| self.statuses.contains(&code)),
-            PluginErrorKind::Decode
+            PluginErrorKind::Transport
+            | PluginErrorKind::Decode
             | PluginErrorKind::Unsupported
             | PluginErrorKind::Auth
             | PluginErrorKind::Quota

@@ -48,6 +48,9 @@ flowchart BT
   pluginApi["plugin-api<br/>plugin contract"]
   pluginSdk["plugin-sdk<br/>helpers"]
   pluginHost["plugin-host<br/>HostContext"]
+  pluginRegistry["plugin-registry<br/>composition"]
+  pluginRelay["plugin-relay<br/>provider"]
+  pluginEcho["plugin-echo<br/>inbound"]
   gateway["gateway<br/>HTTP server"]
   daemon["daemon<br/>composition root"]
   cli["cli<br/>hofund binary"]
@@ -63,6 +66,14 @@ flowchart BT
   pluginSdk --> pluginApi
   pluginSdk --> quirks
   pluginHost --> pluginApi
+  pluginRegistry --> pluginApi
+  pluginRegistry --> pluginSdk
+  pluginRegistry --> pluginRelay
+  pluginRegistry --> pluginEcho
+  pluginRelay --> pluginApi
+  pluginRelay --> pluginSdk
+  pluginEcho --> pluginApi
+  pluginEcho --> pluginSdk
   router --> pluginApi
   router --> ir
   gateway --> router
@@ -94,8 +105,12 @@ as "depends on". `gateway` depends on `plugin-api` for the raw body and
 depends on `plugin-api` so it can adapt a provider into a router member.
 `desktop` sits beside `cli` and depends on the same two crates as `cli`.
 `plugin-api` depends on `ir`. `plugin-sdk` depends on `plugin-api` and
-`quirks`. `plugin-host` depends only on `plugin-api`. The three kits depend
-only on `plugin-host` and are not on the diagram.
+`quirks`. `plugin-host` depends on `plugin-api`. Its tests also depend on
+`plugin-sdk` so the retry contract runs against the pooled client. The pooled HTTP client
+lives in `plugin-host`. `plugin-registry` depends on `plugin-api`,
+`plugin-sdk`, and the plugin crates it composes. The three kits depend
+only on `plugin-host` and are not on the diagram. `plugin-relay` dev-depends
+on `kit-upstream` so its tests can build a host.
 
 | Package | May depend on |
 | --- | --- |
@@ -105,7 +120,10 @@ only on `plugin-host` and are not on the diagram.
 | `hofund-plugin-api` | `hofund-ir` |
 | `hofund-plugin-sdk` | `hofund-plugin-api`, `hofund-quirks` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
-| `hofund-plugin-host` | `hofund-plugin-api` |
+| `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay` |
+| `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
 | `hofund-kit-upstream` | `hofund-plugin-host` |
 | `hofund-kit-subscription` | `hofund-plugin-host` |
 | `hofund-kit-agent` | `hofund-plugin-host` |
@@ -159,8 +177,11 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | --- | --- |
 | `ir` | Canonical request, response, and stream-event types. No I/O. |
 | `plugin-api` | Plugin traits, `PluginError`, newtypes, and `HostContext` handles. |
-| `plugin-sdk` | Helpers a plugin may use. Transports land later. Re-exports `tracing`. |
-| `plugin-host` | The `HostContext` constructor and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
+| `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. Re-exports `tracing` and `async_trait`. |
+| `plugin-host` | The `HostContext` constructor, the pooled HTTP client, and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
+| `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate ids and route-prefix conflicts. |
+| `plugin-relay` | Sample upstream plugin. The kit dependency is tests only. |
+| `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
 | `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |
 | `codec` | Per-protocol encode and decode to and from the IR. Hub-and-spoke, so N protocols do not become an N-by-M matrix. |
 | `quirks` | Data-driven vendor capability and quirk descriptions. |

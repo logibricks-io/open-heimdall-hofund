@@ -12,10 +12,25 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PluginErrorKind {
-    /// The connection could not be established, or the body failed in transit.
+    /// DNS, TCP, or TLS failed before the request was sent.
+    ///
+    /// A retry may repeat this kind for every HTTP method. A reset after the
+    /// request was sent is [`Transport`](Self::Transport), not `Connect`.
     Connect,
-    /// The upstream did not answer within the kernel deadline.
+    /// The socket stalled past the host's connect or read deadline.
+    ///
+    /// A retry may repeat this kind only when the call is idempotent: `GET`,
+    /// `HEAD`, `OPTIONS`, `PUT`, `DELETE`, or a call the caller marked
+    /// idempotent. `POST` and `PATCH` are not retried on a timeout unless
+    /// that mark is set.
     Timeout,
+    /// The request was sent, then the connection failed or the body could not be read.
+    ///
+    /// This is the kind for a reset after the upstream received the body, and
+    /// for a failure while reading the response. A retry may repeat it only
+    /// when the call is idempotent, under the same rule as [`Timeout`](Self::Timeout).
+    /// It is never retried for a non-idempotent `POST` or `PATCH`.
+    Transport,
     /// The upstream returned an HTTP status.
     Status,
     /// The body was not a response this protocol understands.
@@ -74,6 +89,12 @@ impl PluginError {
     #[must_use]
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::new(PluginErrorKind::Timeout, message)
+    }
+
+    /// The request was sent, then the socket failed or the body could not be read.
+    #[must_use]
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::new(PluginErrorKind::Transport, message)
     }
 
     /// An HTTP status from the upstream.
@@ -187,6 +208,7 @@ impl fmt::Display for PluginErrorKind {
         formatter.write_str(match self {
             Self::Connect => "connect",
             Self::Timeout => "timeout",
+            Self::Transport => "transport",
             Self::Status => "status",
             Self::Decode => "decode",
             Self::Unsupported => "unsupported",
@@ -225,6 +247,11 @@ mod tests {
             PluginErrorKind::Internal
         );
         assert_eq!(error.message(), "slow down");
+        assert_eq!(
+            PluginError::transport("reset").kind(),
+            PluginErrorKind::Transport
+        );
+        assert_eq!(PluginErrorKind::Transport.to_string(), "transport");
     }
 
     #[test]
