@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connect warns when the tool's configured model has no route.
 - OpenCode follows `XDG_CONFIG_HOME` when that variable is set.
 - Disconnect removes empty directories that connect created.
+- OpenCode writes `provider.hofund` with npm `@ai-sdk/openai-compatible`,
+  `options.baseURL`, `options.apiKey`, and `models`.
+- A provider and a route member may set `max_output_tokens`. Messages encode
+  uses 16384 when the client, the route, and the quirk profile all omit a cap.
 
 ### Fixed
 
@@ -82,6 +86,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the previous token until restart.
 - Disconnect keeps edits the user made while connected, such as a Codex
   `sandbox_mode` key.
+- A Messages upstream accepts a request that omitted `max_tokens`. A request
+  the codec cannot encode is HTTP 400 `invalid_request_error`.
+- A namespaced tool call comes back as `namespace` plus the original name.
+  A custom tool call comes back to a Responses client as `custom_tool_call`
+  with the raw input.
+- A Responses stream uses the same `output_index` as
+  `response.completed.output`.
+- `POST /v1/messages/count_tokens` does not send `max_tokens`.
+- Responses item ids are unique. A same-protocol reply keeps the upstream
+  item id. A unary output item has `id` and `status`.
+- A dropped tool is warned once per name per process.
+- Chat usage includes `total_tokens` when input and output are both known.
 
 ## [0.1.0] - 2026-10-25
 

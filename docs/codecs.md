@@ -200,18 +200,39 @@ Crossing to another protocol uses the canonical tools only:
   `parameters`. Any other `tool_search` is dropped.
 - `web_search` and every other type are dropped.
 
-Dropped names are logged by the provider (`warning: dropped tool ...`) and
-are not a 400. Checked 2026-10-25 against the Responses tool list and against
+Dropped names are logged by the provider (`warning: dropped tool ...`) once
+per name per process, and only when the upstream protocol differs. A later
+request that drops the same name is silent. The drop is not a 400.
+
+On the way back, a Responses client receives the original call. The codec
+keeps a per-request map (`hofund_tool_names`) from the flattened name to the
+original name, namespace, and kind. A namespaced function is written as
+`function_call` with `namespace`, the original `name`, and
+`encrypted_function_args: []`. A custom tool is written as `custom_tool_call`
+with `input` set to the raw string (the `input` field of the JSON arguments,
+a lone JSON string, or the argument text). The map is private, so it is not
+sent upstream. Chat and Messages upstreams both go through this restore, for
+a unary body and for a stream. A same-protocol reply already uses the
+original names, so the map is not applied. A stream of a custom call emits
+`response.custom_tool_call_input.delta` and `.done` with the unescaped input.
+
+Checked 2026-10-25 against the Responses tool list and against
 `internal/gateway/responses.go` (`customSchema`, namespace flattening,
-`web_search` not offered as a function, client `tool_search`).
+`callTo`, `web_search` not offered as a function, client `tool_search`) and
+`internal/gateway/custom_tool.go` (`customStream`).
 
 ## Client-facing ids and Chat usage chunks
 
 A Responses body and each `response.created` / completed skeleton use an id
 that starts with `resp_`. A missing id becomes `resp_local`. An id that
-already has the prefix is kept. Output item ids are `msg_N`, `rs_N`, and
-`fc_N` from one counter, so a later item does not reuse `msg_0` when its
-block index is 0 again.
+already has the prefix is kept. Output item ids start with `msg_`, `rs_`,
+`fc_`, or `ctc_` and then a suffix of time and a process counter, so two
+items in one response, and two responses, do not share an id. A unary output
+item also has `status: completed` when the caller did not set one. A sealed
+reasoning item is written back as stored. A same-protocol response keeps an
+item id the upstream already sent, on the unary body and on the stream. The
+stream copies that id onto the block (`item_id`) and the encoder prefers it
+over a fresh one.
 
 A non-streaming Messages body always has an id. A missing id becomes
 `msg_local`. An id without the `msg_` prefix is prefixed. The stream already
@@ -239,7 +260,7 @@ user text, or later in a system string, stays. Checked 2026-10-25 against
 
 | IR | Anthropic Messages | Chat Completions | Responses | Generative Language |
 | --- | --- | --- | --- | --- |
-| `max_tokens` | `max_tokens` (required on encode) | `max_completion_tokens` | `max_output_tokens` | `generationConfig.maxOutputTokens` |
+| `max_tokens` | `max_tokens` (always written; see below) | `max_completion_tokens` | `max_output_tokens` | `generationConfig.maxOutputTokens` |
 | `temperature`, `top_p` | same names | same names | same names | `temperature`, `topP` |
 | `top_k` | `top_k` | omitted | omitted | `topK` |
 | `stop` | `stop_sequences` | `stop` (always an array) | omitted | `stopSequences` (always an array) |
@@ -248,13 +269,27 @@ user text, or later in a system string, stays. Checked 2026-10-25 against
 | `stream: true` | `stream: true` | `stream: true`. The Chat adapter, not the codec, also sets `stream_options.include_usage` so the upstream returns usage. A codec round trip does not add that object. | `stream: true` | `stream: true` on the body |
 | `stream: false` | omitted | omitted | omitted | omitted |
 
-Anthropic encode returns `MissingField("max_tokens")` when the IR has no cap.
-It does not invent one. Decode of a request may omit the cap.
+Messages encode always writes `max_tokens`. The client's cap wins. Otherwise
+the router copies the route member's `max_output_tokens`, or the provider's
+when the member omits it, and only when the client omitted a cap. The
+`messages-default` quirk then fills 4096 if the cap is still absent. Messages
+encode uses 16384 when all of those are absent
+(`internal/gateway/maxoutput.go`, `defaultMaxTokens`, checked 2026-10-25).
+Chat and Responses do not invent a cap. Decode of a request may omit it.
+Create requires the field
+(<https://platform.claude.com/docs/en/api/messages>). A body the codec cannot
+encode is HTTP 400 `invalid_request_error`. The Messages provider deletes
+`max_tokens` before `POST /v1/messages/count_tokens`. That endpoint rejects
+the field. The permitted count fields include `model`, `messages`, `system`,
+`tools`, `tool_choice`, `thinking`, `cache_control`, and `output_config`
+(<https://platform.claude.com/docs/en/build-with-claude/token-counting>,
+checked 2026-10-25).
 
 Chat Completions decode reads `max_completion_tokens` and `max_tokens`. When
 both are set, `max_completion_tokens` wins and the other value is dropped.
-Encode writes only `max_completion_tokens`. `total_tokens` is written only
-when the IR has it. The codec does not synthesize a sum.
+Encode writes only `max_completion_tokens`. `total_tokens` is the IR total.
+When that is absent and both `input_tokens` and `output_tokens` are present,
+encode writes their sum.
 
 ## Images, thinking, and text
 
@@ -389,10 +424,15 @@ event is an unknown event and does not synthesize `message_stop`. Signature
 deltas are skipped on encode.
 
 The Responses encoder writes `response.created`, then one item per block.
+`output_index` is assigned in the order items are opened, starting at 0, and
+`response.completed.output` is that same order. A Chat tool call whose IR
+index is 2 or higher is still `output_index` 0 when it is the only item.
 Closing a text block writes `response.output_text.done` and
 `response.content_part.done` with the accumulated text, then
 `response.output_item.done` whose item has `id` and `content`. A function
 call's done item has `id`, `call_id`, `name`, and the accumulated `arguments`.
+A restored custom call uses `custom_tool_call` and
+`response.custom_tool_call_input.delta`.
 A reasoning done item has `id` and the accumulated text, or the sealed item
 when one was stored. `response.completed`, `response.incomplete`, or
 `response.failed` then carries that full `output` array. Every event includes

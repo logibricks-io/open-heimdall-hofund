@@ -1,7 +1,9 @@
 //! Upstream adapters against a local mock. No real network.
 
 use futures_util::StreamExt;
-use hofund_ir::{ContentPart, Message, Request, Role, StreamEvent};
+use hofund_ir::{
+    ContentPart, Extensions, Message, Request, Role, StreamEvent, ToolArguments, ToolCallPart,
+};
 use hofund_provider::{
     Anthropic, Completion, CountOutcome, Endpoint, OpenAiCompat, OpenAiProtocol, Provider,
     ProviderErrorKind,
@@ -436,6 +438,28 @@ async fn messages_count_is_forwarded_and_a_missing_endpoint_is_unsupported() {
         .await
         .expect("count");
     assert!(matches!(counted, CountOutcome::Counted(17)));
+    let seen = server.received_requests().await.expect("requests");
+    let body: Value = serde_json::from_slice(&seen[0].body).expect("json");
+    assert!(body.get("max_tokens").is_none(), "{body}");
+    assert_eq!(body["model"], json!("demo"));
+
+    let omitted = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 4})))
+        .expect(1)
+        .mount(&omitted)
+        .await;
+    let provider = Anthropic::new(Endpoint::new("plain", omitted.uri())).expect("provider");
+    let mut bare = user_request(false);
+    bare.params.max_tokens = None;
+    provider
+        .count_input(bare, "openai-responses")
+        .await
+        .expect("count");
+    let seen = omitted.received_requests().await.expect("requests");
+    let body: Value = serde_json::from_slice(&seen[0].body).expect("json");
+    assert!(body.get("max_tokens").is_none(), "{body}");
 
     let missing = MockServer::start().await;
     Mock::given(method("POST"))
@@ -548,4 +572,26 @@ async fn event_has_created(completion: Completion) -> bool {
         }
     }
     found
+}
+
+#[tokio::test]
+async fn translating_a_bad_tool_call_is_a_client_error() {
+    let provider =
+        Anthropic::new(Endpoint::new("primary", "http://127.0.0.1:9")).expect("provider");
+    let mut request = Request::new("demo");
+    let mut message = Message::new(Role::Assistant);
+    message.content.push(ContentPart::ToolCall(ToolCallPart {
+        id: "c".to_owned(),
+        name: "n".to_owned(),
+        arguments: ToolArguments::Raw {
+            text: "not-json".to_owned(),
+        },
+        extensions: Extensions::new(),
+    }));
+    request.messages.push(message);
+    let Err(error) = provider.execute(request, "openai-responses").await else {
+        panic!("a tool call that is not JSON must not be sent upstream");
+    };
+    assert_eq!(error.kind, ProviderErrorKind::Status);
+    assert_eq!(error.status, Some(400));
 }

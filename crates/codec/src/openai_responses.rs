@@ -16,6 +16,7 @@ use hofund_ir::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::custom_input::{CustomStream, custom_input_text};
 use crate::error::CodecError;
 use crate::jsonutil::{
     Object, expect_array, expect_object, insert_f64, insert_u64, parse_object, require_string,
@@ -33,6 +34,10 @@ const RAW_TOOLS: &str = "hofund_responses_tools";
 /// The provider logs them when the upstream protocol is different, then the
 /// extension bag is dropped. Same-protocol encode skips the key.
 pub const UNMAPPED_TOOLS: &str = "hofund_unmapped_tools";
+
+/// Request-extension object mapping a flattened tool name back to the client's
+/// namespace and original name. Same-protocol encode skips the key.
+const TOOL_NAMES: &str = "hofund_tool_names";
 
 /// Codec for the OpenAI Responses API.
 #[derive(Debug, Default, Clone, Copy)]
@@ -77,7 +82,15 @@ impl Codec for OpenAiResponses {
     }
 
     fn encode_response(&self, response: &Response) -> Result<Vec<u8>, CodecError> {
-        encode_response(response)
+        encode_response(response, &ToolMap::new())
+    }
+
+    fn encode_response_for(
+        &self,
+        request: &Request,
+        response: &Response,
+    ) -> Result<Vec<u8>, CodecError> {
+        encode_response(response, &tool_map(&request.extensions))
     }
 
     fn encode_stream(&self, events: &[StreamEvent]) -> Result<Vec<u8>, CodecError> {
@@ -90,6 +103,12 @@ impl Codec for OpenAiResponses {
 
     fn stream_encoder(&self) -> Box<dyn crate::StreamEncoder> {
         Box::new(Encoder::default())
+    }
+
+    fn stream_encoder_for(&self, request: &Request) -> Box<dyn crate::StreamEncoder> {
+        Box::new(Encoder {
+            inner: StreamEncoder::with_tools(tool_map(&request.extensions)),
+        })
     }
 
     fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
@@ -125,7 +144,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
     {
         apply_allowed_filter(raw, &names, web);
     }
-    let (tools, dropped) = decode_tools(raw_tools.clone())?;
+    let (tools, dropped, named) = decode_tools(raw_tools.clone())?;
     let (tool_choice, tools) = decode_tool_choice(choice_value, tools)?;
     let max_tokens = take_u64(&mut object, "max_output_tokens")?;
     let temperature = take_f64(&mut object, "temperature")?;
@@ -148,6 +167,9 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
             UNMAPPED_TOOLS,
             Value::Array(dropped.into_iter().map(Value::String).collect()),
         );
+    }
+    if !named.is_empty() {
+        extensions.insert(TOOL_NAMES, Value::Object(named));
     }
     Ok(Request {
         model,
@@ -295,6 +317,8 @@ fn decode_reasoning(mut object: Object) -> Result<Option<Message>, CodecError> {
     if sealed {
         object.insert("type".to_owned(), Value::String("reasoning".to_owned()));
         extensions.insert(SEALED_ITEM, Value::Object(object));
+    } else if let Some(id) = object.remove("id") {
+        extensions.insert("id", id);
     }
     Ok(Some(Message {
         role: Role::Assistant,
@@ -426,19 +450,87 @@ fn image_source(url: &str) -> ImageSource {
     }
 }
 
-fn decode_tools(value: Option<Value>) -> Result<(Vec<Tool>, Vec<String>), CodecError> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolKind {
+    Function,
+    Custom,
+}
+
+#[derive(Clone)]
+struct RestoredTool {
+    name: String,
+    namespace: String,
+    kind: ToolKind,
+}
+
+type ToolMap = BTreeMap<String, RestoredTool>;
+
+struct Emit<'a> {
+    response: bool,
+    tools: &'a ToolMap,
+}
+
+fn tool_map(extensions: &Extensions) -> ToolMap {
+    let Some(Value::Object(object)) = extensions.get(TOOL_NAMES) else {
+        return ToolMap::new();
+    };
+    let mut map = ToolMap::new();
+    for (flat, value) in object {
+        let Some(entry) = value.as_object() else {
+            continue;
+        };
+        let kind = match entry.get("kind").and_then(Value::as_str) {
+            Some("custom") => ToolKind::Custom,
+            _ => ToolKind::Function,
+        };
+        map.insert(
+            flat.clone(),
+            RestoredTool {
+                name: entry
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(flat)
+                    .to_owned(),
+                namespace: entry
+                    .get("namespace")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                kind,
+            },
+        );
+    }
+    map
+}
+
+fn remember(named: &mut Object, offered: &str, name: &str, namespace: &str, kind: &str) {
+    if kind == "function" && namespace.is_empty() {
+        return;
+    }
+    named.insert(
+        offered.to_owned(),
+        serde_json::json!({
+            "name": name,
+            "namespace": namespace,
+            "kind": kind,
+        }),
+    );
+}
+
+fn decode_tools(value: Option<Value>) -> Result<(Vec<Tool>, Vec<String>, Object), CodecError> {
     let Some(value) = value else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Object::new()));
     };
     if value.is_null() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Object::new()));
     }
     let mut tools = Vec::new();
     let mut dropped = Vec::new();
+    let mut named = Object::new();
     for item in expect_array(value, "tools")? {
-        offer_tool(item, None, &mut tools, &mut dropped)?;
+        offer_tool(item, None, &mut tools, &mut dropped, &mut named)?;
     }
-    Ok((tools, dropped))
+    Ok((tools, dropped, named))
 }
 
 fn offer_tool(
@@ -446,6 +538,7 @@ fn offer_tool(
     namespace: Option<&str>,
     tools: &mut Vec<Tool>,
     dropped: &mut Vec<String>,
+    named: &mut Object,
 ) -> Result<(), CodecError> {
     let mut object = expect_object(value, "tools")?;
     let kind = take_string(&mut object, "type")?.unwrap_or_else(|| "function".to_owned());
@@ -456,7 +549,7 @@ fn offer_tool(
             return Ok(());
         };
         for item in expect_array(nested, "tools")? {
-            offer_tool(item, Some(space.as_str()), tools, dropped)?;
+            offer_tool(item, Some(space.as_str()), tools, dropped, named)?;
         }
         return Ok(());
     }
@@ -481,6 +574,7 @@ fn offer_tool(
             .remove("parameters")
             .unwrap_or_else(|| Value::Object(Object::new()));
         unseal(&mut schema);
+        remember(named, &offered, &name, namespace.unwrap_or(""), "function");
         tools.push(Tool {
             name: offered,
             description,
@@ -496,6 +590,7 @@ fn offer_tool(
         }
         let description = take_string(&mut object, "description")?;
         let format = object.remove("format");
+        remember(named, &offered, &name, namespace.unwrap_or(""), "custom");
         tools.push(Tool {
             name: offered,
             description: Some(custom_description(description.as_deref(), format.as_ref())),
@@ -766,7 +861,17 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     if let Some(text) = instructions {
         object.insert("instructions".to_owned(), Value::String(text.to_owned()));
     }
-    object.insert("input".to_owned(), Value::Array(encode_items(messages)?));
+    let tools = ToolMap::new();
+    object.insert(
+        "input".to_owned(),
+        Value::Array(encode_items(
+            messages,
+            &Emit {
+                response: false,
+                tools: &tools,
+            },
+        )?),
+    );
     if let Some(raw) = request.extensions.get(RAW_TOOLS) {
         object.insert("tools".to_owned(), raw.clone());
     } else if !request.tools.is_empty() {
@@ -830,15 +935,19 @@ fn split_instructions(messages: &[Message]) -> (Option<&str>, &[Message]) {
     }
 }
 
-fn encode_items(messages: &[Message]) -> Result<Vec<Value>, CodecError> {
+fn encode_items(messages: &[Message], emit: &Emit<'_>) -> Result<Vec<Value>, CodecError> {
     let mut items = Vec::new();
     for message in messages {
-        push_message_items(message, &mut items)?;
+        push_message_items(message, &mut items, emit)?;
     }
     Ok(items)
 }
 
-fn push_message_items(message: &Message, items: &mut Vec<Value>) -> Result<(), CodecError> {
+fn push_message_items(
+    message: &Message,
+    items: &mut Vec<Value>,
+    emit: &Emit<'_>,
+) -> Result<(), CodecError> {
     let mut content = Vec::new();
     for part in &message.content {
         match part {
@@ -846,26 +955,31 @@ fn push_message_items(message: &Message, items: &mut Vec<Value>) -> Result<(), C
             ContentPart::Image(image) => content.push(image_item(image)),
             ContentPart::Unknown(unknown) => content.push(unknown_item(unknown)),
             ContentPart::Thinking(thinking) => {
-                flush_content(message, &mut content, items);
-                if let Some(item) = thinking_item(thinking) {
+                flush_content(message, &mut content, items, emit);
+                if let Some(item) = thinking_item(thinking, emit) {
                     items.push(item);
                 }
             }
             ContentPart::ToolCall(call) => {
-                flush_content(message, &mut content, items);
-                items.push(function_call_item(call));
+                flush_content(message, &mut content, items, emit);
+                items.push(function_call_item(call, emit));
             }
             ContentPart::ToolResult(result) => {
-                flush_content(message, &mut content, items);
+                flush_content(message, &mut content, items, emit);
                 items.push(function_output_item(result));
             }
         }
     }
-    flush_content(message, &mut content, items);
+    flush_content(message, &mut content, items, emit);
     Ok(())
 }
 
-fn flush_content(message: &Message, content: &mut Vec<Value>, items: &mut Vec<Value>) {
+fn flush_content(
+    message: &Message,
+    content: &mut Vec<Value>,
+    items: &mut Vec<Value>,
+    emit: &Emit<'_>,
+) {
     if content.is_empty() {
         return;
     }
@@ -876,6 +990,9 @@ fn flush_content(message: &Message, content: &mut Vec<Value>, items: &mut Vec<Va
         Value::String(role_name(message.role).to_owned()),
     );
     item.insert("content".to_owned(), Value::Array(std::mem::take(content)));
+    if emit.response {
+        put_identity(&mut item, &message.extensions, "msg");
+    }
     message.extensions.merge_into(&mut item);
     items.push(Value::Object(item));
 }
@@ -943,7 +1060,7 @@ fn unknown_item(part: &UnknownPart) -> Value {
     Value::Object(item)
 }
 
-fn thinking_item(part: &ThinkingPart) -> Option<Value> {
+fn thinking_item(part: &ThinkingPart, emit: &Emit<'_>) -> Option<Value> {
     if let Some(Value::Object(sealed)) = part.extensions.get(SEALED_ITEM) {
         return Some(Value::Object(sealed.clone()));
     }
@@ -959,11 +1076,19 @@ fn thinking_item(part: &ThinkingPart) -> Option<Value> {
             "text": part.text,
         })]),
     );
+    if emit.response {
+        put_identity(&mut item, &part.extensions, "rs");
+    }
     merge_except(&part.extensions, &mut item, SEALED_ITEM);
     Some(Value::Object(item))
 }
 
-fn function_call_item(call: &ToolCallPart) -> Value {
+fn function_call_item(call: &ToolCallPart, emit: &Emit<'_>) -> Value {
+    if emit.response
+        && let Some(restored) = emit.tools.get(&call.name)
+    {
+        return restored_call(call, restored);
+    }
     let mut item = Object::new();
     item.insert("type".to_owned(), Value::String("function_call".to_owned()));
     item.insert("call_id".to_owned(), Value::String(call.id.clone()));
@@ -972,8 +1097,80 @@ fn function_call_item(call: &ToolCallPart) -> Value {
         "arguments".to_owned(),
         Value::String(call.arguments.to_text()),
     );
+    if emit.response {
+        put_identity(&mut item, &call.extensions, "fc");
+    }
     call.extensions.merge_into(&mut item);
     Value::Object(item)
+}
+
+fn restored_call(call: &ToolCallPart, restored: &RestoredTool) -> Value {
+    let mut item = Object::new();
+    let prefix = if restored.kind == ToolKind::Custom {
+        "ctc"
+    } else {
+        "fc"
+    };
+    put_identity(&mut item, &call.extensions, prefix);
+    item.insert("call_id".to_owned(), Value::String(call.id.clone()));
+    item.insert("name".to_owned(), Value::String(restored.name.clone()));
+    if !restored.namespace.is_empty() {
+        item.insert(
+            "namespace".to_owned(),
+            Value::String(restored.namespace.clone()),
+        );
+    }
+    match restored.kind {
+        ToolKind::Custom => {
+            item.insert(
+                "type".to_owned(),
+                Value::String("custom_tool_call".to_owned()),
+            );
+            item.insert(
+                "input".to_owned(),
+                Value::String(custom_input_text(&call.arguments.to_text())),
+            );
+        }
+        ToolKind::Function => {
+            item.insert("type".to_owned(), Value::String("function_call".to_owned()));
+            item.insert(
+                "arguments".to_owned(),
+                Value::String(call.arguments.to_text()),
+            );
+            item.insert(
+                "encrypted_function_args".to_owned(),
+                Value::Array(Vec::new()),
+            );
+        }
+    }
+    call.extensions.merge_into(&mut item);
+    Value::Object(item)
+}
+
+fn put_identity(item: &mut Object, extensions: &Extensions, prefix: &str) {
+    if !item.contains_key("id") {
+        let id = extensions
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| fresh_id(prefix));
+        item.insert("id".to_owned(), Value::String(id));
+    }
+    if !item.contains_key("status") && extensions.get("status").is_none() {
+        item.insert("status".to_owned(), Value::String("completed".to_owned()));
+    }
+}
+
+fn fresh_id(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{prefix}_{nanos:x}{n:x}")
 }
 
 fn function_output_item(result: &ToolResultPart) -> Value {
@@ -1166,7 +1363,7 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
     })
 }
 
-fn encode_response(response: &Response) -> Result<Vec<u8>, CodecError> {
+fn encode_response(response: &Response, tools: &ToolMap) -> Result<Vec<u8>, CodecError> {
     if response.message.role != Role::Assistant {
         return Err(CodecError::Unsupported {
             message: "a response message must use the assistant role".to_owned(),
@@ -1188,7 +1385,13 @@ fn encode_response(response: &Response) -> Result<Vec<u8>, CodecError> {
     }
     object.insert(
         "output".to_owned(),
-        Value::Array(encode_items(std::slice::from_ref(&response.message))?),
+        Value::Array(encode_items(
+            std::slice::from_ref(&response.message),
+            &Emit {
+                response: true,
+                tools,
+            },
+        )?),
     );
     if let Some(usage) = &response.usage {
         object.insert("usage".to_owned(), encode_usage(usage));
@@ -1289,6 +1492,9 @@ struct ItemState {
     call_id: String,
     name: String,
     text: String,
+    output_index: u32,
+    restored: Option<RestoredTool>,
+    custom_input: CustomStream,
 }
 
 #[derive(Default)]
@@ -1301,8 +1507,9 @@ struct StreamEncoder {
     stop: Option<Stop>,
     usage: Option<Usage>,
     sequence: u64,
-    next_item: u64,
+    next_output: u32,
     completed: bool,
+    tools: ToolMap,
 }
 
 #[derive(Clone, Copy)]
@@ -1313,6 +1520,13 @@ enum ItemKind {
 }
 
 impl StreamEncoder {
+    fn with_tools(tools: ToolMap) -> Self {
+        Self {
+            tools,
+            ..Self::default()
+        }
+    }
+
     fn push(&mut self, event: &StreamEvent) -> Result<(), CodecError> {
         match event {
             StreamEvent::MessageStart(start) => {
@@ -1328,48 +1542,77 @@ impl StreamEncoder {
             }
             StreamEvent::ContentBlockStart(start) => self.open_block(start)?,
             StreamEvent::TextDelta(delta) => {
-                self.ensure(delta.index, ItemKind::Message);
+                self.ensure(delta.index, ItemKind::Message, &Extensions::new());
                 if let Some(item) = self.open.get_mut(&delta.index) {
                     item.text.push_str(&delta.text);
                 }
+                let output_index = self.output_index(delta.index);
                 self.write(
                     "response.output_text.delta",
                     serde_json::json!({
                         "type": "response.output_text.delta",
-                        "output_index": delta.index,
+                        "output_index": output_index,
                         "content_index": 0,
                         "delta": delta.text,
                     }),
                 );
             }
             StreamEvent::ThinkingDelta(delta) => {
-                self.ensure(delta.index, ItemKind::Reasoning);
+                self.ensure(delta.index, ItemKind::Reasoning, &Extensions::new());
                 if let Some(item) = self.open.get_mut(&delta.index) {
                     item.text.push_str(&delta.text);
                 }
+                let output_index = self.output_index(delta.index);
                 self.write(
                     "response.reasoning_text.delta",
                     serde_json::json!({
                         "type": "response.reasoning_text.delta",
-                        "output_index": delta.index,
+                        "output_index": output_index,
                         "content_index": 0,
                         "delta": delta.text,
                     }),
                 );
             }
             StreamEvent::ToolArgumentsDelta(delta) => {
-                self.ensure(delta.index, ItemKind::Function);
-                if let Some(item) = self.open.get_mut(&delta.index) {
-                    item.text.push_str(&delta.partial_json);
+                self.ensure(delta.index, ItemKind::Function, &Extensions::new());
+                let output_index = self.output_index(delta.index);
+                let custom = self.open.get(&delta.index).is_some_and(|item| {
+                    item.restored
+                        .as_ref()
+                        .is_some_and(|tool| tool.kind == ToolKind::Custom)
+                });
+                if custom {
+                    let piece = self
+                        .open
+                        .get_mut(&delta.index)
+                        .map(|item| {
+                            item.text.push_str(&delta.partial_json);
+                            item.custom_input.feed(&delta.partial_json)
+                        })
+                        .unwrap_or_default();
+                    if !piece.is_empty() {
+                        self.write(
+                            "response.custom_tool_call_input.delta",
+                            serde_json::json!({
+                                "type": "response.custom_tool_call_input.delta",
+                                "output_index": output_index,
+                                "delta": piece,
+                            }),
+                        );
+                    }
+                } else {
+                    if let Some(item) = self.open.get_mut(&delta.index) {
+                        item.text.push_str(&delta.partial_json);
+                    }
+                    self.write(
+                        "response.function_call_arguments.delta",
+                        serde_json::json!({
+                            "type": "response.function_call_arguments.delta",
+                            "output_index": output_index,
+                            "delta": delta.partial_json,
+                        }),
+                    );
                 }
-                self.write(
-                    "response.function_call_arguments.delta",
-                    serde_json::json!({
-                        "type": "response.function_call_arguments.delta",
-                        "output_index": delta.index,
-                        "delta": delta.partial_json,
-                    }),
-                );
             }
             StreamEvent::SignatureDelta(_) => {}
             StreamEvent::ContentBlockStop(stop) => self.close(stop.index, &stop.extensions),
@@ -1409,7 +1652,7 @@ impl StreamEncoder {
         }
     }
 
-    fn ensure(&mut self, index: u32, kind: ItemKind) {
+    fn ensure(&mut self, index: u32, kind: ItemKind, extensions: &Extensions) {
         if self.open.contains_key(&index) {
             return;
         }
@@ -1424,24 +1667,45 @@ impl StreamEncoder {
                 name: String::new(),
             },
         };
-        self.write_open(index, &block, &Extensions::new());
+        self.write_open(index, &block, extensions);
+    }
+
+    fn output_index(&self, index: u32) -> u32 {
+        self.open
+            .get(&index)
+            .map(|item| item.output_index)
+            .unwrap_or(0)
     }
 
     fn write_open(&mut self, index: u32, block: &BlockStart, extensions: &Extensions) {
         if self.open.contains_key(&index) {
             return;
         }
-        let prefix = match block {
-            BlockStart::Text => "msg",
-            BlockStart::Thinking { .. } => "rs",
-            BlockStart::ToolCall { .. } => "fc",
-            BlockStart::Unknown { .. } => return,
+        let restored = match block {
+            BlockStart::ToolCall { name, .. } => self.tools.get(name).cloned(),
+            _ => None,
         };
-        let id = format!("{prefix}_{}", self.next_item);
-        self.next_item += 1;
-        let Some(state) = ItemState::from_block(block, id) else {
+        let prefix = match (&restored, block) {
+            (Some(tool), _) if tool.kind == ToolKind::Custom => "ctc",
+            (_, BlockStart::Text) => "msg",
+            (_, BlockStart::Thinking { .. }) => "rs",
+            (_, BlockStart::ToolCall { .. }) => "fc",
+            (_, BlockStart::Unknown { .. }) => return,
+        };
+        let id = extensions
+            .get("item_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| fresh_id(prefix));
+        let output_index = self.next_output;
+        self.next_output += 1;
+        let Some(mut state) = ItemState::from_block(block, id, output_index, restored) else {
             return;
         };
+        if let Some(tool) = state.restored.clone() {
+            state.name = tool.name;
+        }
         let kind = state.kind;
         let item = state.added_item(extensions);
         self.open.insert(index, state);
@@ -1449,7 +1713,7 @@ impl StreamEncoder {
             "response.output_item.added",
             serde_json::json!({
                 "type": "response.output_item.added",
-                "output_index": index,
+                "output_index": output_index,
                 "item": item,
             }),
         );
@@ -1458,7 +1722,7 @@ impl StreamEncoder {
                 "response.content_part.added",
                 serde_json::json!({
                     "type": "response.content_part.added",
-                    "output_index": index,
+                    "output_index": output_index,
                     "content_index": 0,
                     "part": {"type": "output_text", "text": "", "annotations": []},
                 }),
@@ -1470,6 +1734,7 @@ impl StreamEncoder {
         let Some(state) = self.open.remove(&index) else {
             return;
         };
+        let output_index = state.output_index;
         let item = match state.kind {
             ItemKind::Message => {
                 let text = state.text;
@@ -1482,7 +1747,7 @@ impl StreamEncoder {
                     "response.output_text.done",
                     serde_json::json!({
                         "type": "response.output_text.done",
-                        "output_index": index,
+                        "output_index": output_index,
                         "content_index": 0,
                         "text": text,
                     }),
@@ -1491,7 +1756,7 @@ impl StreamEncoder {
                     "response.content_part.done",
                     serde_json::json!({
                         "type": "response.content_part.done",
-                        "output_index": index,
+                        "output_index": output_index,
                         "content_index": 0,
                         "part": part.clone(),
                     }),
@@ -1504,14 +1769,7 @@ impl StreamEncoder {
                     "content": [part],
                 })
             }
-            ItemKind::Function => serde_json::json!({
-                "id": state.id,
-                "type": "function_call",
-                "status": "completed",
-                "call_id": state.call_id,
-                "name": state.name,
-                "arguments": state.text,
-            }),
+            ItemKind::Function => self.finish_call(&state, output_index),
             ItemKind::Reasoning => match extensions.get(SEALED_ITEM) {
                 Some(Value::Object(sealed)) => {
                     let mut sealed = sealed.clone();
@@ -1533,15 +1791,74 @@ impl StreamEncoder {
                 }
             },
         };
-        self.done.insert(index, item.clone());
+        self.done.insert(output_index, item.clone());
         self.write(
             "response.output_item.done",
             serde_json::json!({
                 "type": "response.output_item.done",
-                "output_index": index,
+                "output_index": output_index,
                 "item": item,
             }),
         );
+    }
+
+    fn finish_call(&mut self, state: &ItemState, output_index: u32) -> Value {
+        let Some(restored) = &state.restored else {
+            return serde_json::json!({
+                "id": state.id,
+                "type": "function_call",
+                "status": "completed",
+                "call_id": state.call_id,
+                "name": state.name,
+                "arguments": state.text,
+            });
+        };
+        if restored.kind == ToolKind::Custom {
+            let input = custom_input_text(&state.text);
+            self.write(
+                "response.custom_tool_call_input.done",
+                serde_json::json!({
+                    "type": "response.custom_tool_call_input.done",
+                    "output_index": output_index,
+                    "input": input,
+                }),
+            );
+            let mut item = serde_json::json!({
+                "id": state.id,
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": state.call_id,
+                "name": state.name,
+                "input": input,
+            });
+            if !restored.namespace.is_empty()
+                && let Some(object) = item.as_object_mut()
+            {
+                object.insert(
+                    "namespace".to_owned(),
+                    Value::String(restored.namespace.clone()),
+                );
+            }
+            return item;
+        }
+        let mut item = serde_json::json!({
+            "id": state.id,
+            "type": "function_call",
+            "status": "completed",
+            "call_id": state.call_id,
+            "name": state.name,
+            "arguments": state.text,
+            "encrypted_function_args": [],
+        });
+        if !restored.namespace.is_empty()
+            && let Some(object) = item.as_object_mut()
+        {
+            object.insert(
+                "namespace".to_owned(),
+                Value::String(restored.namespace.clone()),
+            );
+        }
+        item
     }
 
     fn complete(&mut self) {
@@ -1608,7 +1925,12 @@ impl StreamEncoder {
 }
 
 impl ItemState {
-    fn from_block(block: &BlockStart, id: String) -> Option<Self> {
+    fn from_block(
+        block: &BlockStart,
+        id: String,
+        output_index: u32,
+        restored: Option<RestoredTool>,
+    ) -> Option<Self> {
         let state = match block {
             BlockStart::Text => Self {
                 kind: ItemKind::Message,
@@ -1616,6 +1938,9 @@ impl ItemState {
                 call_id: String::new(),
                 name: String::new(),
                 text: String::new(),
+                output_index,
+                restored,
+                custom_input: CustomStream::default(),
             },
             BlockStart::Thinking { .. } => Self {
                 kind: ItemKind::Reasoning,
@@ -1623,6 +1948,9 @@ impl ItemState {
                 call_id: String::new(),
                 name: String::new(),
                 text: String::new(),
+                output_index,
+                restored,
+                custom_input: CustomStream::default(),
             },
             BlockStart::ToolCall { id: call_id, name } => Self {
                 kind: ItemKind::Function,
@@ -1630,6 +1958,9 @@ impl ItemState {
                 call_id: call_id.clone(),
                 name: name.clone(),
                 text: String::new(),
+                output_index,
+                restored,
+                custom_input: CustomStream::default(),
             },
             BlockStart::Unknown { .. } => return None,
         };
@@ -1659,14 +1990,55 @@ impl ItemState {
                     "summary": [],
                 }),
             },
-            ItemKind::Function => serde_json::json!({
-                "id": self.id,
-                "type": "function_call",
-                "call_id": self.call_id,
-                "name": self.name,
-                "arguments": "",
-                "status": "in_progress",
-            }),
+            ItemKind::Function => {
+                let custom = self
+                    .restored
+                    .as_ref()
+                    .is_some_and(|tool| tool.kind == ToolKind::Custom);
+                if custom {
+                    let mut item = serde_json::json!({
+                        "id": self.id,
+                        "type": "custom_tool_call",
+                        "call_id": self.call_id,
+                        "name": self.name,
+                        "input": "",
+                        "status": "in_progress",
+                    });
+                    if let Some(tool) = &self.restored
+                        && !tool.namespace.is_empty()
+                        && let Some(object) = item.as_object_mut()
+                    {
+                        object.insert(
+                            "namespace".to_owned(),
+                            Value::String(tool.namespace.clone()),
+                        );
+                    }
+                    item
+                } else {
+                    let mut item = serde_json::json!({
+                        "id": self.id,
+                        "type": "function_call",
+                        "call_id": self.call_id,
+                        "name": self.name,
+                        "arguments": "",
+                        "status": "in_progress",
+                    });
+                    if let Some(tool) = &self.restored
+                        && !tool.namespace.is_empty()
+                        && let Some(object) = item.as_object_mut()
+                    {
+                        object.insert(
+                            "namespace".to_owned(),
+                            Value::String(tool.namespace.clone()),
+                        );
+                        object.insert(
+                            "encrypted_function_args".to_owned(),
+                            Value::Array(Vec::new()),
+                        );
+                    }
+                    item
+                }
+            }
         }
     }
 }
@@ -1679,6 +2051,7 @@ struct Decoder {
     open: BTreeSet<u32>,
     deltas: BTreeSet<u32>,
     args: BTreeMap<u32, String>,
+    item_ids: BTreeMap<u32, String>,
 }
 
 impl StreamDecoder for Decoder {
@@ -1811,8 +2184,10 @@ impl Decoder {
         let Some(mut item) = take_object(&mut object, "item")? else {
             return Ok(());
         };
+        self.note_id(index, &item);
         let kind = take_string(&mut item, "type")?.unwrap_or_default();
         match kind.as_str() {
+            "message" => {}
             "function_call" => {
                 self.called = true;
                 let id = take_string(&mut item, "call_id")?.unwrap_or_default();
@@ -1955,6 +2330,7 @@ impl Decoder {
         let index = index_of(&mut object)?;
         let mut seal = Extensions::new();
         if let Some(mut item) = take_object(&mut object, "item")? {
+            self.note_id(index, &item);
             let kind = take_string(&mut item, "type")?.unwrap_or_default();
             if kind == "reasoning" {
                 seal = seal_extensions(&item);
@@ -2155,13 +2531,19 @@ impl Decoder {
         events.push(StreamEvent::ContentBlockStart(ContentBlockStart {
             index,
             block: BlockStart::Text,
-            extensions: Extensions::new(),
+            extensions: self.carried_id(index),
         }));
     }
 
     fn open_thinking(&mut self, index: u32, extensions: Extensions, events: &mut Vec<StreamEvent>) {
         if !self.open.insert(index) {
             return;
+        }
+        let mut extensions = extensions;
+        if extensions.get("item_id").is_none()
+            && let Some(id) = self.item_ids.get(&index)
+        {
+            extensions.insert("item_id", Value::String(id.clone()));
         }
         events.push(StreamEvent::ContentBlockStart(ContentBlockStart {
             index,
@@ -2180,8 +2562,26 @@ impl Decoder {
         events.push(StreamEvent::ContentBlockStart(ContentBlockStart {
             index,
             block: BlockStart::ToolCall { id, name },
-            extensions: Extensions::new(),
+            extensions: self.carried_id(index),
         }));
+    }
+
+    fn note_id(&mut self, index: u32, item: &Object) {
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        if id.is_empty() {
+            return;
+        }
+        self.item_ids.entry(index).or_insert_with(|| id.to_owned());
+    }
+
+    fn carried_id(&self, index: u32) -> Extensions {
+        let mut extensions = Extensions::new();
+        if let Some(id) = self.item_ids.get(&index) {
+            extensions.insert("item_id", Value::String(id.clone()));
+        }
+        extensions
     }
 
     fn close(&mut self, index: u32, extensions: Extensions, events: &mut Vec<StreamEvent>) {

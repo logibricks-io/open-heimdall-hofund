@@ -14,6 +14,7 @@ struct Fake {
     id: &'static str,
     seen: Arc<Mutex<Vec<String>>>,
     count: Count,
+    caps: Option<Arc<Mutex<Vec<Option<u64>>>>>,
 }
 
 enum Count {
@@ -47,6 +48,9 @@ impl Provider for Fake {
         _inbound_protocol: &str,
     ) -> Result<Completion, ProviderError> {
         self.seen.lock().expect("seen").push(request.model.clone());
+        if let Some(caps) = &self.caps {
+            caps.lock().expect("caps").push(request.params.max_tokens);
+        }
         if let Count::Reject(status) = self.count {
             return Err(ProviderError::status(status, "down"));
         }
@@ -69,8 +73,10 @@ fn hop(id: &'static str, wire: Option<&str>, seen: &Arc<Mutex<Vec<String>>>, cou
             id,
             seen: Arc::clone(seen),
             count,
+            caps: None,
         }),
         wire_model: wire.map(str::to_owned),
+        max_output_tokens: None,
     }
 }
 
@@ -195,4 +201,50 @@ async fn count_uses_an_upstream_count_and_estimates_when_none_can() {
         .expect("estimate");
     assert!(count.estimated);
     assert_eq!(count.tokens, 1);
+}
+
+#[tokio::test]
+async fn a_hop_cap_fills_an_omitted_max_tokens_and_a_client_cap_wins() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let caps = Arc::new(Mutex::new(Vec::new()));
+    let hop = Hop {
+        provider: Arc::new(Fake {
+            id: "primary",
+            seen: Arc::clone(&seen),
+            count: Count::Number(1),
+            caps: Some(Arc::clone(&caps)),
+        }),
+        wire_model: None,
+        max_output_tokens: Some(8192),
+    };
+    let mut routes = BTreeMap::new();
+    routes.insert("demo".to_owned(), vec![hop]);
+    let mut request = ask("demo");
+    router(routes)
+        .dispatch(request.clone(), "inbound")
+        .await
+        .expect("dispatch");
+    request.params.max_tokens = Some(32);
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "demo".to_owned(),
+        vec![Hop {
+            provider: Arc::new(Fake {
+                id: "primary",
+                seen: Arc::clone(&seen),
+                count: Count::Number(1),
+                caps: Some(Arc::clone(&caps)),
+            }),
+            wire_model: None,
+            max_output_tokens: Some(8192),
+        }],
+    );
+    router(routes)
+        .dispatch(request, "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(
+        caps.lock().expect("caps").as_slice(),
+        [Some(8192), Some(32)]
+    );
 }

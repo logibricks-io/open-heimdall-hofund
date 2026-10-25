@@ -61,6 +61,11 @@ pub struct Provider {
     pub quirks: Option<String>,
     /// Extra request headers.
     pub headers: BTreeMap<String, String>,
+    /// Output cap used when the client omits `max_tokens`.
+    ///
+    /// A route member can override this. Absent leaves the cap to a quirk
+    /// profile, or to the Messages codec's fallback.
+    pub max_output_tokens: Option<u64>,
 }
 
 /// Protocol family of one provider.
@@ -103,6 +108,10 @@ pub struct Upstream {
     /// Absent means the name the client used, after `provider/model` is
     /// reduced to the model portion.
     pub model: Option<String>,
+    /// Output cap for this hop when the client omits `max_tokens`.
+    ///
+    /// Absent uses the provider's `max_output_tokens`.
+    pub max_output_tokens: Option<u64>,
 }
 
 /// The first structural problem in a configuration file.
@@ -246,6 +255,12 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             )));
         }
         let kind = kind_of(&provider)?;
+        if provider.max_output_tokens == Some(0) {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{}` has max_output_tokens 0",
+                provider.id
+            )));
+        }
         providers.push(Provider {
             id: provider.id,
             kind,
@@ -253,6 +268,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             api_key: provider.api_key,
             quirks: provider.quirks,
             headers: provider.headers,
+            max_output_tokens: provider.max_output_tokens,
         });
     }
     let mut models = BTreeSet::new();
@@ -301,9 +317,9 @@ fn upstream_of(
     upstream: RawUpstream,
     providers: &BTreeSet<String>,
 ) -> Result<Upstream, ConfigError> {
-    let (provider, model) = match upstream {
-        RawUpstream::Id(provider) => (provider, None),
-        RawUpstream::Mapped(mapped) => (mapped.provider, mapped.model),
+    let (provider, model, max_output_tokens) = match upstream {
+        RawUpstream::Id(provider) => (provider, None, None),
+        RawUpstream::Mapped(mapped) => (mapped.provider, mapped.model, mapped.max_output_tokens),
     };
     if provider.is_empty() {
         return Err(ConfigError::Invalid(format!(
@@ -320,7 +336,16 @@ fn upstream_of(
             "route `{route}` has an empty model for provider `{provider}`"
         )));
     }
-    Ok(Upstream { provider, model })
+    if max_output_tokens == Some(0) {
+        return Err(ConfigError::Invalid(format!(
+            "route `{route}` has max_output_tokens 0 for provider `{provider}`"
+        )));
+    }
+    Ok(Upstream {
+        provider,
+        model,
+        max_output_tokens,
+    })
 }
 
 fn kind_of(provider: &RawProvider) -> Result<Kind, ConfigError> {
@@ -423,6 +448,8 @@ struct RawProvider {
     quirks: Option<String>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -445,6 +472,8 @@ struct RawMappedUpstream {
     provider: String,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
 }
 
 #[cfg(test)]
@@ -478,6 +507,8 @@ mod tests {
         ));
         assert_eq!(config.routes[0].upstreams[0].provider, "primary");
         assert_eq!(config.routes[0].upstreams[0].model, None);
+        assert_eq!(config.providers[0].max_output_tokens, None);
+        assert_eq!(config.routes[0].upstreams[0].max_output_tokens, None);
     }
 
     #[test]
@@ -506,6 +537,36 @@ mod tests {
             Some("claude-sonnet")
         );
         assert_eq!(config.routes[0].upstreams[1].model, None);
+    }
+
+    #[test]
+    fn max_output_tokens_can_be_set_on_a_provider_and_a_route_member() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "anthropic"
+            base_url = "https://example.test"
+            max_output_tokens = 8192
+            [[routes]]
+            model = "demo"
+            upstreams = [{ provider = "primary", max_output_tokens = 1024 }]
+            "#,
+        )
+        .expect("config");
+        assert_eq!(config.providers[0].max_output_tokens, Some(8192));
+        assert_eq!(config.routes[0].upstreams[0].max_output_tokens, Some(1024));
+        let error = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            kind = "anthropic"
+            base_url = "https://example.test"
+            max_output_tokens = 0
+            "#,
+        )
+        .expect_err("zero");
+        assert!(error.to_string().contains("max_output_tokens"));
         let error = load(
             r#"
             [[providers]]

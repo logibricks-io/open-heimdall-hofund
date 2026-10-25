@@ -53,6 +53,8 @@ pub struct Hop {
     /// Model name sent to `provider`. Absent keeps the caller's model name,
     /// after a `provider/model` id is reduced to its model portion.
     pub wire_model: Option<String>,
+    /// Output cap applied when the request omitted one.
+    pub max_output_tokens: Option<u64>,
 }
 
 /// A model-to-upstream table.
@@ -92,6 +94,7 @@ impl Router {
                     .map(|provider| Hop {
                         provider,
                         wire_model: None,
+                        max_output_tokens: None,
                     })
                     .collect();
                 (model, hops)
@@ -344,6 +347,9 @@ pub enum RouterError {
 
 fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {
     request.model = hop.wire_model.clone().unwrap_or_else(|| bare.to_owned());
+    if request.params.max_tokens.is_none() {
+        request.params.max_tokens = hop.max_output_tokens;
+    }
 }
 
 fn candidates(found: &[(String, Hop)]) -> String {

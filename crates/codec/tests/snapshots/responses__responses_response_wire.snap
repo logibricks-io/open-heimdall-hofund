@@ -1,6 +1,7 @@
 ---
 source: crates/codec/tests/responses.rs
-expression: pretty_json(&encoded)
+assertion_line: 160
+expression: stable_ids(&encoded)
 ---
 {
   "object": "response",
@@ -15,7 +16,9 @@ expression: pretty_json(&encoded)
           "type": "reasoning_text",
           "text": "thinking"
         }
-      ]
+      ],
+      "id": "id_0",
+      "status": "completed"
     },
     {
       "type": "message",
@@ -25,13 +28,17 @@ expression: pretty_json(&encoded)
           "type": "output_text",
           "text": "Rain."
         }
-      ]
+      ],
+      "id": "id_1",
+      "status": "completed"
     },
     {
       "type": "function_call",
       "call_id": "call_9",
       "name": "get_weather",
-      "arguments": "{}"
+      "arguments": "{}",
+      "id": "id_2",
+      "status": "completed"
     }
   ],
   "usage": {
