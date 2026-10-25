@@ -14,8 +14,8 @@ use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 
 pub use hofund_gateway::Running;
 use hofund_provider::{
-    Anthropic, Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, Vertex,
-    Wire, resolve,
+    Anthropic, Bedrock, Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider,
+    Vertex, Wire, resolve,
 };
 use hofund_quirks::named;
 use hofund_router::{FailoverPolicy, Hop, Router};
@@ -261,6 +261,27 @@ fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, Dae
                 Vertex::new(endpoint, &provider.credentials, &provider.impersonate)
                     .map_err(show)?,
             ),
+            Wire::Converse => {
+                let access_key_id =
+                    hofund_secrets::resolve(&provider.access_key_id).map_err(show)?;
+                let secret_access_key =
+                    hofund_secrets::resolve(&provider.secret_access_key).map_err(show)?;
+                let session_token = if provider.session_token.is_empty() {
+                    String::new()
+                } else {
+                    hofund_secrets::resolve(&provider.session_token).map_err(show)?
+                };
+                Arc::new(
+                    Bedrock::new(
+                        endpoint,
+                        provider.region.as_deref().unwrap_or(""),
+                        &access_key_id,
+                        &secret_access_key,
+                        &session_token,
+                    )
+                    .map_err(show)?,
+                )
+            }
         };
         built.insert(provider.id.clone(), adapter);
     }
@@ -283,6 +304,7 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
                 PresetWire::Responses => Wire::Responses,
                 PresetWire::Messages => Wire::Messages,
                 PresetWire::Generative => Wire::Generative,
+                PresetWire::Converse => Wire::Converse,
             }),
             base_url: &provider.base_url,
             project: &provider.project,
@@ -311,6 +333,7 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
         }
         Kind::Anthropic => (Wire::Messages, Credential::Default),
         Kind::Generative => (Wire::Generative, Credential::Default),
+        Kind::Converse => (Wire::Converse, Credential::Default),
     };
     Ok(Planned {
         base_url: provider.base_url.clone(),

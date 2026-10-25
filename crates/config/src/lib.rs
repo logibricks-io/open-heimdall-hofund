@@ -87,6 +87,17 @@ pub struct Provider {
     /// Service account email the Vertex token is traded for. Empty keeps the
     /// account in the credentials file.
     pub impersonate: String,
+    /// AWS access key id for Bedrock Converse. `env:NAME` reads that variable.
+    ///
+    /// Empty unless `protocol = "converse"` on preset `bedrock`, or
+    /// `kind = "converse"`.
+    pub access_key_id: String,
+    /// AWS secret access key for Bedrock Converse. `env:NAME` reads that
+    /// variable. The value is not written to logs.
+    pub secret_access_key: String,
+    /// AWS session token for Bedrock Converse. Empty for a long-lived key.
+    /// `env:NAME` reads that variable.
+    pub session_token: String,
 }
 
 /// Protocol family of one provider.
@@ -105,6 +116,11 @@ pub enum Kind {
     /// A bare host is completed with `/v1beta`. A pasted method URL is cut
     /// back to that root. The API key is sent as `x-goog-api-key`.
     Generative,
+    /// Amazon Bedrock Converse.
+    ///
+    /// `base_url` is the runtime root. `region` is the signing region.
+    /// `access_key_id` and `secret_access_key` sign the call. No API key.
+    Converse,
 }
 
 /// Protocol selected for [`Kind::OpenAiCompat`].
@@ -127,6 +143,8 @@ pub enum PresetWire {
     Messages,
     /// The Generative Language API.
     Generative,
+    /// Amazon Bedrock Converse.
+    Converse,
 }
 
 /// One model route.
@@ -296,6 +314,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             )));
         }
         let vertex = vertex_of(&provider)?;
+        let aws = aws_of(&provider)?;
         providers.push(Provider {
             id: provider.id,
             kind: source.kind,
@@ -311,6 +330,9 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             location: vertex.location,
             credentials: vertex.credentials,
             impersonate: vertex.impersonate,
+            access_key_id: aws.access_key_id,
+            secret_access_key: aws.secret_access_key,
+            session_token: aws.session_token,
         });
     }
     let mut models = BTreeSet::new();
@@ -409,9 +431,16 @@ fn source_of(provider: &RawProvider) -> Result<Source, ConfigError> {
             provider.id
         ))),
         (None, Some(kind)) => {
-            if provider.region.is_some() {
+            let converse = kind == "converse";
+            if provider.region.is_some() && !converse {
                 return Err(ConfigError::Invalid(format!(
                     "provider `{}` sets region without a preset",
+                    provider.id
+                )));
+            }
+            if converse && provider.region.as_deref().unwrap_or("").is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "provider `{}` is Converse and needs a region",
                     provider.id
                 )));
             }
@@ -424,7 +453,11 @@ fn source_of(provider: &RawProvider) -> Result<Source, ConfigError> {
             Ok(Source {
                 kind: Some(kind_of(provider, kind)?),
                 preset: None,
-                region: None,
+                region: if converse {
+                    provider.region.clone()
+                } else {
+                    None
+                },
                 preset_wire: None,
                 base_url: provider.base_url.clone(),
             })
@@ -496,6 +529,52 @@ fn vertex_of(provider: &RawProvider) -> Result<VertexFields, ConfigError> {
     })
 }
 
+struct AwsFields {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: String,
+}
+
+fn aws_of(provider: &RawProvider) -> Result<AwsFields, ConfigError> {
+    let access_key_id = provider.access_key_id.trim().to_owned();
+    let secret_access_key = provider.secret_access_key.trim().to_owned();
+    let session_token = provider.session_token.trim().to_owned();
+    let set =
+        !access_key_id.is_empty() || !secret_access_key.is_empty() || !session_token.is_empty();
+    let converse = (provider.preset.as_deref() == Some("bedrock")
+        && provider.protocol.as_deref() == Some("converse"))
+        || provider.kind.as_deref() == Some("converse");
+    if set && !converse {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{}` sets access_key_id, secret_access_key, or session_token, which only Bedrock Converse uses",
+            provider.id
+        )));
+    }
+    if converse && access_key_id.is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{}` is Converse and needs access_key_id",
+            provider.id
+        )));
+    }
+    if converse && secret_access_key.is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{}` is Converse and needs secret_access_key",
+            provider.id
+        )));
+    }
+    if converse && !provider.api_key.is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{}` is Converse and does not take an API key",
+            provider.id
+        )));
+    }
+    Ok(AwsFields {
+        access_key_id,
+        secret_access_key,
+        session_token,
+    })
+}
+
 fn preset_wire_of(provider: &RawProvider) -> Result<Option<PresetWire>, ConfigError> {
     match provider.protocol.as_deref() {
         None => Ok(None),
@@ -503,6 +582,15 @@ fn preset_wire_of(provider: &RawProvider) -> Result<Option<PresetWire>, ConfigEr
         Some("responses") => Ok(Some(PresetWire::Responses)),
         Some("messages") => Ok(Some(PresetWire::Messages)),
         Some("generative") => Ok(Some(PresetWire::Generative)),
+        Some("converse") => {
+            if provider.preset.as_deref() != Some("bedrock") {
+                return Err(ConfigError::Invalid(format!(
+                    "provider `{}` uses protocol `converse`, which only preset `bedrock` has",
+                    provider.id
+                )));
+            }
+            Ok(Some(PresetWire::Converse))
+        }
         Some(other) => Err(ConfigError::Invalid(format!(
             "provider `{}` has unknown protocol `{other}`",
             provider.id
@@ -542,6 +630,15 @@ fn kind_of(provider: &RawProvider, kind: &str) -> Result<Kind, ConfigError> {
                 )));
             }
             Ok(Kind::Generative)
+        }
+        "converse" => {
+            if provider.protocol.is_some() {
+                return Err(ConfigError::Invalid(format!(
+                    "provider `{}` does not take a protocol",
+                    provider.id
+                )));
+            }
+            Ok(Kind::Converse)
         }
         other => Err(ConfigError::Invalid(format!(
             "provider `{}` has unknown kind `{other}`",
@@ -635,6 +732,12 @@ struct RawProvider {
     credentials: String,
     #[serde(default)]
     impersonate: String,
+    #[serde(default)]
+    access_key_id: String,
+    #[serde(default)]
+    secret_access_key: String,
+    #[serde(default)]
+    session_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -809,6 +912,51 @@ mod tests {
 
         let error = load("listen = \"not-an-address\"\n").expect_err("listen");
         assert!(error.to_string().contains("listen"));
+    }
+
+    #[test]
+    fn converse_keeps_the_signing_keys_and_refuses_an_api_key() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "bedrock"
+            preset = "bedrock"
+            region = "us-east-1"
+            protocol = "converse"
+            access_key_id = "AKIAIOSFODNN7EXAMPLE"
+            secret_access_key = "secret"
+            session_token = "token"
+            "#,
+        )
+        .expect("converse");
+        let provider = &config.providers[0];
+        assert_eq!(provider.preset_wire, Some(super::PresetWire::Converse));
+        assert_eq!(provider.access_key_id, "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(provider.secret_access_key, "secret");
+        assert_eq!(provider.session_token, "token");
+        let error = load(
+            r#"
+            [[providers]]
+            id = "bedrock"
+            preset = "bedrock"
+            protocol = "converse"
+            api_key = "ABSK"
+            access_key_id = "AKIA"
+            secret_access_key = "secret"
+            "#,
+        )
+        .expect_err("api key");
+        assert!(error.to_string().contains("does not take an API key"));
+        let error = load(
+            r#"
+            [[providers]]
+            id = "openai"
+            preset = "openai"
+            access_key_id = "AKIA"
+            "#,
+        )
+        .expect_err("openai key");
+        assert!(error.to_string().contains("only Bedrock Converse"));
     }
 
     #[test]

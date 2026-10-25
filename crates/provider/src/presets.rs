@@ -27,6 +27,9 @@ pub enum Wire {
     /// Vertex AI publisher `generateContent`. The base includes the project
     /// and the location. The adapter appends `publishers/google/models/{model}`.
     Vertex,
+    /// Bedrock Converse. The base is the runtime root. The adapter appends
+    /// `/model/{model}/converse`.
+    Converse,
 }
 
 /// What the caller asked the catalog to resolve.
@@ -112,6 +115,9 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
         None => None,
     };
     let endpoints = Endpoints::of(preset, region);
+    if request.wire == Some(Wire::Converse) {
+        return resolve_converse(preset, request, &endpoints);
+    }
     if let Some(wire) = request.wire {
         let base = endpoints
             .url(wire)
@@ -220,6 +226,35 @@ pub(crate) fn preset_models(id: &str) -> Option<&[String]> {
         .map(|preset| preset.models.as_slice())
 }
 
+fn resolve_converse(
+    preset: &Preset,
+    request: &Resolve<'_>,
+    endpoints: &Endpoints<'_>,
+) -> Result<Resolved, PresetError> {
+    if preset.id != "bedrock" {
+        return Err(PresetError::new(format!(
+            "preset `{}` has no converse endpoint",
+            preset.id
+        )));
+    }
+    let chat = endpoints.url(Wire::Chat).unwrap_or("");
+    if chat.is_empty() && request.base_url.is_empty() {
+        return Err(PresetError::new(
+            "preset `bedrock` has no converse endpoint",
+        ));
+    }
+    let base = if request.base_url.is_empty() {
+        chat.to_owned()
+    } else {
+        request.base_url.to_owned()
+    };
+    Ok(finish(
+        preset,
+        Wire::Converse,
+        crate::bedrock::runtime_root(&base),
+    ))
+}
+
 fn unavailable(preset: &Preset) -> PresetError {
     if preset.id == "google-vertex" {
         return PresetError::new(
@@ -241,7 +276,7 @@ fn unavailable(preset: &Preset) -> PresetError {
 }
 
 fn credential(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
-    if wire == Wire::Vertex {
+    if wire == Wire::Vertex || wire == Wire::Converse {
         return Credential::Bearer;
     }
     if wire == Wire::Generative {
@@ -251,7 +286,7 @@ fn credential(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
     if preset_id == "azure" || azure_host(&host) {
         return match wire {
             Wire::Messages => Credential::XApiKey,
-            Wire::Chat | Wire::Responses | Wire::Vertex => Credential::ApiKey,
+            Wire::Chat | Wire::Responses | Wire::Vertex | Wire::Converse => Credential::ApiKey,
             Wire::Generative => Credential::GoogApiKey,
         };
     }
@@ -336,6 +371,7 @@ fn wire_name(wire: Wire) -> &'static str {
         Wire::Messages => "messages",
         Wire::Generative => "generative",
         Wire::Vertex => "vertex",
+        Wire::Converse => "converse",
     }
 }
 
@@ -370,7 +406,7 @@ impl<'a> Endpoints<'a> {
             Wire::Responses => Some(self.responses),
             Wire::Messages => Some(self.messages),
             Wire::Generative => Some(self.generative),
-            Wire::Vertex => None,
+            Wire::Vertex | Wire::Converse => None,
         }
     }
 }
@@ -659,6 +695,30 @@ mod tests {
             "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1"
         );
         assert_eq!(bedrock_chat.credential, crate::Credential::Bearer);
+        let converse = resolve(&Resolve {
+            id: "bedrock",
+            region: Some("eu-west-1"),
+            wire: Some(Wire::Converse),
+            base_url: "",
+            project: "",
+            location: "",
+        })
+        .expect("converse");
+        assert_eq!(converse.wire, Wire::Converse);
+        assert_eq!(
+            converse.base_url,
+            "https://bedrock-runtime.eu-west-1.amazonaws.com"
+        );
+        let error = resolve(&Resolve {
+            id: "bedrock-mantle",
+            region: None,
+            wire: Some(Wire::Converse),
+            base_url: "",
+            project: "",
+            location: "",
+        })
+        .expect_err("mantle converse");
+        assert!(error.to_string().contains("no converse endpoint"));
 
         let mantle = resolve(&Resolve {
             id: "bedrock-mantle",

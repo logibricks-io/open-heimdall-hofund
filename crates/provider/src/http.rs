@@ -252,6 +252,41 @@ pub(crate) async fn post_json(
     send_json(upstream, url, body, None).await
 }
 
+pub(crate) async fn post_with_headers(
+    upstream: &Upstream,
+    url: &str,
+    body: Vec<u8>,
+    extra: HeaderMap,
+) -> Result<reqwest::Response, ProviderError> {
+    upstream
+        .client
+        .post(url)
+        .headers(upstream.headers.clone())
+        .headers(extra)
+        .body(body)
+        .send()
+        .await
+        .map_err(map_transport)
+}
+
+/// Header pairs captured at [`Upstream::open`], excluding `Authorization`.
+///
+/// A signer includes these so a caller-supplied header is part of the
+/// signature instead of an unsigned extra.
+pub(crate) fn extra_header_pairs(upstream: &Upstream) -> Vec<(String, String)> {
+    upstream
+        .headers
+        .iter()
+        .filter(|(name, _)| name.as_str() != "authorization")
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
 pub(crate) async fn post_bearer(
     upstream: &Upstream,
     url: &str,
