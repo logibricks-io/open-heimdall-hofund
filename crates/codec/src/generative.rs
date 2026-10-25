@@ -863,10 +863,11 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
 }
 
 fn encode_usage(usage: &Usage) -> Option<Value> {
+    let (input, output, total) = usage.filled_counts();
     let mut object = Object::new();
-    insert_u64(&mut object, "promptTokenCount", usage.input_tokens);
-    insert_u64(&mut object, "candidatesTokenCount", usage.output_tokens);
-    insert_u64(&mut object, "totalTokenCount", usage.total_tokens);
+    object.insert("promptTokenCount".to_owned(), Value::from(input));
+    object.insert("candidatesTokenCount".to_owned(), Value::from(output));
+    object.insert("totalTokenCount".to_owned(), Value::from(total));
     insert_u64(
         &mut object,
         "cachedContentTokenCount",
@@ -1304,6 +1305,8 @@ impl Decoder {
 #[derive(Debug, Default)]
 struct Encoder {
     calls: BTreeMap<u32, PendingCall>,
+    usage: Option<Usage>,
+    wrote_usage: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1318,17 +1321,20 @@ impl StreamEncoder for Encoder {
     fn push(&mut self, event: &StreamEvent) -> Result<Vec<u8>, CodecError> {
         let mut out = Vec::new();
         match event {
-            StreamEvent::MessageStart(start) => write_chunk(
-                &mut out,
-                Chunk {
-                    id: start.id.as_deref(),
-                    model: start.model.as_deref(),
-                    parts: Vec::new(),
-                    finish: None,
-                    usage: None,
-                    extensions: &start.extensions,
-                },
-            )?,
+            StreamEvent::MessageStart(start) => {
+                Usage::merge_patch(&mut self.usage, start.usage.as_ref());
+                write_chunk(
+                    &mut out,
+                    Chunk {
+                        id: start.id.as_deref(),
+                        model: start.model.as_deref(),
+                        parts: Vec::new(),
+                        finish: None,
+                        usage: None,
+                        extensions: &start.extensions,
+                    },
+                )?;
+            }
             StreamEvent::ContentBlockStart(start) => self.start_block(start)?,
             StreamEvent::TextDelta(delta) => {
                 if delta.text.is_empty() && delta.extensions.is_empty() {
@@ -1412,6 +1418,7 @@ impl StreamEncoder for Encoder {
             }
             StreamEvent::MessageDelta(delta) => {
                 self.flush_calls(&mut out)?;
+                Usage::merge_patch(&mut self.usage, delta.usage.as_ref());
                 let finish = delta.stop.as_ref().map(|stop| encode_finish(&stop.reason));
                 write_chunk(
                     &mut out,
@@ -1420,12 +1427,30 @@ impl StreamEncoder for Encoder {
                         model: None,
                         parts: Vec::new(),
                         finish: finish.as_deref(),
-                        usage: delta.usage.as_ref(),
+                        usage: self.usage.as_ref(),
                         extensions: &delta.extensions,
                     },
                 )?;
+                self.wrote_usage = self.usage.is_some();
             }
-            StreamEvent::MessageStop(_) => self.flush_calls(&mut out)?,
+            StreamEvent::MessageStop(_) => {
+                self.flush_calls(&mut out)?;
+                if !self.wrote_usage && self.usage.is_some() {
+                    let usage = self.usage.clone();
+                    write_chunk(
+                        &mut out,
+                        Chunk {
+                            id: None,
+                            model: None,
+                            parts: Vec::new(),
+                            finish: None,
+                            usage: usage.as_ref(),
+                            extensions: &Extensions::new(),
+                        },
+                    )?;
+                    self.wrote_usage = true;
+                }
+            }
             StreamEvent::Ping(_) => {}
             StreamEvent::Unknown(event) => encode_unknown(&mut out, event)?,
         }

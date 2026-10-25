@@ -207,14 +207,26 @@ request that drops the same name is silent. The drop is not a 400.
 On the way back, a Responses client receives the original call. The codec
 keeps a per-request map (`hofund_tool_names`) from the flattened name to the
 original name, namespace, and kind. A namespaced function is written as
-`function_call` with `namespace`, the original `name`, and
-`encrypted_function_args: []`. A custom tool is written as `custom_tool_call`
-with `input` set to the raw string (the `input` field of the JSON arguments,
-a lone JSON string, or the argument text). The map is private, so it is not
-sent upstream. Chat and Messages upstreams both go through this restore, for
-a unary body and for a stream. A same-protocol reply already uses the
-original names, so the map is not applied. A stream of a custom call emits
+`function_call` with `namespace` and the original `name`. A custom tool is
+written as `custom_tool_call` with `input` set to the raw string (the
+`input` field of the JSON arguments, a lone JSON string, or the argument
+text). The map is private, so it is not sent upstream. Chat and Messages
+upstreams both go through this restore, for a unary body and for a stream.
+A same-protocol reply already uses the original names, so the map is not
+applied. A stream of a custom call emits
 `response.custom_tool_call_input.delta` and `.done` with the unescaped input.
+`encrypted_function_args` is not written.
+
+A history item is encoded the same way. `custom_tool_call` becomes an
+assistant tool call whose name is the declared flat name (`namespace__name`
+when a namespace is set, otherwise the original name) and whose arguments
+are `{"input": <raw>}`. `custom_tool_call_output` becomes a tool result with
+that `call_id`. A namespaced `function_call` in history is sent upstream
+under that same flat name, which is the name on the tool declaration.
+Same-protocol Responses encode keeps `custom_tool_call`, the raw `input`,
+`custom_tool_call_output`, and `namespace` plus the original function name.
+The private `hofund_call_name` and `hofund_call_kind` keys are dropped when
+the outbound protocol differs.
 
 Checked 2026-10-25 against the Responses tool list and against
 `internal/gateway/responses.go` (`customSchema`, namespace flattening,
@@ -243,7 +255,9 @@ writes them on every later chunk. Usage is a separate chunk with
 `choices: []` and is written only when the client request set
 `stream_options.include_usage` to true. The finish chunk does not carry
 `usage`. The Chat adapter still asks the upstream for usage, so the ledger
-can record it when the client did not ask to see it.
+can record it when the client did not ask to see it. When a usage object is
+written it always includes `prompt_tokens`, `completion_tokens`, and
+`total_tokens`. See Usage for how a Messages stream is merged before that.
 
 ## Billing header
 
@@ -342,8 +356,30 @@ The `object` field is structural and is not stored. `created` and
 
 ## Usage
 
-Counters are optional so a stream event can carry a subset.
-`Usage::merge_from` overwrites counters the patch sets.
+Counters are optional on the IR so a stream event can carry a subset.
+`Usage::merge_from` overwrites counters the patch sets and leaves the others.
+`Usage::merge_patch` applies that to the encoder's accumulated usage.
+
+Messages puts input and cache tokens on `message_start` and output tokens on
+`message_delta`. Anthropic encode keeps that split: `message_start.message.usage`
+is the start event, and the single `message_delta` carries the delta. Responses,
+Chat Completions, and Generative Language encode merge the two before writing
+one usage object. A later counter replaces only the counters it sets, so an
+output-only delta does not drop the input tokens from `message_start`. When
+`message_delta` has no usage, the accumulated start usage is still written on
+the final chunk. No usage object is written when the IR never supplied one.
+
+When a usage object is written, the required counts are always present. A
+missing input or output is 0. A missing total is the sum. Responses always
+includes `input_tokens`, `output_tokens`, `total_tokens`,
+`input_tokens_details` (`cached_tokens`, `cache_write_tokens`), and
+`output_tokens_details` (`reasoning_tokens`). Cache and reasoning details are
+0 when the IR did not set them (checked 2026-10-25,
+<https://platform.openai.com/docs/api-reference/responses/object>). Chat always
+includes `prompt_tokens`, `completion_tokens`, and `total_tokens`; the details
+objects stay optional. Generative Language always includes `promptTokenCount`,
+`candidatesTokenCount`, and `totalTokenCount`; cache and thoughts counts stay
+optional.
 
 | IR | Anthropic | Chat Completions | Responses | Generative Language |
 | --- | --- | --- | --- | --- |

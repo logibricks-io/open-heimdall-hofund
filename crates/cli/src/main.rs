@@ -417,7 +417,18 @@ fn connect(
             }
         }
     }
+    if adapter.id() == "opencode" {
+        println!("{}", opencode_models_note());
+    }
     warn_unrouted_model(adapter, &session, config)
+}
+
+/// OpenCode's `models` object stays empty.
+///
+/// A catalog would supply name, modalities, context, and reasoning. This
+/// build does not ship one, and connect does not copy route names in its place.
+fn opencode_models_note() -> &'static str {
+    "opencode: models stays {}. This build does not ship a model catalog, and connect does not copy route names into the provider entry."
 }
 
 fn redact_diff(diff: &str, token: &str) -> String {
@@ -487,7 +498,7 @@ fn agent_status(config: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, HelpTopic, parse, redact_diff};
+    use super::{Command, HelpTopic, opencode_models_note, parse, redact_diff};
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -576,5 +587,9 @@ mod tests {
             redact_diff("token = \"local-token\"\n", "local-token"),
             "token = \"[redacted]\"\n"
         );
+        let note = opencode_models_note();
+        assert!(note.contains("models stays {}"));
+        assert!(note.contains("catalog"));
+        assert!(note.contains("route names"));
     }
 }

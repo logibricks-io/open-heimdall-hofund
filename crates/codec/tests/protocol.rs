@@ -1,10 +1,11 @@
 //! Snapshot, round-trip, cross-protocol, and streaming tests. No network.
 
-use hofund_codec::{AnthropicMessages, Codec, OpenAiChat};
+use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
 use hofund_ir::{
-    ContentPart, ImageDetail, ImageSource, Request, Response, Role, StopReason, StreamEvent,
-    ToolArguments, ToolChoiceMode, assemble,
+    ContentPart, Extensions, ImageDetail, ImageSource, Message, Request, Response, Role, Stop,
+    StopReason, StreamEvent, ToolArguments, ToolChoiceMode, Usage, assemble,
 };
+use serde::Deserialize;
 use serde_json::json;
 
 const ANTHROPIC_REQUEST: &str = include_str!("fixtures/anthropic_request.json");
@@ -688,6 +689,245 @@ fn assert_err<T: std::fmt::Debug, E: std::fmt::Debug>(
     let caught = std::panic::catch_unwind(decode);
     let result = caught.expect("malformed input panicked");
     assert!(result.is_err());
+}
+
+#[test]
+fn anthropic_stream_usage_is_merged_for_every_client() {
+    let sse = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"m","usage":{"input_tokens":21,"output_tokens":0,"cache_read_input_tokens":4,"cache_creation_input_tokens":2}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+    let events = AnthropicMessages
+        .decode_stream(sse.as_bytes())
+        .expect("decode");
+    let start = events.iter().find_map(|event| match event {
+        StreamEvent::MessageStart(start) => start.usage.as_ref(),
+        _ => None,
+    });
+    let delta = events.iter().find_map(|event| match event {
+        StreamEvent::MessageDelta(delta) => delta.usage.as_ref(),
+        _ => None,
+    });
+    assert_eq!(start.and_then(|usage| usage.input_tokens), Some(21));
+    assert_eq!(start.and_then(|usage| usage.output_tokens), Some(0));
+    assert_eq!(start.and_then(|usage| usage.cache_read_tokens), Some(4));
+    assert_eq!(start.and_then(|usage| usage.cache_write_tokens), Some(2));
+    assert_eq!(delta.and_then(|usage| usage.output_tokens), Some(5));
+    assert!(delta.and_then(|usage| usage.input_tokens).is_none());
+
+    let responses = data_values(&OpenAiResponses.encode_stream(&events).expect("responses"));
+    let created = responses
+        .iter()
+        .find(|frame| frame["type"] == "response.created")
+        .expect("created");
+    assert!(created["response"].get("usage").is_none(), "{created}");
+    let completed = responses
+        .iter()
+        .find(|frame| frame["type"] == "response.completed")
+        .expect("completed");
+    assert_codex_usage(&completed["response"]["usage"], 21, 5, 26, 4, 2, 0);
+
+    let chat = data_values(&OpenAiChat.encode_stream(&events).expect("chat"));
+    let role = chat
+        .iter()
+        .find(|frame| frame["choices"][0]["delta"]["role"] == "assistant")
+        .expect("role");
+    assert!(role.get("usage").is_none(), "{role}");
+    let usages: Vec<_> = chat
+        .iter()
+        .filter(|frame| frame.get("usage").is_some())
+        .collect();
+    assert_eq!(usages.len(), 1, "{usages:?}");
+    assert!(usages[0]["choices"].as_array().expect("choices").is_empty());
+    assert_eq!(usages[0]["usage"]["prompt_tokens"], json!(21));
+    assert_eq!(usages[0]["usage"]["completion_tokens"], json!(5));
+    assert_eq!(usages[0]["usage"]["total_tokens"], json!(26));
+    assert_eq!(
+        usages[0]["usage"]["prompt_tokens_details"]["cached_tokens"],
+        json!(4)
+    );
+    assert!(
+        usages[0]["usage"]
+            .get("completion_tokens_details")
+            .is_none()
+    );
+
+    let gemini = data_values(&GenerativeLanguage.encode_stream(&events).expect("gemini"));
+    let metas: Vec<_> = gemini
+        .iter()
+        .filter(|frame| frame.get("usageMetadata").is_some())
+        .collect();
+    assert_eq!(metas.len(), 1, "{metas:?}");
+    assert_eq!(metas[0]["usageMetadata"]["promptTokenCount"], json!(21));
+    assert_eq!(metas[0]["usageMetadata"]["candidatesTokenCount"], json!(5));
+    assert_eq!(metas[0]["usageMetadata"]["totalTokenCount"], json!(26));
+    assert_eq!(
+        metas[0]["usageMetadata"]["cachedContentTokenCount"],
+        json!(4)
+    );
+    assert!(
+        metas[0]["usageMetadata"]
+            .get("thoughtsTokenCount")
+            .is_none()
+    );
+
+    let mut quiet = events;
+    for event in &mut quiet {
+        if let StreamEvent::MessageDelta(delta) = event {
+            delta.usage = None;
+        }
+    }
+    let completed = data_values(&OpenAiResponses.encode_stream(&quiet).expect("responses"))
+        .into_iter()
+        .find(|frame| frame["type"] == "response.completed")
+        .expect("completed");
+    assert_codex_usage(&completed["response"]["usage"], 21, 0, 21, 4, 2, 0);
+    let chat = data_values(&OpenAiChat.encode_stream(&quiet).expect("chat"));
+    let usage = chat
+        .iter()
+        .find(|frame| frame.get("usage").is_some())
+        .expect("usage");
+    assert_eq!(usage["usage"]["prompt_tokens"], json!(21));
+    assert_eq!(usage["usage"]["completion_tokens"], json!(0));
+    assert_eq!(usage["usage"]["total_tokens"], json!(21));
+
+    let fixture = AnthropicMessages
+        .decode_stream(ANTHROPIC_STREAM)
+        .expect("fixture");
+    let completed = data_values(&OpenAiResponses.encode_stream(&fixture).expect("responses"))
+        .into_iter()
+        .find(|frame| frame["type"] == "response.completed")
+        .expect("completed");
+    assert_codex_usage(&completed["response"]["usage"], 25, 12, 37, 0, 0, 0);
+}
+
+#[test]
+fn partial_usage_fills_the_fields_each_protocol_requires() {
+    let response = Response {
+        id: Some("resp_local".to_owned()),
+        model: Some("m".to_owned()),
+        message: {
+            let mut message = Message::new(Role::Assistant);
+            message.content.push(ContentPart::text("ok"));
+            message
+        },
+        stop: Some(Stop {
+            reason: StopReason::EndTurn,
+            sequence: None,
+        }),
+        usage: Some(Usage {
+            output_tokens: Some(5),
+            ..Usage::default()
+        }),
+        extensions: Extensions::new(),
+    };
+    let responses = OpenAiResponses
+        .encode_response(&response)
+        .expect("responses");
+    let responses: serde_json::Value = serde_json::from_slice(&responses).expect("json");
+    assert_codex_usage(&responses["usage"], 0, 5, 5, 0, 0, 0);
+    let chat = OpenAiChat.encode_response(&response).expect("chat");
+    let chat: serde_json::Value = serde_json::from_slice(&chat).expect("json");
+    assert_eq!(chat["usage"]["prompt_tokens"], json!(0));
+    assert_eq!(chat["usage"]["completion_tokens"], json!(5));
+    assert_eq!(chat["usage"]["total_tokens"], json!(5));
+    let gemini = GenerativeLanguage
+        .encode_response(&response)
+        .expect("gemini");
+    let gemini: serde_json::Value = serde_json::from_slice(&gemini).expect("json");
+    assert_eq!(gemini["usageMetadata"]["promptTokenCount"], json!(0));
+    assert_eq!(gemini["usageMetadata"]["candidatesTokenCount"], json!(5));
+    assert_eq!(gemini["usageMetadata"]["totalTokenCount"], json!(5));
+
+    let mut absent = response;
+    absent.usage = None;
+    let responses = OpenAiResponses.encode_response(&absent).expect("responses");
+    let responses: serde_json::Value = serde_json::from_slice(&responses).expect("json");
+    assert!(responses.get("usage").is_none(), "{responses}");
+}
+
+fn assert_codex_usage(
+    usage: &serde_json::Value,
+    input: u64,
+    output: u64,
+    total: u64,
+    cached: u64,
+    cache_write: u64,
+    reasoning: u64,
+) {
+    let parsed: CodexUsage = serde_json::from_value(usage.clone()).unwrap_or_else(|error| {
+        panic!("Codex rejects this usage ({error}): {usage}");
+    });
+    assert_eq!(parsed.input_tokens, input);
+    assert_eq!(parsed.output_tokens, output);
+    assert_eq!(parsed.total_tokens, total);
+    assert_eq!(parsed.input_tokens_details.cached_tokens, cached);
+    assert_eq!(parsed.input_tokens_details.cache_write_tokens, cache_write);
+    assert_eq!(parsed.output_tokens_details.reasoning_tokens, reasoning);
+    assert!(
+        serde_json::from_value::<CodexUsage>(json!({
+            "output_tokens": 1,
+            "total_tokens": 1,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0}
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<CodexUsage>(json!({
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0}
+        }))
+        .is_err()
+    );
+}
+
+fn data_values(bytes: &[u8]) -> Vec<serde_json::Value> {
+    let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+    text.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .filter(|data| *data != "[DONE]")
+        .map(|data| serde_json::from_str(data).unwrap_or_else(|error| panic!("{error}: {data}")))
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+    input_tokens_details: CodexInputDetails,
+    output_tokens_details: CodexOutputDetails,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexInputDetails {
+    cached_tokens: u64,
+    #[serde(default)]
+    cache_write_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexOutputDetails {
+    reasoning_tokens: u64,
 }
 
 proptest::proptest! {

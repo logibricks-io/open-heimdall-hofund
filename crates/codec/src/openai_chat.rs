@@ -1339,16 +1339,11 @@ fn usage_from(
 }
 
 fn encode_usage(usage: &Usage) -> Value {
+    let (input, output, total) = usage.filled_counts();
     let mut object = Object::new();
-    insert_u64(&mut object, "prompt_tokens", usage.input_tokens);
-    insert_u64(&mut object, "completion_tokens", usage.output_tokens);
-    let total = usage
-        .total_tokens
-        .or(match (usage.input_tokens, usage.output_tokens) {
-            (Some(input), Some(output)) => Some(input.saturating_add(output)),
-            _ => None,
-        });
-    insert_u64(&mut object, "total_tokens", total);
+    object.insert("prompt_tokens".to_owned(), Value::from(input));
+    object.insert("completion_tokens".to_owned(), Value::from(output));
+    object.insert("total_tokens".to_owned(), Value::from(total));
     if let Some(cached) = usage.cache_read_tokens {
         object.insert(
             "prompt_tokens_details".to_owned(),
@@ -1420,6 +1415,8 @@ struct Encoder {
     id: Option<String>,
     model: Option<String>,
     include_usage: bool,
+    usage: Option<Usage>,
+    usage_sent: bool,
 }
 
 impl OpenAiChat {
@@ -1468,6 +1465,7 @@ fn encode_stream_event(
             if start.model.is_some() {
                 encoder.model.clone_from(&start.model);
             }
+            Usage::merge_patch(&mut encoder.usage, start.usage.as_ref());
             write_chunk(
                 out,
                 encoder.id.as_deref(),
@@ -1553,6 +1551,7 @@ fn encode_stream_event(
         StreamEvent::ContentBlockStop(_) => Ok(()),
         StreamEvent::MessageDelta(delta) => {
             let finish = delta.stop.as_ref().map(|stop| encode_finish(&stop.reason));
+            Usage::merge_patch(&mut encoder.usage, delta.usage.as_ref());
             write_chunk(
                 out,
                 encoder.id.as_deref(),
@@ -1563,13 +1562,21 @@ fn encode_stream_event(
                 None,
             )?;
             if encoder.include_usage
-                && let Some(usage) = delta.usage.as_ref()
+                && let Some(usage) = encoder.usage.as_ref()
             {
                 write_usage_chunk(out, encoder.id.as_deref(), encoder.model.as_deref(), usage)?;
+                encoder.usage_sent = true;
             }
             Ok(())
         }
         StreamEvent::MessageStop(_) => {
+            if encoder.include_usage
+                && !encoder.usage_sent
+                && let Some(usage) = encoder.usage.clone()
+            {
+                write_usage_chunk(out, encoder.id.as_deref(), encoder.model.as_deref(), &usage)?;
+                encoder.usage_sent = true;
+            }
             sse::write_event(out, None, "[DONE]");
             Ok(())
         }

@@ -38,6 +38,10 @@ pub const UNMAPPED_TOOLS: &str = "hofund_unmapped_tools";
 /// Request-extension object mapping a flattened tool name back to the client's
 /// namespace and original name. Same-protocol encode skips the key.
 const TOOL_NAMES: &str = "hofund_tool_names";
+/// Original tool name when the IR name was flattened for another protocol.
+const CALL_NAME: &str = "hofund_call_name";
+/// `custom` when the input item was a custom tool call or its output.
+const CALL_KIND: &str = "hofund_call_kind";
 
 /// Codec for the OpenAI Responses API.
 #[derive(Debug, Default, Clone, Copy)]
@@ -231,6 +235,8 @@ fn decode_item(item: Value) -> Result<Option<Message>, CodecError> {
         }
         "function_call" => Ok(Some(decode_function_call(object)?)),
         "function_call_output" => Ok(Some(decode_function_output(object)?)),
+        "custom_tool_call" => Ok(Some(decode_custom_call(object)?)),
+        "custom_tool_call_output" => Ok(Some(decode_custom_output(object)?)),
         "reasoning" => Ok(decode_reasoning(object)?),
         other => {
             let mut extensions = Extensions::from_map(object);
@@ -251,17 +257,92 @@ fn decode_function_call(mut object: Object) -> Result<Message, CodecError> {
     let id = take_string(&mut object, "call_id")?.unwrap_or_default();
     let name = take_string(&mut object, "name")?.unwrap_or_default();
     let arguments = take_string(&mut object, "arguments")?.unwrap_or_default();
+    let namespace = take_string(&mut object, "namespace")?.filter(|value| !value.is_empty());
     let _ = object.remove("status");
+    remember_call(&mut object, &name, namespace.as_deref(), None);
+    Ok(tool_call_message(
+        id,
+        offered_name(&name, namespace.as_deref()),
+        ToolArguments::from_text(&arguments),
+        object,
+    ))
+}
+
+fn decode_custom_call(mut object: Object) -> Result<Message, CodecError> {
+    let id = take_string(&mut object, "call_id")?.unwrap_or_default();
+    let name = take_string(&mut object, "name")?.unwrap_or_default();
+    let input = take_string(&mut object, "input")?.unwrap_or_default();
+    let namespace = take_string(&mut object, "namespace")?.filter(|value| !value.is_empty());
+    let _ = object.remove("status");
+    remember_call(&mut object, &name, namespace.as_deref(), Some("custom"));
+    Ok(tool_call_message(
+        id,
+        offered_name(&name, namespace.as_deref()),
+        ToolArguments::Json {
+            value: serde_json::json!({ "input": input }),
+        },
+        object,
+    ))
+}
+
+fn decode_custom_output(mut object: Object) -> Result<Message, CodecError> {
+    let id = take_string(&mut object, "call_id")?.unwrap_or_default();
+    let content = match object.remove("output") {
+        Some(Value::String(text)) => vec![text_part(text)],
+        Some(Value::Array(items)) => decode_parts(items)?,
+        Some(Value::Null) | None => Vec::new(),
+        Some(_) => {
+            return Err(CodecError::WrongType { field: "output" });
+        }
+    };
+    object.insert(CALL_KIND.to_owned(), Value::String("custom".to_owned()));
     Ok(Message {
-        role: Role::Assistant,
-        content: vec![ContentPart::ToolCall(ToolCallPart {
+        role: Role::Tool,
+        content: vec![ContentPart::ToolResult(ToolResultPart {
             id,
-            name,
-            arguments: ToolArguments::from_text(&arguments),
+            is_error: false,
+            content,
             extensions: Extensions::from_map(object),
         })],
         extensions: Extensions::new(),
     })
+}
+
+fn remember_call(object: &mut Object, name: &str, namespace: Option<&str>, kind: Option<&str>) {
+    if let Some(kind) = kind {
+        object.insert(CALL_KIND.to_owned(), Value::String(kind.to_owned()));
+    }
+    if namespace.is_some() || kind.is_some() {
+        object.insert(CALL_NAME.to_owned(), Value::String(name.to_owned()));
+    }
+    if let Some(namespace) = namespace {
+        object.insert("namespace".to_owned(), Value::String(namespace.to_owned()));
+    }
+}
+
+fn offered_name(name: &str, namespace: Option<&str>) -> String {
+    match namespace {
+        Some(space) if !space.is_empty() => flat_name(space, name),
+        _ => name.to_owned(),
+    }
+}
+
+fn tool_call_message(
+    id: String,
+    name: String,
+    arguments: ToolArguments,
+    object: Object,
+) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentPart::ToolCall(ToolCallPart {
+            id,
+            name,
+            arguments,
+            extensions: Extensions::from_map(object),
+        })],
+        extensions: Extensions::new(),
+    }
 }
 
 fn decode_function_output(mut object: Object) -> Result<Message, CodecError> {
@@ -1084,6 +1165,9 @@ fn thinking_item(part: &ThinkingPart, emit: &Emit<'_>) -> Option<Value> {
 }
 
 fn function_call_item(call: &ToolCallPart, emit: &Emit<'_>) -> Value {
+    if call.extensions.get(CALL_KIND).and_then(Value::as_str) == Some("custom") {
+        return custom_history_item(call, emit);
+    }
     if emit.response
         && let Some(restored) = emit.tools.get(&call.name)
     {
@@ -1092,7 +1176,7 @@ fn function_call_item(call: &ToolCallPart, emit: &Emit<'_>) -> Value {
     let mut item = Object::new();
     item.insert("type".to_owned(), Value::String("function_call".to_owned()));
     item.insert("call_id".to_owned(), Value::String(call.id.clone()));
-    item.insert("name".to_owned(), Value::String(call.name.clone()));
+    item.insert("name".to_owned(), Value::String(original_call_name(call)));
     item.insert(
         "arguments".to_owned(),
         Value::String(call.arguments.to_text()),
@@ -1100,8 +1184,36 @@ fn function_call_item(call: &ToolCallPart, emit: &Emit<'_>) -> Value {
     if emit.response {
         put_identity(&mut item, &call.extensions, "fc");
     }
-    call.extensions.merge_into(&mut item);
+    merge_public(&call.extensions, &mut item);
     Value::Object(item)
+}
+
+fn custom_history_item(call: &ToolCallPart, emit: &Emit<'_>) -> Value {
+    let mut item = Object::new();
+    item.insert(
+        "type".to_owned(),
+        Value::String("custom_tool_call".to_owned()),
+    );
+    item.insert("call_id".to_owned(), Value::String(call.id.clone()));
+    item.insert("name".to_owned(), Value::String(original_call_name(call)));
+    item.insert(
+        "input".to_owned(),
+        Value::String(custom_input_text(&call.arguments.to_text())),
+    );
+    if emit.response {
+        put_identity(&mut item, &call.extensions, "ctc");
+    }
+    merge_public(&call.extensions, &mut item);
+    Value::Object(item)
+}
+
+fn original_call_name(call: &ToolCallPart) -> String {
+    call.extensions
+        .get(CALL_NAME)
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(call.name.as_str())
+        .to_owned()
 }
 
 fn restored_call(call: &ToolCallPart, restored: &RestoredTool) -> Value {
@@ -1137,10 +1249,6 @@ fn restored_call(call: &ToolCallPart, restored: &RestoredTool) -> Value {
                 "arguments".to_owned(),
                 Value::String(call.arguments.to_text()),
             );
-            item.insert(
-                "encrypted_function_args".to_owned(),
-                Value::Array(Vec::new()),
-            );
         }
     }
     call.extensions.merge_into(&mut item);
@@ -1174,14 +1282,22 @@ fn fresh_id(prefix: &str) -> String {
 }
 
 fn function_output_item(result: &ToolResultPart) -> Value {
+    let custom = result.extensions.get(CALL_KIND).and_then(Value::as_str) == Some("custom");
     let mut item = Object::new();
     item.insert(
         "type".to_owned(),
-        Value::String("function_call_output".to_owned()),
+        Value::String(
+            if custom {
+                "custom_tool_call_output"
+            } else {
+                "function_call_output"
+            }
+            .to_owned(),
+        ),
     );
     item.insert("call_id".to_owned(), Value::String(result.id.clone()));
     item.insert("output".to_owned(), encode_tool_output(&result.content));
-    result.extensions.merge_into(&mut item);
+    merge_public(&result.extensions, &mut item);
     Value::Object(item)
 }
 
@@ -1438,21 +1554,24 @@ fn encode_status(stop: Option<&Stop>) -> (String, Option<Value>) {
 }
 
 fn encode_usage(usage: &Usage) -> Value {
+    let (input, output, total) = usage.filled_counts();
     let mut object = Object::new();
-    insert_u64(&mut object, "input_tokens", usage.input_tokens);
-    insert_u64(&mut object, "output_tokens", usage.output_tokens);
-    insert_u64(&mut object, "total_tokens", usage.total_tokens);
-    if usage.cache_read_tokens.is_some() || usage.cache_write_tokens.is_some() {
-        let mut details = Object::new();
-        insert_u64(&mut details, "cached_tokens", usage.cache_read_tokens);
-        insert_u64(&mut details, "cache_write_tokens", usage.cache_write_tokens);
-        object.insert("input_tokens_details".to_owned(), Value::Object(details));
-    }
-    if usage.reasoning_tokens.is_some() {
-        let mut details = Object::new();
-        insert_u64(&mut details, "reasoning_tokens", usage.reasoning_tokens);
-        object.insert("output_tokens_details".to_owned(), Value::Object(details));
-    }
+    object.insert("input_tokens".to_owned(), Value::from(input));
+    object.insert("output_tokens".to_owned(), Value::from(output));
+    object.insert("total_tokens".to_owned(), Value::from(total));
+    object.insert(
+        "input_tokens_details".to_owned(),
+        serde_json::json!({
+            "cached_tokens": usage.cache_read_tokens.unwrap_or(0),
+            "cache_write_tokens": usage.cache_write_tokens.unwrap_or(0),
+        }),
+    );
+    object.insert(
+        "output_tokens_details".to_owned(),
+        serde_json::json!({
+            "reasoning_tokens": usage.reasoning_tokens.unwrap_or(0),
+        }),
+    );
     usage.extensions.merge_into(&mut object);
     Value::Object(object)
 }
@@ -1532,6 +1651,7 @@ impl StreamEncoder {
             StreamEvent::MessageStart(start) => {
                 self.id.clone_from(&start.id);
                 self.model.clone_from(&start.model);
+                Usage::merge_patch(&mut self.usage, start.usage.as_ref());
                 self.write(
                     "response.created",
                     serde_json::json!({
@@ -1620,9 +1740,7 @@ impl StreamEncoder {
                 if delta.stop.is_some() {
                     self.stop.clone_from(&delta.stop);
                 }
-                if delta.usage.is_some() {
-                    self.usage.clone_from(&delta.usage);
-                }
+                Usage::merge_patch(&mut self.usage, delta.usage.as_ref());
             }
             StreamEvent::MessageStop(_) => self.complete(),
             StreamEvent::Ping(ping) => {
@@ -1848,7 +1966,6 @@ impl StreamEncoder {
             "call_id": state.call_id,
             "name": state.name,
             "arguments": state.text,
-            "encrypted_function_args": [],
         });
         if !restored.namespace.is_empty()
             && let Some(object) = item.as_object_mut()
@@ -2030,10 +2147,6 @@ impl ItemState {
                         object.insert(
                             "namespace".to_owned(),
                             Value::String(tool.namespace.clone()),
-                        );
-                        object.insert(
-                            "encrypted_function_args".to_owned(),
-                            Value::Array(Vec::new()),
                         );
                     }
                     item
