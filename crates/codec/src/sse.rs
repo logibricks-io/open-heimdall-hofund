@@ -20,6 +20,8 @@ pub(crate) struct SseFrame {
 #[derive(Debug, Default)]
 pub(crate) struct SseParser {
     buffer: Vec<u8>,
+    /// First index of `buffer` that has not been searched for a line ending.
+    scanned: usize,
     event: Option<String>,
     data: Vec<String>,
     started: bool,
@@ -39,8 +41,17 @@ impl SseParser {
 
     fn drain(&mut self, end_of_stream: bool) -> Result<Vec<SseFrame>, CodecError> {
         let mut frames = Vec::new();
-        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
+        loop {
+            let Some(relative) = self.buffer[self.scanned..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+            else {
+                self.scanned = self.buffer.len();
+                break;
+            };
+            let newline = self.scanned + relative;
             let mut line: Vec<u8> = self.buffer.drain(..=newline).collect();
+            self.scanned = 0;
             line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
@@ -51,6 +62,7 @@ impl SseParser {
         }
         if end_of_stream && !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
+            self.scanned = 0;
             if let Some(frame) = self.push_line(&line)? {
                 frames.push(frame);
             }
@@ -96,6 +108,14 @@ impl SseParser {
         self.started = false;
         Some(frame)
     }
+}
+
+pub(crate) fn data_frame(json: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(json.len() + 8);
+    out.extend_from_slice(b"data: ");
+    out.extend_from_slice(json);
+    out.extend_from_slice(b"\n\n");
+    out
 }
 
 pub(crate) fn write_event(out: &mut Vec<u8>, event: Option<&str>, data: &str) {

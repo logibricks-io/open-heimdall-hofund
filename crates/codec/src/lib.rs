@@ -17,6 +17,7 @@ mod generative;
 mod jsonutil;
 mod openai_chat;
 mod openai_responses;
+mod passthrough;
 mod sse;
 
 pub use anthropic::AnthropicMessages;
@@ -25,6 +26,7 @@ pub use error::CodecError;
 pub use generative::GenerativeLanguage;
 pub use openai_chat::OpenAiChat;
 pub use openai_responses::{OpenAiResponses, UNMAPPED_TOOLS};
+pub use passthrough::RawTap;
 
 use hofund_ir::{Request, Response, StreamEvent};
 
@@ -120,6 +122,85 @@ pub trait Codec: Send + Sync {
     /// overrides this.
     fn stream_encoder_for(&self, _request: &Request) -> Box<dyn StreamEncoder> {
         self.stream_encoder()
+    }
+
+    /// JSON paths whose string value is the model name the client sees.
+    ///
+    /// Each path is object keys from the root of one JSON value. A same-protocol
+    /// body is patched only at these paths. Protocols with no such field return
+    /// an empty slice.
+    fn model_paths(&self) -> &'static [&'static [&'static str]] {
+        &[&["model"]]
+    }
+
+    /// Content type of a streaming body in this protocol.
+    fn stream_content_type(&self) -> &'static str {
+        "text/event-stream"
+    }
+
+    /// Content type of a unary or streaming body in this protocol.
+    fn response_content_type(&self, stream: bool) -> &'static str {
+        if stream {
+            self.stream_content_type()
+        } else {
+            "application/json"
+        }
+    }
+
+    /// Reads tokens from a raw stream.
+    ///
+    /// When `client_model` and `upstream_model` differ, the bytes of each
+    /// [`Codec::model_paths`] string are spliced. Equal names are forwarded
+    /// without parsing the body for a rewrite, including a model name the
+    /// upstream returns that was not the name sent.
+    fn raw_tap(&self, client_model: &str, upstream_model: &str) -> Box<dyn RawTap> {
+        Box::new(passthrough::DecoderTap::new(
+            self.stream_decoder(),
+            self.model_paths(),
+            client_model,
+            upstream_model,
+        ))
+    }
+
+    /// Input and output tokens in a unary body, when this protocol reports them.
+    fn response_tokens(&self, bytes: &[u8]) -> (Option<i64>, Option<i64>) {
+        let Ok(response) = self.decode_response(bytes) else {
+            return (None, None);
+        };
+        let Some(usage) = response.usage else {
+            return (None, None);
+        };
+        (
+            usage
+                .input_tokens
+                .and_then(|value| i64::try_from(value).ok()),
+            usage
+                .output_tokens
+                .and_then(|value| i64::try_from(value).ok()),
+        )
+    }
+
+    /// Replaces model fields in a complete unary body.
+    ///
+    /// Equal names are returned unchanged. Differing names splice the model
+    /// string at [`Codec::model_paths`] and leave every other byte as it
+    /// arrived. A body that cannot be parsed is returned unchanged.
+    fn rewrite_model(&self, bytes: &[u8], client_model: &str, upstream_model: &str) -> Vec<u8> {
+        passthrough::rewrite_all(bytes, self.model_paths(), client_model, upstream_model)
+    }
+
+    /// Encodes a stream error as a protocol frame, not a clean end of stream.
+    ///
+    /// The default frame is `event: error` and the JSON from [`Codec::encode_error`].
+    /// A stream that fails after the first event still ends with this frame.
+    /// Chat, Responses, and Generative Language override the shape.
+    fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
+        let json = self.encode_error(status, message);
+        let mut out = Vec::with_capacity(json.len() + 16);
+        out.extend_from_slice(b"event: error\ndata: ");
+        out.extend_from_slice(&json);
+        out.extend_from_slice(b"\n\n");
+        out
     }
 
     /// Encodes an error body in this protocol's JSON shape.

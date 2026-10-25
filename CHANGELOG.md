@@ -20,6 +20,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The router speaks `Member` and `PluginError`. The daemon adapts each
+  provider into a tower service with a kernel deadline and panic containment
+  over the call and the whole response body, and publishes the route table
+  as an `ArcSwap` snapshot at startup. A panic, including one while polling
+  a stream, omits that member from the next snapshot. The body deadline is
+  idle time since the last chunk. A stream that keeps sending is not cut
+  off at twice the endpoint timeout. Same-protocol responses are forwarded
+  as bytes. The codec reads token usage across chunk boundaries. When the
+  name the client asked for is the name sent upstream, the body is forwarded
+  without parsing it for a rewrite, and the typed response keeps the model
+  the upstream returned. When the names differ, only the bytes of that
+  protocol's model string are spliced, so numbers, escapes, and tool
+  arguments stay byte-exact, and the typed response is labelled with the
+  client name. The match is the field path, not the string value. A leading
+  BOM is stripped. An event larger than 1 MiB splices a model string found
+  in the held prefix and streams the rest. A model string not found by that
+  cap, invalid JSON, trailing garbage, two JSON values, or a partial event
+  flushed on an upstream error is forwarded unchanged and counted in
+  `hofund_model_rewrite_skipped_total`. The contract is
+  `docs/model-names.md`. A leading in-band
+  failure still fails over. A later stream error is that protocol's error
+  frame. Bytes still held by the rewriter are flushed and closed as an event
+  first. A frame that already ends in `\r\n\r\n` or `\r\r` does not gain an
+  extra blank event. The stream content type comes from the codec. Gateway
+  routes, status codes, and usage provider ids are unchanged.
 - The plugin seam from RFC 0001 is in `hofund-plugin-api`,
   `hofund-plugin-sdk`, and `hofund-plugin-host`, plus the three test kits.
   `hofund-provider` and `hofund-agent` re-export the new traits. Gateway,

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
 use hofund_ir::Request;
 use hofund_quirks::Profile;
@@ -58,7 +59,10 @@ pub struct Endpoint {
     pub headers: Vec<(String, String)>,
     /// Quirk profile applied to the canonical request before encode.
     pub quirks: Option<&'static Profile>,
-    /// Whole-call timeout, including a streaming body that stalls.
+    /// Idle deadline the kernel enforces between body chunks.
+    ///
+    /// Reqwest's read timeout is slightly longer, so a stall is reported by
+    /// the kernel. A stream that keeps sending is not cut off.
     pub timeout: Duration,
 }
 
@@ -126,7 +130,8 @@ impl Upstream {
             headers.insert(header_name, header_value);
         }
         let client = reqwest::Client::builder()
-            .timeout(endpoint.timeout)
+            .connect_timeout(endpoint.timeout)
+            .read_timeout(socket_backstop(endpoint.timeout))
             .build()
             .map_err(|error| ProviderError::connect(error.to_string()))?;
         Ok(Self {
@@ -400,6 +405,10 @@ async fn finish(
         let bytes = response.bytes().await.unwrap_or_default();
         return Err(ProviderError::status(status.as_u16(), message_from(&bytes)));
     }
+    if !cross_protocol {
+        return raw_completion(response, streaming, codec).await;
+    }
+    // Cross-protocol only. Extensions are stripped on the way back.
     if streaming {
         let events = SseEvents::new(
             response.bytes_stream(),
@@ -412,11 +421,68 @@ async fn finish(
         let mut decoded = codec
             .decode_response(&bytes)
             .map_err(|error| ProviderError::decode(error.to_string()))?;
-        if cross_protocol {
-            decoded.strip_extensions();
-        }
+        decoded.strip_extensions();
         Ok(Completion::Unary(Box::new(decoded)))
     }
+}
+
+pub(crate) async fn raw_completion(
+    response: reqwest::Response,
+    streaming: bool,
+    codec: &dyn Codec,
+) -> Result<Completion, ProviderError> {
+    if streaming {
+        return raw_stream(response, codec).await;
+    }
+    let bytes = response.bytes().await.map_err(map_transport)?;
+    Ok(Completion::Raw(Box::pin(futures_util::stream::once(
+        async move { Ok(bytes) },
+    ))))
+}
+
+async fn raw_stream(
+    response: reqwest::Response,
+    codec: &dyn Codec,
+) -> Result<Completion, ProviderError> {
+    let mut incoming = response.bytes_stream();
+    let mut decoder = codec.stream_decoder();
+    let mut buffered = Vec::new();
+    loop {
+        match incoming.next().await {
+            None => break,
+            Some(Err(error)) => return Err(map_transport(error)),
+            Some(Ok(chunk)) => {
+                let events = match decoder.push(&chunk) {
+                    Ok(events) => events,
+                    Err(_) => {
+                        buffered.push(chunk);
+                        break;
+                    }
+                };
+                buffered.push(chunk);
+                if events.is_empty() {
+                    continue;
+                }
+                if let Some(error) = crate::stream::failure_of(events.first().expect("event")) {
+                    return Err(error);
+                }
+                break;
+            }
+        }
+    }
+    let head = futures_util::stream::iter(buffered.into_iter().map(Ok));
+    let rest = incoming.map(map_chunk);
+    Ok(Completion::Raw(Box::pin(head.chain(rest))))
+}
+
+/// Reqwest's read timeout sits 50ms past the kernel's idle deadline, so the
+/// kernel is the one that reports a stall. There is no whole-call cap.
+pub(crate) fn socket_backstop(idle: Duration) -> Duration {
+    idle.saturating_add(Duration::from_millis(50))
+}
+
+fn map_chunk(chunk: Result<bytes::Bytes, reqwest::Error>) -> Result<bytes::Bytes, ProviderError> {
+    chunk.map_err(map_transport)
 }
 
 /// Adapter identity used by the concrete providers.

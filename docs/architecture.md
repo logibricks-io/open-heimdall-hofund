@@ -63,12 +63,13 @@ flowchart BT
   pluginSdk --> pluginApi
   pluginSdk --> quirks
   pluginHost --> pluginApi
-  router --> provider
+  router --> pluginApi
   router --> ir
   gateway --> router
   gateway --> codec
   gateway --> ir
   gateway --> usage
+  gateway --> pluginApi
   daemon --> gateway
   daemon --> config
   daemon --> secrets
@@ -76,6 +77,7 @@ flowchart BT
   daemon --> codec
   daemon --> quirks
   daemon --> router
+  daemon --> pluginApi
   daemon --> usage
   agent --> config
   agent --> pluginApi
@@ -85,8 +87,11 @@ flowchart BT
   desktop --> agent
 ```
 
-The spine is `ir ← codec ← provider ← router ← gateway ← daemon ← cli`. Read
-each arrow as "depends on". `agent` depends on `config` and `plugin-api`.
+The HTTP spine is `ir ← codec ← provider`, then `gateway ← daemon ← cli`.
+`router` depends on `ir` and `plugin-api`, not on `provider`. Read each arrow
+as "depends on". `gateway` depends on `plugin-api` for the raw body and
+`PluginError`. `agent` depends on `config` and `plugin-api`. `daemon`
+depends on `plugin-api` so it can adapt a provider into a router member.
 `desktop` sits beside `cli` and depends on the same two crates as `cli`.
 `plugin-api` depends on `ir`. `plugin-sdk` depends on `plugin-api` and
 `quirks`. `plugin-host` depends only on `plugin-api`. The three kits depend
@@ -104,13 +109,13 @@ only on `plugin-host` and are not on the diagram.
 | `hofund-kit-subscription` | `hofund-plugin-host` |
 | `hofund-kit-agent` | `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
-| `hofund-router` | `hofund-ir`, `hofund-provider` |
-| `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-router`, `hofund-usage` |
+| `hofund-router` | `hofund-ir`, `hofund-plugin-api` |
+| `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-router`, `hofund-usage` |
 | `hofund-config` | — |
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
-| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
@@ -138,7 +143,9 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 - Protocol names (Anthropic Messages, OpenAI Chat Completions, OpenAI Responses,
   and the Generative Language API) belong in `codec`. Naming a protocol there
   is not permission to mention that vendor from `gateway` or `router`.
-- The HTTP stack is axum. Only `gateway` may depend on axum, tower, or hyper.
+- The HTTP stack is axum. Only `gateway` may depend on axum or hyper. The
+  daemon may depend on `tower` for the kernel deadline and panic layer. The
+  router must not depend on `tower`.
 - `usage` stays a leaf. `gateway` records one row per request. `usage` does
   not depend on `ir`; cache counters stay on the canonical usage object.
   `router` must not own usage.
@@ -157,7 +164,7 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | `codec` | Per-protocol encode and decode to and from the IR. Hub-and-spoke, so N protocols do not become an N-by-M matrix. |
 | `quirks` | Data-driven vendor capability and quirk descriptions. |
 | `provider` | `Provider` trait and upstream adapters. |
-| `router` | Routing groups, strategies, and failover. |
+| `router` | Ordered failover across `Member`s, and the startup `ArcSwap` snapshot. It does not name a plugin trait. |
 | `gateway` | axum HTTP server and middleware pipeline. |
 | `agent` | Coding-agent config adapters. A declarative description per agent; plan an edit, then apply it. The daemon passes the gateway URL and token in. |
 | `config` | Typed configuration for listeners, routes, accounts, and agents. |
@@ -171,9 +178,13 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 ## What is intentionally absent
 
 - Routing strategies other than ordered failover.
-- A running process does not reload configuration. It does re-read the bearer
-  token file on each request, so `hofund token rotate` takes effect without a
-  restart. `GET /health` is unauthenticated and returns no secrets.
+- A running process does not reload configuration. The daemon publishes the
+  route table as an `ArcSwap` snapshot at startup. A panic in a member
+  publishes a snapshot that omits that member. In-flight requests keep the
+  `Arc` they loaded. Hot reload of configuration is pull request L. The
+  process does re-read the bearer token file on each request, so
+  `hofund token rotate` takes effect without a restart. `GET /health` is
+  unauthenticated and returns no secrets.
 - There is no rest timer and no process-global route counter.
 - Language packs. A future i18n pack is the other place, besides
   `README.<lang>.md`, where a language other than English may appear.

@@ -64,6 +64,10 @@ impl Codec for AnthropicMessages {
     fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
         encode_error(status, message)
     }
+
+    fn model_paths(&self) -> &'static [&'static [&'static str]] {
+        &[&["model"], &["message", "model"]]
+    }
 }
 
 #[derive(Debug, Default)]

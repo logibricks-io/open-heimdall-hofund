@@ -1,8 +1,10 @@
 //! Upstream adapters against a local mock. No real network.
 
 use futures_util::StreamExt;
+use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
 use hofund_ir::{
-    ContentPart, Extensions, Message, Request, Role, StreamEvent, ToolArguments, ToolCallPart,
+    ContentPart, Extensions, Message, Request, Response, Role, StreamEvent, ToolArguments,
+    ToolCallPart,
 };
 use hofund_provider::{
     Anthropic, Completion, CountOutcome, Credential, Endpoint, Generative, OpenAiCompat,
@@ -35,17 +37,72 @@ impl Match for OmitsSampling {
     }
 }
 
+fn text_in(response: &Response) -> String {
+    response
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            ContentPart::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn text_in_events(events: &[StreamEvent]) -> String {
+    let mut text = String::new();
+    for event in events {
+        if let StreamEvent::TextDelta(delta) = event {
+            text.push_str(&delta.text);
+        }
+    }
+    text
+}
+
+/// Same-protocol completions are raw bytes. Try each codec until one yields text.
+fn text_in_raw(bytes: &[u8]) -> String {
+    let codecs: [&dyn Codec; 4] = [
+        &OpenAiChat,
+        &OpenAiResponses,
+        &AnthropicMessages,
+        &GenerativeLanguage,
+    ];
+    if bytes.windows(5).any(|window| window == b"data:") {
+        for codec in codecs {
+            if let Ok(events) = codec.decode_stream(bytes) {
+                let text = text_in_events(&events);
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+        }
+    }
+    for codec in codecs {
+        if let Ok(response) = codec.decode_response(bytes) {
+            let text = text_in(&response);
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    String::new()
+}
+
+async fn collect_raw<S, E>(mut stream: S) -> Vec<u8>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
+    E: std::fmt::Debug,
+{
+    let mut bytes = Vec::new();
+    while let Some(item) = stream.next().await {
+        bytes.extend_from_slice(&item.expect("chunk"));
+    }
+    bytes
+}
+
 async fn text_of(completion: Completion) -> String {
     match completion {
-        Completion::Unary(response) => response
-            .message
-            .content
-            .iter()
-            .find_map(|part| match part {
-                ContentPart::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .unwrap_or_default(),
+        Completion::Unary(response) => text_in(&response),
         Completion::Stream(mut stream) => {
             let mut text = String::new();
             while let Some(item) = stream.next().await {
@@ -55,6 +112,7 @@ async fn text_of(completion: Completion) -> String {
             }
             text
         }
+        Completion::Raw(stream) => text_in_raw(&collect_raw(stream).await),
     }
 }
 
@@ -233,12 +291,23 @@ async fn leading_failed_responses_stream_is_a_status_error() {
 
     let endpoint = Endpoint::new("primary", server.uri());
     let provider = OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).expect("provider");
-    let Completion::Stream(mut stream) = provider
+    let same = match provider
         .execute(user_request(true), "openai-responses")
         .await
-        .expect("call")
-    else {
-        panic!("expected a stream");
+    {
+        Ok(_) => panic!("leading failure fails over"),
+        Err(error) => error,
+    };
+    assert_eq!(same.kind, ProviderErrorKind::Status);
+    assert_eq!(same.status, Some(502));
+    assert_eq!(same.message, "overloaded");
+
+    let foreign = provider
+        .execute(user_request(true), "openai-chat")
+        .await
+        .expect("cross");
+    let Completion::Stream(mut stream) = foreign else {
+        panic!("expected a decoded stream");
     };
     let error = stream.next().await.expect("item").expect_err("status");
     assert_eq!(error.kind, ProviderErrorKind::Status);
@@ -639,21 +708,31 @@ fn billing_request(with_rest: bool) -> Request {
     request
 }
 
+fn event_created(event: &StreamEvent) -> bool {
+    event
+        .extensions()
+        .is_some_and(|extensions| extensions.get("created").is_some())
+}
+
 async fn event_has_created(completion: Completion) -> bool {
-    let Completion::Stream(mut stream) = completion else {
-        return false;
-    };
-    let mut found = false;
-    while let Some(item) = stream.next().await {
-        if let Ok(event) = item
-            && event
-                .extensions()
-                .is_some_and(|extensions| extensions.get("created").is_some())
-        {
-            found = true;
+    match completion {
+        Completion::Stream(mut stream) => {
+            let mut found = false;
+            while let Some(item) = stream.next().await {
+                if let Ok(event) = item
+                    && event_created(&event)
+                {
+                    found = true;
+                }
+            }
+            found
         }
+        Completion::Raw(stream) => OpenAiChat
+            .decode_stream(&collect_raw(stream).await)
+            .map(|events| events.iter().any(event_created))
+            .unwrap_or(false),
+        Completion::Unary(_) => false,
     }
-    found
 }
 
 #[tokio::test]

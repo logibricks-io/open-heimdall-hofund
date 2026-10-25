@@ -95,6 +95,10 @@ impl Codec for OpenAiChat {
     fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {
         encode_error(status, message)
     }
+
+    fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
+        crate::sse::data_frame(&self.encode_error(status, message))
+    }
 }
 
 #[derive(Debug, Default)]

@@ -38,6 +38,7 @@ pub use hofund_plugin_api::{
 use std::pin::Pin;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures_util::Stream;
 use hofund_ir::{Request, Response, StreamEvent};
 
@@ -50,6 +51,8 @@ pub enum Completion {
     Unary(Box<Response>),
     /// Events in order. The stream ends when the upstream body ends.
     Stream(Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>),
+    /// Same-protocol bytes. The gateway forwards them and only observes them.
+    Raw(Pin<Box<dyn Stream<Item = Result<Bytes, ProviderError>> + Send>>),
 }
 
 /// The result of asking an upstream to count input tokens.
@@ -92,7 +95,9 @@ pub trait Provider: Send + Sync {
     /// and stream events. The same id keeps the bag, so a same-protocol
     /// passthrough still round-trips unknown fields.
     ///
-    /// When `request.stream` is set, the result is [`Completion::Stream`].
+    /// When `request.stream` is set and `inbound_protocol` differs from this
+    /// adapter, the result is [`Completion::Stream`]. The same protocol returns
+    /// [`Completion::Raw`] and the caller forwards the bytes.
     ///
     /// # Errors
     ///

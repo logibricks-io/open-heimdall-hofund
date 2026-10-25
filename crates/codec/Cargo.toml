@@ -12,7 +12,9 @@ rust-version.workspace = true
 
 [dependencies]
 hofund-ir = { workspace = true }
+metrics = "0.24.3"
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tracing = "0.1.44"
 sha2 = "0.10.9"
 thiserror = "2.0.21"
 
@@ -20,6 +22,11 @@ thiserror = "2.0.21"
 workspace = true
 
 [dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 insta = { version = "1.49.0", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+
+[[bench]]
+name = "relay"
+harness = false

@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use syn::visit::Visit;
+
 #[path = "support/plugin_rules.rs"]
 mod plugin_rules;
 
@@ -47,13 +49,20 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-codec",
             "hofund-config",
             "hofund-gateway",
+            "hofund-plugin-api",
             "hofund-provider",
             "hofund-quirks",
             "hofund-router",
             "hofund-secrets",
             "hofund-usage",
         ],
-        "hofund-gateway" => &["hofund-codec", "hofund-ir", "hofund-router", "hofund-usage"],
+        "hofund-gateway" => &[
+            "hofund-codec",
+            "hofund-ir",
+            "hofund-plugin-api",
+            "hofund-router",
+            "hofund-usage",
+        ],
         "hofund-ir" => &[],
         "hofund-kit-agent" => &["hofund-plugin-host"],
         "hofund-kit-subscription" => &["hofund-plugin-host"],
@@ -68,7 +77,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-quirks",
         ],
         "hofund-quirks" => &["hofund-ir"],
-        "hofund-router" => &["hofund-ir", "hofund-provider"],
+        "hofund-router" => &["hofund-ir", "hofund-plugin-api"],
         "hofund-secrets" => &[],
         "hofund-usage" => &[],
         "xtask" => &[],
@@ -239,6 +248,130 @@ fn gateway_and_router_do_not_name_vendors() {
         "vendor names belong in quirks data and provider adapters, not in gateway or router:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn router_does_not_name_plugin_host_types() {
+    let root = workspace_root();
+    let mut violations = Vec::new();
+    for path in rust_files(&root.join("crates/router")) {
+        let text = read_to_string(&path);
+        for word in ["UpstreamProvider", "HostContext"] {
+            if contains_word(&text, word) {
+                violations.push(format!("{}: {word}", relative(&root, &path)));
+            }
+        }
+    }
+    let reexports = ["Completion", "MemberId", "PluginError", "Request"];
+    let imports = [
+        "BodyStream",
+        "Completion",
+        "CountOutcome",
+        "MemberId",
+        "PluginError",
+        "PluginErrorKind",
+        "Request",
+    ];
+    for path in rust_files(&root.join("crates/router/src")) {
+        let text = read_to_string(&path);
+        for (is_pub, name) in plugin_api_use_names(&text) {
+            let allowed = if is_pub { &reexports[..] } else { &imports[..] };
+            if !allowed.contains(&name.as_str()) {
+                let kind = if is_pub { "re-exports" } else { "imports" };
+                violations.push(format!(
+                    "{} {kind} `{name}` from hofund-plugin-api",
+                    relative(&root, &path)
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "the router re-exports only PluginError, Request, Completion, and MemberId, and its other plugin-api imports are PluginErrorKind, CountOutcome, and BodyStream:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn a_crate_alias_reexport_is_outside_the_allow_list() {
+    let reexports = ["Completion", "MemberId", "PluginError", "Request"];
+    for sample in [
+        "pub use hofund_plugin_api as api;\n",
+        "pub use hofund_plugin_api::*;\n",
+        "pub use hofund_plugin_api::{self as api};\n",
+    ] {
+        let names = plugin_api_use_names(sample);
+        assert!(
+            names
+                .iter()
+                .any(|(is_pub, name)| { *is_pub && !reexports.contains(&name.as_str()) }),
+            "{sample:?} -> {names:?}"
+        );
+    }
+}
+
+fn plugin_api_use_names(text: &str) -> Vec<(bool, String)> {
+    let Ok(file) = syn::parse_file(text) else {
+        return vec![(false, "does not parse".to_owned())];
+    };
+    let mut found = Vec::new();
+    UseScan { found: &mut found }.visit_file(&file);
+    found
+}
+
+struct UseScan<'a> {
+    found: &'a mut Vec<(bool, String)>,
+}
+
+impl<'ast> Visit<'ast> for UseScan<'_> {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        let is_pub = matches!(item.vis, syn::Visibility::Public(_));
+        collect_plugin_api_use(&item.tree, &[], is_pub, self.found);
+    }
+}
+
+fn collect_plugin_api_use(
+    tree: &syn::UseTree,
+    prefix: &[String],
+    is_pub: bool,
+    found: &mut Vec<(bool, String)>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let mut next = prefix.to_vec();
+            next.push(path.ident.to_string());
+            collect_plugin_api_use(&path.tree, &next, is_pub, found);
+        }
+        syn::UseTree::Name(name) => note_plugin_api_name(prefix, &name.ident, is_pub, found),
+        syn::UseTree::Rename(name) => {
+            if prefix.is_empty() && name.ident == "hofund_plugin_api" {
+                found.push((is_pub, name.rename.to_string()));
+            } else {
+                note_plugin_api_name(prefix, &name.ident, is_pub, found);
+            }
+        }
+        syn::UseTree::Glob(_) => {
+            if prefix.first().map(String::as_str) == Some("hofund_plugin_api") {
+                found.push((is_pub, "*".to_owned()));
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_plugin_api_use(item, prefix, is_pub, found);
+            }
+        }
+    }
+}
+
+fn note_plugin_api_name(
+    prefix: &[String],
+    name: &syn::Ident,
+    is_pub: bool,
+    found: &mut Vec<(bool, String)>,
+) {
+    if prefix.first().map(String::as_str) == Some("hofund_plugin_api") {
+        found.push((is_pub, name.to_string()));
+    }
 }
 
 fn lints_follow_workspace(manifest: &str) -> bool {

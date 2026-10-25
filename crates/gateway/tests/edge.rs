@@ -6,16 +6,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
+use bytes::Bytes;
 use futures_util::stream;
-use hofund_codec::{Codec, CodecError, GenerativeLanguage, StreamDecoder, StreamEncoder};
+use hofund_codec::{
+    AnthropicMessages, Codec, CodecError, GenerativeLanguage, OpenAiChat, OpenAiResponses,
+    StreamDecoder, StreamEncoder,
+};
 use hofund_gateway::Gateway;
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY};
 use hofund_ir::{
     ContentPart, Extensions, Message, Request as ModelRequest, Response, Role, StreamEvent,
     TextDelta,
 };
-use hofund_router::{Completion, FailoverPolicy, Provider, ProviderError, Router};
+use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PresetId};
+use hofund_router::{Completion, FailoverPolicy, Hop, Member, Router, Snapshot};
 use hofund_usage::Ledger;
 use tower::ServiceExt;
 
@@ -118,26 +123,35 @@ impl StreamEncoder for PlainEncoder {
 }
 
 struct Fake {
-    id: &'static str,
+    route_id: &'static str,
+    member_id: MemberId,
     hits: Arc<AtomicUsize>,
     fail: Option<u16>,
     stream: bool,
 }
 
 #[async_trait]
-impl Provider for Fake {
-    fn id(&self) -> &str {
-        self.id
+impl Member for Fake {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        self.route_id
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
     }
 
     async fn execute(
         &self,
         request: ModelRequest,
         _inbound_protocol: &str,
-    ) -> Result<Completion, ProviderError> {
+    ) -> Result<Completion, PluginError> {
         self.hits.fetch_add(1, Ordering::SeqCst);
         if let Some(status) = self.fail {
-            return Err(ProviderError::status(status, "nope"));
+            return Err(PluginError::status_error(status, "nope"));
         }
         if request.stream || self.stream {
             let event = StreamEvent::TextDelta(TextDelta {
@@ -153,20 +167,27 @@ impl Provider for Fake {
     }
 }
 
-fn gateway(providers: Vec<Arc<dyn Provider>>, token: &str) -> axum::Router {
-    gateway_with(providers, token, false)
+fn member_id(id: &'static str) -> MemberId {
+    MemberId::from_preset(
+        PresetId::try_from(id).expect("preset"),
+        MemberKey::from_static("row"),
+    )
 }
 
-fn gateway_with(providers: Vec<Arc<dyn Provider>>, token: &str, generative: bool) -> axum::Router {
+fn gateway(members: Vec<Arc<dyn Member>>, token: &str) -> axum::Router {
+    gateway_with(members, token, false)
+}
+
+fn gateway_with(members: Vec<Arc<dyn Member>>, token: &str, generative: bool) -> axum::Router {
     let dir = std::env::temp_dir().join(format!(
         "hofund-edge-{}-{}-{generative}",
         std::process::id(),
-        providers.len()
+        members.len()
     ));
     let _ = std::fs::create_dir_all(&dir);
     let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
-    routes.insert("demo".to_owned(), providers);
+    routes.insert("demo".to_owned(), members);
     let mut codecs = HashMap::new();
     codecs.insert("/v1/plain".to_owned(), Arc::new(Plain) as Arc<dyn Codec>);
     if generative {
@@ -177,7 +198,7 @@ fn gateway_with(providers: Vec<Arc<dyn Provider>>, token: &str, generative: bool
         codecs.insert(GENERATIVE_STREAM.to_owned(), Arc::new(GenerativeLanguage));
     }
     Gateway::new(
-        Router::new(routes, FailoverPolicy::default()),
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
         token.to_owned(),
         codecs,
         usage,
@@ -185,9 +206,10 @@ fn gateway_with(providers: Vec<Arc<dyn Provider>>, token: &str, generative: bool
     .into_router()
 }
 
-fn fake(id: &'static str, hits: &Arc<AtomicUsize>, fail: Option<u16>) -> Arc<dyn Provider> {
+fn fake(id: &'static str, hits: &Arc<AtomicUsize>, fail: Option<u16>) -> Arc<dyn Member> {
     Arc::new(Fake {
-        id,
+        route_id: id,
+        member_id: member_id(id),
         hits: Arc::clone(hits),
         fail,
         stream: false,
@@ -249,7 +271,8 @@ async fn a_stream_is_pulled_and_a_client_error_does_not_fail_over() {
     let app = gateway(
         vec![
             Arc::new(Fake {
-                id: "primary",
+                route_id: "primary",
+                member_id: member_id("primary"),
                 hits: Arc::new(AtomicUsize::new(0)),
                 fail: None,
                 stream: true,
@@ -261,6 +284,7 @@ async fn a_stream_is_pulled_and_a_client_error_does_not_fail_over() {
     let (status, body) = call(app, Some("secret"), r#"{"model":"demo","stream":true}"#).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("data: hi"));
+    assert!(!body.contains("event: error"));
     assert_eq!(second.load(Ordering::SeqCst), 0);
 
     let backup = Arc::new(AtomicUsize::new(0));
@@ -424,7 +448,7 @@ async fn a_replaced_token_file_is_read_on_the_next_request() {
     let mut codecs = HashMap::new();
     codecs.insert("/v1/plain".to_owned(), Arc::new(Plain) as Arc<dyn Codec>);
     let app = Gateway::with_token_file(
-        Router::new(routes, FailoverPolicy::default()),
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
         "first".to_owned(),
         token_path.clone(),
         codecs,
@@ -458,7 +482,7 @@ async fn a_rejected_body_records_the_model_it_named() {
     let mut codecs = HashMap::new();
     codecs.insert("/v1/plain".to_owned(), Arc::new(Plain) as Arc<dyn Codec>);
     let app = Gateway::new(
-        Router::new(routes, FailoverPolicy::default()),
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
         "secret".to_owned(),
         codecs,
         Arc::clone(&usage),
@@ -471,6 +495,56 @@ async fn a_rejected_body_records_the_model_it_named() {
     assert_eq!(rows[0].model, "gpt-demo");
     assert_eq!(rows[0].status, "400");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+struct ThenFail {
+    member_id: MemberId,
+}
+
+#[async_trait]
+impl Member for ThenFail {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, PluginError> {
+        let event = StreamEvent::TextDelta(TextDelta {
+            index: 0,
+            text: "hi".to_owned(),
+            extensions: Extensions::new(),
+        });
+        Ok(Completion::Stream(Box::pin(stream::iter(vec![
+            Ok(event),
+            Err(PluginError::status_error(502, "mid-stream")),
+        ]))))
+    }
+}
+
+#[tokio::test]
+async fn a_stream_error_after_an_event_is_an_error_frame() {
+    let app = gateway(
+        vec![Arc::new(ThenFail {
+            member_id: member_id("primary"),
+        })],
+        "secret",
+    );
+    let (status, body) = call(app, Some("secret"), r#"{"model":"demo","stream":true}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("data: hi"), "{body}");
+    assert!(body.contains("event: error"), "{body}");
+    assert!(body.contains("mid-stream"), "{body}");
 }
 
 async fn call_with(
@@ -496,4 +570,343 @@ async fn call_with(
         .await
         .expect("body");
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+struct RawReply {
+    member_id: MemberId,
+    parts: Vec<Vec<u8>>,
+    then_error: bool,
+}
+
+#[async_trait]
+impl Member for RawReply {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, PluginError> {
+        let mut items: Vec<Result<Bytes, PluginError>> = self
+            .parts
+            .iter()
+            .map(|part| Ok(Bytes::copy_from_slice(part)))
+            .collect();
+        if self.then_error {
+            items.push(Err(PluginError::status_error(502, "mid-stream")));
+        }
+        Ok(Completion::Raw(BodyStream::from_stream(stream::iter(
+            items,
+        ))))
+    }
+}
+
+fn raw_app(
+    parts: Vec<Vec<u8>>,
+    then_error: bool,
+) -> (axum::Router, Arc<Ledger>, std::path::PathBuf) {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "hofund-edge-raw-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "demo".to_owned(),
+        vec![Hop {
+            member: Arc::new(RawReply {
+                member_id: member_id("primary"),
+                parts,
+                then_error,
+            }) as Arc<dyn Member>,
+            wire_model: Some("upstream".to_owned()),
+            max_output_tokens: None,
+        }],
+    );
+    let mut codecs = HashMap::new();
+    codecs.insert(
+        "/v1/chat/completions".to_owned(),
+        Arc::new(OpenAiChat) as Arc<dyn Codec>,
+    );
+    codecs.insert("/v1/responses".to_owned(), Arc::new(OpenAiResponses));
+    codecs.insert("/v1/messages".to_owned(), Arc::new(AnthropicMessages));
+    codecs.insert(GENERATIVE_UNARY.to_owned(), Arc::new(GenerativeLanguage));
+    codecs.insert(GENERATIVE_STREAM.to_owned(), Arc::new(GenerativeLanguage));
+    let app = Gateway::new(
+        Snapshot::new(Router::from_hops(routes, FailoverPolicy::default())),
+        "secret".to_owned(),
+        codecs,
+        Arc::clone(&usage),
+    )
+    .into_router();
+    (app, usage, dir)
+}
+
+async fn post_raw(app: axum::Router, uri: &str, body: &str) -> (StatusCode, String, String) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("authorization", "Bearer secret")
+                .body(Body::from(body.to_owned()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        content_type,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+fn split_at(bytes: &'static [u8], marker: &str) -> Vec<Vec<u8>> {
+    let index = bytes
+        .windows(marker.len())
+        .position(|window| window == marker.as_bytes())
+        .unwrap_or_else(|| panic!("missing {marker}"));
+    vec![bytes[..index].to_vec(), bytes[index..].to_vec()]
+}
+
+#[tokio::test]
+async fn raw_passthrough_counts_usage_and_keeps_the_requested_model() {
+    let chat_stream = concat!(
+        "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream\",",
+        "\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
+    );
+    let chat_unary = br#"{"id":"c","object":"chat.completion","model":"upstream","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}"#;
+    let messages_body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",",
+        "\"role\":\"assistant\",\"model\":\"upstream\",\"content\":[],",
+        "\"usage\":{\"input_tokens\":11,\"output_tokens\":1}}}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
+        "\"usage\":{\"output_tokens\":7}}\n\n",
+    );
+    let responses = concat!(
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"upstream\",",
+        "\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}}\n\n",
+    );
+    let generative = concat!(
+        "data: {\"responseId\":\"g\",\"modelVersion\":\"upstream\",",
+        "\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":7}}\n\n",
+    );
+    let generative_unary = br#"{"responseId":"g","modelVersion":"upstream","candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7}}"#;
+    let chat_request =
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    let cases = [
+        (
+            "chat-stream",
+            "/v1/chat/completions",
+            chat_request,
+            vec![chat_stream.as_bytes().to_vec()],
+            "text/event-stream",
+        ),
+        (
+            "chat-split",
+            "/v1/chat/completions",
+            chat_request,
+            split_at(chat_stream.as_bytes(), "prompt_tokens"),
+            "text/event-stream",
+        ),
+        (
+            "chat-unary",
+            "/v1/chat/completions",
+            r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#,
+            split_at(chat_unary, "prompt_tokens"),
+            "application/json",
+        ),
+        (
+            "messages",
+            "/v1/messages",
+            r#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+            split_at(messages_body.as_bytes(), "input_tokens"),
+            "text/event-stream",
+        ),
+        (
+            "responses",
+            "/v1/responses",
+            r#"{"model":"demo","input":"hi","stream":true}"#,
+            split_at(responses.as_bytes(), "input_tokens"),
+            "text/event-stream",
+        ),
+        (
+            "generative-stream",
+            "/v1beta/models/demo:streamGenerateContent",
+            r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+            split_at(generative.as_bytes(), "promptTokenCount"),
+            "text/event-stream",
+        ),
+        (
+            "generative-unary",
+            "/v1beta/models/demo:generateContent",
+            r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+            split_at(generative_unary, "promptTokenCount"),
+            "application/json",
+        ),
+    ];
+    for (name, uri, request, parts, content_type) in cases {
+        let (app, usage, dir) = raw_app(parts, false);
+        let (status, got_type, body) = post_raw(app, uri, request).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        assert_eq!(got_type, content_type, "{name}");
+        assert!(body.contains("demo"), "{name} model: {body}");
+        assert!(
+            !body.contains("upstream"),
+            "{name} wire model leaked: {body}"
+        );
+        let rows = usage.rows().expect("rows");
+        assert_eq!(rows.len(), 1, "{name}");
+        assert_eq!(rows[0].model, "demo", "{name}");
+        assert_eq!(rows[0].upstream, "primary", "{name}");
+        assert_eq!(rows[0].input_tokens, Some(11), "{name}: {body}");
+        assert_eq!(rows[0].output_tokens, Some(7), "{name}: {body}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn a_partial_raw_frame_is_closed_before_the_protocol_error() {
+    let (app, _usage, dir) = raw_app(vec![br#"data: {"n":1"#.to_vec()], true);
+    let (status, content_type, body) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(content_type, "text/event-stream");
+    assert!(
+        body.starts_with("data: {\"n\":1\n\ndata: {\"error\":"),
+        "{body}"
+    );
+    assert!(!body.contains("event:"), "{body}");
+    assert!(body.contains("mid-stream"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_comment_quote_does_not_leak_the_upstream_model() {
+    let body = concat!(
+        ": keep-alive \"\n\n",
+        "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream-x\",",
+        "\"choices\":[]}\n\n",
+    );
+    let (app, usage, dir) = raw_app(vec![body.as_bytes().to_vec()], false);
+    let (status, _, got) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert!(got.contains(": keep-alive \""), "{got}");
+    assert!(got.contains("\"model\":\"demo\""), "{got}");
+    assert!(!got.contains("upstream-x"), "{got}");
+    assert_eq!(usage.rows().expect("rows")[0].model, "demo");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn tool_arguments_keep_a_nested_model_field() {
+    let messages = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",",
+        "\"role\":\"assistant\",\"model\":\"upstream-x\",\"content\":[",
+        "{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"car\",\"input\":{\"model\":\"tesla-3\"}}",
+        "],\"usage\":{\"input_tokens\":11,\"output_tokens\":1}}}\n\n",
+    );
+    let (app, _, dir) = raw_app(vec![messages.as_bytes().to_vec()], false);
+    let (status, _, got) = post_raw(
+        app,
+        "/v1/messages",
+        r#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert!(got.contains("\"model\":\"demo\""), "{got}");
+    assert!(got.contains("\"model\":\"tesla-3\""), "{got}");
+    assert!(!got.contains("upstream-x"), "{got}");
+    let _ = std::fs::remove_dir_all(dir);
+
+    let language = br#"{"responseId":"g","modelVersion":"upstream-x","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"car","args":{"model":"tesla-3"}}}]}}]}"#;
+    let (app, _, dir) = raw_app(vec![language.to_vec()], false);
+    let (status, content_type, got) = post_raw(
+        app,
+        "/v1beta/models/demo:generateContent",
+        r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(content_type, "application/json");
+    assert!(got.contains("\"modelVersion\":\"demo\""), "{got}");
+    assert!(got.contains("\"model\":\"tesla-3\""), "{got}");
+    assert!(!got.contains("upstream-x"), "{got}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_crlf_frame_does_not_gain_an_extra_blank_event() {
+    let chunk = concat!(
+        "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream\",",
+        "\"choices\":[]}\r\n\r\n",
+    );
+    let (app, _, dir) = raw_app(vec![chunk.as_bytes().to_vec()], true);
+    let (status, _, body) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"model\":\"demo\""), "{body}");
+    assert!(!body.contains("upstream"), "{body}");
+    assert!(!body.contains("\r\n\r\n\n\n"), "{body:?}");
+    assert!(!body.contains("\n\n\n\n"), "{body:?}");
+    assert!(body.contains("mid-stream"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn held_rewriter_bytes_are_flushed_before_the_error_frame() {
+    let (app, _, dir) = raw_app(vec![br#"data: {"model":"upstream"#.to_vec()], true);
+    let (status, _, body) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.starts_with("data: {\"model\":\"upstream\n\ndata: {\"error\":"),
+        "{body}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

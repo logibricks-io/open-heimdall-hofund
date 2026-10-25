@@ -604,16 +604,24 @@ mod tests {
     }
 
     fn root() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // A wall-clock stamp is not unique across parallel tests. Windows
+        // often returns the same `SystemTime` for the whole batch, so two
+        // tests shared `accounts.json` and the second rename of `accounts.tmp`
+        // failed with ERROR_FILE_NOT_FOUND.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "hofund-host-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).expect("root");
         path
+    }
+
+    #[test]
+    fn test_roots_do_not_share_a_directory() {
+        assert_ne!(root(), root());
     }
 
     fn idle_job() -> hofund_plugin_api::Job {

@@ -26,7 +26,8 @@ use endpoints::{GENERATIVE_CATCHALL, inject_target, match_count, match_generate,
 use futures_util::{Stream, StreamExt};
 use hofund_codec::{Codec, StreamEncoder};
 use hofund_ir::{Request as ModelRequest, StreamEvent};
-use hofund_router::{Completion, ProviderError, ProviderErrorKind, Router, RouterError};
+use hofund_plugin_api::{BodyStream, PluginErrorKind};
+use hofund_router::{Completion, PluginError, RouterError, Snapshot};
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -40,7 +41,7 @@ pub struct Gateway {
 }
 
 struct Inner {
-    router: Router,
+    snapshot: Snapshot,
     /// Last token read from [`Self::token_file`], or the token passed to
     /// [`Gateway::new`] when that file cannot be read.
     token: Mutex<String>,
@@ -71,16 +72,19 @@ pub enum GatewayError {
 }
 
 impl Gateway {
-    /// A gateway that routes with `router`, requires `token`, and decodes each
+    /// A gateway that routes with `snapshot`, requires `token`, and decodes each
     /// path with the codec in `codecs`.
+    ///
+    /// Each request loads the snapshot for that call. A later store does not
+    /// change a call that already loaded.
     #[must_use]
     pub fn new(
-        router: Router,
+        snapshot: Snapshot,
         token: String,
         codecs: HashMap<String, Arc<dyn Codec>>,
         usage: Arc<Ledger>,
     ) -> Self {
-        Self::build(router, token, None, codecs, usage)
+        Self::build(snapshot, token, None, codecs, usage)
     }
 
     /// Like [`Self::new`], and re-reads `token_file` on each request.
@@ -89,17 +93,17 @@ impl Gateway {
     /// replaced by rename, so a reader sees the previous token or the new one.
     #[must_use]
     pub fn with_token_file(
-        router: Router,
+        snapshot: Snapshot,
         token: String,
         token_file: PathBuf,
         codecs: HashMap<String, Arc<dyn Codec>>,
         usage: Arc<Ledger>,
     ) -> Self {
-        Self::build(router, token, Some(token_file), codecs, usage)
+        Self::build(snapshot, token, Some(token_file), codecs, usage)
     }
 
     fn build(
-        router: Router,
+        snapshot: Snapshot,
         token: String,
         token_file: Option<PathBuf>,
         codecs: HashMap<String, Arc<dyn Codec>>,
@@ -107,7 +111,7 @@ impl Gateway {
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                router,
+                snapshot,
                 token: Mutex::new(token),
                 token_file,
                 codecs,
@@ -204,7 +208,8 @@ async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
         return response;
     }
     let data: Vec<_> = app
-        .router
+        .snapshot
+        .load()
         .models()
         .into_iter()
         .map(|id| serde_json::json!({"id": id, "object": "model", "owned_by": "hofund"}))
@@ -231,7 +236,8 @@ async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> R
         return response;
     }
     let models: Vec<_> = app
-        .router
+        .snapshot
+        .load()
         .models()
         .into_iter()
         .map(|id| {
@@ -289,24 +295,24 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let model_request = match codec.decode_request(&bytes) {
         Ok(model_request) => model_request,
         Err(error) => {
-            record(
+            write_usage(
                 &app.usage,
-                &ModelRequest::new(model_name(&bytes)),
-                "",
+                &UsageMeta::new(&ModelRequest::new(model_name(&bytes)), "", started),
                 None,
-                started,
                 StatusCode::BAD_REQUEST,
             );
             return coded(codec.as_ref(), StatusCode::BAD_REQUEST, &error.to_string());
         }
     };
-    match app.router.dispatch(model_request.clone(), codec.id()).await {
+    let router = app.snapshot.load();
+    match router.dispatch(&model_request, codec.id()).await {
         Ok(routed) => {
             success(
                 app,
                 codec,
-                model_request,
-                routed.upstream_id,
+                &model_request,
+                &routed.upstream_id,
+                &routed.upstream_model,
                 routed.completion,
                 started,
             )
@@ -349,7 +355,8 @@ async fn count_tokens(
         Ok(model_request) => model_request,
         Err(error) => return coded(codec.as_ref(), StatusCode::BAD_REQUEST, &error.to_string()),
     };
-    match app.router.count(model_request, codec.id()).await {
+    let router = app.snapshot.load();
+    match router.count(&model_request, codec.id()).await {
         Ok(count) => json_response(
             StatusCode::OK,
             codec.encode_token_count(count.tokens, count.estimated),
@@ -358,7 +365,9 @@ async fn count_tokens(
             let (status, message) = match error {
                 RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string()),
                 RouterError::Ambiguous { .. } => (StatusCode::BAD_REQUEST, error.to_string()),
-                RouterError::Upstream { error, .. } => (status_of(&error), error.message),
+                RouterError::Upstream { error, .. } => {
+                    (status_of(&error), error.message().to_owned())
+                }
             };
             coded(codec.as_ref(), status, &message)
         }
@@ -452,11 +461,13 @@ fn tokens_match(expected: &str, presented: &str) -> bool {
 async fn success(
     app: Arc<Inner>,
     codec: Arc<dyn Codec>,
-    request: ModelRequest,
-    upstream: String,
+    request: &ModelRequest,
+    upstream: &str,
+    upstream_model: &str,
     completion: Completion,
     started: Instant,
 ) -> Response {
+    let meta = UsageMeta::new(request, upstream, started);
     match completion {
         Completion::Unary(response) => {
             let input = response
@@ -467,40 +478,168 @@ async fn success(
                 .usage
                 .as_ref()
                 .and_then(|usage| as_i64(usage.output_tokens));
-            record(
-                &app.usage,
-                &request,
-                &upstream,
-                Some((input, output)),
-                started,
-                StatusCode::OK,
-            );
-            match codec.encode_response_for(&request, &response) {
+            write_usage(&app.usage, &meta, Some((input, output)), StatusCode::OK);
+            match codec.encode_response_for(request, &response) {
                 Ok(bytes) => json_response(StatusCode::OK, bytes),
                 Err(error) => coded(codec.as_ref(), StatusCode::BAD_GATEWAY, &error.to_string()),
             }
         }
         Completion::Stream(events) => {
-            let encoder = codec.stream_encoder_for(&request);
+            let encoder = codec.stream_encoder_for(request);
+            let on_error = {
+                let codec = Arc::clone(&codec);
+                move |error: &PluginError| {
+                    codec.encode_stream_error(status_of(error).as_u16(), error.message())
+                }
+            };
             let body = sse_body(
                 events,
                 encoder,
                 RecordOnEnd {
                     usage: Arc::clone(&app.usage),
-                    request,
-                    upstream,
-                    started,
+                    meta,
                     input: None,
                     output: None,
                 },
+                Box::new(on_error),
             );
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/event-stream")
+                .header(header::CONTENT_TYPE, codec.stream_content_type())
                 .body(Body::from_stream(body))
                 .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
         }
+        Completion::Raw(body) => raw_body(app, codec, request, upstream_model, meta, body).await,
+        _ => text_response(StatusCode::BAD_GATEWAY, "unsupported completion"),
     }
+}
+
+async fn raw_body(
+    app: Arc<Inner>,
+    codec: Arc<dyn Codec>,
+    request: &ModelRequest,
+    upstream_model: &str,
+    mut meta: UsageMeta,
+    mut body: BodyStream,
+) -> Response {
+    let content_type = codec.response_content_type(request.stream);
+    if request.stream {
+        let usage = Arc::clone(&app.usage);
+        let tap = codec.raw_tap(&request.model, upstream_model);
+        let on_error = {
+            let codec = Arc::clone(&codec);
+            move |error: &PluginError| {
+                codec.encode_stream_error(status_of(error).as_u16(), error.message())
+            }
+        };
+        let stream = futures_util::stream::unfold(
+            (body, meta, usage, tap, on_error, true, 0u8),
+            |(mut body, mut meta, usage, mut tap, on_error, boundary, phase)| async move {
+                if phase == 1 {
+                    write_usage(
+                        &usage,
+                        &meta,
+                        Some((meta.input, meta.output)),
+                        StatusCode::OK,
+                    );
+                    return None;
+                }
+                if phase == 2 {
+                    return None;
+                }
+                match body.next_chunk().await {
+                    None => {
+                        let tail = tap.finish();
+                        let (input, output) = tap.tokens();
+                        meta.input = input.or(meta.input);
+                        meta.output = output.or(meta.output);
+                        if tail.is_empty() {
+                            write_usage(
+                                &usage,
+                                &meta,
+                                Some((meta.input, meta.output)),
+                                StatusCode::OK,
+                            );
+                            None
+                        } else {
+                            Some((
+                                Ok::<Bytes, std::io::Error>(Bytes::from(tail)),
+                                (body, meta, usage, tap, on_error, boundary, 1),
+                            ))
+                        }
+                    }
+                    Some(Err(error)) => {
+                        let mut tail = tap.finish();
+                        let (input, output) = tap.tokens();
+                        meta.input = input.or(meta.input);
+                        meta.output = output.or(meta.output);
+                        write_usage(
+                            &usage,
+                            &meta,
+                            Some((meta.input, meta.output)),
+                            StatusCode::BAD_GATEWAY,
+                        );
+                        let mut frame = on_error(&error);
+                        if tail.is_empty() && !boundary {
+                            let mut prefixed = b"\n\n".to_vec();
+                            prefixed.extend(frame);
+                            frame = prefixed;
+                        }
+                        tail.extend(frame);
+                        Some((
+                            Ok(Bytes::from(tail)),
+                            (body, meta, usage, tap, on_error, true, 2),
+                        ))
+                    }
+                    Some(Ok(chunk)) => {
+                        let forwarded = tap.push(&chunk);
+                        let (input, output) = tap.tokens();
+                        meta.input = input.or(meta.input);
+                        meta.output = output.or(meta.output);
+                        let boundary = if forwarded.is_empty() {
+                            boundary
+                        } else {
+                            frame_closed(&forwarded)
+                        };
+                        Some((
+                            Ok(Bytes::from(forwarded)),
+                            (body, meta, usage, tap, on_error, boundary, 0),
+                        ))
+                    }
+                }
+            },
+        );
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from_stream(stream))
+            .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"));
+    }
+    let mut bytes = Vec::new();
+    let mut failed: Option<PluginError> = None;
+    while let Some(chunk) = body.next_chunk().await {
+        match chunk {
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(error) => {
+                failed = Some(error);
+                break;
+            }
+        }
+    }
+    if let Some(error) = failed {
+        write_usage(&app.usage, &meta, None, StatusCode::BAD_GATEWAY);
+        return coded(codec.as_ref(), StatusCode::BAD_GATEWAY, error.message());
+    }
+    let (input, output) = codec.response_tokens(&bytes);
+    meta.input = input;
+    meta.output = output;
+    write_usage(&app.usage, &meta, Some((input, output)), StatusCode::OK);
+    let body = codec.rewrite_model(&bytes, &request.model, upstream_model);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, codec.response_content_type(false))
+        .body(Body::from(body))
+        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "response"))
 }
 
 fn failure(
@@ -516,40 +655,69 @@ fn failure(
             (StatusCode::BAD_REQUEST, String::new(), error.to_string())
         }
         RouterError::Upstream { upstream_id, error } => {
-            (status_of(&error), upstream_id, error.message)
+            (status_of(&error), upstream_id, error.message().to_owned())
         }
     };
-    record(&app.usage, request, &upstream, None, started, status);
+    write_usage(
+        &app.usage,
+        &UsageMeta::new(request, &upstream, started),
+        None,
+        status,
+    );
     coded(codec, status, &message)
 }
 
-fn status_of(error: &ProviderError) -> StatusCode {
-    let code = match error.kind {
-        ProviderErrorKind::Status => error.status.unwrap_or(502),
-        ProviderErrorKind::Connect | ProviderErrorKind::Timeout | ProviderErrorKind::Decode => 502,
+fn status_of(error: &PluginError) -> StatusCode {
+    let code = match error.kind() {
+        PluginErrorKind::Status => error.status().unwrap_or(502),
+        _ => 502,
     };
     StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY)
 }
 
-struct RecordOnEnd {
-    usage: Arc<Ledger>,
-    request: ModelRequest,
+struct UsageMeta {
+    model: String,
     upstream: String,
     started: Instant,
     input: Option<i64>,
     output: Option<i64>,
 }
 
+impl UsageMeta {
+    fn new(request: &ModelRequest, upstream: &str, started: Instant) -> Self {
+        Self {
+            model: request.model.clone(),
+            upstream: upstream.to_owned(),
+            started,
+            input: None,
+            output: None,
+        }
+    }
+}
+
+struct RecordOnEnd {
+    usage: Arc<Ledger>,
+    meta: UsageMeta,
+    input: Option<i64>,
+    output: Option<i64>,
+}
+
+type ErrorFrame = Box<dyn Fn(&PluginError) -> Vec<u8> + Send>;
+
 fn sse_body(
-    incoming: Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+    incoming: Pin<Box<dyn Stream<Item = Result<StreamEvent, PluginError>> + Send>>,
     encoder: Box<dyn StreamEncoder>,
     record: RecordOnEnd,
+    on_error: ErrorFrame,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     futures_util::stream::unfold(
-        (incoming, encoder, record, false),
-        |(mut incoming, mut encoder, mut record, flushed)| async move {
-            if flushed {
+        (incoming, encoder, record, on_error, true, 0u8),
+        |(mut incoming, mut encoder, mut record, on_error, boundary, phase)| async move {
+            if phase == 1 {
                 finish_record(&record, StatusCode::OK);
+                return None;
+            }
+            if phase == 2 {
                 return None;
             }
             loop {
@@ -560,9 +728,10 @@ fn sse_body(
                             return None;
                         }
                         Ok(bytes) => {
+                            let boundary = frame_closed(&bytes);
                             return Some((
                                 Ok(Bytes::from(bytes)),
-                                (incoming, encoder, record, true),
+                                (incoming, encoder, record, on_error, boundary, 1),
                             ));
                         }
                         Err(_) => {
@@ -570,18 +739,28 @@ fn sse_body(
                             return None;
                         }
                     },
-                    Some(Err(_)) => {
+                    Some(Err(error)) => {
                         finish_record(&record, StatusCode::BAD_GATEWAY);
-                        return None;
+                        let mut bytes = on_error(&error);
+                        if !boundary {
+                            let mut prefixed = b"\n\n".to_vec();
+                            prefixed.extend_from_slice(&bytes);
+                            bytes = prefixed;
+                        }
+                        return Some((
+                            Ok(Bytes::from(bytes)),
+                            (incoming, encoder, record, on_error, true, 2),
+                        ));
                     }
                     Some(Ok(event)) => {
                         note_usage(&event, &mut record.input, &mut record.output);
                         match encoder.push(&event) {
                             Ok(bytes) if bytes.is_empty() => {}
                             Ok(bytes) => {
+                                let boundary = frame_closed(&bytes);
                                 return Some((
                                     Ok(Bytes::from(bytes)),
-                                    (incoming, encoder, record, false),
+                                    (incoming, encoder, record, on_error, boundary, 0),
                                 ));
                             }
                             Err(_) => {
@@ -594,6 +773,10 @@ fn sse_body(
             }
         },
     )
+}
+
+fn frame_closed(bytes: &[u8]) -> bool {
+    bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n") || bytes.ends_with(b"\r\r")
 }
 
 fn note_usage(event: &StreamEvent, input: &mut Option<i64>, output: &mut Option<i64>) {
@@ -613,48 +796,36 @@ fn note_usage(event: &StreamEvent, input: &mut Option<i64>, output: &mut Option<
     }
 }
 
-fn finish_record(record: &RecordOnEnd, status: StatusCode) {
-    record_row(
-        &record.usage,
-        &record.request,
-        &record.upstream,
-        Some((record.input, record.output)),
-        record.started,
-        status,
-    );
+fn finish_record(row: &RecordOnEnd, status: StatusCode) {
+    write_usage(&row.usage, &row.meta, Some((row.input, row.output)), status);
 }
 
-fn record(
+fn write_usage(
     usage: &Ledger,
-    request: &ModelRequest,
-    upstream: &str,
+    meta: &UsageMeta,
     tokens: Option<(Option<i64>, Option<i64>)>,
-    started: Instant,
-    status: StatusCode,
-) {
-    record_row(usage, request, upstream, tokens, started, status);
-}
-
-fn record_row(
-    usage: &Ledger,
-    request: &ModelRequest,
-    upstream: &str,
-    tokens: Option<(Option<i64>, Option<i64>)>,
-    started: Instant,
     status: StatusCode,
 ) {
     let (input_tokens, output_tokens) = tokens.unwrap_or((None, None));
+    if let Some(tokens) = input_tokens.and_then(|value| u64::try_from(value).ok()) {
+        metrics::counter!("hofund_tokens", "direction" => "input").increment(tokens);
+    }
+    if let Some(tokens) = output_tokens.and_then(|value| u64::try_from(value).ok()) {
+        metrics::counter!("hofund_tokens", "direction" => "output").increment(tokens);
+    }
+    metrics::histogram!("hofund_member_latency_ms")
+        .record(meta.started.elapsed().as_millis() as f64);
     let row = Row {
         created_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| {
                 i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
             }),
-        model: request.model.clone(),
-        upstream: upstream.to_owned(),
+        model: meta.model.clone(),
+        upstream: meta.upstream.clone(),
         input_tokens,
         output_tokens,
-        latency_ms: i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
+        latency_ms: i64::try_from(meta.started.elapsed().as_millis()).unwrap_or(i64::MAX),
         status: status.as_u16().to_string(),
     };
     let _ = usage.record(&row);

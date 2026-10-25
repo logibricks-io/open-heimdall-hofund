@@ -1,23 +1,34 @@
-//! Ordered routing and failover across providers.
+//! Ordered routing and failover across members.
 //!
-//! A model name maps to an ordered list of providers. The next provider is
-//! tried only when the current one fails before any stream event has been
-//! produced. This crate does not name vendors and does not read quirk data.
+//! A model name maps to an ordered list of members. The next member is tried
+//! only when the current one fails before any stream event or raw chunk has
+//! been produced. This crate does not name vendors or the plugin upstream and
+//! host types, and it does not read quirk data. It does not depend on `tower`.
+//! The daemon adapts each member into a service and wraps that service in the
+//! kernel layers.
+
+mod member;
+mod snapshot;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures_util::StreamExt;
-use hofund_ir::{Request, StreamEvent, estimate_input_tokens};
+use hofund_ir::{StreamEvent, estimate_input_tokens};
+use hofund_plugin_api::{BodyStream, CountOutcome, PluginErrorKind};
+use tracing::Instrument;
 
-pub use hofund_provider::{Completion, CountOutcome, Provider, ProviderError, ProviderErrorKind};
+pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
+pub use member::Member;
+pub use snapshot::Snapshot;
 
-/// Which failures may try the next provider.
+/// Which failures may try the next member.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailoverPolicy {
-    /// Connect and timeout errors try the next provider.
+    /// Connect and timeout errors try the next member.
     pub connect_errors: bool,
-    /// HTTP statuses that try the next provider.
+    /// HTTP statuses that try the next member.
     pub statuses: BTreeSet<u16>,
 }
 
@@ -32,25 +43,37 @@ impl Default for FailoverPolicy {
 
 impl FailoverPolicy {
     /// Whether `error` happened early enough, and is of a kind, that another
-    /// provider may be tried.
+    /// member may be tried.
+    ///
+    /// Kinds other than connect, timeout, and a listed status do not fail
+    /// over. The wildcard is required because [`PluginErrorKind`] is
+    /// `#[non_exhaustive]`: a new kind does not break this match.
     #[must_use]
-    pub fn allows(&self, error: &ProviderError) -> bool {
-        match error.kind {
-            ProviderErrorKind::Connect | ProviderErrorKind::Timeout => self.connect_errors,
-            ProviderErrorKind::Status => error
-                .status
+    pub fn allows(&self, error: &PluginError) -> bool {
+        match error.kind() {
+            PluginErrorKind::Connect | PluginErrorKind::Timeout => self.connect_errors,
+            PluginErrorKind::Status => error
+                .status()
                 .is_some_and(|code| self.statuses.contains(&code)),
-            ProviderErrorKind::Decode => false,
+            PluginErrorKind::Decode
+            | PluginErrorKind::Unsupported
+            | PluginErrorKind::Auth
+            | PluginErrorKind::Quota
+            | PluginErrorKind::Config
+            | PluginErrorKind::Cancelled
+            | PluginErrorKind::Io
+            | PluginErrorKind::Internal => false,
+            _ => false,
         }
     }
 }
 
-/// One provider a route may call, and the model name that provider expects.
+/// One member a route may call, and the model name that member expects.
 #[derive(Clone)]
 pub struct Hop {
     /// The upstream.
-    pub provider: Arc<dyn Provider>,
-    /// Model name sent to `provider`. Absent keeps the caller's model name,
+    pub member: Arc<dyn Member>,
+    /// Model name sent to `member`. Absent keeps the caller's model name,
     /// after a `provider/model` id is reduced to its model portion.
     pub wire_model: Option<String>,
     /// Output cap applied when the request omitted one.
@@ -83,16 +106,16 @@ struct Resolved {
 impl Router {
     /// Builds a router. An empty list for a model is the same as no route.
     ///
-    /// Each provider is called with the model name the client sent.
+    /// Each member is called with the model name the client sent.
     #[must_use]
-    pub fn new(routes: BTreeMap<String, Vec<Arc<dyn Provider>>>, policy: FailoverPolicy) -> Self {
+    pub fn new(routes: BTreeMap<String, Vec<Arc<dyn Member>>>, policy: FailoverPolicy) -> Self {
         let routes = routes
             .into_iter()
-            .map(|(model, providers)| {
-                let hops = providers
+            .map(|(model, members)| {
+                let hops = members
                     .into_iter()
-                    .map(|provider| Hop {
-                        provider,
+                    .map(|member| Hop {
+                        member,
                         wire_model: None,
                         max_output_tokens: None,
                     })
@@ -103,13 +126,13 @@ impl Router {
         Self::from_hops(routes, policy)
     }
 
-    /// Builds a router from hops that may rename the model per provider.
+    /// Builds a router from hops that may rename the model per member.
     #[must_use]
     pub fn from_hops(routes: BTreeMap<String, Vec<Hop>>, policy: FailoverPolicy) -> Self {
         let mut providers = BTreeSet::new();
         for hops in routes.values() {
             for hop in hops {
-                providers.insert(hop.provider.id().to_owned());
+                providers.insert(hop.member.route_id().to_owned());
             }
         }
         Self {
@@ -131,9 +154,16 @@ impl Router {
 
     /// Runs `request` against the upstreams configured for its model.
     ///
-    /// `inbound_protocol` is forwarded to each provider so an adapter can
-    /// tell a same-protocol passthrough from a translation. The reply's model
-    /// is the name the client sent. Each hop may send a different name upstream.
+    /// `inbound_protocol` is forwarded to each member so an adapter can tell
+    /// a same-protocol passthrough from a translation. When the name sent
+    /// upstream differs from the name the client asked for, a decoded body is
+    /// relabelled with the client name. When the names are equal, the model
+    /// the member returned is kept, including a dated snapshot. A raw body
+    /// follows the same rule in the gateway. Each hop may send a different
+    /// name upstream.
+    ///
+    /// The per-attempt clone of `request` stays. The caller does not clone
+    /// before this call.
     ///
     /// # Errors
     ///
@@ -143,33 +173,37 @@ impl Router {
     /// allowed attempt failed, or when a failure is not one the policy retries.
     pub async fn dispatch(
         &self,
-        request: Request,
+        request: &Request,
         inbound_protocol: &str,
     ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
         let resolved = self.resolve(&asked)?;
         let policy = self.policy.clone();
         let mut last = None;
-        for hop in &resolved.hops {
+        for (index, hop) in resolved.hops.iter().enumerate() {
             let mut attempt = request.clone();
             apply_wire(&mut attempt, hop, &resolved.bare);
-            let result = match hop.provider.execute(attempt, inbound_protocol).await {
-                Ok(completion) => accept(completion).await,
-                Err(error) => Err(error),
-            };
+            let upstream_model = attempt.model.clone();
+            let result = call_member(hop, index, inbound_protocol, attempt).await;
             match result {
                 Ok(completion) => {
+                    let completion = if asked == upstream_model {
+                        completion
+                    } else {
+                        label_model(completion, asked)
+                    };
                     return Ok(Routed {
-                        upstream_id: hop.provider.id().to_owned(),
-                        completion: label_model(completion, asked),
+                        upstream_id: hop.member.route_id().to_owned(),
+                        upstream_model,
+                        completion,
                     });
                 }
                 Err(error) if policy.allows(&error) => {
-                    last = Some((hop.provider.id().to_owned(), error));
+                    last = Some((hop.member.route_id().to_owned(), error));
                 }
                 Err(error) => {
                     return Err(RouterError::Upstream {
-                        upstream_id: hop.provider.id().to_owned(),
+                        upstream_id: hop.member.route_id().to_owned(),
                         error,
                     });
                 }
@@ -195,31 +229,42 @@ impl Router {
     /// when an upstream rejects the count and no later upstream can be tried.
     pub async fn count(
         &self,
-        request: Request,
+        request: &Request,
         inbound_protocol: &str,
     ) -> Result<InputCount, RouterError> {
         let resolved = self.resolve(&request.model)?;
         let policy = self.policy.clone();
         let mut last = None;
         let mut unsupported = false;
-        for hop in &resolved.hops {
+        for (index, hop) in resolved.hops.iter().enumerate() {
             let mut attempt = request.clone();
             apply_wire(&mut attempt, hop, &resolved.bare);
-            match hop.provider.count_input(attempt, inbound_protocol).await {
+            let span = member_span(hop, index, inbound_protocol);
+            let started = Instant::now();
+            let result = hop
+                .member
+                .count_input(attempt, inbound_protocol)
+                .instrument(span.clone())
+                .await;
+            record_call(&span, &result_status(result.as_ref().err()), started);
+            match result {
                 Ok(CountOutcome::Counted(tokens)) => {
                     return Ok(InputCount {
                         tokens,
                         estimated: false,
-                        upstream_id: hop.provider.id().to_owned(),
+                        upstream_id: hop.member.route_id().to_owned(),
                     });
                 }
-                Ok(CountOutcome::Unsupported) => unsupported = true,
+                // `Unsupported` and any future variant are not a count. The
+                // wildcard is required because [`CountOutcome`] is
+                // `#[non_exhaustive]`.
+                Ok(_) => unsupported = true,
                 Err(error) if policy.allows(&error) => {
-                    last = Some((hop.provider.id().to_owned(), error));
+                    last = Some((hop.member.route_id().to_owned(), error));
                 }
                 Err(error) => {
                     return Err(RouterError::Upstream {
-                        upstream_id: hop.provider.id().to_owned(),
+                        upstream_id: hop.member.route_id().to_owned(),
                         error,
                     });
                 }
@@ -227,7 +272,7 @@ impl Router {
         }
         if unsupported {
             return Ok(InputCount {
-                tokens: estimate_input_tokens(&request),
+                tokens: estimate_input_tokens(request),
                 estimated: true,
                 upstream_id: String::new(),
             });
@@ -249,7 +294,7 @@ impl Router {
             && self.providers.contains(provider_id)
         {
             let found = self.matching(|route_model, hop| {
-                hop.provider.id() == provider_id
+                hop.member.route_id() == provider_id
                     && (route_model == model || hop.wire_model.as_deref() == Some(model))
             });
             return self.one(asked, model, found);
@@ -311,8 +356,11 @@ impl Router {
 pub struct Routed {
     /// Id of the provider that produced the completion.
     pub upstream_id: String,
-    /// The completion. A stream has already produced its first event, or
-    /// ended empty. A failure before that is not returned here.
+    /// Model name sent to that provider. The gateway compares it with the
+    /// name the client asked for before touching a raw body.
+    pub upstream_model: String,
+    /// The completion. A stream or raw body has already produced its first
+    /// chunk, or ended empty. A failure before that is not returned here.
     pub completion: Completion,
 }
 
@@ -341,7 +389,7 @@ pub enum RouterError {
         /// The last upstream that was asked.
         upstream_id: String,
         /// Its error.
-        error: ProviderError,
+        error: PluginError,
     },
 }
 
@@ -355,7 +403,7 @@ fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {
 fn candidates(found: &[(String, Hop)]) -> String {
     found
         .iter()
-        .map(|(route, hop)| format!("{}/{}", hop.provider.id(), route))
+        .map(|(route, hop)| format!("{}/{}", hop.member.route_id(), route))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -371,19 +419,83 @@ fn label_model(completion: Completion, model: String) -> Completion {
                 stream.map(move |item| item.map(|event: StreamEvent| event.with_model(&model)));
             Completion::Stream(Box::pin(labeled))
         }
+        Completion::Raw(body) => Completion::Raw(body), // the gateway patches the model
+        _ => completion,
     }
 }
 
-async fn accept(completion: Completion) -> Result<Completion, ProviderError> {
-    let Completion::Stream(mut stream) = completion else {
-        return Ok(completion);
-    };
-    match stream.next().await {
-        None => Ok(Completion::Stream(stream)),
-        Some(Err(error)) => Err(error),
-        Some(Ok(event)) => {
-            let head = futures_util::stream::once(async move { Ok(event) });
-            Ok(Completion::Stream(Box::pin(head.chain(stream))))
+async fn accept(completion: Completion) -> Result<Completion, PluginError> {
+    match completion {
+        Completion::Stream(mut stream) => match stream.next().await {
+            None => Ok(Completion::Stream(stream)),
+            Some(Err(error)) => Err(error),
+            Some(Ok(event)) => {
+                let head = futures_util::stream::once(async move { Ok(event) });
+                Ok(Completion::Stream(Box::pin(head.chain(stream))))
+            }
+        },
+        Completion::Raw(mut body) => match body.next_chunk().await {
+            None => Ok(Completion::Raw(body)),
+            Some(Err(error)) => Err(error),
+            Some(Ok(chunk)) => Ok(Completion::Raw(BodyStream::resume(chunk, body))),
+        },
+        other => Ok(other),
+    }
+}
+
+async fn call_member(
+    hop: &Hop,
+    index: usize,
+    inbound_protocol: &str,
+    attempt: Request,
+) -> Result<Completion, PluginError> {
+    let span = member_span(hop, index, inbound_protocol);
+    let started = Instant::now();
+    let result = async {
+        match hop.member.execute(attempt, inbound_protocol).await {
+            Ok(completion) => accept(completion).await,
+            Err(error) => Err(error),
         }
     }
+    .instrument(span.clone())
+    .await;
+    record_call(&span, &result_status(result.as_ref().err()), started);
+    result
+}
+
+fn member_span(hop: &Hop, index: usize, inbound_protocol: &str) -> tracing::Span {
+    tracing::info_span!(
+        "member",
+        "plugin.id" = hop.member.plugin_id(),
+        "preset.id" = hop.member.preset_id(),
+        "member.id" = %hop.member.id(),
+        attempt = index + 1,
+        "protocol.in" = inbound_protocol,
+        "protocol.out" = hop.member.protocol(),
+        status = tracing::field::Empty,
+        ttft_ms = tracing::field::Empty,
+    )
+}
+
+fn record_call(span: &tracing::Span, status: &str, started: Instant) {
+    let ttft_ms = u128_as_u64(started.elapsed().as_millis());
+    span.record("status", status);
+    span.record("ttft_ms", ttft_ms);
+    metrics::counter!("hofund_member_requests").increment(1);
+    metrics::histogram!("hofund_member_ttft_ms").record(ttft_ms as f64);
+    metrics::histogram!("hofund_member_ttfb_ms").record(ttft_ms as f64);
+    if status != "ok" {
+        metrics::counter!("hofund_member_errors", "kind" => status.to_owned()).increment(1);
+    }
+}
+
+fn result_status(error: Option<&PluginError>) -> String {
+    match error {
+        None => "ok".to_owned(),
+        Some(error) => error.kind().to_string(),
+    }
+}
+
+fn u128_as_u64(value: u128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }

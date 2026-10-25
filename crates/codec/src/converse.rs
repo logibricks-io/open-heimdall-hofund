@@ -281,6 +281,14 @@ impl Codec for Converse {
     fn stream_encoder(&self) -> Box<dyn StreamEncoder> {
         Box::new(ConverseEncoder)
     }
+
+    fn model_paths(&self) -> &'static [&'static [&'static str]] {
+        &[]
+    }
+
+    fn stream_content_type(&self) -> &'static str {
+        "application/vnd.amazon.eventstream"
+    }
 }
 
 fn reject_unmapped_params(request: &Request) -> Result<(), CodecError> {

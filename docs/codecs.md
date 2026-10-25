@@ -1,5 +1,8 @@
 # Protocol codecs
 
+The model-name contract for a mapped alias and for an equal name is in
+[Model names on a response](model-names.md).
+
 `hofund-codec` translates each external protocol to and from `hofund-ir`.
 One implementation per protocol is the whole matrix: a client protocol and an
 upstream protocol never translate into each other directly. They both speak

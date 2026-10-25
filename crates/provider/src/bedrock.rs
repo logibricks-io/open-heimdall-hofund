@@ -178,11 +178,14 @@ impl Provider for Bedrock {
                 http::message_from(&bytes),
             ));
         }
+        if !cross_protocol {
+            return http::raw_completion(response, stream, &codec).await;
+        }
         if stream {
             let events = crate::stream::SseEvents::new(
                 response.bytes_stream(),
                 codec.stream_decoder(),
-                cross_protocol,
+                true,
             );
             return Ok(Completion::Stream(Box::pin(events)));
         }
@@ -190,9 +193,7 @@ impl Provider for Bedrock {
         let mut decoded = codec
             .decode_response(&bytes)
             .map_err(|error| ProviderError::decode(error.to_string()))?;
-        if cross_protocol {
-            decoded.strip_extensions();
-        }
+        decoded.strip_extensions();
         Ok(Completion::Unary(Box::new(decoded)))
     }
 }

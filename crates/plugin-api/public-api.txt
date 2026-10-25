@@ -75,6 +75,7 @@ BodyStream #[non_exhaustive]
 BodyStream::async fn next_chunk (& mut self) -> Option < Result < Bytes , PluginError > >
 BodyStream::fn from_bytes (bytes : impl Into < Bytes >) -> Self
 BodyStream::fn from_stream (stream : impl Stream < Item = Result < Bytes , PluginError > > + Send + 'static ,) -> Self
+BodyStream::fn resume (chunk : Bytes , rest : Self) -> Self
 BuildError
 BuildError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Error)
 BuildError::fn message (& self) -> & str
