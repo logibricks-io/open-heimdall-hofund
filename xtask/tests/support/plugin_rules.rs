@@ -806,6 +806,100 @@ fast = ["dep:api/kernel"]
     assert!(found.contains("lib target sets path"), "{found}");
     assert!(found.contains("bin target sets path"), "{found}");
     let _ = fs::remove_dir_all(&paths);
+
+    let includes = std::env::temp_dir().join(format!("hofund-plugin-a38-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&includes);
+    let manifest = "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n";
+    let probes = [
+        (
+            "coreinc",
+            "::core::include!(\"../../target/evil.rs\");\nfn clean() {}\n".to_owned(),
+            "../../target/evil.rs",
+        ),
+        (
+            "absinc",
+            format!(
+                "std::include!(\"{}\");\nfn clean() {{}}\n",
+                std::env::temp_dir()
+                    .join("hofund-a38c-evil.rs")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            ),
+            "hofund-a38c-evil.rs",
+        ),
+        (
+            "apiinc",
+            "::core::include!(\"../../../../crates/plugin-api/notes/evil.rs\");\nfn clean() {}\n"
+                .to_owned(),
+            "plugin-api/notes/evil.rs",
+        ),
+        (
+            "renamedinc",
+            "use std::include as sneak;\nfn load() { sneak!(\"../out.rs\"); }\n".to_owned(),
+            "../out.rs",
+        ),
+    ];
+    for (id, source, needle) in probes {
+        let pkg = includes.join("plugins/providers").join(id);
+        fs::create_dir_all(pkg.join("src")).expect("dir");
+        fs::write(pkg.join("Cargo.toml"), manifest).expect("manifest");
+        fs::write(pkg.join("src/lib.rs"), source).expect("lib");
+        let found = plugin_tree_violations(&includes.join("plugins")).join("\n");
+        let lines: Vec<_> = found
+            .lines()
+            .filter(|line| line.contains(&format!("providers/{id} ")))
+            .collect();
+        assert!(
+            lines.iter().any(|line| line.contains("leaves src")),
+            "{id} missing leaves src in:\n{found}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains(needle)),
+            "{id} missing {needle} in:\n{found}"
+        );
+    }
+    #[cfg(unix)]
+    {
+        let file_pkg = includes.join("plugins/providers/filelink");
+        fs::create_dir_all(file_pkg.join("src")).expect("filelink");
+        fs::write(file_pkg.join("Cargo.toml"), manifest).expect("manifest");
+        fs::write(
+            file_pkg.join("src/lib.rs"),
+            "::core::include!(\"m.txt\");\nfn clean() {}\n",
+        )
+        .expect("lib");
+        let evil = includes.join("evil.txt");
+        fs::write(&evil, "#[cfg(not(clippy))]\npub fn sneak() {}\n").expect("evil");
+        std::os::unix::fs::symlink(&evil, file_pkg.join("src/m.txt")).expect("file symlink");
+        let dir_pkg = includes.join("plugins/providers/dirlink");
+        fs::create_dir_all(dir_pkg.join("src")).expect("dirlink");
+        fs::write(dir_pkg.join("Cargo.toml"), manifest).expect("manifest");
+        fs::write(
+            dir_pkg.join("src/lib.rs"),
+            "::core::include!(\"d/m.txt\");\nfn clean() {}\n",
+        )
+        .expect("lib");
+        let evildir = includes.join("evildir");
+        fs::create_dir_all(&evildir).expect("evildir");
+        fs::write(evildir.join("m.txt"), "fn sneak() {}\n").expect("module");
+        std::os::unix::fs::symlink(&evildir, dir_pkg.join("src/d")).expect("dir symlink");
+        let found = plugin_tree_violations(&includes.join("plugins")).join("\n");
+        for id in ["filelink", "dirlink"] {
+            let lines: Vec<_> = found
+                .lines()
+                .filter(|line| line.contains(&format!("providers/{id} ")))
+                .collect();
+            assert!(
+                lines.iter().any(|line| line.contains("symlink")),
+                "{id} missing symlink in:\n{found}"
+            );
+            assert!(
+                lines.iter().all(|line| !line.contains("leaves src")),
+                "{id} must stay inside src and fail as a symlink:\n{found}"
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(&includes);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

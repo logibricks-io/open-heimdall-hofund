@@ -249,17 +249,20 @@ pub fn scan_source(text: &str) -> Vec<String> {
     hits
 }
 
-/// `#[path]` escapes, target `path` keys, and non-literal includes under a plugin package.
+/// Symlinks, `#[path]` escapes, target `path` keys, and includes under a plugin package.
 ///
-/// The file set is every `.rs` file under `src/`, plus literal `include!` targets and
-/// in-root `#[path]` targets (any extension). That walk is a superset of one build:
-/// a `cfg` branch Cargo did not compile is still scanned. Dep-info is a second pass,
-/// after Cargo, in [`scan_compiled_sources`].
+/// The file set is every `.rs` file under `src/` that is not a symlink, plus a
+/// string-literal `include!` that stays inside `src/`, and in-root `#[path]`
+/// targets (any extension). A symlink anywhere in the package is rejected and
+/// not followed. That walk is a superset of one build: a `cfg` branch Cargo
+/// did not compile is still scanned. Dep-info is a second pass, after Cargo,
+/// in [`scan_compiled_sources`].
 #[must_use]
 pub fn source_violations(package_dir: &Path) -> Vec<String> {
     let mut hits = Vec::new();
     let mut seen = BTreeSet::new();
     let src = package_dir.join("src");
+    hits.extend(package_symlinks(package_dir));
     if src.is_dir() {
         for file in rust_files(&src) {
             hits.extend(scan_file(&file, &src, &mut seen));
@@ -302,14 +305,6 @@ fn scan_file(file: &Path, root: &Path, seen: &mut BTreeSet<PathBuf>) -> Vec<Stri
         return vec![format!("unreadable {}", file.display())];
     };
     let (mut hits, extra) = scan_parsed(file, root, &text);
-    if let Some(dir) = file.parent() {
-        for included in literal_includes(&text) {
-            let next = dir.join(included);
-            if next.is_file() {
-                hits.extend(scan_file(&next, root, seen));
-            }
-        }
-    }
     for next in extra {
         if next.is_file() {
             hits.extend(scan_file(&next, root, seen));
@@ -445,19 +440,12 @@ fn build_script_cfg_hits(text: &str) -> Vec<String> {
     hits
 }
 
-fn literal_includes(text: &str) -> Vec<String> {
-    let Ok(parsed) = syn::parse_file(text) else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    IncludePass { found: &mut found }.visit_file(&parsed);
-    found
-}
-
 #[derive(Default)]
 struct Aliases {
     crates: BTreeMap<String, String>,
     globs: BTreeSet<String>,
+    /// Local name to `include`, `include_str`, or `include_bytes`.
+    includes: BTreeMap<String, String>,
 }
 
 struct AliasPass<'a> {
@@ -482,27 +470,12 @@ impl<'ast> Visit<'ast> for AliasPass<'_> {
     }
 }
 
-struct IncludePass<'a> {
-    found: &'a mut Vec<String>,
-}
-
-impl<'ast> Visit<'ast> for IncludePass<'_> {
-    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        if mac.path.is_ident("include")
-            && let Ok(literal) = syn::parse2::<syn::LitStr>(mac.tokens.clone())
-        {
-            self.found.push(literal.value());
-        }
-        syn::visit::visit_macro(self, mac);
-    }
-}
-
 struct SourceFinder<'a> {
     file: &'a Path,
     root: &'a Path,
     aliases: Aliases,
     hits: Vec<String>,
-    /// In-root `#[path]` targets. Scanned whatever the extension is.
+    /// In-root `#[path]` targets and in-src `include!` files.
     extra: Vec<PathBuf>,
 }
 
@@ -557,10 +530,23 @@ impl<'ast> Visit<'ast> for SourceFinder<'_> {
             .last()
             .map(|segment| segment.ident.unraw().to_string())
         {
-            if matches!(name.as_str(), "include" | "include_str" | "include_bytes")
-                && syn::parse2::<syn::LitStr>(mac.tokens.clone()).is_err()
-            {
-                self.hits.push(format!("non-literal {name}!"));
+            let kind = self
+                .aliases
+                .includes
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| name.clone());
+            if is_include_macro(&kind) {
+                match syn::parse2::<syn::LitStr>(mac.tokens.clone()) {
+                    Err(_) => self.hits.push(format!("non-literal {kind}!")),
+                    Ok(lit) => match resolved_include(self.file, &lit.value(), self.root) {
+                        Some(path) if kind == "include" => self.extra.push(path),
+                        Some(_) => {}
+                        None => self
+                            .hits
+                            .push(format!("include path \"{}\" leaves src", lit.value())),
+                    },
+                }
             }
             if name == "cfg"
                 && let Ok(meta) = syn::parse2::<syn::Meta>(mac.tokens.clone())
@@ -661,6 +647,11 @@ fn note_crate_alias(prefix: &[String], tree: &syn::UseTree, aliases: &mut Aliase
         }
         syn::UseTree::Rename(name) => {
             let original = ident(&name.ident);
+            if is_include_macro(&original) {
+                aliases
+                    .includes
+                    .insert(ident(&name.rename), original.clone());
+            }
             let crate_name = if original == "self" {
                 prefix.first().cloned()
             } else if prefix.is_empty() {
@@ -688,8 +679,31 @@ fn note_crate_alias(prefix: &[String], tree: &syn::UseTree, aliases: &mut Aliase
                 note_crate_alias(prefix, item, aliases);
             }
         }
-        syn::UseTree::Name(_) => {}
+        syn::UseTree::Name(name) => {
+            let original = ident(&name.ident);
+            if is_include_macro(&original) {
+                aliases.includes.insert(original.clone(), original);
+            }
+        }
     }
+}
+
+fn is_include_macro(name: &str) -> bool {
+    matches!(name, "include" | "include_str" | "include_bytes")
+}
+
+/// A string-literal include path, joined lexically and kept inside `root`.
+///
+/// Symlinks are not followed. An absolute path, or one that normalizes outside
+/// `root`, is not an include the scan will open.
+fn resolved_include(file: &Path, rel: &str, root: &Path) -> Option<PathBuf> {
+    let rel_path = Path::new(rel);
+    if rel.is_empty() || rel_path.is_absolute() {
+        return None;
+    }
+    let parent = file.parent()?;
+    let joined = normalize(&parent.join(rel_path));
+    under_dir(&joined, root).then_some(joined)
 }
 
 fn walk_use(prefix: &[String], tree: &syn::UseTree, aliases: &Aliases, hits: &mut Vec<String>) {
@@ -962,8 +976,7 @@ fn escapes(file: &Path, rel: &str, root: &Path) -> bool {
         return true;
     };
     let joined = normalize(&parent.join(rel_path));
-    let root = normalize(root);
-    !joined.starts_with(&root)
+    !under_dir(&joined, root)
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -1028,13 +1041,46 @@ fn rust_files(dir: &Path) -> Vec<PathBuf> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
             files.extend(rust_files(&path));
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
             files.push(path);
         }
     }
     files
+}
+
+/// Every symlink in the package, file or directory. The link is not followed.
+fn package_symlinks(dir: &Path) -> Vec<String> {
+    let mut hits = Vec::new();
+    walk_symlinks(dir, &mut hits);
+    hits
+}
+
+fn walk_symlinks(dir: &Path, hits: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            hits.push(format!("unreadable {}", path.display()));
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            hits.push(format!("symlink {}", path.display()));
+            continue;
+        }
+        if meta.is_dir() {
+            walk_symlinks(&path, hits);
+        }
+    }
 }
 
 /// Directory of `xtask/plugin-boundary/clippy.toml`.
@@ -1215,12 +1261,11 @@ pub fn target_roots_under_src(workspace: &Path, package_dir: &Path) -> Result<()
 }
 
 fn target_root_errors(meta: &Metadata, package_dir: &Path) -> Vec<String> {
-    let package = host_path(package_dir);
-    let src = package.join("src");
+    let src = package_dir.join("src");
     let roots: Vec<&Path> = meta
         .targets
         .iter()
-        .filter(|(dir, _, _)| host_path(dir) == package)
+        .filter(|(dir, _, _)| same_root(dir, package_dir))
         .map(|(_, _, src_path)| src_path.as_path())
         .collect();
     if roots.is_empty() {
@@ -1231,7 +1276,7 @@ fn target_root_errors(meta: &Metadata, package_dir: &Path) -> Vec<String> {
     }
     let mut errors = Vec::new();
     for src_path in roots {
-        if !host_path(src_path).starts_with(&src) {
+        if !under_dir(src_path, &src) {
             errors.push(format!(
                 "target root {} is outside {}",
                 src_path.display(),
@@ -1242,19 +1287,23 @@ fn target_root_errors(meta: &Metadata, package_dir: &Path) -> Vec<String> {
     errors
 }
 
-/// Scan every source file rustc listed for this package.
+/// Scan sources rustc listed for this plugin, and reject anything outside `src/`.
 ///
 /// Runs after `cargo check` and the plugin Clippy passes. Dep-info (`.d`) for
-/// each target is parsed, and every listed file inside the package is lexed,
-/// whatever its extension. A file that will not lex is rejected. A listed file
-/// outside the package is rejected, except workspace-allowed crates and the
-/// build directories rustc records.
+/// each of the plugin's own targets is parsed. A listed file inside the
+/// package `src/` directory is lexed, whatever its extension. A file that will
+/// not lex is rejected. A plugin has no build script, so a listed path in the
+/// build directory, under `crates/plugin-api` or `crates/plugin-sdk`, or
+/// anywhere else outside `src/` is rejected. The workspace `Cargo.toml`,
+/// `Cargo.lock`, and `xtask/plugin-boundary/clippy.toml` are Clippy rebuild
+/// inputs and are ignored. Paths are classified without following symlinks.
+/// The package root and the workspace root are the only paths canonicalized.
 ///
 /// # Errors
 ///
-/// Returns an error when metadata or dep-info cannot be read, no source was
-/// listed, a listed file will not lex, the scan finds a boundary hit, or a
-/// listed file lies outside the package.
+/// Returns an error when metadata or dep-info cannot be read, no source under
+/// `src/` was listed, a listed file will not lex, the scan finds a boundary
+/// hit, or a listed file lies outside `src/`.
 pub fn scan_compiled_sources(workspace: &Path, package_dir: &Path) -> Result<(), String> {
     scan_dep_info(workspace, package_dir, &cargo_target_dir(workspace))
 }
@@ -1268,11 +1317,10 @@ fn cargo_target_dir(workspace: &Path) -> PathBuf {
 
 fn scan_dep_info(workspace: &Path, package_dir: &Path, target_dir: &Path) -> Result<(), String> {
     let meta = cargo_metadata(workspace)?;
-    let package = host_path(package_dir);
     let names: Vec<String> = meta
         .targets
         .iter()
-        .filter(|(dir, _, _)| host_path(dir) == package)
+        .filter(|(dir, _, _)| same_root(dir, package_dir))
         .map(|(_, name, _)| name.clone())
         .collect();
     if names.is_empty() {
@@ -1301,9 +1349,7 @@ fn scan_dep_info(workspace: &Path, package_dir: &Path, target_dir: &Path) -> Res
             package_dir.display()
         ));
     }
-    let sysroot = rustc_sysroot();
-    let cargo_home = cargo_home_dir();
-    let src = package.join("src");
+    let src = package_dir.join("src");
     let mut hits = Vec::new();
     let mut seen = BTreeSet::new();
     let mut saw_package_source = false;
@@ -1312,23 +1358,15 @@ fn scan_dep_info(workspace: &Path, package_dir: &Path, target_dir: &Path) -> Res
             // An older dep-info can name a file a later build removed.
             continue;
         }
-        match listed_outside(
-            &path,
-            &package,
-            workspace,
-            target_dir,
-            sysroot.as_deref(),
-            cargo_home.as_deref(),
-        ) {
+        match classify_listed(&path, package_dir, workspace) {
             Listed::Inside => {
                 saw_package_source = true;
                 hits.extend(scan_listed(&path, &src, &mut seen));
             }
-            Listed::Allowed => {}
-            Listed::Outside => hits.push(format!(
-                "dep-info lists {} outside the package",
-                path.display()
-            )),
+            Listed::Ignored => {}
+            Listed::Outside => {
+                hits.push(format!("dep-info lists {} outside src", path.display()));
+            }
         }
     }
     if !saw_package_source {
@@ -1348,42 +1386,19 @@ fn scan_dep_info(workspace: &Path, package_dir: &Path, target_dir: &Path) -> Res
 
 enum Listed {
     Inside,
-    Allowed,
+    Ignored,
     Outside,
 }
 
-fn listed_outside(
-    path: &Path,
-    package: &Path,
-    workspace: &Path,
-    target_dir: &Path,
-    sysroot: Option<&Path>,
-    cargo_home: Option<&Path>,
-) -> Listed {
-    let path = host_path(path);
-    if path.starts_with(package) {
+/// A plugin target's dep-info may name files inside `src/`, or three Clippy
+/// rebuild inputs. Every other existing path, including the build directory
+/// and `crates/plugin-api` / `crates/plugin-sdk`, is outside `src/`.
+fn classify_listed(path: &Path, package_dir: &Path, workspace: &Path) -> Listed {
+    if is_rebuild_input(path, workspace) {
+        return Listed::Ignored;
+    }
+    if under_dir(path, &package_dir.join("src")) {
         return Listed::Inside;
-    }
-    let allowed = [
-        host_path(&workspace.join("crates/plugin-api")),
-        host_path(&workspace.join("crates/plugin-sdk")),
-        host_path(target_dir),
-    ];
-    if allowed.iter().any(|root| path.starts_with(root)) {
-        return Listed::Allowed;
-    }
-    if cargo_home.is_some_and(|root| path.starts_with(host_path(root))) {
-        return Listed::Allowed;
-    }
-    if sysroot.is_some_and(|root| path.starts_with(host_path(root))) {
-        return Listed::Allowed;
-    }
-    // Clippy records these rebuild inputs. They are not crate source.
-    if path == host_path(&workspace.join("Cargo.toml"))
-        || path == host_path(&workspace.join("Cargo.lock"))
-        || path == host_path(&workspace.join("xtask/plugin-boundary/clippy.toml"))
-    {
-        return Listed::Allowed;
     }
     Listed::Outside
 }
@@ -1535,54 +1550,94 @@ fn split_make_words(input: &str) -> Vec<String> {
 fn resolve_listed(workspace: &Path, raw: &str) -> PathBuf {
     let path = PathBuf::from(raw);
     if path.is_absolute() {
-        host_path(&path)
+        lexical_path(&path)
     } else {
-        host_path(&workspace.join(path))
+        lexical_path(&workspace.join(path))
     }
 }
 
-fn host_path(path: &Path) -> PathBuf {
+/// Unresolved path: drop a verbatim `\\?\` prefix and collapse `.` / `..`.
+///
+/// Symlinks are not followed. A Windows short name stays a short name.
+fn lexical_path(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
-    let stripped = text.strip_prefix(r"\\?\").unwrap_or(text.as_ref());
-    let path = Path::new(stripped);
-    // macOS temp dirs are `/var`, which is a symlink to `/private/var`. Cargo
-    // metadata returns the canonical path, so a lexical compare misses the package.
-    if let Ok(canonical) = fs::canonicalize(path) {
-        let text = canonical.to_string_lossy();
-        let stripped = text.strip_prefix(r"\\?\").unwrap_or(text.as_ref());
-        return normalize(Path::new(stripped));
-    }
-    normalize(path)
+    let stripped = text
+        .strip_prefix(r"\\?\")
+        .or_else(|| text.strip_prefix("//?/"))
+        .unwrap_or(text.as_ref());
+    normalize(Path::new(stripped))
 }
 
-fn rustc_sysroot() -> Option<PathBuf> {
-    let output = Command::new("rustc")
-        .args(["--print", "sysroot"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Canonical spelling of a directory root, used only to compare two roots.
+///
+/// File paths stay lexical. This is what makes macOS `/var` match
+/// `/private/var`, and a Windows 8.3 directory match its long name, without
+/// moving a symlink inside the package onto the directory it points at.
+fn canonical_root(path: &Path) -> PathBuf {
+    let lexical = lexical_path(path);
+    if !lexical.is_absolute() {
+        return lexical;
     }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let line = text.lines().next()?.trim();
-    (!line.is_empty()).then(|| PathBuf::from(line))
+    match fs::canonicalize(&lexical) {
+        Ok(canonical) => lexical_path(&canonical),
+        Err(_) => lexical,
+    }
 }
 
-fn cargo_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("CARGO_HOME")
-        && !home.is_empty()
+fn same_root(a: &Path, b: &Path) -> bool {
+    if !a.is_absolute() || !b.is_absolute() {
+        return lexical_path(a) == lexical_path(b);
+    }
+    canonical_root(a) == canonical_root(b)
+}
+
+/// `path` is inside `dir` by its unresolved spelling.
+///
+/// A relative `dir` is only a lexical prefix. Canonicalizing it would use the
+/// process cwd. An absolute `dir` that exists is also compared after
+/// canonicalizing that root alone.
+fn under_dir(path: &Path, dir: &Path) -> bool {
+    let path = lexical_path(path);
+    let lexical = lexical_path(dir);
+    if path.starts_with(&lexical) {
+        return true;
+    }
+    if dir.is_absolute()
+        && let Ok(canonical) = fs::canonicalize(dir)
     {
-        return Some(PathBuf::from(home));
+        return path.starts_with(lexical_path(&canonical));
     }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".cargo"))
+    false
+}
+
+/// Clippy records these next to the crate sources. They are not scanned.
+const REBUILD_INPUTS: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "xtask/plugin-boundary/clippy.toml",
+];
+
+fn is_rebuild_input(path: &Path, workspace: &Path) -> bool {
+    let path = lexical_path(path);
+    let mut roots = vec![lexical_path(workspace)];
+    if workspace.is_absolute()
+        && let Ok(canonical) = fs::canonicalize(workspace)
+    {
+        let canonical = lexical_path(&canonical);
+        if canonical != roots[0] {
+            roots.push(canonical);
+        }
+    }
+    roots
+        .iter()
+        .any(|root| REBUILD_INPUTS.iter().any(|rel| path == root.join(rel)))
 }
 
 fn workspace_package_id(meta: &Metadata, name: &str, workspace: &Path) -> Result<String, String> {
     let workspace = normalize(workspace);
     let mut found = Vec::new();
     for (package, id, manifest) in &meta.ids_by_manifest {
-        if package == name && normalize(Path::new(manifest)).starts_with(&workspace) {
+        if package == name && under_dir(Path::new(manifest), &workspace) {
             found.push(id.clone());
         }
     }
@@ -2172,28 +2227,40 @@ cc = "1"
         std::fs::write(&bad, "\"unterminated").expect("bad");
         let target = root.join("target/debug/deps");
         std::fs::create_dir_all(&target).expect("deps");
+        let evil = root.join("target/evil.rs");
+        std::fs::write(&evil, "#[cfg(not(clippy))]\nfn sneak() {}\n").expect("evil");
+        std::fs::write(root.join("Cargo.lock"), "# lock\n").expect("lock");
         let listed = format!(
-            "probe_dep-abc.d: {} {} {} {} {}\n",
+            "probe_dep-abc.d: {} {} {} {} {} {} {} {}\n",
             package.join("src/lib.rs").display(),
             allowed.display(),
             clippy_toml.display(),
             outside.display(),
             bad.display(),
+            evil.display(),
+            root.join("Cargo.toml").display(),
+            root.join("Cargo.lock").display(),
         );
         std::fs::write(target.join("probe_dep-abc.d"), listed).expect("dep-info");
         let err =
             super::scan_dep_info(&root, &package, &root.join("target")).expect_err("outside file");
-        assert!(err.contains("outside the package"), "{err}");
-        // The report uses the canonical path. Windows temp dirs are `RUNNER~1`.
-        assert!(
-            err.contains(&super::host_path(&outside).display().to_string()),
-            "{err}"
-        );
+        assert!(err.contains("outside src"), "{err}");
+        // The filename is stable. The directory spelling depends on TMPDIR.
+        assert!(err.contains("hofund-not-allowed"), "{err}");
+        assert!(err.contains("sneak.txt"), "{err}");
+        assert!(err.contains("evil.rs"), "{err}");
         assert!(err.contains("source does not lex"), "{err}");
         assert!(!err.contains("cfg(clippy)"), "{err}");
         assert!(!err.contains("does not parse"), "{err}");
-        assert!(!err.contains("sneak.txt"), "{err}");
         assert!(!err.contains("clippy.toml"), "{err}");
+        assert!(
+            !err.contains(&root.join("Cargo.toml").display().to_string()),
+            "{err}"
+        );
+        assert!(
+            !err.contains(&root.join("Cargo.lock").display().to_string()),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&outside);
     }
@@ -2239,20 +2306,129 @@ plugins/providers/fixture/src/lib.rs:\n\
         ));
     }
 
+    #[test]
+    fn qualified_includes_must_stay_inside_src() {
+        let relative = super::scan_source("::core::include!(\"../../target/evil.rs\");\n");
+        assert!(
+            relative.iter().any(|hit| hit.contains("leaves src")),
+            "{relative:?}"
+        );
+        let absolute = if cfg!(windows) {
+            "C:/abs/evil.rs"
+        } else {
+            "/tmp/evil.rs"
+        };
+        let absolute = super::scan_source(&format!("std::include!(\"{absolute}\");\n"));
+        assert!(
+            absolute.iter().any(|hit| hit.contains("leaves src")),
+            "{absolute:?}"
+        );
+        let api = super::scan_source(
+            "::core::include!(\"../../../../crates/plugin-api/notes/evil.rs\");\n",
+        );
+        assert!(api.iter().any(|hit| hit.contains("leaves src")), "{api:?}");
+        let renamed = super::scan_source("use std::include as sneak;\nsneak!(\"../out.rs\");\n");
+        assert!(
+            renamed.iter().any(|hit| hit.contains("leaves src")),
+            "{renamed:?}"
+        );
+        let inside = super::scan_source("use std::include as sneak;\nsneak!(\"m.txt\");\n");
+        assert!(
+            inside
+                .iter()
+                .all(|hit| !hit.contains("leaves src") && !hit.contains("non-literal")),
+            "{inside:?}"
+        );
+        let bytes = super::scan_source("::core::include_bytes!(\"../out.bin\");\n");
+        assert!(
+            bytes.iter().any(|hit| hit.contains("leaves src")),
+            "{bytes:?}"
+        );
+        let data = super::scan_source("include_str!(\"data.txt\");\n");
+        assert!(
+            data.iter().all(|hit| !hit.contains("leaves src")),
+            "{data:?}"
+        );
+        let dynamic = super::scan_source("std::include!(concat!(\"a.rs\"));\n");
+        assert!(
+            dynamic
+                .iter()
+                .any(|hit| hit.contains("non-literal include!")),
+            "{dynamic:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn host_path_follows_a_directory_symlink() {
+    fn symlinks_are_rejected_without_rewriting_the_path() {
         let root =
             std::env::temp_dir().join(format!("hofund-plugin-symlink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let real = root.join("real");
         std::fs::create_dir_all(real.join("src")).expect("real");
-        std::os::unix::fs::symlink(&real, root.join("link")).expect("symlink");
-        assert_eq!(
-            super::host_path(&root.join("link")),
-            super::host_path(&real)
+        std::fs::write(real.join("src/lib.rs"), "fn clean() {}\n").expect("lib");
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        assert_eq!(super::canonical_root(&link), super::canonical_root(&real));
+        let through = link.join("src/lib.rs");
+        assert!(super::lexical_path(&through).starts_with(super::lexical_path(&link)));
+        assert!(!super::lexical_path(&through).starts_with(super::lexical_path(&real)));
+        // Cargo metadata uses the canonical file path. The package root may
+        // still be the unresolved symlink, including an outer TMPDIR link.
+        let canonical_file =
+            std::fs::canonicalize(real.join("src/lib.rs")).expect("canonical file");
+        assert!(super::under_dir(&canonical_file, &link.join("src")));
+        assert!(super::under_dir(&through, &link.join("src")));
+        assert!(!super::under_dir(&root.join("evil.txt"), &link.join("src")));
+        assert!(super::under_dir(
+            std::path::Path::new("src/lib.rs"),
+            std::path::Path::new("src")
+        ));
+        assert!(!super::under_dir(&through, std::path::Path::new("src")));
+
+        let file_pkg = root.join("file-pkg");
+        std::fs::create_dir_all(file_pkg.join("src")).expect("file pkg");
+        std::fs::write(
+            file_pkg.join("Cargo.toml"),
+            "[package]\nname = \"file-pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            file_pkg.join("src/lib.rs"),
+            "::core::include!(\"m.txt\");\n",
+        )
+        .expect("lib");
+        let evil = root.join("evil.txt");
+        std::fs::write(&evil, "#[cfg(not(clippy))]\nfn sneak() {}\n").expect("evil");
+        std::os::unix::fs::symlink(&evil, file_pkg.join("src/m.txt")).expect("file link");
+        let file_hits = source_violations(&file_pkg).join("\n");
+        assert!(file_hits.contains("symlink"), "{file_hits}");
+        assert!(file_hits.contains("m.txt"), "{file_hits}");
+        assert!(!file_hits.contains("leaves src"), "{file_hits}");
+
+        let dir_pkg = root.join("dir-pkg");
+        std::fs::create_dir_all(dir_pkg.join("src")).expect("dir pkg");
+        std::fs::write(
+            dir_pkg.join("Cargo.toml"),
+            "[package]\nname = \"dir-pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir_pkg.join("src/lib.rs"),
+            "::core::include!(\"d/m.txt\");\n",
+        )
+        .expect("lib");
+        let evildir = root.join("evildir");
+        std::fs::create_dir_all(&evildir).expect("evildir");
+        std::fs::write(evildir.join("m.txt"), "fn sneak() {}\n").expect("module");
+        std::os::unix::fs::symlink(&evildir, dir_pkg.join("src/d")).expect("dir link");
+        let dir_hits = source_violations(&dir_pkg).join("\n");
+        assert!(dir_hits.contains("symlink"), "{dir_hits}");
+        assert!(
+            dir_hits.contains(&dir_pkg.join("src/d").display().to_string()),
+            "{dir_hits}"
         );
-        assert!(super::host_path(&root.join("link/src")).starts_with(super::host_path(&real)));
+        assert!(!dir_hits.contains("leaves src"), "{dir_hits}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2260,11 +2436,11 @@ plugins/providers/fixture/src/lib.rs:\n\
     fn target_roots_must_sit_under_src() {
         let package = std::path::Path::new("/tmp/pkg");
         let src = std::path::PathBuf::from("/tmp/pkg/src/lib.rs");
-        assert!(super::host_path(&src).starts_with(super::host_path(&package.join("src"))));
+        assert!(super::under_dir(&src, &package.join("src")));
         let moved = std::path::PathBuf::from("/tmp/pkg/lib/lib.rs");
-        assert!(!super::host_path(&moved).starts_with(super::host_path(&package.join("src"))));
+        assert!(!super::under_dir(&moved, &package.join("src")));
         let tests = std::path::PathBuf::from("/tmp/pkg/tests/t.rs");
-        assert!(!super::host_path(&tests).starts_with(super::host_path(&package.join("src"))));
+        assert!(!super::under_dir(&tests, &package.join("src")));
         let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("workspace")
