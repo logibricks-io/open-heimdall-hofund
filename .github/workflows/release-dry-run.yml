@@ -20,12 +20,6 @@ on:
       - "apps/desktop/**"
       - "rust-toolchain.toml"
   workflow_dispatch:
-  # A push of this branch runs the full local matrix. workflow_dispatch is the
-  # same matrix; the branch entry is how this pull request starts that run
-  # when the token cannot dispatch. Remove the branch before merging.
-  push:
-    branches:
-      - cursor/release-dry-run-692a
 
 permissions:
   contents: read
@@ -60,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           dist plan --output-format=json > plan.json
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_EVENT_NAME" = "push" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             include="$(jq -c '.ci.github.artifacts_matrix.include' plan.json)"
           else
             include="$(jq -c '[.ci.github.artifacts_matrix.include[] | select(.targets[] == "x86_64-unknown-linux-gnu")]' plan.json)"
