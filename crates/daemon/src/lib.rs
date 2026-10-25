@@ -509,20 +509,24 @@ fn option_present<'a>(
 }
 
 fn wire_of_protocol(provider_id: &str, protocol: &str) -> Result<Wire, DaemonError> {
-    let id = ProtocolId::try_from(protocol).map_err(|_| {
-        DaemonError::new(format!(
-            "provider `{provider_id}` has unknown protocol id `{protocol}`; expected {}",
-            expected_protocols()
-        ))
-    })?;
-    // `ProtocolId` is exhaustive. A new codec id fails this match.
-    Ok(match id {
-        ProtocolId::OPENAI_CHAT => Wire::Chat,
-        ProtocolId::OPENAI_RESPONSES => Wire::Responses,
-        ProtocolId::ANTHROPIC_MESSAGES => Wire::Messages,
-        ProtocolId::GENERATIVE_LANGUAGE => Wire::Generative,
-        ProtocolId::BEDROCK_CONVERSE => Wire::Converse,
-    })
+    let id = ProtocolId::try_from(protocol).map_err(|_| unknown_protocol(provider_id, protocol))?;
+    match id {
+        ProtocolId::OPENAI_CHAT => Ok(Wire::Chat),
+        ProtocolId::OPENAI_RESPONSES => Ok(Wire::Responses),
+        ProtocolId::ANTHROPIC_MESSAGES => Ok(Wire::Messages),
+        ProtocolId::GENERATIVE_LANGUAGE => Ok(Wire::Generative),
+        ProtocolId::BEDROCK_CONVERSE => Ok(Wire::Converse),
+        // `ProtocolId` is `#[non_exhaustive]`, so a later codec id still
+        // compiles here. Name it instead of panicking.
+        _ => Err(unknown_protocol(provider_id, protocol)),
+    }
+}
+
+fn unknown_protocol(provider_id: &str, protocol: &str) -> DaemonError {
+    DaemonError::new(format!(
+        "provider `{provider_id}` has unknown protocol id `{protocol}`; expected {}",
+        expected_protocols()
+    ))
 }
 
 fn expected_protocols() -> String {
@@ -554,14 +558,17 @@ fn wire_of_plugin(plugin: &str) -> Result<Wire, DaemonError> {
             "plugin `{plugin}` declares no protocol"
         )));
     };
-    // Same closed set as `wire_of_protocol`. The wildcard would be unreachable.
-    Ok(match protocol {
-        ProtocolId::OPENAI_CHAT => Wire::Chat,
-        ProtocolId::OPENAI_RESPONSES => Wire::Responses,
-        ProtocolId::ANTHROPIC_MESSAGES => Wire::Messages,
-        ProtocolId::GENERATIVE_LANGUAGE => Wire::Generative,
-        ProtocolId::BEDROCK_CONVERSE => Wire::Converse,
-    })
+    match protocol {
+        ProtocolId::OPENAI_CHAT => Ok(Wire::Chat),
+        ProtocolId::OPENAI_RESPONSES => Ok(Wire::Responses),
+        ProtocolId::ANTHROPIC_MESSAGES => Ok(Wire::Messages),
+        ProtocolId::GENERATIVE_LANGUAGE => Ok(Wire::Generative),
+        ProtocolId::BEDROCK_CONVERSE => Ok(Wire::Converse),
+        // Same `#[non_exhaustive]` requirement as `wire_of_protocol`.
+        _ => Err(DaemonError::new(format!(
+            "plugin `{plugin}` speaks an unknown protocol `{protocol}`"
+        ))),
+    }
 }
 
 fn inbound_codecs() -> HashMap<String, Arc<dyn Codec>> {

@@ -315,7 +315,7 @@ ProcessHandle::async fn spawn (& self , request : & SpawnRequest) -> Result < Sp
 ProcessHandle::async fn wait (& self , spawned : Spawned) -> Result < i32 , PluginError >
 ProcessHandle::fn kill (& self , spawned : Spawned) -> Result < () , PluginError >
 ProtocolId
-ProtocolId derives(Clone, Copy, Debug, PartialEq, Eq, Hash)
+ProtocolId #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Hash)
 ProtocolId::ALL
 ProtocolId::ANTHROPIC_MESSAGES
 ProtocolId::AnthropicMessages

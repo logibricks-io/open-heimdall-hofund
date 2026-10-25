@@ -556,7 +556,8 @@ fn options_of(
 /// A non-empty value is rewritten to a codec id and the load records a warning
 /// that names the replacement. The next release rejects both. `kind` selects
 /// the family: `openai_compat` may be Chat or Responses. A `kind` that
-/// disagrees with `protocol` is an error. A protocol string that is neither a
+/// disagrees with `protocol` is an error. `protocol` is trimmed first. A blank
+/// value is absent, the same as a blank `kind`. A string that is neither a
 /// short name nor a codec id is kept, and the daemon rejects it.
 fn resolve_protocol(
     provider: &RawProvider,
@@ -567,16 +568,11 @@ fn resolve_protocol(
         Some(kind) => Some(kind),
         None => None,
     };
-    let raw_protocol = match provider.protocol.as_deref() {
-        Some("") => {
-            return Err(ConfigError::Invalid(format!(
-                "provider `{}` has an empty protocol",
-                provider.id
-            )));
-        }
-        Some(protocol) => Some(protocol),
-        None => None,
-    };
+    let raw_protocol = provider
+        .protocol
+        .as_deref()
+        .map(str::trim)
+        .filter(|protocol| !protocol.is_empty());
     let family = match kind {
         None => None,
         Some("openai_compat" | "anthropic" | "generative" | "converse") => kind,
@@ -1373,6 +1369,81 @@ mod tests {
         )
         .expect_err("kind");
         assert!(unknown.to_string().contains("unknown kind `vertex`"));
+    }
+
+    #[test]
+    fn a_blank_protocol_is_absent_and_surrounding_space_is_trimmed() {
+        let blank = load(
+            r#"
+            [[providers]]
+            id = "bare"
+            protocol = "   "
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect_err("blank");
+        assert!(blank.to_string().contains("needs a protocol or a preset"));
+        let empty = load(
+            r#"
+            [[providers]]
+            id = "gemini"
+            preset = "google"
+            protocol = ""
+            "#,
+        )
+        .expect("empty with a preset");
+        assert!(empty.providers[0].protocol.is_none());
+        assert!(empty.warnings.is_empty());
+        let padded = load(
+            r#"
+            [[providers]]
+            id = "studio"
+            protocol = " chat "
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect("padded short name");
+        assert_eq!(padded.providers[0].protocol.as_deref(), Some("openai-chat"));
+        assert!(
+            padded
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("renamed to `openai-chat`"))
+        );
+        let canonical = load(
+            r#"
+            [[providers]]
+            id = "studio"
+            protocol = " openai-chat "
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect("padded codec id");
+        assert_eq!(
+            canonical.providers[0].protocol.as_deref(),
+            Some("openai-chat")
+        );
+        assert!(canonical.warnings.is_empty());
+        let with_kind = load(
+            r#"
+            [[providers]]
+            id = "backup"
+            kind = "anthropic"
+            protocol = "  "
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect("blank protocol with kind");
+        assert_eq!(
+            with_kind.providers[0].protocol.as_deref(),
+            Some("anthropic-messages")
+        );
+        assert!(
+            with_kind
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("renamed"))
+        );
     }
 
     #[test]

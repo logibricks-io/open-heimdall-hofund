@@ -31,7 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An empty or whitespace-only string is absent, both for those legacy keys
   and for string values in `[providers.options]` and `[subscriptions.options]`.
   It is not copied, and it is not an error. `0`, `false`, an empty array, and
-  an empty table are kept. A blank string inside an array is kept.
+  an empty table are kept. A blank string inside an array is kept. A blank
+  `protocol` is absent, the same as a blank `kind`. `protocol` is trimmed
+  before a short name is rewritten.
 
 ### Fixed
 

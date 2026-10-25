@@ -269,11 +269,8 @@ impl fmt::Display for MemberKey {
 /// Config stores the id as a string. The daemon converts it with [`TryFrom`].
 /// An unknown string is an error here, the same class of failure as an unknown
 /// preset id.
-///
-/// This enum is exhaustive. The other public enums stay `#[non_exhaustive]`.
-/// `as_str` and the daemon's `wire_of_protocol` match every variant, so a new
-/// codec id is a compile error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ProtocolId {
     /// `openai-chat`.
     OpenAiChat,
