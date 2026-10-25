@@ -782,9 +782,15 @@ mod tests {
 
     #[test]
     fn the_v0_1_0_example_checks_with_warnings_only() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../config/fixtures/v0.1.0-hofund.toml");
+        let dir = std::env::temp_dir().join(format!("hofund-v010-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("hofund.toml");
+        std::fs::copy(&source, &path).expect("copy fixture");
         check(&path).expect("v0.1.0");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
