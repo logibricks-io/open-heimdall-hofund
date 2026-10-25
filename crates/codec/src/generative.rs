@@ -8,8 +8,9 @@
 //! Gemini CLI posts these methods at `{origin}/v1beta/models/{model}`. The
 //! model is a path segment in that API. This codec also reads and writes
 //! `model` and `stream` on the JSON body so a gateway can inject the path
-//! model and the stream method, and so a round trip stays stable. This
-//! version has no upstream adapter for the protocol.
+//! model and the stream method, and so a round trip stays stable. An upstream
+//! adapter strips those two fields before it posts: the model is the path,
+//! and `stream` selects `streamGenerateContent`.
 
 use std::collections::BTreeMap;
 
@@ -39,6 +40,24 @@ const THOUGHT_SIGNATURE: &str = "thoughtSignature";
 /// Codec for the Generative Language API.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GenerativeLanguage;
+
+impl GenerativeLanguage {
+    /// Drops `model` and `stream` before an upstream POST.
+    ///
+    /// The gateway stores the path model and the stream method on the JSON
+    /// body. The Generative Language API takes the model as a path segment
+    /// and does not define either field on the request body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError`] when `bytes` is not a JSON object.
+    pub fn prepare_upstream_body(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
+        let mut object = parse_object(bytes)?;
+        object.remove("model");
+        object.remove("stream");
+        to_bytes(&Value::Object(object))
+    }
+}
 
 impl Codec for GenerativeLanguage {
     fn id(&self) -> &'static str {

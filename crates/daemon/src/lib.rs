@@ -14,7 +14,8 @@ use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 
 pub use hofund_gateway::Running;
 use hofund_provider::{
-    Anthropic, Credential, Endpoint, OpenAiCompat, OpenAiProtocol, Provider, Wire, resolve,
+    Anthropic, Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, Wire,
+    resolve,
 };
 use hofund_quirks::named;
 use hofund_router::{FailoverPolicy, Hop, Router};
@@ -255,6 +256,7 @@ fn providers(config: &Config) -> Result<BTreeMap<String, Arc<dyn Provider>>, Dae
                 Arc::new(OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).map_err(show)?)
             }
             Wire::Messages => Arc::new(Anthropic::new(endpoint).map_err(show)?),
+            Wire::Generative => Arc::new(Generative::new(endpoint).map_err(show)?),
         };
         built.insert(provider.id.clone(), adapter);
     }
@@ -276,6 +278,7 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
                 PresetWire::Chat => Wire::Chat,
                 PresetWire::Responses => Wire::Responses,
                 PresetWire::Messages => Wire::Messages,
+                PresetWire::Generative => Wire::Generative,
             }),
             base_url: &provider.base_url,
         })
@@ -301,6 +304,7 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
             (wire, Credential::Default)
         }
         Kind::Anthropic => (Wire::Messages, Credential::Default),
+        Kind::Generative => (Wire::Generative, Credential::Default),
     };
     Ok(Planned {
         base_url: provider.base_url.clone(),
@@ -366,6 +370,18 @@ mod tests {
         )
         .expect("write");
         check(&path).expect("azure");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"gemini\"\npreset = \"google\"\napi_key = \"test\"\n",
+        )
+        .expect("write");
+        check(&path).expect("google");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"gemini\"\npreset = \"google\"\nprotocol = \"chat\"\napi_key = \"test\"\n",
+        )
+        .expect("write");
+        check(&path).expect("google chat");
         std::fs::write(
             &path,
             "[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n",

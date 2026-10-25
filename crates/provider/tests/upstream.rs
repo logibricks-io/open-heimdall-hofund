@@ -5,8 +5,8 @@ use hofund_ir::{
     ContentPart, Extensions, Message, Request, Role, StreamEvent, ToolArguments, ToolCallPart,
 };
 use hofund_provider::{
-    Anthropic, Completion, CountOutcome, Credential, Endpoint, OpenAiCompat, OpenAiProtocol,
-    Provider, ProviderErrorKind,
+    Anthropic, Completion, CountOutcome, Credential, Endpoint, Generative, OpenAiCompat,
+    OpenAiProtocol, Provider, ProviderErrorKind,
 };
 use hofund_quirks::named;
 use serde_json::{Value, json};
@@ -676,4 +676,129 @@ async fn translating_a_bad_tool_call_is_a_client_error() {
     };
     assert_eq!(error.kind, ProviderErrorKind::Status);
     assert_eq!(error.status, Some(400));
+}
+
+#[tokio::test]
+async fn generative_unary_uses_the_api_key_header_and_omits_model() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/demo:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "hello"}]},
+                "finishReason": "STOP"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut endpoint = Endpoint::new("studio", server.uri());
+    endpoint.api_key = "secret".to_owned();
+    let provider = Generative::new(endpoint).expect("provider");
+    let completion = provider
+        .execute(user_request(false), "generative-language")
+        .await
+        .expect("call");
+    assert_eq!(text_of(completion).await, "hello");
+
+    let requests = server.received_requests().await.expect("requests");
+    let request = &requests[0];
+    assert_eq!(request.url.path(), "/v1beta/models/demo:generateContent");
+    assert!(request.url.query().is_none());
+    assert_eq!(
+        request
+            .headers
+            .get("x-goog-api-key")
+            .expect("key")
+            .to_str()
+            .expect("text"),
+        "secret"
+    );
+    assert!(request.headers.get("authorization").is_none());
+    let body: Value = serde_json::from_slice(&request.body).expect("json");
+    assert!(body.get("model").is_none());
+    assert!(body.get("stream").is_none());
+    assert!(body.get("contents").is_some());
+}
+
+#[tokio::test]
+async fn generative_stream_uses_sse_and_a_pasted_base_is_cut_back() {
+    let server = MockServer::start().await;
+    let body = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello\"}]}}]}\n\n";
+    Mock::given(method("POST"))
+        .and(path(
+            "/proxy/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let base = format!(
+        "{}/proxy/v1beta/models/gemini-2.5-flash:generateContent",
+        server.uri()
+    );
+    let mut endpoint = Endpoint::new("studio", base);
+    endpoint.api_key = "secret".to_owned();
+    let provider = Generative::new(endpoint).expect("provider");
+    let mut request = user_request(true);
+    request.model = "models/gemini-2.5-pro".to_owned();
+    let completion = provider
+        .execute(request, "openai-chat")
+        .await
+        .expect("call");
+    assert_eq!(text_of(completion).await, "hello");
+
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests[0].url.path(),
+        "/proxy/v1beta/models/gemini-2.5-pro:streamGenerateContent"
+    );
+    assert_eq!(requests[0].url.query(), Some("alt=sse"));
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json");
+    assert!(body.get("model").is_none());
+    assert!(body.get("stream").is_none());
+}
+
+#[tokio::test]
+async fn generative_count_reads_total_tokens_and_a_missing_method_is_unsupported() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/demo:countTokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"totalTokens": 17})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let endpoint = Endpoint::new("studio", format!("{}/v1beta", server.uri()));
+    let provider = Generative::new(endpoint).expect("provider");
+    let counted = provider
+        .count_input(user_request(false), "generative-language")
+        .await
+        .expect("count");
+    assert!(matches!(counted, CountOutcome::Counted(17)));
+
+    let requests = server.received_requests().await.expect("requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json");
+    assert!(body.get("model").is_none());
+    assert!(requests[0].headers.get("authorization").is_none());
+    assert!(requests[0].headers.get("x-goog-api-key").is_none());
+
+    let missing = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/demo:countTokens"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+        .mount(&missing)
+        .await;
+    let provider = Generative::new(Endpoint::new("studio", missing.uri())).expect("provider");
+    let outcome = provider
+        .count_input(user_request(false), "generative-language")
+        .await
+        .expect("missing");
+    assert!(matches!(outcome, CountOutcome::Unsupported));
 }

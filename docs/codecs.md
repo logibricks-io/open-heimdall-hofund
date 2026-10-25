@@ -13,8 +13,10 @@ Implemented:
 - `GenerativeLanguage` (`generative-language`)
 
 There is no HTTP server here. The codec crate does not open sockets, and its
-tests do not use the network. `GenerativeLanguage` is an inbound client
-protocol. This version has no upstream adapter that posts it.
+tests do not use the network. `GenerativeLanguage` is both an inbound client
+protocol and the body an upstream adapter posts. The adapter removes `model`
+and `stream` from that body: the model is a path segment, and `stream` selects
+`streamGenerateContent`.
 
 ## Reasoning effort
 

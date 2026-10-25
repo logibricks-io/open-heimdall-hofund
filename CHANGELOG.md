@@ -29,8 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/hofund.toml` documents `[[providers]]` and `[[routes]]`.
 - The gateway accepts `x-api-key`, compared in constant time, on every routed request.
 - Provider presets. `[[providers]]` may set `preset` instead of `kind`, with
-  optional `region`, `protocol` (`chat`, `responses`, or `messages`), and
-  `base_url`. The catalog is `crates/provider/presets.toml`.
+  optional `region`, `protocol` (`chat`, `responses`, `messages`, or
+  `generative`), and `base_url`. The catalog is `crates/provider/presets.toml`.
+- `kind = "generative"` posts the Generative Language API:
+  `models/{model}:generateContent`, `streamGenerateContent?alt=sse`, and
+  `countTokens`. The API key is sent as `x-goog-api-key`. `preset = "google"`
+  uses that adapter. `protocol = "chat"` on that preset keeps the
+  OpenAI-compatible root.
 
 ### Changed
 

@@ -22,6 +22,8 @@ pub enum Wire {
     Responses,
     /// `POST {base}/v1/messages`.
     Messages,
+    /// `POST {base}/models/{model}:generateContent`.
+    Generative,
 }
 
 /// What the caller asked the catalog to resolve.
@@ -30,7 +32,8 @@ pub struct Resolve<'a> {
     pub id: &'a str,
     /// Region id. Absent uses the preset's own endpoints.
     pub region: Option<&'a str>,
-    /// Protocol to select. Absent uses chat, then responses, then messages.
+    /// Protocol to select. Absent uses a generative URL when the preset has
+    /// one, then chat, then responses, then messages.
     pub wire: Option<Wire>,
     /// Caller-supplied root. Required for a preset that has no URL of its own.
     /// When the preset already has a URL, this replaces it.
@@ -119,6 +122,16 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
         };
         return Ok(finish(preset, wire, base));
     }
+    if let Some(base) = endpoints
+        .url(Wire::Generative)
+        .filter(|url| !url.is_empty())
+    {
+        return Ok(finish(
+            preset,
+            Wire::Generative,
+            prefer_override(base, request.base_url),
+        ));
+    }
     for wire in [Wire::Chat, Wire::Responses, Wire::Messages] {
         if let Some(base) = endpoints.url(wire).filter(|url| !url.is_empty()) {
             return Ok(finish(
@@ -184,11 +197,15 @@ fn unavailable(preset: &Preset) -> PresetError {
 }
 
 fn credential(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
+    if wire == Wire::Generative {
+        return Credential::GoogApiKey;
+    }
     let host = host_of(base_url);
     if preset_id == "azure" || azure_host(&host) {
         return match wire {
             Wire::Messages => Credential::XApiKey,
             Wire::Chat | Wire::Responses => Credential::ApiKey,
+            Wire::Generative => Credential::GoogApiKey,
         };
     }
     if wire == Wire::Messages {
@@ -270,6 +287,7 @@ fn wire_name(wire: Wire) -> &'static str {
         Wire::Chat => "chat",
         Wire::Responses => "responses",
         Wire::Messages => "messages",
+        Wire::Generative => "generative",
     }
 }
 
@@ -277,6 +295,7 @@ struct Endpoints<'a> {
     chat: &'a str,
     responses: &'a str,
     messages: &'a str,
+    generative: &'a str,
 }
 
 impl<'a> Endpoints<'a> {
@@ -286,12 +305,14 @@ impl<'a> Endpoints<'a> {
                 chat: &preset.chat,
                 responses: &preset.responses,
                 messages: &preset.anthropic,
+                generative: &preset.generative,
             };
         };
         Self {
             chat: or_preset(&region.chat, &preset.chat),
             responses: or_preset(&region.responses, &preset.responses),
             messages: or_preset(&region.anthropic, &preset.anthropic),
+            generative: &preset.generative,
         }
     }
 
@@ -300,6 +321,7 @@ impl<'a> Endpoints<'a> {
             Wire::Chat => Some(self.chat),
             Wire::Responses => Some(self.responses),
             Wire::Messages => Some(self.messages),
+            Wire::Generative => Some(self.generative),
         }
     }
 }
@@ -380,6 +402,8 @@ struct Preset {
     responses: String,
     #[serde(default)]
     anthropic: String,
+    #[serde(default)]
+    generative: String,
     #[serde(default)]
     decide: String,
     #[serde(default)]
@@ -468,6 +492,7 @@ mod tests {
                 preset.chat.as_str(),
                 preset.responses.as_str(),
                 preset.anthropic.as_str(),
+                preset.generative.as_str(),
                 preset.decide.as_str(),
                 preset.website.as_str(),
                 preset.keys_url.as_str(),
@@ -626,6 +651,33 @@ mod tests {
         })
         .expect("zhipu");
         assert_eq!(zhipu.base_url, "https://open.bigmodel.cn/api/v1");
+
+        let google = resolve(&Resolve {
+            id: "google",
+            region: None,
+            wire: None,
+            base_url: "",
+        })
+        .expect("google");
+        assert_eq!(google.wire, Wire::Generative);
+        assert_eq!(
+            google.base_url,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+        assert_eq!(google.credential, crate::Credential::GoogApiKey);
+        let google_chat = resolve(&Resolve {
+            id: "google",
+            region: None,
+            wire: Some(Wire::Chat),
+            base_url: "",
+        })
+        .expect("google chat");
+        assert_eq!(google_chat.wire, Wire::Chat);
+        assert_eq!(
+            google_chat.base_url,
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+        assert_eq!(google_chat.credential, crate::Credential::Bearer);
 
         let error = resolve(&Resolve {
             id: "google-vertex",

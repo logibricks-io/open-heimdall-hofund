@@ -86,6 +86,12 @@ pub enum Kind {
     },
     /// The Messages API.
     Anthropic,
+    /// The Generative Language API (`generateContent`).
+    ///
+    /// `base_url` is the root `models/{model}:generateContent` is appended to.
+    /// A bare host is completed with `/v1beta`. A pasted method URL is cut
+    /// back to that root. The API key is sent as `x-goog-api-key`.
+    Generative,
 }
 
 /// Protocol selected for [`Kind::OpenAiCompat`].
@@ -106,6 +112,8 @@ pub enum PresetWire {
     Responses,
     /// The Messages API.
     Messages,
+    /// The Generative Language API.
+    Generative,
 }
 
 /// One model route.
@@ -433,6 +441,7 @@ fn preset_wire_of(provider: &RawProvider) -> Result<Option<PresetWire>, ConfigEr
         Some("chat") => Ok(Some(PresetWire::Chat)),
         Some("responses") => Ok(Some(PresetWire::Responses)),
         Some("messages") => Ok(Some(PresetWire::Messages)),
+        Some("generative") => Ok(Some(PresetWire::Generative)),
         Some(other) => Err(ConfigError::Invalid(format!(
             "provider `{}` has unknown protocol `{other}`",
             provider.id
@@ -463,6 +472,15 @@ fn kind_of(provider: &RawProvider, kind: &str) -> Result<Kind, ConfigError> {
                 )));
             }
             Ok(Kind::Anthropic)
+        }
+        "generative" => {
+            if provider.protocol.is_some() {
+                return Err(ConfigError::Invalid(format!(
+                    "provider `{}` does not take a protocol",
+                    provider.id
+                )));
+            }
+            Ok(Kind::Generative)
         }
         other => Err(ConfigError::Invalid(format!(
             "provider `{}` has unknown kind `{other}`",
@@ -682,6 +700,35 @@ mod tests {
     }
 
     #[test]
+    fn a_generative_provider_parses_without_a_protocol() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "studio"
+            kind = "generative"
+            base_url = "https://generativelanguage.googleapis.com"
+            api_key = "env:GEMINI_API_KEY"
+            "#,
+        )
+        .expect("config");
+        assert!(matches!(
+            config.providers[0].kind,
+            Some(Kind::Generative)
+        ));
+        let error = load(
+            r#"
+            [[providers]]
+            id = "studio"
+            kind = "generative"
+            protocol = "chat"
+            base_url = "https://example.test"
+            "#,
+        )
+        .expect_err("protocol");
+        assert!(error.to_string().contains("does not take a protocol"));
+    }
+
+    #[test]
     fn the_first_structural_error_is_reported() {
         let error = load(
             r#"
@@ -714,6 +761,19 @@ mod tests {
         assert_eq!(
             config.providers[0].preset_wire,
             Some(super::PresetWire::Responses)
+        );
+        let google = load(
+            r#"
+            [[providers]]
+            id = "gemini"
+            preset = "google"
+            protocol = "generative"
+            "#,
+        )
+        .expect("google");
+        assert_eq!(
+            google.providers[0].preset_wire,
+            Some(super::PresetWire::Generative)
         );
         let error = load(
             r#"
