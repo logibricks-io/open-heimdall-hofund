@@ -38,6 +38,53 @@ fn drop_item_ids(response: &mut hofund_ir::Response) {
     }
 }
 
+/// Drops counters that encode fills in so a client always sees them.
+///
+/// A missing total becomes the sum. A missing cache or reasoning counter
+/// becomes zero. The original event did not carry those numbers.
+fn relax_filled_usage(before: &[StreamEvent], after: &mut [StreamEvent]) {
+    for (left, right) in before.iter().zip(after.iter_mut()) {
+        match (left, right) {
+            (StreamEvent::MessageStart(left), StreamEvent::MessageStart(right)) => {
+                relax_usage(left.usage.as_ref(), &mut right.usage);
+            }
+            (StreamEvent::MessageDelta(left), StreamEvent::MessageDelta(right)) => {
+                relax_usage(left.usage.as_ref(), &mut right.usage);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn relax_usage(original: Option<&hofund_ir::Usage>, decoded: &mut Option<hofund_ir::Usage>) {
+    let Some(original) = original else {
+        return;
+    };
+    let Some(decoded) = decoded else {
+        return;
+    };
+    if original.total_tokens.is_none() {
+        let sum = decoded
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_add(decoded.output_tokens.unwrap_or(0));
+        if decoded.total_tokens == Some(sum) {
+            decoded.total_tokens = None;
+        }
+    }
+    relax_zero(original.input_tokens, &mut decoded.input_tokens);
+    relax_zero(original.output_tokens, &mut decoded.output_tokens);
+    relax_zero(original.cache_read_tokens, &mut decoded.cache_read_tokens);
+    relax_zero(original.cache_write_tokens, &mut decoded.cache_write_tokens);
+    relax_zero(original.reasoning_tokens, &mut decoded.reasoning_tokens);
+}
+
+fn relax_zero(original: Option<u64>, decoded: &mut Option<u64>) {
+    if original.is_none() && *decoded == Some(0) {
+        *decoded = None;
+    }
+}
+
 fn drop_stream_ids(events: &mut [StreamEvent]) {
     for event in events {
         if let StreamEvent::ContentBlockStart(start) = event {
@@ -184,6 +231,7 @@ fn stream_round_trip_reconciles_argument_suffix() {
     let encoded = OpenAiResponses.encode_stream(&first).expect("encode");
     let mut second = OpenAiResponses.decode_stream(&encoded).expect("redecode");
     drop_stream_ids(&mut second);
+    relax_filled_usage(&first, &mut second);
     assert_eq!(first, second);
     insta::assert_snapshot!("responses_stream_ir", pretty_value!(&first));
     let response = assemble(&first);
@@ -766,7 +814,7 @@ fn restore_call(
     if kind == "function_call" {
         assert_eq!(item["name"], json!("spawn_agent"));
         assert_eq!(item["namespace"], json!("multi_agent_v1"));
-        assert_eq!(item["encrypted_function_args"], json!([]));
+        assert!(item.get("encrypted_function_args").is_none(), "{item}");
     } else {
         assert_eq!(item["name"], json!("apply_patch"));
         assert!(item.get("arguments").is_none(), "{item}");
@@ -795,7 +843,7 @@ fn codex_calls_restore_on_chat_and_messages_stream_indexes() {
         let item = &completed["response"]["output"][0];
         assert_eq!(item["name"], json!("spawn_agent"));
         assert_eq!(item["namespace"], json!("multi_agent_v1"));
-        assert_eq!(item["encrypted_function_args"], json!([]));
+        assert!(item.get("encrypted_function_args").is_none(), "{item}");
 
         let frames = encode_events(
             &request,
@@ -892,4 +940,117 @@ fn item_ids_differ_across_responses_and_upstream_ids_stay() {
     let encoded = OpenAiResponses.encode_stream(&events).expect("encode");
     let text = String::from_utf8(encoded).expect("utf8");
     assert!(text.contains("\"id\":\"msg_keep\""), "{text}");
+}
+
+#[test]
+fn custom_and_namespaced_history_reaches_chat_and_messages() {
+    let body = r#"{
+        "model": "m",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_ns",
+                "name": "wait_agent",
+                "namespace": "multi_agent_v1",
+                "arguments": "{\"task\":\"wait\"}"
+            },
+            {"type": "function_call_output", "call_id": "call_ns", "output": "ready"},
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": "*** Begin Patch"
+            },
+            {"type": "custom_tool_call_output", "call_id": "call_patch", "output": "ok"}
+        ]
+    }"#;
+    let request = OpenAiResponses
+        .decode_request(body.as_bytes())
+        .expect("decode");
+    let encoded = OpenAiResponses.encode_request(&request).expect("responses");
+    let wire: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    let input = wire["input"].as_array().expect("input");
+    assert_eq!(input[0]["type"], json!("function_call"));
+    assert_eq!(input[0]["name"], json!("wait_agent"));
+    assert_eq!(input[0]["namespace"], json!("multi_agent_v1"));
+    assert_eq!(input[0]["call_id"], json!("call_ns"));
+    assert_eq!(input[0]["arguments"], json!(r#"{"task":"wait"}"#));
+    assert!(
+        input[0].get("encrypted_function_args").is_none(),
+        "{input:?}"
+    );
+    assert_eq!(input[1]["type"], json!("function_call_output"));
+    assert_eq!(input[1]["call_id"], json!("call_ns"));
+    assert_eq!(input[1]["output"], json!("ready"));
+    assert_eq!(input[2]["type"], json!("custom_tool_call"));
+    assert_eq!(input[2]["name"], json!("apply_patch"));
+    assert_eq!(input[2]["call_id"], json!("call_patch"));
+    assert_eq!(input[2]["input"], json!("*** Begin Patch"));
+    assert_eq!(input[3]["type"], json!("custom_tool_call_output"));
+    assert_eq!(input[3]["call_id"], json!("call_patch"));
+    assert_eq!(input[3]["output"], json!("ok"));
+
+    let mut upstream = request;
+    upstream.strip_extensions();
+    let chat = OpenAiChat.encode_request(&upstream).expect("chat");
+    let chat: serde_json::Value = serde_json::from_slice(&chat).expect("json");
+    let messages = chat["messages"].as_array().expect("messages");
+    assert_eq!(messages[0]["role"], json!("assistant"));
+    assert_eq!(messages[0]["tool_calls"][0]["id"], json!("call_ns"));
+    assert_eq!(
+        messages[0]["tool_calls"][0]["function"]["name"],
+        json!("multi_agent_v1__wait_agent")
+    );
+    assert_eq!(
+        messages[0]["tool_calls"][0]["function"]["arguments"],
+        json!(r#"{"task":"wait"}"#)
+    );
+    assert_eq!(messages[1]["role"], json!("tool"));
+    assert_eq!(messages[1]["tool_call_id"], json!("call_ns"));
+    assert_eq!(messages[1]["content"], json!("ready"));
+    assert_eq!(messages[2]["tool_calls"][0]["id"], json!("call_patch"));
+    assert_eq!(
+        messages[2]["tool_calls"][0]["function"]["name"],
+        json!("apply_patch")
+    );
+    assert_eq!(
+        messages[2]["tool_calls"][0]["function"]["arguments"],
+        json!(r#"{"input":"*** Begin Patch"}"#)
+    );
+    assert_eq!(messages[3]["role"], json!("tool"));
+    assert_eq!(messages[3]["tool_call_id"], json!("call_patch"));
+    assert_eq!(messages[3]["content"], json!("ok"));
+    assert!(!chat.to_string().contains("hofund_"));
+
+    let messages_body = AnthropicMessages
+        .encode_request(&upstream)
+        .expect("messages");
+    let messages_body: serde_json::Value = serde_json::from_slice(&messages_body).expect("json");
+    let turns = messages_body["messages"].as_array().expect("messages");
+    assert_eq!(turns[0]["role"], json!("assistant"));
+    assert_eq!(turns[0]["content"][0]["type"], json!("tool_use"));
+    assert_eq!(turns[0]["content"][0]["id"], json!("call_ns"));
+    assert_eq!(
+        turns[0]["content"][0]["name"],
+        json!("multi_agent_v1__wait_agent")
+    );
+    assert_eq!(turns[0]["content"][0]["input"]["task"], json!("wait"));
+    assert!(turns[0]["content"][0].get("namespace").is_none());
+    assert_eq!(turns[1]["role"], json!("user"));
+    assert_eq!(turns[1]["content"][0]["type"], json!("tool_result"));
+    assert_eq!(turns[1]["content"][0]["tool_use_id"], json!("call_ns"));
+    assert_eq!(turns[1]["content"][0]["content"], json!("ready"));
+    assert_eq!(turns[2]["content"][0]["type"], json!("tool_use"));
+    assert_eq!(turns[2]["content"][0]["id"], json!("call_patch"));
+    assert_eq!(turns[2]["content"][0]["name"], json!("apply_patch"));
+    assert_eq!(
+        turns[2]["content"][0]["input"],
+        json!({"input": "*** Begin Patch"})
+    );
+    assert_eq!(turns[3]["role"], json!("user"));
+    assert_eq!(turns[3]["content"][0]["type"], json!("tool_result"));
+    assert_eq!(turns[3]["content"][0]["tool_use_id"], json!("call_patch"));
+    assert_eq!(turns[3]["content"][0]["content"], json!("ok"));
+    assert!(!messages_body.to_string().contains("hofund_"));
+    assert!(!messages_body.to_string().contains("custom_tool_call"));
 }

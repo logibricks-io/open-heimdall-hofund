@@ -45,10 +45,64 @@ impl Usage {
         merge_counter(&mut self.reasoning_tokens, patch.reasoning_tokens);
         self.extensions.absorb(&patch.extensions);
     }
+
+    /// Merges `patch` into `slot`. A missing patch leaves `slot` unchanged.
+    pub fn merge_patch(slot: &mut Option<Self>, patch: Option<&Self>) {
+        let Some(patch) = patch else {
+            return;
+        };
+        match slot {
+            Some(current) => current.merge_from(patch),
+            None => *slot = Some(patch.clone()),
+        }
+    }
+
+    /// Input, output, and total, with a missing total filled by the sum.
+    ///
+    /// A missing input or output is zero so a client that requires the field
+    /// still receives a number.
+    #[must_use]
+    pub fn filled_counts(&self) -> (u64, u64, u64) {
+        let input = self.input_tokens.unwrap_or(0);
+        let output = self.output_tokens.unwrap_or(0);
+        let total = self.total_tokens.unwrap_or(input.saturating_add(output));
+        (input, output, total)
+    }
 }
 
 fn merge_counter(slot: &mut Option<u64>, patch: Option<u64>) {
     if let Some(value) = patch {
         *slot = Some(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Usage;
+
+    #[test]
+    fn merge_patch_keeps_counters_the_later_event_omits() {
+        let mut slot = None;
+        Usage::merge_patch(
+            &mut slot,
+            Some(&Usage {
+                input_tokens: Some(21),
+                output_tokens: Some(0),
+                cache_read_tokens: Some(4),
+                cache_write_tokens: Some(2),
+                ..Usage::default()
+            }),
+        );
+        Usage::merge_patch(
+            &mut slot,
+            Some(&Usage {
+                output_tokens: Some(5),
+                ..Usage::default()
+            }),
+        );
+        let usage = slot.expect("merged");
+        assert_eq!(usage.filled_counts(), (21, 5, 26));
+        assert_eq!(usage.cache_read_tokens, Some(4));
+        assert_eq!(usage.cache_write_tokens, Some(2));
     }
 }

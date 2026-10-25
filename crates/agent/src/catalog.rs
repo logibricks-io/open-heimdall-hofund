@@ -219,7 +219,9 @@ const GEMINI: Description = Description {
 /// The provider entry is `provider.<id>` with `npm`
 /// `@ai-sdk/openai-compatible`, `options.baseURL`, `options.apiKey`, and
 /// `models`. `options.baseURL` includes `/v1` because that package appends
-/// `/chat/completions`. No model id is invented, so `models` is `{}`. A
+/// `/chat/completions`. No model id is invented. `models` stays `{}` because
+/// this build does not ship a model catalog, and connect does not copy route
+/// names into that object. `hofund agent connect opencode` says so. A
 /// string `model` is compared with route names and is not rewritten. The
 /// v2 docs describe `providers` plus `package` and `settings`; this adapter
 /// follows the current providers page instead. Both pages document

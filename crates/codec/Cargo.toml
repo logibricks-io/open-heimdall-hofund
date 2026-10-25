@@ -21,4 +21,5 @@ workspace = true
 
 [dev-dependencies]
 insta = { version = "1.49.0", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }

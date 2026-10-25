@@ -50,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `options.baseURL`, `options.apiKey`, and `models`.
 - A provider and a route member may set `max_output_tokens`. Messages encode
   uses 16384 when the client, the route, and the quirk profile all omit a cap.
+- A Responses usage object always includes `input_tokens`, `output_tokens`,
+  `total_tokens`, `input_tokens_details`, and `output_tokens_details`. A
+  missing counter is 0.
+- Generative Language `usageMetadata` always includes `promptTokenCount`,
+  `candidatesTokenCount`, and `totalTokenCount` when usage is present.
+- `function_call` items no longer include an empty `encrypted_function_args`
+  array.
+- `hofund agent connect opencode` says that `models` stays empty because this
+  build does not ship a model catalog and does not copy route names.
 
 ### Fixed
 
@@ -97,7 +106,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Responses item ids are unique. A same-protocol reply keeps the upstream
   item id. A unary output item has `id` and `status`.
 - A dropped tool is warned once per name per process.
-- Chat usage includes `total_tokens` when input and output are both known.
+- Chat usage includes `prompt_tokens`, `completion_tokens`, and `total_tokens`
+  whenever a usage object is written. A missing input or output is 0. A
+  missing total is their sum.
+- A Messages stream's usage is merged across `message_start` and
+  `message_delta` when it is encoded for Responses, Chat Completions, or
+  Generative Language. An output-only delta no longer drops the input tokens.
+- Responses history items `custom_tool_call` and `custom_tool_call_output`
+  sent to Chat or Messages keep the call id, the raw input, and the output.
+  The call is an assistant tool call with arguments `{"input": <raw>}`. The
+  output is a tool result.
+- A namespaced `function_call` in history is sent upstream under the flattened
+  name declared for that tool.
 
 ## [0.1.0] - 2026-10-25
 
