@@ -3,14 +3,16 @@
 //! so N client protocols and M upstream protocols compose without a direct N-by-M
 //! translator matrix.
 //!
-//! [`AnthropicMessages`], [`OpenAiChat`], [`OpenAiResponses`], and
-//! [`GenerativeLanguage`] are implemented. Field mappings and lossy conversions
+//! [`AnthropicMessages`], [`OpenAiChat`], [`OpenAiResponses`],
+//! [`GenerativeLanguage`], and [`Converse`] are implemented. Field mappings and lossy conversions
 //! are documented in `docs/codecs.md`. Protocol names belong in this crate;
 //! vendor capability gaps belong in `quirks`.
 
 mod anthropic;
+mod converse;
 mod custom_input;
 mod error;
+mod eventstream;
 mod generative;
 mod jsonutil;
 mod openai_chat;
@@ -18,6 +20,7 @@ mod openai_responses;
 mod sse;
 
 pub use anthropic::AnthropicMessages;
+pub use converse::Converse;
 pub use error::CodecError;
 pub use generative::GenerativeLanguage;
 pub use openai_chat::OpenAiChat;

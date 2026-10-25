@@ -11,6 +11,7 @@ Implemented:
 - `OpenAiChat` (`openai-chat`)
 - `OpenAiResponses` (`openai-responses`)
 - `GenerativeLanguage` (`generative-language`)
+- `Converse` (`bedrock-converse`)
 
 There is no HTTP server here. The codec crate does not open sockets, and its
 tests do not use the network. `GenerativeLanguage` is both an inbound client
@@ -615,3 +616,41 @@ Images, function responses, and unknown parts in a stream are unknown events
 named `part`. Same-protocol equality is `decode(encode(decode(bytes)))`.
 Hand-built events that delay a function-call stop past a later text delta are
 not required to round-trip, because the encoder holds the call until the stop.
+
+## Converse
+
+Bedrock Converse puts the model in the URL:
+`POST /model/{modelId}/converse` and
+`POST /model/{modelId}/converse-stream`. This codec does not write `model`
+or `stream` into the JSON body. The provider percent-encodes the model id
+for SigV4 (`:` becomes `%3A`) and chooses the method from `request.stream`.
+
+`system` is an array of text blocks. `Role::System` and `Role::Developer`
+are both written there, in order. A non-text system part is an error.
+`messages` alternate `user` and `assistant`. Adjacent messages with the same
+role are merged. `Role::Tool` is a user message of `toolResult` blocks. The
+first message has to be `user`.
+
+`inferenceConfig` carries `maxTokens`, `temperature`, `topP`, and
+`stopSequences`. `top_k` is written to `additionalModelRequestFields`, which
+is where the Converse examples put a field `inferenceConfig` does not have.
+`seed`, `presence_penalty`, `frequency_penalty`, and reasoning effort are
+rejected. Effort is not given an invented thinking budget. Image `detail` is
+not sent. An image URL is an error, because Converse image `source` is
+`bytes`. Formats are `png`, `jpeg`, `gif`, and `webp`.
+
+`toolConfig.tools[].toolSpec.inputSchema.json` is the tool's JSON Schema.
+`toolChoice` is `auto`, `any` (required), or `tool.name`. An explicit choice
+of none omits `toolConfig`. A tool input that is not a JSON object is an
+error.
+
+`stopReason` maps `end_turn`, `max_tokens`, `stop_sequence`, `tool_use`, and
+`content_filtered` or `guardrail_intervened`. Anything else stays
+`StopReason::Other`. `additionalModelResponseFields.stop_sequence` is the
+matched sequence. Usage reads `inputTokens`, `outputTokens`, `totalTokens`,
+`cacheReadInputTokens`, and `cacheWriteInputTokens`.
+
+The stream is an AWS event-stream, not SSE. `contentBlockDelta` of `text`
+opens a text block on first use. `messageStop` is held until `metadata`
+carries usage, then one message delta carries both the stop and the usage.
+An exception frame is an error. A truncated frame is an error.

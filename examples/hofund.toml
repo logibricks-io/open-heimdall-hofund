@@ -63,6 +63,17 @@ api_key = "replace-me-too"
 # project = "my-project"
 # location = "global"
 # credentials = "~/adc.json"
+# Bedrock Converse. SigV4, not a Bedrock API key. `region` selects the runtime
+# host and is the signing region. Chat and Messages on this preset still use
+# `api_key` and do not set these fields.
+# [[providers]]
+# id = "bedrock"
+# preset = "bedrock"
+# region = "us-east-1"
+# protocol = "converse"
+# access_key_id = "env:AWS_ACCESS_KEY_ID"
+# secret_access_key = "env:AWS_SECRET_ACCESS_KEY"
+# session_token = "env:AWS_SESSION_TOKEN"
 
 [[routes]]
 model = "demo"

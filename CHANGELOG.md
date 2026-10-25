@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `/openai/v1`, and every other chat or Responses model under `/v1`.
   A refusal that the model is not supported on that route is tried once at
   the other prefix. Messages stay on `/anthropic`.
+- `protocol = "converse"` on preset `bedrock`, or `kind = "converse"`, posts
+  Bedrock Converse and ConverseStream. The call is signed with SigV4
+  (`access_key_id`, `secret_access_key`, optional `session_token`). No API
+  key is sent on that path. Chat and Messages on the same preset still use
+  a Bedrock API key.
 
 ### Fixed
 
