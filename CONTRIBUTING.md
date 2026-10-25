@@ -1,7 +1,8 @@
 # Contributing
 
-Thanks for contributing to hofund. This repository is pre-alpha. The scaffold
-is in place; product behavior is not.
+Thanks for contributing to hofund. The local gateway, the coding-agent
+adapters, and the menu-bar app are in the tree. The version under preparation
+is 0.1.0. See [docs/release.md](docs/release.md) before tagging.
 
 ## Language
 
@@ -58,8 +59,7 @@ publish them.
 
 - Write the title, the description, and the commit messages in English.
 - Describe what changed and how you tested it.
-- Keep the change scoped to the task. This tree does not yet contain product
-  behavior; do not add a protocol implementation inside a scaffold-only change
+- Keep the change scoped to the task. Do not add a protocol implementation
   unless the issue asks for it.
 - CI must be green: formatting, Clippy (`-D warnings`), tests on Linux, macOS,
   and Windows, and `cargo deny` (advisories, licenses, bans, and sources).

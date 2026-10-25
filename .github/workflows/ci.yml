@@ -31,7 +31,7 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -42,13 +42,23 @@ jobs:
         uses: ./.github/actions/rust-toolchain
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+      - name: Install desktop host libraries
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Dpkg::Options::="--force-confold" \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: test
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +73,17 @@ jobs:
         uses: ./.github/actions/rust-toolchain
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+      - name: Install desktop host libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Dpkg::Options::="--force-confold" \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev
       - name: Test
         run: cargo test --workspace
 

@@ -39,11 +39,12 @@ Present:
 - coding-agent config adapters (`agent`) for Claude Code, Codex CLI, Gemini
   CLI, and OpenCode, with `hofund agent list`, `hofund agent connect`,
   `hofund agent disconnect`, and `hofund agent status`
+- a Tauri v2 menu-bar app at `apps/desktop` (`hofund-desktop`) that starts and
+  stops the gateway, lists agents from the catalog, and shows the usage table
 
 Planned behavior, not present yet:
 
-- a future Tauri v2 menu-bar app at `apps/desktop` (do not create it until a
-  task asks for it)
+- further routing strategies, and i18n language packs
 
 ## Architecture rules
 
@@ -53,6 +54,9 @@ and is enforced by `xtask/tests/workspace_invariants.rs`.
 Spine, each crate depending only downward:
 
 `ir ← codec ← provider ← router ← gateway ← daemon ← cli`
+
+`apps/desktop` (`hofund-desktop`) sits beside `cli` and depends only on
+`daemon` and `agent`. Nothing in `crates/` depends on it.
 
 - `agent` depends only on `config`. Never on `gateway`, `router`, `provider`,
   `codec`, `ir`, or `daemon`.

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 /// Workspace-relative paths of every Cargo package, in the same order as the
 /// root `[workspace] members` list is asserted below.
 const MEMBERS: &[&str] = &[
+    "apps/desktop/src-tauri",
     "crates/agent",
     "crates/cli",
     "crates/codec",
@@ -32,6 +33,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-cli" => &["hofund-agent", "hofund-daemon"],
         "hofund-codec" => &["hofund-ir"],
         "hofund-config" => &[],
+        "hofund-desktop" => &["hofund-agent", "hofund-daemon"],
         "hofund-daemon" => &[
             "hofund-codec",
             "hofund-config",
@@ -125,15 +127,15 @@ fn dependency_graph_matches_architecture() {
         "pinned toolchain drifted"
     );
     assert!(
-        manifest.contains("version = \"0.0.1\""),
+        manifest.contains("version = \"0.1.0\""),
         "workspace package version drifted"
     );
     for line in manifest.lines() {
         let trimmed = strip_comment(line).trim();
         if trimmed.starts_with("hofund-") {
             assert!(
-                trimmed.contains("version = \"0.0.1\""),
-                "workspace dependency must repeat version 0.0.1: {trimmed}"
+                trimmed.contains("version = \"0.1.0\""),
+                "workspace dependency must repeat version 0.1.0: {trimmed}"
             );
         }
     }
@@ -165,6 +167,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-codec",
         "hofund-config",
         "hofund-daemon",
+        "hofund-desktop",
         "hofund-gateway",
         "hofund-ir",
         "hofund-provider",

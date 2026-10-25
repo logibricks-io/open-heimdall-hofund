@@ -99,6 +99,21 @@ pub fn local_gateway(path: &Path) -> Result<LocalGateway, DaemonError> {
     })
 }
 
+/// The configuration file the menu-bar app reads.
+///
+/// `HOFUND_CONFIG` selects the file when it is set. Otherwise the path is
+/// `hofund/hofund.toml` under the platform config directory.
+pub use hofund_config::user_config_path;
+
+/// Creates a starter configuration file when `path` is absent.
+pub use hofund_config::ensure_config_file;
+
+/// The listen address written in `path`, when the file parses.
+#[must_use]
+pub fn configured_listen(path: &Path) -> Option<String> {
+    load_path(path).ok().map(|config| config.listen.to_string())
+}
+
 /// The usage table for the database named by `path`'s config.
 ///
 /// # Errors
