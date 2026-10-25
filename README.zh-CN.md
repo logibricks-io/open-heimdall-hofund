@@ -2,6 +2,13 @@
 
 [English](README.md) | **简体中文**
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.svg">
+    <img alt="hofund" src="assets/brand/lockup-light.svg" width="320">
+  </picture>
+</p>
+
 hofund 是 LogiBricks Heimdall 系列中的本地 LLM 网关。它在不同的 LLM API 协议之间做转换，让编码代理指向任意模型，并在多个提供商与账号之间进行故障转移。
 
 Heimdall 是那扇门。Hofund 是守门的剑。
