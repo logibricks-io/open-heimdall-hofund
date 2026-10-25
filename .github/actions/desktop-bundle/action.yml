@@ -5,6 +5,34 @@ inputs:
   bundles:
     description: Comma-separated tauri build --bundles value
     required: true
+  codesign_certificate:
+    description: Base64 Apple Developer ID certificate. Empty skips signing.
+    required: false
+    default: ""
+  codesign_certificate_password:
+    description: Password for the Apple certificate.
+    required: false
+    default: ""
+  apple_id:
+    description: Apple ID for notarization.
+    required: false
+    default: ""
+  apple_password:
+    description: App-specific password for notarization.
+    required: false
+    default: ""
+  apple_team_id:
+    description: Apple team id for notarization.
+    required: false
+    default: ""
+  windows_certificate:
+    description: Base64 Windows Authenticode certificate. Empty skips signing.
+    required: false
+    default: ""
+  windows_certificate_password:
+    description: Password for the Windows certificate.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -32,11 +60,11 @@ runs:
       shell: bash
       working-directory: apps/desktop/src-tauri
       env:
-        CODESIGN_CERTIFICATE: ${{ secrets.CODESIGN_CERTIFICATE }}
-        CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
-        APPLE_ID: ${{ secrets.APPLE_ID }}
-        APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        CODESIGN_CERTIFICATE: ${{ inputs.codesign_certificate }}
+        CODESIGN_CERTIFICATE_PASSWORD: ${{ inputs.codesign_certificate_password }}
+        APPLE_ID: ${{ inputs.apple_id }}
+        APPLE_PASSWORD: ${{ inputs.apple_password }}
+        APPLE_TEAM_ID: ${{ inputs.apple_team_id }}
       run: |
         set -euo pipefail
         if [ -n "${CODESIGN_CERTIFICATE:-}" ] && [ -n "${CODESIGN_CERTIFICATE_PASSWORD:-}" ]; then
@@ -58,8 +86,8 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       env:
-        WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-        WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        WINDOWS_CERTIFICATE: ${{ inputs.windows_certificate }}
+        WINDOWS_CERTIFICATE_PASSWORD: ${{ inputs.windows_certificate_password }}
       run: |
         if ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE) -or [string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE_PASSWORD)) {
           Write-Host "Windows signing secrets are absent; signing is skipped."

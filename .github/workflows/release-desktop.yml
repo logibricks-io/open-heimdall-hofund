@@ -38,6 +38,13 @@ jobs:
         uses: ./.github/actions/desktop-bundle
         with:
           bundles: ${{ matrix.bundles }}
+          codesign_certificate: ${{ secrets.CODESIGN_CERTIFICATE }}
+          codesign_certificate_password: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
+          apple_id: ${{ secrets.APPLE_ID }}
+          apple_password: ${{ secrets.APPLE_PASSWORD }}
+          apple_team_id: ${{ secrets.APPLE_TEAM_ID }}
+          windows_certificate: ${{ secrets.WINDOWS_CERTIFICATE }}
+          windows_certificate_password: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
 
   attach:
     name: attach desktop bundles
