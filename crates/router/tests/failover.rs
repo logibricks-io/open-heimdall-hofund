@@ -60,14 +60,7 @@ impl Provider for Fake {
 fn reply() -> Response {
     let mut message = Message::new(Role::Assistant);
     message.content.push(ContentPart::text("ok"));
-    Response {
-        id: None,
-        model: None,
-        message,
-        stop: None,
-        usage: None,
-        extensions: Extensions::new(),
-    }
+    Response::from_parts(None, None, message, None, None, Extensions::new())
 }
 
 fn text_event(text: &str) -> StreamEvent {

@@ -11,6 +11,7 @@ use crate::tools::{Tool, ToolChoice};
 ///
 /// This type performs no I/O. Codecs translate protocol payloads into it and
 /// back out of it.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     /// Model identifier, as the caller named it.
@@ -47,6 +48,32 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl Request {
+    /// Builds a request from decoded parts.
+    ///
+    /// Other crates use this constructor. The struct is [`non_exhaustive`], so
+    /// a struct literal outside this crate does not compile.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        model: String,
+        messages: Vec<Message>,
+        tools: Vec<Tool>,
+        tool_choice: Option<ToolChoice>,
+        params: GenerationParams,
+        stream: bool,
+        extensions: Extensions,
+    ) -> Self {
+        Self {
+            model,
+            messages,
+            tools,
+            tool_choice,
+            params,
+            stream,
+            extensions,
+        }
+    }
+
     /// A request with no messages and default parameters.
     #[must_use]
     pub fn new(model: impl Into<String>) -> Self {

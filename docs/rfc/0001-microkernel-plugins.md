@@ -1,10 +1,10 @@
 # RFC 0001: Microkernel and plugins
 
-- Status: **Accepted**. Owner sign-off on 2026-10-25 is conditional on the architecture review (appendix), including wording fixes F1, F2, and F3. This document is the design. It is not the build. The dependency table in [architecture.md](../architecture.md) stays normative until the migration pull requests land. No crate moves in this pull request.
+- Status: **Accepted**. Owner sign-off on 2026-10-25 is conditional on the architecture review (appendix), including wording fixes F1, F2, and F3. This document is the design. PR B landed the seam crates. The dependency table in [architecture.md](../architecture.md) includes those edges. Later migration pull requests update it again.
 - Date: 2026-10-25. Amended the same day from the architecture review (appendix), and accepted the same day under that review.
 - hofund pin: `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4` (main after pull request #26)
 - Upstream pin: yetone/magpie `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`. `internal/provider/presets.go` is byte-identical at `5b2b3d3f50959735403dff6b77a85eec65772218`. The preset file records that pin at `crates/provider/presets.toml` line 8.
-- Workspace version: `0.1.0` (`xtask/tests/workspace_invariants.rs` asserts the manifest). The plugin API below is the accepted design. It is not a published semver promise until PR B lands the crate. The semver policy is in section 1.
+- Workspace version: `0.1.0` (`xtask/tests/workspace_invariants.rs` asserts the manifest). PR B landed the plugin API crate and `const API`. The workspace stays `publish = false`. The semver policy is in section 1.
 
 ## Summary
 
@@ -749,7 +749,7 @@ Until that move, paths stay `crates/<name>` and the new crates are `crates/plugi
 
 ### Rules `xtask` enforces when the first plugin lands
 
-This pull request does not add these checks. The pull request that adds `plugins/` adds them next to `dependency_graph_matches_architecture`.
+PR B adds the checker next to `dependency_graph_matches_architecture`. It runs every rule that already has a subject: the host-dependency allowlist, the router name ban, `from_backends`, the API and SDK lint attributes, the `tracing` re-export, and kit `publish`. The `plugins/` walk runs when that directory exists. A fixture test rejects a bad tree, so the rules are not waiting on the first plugin to be written. PR D is when the first real plugin turns that walk on in the repository.
 
 1. A package under `plugins/<kind>/` (`providers`, `subscriptions`, `agents`, `inbound`) may name `hofund-plugin-api` and, when it uses a helper, `hofund-plugin-sdk`. No other workspace dependency. Pure third-party crates (`ring`, `serde`, and similar) are allowed. `hofund-gateway`, `hofund-daemon`, `hofund-router`, `hofund-provider`, `hofund-ir`, `hofund-plugin-host`, `hofund-plugin-registry`, and any implementation crate `hofund-plugin-<id>` are rejected. `plugins/registry` is rule 3, not this rule. The reserved ids in the Names section are not plugin ids.
 2. No plugin depends on another plugin. This is the rule `TestPluginsImportOnlyCore` enforces for Go imports (`internal/pluginrt/pluginrt_test.go` line 94, described at `pluginrt.go` lines 8-10). Here it is a Cargo dependency check plus a walk of `use` paths.
@@ -847,6 +847,25 @@ Each one is branched from latest `main`. Each one updates `docs/architecture.md`
 | H | Subscription plugins, one directory each: `codex`, `claude`, `copilot`, `gemini`. Each implements `upstream`. Accounts are router members (rows 2.12 and 3.7). Quota uses PR K. N9 merges before Copilot. Sign-in commands use the in-process CLI path until L. | After D, B2, and K. Codex also after S. Does not wait for L. The four directories do not overlap. |
 | I | Delete `crates/provider/presets.toml` once every fragment is compiled in. The catalog test still asserts the 58 ids and the four aliases. Widen the vendor-name scan. No allowlist. | After E and S. |
 | J | Move `crates/<name>` to `crates/kernel/<name>`, and `crates/cli` to `apps/cli`. Mechanical. | After I. Not beside feature work. |
+
+### PR B notes
+
+PR B landed the seam and kept gateway behavior the same. These are the places the code does not match a sentence above, and why.
+
+- Backend traits are `#[doc(hidden)] pub` in `hofund_plugin_api::kernel`. `HostContext::from_backends` and `SurfaceHost::from_parts` are `#[doc(hidden)] pub`. A handle holds `Arc<dyn Backend>`, and another crate cannot fill a private field, so the traits cannot live only in `hofund-plugin-host`. The constructors plugins and the kernel call are `host_context`, `surface_host`, and `test_host`. `xtask` rejects `from_backends(` and `hofund_plugin_api::kernel` outside the API, the host, and the kits.
+- `Schema` is a small ordered form (`empty`, `string`, `boolean`, `integer`, `array`, `object`). The API does not depend on `schemars`.
+- `ProbeReport::from_completion` is async. The stream it reads is async. The sketch in section 2.1 was sync.
+- `ProviderError` is not an alias of `PluginError`. The router still matches `ProviderErrorKind` exhaustively. The alias, and the wildcard, are PR C.
+- `hofund_secrets::resolve` still returns `String`. No plugin calls it yet, and changing the return type would edit every caller for no current plugin.
+- The account backend is `FileAccountStore`: a mode `0600` file, an advisory lock on a sibling lock file, and an in-memory cache dropped on every write. A read reloads when the mtime changes. The OS keychain can replace this type later. The scheduler records jobs and does not spawn tasks. The daemon does not call the store, the clock, or the spawner.
+- `Request` and `Response` are `#[non_exhaustive]`. `StreamEvent` is not. It is an enum and already has an unknown variant. Marking the enum `non_exhaustive` would force a wildcard in every codec match before a plugin exists.
+- `MemberId` is built with `from_preset` and `from_parts`. It has no `TryFrom<&str>`. A member id is not a string a plugin concatenates.
+- `AccountId` stays kebab-case, as the Names section says. A vendor account id that is not kebab-case has to be mapped by that plugin. Widening the alphabet is a later change if a real account id cannot be mapped.
+- The public-API snapshot is `crates/plugin-api/public-api.txt`, produced by a `syn` walk of the source. `cargo-public-api` needs rustdoc JSON, and the pinned stable toolchain only emits HTML. `kebab_id!` types are included by reading that macro. The diff of the text file is the review.
+- `test_host` returns `HostContext` and panics when the account file cannot be created. That matches the signature in this document. `FileAccountStore::open` still returns `Result`.
+- `From<BuildError> for PluginError` maps a build failure to `PluginErrorKind::Config`. This document required `From<ConfigError> for BuildError`, which is also implemented.
+- `hofund-plugin-host` depends only on `hofund-plugin-api`. The hidden kernel module re-exports the HTTP request and response types and `expose_secret`, so the host crate does not name `http` or `secrecy`.
+- `hofund-provider` re-exports `UpstreamFactory`, `UpstreamProvider`, `SubscriptionFactory`, `Subscription`, `InboundSurface`, and the erased factories. `hofund-agent` re-exports `AgentFactory`, `AgentIntegration`, `DynAgentFactory`, `GatewayTarget`, `Plan`, `FileChange`, `DisconnectOutcome`, and `ConnectionStatus`. The existing `Provider` and `AgentAdapter` traits stay. `GatewayTarget::token` is a `SecretString`. Callers use accessors. The bytes written into agent files are the same.
 
 Quirks stay in the kernel for the whole sequence. A new `Rule` variant is a kernel pull request. Vendor behavior stays in the plugin that calls `quirks::apply` through the SDK.
 

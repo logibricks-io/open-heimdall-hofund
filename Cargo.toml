@@ -9,7 +9,13 @@ members = [
     "crates/daemon",
     "crates/gateway",
     "crates/ir",
+    "crates/plugin-api",
+    "crates/plugin-host",
+    "crates/plugin-sdk",
     "crates/provider",
+    "kits/agent",
+    "kits/subscription",
+    "kits/upstream",
     "crates/quirks",
     "crates/router",
     "crates/secrets",
@@ -37,6 +43,12 @@ hofund-config = { version = "0.1.0", path = "crates/config" }
 hofund-daemon = { version = "0.1.0", path = "crates/daemon" }
 hofund-gateway = { version = "0.1.0", path = "crates/gateway" }
 hofund-ir = { version = "0.1.0", path = "crates/ir" }
+hofund-kit-agent = { version = "0.1.0", path = "kits/agent" }
+hofund-kit-subscription = { version = "0.1.0", path = "kits/subscription" }
+hofund-kit-upstream = { version = "0.1.0", path = "kits/upstream" }
+hofund-plugin-api = { version = "0.1.0", path = "crates/plugin-api" }
+hofund-plugin-host = { version = "0.1.0", path = "crates/plugin-host" }
+hofund-plugin-sdk = { version = "0.1.0", path = "crates/plugin-sdk" }
 hofund-provider = { version = "0.1.0", path = "crates/provider" }
 hofund-quirks = { version = "0.1.0", path = "crates/quirks" }
 hofund-router = { version = "0.1.0", path = "crates/router" }

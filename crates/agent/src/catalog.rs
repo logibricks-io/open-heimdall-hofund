@@ -457,25 +457,20 @@ impl AgentAdapter for Described {
             let before_bytes = before.unwrap_or_default();
             if before_bytes != after {
                 let diff = unified_diff(&path, &before_bytes, &after);
-                changes.push(FileChange {
-                    path,
-                    before: before_bytes,
-                    after,
-                    diff,
-                });
+                changes.push(FileChange::new(path, before_bytes, after, diff));
             }
         }
-        Ok(Plan { changes })
+        Ok(Plan::new(changes))
     }
 
     fn apply(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, AgentError> {
         let plan = self.plan(session, target)?;
-        for change in &plan.changes {
-            backup_once(&change.path)?;
+        for change in plan.changes() {
+            backup_once(change.path())?;
         }
         let snapshots = self.snapshot_inputs(session, target)?;
-        for change in &plan.changes {
-            write_atomic(&change.path, &change.after)?;
+        for change in plan.changes() {
+            write_atomic(change.path(), change.after())?;
         }
         for (path, kind, assignments) in snapshots {
             if marker_present(&path) {
@@ -535,13 +530,13 @@ impl AgentAdapter for Described {
                 }
             }
         }
-        Ok(ConnectionStatus {
-            id: self.description.id,
-            display_name: self.description.display_name,
-            installed: self.detect(session),
+        Ok(ConnectionStatus::new(
+            self.description.id,
+            self.description.display_name,
+            self.detect(session),
             connected,
             paths,
-        })
+        ))
     }
 
     fn disconnect(&self, session: &Session, force: bool) -> Result<DisconnectOutcome, AgentError> {
@@ -571,7 +566,7 @@ impl AgentAdapter for Described {
             )?);
             changed = true;
         }
-        Ok(DisconnectOutcome { changed, warnings })
+        Ok(DisconnectOutcome::new(changed, warnings))
     }
 
     fn refresh_token(
@@ -722,14 +717,14 @@ fn assignments_for(
 
 fn slot_value(slot: &Slot, target: &GatewayTarget, existing: Option<&str>) -> Option<String> {
     match slot {
-        Slot::Origin => Some(origin(&target.base_url)),
-        Slot::V1 => Some(format!("{}/v1", origin(&target.base_url))),
-        Slot::Token => Some(target.token.clone()),
+        Slot::Origin => Some(origin(target.base_url())),
+        Slot::V1 => Some(format!("{}/v1", origin(target.base_url()))),
+        Slot::Token => Some(target.token().to_owned()),
         Slot::Literal(text) => Some((*text).to_owned()),
-        Slot::GeminiModel => gemini_model(existing, &target.models),
-        Slot::OpenCodeModels => Some(opencode_models_json(&target.models)),
-        Slot::ClaudeModel => claude_model_to_write(existing, &target.models),
-        Slot::ClaudeTier(tier) => claude_tier(existing, &target.models, tier),
+        Slot::GeminiModel => gemini_model(existing, target.models()),
+        Slot::OpenCodeModels => Some(opencode_models_json(target.models())),
+        Slot::ClaudeModel => claude_model_to_write(existing, target.models()),
+        Slot::ClaudeTier(tier) => claude_tier(existing, target.models(), tier),
     }
 }
 

@@ -11,9 +11,9 @@
 //! keys are left in place on apply. TOML comments stay.
 //! JSON comments do not survive an apply; revert restores them.
 //!
-//! This crate depends only on `config`. It does not read the token file and
-//! it does not start the gateway. The daemon resolves the listen address and
-//! the bearer token and passes them in as a [`GatewayTarget`].
+//! This crate depends on `config` and `hofund-plugin-api`. It does not read
+//! the token file and it does not start the gateway. The daemon resolves the
+//! listen address and the bearer token and passes them in as a [`GatewayTarget`].
 //!
 //! The four adapters, and the documents they were checked against:
 //!
@@ -47,35 +47,16 @@ use std::path::PathBuf;
 // Referenced so this crate's manifest dependency is compiled, not merely declared.
 use hofund_config as _;
 
+pub use hofund_plugin_api::{
+    AgentFactory, AgentIntegration, ConnectionStatus, DisconnectOutcome, DynAgentFactory,
+    FileChange, GatewayTarget, Plan,
+};
+
 mod catalog;
 mod edit;
 mod store;
 
 pub use catalog::{adapters, find};
-
-/// What [`AgentAdapter::disconnect`] did.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DisconnectOutcome {
-    /// A backed-up file was merged or replaced.
-    pub changed: bool,
-    /// Keys the user changed after connect. Those values were left in place.
-    pub warnings: Vec<String>,
-}
-
-/// Where the local gateway is listening, and the bearer token clients send.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GatewayTarget {
-    /// Origin such as `http://127.0.0.1:3425`. A trailing slash is ignored.
-    pub base_url: String,
-    /// Bearer token. Adapters write it into the agent file that tool documents.
-    pub token: String,
-    /// Route model ids from the gateway config, in file order.
-    ///
-    /// OpenCode's `models` object has one entry per id. Gemini CLI and Claude
-    /// Code use the id only when this list has one entry and the tool has no
-    /// model yet.
-    pub models: Vec<String>,
-}
 
 /// The home directory and optional path overrides an adapter reads.
 ///
@@ -167,41 +148,6 @@ pub struct ConfigFile {
     pub path: PathBuf,
     /// File bytes, or `None` when the file is absent.
     pub bytes: Option<Vec<u8>>,
-}
-
-/// A planned edit that has not been written unless [`AgentAdapter::apply`] ran.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Plan {
-    /// Files whose bytes would change. Already-matching files are omitted.
-    pub changes: Vec<FileChange>,
-}
-
-/// One file in a [`Plan`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FileChange {
-    /// Path that would be replaced.
-    pub path: PathBuf,
-    /// Bytes before the edit. Empty when the file does not exist yet.
-    pub before: Vec<u8>,
-    /// Bytes after the edit.
-    pub after: Vec<u8>,
-    /// A line diff of `before` and `after`. Empty when they are identical.
-    pub diff: String,
-}
-
-/// Whether an agent is installed and whether its files already match a target.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConnectionStatus {
-    /// Stable id, such as `claude-code`.
-    pub id: &'static str,
-    /// Name printed by the CLI.
-    pub display_name: &'static str,
-    /// The binary is on `PATH`, or a managed config file already exists.
-    pub installed: bool,
-    /// Every declared key equals the target. A missing file is not connected.
-    pub connected: bool,
-    /// Config paths this adapter would read or write.
-    pub paths: Vec<PathBuf>,
 }
 
 /// Failure while reading, planning, applying, or reverting an agent file.

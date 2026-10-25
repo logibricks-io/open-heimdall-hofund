@@ -238,14 +238,14 @@ fn chat_turn() -> Vec<StreamEvent> {
 
 #[test]
 fn anthropic_unary_id_uses_the_message_prefix() {
-    let mut response = Response {
-        id: None,
-        model: Some("m".to_owned()),
-        message: hofund_ir::Message::new(Role::Assistant),
-        stop: None,
-        usage: None,
-        extensions: hofund_ir::Extensions::new(),
-    };
+    let mut response = Response::from_parts(
+        None,
+        Some("m".to_owned()),
+        hofund_ir::Message::new(Role::Assistant),
+        None,
+        None,
+        hofund_ir::Extensions::new(),
+    );
     response.message.content.push(ContentPart::text("ok"));
     let encoded = AnthropicMessages
         .encode_response(&response)
@@ -454,17 +454,17 @@ fn chat_joins_assistant_text_and_stop_sequence_becomes_end_turn() {
     let decoded = OpenAiChat.decode_request(&encoded).expect("decode");
     assert_eq!(decoded.messages[0].content, vec![ContentPart::text("abc")]);
 
-    let mut response = Response {
-        id: None,
-        model: None,
-        message: hofund_ir::Message::new(Role::Assistant),
-        stop: Some(hofund_ir::Stop {
+    let mut response = Response::from_parts(
+        None,
+        None,
+        hofund_ir::Message::new(Role::Assistant),
+        Some(hofund_ir::Stop {
             reason: StopReason::StopSequence,
             sequence: Some("END".to_owned()),
         }),
-        usage: None,
-        extensions: hofund_ir::Extensions::new(),
-    };
+        None,
+        hofund_ir::Extensions::new(),
+    );
     response.message.content.push(ContentPart::text("x"));
     let encoded = OpenAiChat.encode_response(&response).expect("encode");
     let decoded = OpenAiChat.decode_response(&encoded).expect("decode");
@@ -818,24 +818,24 @@ data: {"type":"message_stop"}
 
 #[test]
 fn partial_usage_fills_the_fields_each_protocol_requires() {
-    let response = Response {
-        id: Some("resp_local".to_owned()),
-        model: Some("m".to_owned()),
-        message: {
+    let response = Response::from_parts(
+        Some("resp_local".to_owned()),
+        Some("m".to_owned()),
+        {
             let mut message = Message::new(Role::Assistant);
             message.content.push(ContentPart::text("ok"));
             message
         },
-        stop: Some(Stop {
+        Some(Stop {
             reason: StopReason::EndTurn,
             sequence: None,
         }),
-        usage: Some(Usage {
+        Some(Usage {
             output_tokens: Some(5),
             ..Usage::default()
         }),
-        extensions: Extensions::new(),
-    };
+        Extensions::new(),
+    );
     let responses = OpenAiResponses
         .encode_response(&response)
         .expect("responses");

@@ -40,6 +40,7 @@ pub struct Stop {
 }
 
 /// One completed assistant turn.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     /// Response identifier.
@@ -62,6 +63,29 @@ pub struct Response {
 }
 
 impl Response {
+    /// Builds a response from decoded parts.
+    ///
+    /// Other crates use this constructor. The struct is [`non_exhaustive`], so
+    /// a struct literal outside this crate does not compile.
+    #[must_use]
+    pub fn from_parts(
+        id: Option<String>,
+        model: Option<String>,
+        message: Message,
+        stop: Option<Stop>,
+        usage: Option<Usage>,
+        extensions: Extensions,
+    ) -> Self {
+        Self {
+            id,
+            model,
+            message,
+            stop,
+            usage,
+            extensions,
+        }
+    }
+
     /// Drops extension bags on the response, its usage, and its message.
     pub fn strip_extensions(&mut self) {
         self.extensions.clear();

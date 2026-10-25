@@ -462,14 +462,14 @@ fn tool_search_for_the_client_becomes_a_function() {
 
 #[test]
 fn response_ids_are_prefixed_and_item_ids_are_not_reused() {
-    let mut response = hofund_ir::Response {
-        id: Some("chatcmpl-1".to_owned()),
-        model: Some("m".to_owned()),
-        message: hofund_ir::Message::new(Role::Assistant),
-        stop: None,
-        usage: None,
-        extensions: hofund_ir::Extensions::new(),
-    };
+    let mut response = hofund_ir::Response::from_parts(
+        Some("chatcmpl-1".to_owned()),
+        Some("m".to_owned()),
+        hofund_ir::Message::new(Role::Assistant),
+        None,
+        None,
+        hofund_ir::Extensions::new(),
+    );
     response.message.content.push(ContentPart::text("ok"));
     let encoded = OpenAiResponses.encode_response(&response).expect("encode");
     let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
@@ -732,14 +732,14 @@ fn call_response(name: &str, arguments: &str) -> Response {
         arguments: ToolArguments::from_text(arguments),
         extensions: Extensions::new(),
     }));
-    Response {
-        id: Some("resp_up".to_owned()),
-        model: Some("demo".to_owned()),
+    Response::from_parts(
+        Some("resp_up".to_owned()),
+        Some("demo".to_owned()),
         message,
-        stop: None,
-        usage: None,
-        extensions: Extensions::new(),
-    }
+        None,
+        None,
+        Extensions::new(),
+    )
 }
 
 fn frames_of(bytes: &[u8]) -> Vec<serde_json::Value> {
@@ -944,14 +944,14 @@ fn a_chat_tool_stream_uses_the_completed_output_index() {
 
 #[test]
 fn item_ids_differ_across_responses_and_upstream_ids_stay() {
-    let mut response = Response {
-        id: None,
-        model: Some("m".to_owned()),
-        message: Message::new(Role::Assistant),
-        stop: None,
-        usage: None,
-        extensions: Extensions::new(),
-    };
+    let mut response = Response::from_parts(
+        None,
+        Some("m".to_owned()),
+        Message::new(Role::Assistant),
+        None,
+        None,
+        Extensions::new(),
+    );
     response.message.content.push(ContentPart::text("one"));
     let first = OpenAiResponses.encode_response(&response).expect("first");
     response.message.content.clear();

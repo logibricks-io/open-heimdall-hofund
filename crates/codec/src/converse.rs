@@ -230,14 +230,9 @@ impl Codec for Converse {
             .map(|mut usage| decode_usage(&mut usage))
             .transpose()?;
         extensions.absorb(&Extensions::from_map(object));
-        Ok(Response {
-            id: None,
-            model: None,
-            message,
-            stop,
-            usage,
-            extensions,
-        })
+        Ok(Response::from_parts(
+            None, None, message, stop, usage, extensions,
+        ))
     }
 
     fn encode_response(&self, response: &Response) -> Result<Vec<u8>, CodecError> {

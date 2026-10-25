@@ -198,11 +198,7 @@ impl Control {
             if connect {
                 let local = local_gateway(&self.config_path).map_err(|error| error.to_string())?;
                 let models = route_models(&self.config_path).map_err(|error| error.to_string())?;
-                let target = GatewayTarget {
-                    base_url: local.base_url,
-                    token: local.token,
-                    models,
-                };
+                let target = GatewayTarget::new(local.base_url, local.token, models);
                 adapter
                     .apply(session, &target)
                     .map_err(|error| error.to_string())?;
@@ -210,7 +206,7 @@ impl Control {
                 let outcome = adapter
                     .disconnect(session, false)
                     .map_err(|error| error.to_string())?;
-                return Ok(outcome.warnings);
+                return Ok(outcome.warnings().to_vec());
             }
             Ok(Vec::new())
         })();
@@ -236,18 +232,18 @@ impl Control {
 
     /// Current status. Agent rows follow [`adapters`] order.
     pub(crate) fn snapshot(&mut self, session: &Session) -> Snapshot {
-        let target = local_gateway(&self.config_path)
-            .ok()
-            .map(|local| GatewayTarget {
-                base_url: local.base_url,
-                token: local.token,
-                models: route_models(&self.config_path).unwrap_or_default(),
-            });
+        let target = local_gateway(&self.config_path).ok().map(|local| {
+            GatewayTarget::new(
+                local.base_url,
+                local.token,
+                route_models(&self.config_path).unwrap_or_default(),
+            )
+        });
         let mut agents = Vec::new();
         for adapter in adapters() {
             let connected = match &target {
                 Some(target) => match adapter.status(session, target) {
-                    Ok(status) => status.connected,
+                    Ok(status) => status.connected(),
                     Err(error) => {
                         if self.message.is_empty() {
                             self.message = error.to_string();

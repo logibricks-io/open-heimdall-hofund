@@ -1,0 +1,24 @@
+[package]
+name = "hofund-plugin-host"
+description = "Backend traits' constructor for HostContext. Plugins do not depend on this crate."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-plugin-api = { workspace = true }
+async-trait = "0.1.89"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tokio = { version = "1.52.2", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

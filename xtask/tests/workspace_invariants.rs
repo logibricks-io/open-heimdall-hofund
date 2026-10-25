@@ -17,7 +17,13 @@ const MEMBERS: &[&str] = &[
     "crates/daemon",
     "crates/gateway",
     "crates/ir",
+    "crates/plugin-api",
+    "crates/plugin-host",
+    "crates/plugin-sdk",
     "crates/provider",
+    "kits/agent",
+    "kits/subscription",
+    "kits/upstream",
     "crates/quirks",
     "crates/router",
     "crates/secrets",
@@ -29,7 +35,7 @@ const MEMBERS: &[&str] = &[
 /// Update `docs/architecture.md` in the same change.
 fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
-        "hofund-agent" => &["hofund-config"],
+        "hofund-agent" => &["hofund-config", "hofund-plugin-api"],
         "hofund-cli" => &["hofund-agent", "hofund-daemon"],
         "hofund-codec" => &["hofund-ir"],
         "hofund-config" => &[],
@@ -46,7 +52,18 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         ],
         "hofund-gateway" => &["hofund-codec", "hofund-ir", "hofund-router", "hofund-usage"],
         "hofund-ir" => &[],
-        "hofund-provider" => &["hofund-codec", "hofund-ir", "hofund-quirks"],
+        "hofund-kit-agent" => &["hofund-plugin-host"],
+        "hofund-kit-subscription" => &["hofund-plugin-host"],
+        "hofund-kit-upstream" => &["hofund-plugin-host"],
+        "hofund-plugin-api" => &["hofund-ir"],
+        "hofund-plugin-host" => &["hofund-plugin-api"],
+        "hofund-plugin-sdk" => &["hofund-plugin-api", "hofund-quirks"],
+        "hofund-provider" => &[
+            "hofund-codec",
+            "hofund-ir",
+            "hofund-plugin-api",
+            "hofund-quirks",
+        ],
         "hofund-quirks" => &["hofund-ir"],
         "hofund-router" => &["hofund-ir", "hofund-provider"],
         "hofund-secrets" => &[],
@@ -176,6 +193,12 @@ fn dependency_graph_matches_architecture() {
         "hofund-desktop",
         "hofund-gateway",
         "hofund-ir",
+        "hofund-kit-agent",
+        "hofund-kit-subscription",
+        "hofund-kit-upstream",
+        "hofund-plugin-api",
+        "hofund-plugin-host",
+        "hofund-plugin-sdk",
         "hofund-provider",
         "hofund-quirks",
         "hofund-router",
@@ -213,6 +236,307 @@ fn gateway_and_router_do_not_name_vendors() {
         "vendor names belong in quirks data and provider adapters, not in gateway or router:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn plugin_seam_matches_the_contract() {
+    let root = workspace_root();
+    let api = read_to_string(&root.join("crates/plugin-api/src/lib.rs"));
+    let sdk = read_to_string(&root.join("crates/plugin-sdk/src/lib.rs"));
+    for (name, source) in [("hofund-plugin-api", &api), ("hofund-plugin-sdk", &sdk)] {
+        assert!(
+            source.contains("#! [deny(missing_docs") || source.contains("#![deny(missing_docs"),
+            "{name} must deny missing_docs"
+        );
+        assert!(
+            source.contains("unreachable_pub"),
+            "{name} must deny unreachable_pub"
+        );
+    }
+    assert!(
+        sdk.contains("pub use tracing"),
+        "the SDK re-exports tracing so a plugin does not depend on it"
+    );
+    assert!(
+        sdk.contains("pub use hofund_quirks::apply as apply_quirks"),
+        "the SDK re-exports quirk application"
+    );
+    assert!(
+        !api.contains("hofund_quirks") && !api.contains("tracing"),
+        "the API does not depend on quirks or tracing"
+    );
+    assert!(
+        root.join("crates/plugin-api/public-api.txt").is_file(),
+        "the public API snapshot is missing"
+    );
+
+    let host_users = [
+        "hofund-kit-agent",
+        "hofund-kit-subscription",
+        "hofund-kit-upstream",
+    ];
+    for member in MEMBERS {
+        let manifest = read_to_string(&root.join(member).join("Cargo.toml"));
+        let name = package_name(&manifest);
+        if workspace_deps(&manifest).contains("hofund-plugin-host") {
+            assert!(
+                host_users.contains(&name.as_str()),
+                "{name} must not depend on hofund-plugin-host"
+            );
+        }
+        if name.starts_with("hofund-kit-") {
+            assert!(
+                !manifest.contains("publish = true"),
+                "{name} is test-only and must not set publish = true"
+            );
+            let source = read_to_string(&root.join(member).join("src/lib.rs"));
+            assert!(
+                source.contains("pub use hofund_plugin_host::test_host"),
+                "{name} must expose test_host"
+            );
+        }
+    }
+
+    let mut violations = Vec::new();
+    for path in rust_files(&root) {
+        let rel = relative(&root, &path);
+        if rel.starts_with("target/") {
+            continue;
+        }
+        let text = read_to_string(&path);
+        let in_host_stack = rel.starts_with("crates/plugin-api/")
+            || rel.starts_with("crates/plugin-host/")
+            || rel.starts_with("kits/")
+            || rel.starts_with("xtask/");
+        if !in_host_stack && text.contains("from_backends(") {
+            violations.push(format!("{rel} calls from_backends"));
+        }
+        if !in_host_stack && text.contains("hofund_plugin_api::kernel") {
+            violations.push(format!("{rel} names the kernel backend module"));
+        }
+    }
+    for path in rust_files(&root.join("crates/router")) {
+        let text = read_to_string(&path);
+        for word in ["UpstreamProvider", "HostContext", "Subscription"] {
+            if contains_word(&text, word) {
+                violations.push(format!("{} names {word}", relative(&root, &path)));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "plugin seam rules:\n{}",
+        violations.join("\n")
+    );
+
+    let plugins = root.join("plugins");
+    if plugins.is_dir() {
+        let found = plugin_tree_violations(&plugins);
+        assert!(
+            found.is_empty(),
+            "plugins/ broke the dependency rules:\n{}",
+            found.join("\n")
+        );
+    }
+}
+
+#[test]
+fn plugin_rules_reject_a_bad_tree() {
+    let root = std::env::temp_dir().join(format!("hofund-plugin-rules-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let plugin = root.join("plugins/providers/openai-compat");
+    fs::create_dir_all(plugin.join("src")).expect("dir");
+    fs::write(
+        plugin.join("Cargo.toml"),
+        r#"
+[package]
+name = "hofund-plugin-openai-compat"
+[dependencies]
+hofund-plugin-api = { workspace = true }
+hofund-plugin-host = { workspace = true }
+hofund-ir = { workspace = true }
+reqwest = "0.12"
+[dev-dependencies]
+hofund-kit-agent = { workspace = true }
+[lints]
+workspace = false
+"#,
+    )
+    .expect("manifest");
+    fs::write(
+        plugin.join("src/lib.rs"),
+        "use std::process::Command;\nuse reqwest::Client;\n",
+    )
+    .expect("source");
+    let reserved = root.join("plugins/agents/api");
+    fs::create_dir_all(&reserved).expect("reserved");
+    fs::write(
+        reserved.join("Cargo.toml"),
+        "[package]\nname = \"hofund-plugin-api\"\n[lints]\nworkspace = true\n",
+    )
+    .expect("reserved manifest");
+
+    let violations = plugin_tree_violations(&root.join("plugins"));
+    let text = violations.join("\n");
+    for needle in [
+        "hofund-plugin-host",
+        "hofund-ir",
+        "reqwest",
+        "hofund-kit-agent",
+        "std::process",
+        "lints",
+        "reserved",
+    ] {
+        assert!(text.contains(needle), "missing {needle} in:\n{text}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
+    let mut violations = Vec::new();
+    let kinds = ["providers", "subscriptions", "agents", "inbound"];
+    let Ok(entries) = fs::read_dir(plugins) else {
+        return violations;
+    };
+    for entry in entries.flatten() {
+        let kind_path = entry.path();
+        if !kind_path.is_dir() {
+            continue;
+        }
+        let kind = entry.file_name();
+        let kind = kind.to_string_lossy();
+        if kind == "registry" || !kinds.contains(&kind.as_ref()) {
+            continue;
+        }
+        let Ok(plugins_in_kind) = fs::read_dir(&kind_path) else {
+            continue;
+        };
+        for plugin in plugins_in_kind.flatten() {
+            let path = plugin.path();
+            let id = plugin.file_name().to_string_lossy().into_owned();
+            if ["api", "sdk", "host", "registry"].contains(&id.as_str()) {
+                violations.push(format!("{kind}/{id} uses a reserved plugin id"));
+            }
+            let manifest_path = path.join("Cargo.toml");
+            if !manifest_path.is_file() {
+                continue;
+            }
+            let manifest = read_to_string(&manifest_path);
+            if !lints_follow_workspace(&manifest) {
+                violations.push(format!("{kind}/{id} must set [lints] workspace = true"));
+            }
+            for dep in manifest_deps(&manifest, false) {
+                if dep == "hofund-plugin-host"
+                    || dep == "hofund-ir"
+                    || dep == "hofund-provider"
+                    || dep == "hofund-router"
+                    || dep == "hofund-gateway"
+                    || dep == "hofund-daemon"
+                    || dep == "hofund-plugin-registry"
+                    || dep.starts_with("hofund-kit-")
+                    || (dep.starts_with("hofund-plugin-")
+                        && dep != "hofund-plugin-api"
+                        && dep != "hofund-plugin-sdk")
+                {
+                    violations.push(format!("{kind}/{id} depends on {dep}"));
+                }
+                if ["reqwest", "hyper", "axum", "tracing"].contains(&dep.as_str()) {
+                    violations.push(format!("{kind}/{id} depends on {dep}"));
+                }
+            }
+            let own_kit = match kind.as_ref() {
+                "providers" => "hofund-kit-upstream",
+                "subscriptions" => "hofund-kit-subscription",
+                "agents" => "hofund-kit-agent",
+                _ => "",
+            };
+            for dep in manifest_deps(&manifest, true) {
+                if dep.starts_with("hofund-kit-") && dep != own_kit {
+                    violations.push(format!("{kind}/{id} dev-depends on {dep}"));
+                }
+            }
+            if path.join("src").is_dir() {
+                for source in rust_files(&path.join("src")) {
+                    let text = read_to_string(&source);
+                    for needle in [
+                        "std::process",
+                        "tokio::process",
+                        "tokio::net",
+                        "reqwest",
+                        "hyper",
+                        "axum",
+                    ] {
+                        if text.contains(needle) {
+                            violations.push(format!(
+                                "{kind}/{id} uses {needle} in {}",
+                                source.file_name().unwrap_or_default().to_string_lossy()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    violations
+}
+
+fn lints_follow_workspace(manifest: &str) -> bool {
+    let mut in_lints = false;
+    for line in manifest.lines() {
+        let trimmed = strip_comment(line).trim();
+        if trimmed.starts_with('[') {
+            in_lints = trimmed == "[lints]";
+            continue;
+        }
+        if in_lints && trimmed == "workspace = true" {
+            return true;
+        }
+    }
+    false
+}
+
+fn manifest_deps(manifest: &str, dev: bool) -> Vec<String> {
+    let mut deps = Vec::new();
+    let mut section = "";
+    for line in manifest.lines() {
+        let trimmed = strip_comment(line).trim();
+        if let Some(name) = trimmed.strip_prefix('[') {
+            section = name.trim_end_matches(']');
+            continue;
+        }
+        let wanted = if dev {
+            section == "dev-dependencies"
+        } else {
+            section == "dependencies"
+        };
+        if !wanted {
+            continue;
+        }
+        if let Some((key, _)) = trimmed.split_once('=') {
+            let key = key.trim();
+            if !key.is_empty() && !key.starts_with('[') {
+                deps.push(key.to_string());
+            }
+        }
+    }
+    deps
+}
+
+fn contains_word(text: &str, word: &str) -> bool {
+    let bytes = text.as_bytes();
+    let needle = word.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = text[start..].find(word) {
+        let index = start + offset;
+        let before_ok = index == 0 || !is_ident_byte(bytes[index - 1]);
+        let after = index + needle.len();
+        let after_ok = after == bytes.len() || !is_ident_byte(bytes[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = index + word.len();
+    }
+    false
 }
 
 #[test]

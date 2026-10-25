@@ -30,6 +30,11 @@ pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
 pub use presets::{PresetError, Resolve, Resolved, Wire, catalog_commit, resolve};
 pub use vertex::Vertex;
 
+pub use hofund_plugin_api::{
+    DynSubscriptionFactory, DynUpstreamFactory, InboundSurface, Subscription, SubscriptionFactory,
+    UpstreamFactory, UpstreamProvider,
+};
+
 use std::pin::Pin;
 
 use async_trait::async_trait;
