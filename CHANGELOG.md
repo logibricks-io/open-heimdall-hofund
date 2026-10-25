@@ -7,12 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Provider plugins share SigV4, OAuth token parsing, form bodies, and JSON
+  page cursors from `hofund-plugin-sdk`. Parse errors do not include the
+  response body. Token `Debug` is redacted.
+
 ### Changed
 
+- `[providers.options]` is forwarded to the plugin factory. Each factory has
+  an option schema. An unknown key or a wrong type is a check error that
+  names the provider and the key and does not include the value.
+- Vertex and Bedrock are built through `registry.factory`, like the other
+  wires. The daemon no longer constructs those adapters itself.
+- Built-in adapters use the pooled host client, so `connect_timeout_ms` and
+  `read_timeout_ms` apply to them, including Vertex token mint.
 - `[providers.options]` and `[subscriptions.options]` are opaque TOML tables.
   A value may be a string, an integer, a boolean, an array, or a nested
-  table. Vertex and Bedrock still read strings. A value of another type
-  names the provider and the key.
+  table. A value of the wrong type names the provider and the key.
 
 ### Deprecated
 

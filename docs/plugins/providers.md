@@ -34,6 +34,8 @@ On that path the factory takes the `reqwest` client out of the host's `PooledHtt
 
 An adapter constructed in a unit test, with no pooled client attached, still builds a private client. The daemon does not take that path. Vertex's private client keeps a 30 second whole-call budget for token mint. The factory path does not: mint uses `HttpLimits` like every other call.
 
+`Bedrock`'s `UpstreamSpec` credential is `Bearer` only because that enum has no signed variant. The adapter rejects an API key and signs with SigV4. The style is not read at build time.
+
 `plan` still reads `project`, `location`, and `region` as strings so `resolve` can build a catalog URL. A wrong type fails there, with the provider id and the key, before the factory runs. The factory repeats the check for a raw table that did not come from `plan`. `google-vertex` and `bedrock` are not compiled presets. `resolve` still owns their URLs. The factory owns construction.
 
 `list_models` stays unsupported. The paging helper only reads a JSON page. It does not send a request.

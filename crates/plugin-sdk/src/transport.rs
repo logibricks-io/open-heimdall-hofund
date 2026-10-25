@@ -176,6 +176,22 @@ impl Call {
         self
     }
 
+    /// Sets a JSON body and `content-type: application/json` when that header
+    /// is not already present.
+    #[must_use]
+    pub fn json(self, body: impl AsRef<[u8]>) -> Self {
+        let call = if self
+            .headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("content-type"))
+        {
+            self
+        } else {
+            self.header("content-type", "application/json")
+        };
+        call.bytes(body)
+    }
+
     /// Sends the call once.
     ///
     /// # Errors
@@ -416,6 +432,16 @@ mod tests {
         let plain = Call::post("https://example.test");
         assert!(!plain.idempotent);
         assert!(!format!("{plain:?}").contains("secret"));
+        let json = Call::post("https://example.test").json(br#"{"model":"demo"}"#);
+        let rendered = format!("{json:?}");
+        assert!(rendered.contains("content-type"), "{rendered}");
+        assert!(rendered.contains("body_len"), "{rendered}");
+        let kept = Call::post("https://example.test")
+            .header("Content-Type", "application/json")
+            .json(br"{}");
+        let names = format!("{kept:?}");
+        assert_eq!(names.matches("content-type").count(), 0);
+        assert_eq!(names.matches("Content-Type").count(), 1, "{names}");
     }
 
     #[test]

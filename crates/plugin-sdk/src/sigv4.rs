@@ -10,16 +10,16 @@ use ring::hmac;
 
 /// One signed request's `Authorization` value and the headers that were signed
 /// with it. The caller sends these headers unchanged.
-pub(crate) struct Signature {
+pub struct Signature {
     /// `AWS4-HMAC-SHA256 Credential=...`.
     pub authorization: String,
 }
 
 /// Inputs to [`sign`], other than the headers.
-pub(crate) struct SignInput<'a> {
+pub struct SignInput<'a> {
     /// HTTP method, already uppercase.
     pub method: &'a str,
-    /// Absolute path, already URI-encoded the way SigV4 requires.
+    /// Absolute path, already URI-encoded the way `SigV4` requires.
     pub canonical_uri: &'a str,
     /// Sorted, not-yet-encoded query. Empty when there is no query.
     pub canonical_query: &'a str,
@@ -42,7 +42,10 @@ pub(crate) struct SignInput<'a> {
 
 /// Signs `input`. Header values are trimmed and their internal whitespace is
 /// collapsed, which is the canonical form a verifier rebuilds.
-pub(crate) fn sign(input: &SignInput<'_>) -> Signature {
+///
+/// The secret access key is not copied into [`Signature`].
+#[must_use]
+pub fn sign(input: &SignInput<'_>) -> Signature {
     let payload_hash = payload_hash(input.payload);
     let mut headers: Vec<(String, String)> = input
         .headers
@@ -90,7 +93,8 @@ pub(crate) fn sign(input: &SignInput<'_>) -> Signature {
 }
 
 /// `YYYYMMDD'T'HHMMSS'Z'` for `instant`, which is seconds since the Unix epoch.
-pub(crate) fn amz_date(unix_secs: u64) -> String {
+#[must_use]
+pub fn amz_date(unix_secs: u64) -> String {
     let days = unix_secs / 86_400;
     let time = unix_secs % 86_400;
     let (year, month, day) = civil_from_days(i64::try_from(days).unwrap_or(i64::MAX));
@@ -100,8 +104,9 @@ pub(crate) fn amz_date(unix_secs: u64) -> String {
     format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
 }
 
-/// SigV4 path for one model id. `:` in the id becomes `%3A`.
-pub(crate) fn canonical_model_uri(model: &str, stream: bool) -> String {
+/// `SigV4` path for one model id. `:` in the id becomes `%3A`.
+#[must_use]
+pub fn canonical_model_uri(model: &str, stream: bool) -> String {
     let method = if stream {
         "converse-stream"
     } else {
@@ -111,6 +116,7 @@ pub(crate) fn canonical_model_uri(model: &str, stream: bool) -> String {
 }
 
 /// Encodes every byte except the unreserved set. Hex digits are uppercase.
+#[must_use]
 pub(crate) fn uri_encode(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::new();
@@ -156,8 +162,9 @@ fn normalize_header_value(value: &str) -> String {
     out
 }
 
-/// Lowercase hex SHA-256 of `payload`.
-pub(crate) fn payload_hash(payload: &[u8]) -> String {
+/// Lowercase hex `SHA-256` of `payload`.
+#[must_use]
+pub fn payload_hash(payload: &[u8]) -> String {
     hex_encode(digest(&SHA256, payload).as_ref())
 }
 
@@ -173,7 +180,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// Days since the Unix epoch to a Gregorian year, month, and day.
 ///
-/// This is Howard Hinnant's `civil_from_days`.
+/// This is Howard Hinnant's `civil_from_days`. The casts are the algorithm's
+/// narrowing steps. The inputs that reach it are day counts, not untrusted
+/// sizes.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -231,6 +245,12 @@ mod tests {
             signed
                 .authorization
                 .contains("SignedHeaders=host;range;x-amz-content-sha256;x-amz-date")
+        );
+        assert!(
+            !signed
+                .authorization
+                .contains("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+            "secret access key leaked into Authorization"
         );
     }
 

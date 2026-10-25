@@ -173,6 +173,7 @@ HostContext::fn spawn_process (& self) -> & ProcessHandle
 HttpHandle
 HttpHandle #[non_exhaustive] derives(Clone)
 HttpHandle::async fn send (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
+HttpHandle::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
 IdError
 IdError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Error)
 IdError::const fn reason (self) -> & 'static str
@@ -519,6 +520,7 @@ kernel::DirBackend::fn cache_dir (& self , plugin : & PluginId) -> Result < Path
 kernel::DirBackend::fn state_dir (& self , plugin : & PluginId) -> Result < PathBuf , PluginError >
 kernel::HttpBackend
 kernel::HttpBackend::async fn send (& self , request : HttpRequest < Body > ,) -> Result < HttpResponse < BodyStream > , PluginError >
+kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
 kernel::HttpRequest
 kernel::HttpResponse
 kernel::Job

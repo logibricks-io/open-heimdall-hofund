@@ -30,8 +30,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::error::ProviderError;
 use crate::http::{self, Endpoint, Upstream};
-use crate::sigv4::{self, SignInput};
 use crate::{Completion, Provider};
+use hofund_plugin_sdk::sigv4::{self, SignInput};
 
 /// One Converse upstream.
 pub struct Bedrock {

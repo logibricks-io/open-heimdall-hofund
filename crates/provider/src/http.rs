@@ -64,6 +64,11 @@ pub struct Endpoint {
     /// Reqwest's read timeout is slightly longer, so a stall is reported by
     /// the kernel. A stream that keeps sending is not cut off.
     pub timeout: Duration,
+    /// Host pool client. `None` builds a private client for unit tests.
+    ///
+    /// The registry factory sets this from [`pooled_reqwest`] so connect and
+    /// idle-read timeouts are the daemon's `HttpLimits`.
+    pub client: Option<reqwest::Client>,
 }
 
 impl Endpoint {
@@ -78,8 +83,18 @@ impl Endpoint {
             headers: Vec::new(),
             quirks: None,
             timeout: Duration::from_secs(60),
+            client: None,
         }
     }
+}
+
+/// The pooled `reqwest` client stored by the host, if `value` is one.
+///
+/// The host handle returns the client as a type-erased value. Adapters
+/// downcast it here so the registry crate does not depend on `reqwest`.
+#[must_use]
+pub fn pooled_reqwest(value: &dyn std::any::Any) -> Option<reqwest::Client> {
+    value.downcast_ref::<reqwest::Client>().cloned()
 }
 
 #[derive(Debug)]
@@ -129,11 +144,14 @@ impl Upstream {
             };
             headers.insert(header_name, header_value);
         }
-        let client = reqwest::Client::builder()
-            .connect_timeout(endpoint.timeout)
-            .read_timeout(socket_backstop(endpoint.timeout))
-            .build()
-            .map_err(|error| ProviderError::connect(error.to_string()))?;
+        let client = match endpoint.client.clone() {
+            Some(client) => client,
+            None => reqwest::Client::builder()
+                .connect_timeout(endpoint.timeout)
+                .read_timeout(socket_backstop(endpoint.timeout))
+                .build()
+                .map_err(|error| ProviderError::connect(error.to_string()))?,
+        };
         Ok(Self {
             id: endpoint.id,
             client,

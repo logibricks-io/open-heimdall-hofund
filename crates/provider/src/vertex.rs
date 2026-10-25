@@ -148,6 +148,38 @@ impl Vertex {
         )
     }
 
+    /// [`Vertex::new`] with optional replacements for the token URL and the
+    /// IAM Credentials root. An empty string keeps Google's host.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] in the same cases as [`Vertex::new`].
+    pub fn with_overrides(
+        endpoint: Endpoint,
+        credentials: impl Into<String>,
+        impersonate: impl Into<String>,
+        token_url: &str,
+        iam_root: &str,
+    ) -> Result<Self, ProviderError> {
+        let token_url = if token_url.is_empty() {
+            TOKEN_URL
+        } else {
+            token_url
+        };
+        let iam_root = if iam_root.is_empty() {
+            IAM_ROOT
+        } else {
+            iam_root
+        };
+        Self::open(
+            endpoint,
+            credentials.into(),
+            impersonate.into(),
+            token_url.to_owned(),
+            iam_root.to_owned(),
+        )
+    }
+
     fn open(
         endpoint: Endpoint,
         credentials: String,
@@ -169,10 +201,13 @@ impl Vertex {
         }
         reqwest::Url::parse(&base)
             .map_err(|error| ProviderError::decode(format!("provider URL is invalid: {error}")))?;
-        let token_client = reqwest::Client::builder()
-            .timeout(MINT_TIMEOUT)
-            .build()
-            .map_err(|error| ProviderError::connect(error.to_string()))?;
+        let token_client = match endpoint.client.clone() {
+            Some(client) => client,
+            None => reqwest::Client::builder()
+                .timeout(MINT_TIMEOUT)
+                .build()
+                .map_err(|error| ProviderError::connect(error.to_string()))?,
+        };
         let upstream = Upstream::open(endpoint, "", reqwest::header::HeaderMap::new())?;
         Ok(Self {
             upstream,
@@ -702,12 +737,11 @@ async fn mint_creds_inner(
                     "they have no refresh token",
                 )));
             }
-            let body = form(&[
-                ("grant_type", "refresh_token"),
-                ("client_id", &creds.client_id),
-                ("client_secret", &creds.client_secret),
-                ("refresh_token", &creds.refresh_token),
-            ]);
+            let body = hofund_plugin_sdk::refresh_form(
+                &creds.client_id,
+                &creds.client_secret,
+                &creds.refresh_token,
+            );
             match token_grant(urls, body).await {
                 Ok(minted) => Ok(minted),
                 Err(error) => Err(classify_refresh(error)),
@@ -836,7 +870,7 @@ async fn signed_jwt(
         Ok(assertion) => assertion,
         Err(error) => return Err(MintFail::Other(error)),
     };
-    let body = form(&[
+    let body = hofund_plugin_sdk::form_body(&[
         ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
         ("assertion", &assertion),
     ]);
@@ -967,23 +1001,10 @@ async fn token_grant(
         body.into_bytes(),
     )
     .await?;
-    let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| ProviderError::decode(format!("Google's token response: {error}")))?;
-    let token = value
-        .get("access_token")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    if token.is_empty() {
-        return Err(ProviderError::decode("Google gave no access token"));
-    }
-    let expires_in = value
-        .get("expires_in")
-        .and_then(Value::as_i64)
-        .filter(|seconds| *seconds > 0)
-        .unwrap_or(3600);
-    let expiry = SystemTime::now() + Duration::from_secs(expires_in as u64);
-    Ok((token, expiry))
+    let token = hofund_plugin_sdk::parse_access_token(&bytes)
+        .map_err(|error| ProviderError::decode(error.to_string()))?;
+    let expiry = SystemTime::now() + token.expires_in();
+    Ok((token.expose_secret().to_owned(), expiry))
 }
 
 async fn impersonate_for(
@@ -1135,29 +1156,6 @@ fn http_status_text(status: u16) -> String {
         _ => return format!("HTTP {status}"),
     }
     .to_owned()
-}
-
-fn form(pairs: &[(&str, &str)]) -> String {
-    pairs
-        .iter()
-        .map(|(name, value)| format!("{}={}", form_escape(name), form_escape(value)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn form_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(char::from(byte));
-        } else {
-            out.push('%');
-            const HEX: &[u8; 16] = b"0123456789ABCDEF";
-            out.push(char::from(HEX[(byte >> 4) as usize]));
-            out.push(char::from(HEX[(byte & 0x0f) as usize]));
-        }
-    }
-    out
 }
 
 fn parse_rfc3339_utc(text: &str) -> Option<SystemTime> {

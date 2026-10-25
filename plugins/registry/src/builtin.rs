@@ -1,8 +1,8 @@
-//! Built-in factories for Chat, Responses, Messages, and Generative.
+//! Built-in factories for the adapters that still live in `hofund-provider`.
 //!
-//! These still run the `hofund-provider` adapters. The daemon looks them up
-//! here, so there is one factory path. Pull request E replaces each factory
-//! with a plugin. Vertex and Bedrock are not in this module.
+//! The daemon looks every wire up here. Chat, Responses, Messages, Generative,
+//! Vertex, and Bedrock each validate their own option schema and then call the
+//! adapter. A later pull request can move one adapter into its own plugin crate.
 
 use std::sync::Arc;
 
@@ -16,8 +16,9 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::async_trait;
 use hofund_provider::{
-    Anthropic, Completion as ProviderCompletion, CountOutcome as ProviderCount, Credential,
-    Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, ProviderError,
+    Anthropic, Bedrock, Completion as ProviderCompletion, CountOutcome as ProviderCount,
+    Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, ProviderError,
+    Vertex,
 };
 use hofund_quirks::named;
 
@@ -28,6 +29,8 @@ pub fn factory(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
         "openai-compat" => Some(Arc::new(OpenAiFactory)),
         "anthropic" => Some(Arc::new(AnthropicFactory)),
         "generative" => Some(Arc::new(GenerativeFactory)),
+        "google-vertex" => Some(Arc::new(VertexFactory)),
+        "bedrock" => Some(Arc::new(BedrockFactory)),
         _ => None,
     }
 }
@@ -53,9 +56,43 @@ static GENERATIVE_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     ListKind::Unsupported,
 );
 
+static VERTEX_SPEC: UpstreamSpec = UpstreamSpec::from_static(
+    PluginId::from_static("google-vertex"),
+    &[ProtocolId::GENERATIVE_LANGUAGE],
+    CredentialStyle::Bearer,
+    ListKind::Unsupported,
+);
+
+/// Bedrock signs with SigV4. `CredentialStyle` has no signed variant, and the
+/// adapter rejects an API key. The style is not consulted at build time.
+static BEDROCK_SPEC: UpstreamSpec = UpstreamSpec::from_static(
+    PluginId::from_static("bedrock"),
+    &[ProtocolId::BEDROCK_CONVERSE],
+    CredentialStyle::Bearer,
+    ListKind::Unsupported,
+);
+
+const VERTEX_OPTIONS: &[&str] = &[
+    "project",
+    "location",
+    "credentials",
+    "impersonate",
+    "token_url",
+    "iam_root",
+];
+
+const BEDROCK_OPTIONS: &[&str] = &[
+    "region",
+    "access_key_id",
+    "secret_access_key",
+    "session_token",
+];
+
 struct OpenAiFactory;
 struct AnthropicFactory;
 struct GenerativeFactory;
+struct VertexFactory;
+struct BedrockFactory;
 
 struct EndpointConfig {
     endpoint: Endpoint,
@@ -72,11 +109,11 @@ impl UpstreamFactory for OpenAiFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        Schema::empty()
+        option_schema(&[])
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        let mut config = read_endpoint(raw, true)?;
+        let mut config = read_endpoint(raw, true, &[])?;
         config.protocol = Some(read_protocol(raw)?);
         Ok(config)
     }
@@ -84,10 +121,12 @@ impl UpstreamFactory for OpenAiFactory {
     fn build(
         &self,
         cfg: &Self::Config,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
         let protocol = cfg.protocol.unwrap_or(OpenAiProtocol::Chat);
-        let adapter = OpenAiCompat::new(protocol, cfg.endpoint.clone()).map_err(build_error)?;
+        let mut endpoint = cfg.endpoint.clone();
+        attach_client(&mut endpoint, host);
+        let adapter = OpenAiCompat::new(protocol, endpoint).map_err(build_error)?;
         Ok(Arc::new(Bridged {
             inner: Arc::new(adapter),
         }))
@@ -102,19 +141,21 @@ impl UpstreamFactory for AnthropicFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        Schema::empty()
+        option_schema(&[])
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        read_endpoint(raw, false)
+        read_endpoint(raw, false, &[])
     }
 
     fn build(
         &self,
         cfg: &Self::Config,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
-        let adapter = Anthropic::new(cfg.endpoint.clone()).map_err(build_error)?;
+        let mut endpoint = cfg.endpoint.clone();
+        attach_client(&mut endpoint, host);
+        let adapter = Anthropic::new(endpoint).map_err(build_error)?;
         Ok(Arc::new(Bridged {
             inner: Arc::new(adapter),
         }))
@@ -129,19 +170,127 @@ impl UpstreamFactory for GenerativeFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        Schema::empty()
+        option_schema(&[])
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        read_endpoint(raw, false)
+        read_endpoint(raw, false, &[])
     }
 
     fn build(
         &self,
         cfg: &Self::Config,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
-        let adapter = Generative::new(cfg.endpoint.clone()).map_err(build_error)?;
+        let mut endpoint = cfg.endpoint.clone();
+        attach_client(&mut endpoint, host);
+        let adapter = Generative::new(endpoint).map_err(build_error)?;
+        Ok(Arc::new(Bridged {
+            inner: Arc::new(adapter),
+        }))
+    }
+}
+
+struct VertexConfig {
+    endpoint: Endpoint,
+    credentials: String,
+    impersonate: String,
+    token_url: String,
+    iam_root: String,
+}
+
+impl ValidConfig for VertexConfig {}
+
+impl UpstreamFactory for VertexFactory {
+    type Config = VertexConfig;
+
+    fn spec(&self) -> &'static UpstreamSpec {
+        &VERTEX_SPEC
+    }
+
+    fn config_schema(&self) -> Schema {
+        option_schema(VERTEX_OPTIONS)
+    }
+
+    fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
+        let config = read_endpoint(raw, false, VERTEX_OPTIONS)?;
+        Ok(VertexConfig {
+            endpoint: config.endpoint,
+            credentials: option_string(raw, "credentials")?,
+            impersonate: option_string(raw, "impersonate")?,
+            token_url: option_string(raw, "token_url")?,
+            iam_root: option_string(raw, "iam_root")?,
+        })
+    }
+
+    fn build(
+        &self,
+        cfg: &Self::Config,
+        host: &HostContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+        let mut endpoint = cfg.endpoint.clone();
+        attach_client(&mut endpoint, host);
+        let adapter = Vertex::with_overrides(
+            endpoint,
+            cfg.credentials.clone(),
+            cfg.impersonate.clone(),
+            &cfg.token_url,
+            &cfg.iam_root,
+        )
+        .map_err(build_error)?;
+        Ok(Arc::new(Bridged {
+            inner: Arc::new(adapter),
+        }))
+    }
+}
+
+struct BedrockConfig {
+    endpoint: Endpoint,
+    region: String,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: String,
+}
+
+impl ValidConfig for BedrockConfig {}
+
+impl UpstreamFactory for BedrockFactory {
+    type Config = BedrockConfig;
+
+    fn spec(&self) -> &'static UpstreamSpec {
+        &BEDROCK_SPEC
+    }
+
+    fn config_schema(&self) -> Schema {
+        option_schema(BEDROCK_OPTIONS)
+    }
+
+    fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
+        let config = read_endpoint(raw, false, BEDROCK_OPTIONS)?;
+        Ok(BedrockConfig {
+            endpoint: config.endpoint,
+            region: option_string(raw, "region")?,
+            access_key_id: option_string(raw, "access_key_id")?,
+            secret_access_key: option_string(raw, "secret_access_key")?,
+            session_token: option_string(raw, "session_token")?,
+        })
+    }
+
+    fn build(
+        &self,
+        cfg: &Self::Config,
+        host: &HostContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+        let mut endpoint = cfg.endpoint.clone();
+        attach_client(&mut endpoint, host);
+        let adapter = Bedrock::new(
+            endpoint,
+            &cfg.region,
+            &cfg.access_key_id,
+            &cfg.secret_access_key,
+            &cfg.session_token,
+        )
+        .map_err(build_error)?;
         Ok(Arc::new(Bridged {
             inner: Arc::new(adapter),
         }))
@@ -184,16 +333,69 @@ impl UpstreamProvider for Bridged {
     }
 }
 
-fn read_endpoint(raw: &RawTable, protocol: bool) -> Result<EndpointConfig, ConfigError> {
+fn reject_options(raw: &RawTable, protocol: bool, options: &[&str]) -> Result<(), ConfigError> {
+    let id = provider_id(raw);
     for key in raw.keys() {
-        let allowed = matches!(
-            key,
-            "id" | "base_url" | "api_key" | "credential" | "quirks" | "headers"
-        ) || (protocol && key == "protocol");
-        if !allowed {
-            return Err(ConfigError::new("unknown key").with_path(key));
+        if is_kernel(key, protocol) {
+            continue;
         }
+        if options.contains(&key) {
+            if !matches!(raw.get(key), Some(RawValue::String(_))) {
+                return Err(ConfigError::new(format!(
+                    "provider `{id}` option `{key}` must be a string"
+                ))
+                .with_path(key));
+            }
+            continue;
+        }
+        return Err(
+            ConfigError::new(format!("provider `{id}` has unknown option `{key}`")).with_path(key),
+        );
     }
+    Ok(())
+}
+
+fn is_kernel(key: &str, protocol: bool) -> bool {
+    matches!(
+        key,
+        "id" | "base_url" | "api_key" | "credential" | "quirks" | "headers"
+    ) || (protocol && key == "protocol")
+}
+
+fn provider_id(raw: &RawTable) -> &str {
+    match raw.get("id") {
+        Some(RawValue::String(id)) if !id.is_empty() => id.as_str(),
+        _ => "unknown",
+    }
+}
+
+fn option_schema(fields: &[&str]) -> Schema {
+    let listed = fields
+        .iter()
+        .map(|name| ((*name).to_owned(), Schema::string()))
+        .collect();
+    Schema::object(listed, &[]).expect("option schema")
+}
+
+fn option_string(raw: &RawTable, key: &str) -> Result<String, ConfigError> {
+    Ok(optional_string(raw, key)?.unwrap_or_default())
+}
+
+fn attach_client(endpoint: &mut Endpoint, host: &HostContext) {
+    let Some(pooled) = host.http().pooled_client() else {
+        return;
+    };
+    if let Some(client) = hofund_provider::pooled_reqwest(pooled.as_ref()) {
+        endpoint.client = Some(client);
+    }
+}
+
+fn read_endpoint(
+    raw: &RawTable,
+    protocol: bool,
+    options: &[&str],
+) -> Result<EndpointConfig, ConfigError> {
+    reject_options(raw, protocol, options)?;
     let id = required_string(raw, "id")?;
     let base_url = required_string(raw, "base_url")?;
     let mut endpoint = Endpoint::new(id, base_url);
@@ -267,7 +469,11 @@ fn optional_string(raw: &RawTable, key: &str) -> Result<Option<String>, ConfigEr
     match raw.get(key) {
         None => Ok(None),
         Some(RawValue::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(ConfigError::new("must be a string").with_path(key)),
+        Some(_) => Err(ConfigError::new(format!(
+            "provider `{}` option `{key}` must be a string",
+            provider_id(raw)
+        ))
+        .with_path(key)),
     }
 }
 
@@ -297,5 +503,83 @@ fn plugin_completion(completion: ProviderCompletion) -> PluginCompletion {
                 stream.map(|item| item.map_err(plugin_error)),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BedrockFactory, OpenAiFactory, VertexFactory};
+    use hofund_plugin_api::{RawTable, RawValue, UpstreamFactory};
+
+    fn raw(id: &str) -> RawTable {
+        let mut table = RawTable::new();
+        table.insert("id", RawValue::String(id.to_owned()));
+        table.insert(
+            "base_url",
+            RawValue::String("https://example.test".to_owned()),
+        );
+        table
+    }
+
+    #[test]
+    fn unknown_and_mistyped_options_name_the_provider_and_hide_the_value() {
+        let mut openai = raw("primary");
+        openai.insert(
+            "secret_access_key",
+            RawValue::String("SENTINEL-OPTION-VALUE".to_owned()),
+        );
+        let Err(error) = UpstreamFactory::validate(&OpenAiFactory, &openai) else {
+            panic!("aws key was accepted");
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("provider `primary` has unknown option `secret_access_key`"),
+            "{text}"
+        );
+        assert!(!text.contains("SENTINEL-OPTION-VALUE"), "{text}");
+
+        let mut vertex = raw("vertex");
+        let mut nested = RawTable::new();
+        nested.insert("leak", RawValue::String("SENTINEL-NESTED".to_owned()));
+        vertex.insert("project", RawValue::Table(nested));
+        let Err(error) = UpstreamFactory::validate(&VertexFactory, &vertex) else {
+            panic!("wrong type was accepted");
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("provider `vertex` option `project` must be a string"),
+            "{text}"
+        );
+        assert!(!text.contains("SENTINEL-NESTED"), "{text}");
+
+        let mut bedrock = raw("aws");
+        bedrock.insert("project", RawValue::String("demo-project".to_owned()));
+        let Err(error) = UpstreamFactory::validate(&BedrockFactory, &bedrock) else {
+            panic!("vertex key was accepted");
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("provider `aws` has unknown option `project`"),
+            "{text}"
+        );
+        assert!(!text.contains("demo-project"), "{text}");
+    }
+
+    #[test]
+    fn schemas_list_only_that_plugins_options() {
+        let vertex = UpstreamFactory::config_schema(&VertexFactory);
+        let names = vertex.field_names();
+        assert!(names.contains(&"credentials"));
+        assert!(names.contains(&"token_url"));
+        assert!(!names.contains(&"access_key_id"));
+        let bedrock = UpstreamFactory::config_schema(&BedrockFactory);
+        let names = bedrock.field_names();
+        assert!(names.contains(&"secret_access_key"));
+        assert!(!names.contains(&"project"));
+        assert!(
+            UpstreamFactory::config_schema(&OpenAiFactory)
+                .field_names()
+                .is_empty()
+        );
     }
 }

@@ -62,6 +62,7 @@ flowchart BT
   provider --> ir
   provider --> quirks
   provider --> pluginApi
+  provider --> pluginSdk
   pluginApi --> ir
   pluginSdk --> pluginApi
   pluginSdk --> quirks
@@ -113,9 +114,10 @@ depends on `plugin-api` so it can adapt a provider into a router member.
 `quirks`. `plugin-host` depends on `plugin-api`. Its tests also depend on
 `plugin-sdk` so the retry contract runs against the pooled client. The pooled
 HTTP client lives in `plugin-host`. `plugin-registry` depends on `plugin-api`,
-`plugin-sdk`, the plugin crates it composes, and, until pull request E,
-`provider` and `quirks` for the built-in Chat, Responses, Messages, and
-Generative factories. `daemon` depends on `plugin-registry` and
+`plugin-sdk`, the plugin crates it composes, and `provider` and `quirks`
+for the built-in factories. Those factories still call the `provider`
+adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.
+`daemon` depends on `plugin-registry` and
 `plugin-host` so it can call `factory` and build a `HostContext`.
 `gateway` depends on `plugin-host` so it can build a `SurfaceHost`.
 The three kits depend only on `plugin-host` and are not on the diagram.
@@ -136,7 +138,7 @@ The three kits depend only on `plugin-host` and are not on the diagram.
 | `hofund-kit-upstream` | `hofund-plugin-host` |
 | `hofund-kit-subscription` | `hofund-plugin-host` |
 | `hofund-kit-agent` | `hofund-plugin-host` |
-| `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
+| `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-quirks` |
 | `hofund-router` | `hofund-ir`, `hofund-plugin-api` |
 | `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-usage` |
 | `hofund-config` | — |
@@ -187,9 +189,9 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | --- | --- |
 | `ir` | Canonical request, response, and stream-event types. No I/O. |
 | `plugin-api` | Plugin traits, `PluginError`, newtypes, and `HostContext` handles. |
-| `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. Re-exports `tracing` and `async_trait`. |
+| `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. SigV4, OAuth token parsing, form bodies, and JSON page cursors live here. Re-exports `tracing` and `async_trait`. |
 | `plugin-host` | The `HostContext` constructor, the pooled HTTP client, and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
-| `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` also serves the built-in Chat, Responses, Messages, and Generative adapters until pull request E. |
+| `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` serves the built-in Chat, Responses, Messages, Generative, Vertex, and Bedrock adapters. |
 | `plugin-relay` | Sample upstream plugin. The kit dependency is tests only. |
 | `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
 | `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |

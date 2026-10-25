@@ -1,13 +1,16 @@
 //! Process-wide HTTP clients. One client per proxy and TLS profile.
 //!
-//! The pool is the only `reqwest` client in the plugin stack. Plugins call
+//! The pool is the `reqwest` client in the plugin stack. Plugins call
 //! [`crate::host_context`]'s [`HttpHandle`](hofund_plugin_api::HttpHandle), and
-//! the SDK builds the request. This module does not add a profile argument to
+//! the SDK builds the request. Built-in adapters that still stream take the
+//! same client from [`HttpBackend::pooled_client`](hofund_plugin_api::kernel::HttpBackend::pooled_client).
+//! This module does not add a profile argument to
 //! [`HttpBackend`](hofund_plugin_api::kernel::HttpBackend): the profile is
 //! chosen when the handle is built.
 
+use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -245,6 +248,12 @@ impl HttpBackend for PooledHttp {
         let mut output = HttpResponse::new(BodyStream::from_bytes(collected));
         *output.status_mut() = status;
         Ok(output)
+    }
+
+    fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        client_for(&self.profile, self.limits)
+            .ok()
+            .map(|client| Arc::new(client) as Arc<dyn Any + Send + Sync>)
     }
 }
 
