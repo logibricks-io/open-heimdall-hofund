@@ -11,6 +11,7 @@ mod billing;
 mod error;
 mod generative;
 mod http;
+mod mantle;
 mod openai_compat;
 mod presets;
 mod stream;
