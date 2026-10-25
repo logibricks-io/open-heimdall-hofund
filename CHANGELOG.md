@@ -37,8 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hofund token rotate` is picked up by a running gateway on the next request.
   Connected agents have their token keys rewritten. When that edit fails, the
   command prints `hofund agent connect <id>`.
-- `hofund agent disconnect` removes the keys connect wrote and keeps later
-  edits. `--force` restores the connect-time backup. A second disconnect exits 0.
+- `hofund agent disconnect` restores a file that still matches what connect
+  wrote, and otherwise restores only the values hofund wrote. A value the
+  user changed is kept, with a warning. Later keys stay. `--force` restores
+  the backup bytes. A second disconnect exits 0.
 - `hofund usage` prints local time and a totals line.
 - `hofund agent connect --dry-run` redacts the bearer token in the diff.
 - Connect warns when the tool's configured model has no route.
@@ -47,6 +49,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `hofund agent disconnect` no longer deletes a key that existed before
+  connect, and it no longer removes the backup before the restored file is
+  read back.
+- A Responses request with `namespace`, `web_search`, or `custom` tools is
+  accepted. The same protocol forwards the tools unchanged. A different
+  protocol maps a custom tool to a function with one string input, flattens
+  a namespace, and drops a tool it cannot map after a warning.
+- A locally rejected request records the model named in the body.
+- Client-facing Responses ids start with `resp_`, each output item has its
+  own id, and a non-streaming Messages id starts with `msg_`.
+- A Chat Completions stream forwards a usage chunk only when the client set
+  `stream_options.include_usage`. That chunk has an empty `choices` array,
+  and every chunk keeps `id` and `model`.
+- `examples/hofund.toml` points the sample backup provider at a local URL.
+- A system text that is only `x-anthropic-billing-header` is removed when the
+  request is sent to a different protocol.
 - The extension bag is forwarded only when the inbound and outbound protocols
   are the same. A different protocol drops it, including caller identifiers
   such as `metadata.user_id`, and drops raw stream events that the decoder

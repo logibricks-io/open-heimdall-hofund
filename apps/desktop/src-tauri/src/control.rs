@@ -189,7 +189,7 @@ impl Control {
         id: &str,
         connect: bool,
     ) -> Result<(), String> {
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<Vec<String>, String> {
             let Some(adapter) = find(id) else {
                 return Err(format!("unknown agent `{id}`"));
             };
@@ -203,13 +203,19 @@ impl Control {
                     .apply(session, &target)
                     .map_err(|error| error.to_string())?;
             } else {
-                adapter
+                let outcome = adapter
                     .disconnect(session, false)
                     .map_err(|error| error.to_string())?;
+                return Ok(outcome.warnings);
             }
-            Ok(())
+            Ok(Vec::new())
         })();
-        self.store(result)
+        let warnings = result.as_ref().ok().cloned().unwrap_or_default();
+        self.store(result.map(|_| ()))?;
+        if !warnings.is_empty() {
+            self.message = warnings.join("\n");
+        }
+        Ok(())
     }
 
     /// The usage table from the daemon.

@@ -1,21 +1,24 @@
 ---
 source: crates/codec/tests/protocol.rs
+assertion_line: 268
 expression: text
 ---
 data: {"object":"chat.completion.chunk","id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"}}],"created":1710000000,"system_fingerprint":"fp_1"}
 
-data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"Check "}}],"created":1710000000}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"reasoning_content":"Check "}}],"created":1710000000}
 
-data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"the tool."}}],"created":1710000000}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"reasoning_content":"the tool."}}],"created":1710000000}
 
-data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"I'll look that up."}}],"created":1710000000}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"I'll look that up."}}],"created":1710000000}
 
-data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""},"created":1710000000}]}}]}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""},"created":1710000000}]}}]}
 
-data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"},"created":1710000000}]}}]}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"},"created":1710000000}]}}]}
 
-data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"},"created":1710000000}]}}]}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"},"created":1710000000}]}}]}
 
-data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":25,"completion_tokens":12,"total_tokens":37,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":3}},"created":1710000000}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"created":1710000000}
+
+data: {"object":"chat.completion.chunk","id":"chatcmpl-1","model":"gpt-4o","choices":[],"usage":{"prompt_tokens":25,"completion_tokens":12,"total_tokens":37,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":3}}}
 
 data: [DONE]

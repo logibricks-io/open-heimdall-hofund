@@ -13,6 +13,7 @@ rust-version.workspace = true
 [dependencies]
 hofund-ir = { workspace = true }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
+sha2 = "0.10.9"
 thiserror = "2.0.21"
 
 [lints]

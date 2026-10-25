@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use hofund_codec::{Codec, CodecError};
+use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
 use hofund_ir::Request;
 use hofund_quirks::Profile;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -121,7 +121,10 @@ pub(crate) fn prepare_body(
     if let Some(profile) = upstream.quirks {
         hofund_quirks::apply(profile, &mut request);
     }
-    if codec.id() != inbound_protocol {
+    let cross_protocol = codec.id() != inbound_protocol;
+    if cross_protocol {
+        warn_unmapped(&request);
+        crate::billing::strip_billing_header(&mut request);
         request.strip_extensions();
     }
     let mut body = codec
@@ -187,4 +190,16 @@ pub(crate) async fn execute(
 /// Adapter identity used by both concrete providers.
 pub(crate) fn id_of(upstream: &Upstream) -> &str {
     &upstream.id
+}
+
+fn warn_unmapped(request: &Request) {
+    let Some(serde_json::Value::Array(items)) = request.extensions.get(UNMAPPED_TOOLS) else {
+        return;
+    };
+    for item in items {
+        let Some(name) = item.as_str() else {
+            continue;
+        };
+        eprintln!("warning: dropped tool `{name}`; it has no mapping onto the upstream protocol");
+    }
 }

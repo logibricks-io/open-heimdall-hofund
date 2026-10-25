@@ -291,7 +291,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         Err(error) => {
             record(
                 &app.usage,
-                &model_request_placeholder(),
+                &ModelRequest::new(model_name(&bytes)),
                 "",
                 None,
                 started,
@@ -481,7 +481,7 @@ async fn success(
             }
         }
         Completion::Stream(events) => {
-            let encoder = codec.stream_encoder();
+            let encoder = codec.stream_encoder_for(&request);
             let body = sse_body(
                 events,
                 encoder,
@@ -664,8 +664,16 @@ fn as_i64(value: Option<u64>) -> Option<i64> {
     value.and_then(|value| i64::try_from(value).ok())
 }
 
-fn model_request_placeholder() -> ModelRequest {
-    ModelRequest::new("")
+fn model_name(bytes: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
 }
 
 fn coded(codec: &dyn Codec, status: StatusCode, message: &str) -> Response {

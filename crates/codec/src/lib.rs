@@ -20,7 +20,7 @@ pub use anthropic::AnthropicMessages;
 pub use error::CodecError;
 pub use generative::GenerativeLanguage;
 pub use openai_chat::OpenAiChat;
-pub use openai_responses::OpenAiResponses;
+pub use openai_responses::{OpenAiResponses, UNMAPPED_TOOLS};
 
 use hofund_ir::{Request, Response, StreamEvent};
 
@@ -90,6 +90,15 @@ pub trait Codec: Send + Sync {
     /// The bytes from each [`StreamEncoder::push`] are the SSE for that event
     /// only. State such as an open block stays on the encoder.
     fn stream_encoder(&self) -> Box<dyn StreamEncoder>;
+
+    /// An encoder for a reply to `request`.
+    ///
+    /// The default ignores the request. A codec that changes the stream based
+    /// on what the client asked for, such as Chat Completions usage chunks,
+    /// overrides this.
+    fn stream_encoder_for(&self, _request: &Request) -> Box<dyn StreamEncoder> {
+        self.stream_encoder()
+    }
 
     /// Encodes an error body in this protocol's JSON shape.
     ///

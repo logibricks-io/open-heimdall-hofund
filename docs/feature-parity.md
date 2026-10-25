@@ -5,15 +5,16 @@ This document compares every user-facing capability of
 hofund, the Rust rewrite. Each row cites a source path in each repository.
 
 - **magpie snapshot:** `641b121` (shallow clone, October 2026).
-- **hofund snapshot:** `main` at `77167f8` ("Record the magpie feature-parity matrix and two-stage roadmap", #11).
+- **hofund snapshot:** `main` at `e650022` ("Map each upstream model and carry reasoning effort across protocols", #12).
   Hofund line citations below were checked against that commit on 2026-10-25,
-  except rows 1.5, 1.14, 1.20, and 2.13. Those four cite this change
-  ([#12](https://github.com/logibricks-io/open-heimdall-hofund/pull/12)), which
-  is not on `77167f8` by itself.
+  except rows 1.1, 1.2, 1.3, 1.12, and 5.2. Those cite this change
+  ([#13](https://github.com/logibricks-io/open-heimdall-hofund/pull/13)), which
+  is not on `e650022` by itself.
   [#9](https://github.com/logibricks-io/open-heimdall-hofund/pull/9) is `ac6325a`,
   [#10](https://github.com/logibricks-io/open-heimdall-hofund/pull/10) is `695860d`,
-  and [#11](https://github.com/logibricks-io/open-heimdall-hofund/pull/11) is `77167f8`.
-  Rows #9 and #10 finish are Done and cite the code on `main`.
+  [#11](https://github.com/logibricks-io/open-heimdall-hofund/pull/11) is `77167f8`,
+  and [#12](https://github.com/logibricks-io/open-heimdall-hofund/pull/12) is `e650022`.
+  Rows those pull requests finish are Done and cite the code on `main`.
 - **Goal:** rebuild every core magpie capability in Rust and do each one better.
   Copy designs that are good, stable, and efficient. Redesign the parts that are unsound.
   `docs/magpie-comparison.md` records each adopt-or-redesign verdict.
@@ -70,9 +71,10 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 5. **Secrets out of plain files.** API keys can be `env:NAME` references
    (`crates/secrets/src/lib.rs`). magpie keeps keys in `providers.json` (`ref.md:2998`, "Files").
 6. **Backpressure.** Streams are pulled through the codec, not buffered (`crates/provider/src/stream.rs`).
-7. **Agent backup markers.** Backups use their own markers (`*.hofund.bak`, `*.hofund.absent`)
-   and live beside the file (`crates/agent/src/catalog.rs`). Disconnect deletes
-   only the keys connect wrote, so a later edit stays. `--force` restores the backup bytes.
+7. **Agent backup markers.** Backups use their own markers (`*.hofund.bak`, `*.hofund.absent`, `*.hofund.wrote`)
+   and live beside the file (`crates/agent/src/catalog.rs:479`). A clean disconnect writes the pre-connect bytes back.
+   A later edit stays. The backup is removed only after that write is read back and matches.
+   `--force` restores the backup bytes.
 8. **One config file.** A single TOML file (`crates/config/src/lib.rs`) replaces about 20
    JSON and YAML state files (`ref.md:2998`). It can be reviewed, diffed and checked
    (`hofund config check`).
@@ -91,9 +93,9 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 | # | magpie feature | magpie evidence | Stage | hofund status | hofund evidence | Plan to do better than magpie |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1.1 | OpenAI Chat Completions endpoint `/v1/chat/completions` | `internal/gateway/chat.go`; `ref.md:1880` | core | Done | `crates/codec/src/openai_chat.rs:51` (`include_usage`) | Streamed Chat requests set `stream_options.include_usage`, so the upstream reports usage. Next: golden stream tests per vendor. |
-| 1.2 | OpenAI Responses endpoint `/v1/responses` (SSE) | `internal/gateway/responses.go`; `ref.md:1882` | core | Done | `crates/codec/src/openai_responses.rs` | Streams emit `output_text.done` and `content_part.done`, put `id` and `content` on `output_item.done`, put the full `output` array on `response.completed`, and set `sequence_number` on every event. |
-| 1.3 | Anthropic Messages endpoint `/v1/messages` | `internal/gateway/anthropic.go`; `ref.md:1883` | core | Done | `crates/codec/src/anthropic.rs`; `crates/provider/src/http.rs` | Usage is on `message_start`. `content_block_stop` comes before a single `message_delta`. Message ids start with `msg_`. Extension fields pass through only when the inbound and outbound protocols match, so `metadata.user_id` and `cache_control` do not cross protocols. |
+| 1.1 | OpenAI Chat Completions endpoint `/v1/chat/completions` | `internal/gateway/chat.go`; `ref.md:1880` | core | Done | `crates/codec/src/openai_chat.rs:51` (`include_usage`), `:1428` (`client_wants_usage`) | Streamed Chat requests set `stream_options.include_usage` on the upstream, so the upstream reports usage. The client is sent that usage chunk only when its own request set `include_usage`. The chunk has an empty `choices` array and still carries `id` and `model`. Next: golden stream tests per vendor. |
+| 1.2 | OpenAI Responses endpoint `/v1/responses` (SSE) | `internal/gateway/responses.go`; `ref.md:1882` | core | Done | `crates/codec/src/openai_responses.rs:429` (`decode_tools`), `:2262` (`responses_id`) | Streams emit `output_text.done` and `content_part.done`, put `id` and `content` on `output_item.done`, put the full `output` array on `response.completed`, and set `sequence_number` on every event. A `namespace`, `web_search`, or `custom` tool is accepted. Same-protocol encode writes the original tools array. Client response ids start with `resp_`, and each output item has its own id. |
+| 1.3 | Anthropic Messages endpoint `/v1/messages` | `internal/gateway/anthropic.go`; `ref.md:1883` | core | Done | `crates/codec/src/anthropic.rs:1183` (`anthropic_message_id`); `crates/provider/src/http.rs`; `crates/provider/src/billing.rs:12` | Usage is on `message_start`. `content_block_stop` comes before a single `message_delta`. Message ids start with `msg_`, including a unary reply. Extension fields pass through only when the inbound and outbound protocols match, so `metadata.user_id` and `cache_control` do not cross protocols. A system text that is only `x-anthropic-billing-header` is removed on that crossing. |
 | 1.4 | Gemini `generateContent` and `streamGenerateContent` | `internal/gateway/gemini.go`; `ref.md:1885` | core | Done | `crates/codec/src/generative.rs`; `crates/gateway/src/endpoints.rs` | Keep. Token counting is row 1.5. |
 | 1.5 | Token counting: `/v1/messages/count_tokens` and Gemini `:countTokens` | `ref.md:1884-1885` | core | Done | `crates/gateway/src/lib.rs:139` and `:319`; `crates/gateway/src/endpoints.rs:40` (`match_count`); `crates/provider/src/anthropic.rs:53` | A Messages upstream is asked to count. 404, 405, 501, and a 400 whose message says the endpoint is unsupported become an estimate of `ceil(chars/4)` with `estimated: true` (`crates/ir/src/estimate.rs:14`). A bad image or an unsupported tool stays an error. Counts do not write usage rows. This is not a model-family tokenizer; the catalog is not shipped. |
 | 1.6 | Model list `/v1/models` and `/v1beta/models`, with reasoning levels and context sizes | `ref.md:1887`, `ref.md:1890` | core | Partial | `crates/gateway/src/lib.rs:198` (ids only) | Add context window, output limit, modalities and reasoning levels from the model catalog (row 2.8). |
@@ -102,7 +104,7 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | 1.9 | Speech to text passthrough `/v1/audio/transcriptions` and `/translations` | `internal/gateway/transcribe.go`; `ref.md:1886` | auxiliary | Missing | none | Multipart passthrough with model rewrite only. Stream the body instead of buffering it. |
 | 1.10 | Embeddings | `internal/gateway/embeddings.go` | auxiliary | Missing | none | Add an `/v1/embeddings` codec over the same router. |
 | 1.11 | Routes without the `/v1` prefix and behind a path-prefixed reverse proxy | `ref.md:1864-1866` | auxiliary | Missing | `crates/gateway/src/lib.rs:127` | Add a configurable base path. Never guess from headers. |
-| 1.12 | Cross-protocol translation with tools, reasoning and images | `internal/gateway/ir.go`, `chat_tool_shape.go`, `image_input.go` | core | Done | `crates/ir/src/content.rs`; `crates/codec` | Already better (hub IR). Add a translation conformance suite over every pair. |
+| 1.12 | Cross-protocol translation with tools, reasoning and images | `internal/gateway/ir.go`, `chat_tool_shape.go`, `image_input.go` | core | Done | `crates/ir/src/content.rs`; `crates/codec/src/openai_responses.rs:429`; `crates/provider/src/http.rs:195` | Already better (hub IR). A custom tool becomes a function with one string input. A namespace is flattened to `namespace__name`. `web_search` has no function mapping and is dropped; the provider logs a warning only when the upstream protocol differs. A conformance suite over every pair is still open. |
 | 1.13 | Streaming with flow control | `internal/gateway/sse.go`, `whole_stream.go` | core | Done | `crates/provider/src/stream.rs` | Already better (backpressure). |
 | 1.14 | Reasoning effort mapped between wires (`effort`, `reasoning_effort`, `thinking.budget_tokens`) | `internal/gateway/wire_effort.go`, `effort_update.go`; `ref.md:1291` | core | Done | `crates/ir/src/effort.rs:16`; `crates/ir/src/params.rs:42` | One enum on the request, not a process-global thread map. Same-protocol encode keeps the caller's field. Chat and Responses write `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Messages writes `output_config.effort` (`minimal` as `low`) and `thinking.type = disabled` when the caller asked for no reasoning. Generative Language writes `thinkingLevel`, folding `xhigh` and `max` to `high`, and `thinkingBudget: 0` for no reasoning. Levels are not clamped to a model. `budget_tokens` is not mapped. Level tables checked 2026-10-25. |
 | 1.15 | Prompt cache handling (Anthropic `cache_control`, cache stays on one account) | `internal/gateway/claude_cache.go`; `ref.md:1600-1616` | core | Partial | cache tokens are parsed in `crates/codec/src/*.rs` but not stored | Same-protocol requests keep `cache_control` on the extension bag. A different outbound protocol drops it. Store cache tokens (row 9.2) and keep a session on one upstream (row 4.6). |
@@ -182,7 +184,7 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | # | magpie feature | magpie evidence | Stage | hofund status | hofund evidence | Plan to do better than magpie |
 | --- | --- | --- | --- | --- | --- | --- |
 | 5.1 | Supported agents (about 56 adapters; the README says 65+) | `internal/agent`; `ref.md:88` | core | Partial | `crates/agent/src/catalog.rs` (claude-code, codex, gemini-cli, opencode). OpenCode follows `XDG_CONFIG_HOME` when set (`catalog.rs:224`). Connect warns when the configured model has no route. | Describe each adapter as data (file, format, keys), so most agents need no code. Add the next 10 by usage. |
-| 5.2 | Connect and disconnect with backup and restore | `docs/subsystems/agent-wiring.md`; `internal/agent` | core | Done | `crates/agent/src/catalog.rs:472` (`disconnect`) | Disconnect removes only the keys connect wrote, on the current file, so a later edit such as Codex `sandbox_mode` stays. `--force` restores the connect-time backup. A second disconnect exits 0. Empty directories connect created are removed. |
+| 5.2 | Connect and disconnect with backup and restore | `docs/subsystems/agent-wiring.md`; `internal/agent` | core | Done | `crates/agent/src/catalog.rs:479` (`disconnect`), `:702` (`merge_owned_keys`), `:782` (`restore_exact`); `crates/agent/src/store.rs:91` (`write_verified`) | If the file still equals what connect wrote, disconnect writes the pre-connect backup back, so a compact Claude or Gemini `settings.json` stays byte-identical. Otherwise each owned key returns to its pre-connect value when it still holds what hofund wrote, and is removed only when it was absent before. A value the user changed is kept, with a warning. Keys the user added stay. The backup is deleted only after the restored bytes are read back and match. `--force` writes the backup bytes. A second disconnect exits 0. Empty directories connect created are removed. |
 | 5.3 | Format-preserving edits (TOML, JSONC, YAML) | `internal/edit` | core | Partial | TOML keeps comments; JSONC comments are dropped until revert (`crates/agent/src/catalog.rs`) | Use a lossless JSONC editor that keeps comments. |
 | 5.4 | Drift detection | `docs/subsystems/agent-wiring.md` | core | Partial | `crates/agent/src/lib.rs:175` (`ConnectionStatus`) | Report which keys drifted, and offer to fix them. |
 | 5.5 | Set an agent's model and effort from the CLI (`magpie claude opus`) | `internal/cli/main.go:38`; `ref.md:2597` | core | Missing | none | `hofund agent set <agent> model=<id> effort=<level>`, checked against the catalog. |
@@ -329,7 +331,7 @@ Ranked by how much each one blocks real daily use. Model names per upstream
 (row 1.14), and token counts (row 1.5) are Done in pull request #12 and are
 not listed here. The v0.1 blockers on `main` (`ac6325a` #9, `695860d` #10)
 are not gaps either: stream event order (rows 1.1 to 1.3), field leakage
-across protocols (row 1.3), edits kept on disconnect (row 5.2), token
+across protocols (row 1.3), pre-existing keys restored on disconnect (row 5.2), token
 rotation (row 10.3), `--help` and `examples/hofund.toml` (row 11.1), and
 constant-time `x-api-key` (row 10.2).
 

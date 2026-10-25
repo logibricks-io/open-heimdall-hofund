@@ -196,6 +196,149 @@ fn top_k_is_not_on_the_responses_wire() {
 }
 
 #[test]
+fn codex_tool_types_pass_through_and_map() {
+    // Tool types from the 2026-10-25 Codex CLI 0.164.0 smoke (`namespace`
+    // `multi_agent_v1`, `web_search`, custom `apply_patch` with a grammar).
+    // The body is reconstructed from those types; the original bytes were not saved.
+    let body = include_str!("fixtures/codex_0_164_responses.json");
+    let request = OpenAiResponses
+        .decode_request(body.as_bytes())
+        .expect("decode");
+    let names: Vec<&str> = request
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["multi_agent_v1__spawn_agent", "apply_patch"]);
+    let patch = request
+        .tools
+        .iter()
+        .find(|tool| tool.name == "apply_patch")
+        .expect("apply_patch");
+    assert_eq!(
+        patch.input_schema["properties"]["input"]["type"],
+        json!("string")
+    );
+    assert!(
+        patch
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("lark") && text.contains("input"))
+    );
+    let dropped = request
+        .extensions
+        .get(hofund_codec::UNMAPPED_TOOLS)
+        .expect("dropped");
+    assert_eq!(dropped, &json!(["web_search"]));
+
+    let same = OpenAiResponses.encode_request(&request).expect("encode");
+    let same_value: serde_json::Value = serde_json::from_slice(&same).expect("json");
+    let original: serde_json::Value = serde_json::from_str(body).expect("fixture");
+    assert_eq!(same_value["tools"], original["tools"]);
+
+    let mut crossed = request.clone();
+    crossed.strip_extensions();
+    let chat = OpenAiChat.encode_request(&crossed).expect("chat");
+    let chat_value: serde_json::Value = serde_json::from_slice(&chat).expect("json");
+    let tools = chat_value["tools"].as_array().expect("tools");
+    assert!(tools.iter().all(|tool| tool["type"] == "function"));
+    let offered: Vec<&str> = tools
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert_eq!(offered, vec!["multi_agent_v1__spawn_agent", "apply_patch"]);
+    let chat_text = String::from_utf8(chat).expect("utf8");
+    assert!(!chat_text.contains("web_search"));
+    assert!(!chat_text.contains("namespace"));
+}
+
+#[test]
+fn tool_search_for_the_client_becomes_a_function() {
+    let request = OpenAiResponses
+        .decode_request(
+            br#"{"model":"m","input":"hi","tools":[
+                {"type":"tool_search","name":"tool_search","execution":"client","parameters":{"type":"object"}},
+                {"type":"tool_search","name":"tool_search","execution":"server","parameters":{"type":"object"}},
+                {"type":"image_generation"}
+            ]}"#,
+        )
+        .expect("decode");
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0].name, "tool_search");
+    let dropped = request
+        .extensions
+        .get(hofund_codec::UNMAPPED_TOOLS)
+        .expect("dropped");
+    assert_eq!(
+        dropped,
+        &json!(["tool_search:tool_search", "image_generation"])
+    );
+}
+
+#[test]
+fn response_ids_are_prefixed_and_item_ids_are_not_reused() {
+    let mut response = hofund_ir::Response {
+        id: Some("chatcmpl-1".to_owned()),
+        model: Some("m".to_owned()),
+        message: hofund_ir::Message::new(Role::Assistant),
+        stop: None,
+        usage: None,
+        extensions: hofund_ir::Extensions::new(),
+    };
+    response.message.content.push(ContentPart::text("ok"));
+    let encoded = OpenAiResponses.encode_response(&response).expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    assert_eq!(value["id"], json!("resp_chatcmpl-1"));
+    response.id = None;
+    let encoded = OpenAiResponses.encode_response(&response).expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    assert_eq!(value["id"], json!("resp_local"));
+
+    let events = vec![
+        StreamEvent::MessageStart(hofund_ir::MessageStart {
+            id: Some("chatcmpl-1".to_owned()),
+            model: Some("m".to_owned()),
+            usage: None,
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::ContentBlockStart(hofund_ir::ContentBlockStart {
+            index: 0,
+            block: hofund_ir::BlockStart::Text,
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::TextDelta(hofund_ir::TextDelta {
+            index: 0,
+            text: "a".to_owned(),
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::ContentBlockStop(hofund_ir::ContentBlockStop {
+            index: 0,
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::ContentBlockStart(hofund_ir::ContentBlockStart {
+            index: 0,
+            block: hofund_ir::BlockStart::Text,
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::TextDelta(hofund_ir::TextDelta {
+            index: 0,
+            text: "b".to_owned(),
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::ContentBlockStop(hofund_ir::ContentBlockStop {
+            index: 0,
+            extensions: hofund_ir::Extensions::new(),
+        }),
+        StreamEvent::MessageStop(hofund_ir::MessageStop::default()),
+    ];
+    let encoded = OpenAiResponses.encode_stream(&events).expect("stream");
+    let text = String::from_utf8(encoded).expect("utf8");
+    assert!(text.contains("\"id\":\"resp_chatcmpl-1\""), "{text}");
+    assert!(text.contains("\"id\":\"msg_0\""), "{text}");
+    assert!(text.contains("\"id\":\"msg_1\""), "{text}");
+}
+
+#[test]
 fn malformed_input_is_an_error() {
     assert!(OpenAiResponses.decode_request(b"").is_err());
     assert!(OpenAiResponses.decode_request(b"{}").is_err());

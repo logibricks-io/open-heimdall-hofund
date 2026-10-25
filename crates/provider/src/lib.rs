@@ -7,6 +7,7 @@
 //! polls, which is the backpressure.
 
 mod anthropic;
+mod billing;
 mod error;
 mod http;
 mod openai_compat;

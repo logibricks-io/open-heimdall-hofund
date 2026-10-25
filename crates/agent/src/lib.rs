@@ -4,9 +4,11 @@
 //! keys those files must contain. [`AgentAdapter::plan`] previews the edit.
 //! [`AgentAdapter::apply`] backs up each original file once, then replaces it
 //! by writing a temporary file and renaming it. [`AgentAdapter::disconnect`]
-//! removes only the keys that apply wrote, on the file as it is now, so an
-//! edit made while connected stays. [`AgentAdapter::revert`] puts the original
-//! bytes back. Unrelated keys are left in place on apply. TOML comments stay.
+//! puts the connect-time bytes back when the file is still exactly what apply
+//! wrote. Otherwise each key apply touched is restored to its previous value,
+//! unless the user changed it, in which case that value stays and a warning is
+//! returned. [`AgentAdapter::revert`] puts the original bytes back. Unrelated
+//! keys are left in place on apply. TOML comments stay.
 //! JSON comments do not survive an apply; revert restores them.
 //!
 //! This crate depends only on `config`. It does not read the token file and
@@ -48,6 +50,15 @@ mod edit;
 mod store;
 
 pub use catalog::{adapters, find};
+
+/// What [`AgentAdapter::disconnect`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisconnectOutcome {
+    /// A backed-up file was merged or replaced.
+    pub changed: bool,
+    /// Keys the user changed after connect. Those values were left in place.
+    pub warnings: Vec<String>,
+}
 
 /// Where the local gateway is listening, and the bearer token clients send.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,17 +260,22 @@ pub trait AgentAdapter: Sync {
     /// Returns [`AgentError`] when nothing was backed up, or a write fails.
     fn revert(&self, session: &Session) -> Result<(), AgentError>;
 
-    /// Removes the keys [`Self::apply`] wrote, from the files as they are now.
+    /// Restores each file apply changed.
     ///
-    /// A key added after connect stays. `force` restores the connect-time
-    /// backup instead, which discards those edits. When no backup exists the
-    /// call returns `Ok(false)`.
+    /// When the file is still byte-for-byte what apply wrote, the connect-time
+    /// backup is written back. Otherwise each key apply touched is compared
+    /// with that snapshot: an unchanged key returns to its pre-connect value,
+    /// or is removed when it did not exist, and a key the user edited is kept.
+    /// Keys the user added are kept. `force` writes the backup bytes and
+    /// discards later edits. The backup is deleted only after the restored
+    /// bytes are read back and match. When no backup exists the call returns
+    /// [`DisconnectOutcome`] with `changed: false`.
     ///
     /// # Errors
     ///
     /// Returns [`AgentError`] when a managed file cannot be parsed. The backup
     /// is left in place so a later `force` call can still restore it.
-    fn disconnect(&self, session: &Session, force: bool) -> Result<bool, AgentError>;
+    fn disconnect(&self, session: &Session, force: bool) -> Result<DisconnectOutcome, AgentError>;
 
     /// Writes the token slots in `target` without taking a new backup.
     ///

@@ -18,10 +18,12 @@ protocol = "chat"
 base_url = "http://127.0.0.1:4000/v1"
 api_key = "replace-me"
 
+# Point base_url at a local mock. A placeholder key must not be paired with
+# a real vendor host, or a check of this file can send traffic.
 [[providers]]
 id = "backup"
 kind = "anthropic"
-base_url = "https://api.anthropic.com"
+base_url = "http://127.0.0.1:4001"
 api_key = "replace-me-too"
 
 [[routes]]
