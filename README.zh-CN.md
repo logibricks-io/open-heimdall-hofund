@@ -14,7 +14,7 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 
 ## 状态
 
-**Pre-alpha。** 规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 与 Generative Language API 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，本地 HTTP 服务，以及 Claude Code、Codex CLI、Gemini CLI、OpenCode 的配置适配器已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。桌面应用还没有实现。
+**0.1.0 已准备。** 规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 与 Generative Language API 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，本地 HTTP 服务，Claude Code、Codex CLI、Gemini CLI、OpenCode 的配置适配器，以及菜单栏应用已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。本仓库还没有推送版本标签，也没有发布 GitHub Release。发布步骤见 [docs/release.md](docs/release.md)（英文）。
 
 `hofund serve` 默认监听 `127.0.0.1:3425`，除非配置文件另有指定。所有 `/v1` 请求都需要 `hofund token show` 打印的 bearer token。命令有 `serve`、`config check`、`token show`、`token rotate`、`usage`，以及 `agent list`、`agent connect`、`agent disconnect`、`agent status`。
 
@@ -24,7 +24,34 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 - 编码代理的配置适配器（Claude Code、Codex、Gemini CLI、OpenCode 等）。适配器先生成修改计划，再把修改应用到代理自己的配置上，使任意代理都能调用任意模型。
 - 路由组、选择策略，以及跨提供商和账号的故障转移。
 - 长期运行的本地守护进程，以及 `hofund` 命令行工具。
-- 菜单栏 / 系统托盘应用。预留路径是 `apps/desktop`（Tauri v2），目前尚未创建。
+
+## 安装
+
+在本仓库中构建 `hofund` 命令：
+
+```sh
+cargo install --path crates/cli --locked
+```
+
+这些 crate 的 `publish` 仍为 `false`，因此没有 crates.io 包。
+
+形如 `v0.1.0` 的版本标签会触发发布工作流。该工作流已经写在仓库里，但 0.1.0 还没有因此发布。标签发布之后，资源包括：
+
+- `hofund-cli-installer.sh` 与 `hofund-cli-installer.ps1`，按当前系统下载对应架构的命令行归档
+- macOS（arm64、x86_64，以及用 `lipo` 合成的 universal 归档）、Linux（x86_64 与 aarch64）、Windows（x86_64）的归档及 `.sha256` 校验和
+- `apps/desktop` 打出的菜单栏安装包，以及单独的 `SHA256SUMS`
+
+签名与公证是可选步骤，缺少仓库密钥时会跳过。详见 [docs/release.md](docs/release.md)（英文）。
+
+菜单栏应用是 `hofund-desktop`。Linux 上需要 WebKitGTK 4.1 与 Ayatana AppIndicator 头文件：
+
+```sh
+sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  librsvg2-dev patchelf libxdo-dev
+cargo build -p hofund-desktop
+```
+
+应用读取 `HOFUND_CONFIG`；未设置时使用平台配置目录下的 `hofund/hofund.toml`。第一次 Start 或 Open config 会写入一份只有默认监听地址的配置。命令行仍默认使用当前目录的 `./hofund.toml`。
 
 ## 架构
 

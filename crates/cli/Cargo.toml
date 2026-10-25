@@ -19,5 +19,8 @@ path = "src/main.rs"
 hofund-agent = { workspace = true }
 hofund-daemon = { workspace = true }
 
+[package.metadata.dist]
+dist = true
+
 [lints]
 workspace = true

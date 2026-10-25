@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -117,6 +117,81 @@ pub fn load_path(path: &Path) -> Result<Config, ConfigError> {
     let text =
         std::fs::read_to_string(path).map_err(|error| ConfigError::Read(error.to_string()))?;
     load(&text)
+}
+
+/// A config that only sets the default listen address.
+///
+/// `ensure_config_file` writes this when the user file does not exist yet.
+pub const STARTER_CONFIG: &str = "\
+# Local hofund gateway.
+# Add [[providers]] and [[routes]] before a coding agent calls a model.
+listen = \"127.0.0.1:3425\"
+";
+
+/// The configuration file the menu-bar app reads.
+///
+/// `HOFUND_CONFIG` selects the file when it is set and not empty. Otherwise
+/// the path is `hofund/hofund.toml` under the platform config directory:
+/// `%APPDATA%` on Windows, `~/Library/Application Support` on macOS, and
+/// `XDG_CONFIG_HOME` or `~/.config` on other Unix systems.
+#[must_use]
+pub fn user_config_path() -> PathBuf {
+    resolve_config_path(std::env::var_os("HOFUND_CONFIG"), config_home())
+}
+
+/// Creates `path` and its parent directories when the file is absent.
+///
+/// An existing file is left unchanged. Returns whether a new file was written.
+///
+/// # Errors
+///
+/// Returns the I/O error when a directory or the file cannot be created.
+pub fn ensure_config_file(path: &Path) -> std::io::Result<bool> {
+    if path.is_file() {
+        return Ok(false);
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, STARTER_CONFIG)?;
+    Ok(true)
+}
+
+fn resolve_config_path(explicit: Option<std::ffi::OsString>, config_home: PathBuf) -> PathBuf {
+    if let Some(path) = explicit.filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+    config_home.join("hofund").join("hofund.toml")
+}
+
+fn config_home() -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .map_or_else(|| home_dir().join("AppData").join("Roaming"), PathBuf::from)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        home_dir().join("Library").join("Application Support")
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(path) if !path.is_empty() => PathBuf::from(path),
+            _ => home_dir().join(".config"),
+        }
+    }
+}
+
+fn home_dir() -> PathBuf {
+    #[cfg(windows)]
+    let found = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    #[cfg(not(windows))]
+    let found = std::env::var_os("HOME");
+    found.map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
 /// Parses `text` and returns the first error it finds.
@@ -323,6 +398,8 @@ struct RawRoute {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{Kind, Protocol, load};
 
     #[test]
@@ -365,5 +442,33 @@ mod tests {
 
         let error = load("listen = \"not-an-address\"\n").expect_err("listen");
         assert!(error.to_string().contains("listen"));
+    }
+
+    #[test]
+    fn an_explicit_path_wins_over_the_config_home() {
+        let path = super::resolve_config_path(
+            Some(std::ffi::OsString::from("/tmp/hofund.toml")),
+            PathBuf::from("/unused"),
+        );
+        assert_eq!(path, PathBuf::from("/tmp/hofund.toml"));
+        let path = super::resolve_config_path(None, PathBuf::from("/cfg"));
+        assert_eq!(path, PathBuf::from("/cfg/hofund/hofund.toml"));
+        let path =
+            super::resolve_config_path(Some(std::ffi::OsString::new()), PathBuf::from("/cfg"));
+        assert_eq!(path, PathBuf::from("/cfg/hofund/hofund.toml"));
+    }
+
+    #[test]
+    fn ensure_config_file_writes_once() {
+        let dir = std::env::temp_dir().join(format!("hofund-config-{}", std::process::id()));
+        let path = dir.join("hofund.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(super::ensure_config_file(&path).expect("create"));
+        assert!(path.is_file());
+        std::fs::write(&path, "listen = \"127.0.0.1:9\"\n").expect("overwrite");
+        assert!(!super::ensure_config_file(&path).expect("keep"));
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("127.0.0.1:9"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

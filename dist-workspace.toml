@@ -1,0 +1,26 @@
+[workspace]
+members = ["cargo:."]
+
+# cargo-dist builds the hofund CLI. The menu-bar app is a separate workflow.
+# Signing is not cargo-dist's macos-sign: an empty GitHub secret is the empty
+# string, and cargo-dist 0.32 then tries to decode it. The release workflow
+# signs after a successful build, and only when the secrets are non-empty.
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+installers = ["shell", "powershell"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+]
+pr-run-mode = "skip"
+checksum = "sha256"
+macos-sign = false
+hosting = "github"
+install-updater = false
+github-attestations = false
+unix-archive = ".tar.gz"
+windows-archive = ".zip"

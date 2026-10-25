@@ -1,0 +1,17 @@
+{
+  "identifier": "default",
+  "description": "Commands the usage window may call.",
+  "windows": ["usage"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "allow-snapshot",
+    "allow-start-gateway",
+    "allow-stop-gateway",
+    "allow-set-agent",
+    "allow-usage-summary",
+    "allow-open-config"
+  ]
+}

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-25
+
 ### Added
 
 - Canonical chat IR in `hofund-ir`: messages, content parts (text, image,
@@ -35,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST /v1beta/models/{model}:streamGenerateContent`, and
   `GET /v1beta/models`. Authentication accepts the bearer token,
   `x-goog-api-key`, or a `key` query value, compared in constant time.
+- Menu-bar app `hofund-desktop` (Tauri v2) at `apps/desktop`. It starts and
+  stops the local gateway, shows the listen address, toggles each catalog
+  agent through `hofund-agent`, prints the usage table, opens the config
+  file, and quits. The config path is `HOFUND_CONFIG` or
+  `hofund/hofund.toml` under the platform config directory.
+- Release workflow for the `hofund` CLI (cargo-dist: macOS arm64, x86_64, and
+  universal; Linux x86_64 and aarch64; Windows x86_64) and for Tauri bundles.
+  Archives carry SHA-256 checksums. Code signing and notarization run only
+  when the repository secrets are set.
 - Initial Cargo workspace scaffold for the hofund local LLM gateway, with
   library and binary crates, architecture checks, CI, and repository
   hygiene files.

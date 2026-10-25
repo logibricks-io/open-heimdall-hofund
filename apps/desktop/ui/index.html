@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hofund</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Hofund</h1>
+      <p id="status">Loading…</p>
+    </header>
+    <p class="actions">
+      <button id="start" type="button">Start</button>
+      <button id="stop" type="button">Stop</button>
+      <button id="config" type="button">Open config</button>
+      <button id="refresh" type="button">Refresh</button>
+    </p>
+    <p id="notice"></p>
+    <h2>Agents</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Installed</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="agents"></tbody>
+    </table>
+    <h2>Usage</h2>
+    <pre id="usage"></pre>
+    <script src="main.js"></script>
+  </body>
+</html>

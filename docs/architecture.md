@@ -10,8 +10,8 @@ license notice live in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Do
 not use that project's name or logo as hofund branding.
 
 The local gateway is implemented: codecs, quirk profiles, provider adapters,
-ordered failover, configuration, a bearer token, usage rows, and the `hofund`
-commands. Agent config rewriting and the desktop app are not. The codec field
+ordered failover, configuration, a bearer token, usage rows, the `hofund`
+commands, coding-agent adapters, and the menu-bar app. The codec field
 mapping is in [codecs.md](codecs.md). The adopt-or-redesign record is in
 [magpie-comparison.md](magpie-comparison.md).
 
@@ -20,9 +20,9 @@ Sibling repositories:
 - [`logibricks-io/open-heimdall`](https://github.com/logibricks-io/open-heimdall) — the gate between your applications and intelligence
 - [`logibricks-io/open-heimdall-kernel`](https://github.com/logibricks-io/open-heimdall-kernel) — a Rust gateway using hexagonal architecture
 
-A future desktop shell may live at `apps/desktop` as a Tauri v2 application.
-That directory is reserved and does not exist yet. Nothing in `crates/` may
-depend on it. The desktop app may depend on the same crates as `hofund-cli`.
+The menu-bar app lives at `apps/desktop` (Tauri v2, package `hofund-desktop`).
+Nothing in `crates/` depends on it. It depends on the same crates as
+`hofund-cli`: `hofund-daemon` and `hofund-agent`.
 
 ## Dependency direction
 
@@ -43,6 +43,7 @@ flowchart BT
   gateway["gateway<br/>HTTP server"]
   daemon["daemon<br/>composition root"]
   cli["cli<br/>hofund binary"]
+  desktop["desktop<br/>menu bar"]
 
   codec --> ir
   quirks --> ir
@@ -66,11 +67,13 @@ flowchart BT
   agent --> config
   cli --> daemon
   cli --> agent
+  desktop --> daemon
+  desktop --> agent
 ```
 
 The spine is `ir ← codec ← provider ← router ← gateway ← daemon ← cli`. Read
 each arrow as "depends on". `agent` is a side branch that depends only on
-`config`.
+`config`. `desktop` sits beside `cli` and depends on the same two crates.
 
 | Package | May depend on |
 | --- | --- |
@@ -86,6 +89,7 @@ each arrow as "depends on". `agent` is a side branch that depends only on
 | `hofund-agent` | `hofund-config` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
+| `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
 
 This table is normative. `cargo test --workspace` fails when a package
@@ -131,6 +135,7 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | `usage` | Request and token usage records. |
 | `daemon` | Process composition root. Wires config, secrets, and the gateway. |
 | `cli` | The `hofund` binary. Delegates to the daemon and to agent adapters. |
+| `desktop` | Menu-bar shell at `apps/desktop`. Renders status and calls the daemon and the agent adapters. |
 | `xtask` | Local workspace tasks and the architecture tests. |
 
 ## What is intentionally absent
@@ -138,6 +143,5 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 - Routing strategies other than ordered failover.
 - A running process does not reload configuration.
 - There is no rest timer and no process-global route counter.
-- `apps/desktop`.
 - Language packs. A future i18n pack is the other place, besides
   `README.<lang>.md`, where a language other than English may appear.

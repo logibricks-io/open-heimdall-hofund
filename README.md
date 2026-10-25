@@ -16,11 +16,13 @@ Heimdall is the gate. Hofund is the sword that guards it.
 
 ## Status
 
-**Pre-alpha.** The canonical IR, the Anthropic Messages, OpenAI Chat
+**0.1.0 is prepared.** The canonical IR, the Anthropic Messages, OpenAI Chat
 Completions, OpenAI Responses, and Generative Language codecs, quirk profiles,
-upstream adapters, ordered failover, the local HTTP server, and config
-adapters for Claude Code, Codex CLI, Gemini CLI, and OpenCode are implemented.
-See [docs/codecs.md](docs/codecs.md). The desktop app is not implemented.
+upstream adapters, ordered failover, the local HTTP server, config adapters
+for Claude Code, Codex CLI, Gemini CLI, and OpenCode, and the menu-bar app
+are implemented. See [docs/codecs.md](docs/codecs.md). This tree does not
+publish a GitHub release; the tag step is described in
+[docs/release.md](docs/release.md).
 
 `hofund serve` listens on `127.0.0.1:3425` unless the config says otherwise.
 Every `/v1` request needs the bearer token from `hofund token show`. The
@@ -38,8 +40,44 @@ commands are `serve`, `config check`, `token show`, `token rotate`, `usage`,
 - Routing groups, selection strategies, and failover across providers and
   accounts.
 - A long-running local daemon and the `hofund` CLI.
-- A menu-bar / tray application. The reserved path is `apps/desktop` (Tauri v2).
-  It is not created yet.
+
+## Install
+
+Build the `hofund` binary from this tree:
+
+```sh
+cargo install --path crates/cli --locked
+```
+
+`cargo install --path` uses the lockfile in this repository. The crates stay
+`publish = false`, so there is no crates.io package.
+
+A version tag such as `v0.1.0` is what the release workflow publishes. That
+workflow is in the repository and has not been run for 0.1.0. When a tag is
+published, the assets are:
+
+- `hofund-cli-installer.sh` and `hofund-cli-installer.ps1`, which download
+  the CLI archive for the current machine (one architecture)
+- per-target archives and `.sha256` checksums for macOS (arm64, x86_64, and
+  a universal archive built with `lipo`), Linux (x86_64 and aarch64), and
+  Windows (x86_64)
+- menu-bar bundles from `apps/desktop`, with their own `SHA256SUMS`
+
+The release steps, including optional code signing, are in
+[docs/release.md](docs/release.md).
+
+The menu-bar app is `hofund-desktop`. On Linux the build needs WebKitGTK 4.1
+and the Ayatana AppIndicator headers:
+
+```sh
+sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  librsvg2-dev patchelf libxdo-dev
+cargo build -p hofund-desktop
+```
+
+The app reads `HOFUND_CONFIG`, or `hofund/hofund.toml` under the platform
+config directory, and creates a starter file on Start or Open config. The CLI
+still defaults to `./hofund.toml`.
 
 ## Architecture
 
