@@ -81,7 +81,8 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
    (`hofund config check`).
 9. **Release pipeline.** cargo-dist builds 5 targets plus a universal2 macOS binary,
    with checksums and optional signing (`dist-workspace.toml`, `.github/workflows/release*.yml`).
-   That is reproducible from CI.
+   Pull requests run `dist plan` and install the pinned Tauri CLI
+   (`.github/workflows/ci.yml`). That is reproducible from CI.
 10. **Per-upstream model names and reasoning effort.** Each route member names
     the model it sends (`crates/config/src/lib.rs:98`). Effort is one enum on
     the request (`crates/ir/src/effort.rs:16`), mapped by each codec. Token
@@ -315,7 +316,7 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 | # | magpie feature | magpie evidence | Stage | hofund status | hofund evidence | Plan to do better than magpie |
 | --- | --- | --- | --- | --- | --- | --- |
-| 16.1 | Prebuilt binaries for macOS, Linux and Windows | `build/darwin`, `build/windows`; `ref.md:2322` | core | Done | `dist-workspace.toml`; `.github/workflows/release.yml`, `release-desktop.yml`; `docs/release.md` | Already better: checksums and optional signing. Add provenance attestation. |
+| 16.1 | Prebuilt binaries for macOS, Linux and Windows | `build/darwin`, `build/windows`; `ref.md:2322` | core | Done | `dist-workspace.toml`; `.github/workflows/release.yml`, `release-desktop.yml`, `ci.yml`; `docs/release.md` | Already better: checksums and optional signing. Add provenance attestation. |
 | 16.2 | Self-update with `--proxy`, `--mirror` and auto-update | `internal/update`; `ref.md:2322` | auxiliary | Missing | none | Updater with signature checks (minisign) for the CLI and `tauri-plugin-updater` for the app. |
 | 16.3 | Socket handoff on update, so the port never closes | `internal/handoff` | auxiliary | Missing | none | Pass the listening socket to the new process, then drain the old one. |
 | 16.4 | Background service (systemd, launchd): `daemon install`, `status`, `restart` | `internal/daemon`; `ref.md:2382` | auxiliary | Missing | `crates/daemon` is a library, not a service installer | `hofund service install`, with unit files written atomically. |

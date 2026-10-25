@@ -54,17 +54,34 @@ overwrites those adjustments. After generating, restore all of these:
 - the `universal-macos` job
 - `universal-macos` on the `host` job `needs` list, and in that job's `if`
 - the `Download the universal archive` step in `host`
+- the `Stage the universal archive` step in `host`
+
+`allow-dirty = ["ci"]` is set because of those edits. cargo-dist 0.32 treats
+a `release.yml` that differs from `dist generate` as an error, and the tag
+workflow stops in `dist host --steps=create` before it creates a GitHub
+release. With `ci` in that list, dist leaves the file alone. The adjustments
+above still have to be restored after `dist generate`; the setting does not
+put them back.
 
 Leave `macos-sign = false`. Turning it on puts `CODESIGN_*` into the `dist
 build` environment, including when the secrets are empty.
 
-The workflow runs only when a version tag is pushed. It does not run on pull
-requests (`pr-run-mode = "skip"`).
+The release workflow runs only when a version tag is pushed. It does not run
+on pull requests (`pr-run-mode = "skip"`). CI runs `dist plan` on every pull
+request, using the `cargo-dist-version` in `dist-workspace.toml`. That is the
+same integrity check the tag's plan job runs. The CI job also requires the
+adjustments above to still be present in `release.yml`.
 
 ## Menu bar
 
-`.github/workflows/release-desktop.yml` builds `hofund-desktop` with the Tauri
-CLI pinned to 2.12.5.
+`.github/workflows/release-desktop.yml` builds `hofund-desktop` with
+`@tauri-apps/cli` pinned to 2.12.4.
+
+The Rust crate `tauri` is 2.12.5. The CLI package does not publish 2.12.5.
+2.12.4 is the CLI released with that crate on 2026-10-21 (`tauri-cli` 2.12.4
+on crates.io, `@tauri-apps/cli` 2.12.4 on npm). Installing a missing version
+fails with npm `ETARGET` before any bundle is built. CI installs this same
+pin on every pull request and checks `tauri --version`.
 
 | Runner | Bundles |
 | --- | --- |

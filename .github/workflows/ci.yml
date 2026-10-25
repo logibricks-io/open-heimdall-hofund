@@ -87,6 +87,68 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  release-plan:
+    name: release-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Require the hand-edited release workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F -q 'allow-dirty = ["ci"]' dist-workspace.toml
+          for marker in \
+            '.github/scripts/repack-macos-cli.sh' \
+            '.github/scripts/sign-windows-cli.ps1' \
+            'universal-macos:' \
+            'Download the universal archive' \
+            'Stage the universal archive'
+          do
+            grep -q -F "$marker" .github/workflows/release.yml
+          done
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/rust-toolchain
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F'"' '/^cargo-dist-version[[:space:]]*=/ { print $2; exit }' dist-workspace.toml)"
+          case "$version" in
+            *.*.*) ;;
+            *)
+              echo "cargo-dist-version must be a full major.minor.patch triple" >&2
+              exit 1
+              ;;
+          esac
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${version}/cargo-dist-installer.sh" | sh
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Plan the release
+        shell: bash
+        run: dist plan
+      - name: Install the pinned Tauri CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t pins < <(grep -oE '@tauri-apps/cli@[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/release-desktop.yml)
+          if [ "${#pins[@]}" -ne 1 ]; then
+            echo "release-desktop.yml must pin @tauri-apps/cli exactly once" >&2
+            printf '%s\n' "${pins[@]:-}" >&2
+            exit 1
+          fi
+          npm install --global "${pins[0]}"
+          expected="${pins[0]##*@}"
+          actual="$(tauri --version | awk '{ print $NF }')"
+          echo "tauri --version: ${actual} (pin ${expected})"
+          if [ "$actual" != "$expected" ]; then
+            echo "installed Tauri CLI ${actual} does not match ${expected}" >&2
+            exit 1
+          fi
+
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
