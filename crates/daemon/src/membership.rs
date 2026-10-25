@@ -3,8 +3,9 @@
 //! The service is wrapped in the stage-1 layers: a kernel deadline, panic
 //! containment, and the router's span (the span is entered by the router,
 //! which knows the attempt). A panic marks the member failed and publishes a
-//! snapshot that leaves it out. There is no cooldown timer; that is pull
-//! request K.
+//! snapshot that leaves it out. The body deadline is idle time since the last
+//! chunk. A stream that keeps sending is not cut off. There is no cooldown
+//! timer; that is pull request K.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -313,15 +314,13 @@ fn watch_completion(
     failed: Arc<std::sync::atomic::AtomicBool>,
     reload: Weak<Table>,
 ) -> Completion {
-    let total = idle.saturating_mul(2);
     match completion {
         Completion::Stream(stream) => {
-            Completion::Stream(Box::pin(Watched::new(stream, idle, total, failed, reload)))
+            Completion::Stream(Box::pin(Watched::new(stream, idle, failed, reload)))
         }
         Completion::Raw(body) => Completion::Raw(BodyStream::from_stream(Watched::new(
             body_to_stream(body),
             idle,
-            total,
             failed,
             reload,
         ))),
@@ -341,7 +340,6 @@ fn body_to_stream(
 struct Watched<S> {
     inner: Pin<Box<S>>,
     idle: Duration,
-    total_deadline: tokio::time::Instant,
     idle_deadline: tokio::time::Instant,
     sleep: Pin<Box<tokio::time::Sleep>>,
     failed: Arc<std::sync::atomic::AtomicBool>,
@@ -353,19 +351,15 @@ impl<S> Watched<S> {
     fn new(
         inner: S,
         idle: Duration,
-        total: Duration,
         failed: Arc<std::sync::atomic::AtomicBool>,
         reload: Weak<Table>,
     ) -> Self {
-        let now = tokio::time::Instant::now();
-        let idle_deadline = now + idle;
-        let total_deadline = now + total;
+        let idle_deadline = tokio::time::Instant::now() + idle;
         Self {
             inner: Box::pin(inner),
             idle,
-            total_deadline,
             idle_deadline,
-            sleep: Box::pin(tokio::time::sleep_until(idle_deadline.min(total_deadline))),
+            sleep: Box::pin(tokio::time::sleep_until(idle_deadline)),
             failed,
             reload,
             done: false,
@@ -384,8 +378,7 @@ where
         if this.done {
             return Poll::Ready(None);
         }
-        let now = tokio::time::Instant::now();
-        if now >= this.total_deadline || now >= this.idle_deadline {
+        if tokio::time::Instant::now() >= this.idle_deadline {
             this.done = true;
             return Poll::Ready(Some(Err(PluginError::timeout("kernel deadline exceeded"))));
         }
@@ -410,9 +403,7 @@ where
             },
             Ok(Poll::Ready(item)) => {
                 this.idle_deadline = tokio::time::Instant::now() + this.idle;
-                this.sleep
-                    .as_mut()
-                    .reset(this.idle_deadline.min(this.total_deadline));
+                this.sleep.as_mut().reset(this.idle_deadline);
                 Poll::Ready(item)
             }
         }
@@ -713,6 +704,79 @@ mod tests {
         );
         assert_eq!(snapshot.load().models(), ["demo".to_owned()]);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    struct Pace {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for Pace {
+        fn id(&self) -> &str {
+            "pace"
+        }
+
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<Completion, ProviderError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            let stream = futures_util::stream::unfold(0u8, |n| async move {
+                if n >= 5 {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Some((
+                    Ok::<bytes::Bytes, ProviderError>(bytes::Bytes::from_static(b"x")),
+                    n + 1,
+                ))
+            });
+            Ok(Completion::Raw(Box::pin(stream)))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_active_body_is_not_cut_off_at_twice_the_idle() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let mut built = BTreeMap::new();
+        built.insert(
+            "pace".to_owned(),
+            BuiltProvider {
+                adapter: Arc::new(Pace {
+                    hits: Arc::clone(&hits),
+                }),
+                protocol: "openai-chat",
+                timeout: Duration::from_millis(30),
+                plugin_id: "openai-compat".to_owned(),
+                preset_id: String::new(),
+            },
+        );
+        let mut routes = BTreeMap::new();
+        routes.insert(
+            "demo".to_owned(),
+            vec![PlannedHop {
+                provider: "pace".to_owned(),
+                wire_model: None,
+                max_output_tokens: None,
+            }],
+        );
+        let snapshot = open(&built, routes, FailoverPolicy::default()).expect("snapshot");
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("dispatch");
+        let hofund_plugin_api::Completion::Raw(mut body) = routed.completion else {
+            panic!("raw body");
+        };
+        let mut count = 0;
+        while let Some(chunk) = body.next_chunk().await {
+            chunk.expect("an active stream stays inside the idle deadline");
+            count += 1;
+        }
+        assert_eq!(count, 5);
+        assert_eq!(snapshot.load().models(), ["demo".to_owned()]);
     }
 
     #[test]

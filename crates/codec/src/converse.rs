@@ -282,7 +282,7 @@ impl Codec for Converse {
         Box::new(ConverseEncoder)
     }
 
-    fn model_fields(&self) -> &'static [&'static str] {
+    fn model_paths(&self) -> &'static [&'static [&'static str]] {
         &[]
     }
 

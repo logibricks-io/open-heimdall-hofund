@@ -61,8 +61,8 @@ pub struct Endpoint {
     pub quirks: Option<&'static Profile>,
     /// Idle deadline the kernel enforces between body chunks.
     ///
-    /// The reqwest client uses a longer backstop, so a call that goes
-    /// through the daemon reports the kernel's timeout.
+    /// Reqwest's read timeout is slightly longer, so a stall is reported by
+    /// the kernel. A stream that keeps sending is not cut off.
     pub timeout: Duration,
 }
 
@@ -130,7 +130,8 @@ impl Upstream {
             headers.insert(header_name, header_value);
         }
         let client = reqwest::Client::builder()
-            .timeout(socket_backstop(endpoint.timeout))
+            .connect_timeout(endpoint.timeout)
+            .read_timeout(socket_backstop(endpoint.timeout))
             .build()
             .map_err(|error| ProviderError::connect(error.to_string()))?;
         Ok(Self {
@@ -474,12 +475,10 @@ async fn raw_stream(
     Ok(Completion::Raw(Box::pin(head.chain(rest))))
 }
 
-/// Reqwest's whole-call timeout sits past the kernel's idle and total body
-/// deadlines, so the kernel is the one that reports a stall.
+/// Reqwest's read timeout sits 50ms past the kernel's idle deadline, so the
+/// kernel is the one that reports a stall. There is no whole-call cap.
 pub(crate) fn socket_backstop(idle: Duration) -> Duration {
-    let total = idle.saturating_mul(2);
-    idle.saturating_add(total)
-        .saturating_add(Duration::from_millis(50))
+    idle.saturating_add(Duration::from_millis(50))
 }
 
 fn map_chunk(chunk: Result<bytes::Bytes, reqwest::Error>) -> Result<bytes::Bytes, ProviderError> {

@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use syn::visit::Visit;
+
 #[path = "support/plugin_rules.rs"]
 mod plugin_rules;
 
@@ -290,39 +292,86 @@ fn router_does_not_name_plugin_host_types() {
     );
 }
 
-fn plugin_api_use_names(text: &str) -> Vec<(bool, String)> {
-    let needle = "use hofund_plugin_api::";
-    let mut found = Vec::new();
-    let mut start = 0;
-    while let Some(offset) = text[start..].find(needle) {
-        let index = start + offset;
-        let is_pub = text[..index].trim_end().ends_with("pub");
-        let tail = &text[index + needle.len()..];
-        let (body, next) = if let Some(rest) = tail.strip_prefix('{') {
-            let end = rest.find('}').unwrap_or(rest.len());
-            (&rest[..end], index + needle.len() + 1 + end)
-        } else {
-            let end = tail.find([';', '\n']).unwrap_or(tail.len());
-            (&tail[..end], index + needle.len() + end)
-        };
-        for name in imported_names(body) {
-            found.push((is_pub, name));
-        }
-        start = next;
+#[test]
+fn a_crate_alias_reexport_is_outside_the_allow_list() {
+    let reexports = ["Completion", "MemberId", "PluginError", "Request"];
+    for sample in [
+        "pub use hofund_plugin_api as api;\n",
+        "pub use hofund_plugin_api::*;\n",
+        "pub use hofund_plugin_api::{self as api};\n",
+    ] {
+        let names = plugin_api_use_names(sample);
+        assert!(
+            names
+                .iter()
+                .any(|(is_pub, name)| { *is_pub && !reexports.contains(&name.as_str()) }),
+            "{sample:?} -> {names:?}"
+        );
     }
+}
+
+fn plugin_api_use_names(text: &str) -> Vec<(bool, String)> {
+    let Ok(file) = syn::parse_file(text) else {
+        return vec![(false, "does not parse".to_owned())];
+    };
+    let mut found = Vec::new();
+    UseScan { found: &mut found }.visit_file(&file);
     found
 }
 
-fn imported_names(body: &str) -> Vec<String> {
-    body.split(',')
-        .filter_map(|part| {
-            let part = part.split("//").next().unwrap_or(part);
-            let part = part.split(" as ").next().unwrap_or(part);
-            part.split(|byte: char| !byte.is_ascii_alphanumeric() && byte != '_' && byte != '*')
-                .find(|token| !token.is_empty())
-                .map(str::to_owned)
-        })
-        .collect()
+struct UseScan<'a> {
+    found: &'a mut Vec<(bool, String)>,
+}
+
+impl<'ast> Visit<'ast> for UseScan<'_> {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        let is_pub = matches!(item.vis, syn::Visibility::Public(_));
+        collect_plugin_api_use(&item.tree, &[], is_pub, self.found);
+    }
+}
+
+fn collect_plugin_api_use(
+    tree: &syn::UseTree,
+    prefix: &[String],
+    is_pub: bool,
+    found: &mut Vec<(bool, String)>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let mut next = prefix.to_vec();
+            next.push(path.ident.to_string());
+            collect_plugin_api_use(&path.tree, &next, is_pub, found);
+        }
+        syn::UseTree::Name(name) => note_plugin_api_name(prefix, &name.ident, is_pub, found),
+        syn::UseTree::Rename(name) => {
+            if prefix.is_empty() && name.ident == "hofund_plugin_api" {
+                found.push((is_pub, name.rename.to_string()));
+            } else {
+                note_plugin_api_name(prefix, &name.ident, is_pub, found);
+            }
+        }
+        syn::UseTree::Glob(_) => {
+            if prefix.first().map(String::as_str) == Some("hofund_plugin_api") {
+                found.push((is_pub, "*".to_owned()));
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_plugin_api_use(item, prefix, is_pub, found);
+            }
+        }
+    }
+}
+
+fn note_plugin_api_name(
+    prefix: &[String],
+    name: &syn::Ident,
+    is_pub: bool,
+    found: &mut Vec<(bool, String)>,
+) {
+    if prefix.first().map(String::as_str) == Some("hofund_plugin_api") {
+        found.push((is_pub, name.to_string()));
+    }
 }
 
 fn lints_follow_workspace(manifest: &str) -> bool {

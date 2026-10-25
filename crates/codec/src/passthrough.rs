@@ -2,6 +2,10 @@
 //!
 //! The gateway forwards raw bytes. It asks the codec to read token usage and
 //! to patch the model name, so protocol field names stay in this crate.
+//!
+//! Model names are rewritten per complete SSE event or JSON value. A quote on
+//! a comment line cannot change the next event, and only the codec's model
+//! path is replaced.
 
 use hofund_ir::{StreamEvent, Usage};
 
@@ -25,7 +29,7 @@ pub trait RawTap: Send {
 
 pub(crate) struct DecoderTap {
     decoder: Box<dyn StreamDecoder>,
-    fields: &'static [&'static str],
+    paths: &'static [&'static [&'static str]],
     model: String,
     pending: Vec<u8>,
     input: Option<i64>,
@@ -35,12 +39,12 @@ pub(crate) struct DecoderTap {
 impl DecoderTap {
     pub(crate) fn new(
         decoder: Box<dyn StreamDecoder>,
-        fields: &'static [&'static str],
+        paths: &'static [&'static [&'static str]],
         model: &str,
     ) -> Self {
         Self {
             decoder,
-            fields,
+            paths,
             model: model.to_owned(),
             pending: Vec::new(),
             input: None,
@@ -60,8 +64,11 @@ impl DecoderTap {
     }
 
     fn emit(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if self.paths.is_empty() {
+            return chunk.to_vec();
+        }
         self.pending.extend_from_slice(chunk);
-        let (ready, consumed) = rewrite_ready(&self.pending, self.fields, &self.model);
+        let (ready, consumed) = rewrite_ready(&self.pending, self.paths, &self.model);
         self.pending.drain(..consumed);
         ready
     }
@@ -80,7 +87,12 @@ impl RawTap for DecoderTap {
             self.note(&events);
         }
         let tail = std::mem::take(&mut self.pending);
-        rewrite_all(&tail, self.fields, &self.model)
+        if tail.is_empty() || self.paths.is_empty() {
+            return tail;
+        }
+        let mut out = rewrite_all(&tail, self.paths, &self.model);
+        terminate_event(&mut out);
+        out
     }
 
     fn tokens(&self) -> (Option<i64>, Option<i64>) {
@@ -88,12 +100,18 @@ impl RawTap for DecoderTap {
     }
 }
 
-pub(crate) fn rewrite_all(bytes: &[u8], fields: &[&str], model: &str) -> Vec<u8> {
-    let (mut out, consumed) = rewrite_ready(bytes, fields, model);
-    if consumed < bytes.len() {
-        out.extend_from_slice(&bytes[consumed..]);
+pub(crate) fn rewrite_all(bytes: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
+    if paths.is_empty() {
+        return bytes.to_vec();
     }
-    out
+    if starts_like_sse(bytes) {
+        let (mut out, consumed) = rewrite_ready(bytes, paths, model);
+        if consumed < bytes.len() {
+            out.extend(rewrite_event(&bytes[consumed..], paths, model));
+        }
+        return out;
+    }
+    rewrite_json_document(bytes, paths, model)
 }
 
 fn note_usage(usage: Option<&Usage>, input: &mut Option<i64>, output: &mut Option<i64>) {
@@ -112,113 +130,220 @@ fn as_i64(value: Option<u64>) -> Option<i64> {
     value.and_then(|value| i64::try_from(value).ok())
 }
 
-/// Rewrites complete `"field":"..."` values. The `usize` is how much of
-/// `input` was consumed; the rest may be the start of a model field.
-pub(crate) fn rewrite_ready(input: &[u8], fields: &[&str], model: &str) -> (Vec<u8>, usize) {
-    let replacement = serde_json::to_string(model).unwrap_or_else(|_| "\"\"".to_owned());
-    let mut out = Vec::with_capacity(input.len());
-    let mut index = 0;
-    while index < input.len() {
-        if input[index] != b'"' {
-            out.push(input[index]);
-            index += 1;
-            continue;
-        }
-        let Some(key) = json_string(input, index) else {
-            return (out, index);
+/// Rewrites complete SSE events and JSON values. The `usize` is how much of
+/// `input` was consumed. An unfinished event stays unconsumed.
+pub(crate) fn rewrite_ready(input: &[u8], paths: &[&[&str]], model: &str) -> (Vec<u8>, usize) {
+    if paths.is_empty() || input.is_empty() {
+        return (input.to_vec(), input.len());
+    }
+    if !starts_like_sse(input) {
+        return match json_value_len(input) {
+            Some(len) => (rewrite_one_json(&input[..len], paths, model), len),
+            None => (Vec::new(), 0),
         };
-        match value_string(input, key.end) {
-            Look::Incomplete => return (out, index),
-            Look::NotValue => {
-                out.extend_from_slice(&input[index..key.end]);
-                index = key.end;
+    }
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while let Some(end) = event_end(&input[offset..]) {
+        out.extend(rewrite_event(&input[offset..offset + end], paths, model));
+        offset += end;
+    }
+    (out, offset)
+}
+
+fn rewrite_json_document(bytes: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset..].iter().all(|byte| is_ws(*byte)) {
+            out.extend_from_slice(&bytes[offset..]);
+            break;
+        }
+        match json_value_len(&bytes[offset..]) {
+            Some(len) => {
+                out.extend(rewrite_one_json(&bytes[offset..offset + len], paths, model));
+                offset += len;
             }
-            Look::Value { start, end } => {
-                if fields.iter().any(|field| *field == key.text) {
-                    out.extend_from_slice(&input[index..start]);
-                    out.extend_from_slice(replacement.as_bytes());
-                } else {
-                    out.extend_from_slice(&input[index..end]);
-                }
-                index = end;
+            None => {
+                out.extend_from_slice(&bytes[offset..]);
+                break;
             }
         }
     }
-    (out, input.len())
+    out
 }
 
-struct JsonString {
-    text: String,
-    end: usize,
+fn rewrite_one_json(bytes: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return bytes.to_vec();
+    };
+    if !value.is_object() {
+        return bytes.to_vec();
+    }
+    rewrite_paths(&mut value, paths, model);
+    serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
 }
 
-fn json_string(input: &[u8], start: usize) -> Option<JsonString> {
-    if input.get(start) != Some(&b'"') {
+fn rewrite_paths(value: &mut serde_json::Value, paths: &[&[&str]], model: &str) {
+    for path in paths {
+        rewrite_path(value, path, model);
+    }
+}
+
+fn rewrite_path(value: &mut serde_json::Value, path: &[&str], model: &str) {
+    let Some((head, tail)) = path.split_first() else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(child) = object.get_mut(*head) else {
+        return;
+    };
+    if tail.is_empty() {
+        if child.is_string() {
+            *child = serde_json::Value::String(model.to_owned());
+        }
+        return;
+    }
+    rewrite_path(child, tail, model);
+}
+
+fn rewrite_event(event: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(event.len());
+    let mut start = 0;
+    let mut index = 0;
+    while index < event.len() {
+        if event[index] == b'\n' {
+            out.extend(rewrite_line(&event[start..=index], paths, model));
+            start = index + 1;
+        }
+        index += 1;
+    }
+    if start < event.len() {
+        out.extend(rewrite_line(&event[start..], paths, model));
+    }
+    out
+}
+
+fn rewrite_line(line: &[u8], paths: &[&[&str]], model: &str) -> Vec<u8> {
+    let (content, ending) = split_ending(line);
+    let Some(payload) = data_payload(content) else {
+        return line.to_vec();
+    };
+    let Some(rewritten) = rewrite_payload(payload, paths, model) else {
+        return line.to_vec();
+    };
+    let mut out = Vec::with_capacity(line.len());
+    let payload_at = content.len() - payload.len();
+    out.extend_from_slice(&content[..payload_at]);
+    out.extend(rewritten);
+    out.extend_from_slice(ending);
+    out
+}
+
+fn rewrite_payload(payload: &[u8], paths: &[&[&str]], model: &str) -> Option<Vec<u8>> {
+    let trimmed = payload.iter().position(|byte| !is_ws(*byte))?;
+    let body = &payload[trimmed..];
+    let len = json_value_len(body)?;
+    if body[len..].iter().any(|byte| !is_ws(*byte)) {
         return None;
     }
-    let mut text = String::new();
-    let mut index = start + 1;
-    let mut escape = false;
+    let mut out = payload[..trimmed].to_vec();
+    out.extend(rewrite_one_json(&body[..len], paths, model));
+    out.extend_from_slice(&body[len..]);
+    Some(out)
+}
+
+fn data_payload(content: &[u8]) -> Option<&[u8]> {
+    let rest = content.strip_prefix(b"data:")?;
+    Some(rest.strip_prefix(b" ").unwrap_or(rest))
+}
+
+fn split_ending(line: &[u8]) -> (&[u8], &[u8]) {
+    if line.ends_with(b"\r\n") {
+        (&line[..line.len() - 2], &line[line.len() - 2..])
+    } else if let Some(stripped) = line.strip_suffix(b"\n") {
+        (stripped, &line[line.len() - 1..])
+    } else {
+        (line, &[])
+    }
+}
+
+fn event_end(input: &[u8]) -> Option<usize> {
+    let mut index = 0;
+    let mut line_start = 0;
+    let mut saw_line = false;
     while index < input.len() {
-        let byte = input[index];
-        if escape {
-            text.push(char::from(byte));
-            escape = false;
-            index += 1;
+        if input[index] == b'\n' {
+            let mut content_end = index;
+            if content_end > line_start && input[content_end - 1] == b'\r' {
+                content_end -= 1;
+            }
+            let end = index + 1;
+            if content_end == line_start && saw_line {
+                return Some(end);
+            }
+            saw_line = true;
+            line_start = end;
+            index = end;
             continue;
         }
-        if byte == b'\\' {
-            escape = true;
-            index += 1;
-            continue;
-        }
-        if byte == b'"' {
-            return Some(JsonString {
-                text,
-                end: index + 1,
-            });
-        }
-        text.push(char::from(byte));
         index += 1;
     }
     None
 }
 
-enum Look {
-    Incomplete,
-    NotValue,
-    Value { start: usize, end: usize },
+fn starts_like_sse(input: &[u8]) -> bool {
+    let trimmed = trim_ws(input);
+    trimmed.starts_with(b"data:")
+        || trimmed.starts_with(b"event:")
+        || trimmed.starts_with(b"id:")
+        || trimmed.starts_with(b"retry:")
+        || trimmed.starts_with(b":")
 }
 
-fn value_string(input: &[u8], after_key: usize) -> Look {
-    let index = skip_ws(input, after_key);
-    if index >= input.len() {
-        return Look::Incomplete;
-    }
-    if input[index] != b':' {
-        return Look::NotValue;
-    }
-    let index = skip_ws(input, index + 1);
-    if index >= input.len() {
-        return Look::Incomplete;
-    }
-    if input[index] != b'"' {
-        return Look::NotValue;
-    }
-    match json_string(input, index) {
-        Some(value) => Look::Value {
-            start: index,
-            end: value.end,
-        },
-        None => Look::Incomplete,
+fn trim_ws(input: &[u8]) -> &[u8] {
+    let start = input
+        .iter()
+        .position(|byte| !is_ws(*byte))
+        .unwrap_or(input.len());
+    &input[start..]
+}
+
+fn is_ws(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+fn json_value_len(input: &[u8]) -> Option<usize> {
+    let mut stream = serde_json::Deserializer::from_slice(input).into_iter::<serde_json::Value>();
+    match stream.next() {
+        Some(Ok(_)) => Some(stream.byte_offset()),
+        _ => None,
     }
 }
 
-fn skip_ws(input: &[u8], mut index: usize) -> usize {
-    while index < input.len() && matches!(input[index], b' ' | b'\t' | b'\n' | b'\r') {
-        index += 1;
+/// Ends a partial event so the next frame is not glued to it.
+fn terminate_event(bytes: &mut Vec<u8>) {
+    if bytes.is_empty() || frame_closed(bytes) {
+        return;
     }
-    index
+    let crlf = bytes.windows(2).any(|pair| pair == b"\r\n");
+    if crlf {
+        if bytes.ends_with(b"\r\n") {
+            bytes.extend_from_slice(b"\r\n");
+        } else {
+            bytes.extend_from_slice(b"\r\n\r\n");
+        }
+    } else if bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    } else {
+        bytes.extend_from_slice(b"\n\n");
+    }
+}
+
+pub(crate) fn frame_closed(bytes: &[u8]) -> bool {
+    bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n")
 }
 
 #[cfg(test)]
@@ -229,18 +354,81 @@ mod tests {
     };
 
     #[test]
-    fn a_split_model_field_is_rewritten_without_the_rest_of_the_body() {
-        let fields = ["model"];
+    fn a_split_json_object_is_rewritten_when_it_completes() {
+        let paths: &[&[&str]] = &[&["model"]];
         let head = br#"{"model":"up"#;
-        let (first, consumed) = super::rewrite_ready(head, &fields, "demo");
-        assert_eq!(first, b"{");
-        assert_eq!(consumed, 1);
-        let mut pending = head[consumed..].to_vec();
+        let (first, consumed) = super::rewrite_ready(head, paths, "demo");
+        assert!(first.is_empty(), "{first:?}");
+        assert_eq!(consumed, 0);
+        let mut pending = head.to_vec();
         pending.extend_from_slice(br#"stream","n":1}"#);
-        let mut rewritten = first;
-        rewritten.extend(rewrite_all(&pending, &fields, "demo"));
-        let text = String::from_utf8(rewritten).expect("utf-8");
+        let text = String::from_utf8(rewrite_all(&pending, paths, "demo")).expect("utf-8");
         assert_eq!(text, r#"{"model":"demo","n":1}"#);
+    }
+
+    #[test]
+    fn a_stray_quote_on_a_comment_does_not_leak_the_upstream_model() {
+        let paths: &[&[&str]] = &[&["model"]];
+        for prefix in [": keep-alive \"\n\n", "data: upstream said \"hello\n\n"] {
+            let body = format!(
+                "{prefix}data: {{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream-x\",\"choices\":[]}}\n\n"
+            );
+            let text =
+                String::from_utf8(rewrite_all(body.as_bytes(), paths, "demo")).expect("utf-8");
+            assert!(text.contains("\"model\":\"demo\""), "{prefix}: {text}");
+            assert!(!text.contains("upstream-x"), "{prefix}: {text}");
+            assert!(text.contains(prefix.trim_end()), "{prefix}");
+        }
+    }
+
+    #[test]
+    fn tool_arguments_keep_their_own_model_field() {
+        let anthropic = br#"{"id":"m","type":"message","role":"assistant","model":"upstream-x","content":[{"type":"tool_use","id":"t","name":"car","input":{"model":"tesla-3"}}],"stop_reason":"end_turn"}"#;
+        let anthropic_text =
+            String::from_utf8(AnthropicMessages.rewrite_model(anthropic, "demo")).expect("utf-8");
+        assert!(
+            anthropic_text.contains("\"model\":\"demo\""),
+            "{anthropic_text}"
+        );
+        assert!(
+            anthropic_text.contains("\"model\":\"tesla-3\""),
+            "{anthropic_text}"
+        );
+        assert!(!anthropic_text.contains("upstream-x"), "{anthropic_text}");
+
+        let nested = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"upstream-x\",",
+            "\"content\":[{\"type\":\"tool_use\",\"input\":{\"model\":\"tesla-3\"}}]}}\n\n",
+        );
+        let mut tap = AnthropicMessages.raw_tap("demo");
+        let mut forwarded = tap.push(nested.as_bytes());
+        forwarded.extend(tap.finish());
+        let text = String::from_utf8(forwarded).expect("utf-8");
+        assert!(text.contains("\"model\":\"demo\""), "{text}");
+        assert!(text.contains("\"model\":\"tesla-3\""), "{text}");
+        assert!(!text.contains("upstream-x"), "{text}");
+
+        let gemini = br#"{"responseId":"g","modelVersion":"upstream-x","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"car","args":{"model":"tesla-3"}}}]}}]}"#;
+        let gemini_text =
+            String::from_utf8(GenerativeLanguage.rewrite_model(gemini, "demo")).expect("utf-8");
+        assert!(
+            gemini_text.contains("\"modelVersion\":\"demo\""),
+            "{gemini_text}"
+        );
+        assert!(
+            gemini_text.contains("\"model\":\"tesla-3\""),
+            "{gemini_text}"
+        );
+        assert!(!gemini_text.contains("upstream-x"), "{gemini_text}");
+    }
+
+    #[test]
+    fn a_partial_event_is_terminated_when_the_tap_finishes() {
+        let mut tap = OpenAiChat.raw_tap("demo");
+        assert!(tap.push(br#"data: {"model":"upstream"#).is_empty());
+        let tail = String::from_utf8(tap.finish()).expect("utf-8");
+        assert_eq!(tail, "data: {\"model\":\"upstream\n\n");
     }
 
     #[test]

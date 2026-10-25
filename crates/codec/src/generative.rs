@@ -101,8 +101,8 @@ impl Codec for GenerativeLanguage {
         format!(r#"{{"totalTokens":{tokens},"estimated":{estimated}}}"#).into_bytes()
     }
 
-    fn model_fields(&self) -> &'static [&'static str] {
-        &["model", "modelVersion"]
+    fn model_paths(&self) -> &'static [&'static [&'static str]] {
+        &[&["modelVersion"], &["model"]]
     }
 
     fn encode_error(&self, status: u16, message: &str) -> Vec<u8> {

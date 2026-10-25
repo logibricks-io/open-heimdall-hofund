@@ -807,3 +807,102 @@ async fn a_partial_raw_frame_is_closed_before_the_protocol_error() {
     assert!(body.contains("mid-stream"), "{body}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn a_comment_quote_does_not_leak_the_upstream_model() {
+    let body = concat!(
+        ": keep-alive \"\n\n",
+        "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream-x\",",
+        "\"choices\":[]}\n\n",
+    );
+    let (app, usage, dir) = raw_app(vec![body.as_bytes().to_vec()], false);
+    let (status, _, got) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert!(got.contains(": keep-alive \""), "{got}");
+    assert!(got.contains("\"model\":\"demo\""), "{got}");
+    assert!(!got.contains("upstream-x"), "{got}");
+    assert_eq!(usage.rows().expect("rows")[0].model, "demo");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn tool_arguments_keep_a_nested_model_field() {
+    let messages = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",",
+        "\"role\":\"assistant\",\"model\":\"upstream-x\",\"content\":[",
+        "{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"car\",\"input\":{\"model\":\"tesla-3\"}}",
+        "],\"usage\":{\"input_tokens\":11,\"output_tokens\":1}}}\n\n",
+    );
+    let (app, _, dir) = raw_app(vec![messages.as_bytes().to_vec()], false);
+    let (status, _, got) = post_raw(
+        app,
+        "/v1/messages",
+        r#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert!(got.contains("\"model\":\"demo\""), "{got}");
+    assert!(got.contains("\"model\":\"tesla-3\""), "{got}");
+    assert!(!got.contains("upstream-x"), "{got}");
+    let _ = std::fs::remove_dir_all(dir);
+
+    let language = br#"{"responseId":"g","modelVersion":"upstream-x","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"car","args":{"model":"tesla-3"}}}]}}]}"#;
+    let (app, _, dir) = raw_app(vec![language.to_vec()], false);
+    let (status, content_type, got) = post_raw(
+        app,
+        "/v1beta/models/demo:generateContent",
+        r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(content_type, "application/json");
+    assert!(got.contains("\"modelVersion\":\"demo\""), "{got}");
+    assert!(got.contains("\"model\":\"tesla-3\""), "{got}");
+    assert!(!got.contains("upstream-x"), "{got}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_crlf_frame_does_not_gain_an_extra_blank_event() {
+    let chunk = concat!(
+        "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream\",",
+        "\"choices\":[]}\r\n\r\n",
+    );
+    let (app, _, dir) = raw_app(vec![chunk.as_bytes().to_vec()], true);
+    let (status, _, body) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"model\":\"demo\""), "{body}");
+    assert!(!body.contains("upstream"), "{body}");
+    assert!(!body.contains("\r\n\r\n\n\n"), "{body:?}");
+    assert!(!body.contains("\n\n\n\n"), "{body:?}");
+    assert!(body.contains("mid-stream"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn held_rewriter_bytes_are_flushed_before_the_error_frame() {
+    let (app, _, dir) = raw_app(vec![br#"data: {"model":"upstream"#.to_vec()], true);
+    let (status, _, body) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.starts_with("data: {\"model\":\"upstream\n\ndata: {\"error\":"),
+        "{body}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

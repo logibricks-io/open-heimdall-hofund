@@ -566,7 +566,7 @@ async fn raw_body(
                         }
                     }
                     Some(Err(error)) => {
-                        let _ = tap.finish();
+                        let mut tail = tap.finish();
                         let (input, output) = tap.tokens();
                         meta.input = input.or(meta.input);
                         meta.output = output.or(meta.output);
@@ -577,13 +577,14 @@ async fn raw_body(
                             StatusCode::BAD_GATEWAY,
                         );
                         let mut frame = on_error(&error);
-                        if !boundary {
+                        if tail.is_empty() && !boundary {
                             let mut prefixed = b"\n\n".to_vec();
                             prefixed.extend(frame);
                             frame = prefixed;
                         }
+                        tail.extend(frame);
                         Some((
-                            Ok(Bytes::from(frame)),
+                            Ok(Bytes::from(tail)),
                             (body, meta, usage, tap, on_error, true, 2),
                         ))
                     }
@@ -595,7 +596,7 @@ async fn raw_body(
                         let boundary = if forwarded.is_empty() {
                             boundary
                         } else {
-                            forwarded.ends_with(b"\n\n")
+                            frame_closed(&forwarded)
                         };
                         Some((
                             Ok(Bytes::from(forwarded)),
@@ -724,7 +725,7 @@ fn sse_body(
                             return None;
                         }
                         Ok(bytes) => {
-                            let boundary = bytes.ends_with(b"\n\n");
+                            let boundary = frame_closed(&bytes);
                             return Some((
                                 Ok(Bytes::from(bytes)),
                                 (incoming, encoder, record, on_error, boundary, 1),
@@ -753,7 +754,7 @@ fn sse_body(
                         match encoder.push(&event) {
                             Ok(bytes) if bytes.is_empty() => {}
                             Ok(bytes) => {
-                                let boundary = bytes.ends_with(b"\n\n");
+                                let boundary = frame_closed(&bytes);
                                 return Some((
                                     Ok(Bytes::from(bytes)),
                                     (incoming, encoder, record, on_error, boundary, 0),
@@ -769,6 +770,10 @@ fn sse_body(
             }
         },
     )
+}
+
+fn frame_closed(bytes: &[u8]) -> bool {
+    bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n")
 }
 
 fn note_usage(event: &StreamEvent, input: &mut Option<i64>, output: &mut Option<i64>) {

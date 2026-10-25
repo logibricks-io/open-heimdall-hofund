@@ -124,12 +124,13 @@ pub trait Codec: Send + Sync {
         self.stream_encoder()
     }
 
-    /// JSON object keys whose string value is the model name the client sees.
+    /// JSON paths whose string value is the model name the client sees.
     ///
-    /// A same-protocol body is patched in place. Protocols with no such field
-    /// return an empty slice.
-    fn model_fields(&self) -> &'static [&'static str] {
-        &["model"]
+    /// Each path is object keys from the root of one JSON value. A same-protocol
+    /// body is patched only at these paths. Protocols with no such field return
+    /// an empty slice.
+    fn model_paths(&self) -> &'static [&'static [&'static str]] {
+        &[&["model"]]
     }
 
     /// Content type of a streaming body in this protocol.
@@ -146,11 +147,11 @@ pub trait Codec: Send + Sync {
         }
     }
 
-    /// Reads tokens from a raw stream and rewrites [`Codec::model_fields`].
+    /// Reads tokens from a raw stream and rewrites [`Codec::model_paths`].
     fn raw_tap(&self, model: &str) -> Box<dyn RawTap> {
         Box::new(passthrough::DecoderTap::new(
             self.stream_decoder(),
-            self.model_fields(),
+            self.model_paths(),
             model,
         ))
     }
@@ -175,7 +176,7 @@ pub trait Codec: Send + Sync {
 
     /// Replaces model fields in a complete unary body.
     fn rewrite_model(&self, bytes: &[u8], model: &str) -> Vec<u8> {
-        passthrough::rewrite_all(bytes, self.model_fields(), model)
+        passthrough::rewrite_all(bytes, self.model_paths(), model)
     }
 
     /// Encodes a stream error as a protocol frame, not a clean end of stream.

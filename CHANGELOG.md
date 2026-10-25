@@ -24,14 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider into a tower service with a kernel deadline and panic containment
   over the call and the whole response body, and publishes the route table
   as an `ArcSwap` snapshot at startup. A panic, including one while polling
-  a stream, omits that member from the next snapshot. Same-protocol
-  responses are forwarded as bytes. The codec reads token usage across
-  chunk boundaries and rewrites the model field, so the client still sees
-  the name it requested. A leading in-band failure still fails over. A
-  later stream error is that protocol's error frame, after a blank line
-  when the previous frame was partial. The stream content type comes from
-  the codec. Gateway routes, status codes, and usage provider ids are
-  unchanged.
+  a stream, omits that member from the next snapshot. The body deadline is
+  idle time since the last chunk. A stream that keeps sending is not cut
+  off at twice the endpoint timeout. Same-protocol responses are forwarded
+  as bytes. The codec reads token usage across chunk boundaries and rewrites
+  only that protocol's model field, parsed per SSE event or JSON value, so
+  the client still sees the name it requested and tool arguments are left
+  alone. A leading in-band failure still fails over. A later stream error
+  is that protocol's error frame. Bytes still held by the rewriter are
+  flushed and closed as an event first. A frame that already ends in
+  `\r\n\r\n` does not gain an extra blank event. The stream content type
+  comes from the codec. Gateway routes, status codes, and usage provider
+  ids are unchanged.
 - The plugin seam from RFC 0001 is in `hofund-plugin-api`,
   `hofund-plugin-sdk`, and `hofund-plugin-host`, plus the three test kits.
   `hofund-provider` and `hofund-agent` re-export the new traits. Gateway,

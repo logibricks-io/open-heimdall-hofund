@@ -119,6 +119,10 @@ impl Codec for OpenAiResponses {
         openai_error_body(status, message)
     }
 
+    fn model_paths(&self) -> &'static [&'static [&'static str]] {
+        &[&["model"], &["response", "model"]]
+    }
+
     fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
         let body = serde_json::json!({
             "type": "error",
