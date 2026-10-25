@@ -192,6 +192,49 @@ fn request_round_trip_and_snapshot() {
 }
 
 #[test]
+fn a_nonstandard_cache_write_stays_in_the_ir_and_leaves_the_wire() {
+    let body = br#"{
+        "id": "resp_1",
+        "model": "m",
+        "status": "completed",
+        "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+        "usage": {
+            "input_tokens": 3,
+            "output_tokens": 1,
+            "input_tokens_details": {"cached_tokens": 1, "cache_write_tokens": 4}
+        }
+    }"#;
+    let decoded = OpenAiResponses.decode_response(body).expect("decode");
+    assert_eq!(
+        decoded
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.cache_write_tokens),
+        Some(4)
+    );
+    let encoded = OpenAiResponses.encode_response(&decoded).expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    assert!(
+        value["usage"]["input_tokens_details"]
+            .get("cache_write_tokens")
+            .is_none(),
+        "{value}"
+    );
+    assert_eq!(
+        value["usage"]["input_tokens_details"]["cached_tokens"],
+        json!(1)
+    );
+    let again = OpenAiResponses.decode_response(&encoded).expect("redecode");
+    assert!(
+        again
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.cache_write_tokens)
+            .is_none()
+    );
+}
+
+#[test]
 fn response_round_trip_and_snapshot() {
     let first = OpenAiResponses
         .decode_response(RESPONSE.as_bytes())
@@ -209,12 +252,12 @@ fn response_round_trip_and_snapshot() {
         first.stop.as_ref().map(|stop| &stop.reason),
         Some(&StopReason::ToolUse)
     );
-    assert_eq!(
+    assert!(
         first
             .usage
             .as_ref()
-            .and_then(|usage| usage.cache_write_tokens),
-        Some(1)
+            .and_then(|usage| usage.cache_write_tokens)
+            .is_none()
     );
     assert_eq!(
         first

@@ -32,12 +32,12 @@ impl Anthropic {
             HeaderName::from_static("anthropic-version"),
             HeaderValue::from_static(VERSION),
         );
-        if !endpoint.api_key.is_empty() {
-            let mut value = HeaderValue::try_from(endpoint.api_key.as_str())
-                .map_err(|_| ProviderError::decode("API key is not valid header text"))?;
-            value.set_sensitive(true);
-            headers.insert(HeaderName::from_static("x-api-key"), value);
-        }
+        http::insert_credential(
+            &mut headers,
+            &endpoint.api_key,
+            endpoint.credential,
+            http::Credential::XApiKey,
+        )?;
         Ok(Self {
             upstream: Upstream::open(endpoint, "v1/messages", headers)?,
         })

@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use hofund_codec::{Codec, OpenAiChat, OpenAiResponses};
 use hofund_ir::Request;
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::HeaderMap;
 
 use crate::error::ProviderError;
 use crate::http::{self, Endpoint, Upstream};
@@ -42,12 +42,12 @@ impl OpenAiCompat {
             OpenAiProtocol::Responses => "responses",
         };
         let mut headers = HeaderMap::new();
-        if !endpoint.api_key.is_empty() {
-            let mut value = HeaderValue::try_from(format!("Bearer {}", endpoint.api_key))
-                .map_err(|_| ProviderError::decode("API key is not valid header text"))?;
-            value.set_sensitive(true);
-            headers.insert(reqwest::header::AUTHORIZATION, value);
-        }
+        http::insert_credential(
+            &mut headers,
+            &endpoint.api_key,
+            endpoint.credential,
+            http::Credential::Bearer,
+        )?;
         Ok(Self {
             protocol,
             upstream: Upstream::open(endpoint, path, headers)?,

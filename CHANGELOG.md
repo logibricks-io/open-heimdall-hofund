@@ -28,9 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hofund --help`, `-h`, and `help` print usage for each command.
 - `examples/hofund.toml` documents `[[providers]]` and `[[routes]]`.
 - The gateway accepts `x-api-key`, compared in constant time, on every routed request.
+- Provider presets. `[[providers]]` may set `preset` instead of `kind`, with
+  optional `region`, `protocol` (`chat`, `responses`, or `messages`), and
+  `base_url`. The catalog is `crates/provider/presets.toml`.
 
 ### Changed
 
+- Responses usage objects no longer include `cache_write_tokens`. The counter
+  stays on the internal usage object. `input_tokens_details` carries
+  `cached_tokens` only.
 - The CLI default config path matches the menu-bar app: the platform config
   directory, then `HOFUND_CONFIG`, then `--config`.
 - `hofund config check` prints the path it read, and `config ok: <path>` on success.

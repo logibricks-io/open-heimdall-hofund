@@ -1563,7 +1563,6 @@ fn encode_usage(usage: &Usage) -> Value {
         "input_tokens_details".to_owned(),
         serde_json::json!({
             "cached_tokens": usage.cache_read_tokens.unwrap_or(0),
-            "cache_write_tokens": usage.cache_write_tokens.unwrap_or(0),
         }),
     );
     object.insert(

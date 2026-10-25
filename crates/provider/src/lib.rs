@@ -11,12 +11,14 @@ mod billing;
 mod error;
 mod http;
 mod openai_compat;
+mod presets;
 mod stream;
 
 pub use anthropic::Anthropic;
 pub use error::{ProviderError, ProviderErrorKind};
-pub use http::Endpoint;
+pub use http::{Credential, Endpoint};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
+pub use presets::{PresetError, Resolve, Resolved, Wire, catalog_commit, resolve};
 
 use std::pin::Pin;
 

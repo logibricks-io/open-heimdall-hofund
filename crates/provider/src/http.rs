@@ -16,6 +16,28 @@ use crate::error::ProviderError;
 use crate::stream::SseEvents;
 pub(crate) use crate::stream::{map_transport, message_from};
 
+/// Where an API key is written.
+///
+/// [`Credential::Default`] keeps the adapter's historical header: `Authorization:
+/// Bearer` for Chat and Responses, `x-api-key` for Messages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Credential {
+    /// The adapter's own header.
+    #[default]
+    Default,
+    /// `Authorization: Bearer`.
+    Bearer,
+    /// `api-key`. Azure OpenAI uses this. A bearer token there is an Entra ID token.
+    ApiKey,
+    /// `x-api-key` alone.
+    XApiKey,
+    /// `x-api-key` and `Authorization: Bearer` together.
+    ///
+    /// Third-party Messages gateways disagree about which one they accept, so a
+    /// preset that is not Anthropic's own host sends both.
+    MessagesBoth,
+}
+
 /// Connection settings for one upstream endpoint.
 #[derive(Clone, Debug)]
 pub struct Endpoint {
@@ -25,6 +47,8 @@ pub struct Endpoint {
     pub base_url: String,
     /// Credential sent with each call. Empty when the upstream does not use one.
     pub api_key: String,
+    /// Which header carries [`Self::api_key`].
+    pub credential: Credential,
     /// Extra headers. Names and values must be valid HTTP header text.
     pub headers: Vec<(String, String)>,
     /// Quirk profile applied to the canonical request before encode.
@@ -41,6 +65,7 @@ impl Endpoint {
             id: id.into(),
             base_url: base_url.into(),
             api_key: String::new(),
+            credential: Credential::Default,
             headers: Vec::new(),
             quirks: None,
             timeout: Duration::from_secs(60),
@@ -107,6 +132,69 @@ impl Upstream {
             quirks: endpoint.quirks,
         })
     }
+}
+
+pub(crate) fn insert_credential(
+    headers: &mut HeaderMap,
+    api_key: &str,
+    credential: Credential,
+    default: Credential,
+) -> Result<(), ProviderError> {
+    if api_key.is_empty() {
+        return Ok(());
+    }
+    let style = match credential {
+        Credential::Default => default,
+        other => other,
+    };
+    match style {
+        Credential::Default | Credential::Bearer => {
+            insert_header(
+                headers,
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {api_key}"),
+            )?;
+        }
+        Credential::ApiKey => {
+            insert_header(
+                headers,
+                HeaderName::from_static("api-key"),
+                api_key.to_owned(),
+            )?;
+        }
+        Credential::XApiKey => {
+            insert_header(
+                headers,
+                HeaderName::from_static("x-api-key"),
+                api_key.to_owned(),
+            )?;
+        }
+        Credential::MessagesBoth => {
+            insert_header(
+                headers,
+                HeaderName::from_static("x-api-key"),
+                api_key.to_owned(),
+            )?;
+            insert_header(
+                headers,
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {api_key}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_header(
+    headers: &mut HeaderMap,
+    name: HeaderName,
+    value: String,
+) -> Result<(), ProviderError> {
+    let mut value = HeaderValue::try_from(value)
+        .map_err(|_| ProviderError::decode("API key is not valid header text"))?;
+    value.set_sensitive(true);
+    headers.insert(name, value);
+    Ok(())
 }
 
 pub(crate) fn messages_url(upstream: &Upstream) -> &str {

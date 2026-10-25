@@ -88,6 +88,30 @@ Official level lists, checked 2026-10-25:
 | Count tokens | Messages `count_tokens` is forwarded. An unsupported endpoint becomes a local estimate. A long list of English and Chinese phrases decides which 400 is "unsupported". | Adopt the outcome. Redesign the classifier. | `POST /v1/messages/count_tokens` and `POST /v1beta/models/{model}:countTokens`. A Messages upstream is asked at `{base}/v1/messages/count_tokens`. The posted body omits `max_tokens`. Create still requires that field, so the codec may fill one and the provider removes it before the count POST. 404, 405, 501, and a 400 whose English message says the endpoint is missing, are unsupported. An unsupported image or tool stays an error. When every hop is unsupported, the count is `ceil(characters / 4)` and the body sets `estimated` to true. | The count endpoint rejects `max_tokens` (<https://platform.claude.com/docs/en/build-with-claude/token-counting>, checked 2026-10-25). The phrase list mixes endpoint absence with bad inputs, and it special-cases relay translations. A short English check keeps those apart. A real tokenizer waits for the catalog. |
 | Trailing `role: system` | Chat parse lifts every `system` and `developer` message into one leading system string (`parseChat` / `buildChat` in `internal/gateway/chat.go`). A Messages message whose role is `system` stays in the message list. `buildChat` then writes every non-assistant turn as `user`, so a trailing Messages system message is not moved to the front as `role: system`. | Leave the message where the client put it. | Chat encode writes `role: system` in the position the IR has. A trailing system message, including one Claude Code sends inside `messages`, is not hoisted for a Chat upstream. | `e57e785` does not hoist that trailing Messages role. Moving it would be a new behavior. |
 
+## Provider presets
+
+Read from the upstream preset list at commit `5b2b3d3f50959735403dff6b77a85eec65772218`
+(`internal/provider/presets.go`, `azure.go`, `auth` headers in `test.go`).
+Official references, checked 2026-10-25:
+
+- Responses usage: <https://platform.openai.com/docs/api-reference/responses/object>
+  (`input_tokens_details` has `cached_tokens` only).
+- Gemini OpenAI compatibility: <https://ai.google.dev/gemini-api/docs/openai>.
+- Azure OpenAI v1: <https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle>.
+  The key is the `api-key` header
+  (<https://learn.microsoft.com/en-us/azure/ai-services/openai/reference>).
+- Bedrock API keys: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html>.
+  Regional hosts: <https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html>.
+
+| Subsystem | magpie approach | Verdict | hofund approach | Rationale |
+| --- | --- | --- | --- | --- |
+| Preset list | One Go slice of endpoints, regions, static model ids, and editor hints, plus a fetched partner feed. | Adopt the endpoints. Redesign the shape. | `crates/provider/presets.toml` is the catalog (58 presets and their regions). Icons are not shipped. The partner feed is not fetched. `preset = "<id>"` on a provider fills the base URL and the key header. `region` and `protocol` select among that preset's endpoints. An old id (`qianfan-token-plan`, `tencent-token-plan`, `tencent-tokenhub`, `tencent-tokenhub-cn`) still resolves. | A data file is what a test can diff. The editor hints and the static model ids stay in the file for the model-list work. |
+| Key header | Chat and Responses send `Authorization: Bearer`. Azure sends `api-key`. Messages to `anthropic.com` or Bedrock sends `x-api-key` alone. Other Messages hosts send both headers. Gemini's native protocol sends `x-goog-api-key`. Vertex sends a Google token. | Adopt for the presets this build can call. | The same split, chosen from the preset id and the host. An explicit `kind` keeps the previous default: bearer for Chat and Responses, `x-api-key` for Messages. | Azure rejects a key presented as a bearer token. Bedrock rejects Messages calls that send both headers. Third-party Messages gateways disagree, which is why a preset that is neither Anthropic nor Bedrock sends both. |
+| Azure URL | Any pasted resource, deployment URL, or bare resource name is rewritten to `https://<host>/openai/v1`. Localhost is left alone. | Adopt | `azure_base` does that rewrite. There is no `api-version` query. | That is the v1 surface Azure documents, and it is the path the OpenAI adapter already appends `chat/completions` or `responses` to. |
+| Bedrock | A Bedrock API key, not SigV4. Runtime and Mantle regions are base URLs. Mantle serves some models under `/openai/v1` instead of `/v1`. | Adopt the key and the regions. Leave SigV4 and the per-model path. | Presets `bedrock` and `bedrock-mantle` resolve to those regional roots. Chat uses a bearer token. Messages uses `x-api-key`. | The API-key guide shows a bearer token. The Messages behavior matches the upstream client, which found that both headers together are rejected. SigV4 is the other official mechanism and needs the standard AWS credential chain; it is not in this change. Mantle's extra `/openai/v1` path depends on the model id, which this gateway does not choose per call yet. |
+| Vertex and a remote gateway | Vertex signs with Google credentials. A remote gateway forwards the client's own protocol. | Record them. Do not pretend an adapter exists. | Both presets are in the catalog. `resolve` returns an error that names the missing adapter. | A Chat adapter with a bearer token would send the wrong request. |
+| Gemini preset | The Google preset's chat root is `https://generativelanguage.googleapis.com/v1beta/openai`. | Adopt | Preset `google` uses that root and a bearer token. The native `generateContent` upstream is still a separate adapter. | That is the compatibility endpoint the preset names. The generative codec remains the client protocol. |
+
 ## Not in this version
 
 Routing strategies other than ordered failover, and sessions, are not compared

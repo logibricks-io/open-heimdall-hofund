@@ -24,7 +24,7 @@
     "input_tokens": 12,
     "output_tokens": 4,
     "total_tokens": 16,
-    "input_tokens_details": {"cached_tokens": 2, "cache_write_tokens": 1},
+    "input_tokens_details": {"cached_tokens": 2},
     "output_tokens_details": {"reasoning_tokens": 3}
   },
   "metadata": {"k": "v"}

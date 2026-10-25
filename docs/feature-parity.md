@@ -122,11 +122,11 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | --- | --- | --- | --- | --- | --- | --- |
 | 2.1 | OpenAI-compatible upstreams (Chat and Responses) | `internal/provider/provider.go` | core | Done | `crates/provider/src/openai_compat.rs`; `crates/config/src/lib.rs` (`OpenAiCompat`) | Keep. |
 | 2.2 | Anthropic upstream | `internal/provider/provider.go` | core | Done | `crates/provider/src/anthropic.rs` | Keep. |
-| 2.3 | Google Gemini API upstream | `internal/provider/gemini_api.go`, `google.go` | core | Missing | `crates/provider` has no Gemini adapter | Add a Gemini adapter over the existing generative codec. |
-| 2.4 | Google Vertex AI (ADC, impersonation, per-location models) | `internal/provider/vertex.go`, `internal/gateway/vertex.go`; `ref.md:867` | core | Missing | none | Add with `gcp_auth`-style ADC. Store no service account key. |
-| 2.5 | AWS Bedrock (Converse and Mantle) | `internal/provider/presets.go` (`bedrock`, `bedrock-mantle`); `internal/gateway/mantle.go` | core | Missing | none | Add with SigV4 signing and the standard AWS credential chain. |
-| 2.6 | Azure OpenAI | `internal/provider/azure.go` | core | Missing | none | A quirk profile for path, `api-version` and `api-key` on the OpenAI adapter. |
-| 2.7 | Provider presets (94 entries: vendors, coding plans, regions, local servers) | `internal/provider/presets.go`; `README.md` | core | Missing | none | Ship presets as a versioned data file (TOML), not code. Test each preset's endpoints in CI. |
+| 2.3 | Google Gemini API upstream | `internal/provider/gemini_api.go`, `google.go` | core | Missing | The `google` preset speaks the OpenAI-compatible endpoint (`crates/provider/presets.toml`). There is no native `generateContent` upstream. | Add a Gemini adapter over the existing generative codec. The preset stays on the compatibility endpoint. |
+| 2.4 | Google Vertex AI (ADC, impersonation, per-location models) | `internal/provider/vertex.go`, `internal/gateway/vertex.go`; `ref.md:867` | core | Missing | Preset `google-vertex` is listed and `resolve` refuses it (`crates/provider/src/presets.rs`) | Add with application-default credentials. Store no service account key. |
+| 2.5 | AWS Bedrock (Converse and Mantle) | `internal/provider/presets.go` (`bedrock`, `bedrock-mantle`); `internal/gateway/mantle.go` | core | Partial | `crates/provider/presets.toml` (`bedrock`, `bedrock-mantle`); `crates/provider/src/presets.rs` (`is_bedrock`) | Chat and Responses use `Authorization: Bearer`. Messages uses `x-api-key` alone. Regions are the catalog's. SigV4 and the per-model Mantle `/openai/v1` switch are not in this build. |
+| 2.6 | Azure OpenAI | `internal/provider/azure.go` | core | Partial | `crates/provider/src/presets.rs` (`azure_base`); `Credential::ApiKey` in `crates/provider/src/http.rs` | A resource, a pasted deployment URL, or a resource name becomes `https://<host>/openai/v1`. The key is `api-key`, not a bearer token. Deployment listing is not in this build. |
+| 2.7 | Provider presets (94 entries: vendors, coding plans, regions, local servers) | `internal/provider/presets.go`; `README.md` | core | Partial | `crates/provider/presets.toml` (58 presets, source commit `5b2b3d3f50959735403dff6b77a85eec65772218`); `crates/provider/src/presets.rs`; `preset` on `[[providers]]` | The catalog is data and every endpoint parses. Chat, Responses, and Messages presets build an adapter. Vertex, a remote gateway, and decision-only presets return a clear error. A live partner feed, model lists, and a connectivity command are not in this build. |
 | 2.8 | Model catalog from models.dev: names, prices, limits, reasoning levels | `internal/catalog`; `ref.md:1291` | core | Missing | none | Cache the catalog on disk with an ETag, allow a mirror, and let local overrides win. |
 | 2.9 | Live model lists from each provider, with scheduled refresh and auto-include | `internal/provider/autolist.go`, `modellist.go`; `ref.md:319` | core | Missing | none | Refresh in the background with a backoff. Show a diff of what was added or removed. |
 | 2.10 | Provider test and endpoint detection | `internal/provider/test.go`, `detect.go`; `internal/probelog` | core | Missing | none | Add `hofund provider test <id>`, which sends a minimal request per protocol and logs it like any other request. |
@@ -339,7 +339,7 @@ constant-time `x-api-key` (row 10.2).
 1. **Usage cost and cache tokens (rows 9.2, 9.3, 9.5).** These are what users look at every day.
 2. **Routing strategies, stickiness and cooldown (rows 4.5 to 4.7).** Prompt-cache stickiness
    and backoff decide both cost and reliability.
-3. **Provider presets, model catalog and live model lists (rows 2.7 to 2.9, 2.14).**
+3. **Model catalog and live model lists (rows 2.8, 2.9, 2.14).** Preset endpoints for Chat, Responses, and Messages are in the catalog (row 2.7). Vertex, subscriptions, and `provider test` are still open.
    Every routing, pricing and UI feature depends on these.
 4. **Upstreams: Gemini, Vertex, Bedrock and Azure (rows 2.3 to 2.6).**
 5. **Named gateway keys, LAN and TLS (rows 10.4, 10.5, 10.7).** Constant-time `x-api-key` (row 10.2) is on `main`.

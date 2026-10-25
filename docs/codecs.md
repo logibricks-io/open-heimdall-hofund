@@ -372,10 +372,12 @@ the final chunk. No usage object is written when the IR never supplied one.
 When a usage object is written, the required counts are always present. A
 missing input or output is 0. A missing total is the sum. Responses always
 includes `input_tokens`, `output_tokens`, `total_tokens`,
-`input_tokens_details` (`cached_tokens`, `cache_write_tokens`), and
+`input_tokens_details` (`cached_tokens`), and
 `output_tokens_details` (`reasoning_tokens`). Cache and reasoning details are
 0 when the IR did not set them (checked 2026-10-25,
-<https://platform.openai.com/docs/api-reference/responses/object>). Chat always
+<https://platform.openai.com/docs/api-reference/responses/object>).
+`cache_write_tokens` stays on the IR usage object and is not written on a
+Responses usage object. Chat always
 includes `prompt_tokens`, `completion_tokens`, and `total_tokens`; the details
 objects stay optional. Generative Language always includes `promptTokenCount`,
 `candidatesTokenCount`, and `totalTokenCount`; cache and thoughts counts stay
@@ -387,7 +389,7 @@ optional.
 | `output_tokens` | `output_tokens` | `completion_tokens` | `output_tokens` | `candidatesTokenCount` |
 | `total_tokens` | omitted | `total_tokens` | `total_tokens` | `totalTokenCount` |
 | `cache_read_tokens` | `cache_read_input_tokens` | `prompt_tokens_details.cached_tokens` | `input_tokens_details.cached_tokens` | `cachedContentTokenCount` |
-| `cache_write_tokens` | `cache_creation_input_tokens` | omitted | `input_tokens_details.cache_write_tokens` | omitted |
+| `cache_write_tokens` | `cache_creation_input_tokens` | omitted | omitted | omitted |
 | `reasoning_tokens` | omitted | `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` | `thoughtsTokenCount` |
 
 Responses keeps protocol totals beside the cache counters. It does not subtract

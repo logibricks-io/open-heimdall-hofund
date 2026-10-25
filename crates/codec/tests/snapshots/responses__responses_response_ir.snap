@@ -35,7 +35,6 @@ expression: pretty_value!(&first)
     "output_tokens": 4,
     "total_tokens": 16,
     "cache_read_tokens": 2,
-    "cache_write_tokens": 1,
     "reasoning_tokens": 3
   },
   "extensions": {

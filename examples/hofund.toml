@@ -23,6 +23,14 @@ api_key = "replace-me"
 # max_output_tokens is optional. It fills max_tokens when the client omits
 # one. A route member can set a smaller cap. Messages still sends 16384 when
 # neither is set. Zero is rejected.
+# A preset fills the endpoint from crates/provider/presets.toml.
+# Omit kind. protocol is chat, responses, or messages.
+# [[providers]]
+# id = "openai"
+# preset = "openai"
+# protocol = "responses"
+# api_key = "env:OPENAI_API_KEY"
+
 [[providers]]
 id = "backup"
 kind = "anthropic"
