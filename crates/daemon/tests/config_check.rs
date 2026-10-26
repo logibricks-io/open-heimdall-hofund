@@ -73,6 +73,21 @@ fn vertex_urls_and_credentials_are_checked() {
 }
 
 #[test]
+fn credentials_preflight_error_keeps_its_config_key_path() {
+    let dir = scratch();
+    let missing = dir.join("missing-key-path-credentials.json");
+    let path = config(
+        &dir,
+        &format!("credentials = {:?}", missing.to_string_lossy()),
+    );
+    let error = check(&path).expect_err("missing credentials");
+    let text = error.to_string();
+    assert!(text.starts_with("credentials: "), "{text}");
+    assert!(text.contains("option `credentials`"), "{text}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_resolved_environment_url_is_checked() {
     let dir = scratch();
     let path = config(&dir, &format!("token_url = \"env:{ENV_URL}\""));
@@ -109,7 +124,7 @@ fn resolved_environment_url_child() {
         std::env::var_os(CHILD_CONFIG),
         std::env::var_os(CHILD_OUTPUT),
     ) else {
-        panic!("child helper requires its config and output environment variables");
+        return;
     };
     let error = check(Path::new(&path)).expect_err("resolved invalid URL");
     fs::write(output, error.to_string()).expect("error output");

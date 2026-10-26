@@ -64,9 +64,11 @@ impl Default for HttpProfile {
 
 /// Host timeout and idle-pool config for the pooled client.
 ///
-/// `connect` bounds DNS, TCP, and TLS setup. `read` is the idle time between
-/// socket reads and resets after each successful read, so a stream that keeps
-/// sending is not cut off. There is no whole-call timeout.
+/// `connect` bounds DNS, TCP, and TLS setup. `read` is the daemon-wide reqwest
+/// idle budget between socket reads, including for built-in adapters, and resets
+/// after each successful read. It is not derived from an adapter's endpoint
+/// timeout: when that endpoint timeout is longer, this read budget fires first.
+/// A stream that keeps sending is not cut off. There is no whole-call timeout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct HttpLimits {
     connect: Duration,

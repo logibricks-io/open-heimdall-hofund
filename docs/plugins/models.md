@@ -64,7 +64,7 @@ Gemini native follows `gemini_list.go` and `models.list` (<https://ai.google.dev
 
 - `GET {base}/models?pageSize=1000` with `x-goog-api-key`.
 - Pages follow `nextPageToken` as `pageToken`, at most 20 pages. Each page has its own 8 second timeout.
-- A repeated token or a token on the 20th page returns the rows already read without another request and without failing. That differs from `Paged`.
+- A token on the 20th page returns the rows already read without another request and without failing. Hofund deliberately also returns the partial list on a repeated token; the reference has no repeated-token check. This early stop differs from `Paged` and from the reference.
 - An empty list is an error (`no models listed`).
 - Each id is `name` with a leading `models/` removed.
 - A row whose `supportedGenerationMethods` is non-empty is kept when that array contains `generateContent`. A row with an empty methods array is kept. Embedding (`embedContent`), Imagen (`predict`), and Veo (`predictLongRunning`) are dropped. Magpie applies only this filter to Gemini pages (`gemini_list.go` lines 60-106); hofund's additional common classification is below.
@@ -76,6 +76,8 @@ Gemini native follows `gemini_list.go` and `models.list` (<https://ai.google.dev
 The Azure plugin's `list_models` owns the whole sequence and returns `ListKind::Deployments`: `GET {root}/deployments?api-version=2022-12-01`, then the base-model fallback `GET {base}/models`, header `api-key`. The host aggregator only consumes the returned rows; it does not issue the fallback. `root` is the v1 base with a trailing `/v1` removed. That is the same pair `azureModels` asks (`azure.go` lines 130-161).
 
 On 2026-10-26, `https://learn.microsoft.com/en-us/rest/api/azureopenai/deployments/list?view=rest-azureopenai-2022-12-01` and the same URL without `?view` returned HTTP 404, while `https://learn.microsoft.com/en-us/rest/api/aiservices/accountmanagement/deployments/list` returned HTTP 200. The replacement Microsoft documents is the management-plane deployments API, which needs ARM and Entra ID. Magpie still calls the data-plane URL, and field reports say a resource key still gets an answer. This plan keeps that call and records the risk: it can stop answering without a docs page to follow. The second URL stays. For the usual Azure base that ends in `/openai/v1`, that URL is `/openai/v1/models`. It lists base models. It lists deployment names only when the resource owner named each deployment after its model. The id a chat call must send is the deployment name, so the plugin labels a fallback hit as base models, not deployments. That explicit label is a deliberate difference: magpie returns the fallback rows without distinguishing them (`azure.go` lines 130-154). When both URLs fail, the message ends with `type your deployments' names in as model ids`, which is Azure's own suffix, not the generic one below.
+
+When the first failure is classified as `Cancelled`, the plugin stops without requesting the second URL. No current transport path in the built-in model-list client produces `Cancelled`: its send failures become connect, timeout, or transport errors, and its response-read failures become timeout or transport errors. There is no separate cancellation token or signal in this API; caller cancellation is dropping the call future, which prevents the fallback loop from continuing.
 
 ### Rows that are not chat models
 
@@ -278,7 +280,7 @@ Every listing, probing, and refresh behaviour has one disposition here. A deferr
 | `Paged`, its 20-page cap, and its `has_more` and `last_id` rules | `internal/catalog/live.go:407-489` | Covered: code PR 1 | What one wire's `list_models` does |
 | The 8 second list budget per URL and 8 MiB body cap | `internal/catalog/live.go:422-437,495-524`; `internal/catalog/gemini_list.go:60-80` | Covered: code PR 1 | What one wire's `list_models` does |
 | The 160-rune list error cap | `internal/catalog/live.go:637-662` | Covered: code PR 1 | What one wire's `list_models` does |
-| Gemini's pager and partial result at a repeated token or 20 pages | `internal/catalog/gemini_list.go:23-49` | Covered: code PR 1 | What one wire's `list_models` does |
+| Gemini's pager and partial result at a repeated token or 20 pages | `internal/catalog/gemini_list.go:23-49` | Deliberate difference: hofund returns partial rows on a repeated token, while the reference has no such check; the 20-page cap is covered by code PR 1 | What one wire's `list_models` does |
 | Gemini's generation-method-only filter | `internal/catalog/gemini_list.go:60-106` | Covered: code PR 1 | What one wire's `list_models` does |
 | Anthropic-wire-only single-header list auth learning for `BothAuth` providers, with `BothAuthRefused` and `OneAuthOrder`, Chinese and English refusal phrases, per-provider state, and user-pinned override | `internal/catalog/live.go:495-541`; `internal/catalog/authheader.go:9-73`; `internal/provider/authheader.go:78-106`; `internal/provider/models.go:648-655,737-740` | Covered: code PR 1 | What one wire's `list_models` does |
 | Learned auth and `fixV1` write back to the config file | `internal/provider/authheader.go:80-100`; `internal/provider/models.go:1138-1167` | Deliberate difference: host state holds them because the user's TOML is the user's and the daemon never edits it | Refresh |
