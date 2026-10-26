@@ -439,6 +439,96 @@ mod tests {
     }
 
     #[test]
+    fn aws_get_vanilla_matches_the_botocore_signature() {
+        let headers = [
+            ("host", "example.amazonaws.com"),
+            ("x-amz-date", "20150830T123600Z"),
+        ];
+        let signed = sign(&aws_suite_input(b"", &headers).method("GET")).expect("signature");
+        assert_eq!(
+            signed.authorization(),
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"
+        );
+    }
+
+    #[test]
+    fn aws_post_sts_token_signs_the_security_token_header() {
+        let headers = [
+            (
+                "content-type",
+                "application/x-www-form-urlencoded; charset=utf-8",
+            ),
+            ("host", "example.amazonaws.com"),
+            ("x-amz-date", "20150830T123600Z"),
+            (
+                "x-amz-security-token",
+                "AQoDYXdzEPT//////////wEXAMPLEtc764b5uF7example",
+            ),
+        ];
+        let signed = sign(&aws_suite_input(b"", &headers)).expect("signature");
+        assert_eq!(
+            signed.authorization(),
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token, Signature=8f0ebc5e61a73d2bb71f01e63ff0cfc18d8b211700ccab5f4f5d3a70019ddf82"
+        );
+    }
+
+    #[test]
+    fn aws_post_x_www_form_urlencoded_matches_the_botocore_signature() {
+        let headers = [
+            (
+                "content-type",
+                "application/x-www-form-urlencoded; charset=utf-8",
+            ),
+            ("host", "example.amazonaws.com"),
+            ("x-amz-date", "20150830T123600Z"),
+        ];
+        let signed = sign(&aws_suite_input(
+            b"Action=ListUsers&Version=2010-05-08",
+            &headers,
+        ))
+        .expect("signature");
+        assert_eq!(
+            signed.authorization(),
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=7bf7a551911485bb3bd4fd78c64e975f72b2e50877e5d2e1c0add8cbde89a68f"
+        );
+    }
+
+    #[test]
+    fn aws_post_signs_the_payload_hash_header_and_body() {
+        let payload = b"hello world";
+        let payload_hash = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        assert_eq!(super::payload_hash(payload), payload_hash);
+        let headers = [
+            ("content-type", "text/plain"),
+            ("host", "example.amazonaws.com"),
+            ("x-amz-content-sha256", payload_hash),
+            ("x-amz-date", "20150830T123600Z"),
+        ];
+        let signed = sign(&aws_suite_input(payload, &headers)).expect("signature");
+        assert_eq!(
+            signed.authorization(),
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature=fb75efa750088b7dba527c9728573483563dc8d3a2a4b924d2a49fff245bf8f1"
+        );
+    }
+
+    fn aws_suite_input<'a>(
+        payload: &'a [u8],
+        headers: &'a [(&'a str, &'a str)],
+    ) -> SignInput<'a> {
+        SignInput::new()
+            .method("POST")
+            .canonical_uri("/")
+            .amz_date("20150830T123600Z")
+            .scope("us-east-1", "service")
+            .credentials(
+                "AKIDEXAMPLE",
+                "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            )
+            .payload(payload)
+            .headers(headers)
+    }
+
+    #[test]
     fn a_bedrock_colon_path_double_encodes_only_the_canonical_uri() {
         let body = br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}]}"#;
         let wire_path = "/model/anthropic.claude-3-5-sonnet-20240620-v1%3A0/converse";
