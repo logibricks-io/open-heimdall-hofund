@@ -169,3 +169,82 @@ async fn a_shared_book_survives_fresh_members_and_routers() {
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
 }
+
+#[tokio::test]
+async fn ready_members_keep_order_before_the_cooling_probe() {
+    let (book, seen) = fixture();
+    cool(&book, "first", 300);
+    cool(&book, "third", 60);
+    let router = router(
+        vec![
+            fake("first", &seen, Behavior::Unary),
+            fake("second", &seen, Behavior::Fail),
+            fake("third", &seen, Behavior::Unary),
+            fake("fourth", &seen, Behavior::Unary),
+        ],
+        &book,
+    );
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "fourth");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second", "fourth"]);
+}
+
+#[tokio::test]
+async fn equal_cooldowns_keep_the_first_configured_probe() {
+    let (book, seen) = fixture();
+    for id in ["first", "second", "third"] {
+        cool(&book, id, 60);
+    }
+    let router = router(
+        vec![
+            fake("first", &seen, Behavior::Unary),
+            fake("second", &seen, Behavior::Unary),
+            fake("third", &seen, Behavior::Unary),
+        ],
+        &book,
+    );
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+}
+
+#[tokio::test]
+async fn a_lone_cooling_member_is_still_tried() {
+    let (book, seen) = fixture();
+    cool(&book, "first", 60);
+    let router = router(vec![fake("first", &seen, Behavior::Unary)], &book);
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+}
+
+#[tokio::test]
+async fn all_cooling_members_reduce_to_the_soonest_probe() {
+    let (book, seen) = fixture();
+    cool(&book, "first", 300);
+    cool(&book, "second", 60);
+    cool(&book, "third", 120);
+    let router = router(
+        vec![
+            fake("first", &seen, Behavior::Unary),
+            fake("second", &seen, Behavior::Unary),
+            fake("third", &seen, Behavior::Unary),
+        ],
+        &book,
+    );
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}

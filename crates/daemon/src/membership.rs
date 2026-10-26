@@ -1,16 +1,17 @@
 //! Adapts each configured provider into a [`Member`], then into a tower service.
 //!
 //! The service is wrapped in the stage-1 layers: a kernel deadline, panic
-//! containment, and the router's span (the span is entered by the router,
-//! which knows the attempt). A panic marks the member failed and publishes a
-//! snapshot that leaves it out. The body deadline is idle time since the last
-//! chunk. A stream that keeps sending is not cut off. There is no cooldown
-//! timer; that is pull request K.
+//! containment, cooldown accounting, and the router's span (the span is entered
+//! by the router, which knows the attempt). A panic marks the member failed and
+//! publishes a snapshot that leaves it out until its timed cooldown expires.
+//! The body deadline is idle time since the last chunk. A stream that keeps
+//! sending is not cut off.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -18,13 +19,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::{FutureExt, Stream, StreamExt};
 use hofund_plugin_api::{
-    BodyStream, Completion, CountOutcome, MemberId, MemberKey, PluginError, PresetId, Request,
+    BodyStream, Completion, CountOutcome, MemberId, MemberKey, PluginError, PresetId,
+    QuotaObservation, Request,
 };
+use hofund_plugin_host::ObserveBackend;
 use hofund_provider::{
     Completion as ProviderCompletion, CountOutcome as ProviderCount, Provider, ProviderError,
     ProviderErrorKind,
 };
-use hofund_router::{FailoverPolicy, Hop, Member, Router, Snapshot};
+use hofund_router::{Cooldowns, FailoverPolicy, Hop, Member, Router, Snapshot};
 use tower::Service;
 
 use crate::DaemonError;
@@ -42,6 +45,7 @@ pub(crate) struct BuiltProvider {
 struct Table {
     hops: Mutex<BTreeMap<String, Vec<HopSpec>>>,
     policy: FailoverPolicy,
+    cooldowns: Arc<Cooldowns>,
     snapshot: Snapshot,
 }
 
@@ -57,8 +61,8 @@ struct LiveMember {
     plugin_id: String,
     preset_id: String,
     protocol: &'static str,
-    failed: Arc<std::sync::atomic::AtomicBool>,
-    stack: Guard<ProviderCall>,
+    failed: Arc<AtomicU64>,
+    stack: Cooldown<Guard<ProviderCall>>,
 }
 
 #[derive(Clone)]
@@ -79,20 +83,79 @@ enum Out {
 #[derive(Clone)]
 struct Guard<S> {
     inner: S,
+    id: MemberId,
     timeout: Duration,
-    failed: Arc<std::sync::atomic::AtomicBool>,
+    failed: Arc<AtomicU64>,
+    cooldowns: Arc<Cooldowns>,
     reload: Weak<Table>,
+}
+
+#[derive(Clone)]
+struct Cooldown<S> {
+    inner: S,
+    id: MemberId,
+    cooldowns: Arc<Cooldowns>,
+}
+
+struct MemberObserve {
+    id: MemberId,
+    cooldowns: Arc<Cooldowns>,
+}
+
+impl ObserveBackend for MemberObserve {
+    fn observe(&self, observation: QuotaObservation) -> Result<(), PluginError> {
+        self.cooldowns
+            .observe(&self.id, observation.retry_after(), observation.remaining());
+        Ok(())
+    }
+}
+
+pub(crate) fn observe_backend(
+    provider_id: &str,
+    cooldowns: Arc<Cooldowns>,
+) -> Arc<dyn ObserveBackend> {
+    Arc::new(MemberObserve {
+        id: member_id(provider_id),
+        cooldowns,
+    })
 }
 
 pub(crate) fn open(
     built: &BTreeMap<String, BuiltProvider>,
     routes: BTreeMap<String, Vec<PlannedHop>>,
     policy: FailoverPolicy,
+    cooldowns: Arc<Cooldowns>,
 ) -> Result<Snapshot, DaemonError> {
-    let snapshot = Snapshot::new(Router::from_hops(BTreeMap::new(), policy.clone()));
+    let table = build_table(built, routes, policy, cooldowns)?;
+    let snapshot = table.snapshot.clone();
+    let owner = Arc::clone(&table) as Arc<dyn std::any::Any + Send + Sync>;
+    Ok(snapshot.hold(owner))
+}
+
+#[cfg(test)]
+fn open_with_table(
+    built: &BTreeMap<String, BuiltProvider>,
+    routes: BTreeMap<String, Vec<PlannedHop>>,
+    policy: FailoverPolicy,
+    cooldowns: Arc<Cooldowns>,
+) -> Result<(Snapshot, Arc<Table>), DaemonError> {
+    let table = build_table(built, routes, policy, cooldowns)?;
+    Ok((table.snapshot.clone(), table))
+}
+
+fn build_table(
+    built: &BTreeMap<String, BuiltProvider>,
+    routes: BTreeMap<String, Vec<PlannedHop>>,
+    policy: FailoverPolicy,
+    cooldowns: Arc<Cooldowns>,
+) -> Result<Arc<Table>, DaemonError> {
+    let snapshot = Snapshot::new(
+        Router::from_hops(BTreeMap::new(), policy.clone()).with_cooldowns(Arc::clone(&cooldowns)),
+    );
     let table = Arc::new(Table {
         hops: Mutex::new(BTreeMap::new()),
         policy,
+        cooldowns,
         snapshot,
     });
     let mut stored = BTreeMap::new();
@@ -119,6 +182,7 @@ pub(crate) fn open(
                 member: Arc::new(LiveMember::new(
                     built,
                     &hop.provider,
+                    Arc::clone(&table.cooldowns),
                     Arc::downgrade(&table),
                 )),
                 wire_model: hop.wire_model,
@@ -129,9 +193,7 @@ pub(crate) fn open(
     }
     *table.hops.lock().expect("membership") = stored;
     table.publish();
-    let snapshot = table.snapshot.clone();
-    let owner = Arc::clone(&table) as Arc<dyn std::any::Any + Send + Sync>;
-    Ok(snapshot.hold(owner))
+    Ok(table)
 }
 
 pub(crate) struct PlannedHop {
@@ -159,23 +221,37 @@ impl Table {
             })
             .collect();
         let policy = self.policy.clone();
-        self.snapshot.store(Router::from_hops(routes, policy));
+        self.snapshot
+            .store(Router::from_hops(routes, policy).with_cooldowns(Arc::clone(&self.cooldowns)));
     }
 }
 
 impl LiveMember {
-    fn new(built: &BuiltProvider, route_id: &str, reload: Weak<Table>) -> Self {
-        let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stack = Guard {
+    fn new(
+        built: &BuiltProvider,
+        route_id: &str,
+        cooldowns: Arc<Cooldowns>,
+        reload: Weak<Table>,
+    ) -> Self {
+        let id = member_id(route_id);
+        let failed = Arc::new(AtomicU64::new(0));
+        let guard = Guard {
             inner: ProviderCall {
                 provider: Arc::clone(&built.adapter),
             },
+            id: id.clone(),
             timeout: built.timeout,
             failed: Arc::clone(&failed),
+            cooldowns: Arc::clone(&cooldowns),
             reload,
         };
+        let stack = Cooldown {
+            inner: guard,
+            id: id.clone(),
+            cooldowns,
+        };
         Self {
-            id: member_id(route_id),
+            id,
             route_id: route_id.to_owned(),
             plugin_id: built.plugin_id.clone(),
             preset_id: built.preset_id.clone(),
@@ -186,7 +262,7 @@ impl LiveMember {
     }
 
     fn failed(&self) -> bool {
-        self.failed.load(std::sync::atomic::Ordering::Acquire)
+        self.failed.load(Ordering::Acquire) != 0
     }
 }
 
@@ -250,30 +326,85 @@ where
 
     fn call(&mut self, job: Job) -> Self::Future {
         let mut inner = self.inner.clone();
+        let id = self.id.clone();
         let timeout = self.timeout;
         let failed = Arc::clone(&self.failed);
+        let cooldowns = Arc::clone(&self.cooldowns);
         let reload = Weak::clone(&self.reload);
         Box::pin(async move {
             let fut = AssertUnwindSafe(inner.call(job));
             match tokio::time::timeout(timeout, fut.catch_unwind()).await {
                 Ok(Ok(Ok(Out::Execute(completion)))) => Ok(Out::Execute(watch_completion(
-                    completion,
-                    timeout,
-                    Arc::clone(&failed),
-                    Weak::clone(&reload),
+                    completion, id, timeout, failed, cooldowns, reload,
                 ))),
                 Ok(Ok(result)) => result,
                 Ok(Err(_panic)) => {
-                    failed.store(true, std::sync::atomic::Ordering::Release);
-                    if let Some(table) = reload.upgrade() {
-                        table.publish();
-                    }
+                    member_panicked(id, failed, cooldowns, reload);
                     Err(PluginError::internal("member panicked"))
                 }
                 Err(_elapsed) => Err(PluginError::timeout("kernel deadline exceeded")),
             }
         })
     }
+}
+
+impl<S> Service<Job> for Cooldown<S>
+where
+    S: Service<Job, Response = Out, Error = PluginError> + Clone + Send + 'static,
+    S::Future: Send,
+{
+    type Response = Out;
+    type Error = PluginError;
+    type Future = Pin<Box<dyn Future<Output = Result<Out, PluginError>> + Send>>;
+
+    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(context)
+    }
+
+    fn call(&mut self, job: Job) -> Self::Future {
+        let mut inner = self.inner.clone();
+        let id = self.id.clone();
+        let cooldowns = Arc::clone(&self.cooldowns);
+        let revision = cooldowns.revision(&id);
+        Box::pin(async move {
+            match inner.call(job).await {
+                Ok(Out::Execute(completion)) => Ok(Out::Execute(record_completion(
+                    completion, id, cooldowns, revision,
+                ))),
+                Ok(out) => {
+                    cooldowns.record_success_if_unchanged(&id, revision);
+                    Ok(out)
+                }
+                Err(error) => {
+                    cooldowns.record_failure(&id, &error);
+                    Err(error)
+                }
+            }
+        })
+    }
+}
+
+fn member_panicked(
+    id: MemberId,
+    failed: Arc<AtomicU64>,
+    cooldowns: Arc<Cooldowns>,
+    reload: Weak<Table>,
+) {
+    let cooling = cooldowns.record_panic(&id);
+    let generation = failed.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    if let Some(table) = reload.upgrade() {
+        table.publish();
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(cooling.until())).await;
+        if failed
+            .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            && let Some(table) = reload.upgrade()
+        {
+            table.publish();
+        }
+    });
 }
 
 impl Service<Job> for ProviderCall {
@@ -310,21 +441,94 @@ impl Service<Job> for ProviderCall {
 
 fn watch_completion(
     completion: Completion,
+    id: MemberId,
     idle: Duration,
-    failed: Arc<std::sync::atomic::AtomicBool>,
+    failed: Arc<AtomicU64>,
+    cooldowns: Arc<Cooldowns>,
     reload: Weak<Table>,
 ) -> Completion {
     match completion {
-        Completion::Stream(stream) => {
-            Completion::Stream(Box::pin(Watched::new(stream, idle, failed, reload)))
-        }
+        Completion::Stream(stream) => Completion::Stream(Box::pin(Watched::new(
+            stream, id, idle, failed, cooldowns, reload,
+        ))),
         Completion::Raw(body) => Completion::Raw(BodyStream::from_stream(Watched::new(
             body_to_stream(body),
+            id,
             idle,
             failed,
+            cooldowns,
             reload,
         ))),
         other => other,
+    }
+}
+
+fn record_completion(
+    completion: Completion,
+    id: MemberId,
+    cooldowns: Arc<Cooldowns>,
+    revision: u64,
+) -> Completion {
+    match completion {
+        Completion::Stream(stream) => Completion::Stream(Box::pin(OutcomeStream::new(
+            stream, id, cooldowns, revision,
+        ))),
+        Completion::Raw(body) => Completion::Raw(BodyStream::from_stream(OutcomeStream::new(
+            body_to_stream(body),
+            id,
+            cooldowns,
+            revision,
+        ))),
+        other => {
+            cooldowns.record_success_if_unchanged(&id, revision);
+            other
+        }
+    }
+}
+
+struct OutcomeStream<S> {
+    inner: Pin<Box<S>>,
+    id: MemberId,
+    cooldowns: Arc<Cooldowns>,
+    revision: u64,
+    succeeded: bool,
+}
+
+impl<S> OutcomeStream<S> {
+    fn new(inner: S, id: MemberId, cooldowns: Arc<Cooldowns>, revision: u64) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            id,
+            cooldowns,
+            revision,
+            succeeded: false,
+        }
+    }
+}
+
+impl<S, T> Stream for OutcomeStream<S>
+where
+    S: Stream<Item = Result<T, PluginError>>,
+{
+    type Item = Result<T, PluginError>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Ok(item))) => {
+                if !this.succeeded {
+                    this.cooldowns
+                        .record_success_if_unchanged(&this.id, this.revision);
+                    this.succeeded = true;
+                }
+                Poll::Ready(Some(Ok(item)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                this.cooldowns.record_failure(&this.id, &error);
+                Poll::Ready(Some(Err(error)))
+            }
+            other => other,
+        }
     }
 }
 
@@ -339,10 +543,12 @@ fn body_to_stream(
 
 struct Watched<S> {
     inner: Pin<Box<S>>,
+    id: MemberId,
     idle: Duration,
     idle_deadline: tokio::time::Instant,
     sleep: Pin<Box<tokio::time::Sleep>>,
-    failed: Arc<std::sync::atomic::AtomicBool>,
+    failed: Arc<AtomicU64>,
+    cooldowns: Arc<Cooldowns>,
     reload: Weak<Table>,
     done: bool,
 }
@@ -350,17 +556,21 @@ struct Watched<S> {
 impl<S> Watched<S> {
     fn new(
         inner: S,
+        id: MemberId,
         idle: Duration,
-        failed: Arc<std::sync::atomic::AtomicBool>,
+        failed: Arc<AtomicU64>,
+        cooldowns: Arc<Cooldowns>,
         reload: Weak<Table>,
     ) -> Self {
         let idle_deadline = tokio::time::Instant::now() + idle;
         Self {
             inner: Box::pin(inner),
+            id,
             idle,
             idle_deadline,
             sleep: Box::pin(tokio::time::sleep_until(idle_deadline)),
             failed,
+            cooldowns,
             reload,
             done: false,
         }
@@ -387,11 +597,12 @@ where
         match polled {
             Err(_panic) => {
                 this.done = true;
-                this.failed
-                    .store(true, std::sync::atomic::Ordering::Release);
-                if let Some(table) = this.reload.upgrade() {
-                    table.publish();
-                }
+                member_panicked(
+                    this.id.clone(),
+                    Arc::clone(&this.failed),
+                    Arc::clone(&this.cooldowns),
+                    Weak::clone(&this.reload),
+                );
                 Poll::Ready(Some(Err(PluginError::internal("member panicked"))))
             }
             Ok(Poll::Pending) => match this.sleep.as_mut().poll(context) {
@@ -491,7 +702,14 @@ mod tests {
     use async_trait::async_trait;
     use hofund_plugin_api::Request;
     use hofund_provider::{Completion, Provider, ProviderError};
-    use hofund_router::FailoverPolicy;
+    use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy};
+
+    fn cooldowns() -> Arc<Cooldowns> {
+        Arc::new(Cooldowns::with_clock(
+            CooldownPolicy::default(),
+            Arc::new(|| tokio::time::Instant::now().into_std()),
+        ))
+    }
 
     #[test]
     fn provider_errors_round_trip_with_kinds_status_and_retry_hints() {
@@ -560,7 +778,8 @@ mod tests {
                 max_output_tokens: None,
             }],
         );
-        let snapshot = open(&built, routes, FailoverPolicy::default()).expect("snapshot");
+        let snapshot =
+            open(&built, routes, FailoverPolicy::default(), cooldowns()).expect("snapshot");
         let first = snapshot.load();
         let error = match first.dispatch(&Request::new("demo"), "openai-chat").await {
             Ok(_) => panic!("panic should fail the call"),
@@ -644,7 +863,8 @@ mod tests {
                 max_output_tokens: None,
             }],
         );
-        let snapshot = open(&built, routes, FailoverPolicy::default()).expect("snapshot");
+        let snapshot =
+            open(&built, routes, FailoverPolicy::default(), cooldowns()).expect("snapshot");
         let routed = snapshot
             .load()
             .dispatch(&Request::new("demo"), "openai-chat")
@@ -719,7 +939,8 @@ mod tests {
                 max_output_tokens: None,
             }],
         );
-        let snapshot = open(&built, routes, FailoverPolicy::default()).expect("snapshot");
+        let snapshot =
+            open(&built, routes, FailoverPolicy::default(), cooldowns()).expect("snapshot");
         let error = match snapshot
             .load()
             .dispatch(&Request::new("demo"), "openai-chat")
@@ -793,7 +1014,8 @@ mod tests {
                 max_output_tokens: None,
             }],
         );
-        let snapshot = open(&built, routes, FailoverPolicy::default()).expect("snapshot");
+        let snapshot =
+            open(&built, routes, FailoverPolicy::default(), cooldowns()).expect("snapshot");
         let routed = snapshot
             .load()
             .dispatch(&Request::new("demo"), "openai-chat")
@@ -845,10 +1067,312 @@ mod tests {
                 },
             ],
         );
-        let error = match open(&built, routes, FailoverPolicy::default()) {
+        let error = match open(&built, routes, FailoverPolicy::default(), cooldowns()) {
             Ok(_) => panic!("duplicate member ids should fail startup"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("my-provider"), "{error}");
+    }
+
+    fn built_member(id: &str, adapter: Arc<dyn Provider>) -> BuiltProvider {
+        BuiltProvider {
+            adapter,
+            protocol: "openai-chat",
+            timeout: Duration::from_secs(60),
+            plugin_id: id.to_owned(),
+            preset_id: String::new(),
+        }
+    }
+
+    fn route(ids: &[&str]) -> BTreeMap<String, Vec<PlannedHop>> {
+        BTreeMap::from([(
+            "demo".to_owned(),
+            ids.iter()
+                .map(|id| PlannedHop {
+                    provider: (*id).to_owned(),
+                    wire_model: None,
+                    max_output_tokens: None,
+                })
+                .collect(),
+        )])
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_member_returns_when_its_panic_cooldown_expires() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([(
+            "boom".to_owned(),
+            built_member(
+                "boom",
+                Arc::new(Boom {
+                    hits: Arc::clone(&hits),
+                }),
+            ),
+        )]);
+        let snapshot = open(
+            &built,
+            route(&["boom"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        let error = match snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+        {
+            Ok(_) => panic!("panic should fail the call"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("member panicked"));
+        assert!(snapshot.load().models().is_empty());
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(snapshot.load().models(), ["demo".to_owned()]);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_panic_doubles_the_cooldown() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([(
+            "boom".to_owned(),
+            built_member(
+                "boom",
+                Arc::new(Boom {
+                    hits: Arc::clone(&hits),
+                }),
+            ),
+        )]);
+        let snapshot = open(
+            &built,
+            route(&["boom"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        for _ in 0..2 {
+            let result = snapshot
+                .load()
+                .dispatch(&Request::new("demo"), "openai-chat")
+                .await;
+            assert!(result.is_err());
+            assert!(snapshot.load().models().is_empty());
+            tokio::time::advance(Duration::from_secs(60)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(snapshot.load().models().is_empty());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(snapshot.load().models(), ["demo".to_owned()]);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    fn raw_ok() -> Completion {
+        Completion::Raw(Box::pin(futures_util::stream::once(async {
+            Ok(bytes::Bytes::from_static(b"ok"))
+        })))
+    }
+
+    struct Scripted {
+        id: &'static str,
+        hits: Arc<AtomicUsize>,
+        answers: std::sync::Mutex<std::collections::VecDeque<Result<Completion, ProviderError>>>,
+    }
+
+    #[async_trait]
+    impl Provider for Scripted {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<Completion, ProviderError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            self.answers
+                .lock()
+                .expect("answers")
+                .pop_front()
+                .expect("scripted answer")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_after_cools_a_member_across_republished_snapshots() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                built_member(
+                    "first",
+                    Arc::new(Scripted {
+                        id: "first",
+                        hits: Arc::clone(&first_hits),
+                        answers: std::sync::Mutex::new(
+                            [
+                                Err(ProviderError::status(429, "slow")
+                                    .with_retry_after(Duration::from_secs(120))),
+                                Ok(raw_ok()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    }),
+                ),
+            ),
+            (
+                "second".to_owned(),
+                built_member(
+                    "second",
+                    Arc::new(Scripted {
+                        id: "second",
+                        hits: Arc::clone(&second_hits),
+                        answers: std::sync::Mutex::new(
+                            [Ok(raw_ok()), Ok(raw_ok()), Ok(raw_ok())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                    }),
+                ),
+            ),
+        ]);
+        let book = cooldowns();
+        let (snapshot, table) = super::open_with_table(
+            &built,
+            route(&["first", "second"]),
+            FailoverPolicy::default(),
+            book,
+        )
+        .expect("snapshot");
+
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("failover");
+        assert_eq!(routed.upstream_id, "second");
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("cooling");
+        assert_eq!(routed.upstream_id, "second");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+
+        table.publish();
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("republished");
+        assert_eq!(routed.upstream_id, "second");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_secs(121)).await;
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("expired");
+        assert_eq!(routed.upstream_id, "first");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 3);
+    }
+
+    struct Observing {
+        host: hofund_plugin_api::HostContext,
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for Observing {
+        fn id(&self) -> &str {
+            "observed"
+        }
+
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<Completion, ProviderError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            let observation = self.host.observe().observation().with_remaining(0);
+            self.host
+                .observe()
+                .observe(observation)
+                .map_err(crate::adapt::provider_error)?;
+            Ok(raw_ok())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_observation_cools_only_its_bound_member() {
+        let book = cooldowns();
+        let root = std::env::temp_dir().join(format!("hofund-observe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("root");
+        let host = hofund_plugin_host::runtime_host_with_observe(
+            hofund_plugin_api::PluginId::from_static("observed"),
+            "",
+            &root,
+            hofund_plugin_host::HttpLimits::default(),
+            super::observe_backend("observed", Arc::clone(&book)),
+        )
+        .expect("host");
+        let observed_hits = Arc::new(AtomicUsize::new(0));
+        let backup_hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "observed".to_owned(),
+                built_member(
+                    "observed",
+                    Arc::new(Observing {
+                        host,
+                        hits: Arc::clone(&observed_hits),
+                    }),
+                ),
+            ),
+            (
+                "backup".to_owned(),
+                built_member(
+                    "backup",
+                    Arc::new(Scripted {
+                        id: "backup",
+                        hits: Arc::clone(&backup_hits),
+                        answers: std::sync::Mutex::new([Ok(raw_ok())].into_iter().collect()),
+                    }),
+                ),
+            ),
+        ]);
+        let snapshot = open(
+            &built,
+            route(&["observed", "backup"]),
+            FailoverPolicy::default(),
+            Arc::clone(&book),
+        )
+        .expect("snapshot");
+
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("observed");
+        assert_eq!(routed.upstream_id, "observed");
+        assert!(book.cooling(&super::member_id("observed")).is_some());
+        assert!(book.cooling(&super::member_id("backup")).is_none());
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("backup");
+        assert_eq!(routed.upstream_id, "backup");
+        assert_eq!(observed_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
