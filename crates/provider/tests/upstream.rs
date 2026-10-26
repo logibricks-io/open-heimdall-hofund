@@ -461,14 +461,14 @@ async fn status_503_is_a_status_error() {
 }
 
 #[tokio::test]
-async fn execute_status_errors_carry_bounded_retry_hints() {
+async fn execute_status_errors_carry_unbounded_retry_hints() {
     let date = httpdate::fmt_http_date(
         std::time::UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000),
     );
     for (header, expected) in [
         (Some("120"), Some(120)),
-        (Some(date.as_str()), Some(3600)),
-        (Some("7200"), Some(3600)),
+        (Some(date.as_str()), None),
+        (Some("7200"), Some(7200)),
         (None, None),
     ] {
         let server = MockServer::start().await;
@@ -489,11 +489,18 @@ async fn execute_status_errors_carry_bounded_retry_hints() {
             Ok(_) => panic!("status"),
             Err(error) => error,
         };
-        assert_eq!(
-            error.retry_after(),
-            expected.map(std::time::Duration::from_secs),
-            "header: {header:?}"
-        );
+        if header == Some(date.as_str()) {
+            assert!(
+                error.retry_after() > Some(std::time::Duration::from_secs(7200)),
+                "header: {header:?}"
+            );
+        } else {
+            assert_eq!(
+                error.retry_after(),
+                expected.map(std::time::Duration::from_secs),
+                "header: {header:?}"
+            );
+        }
     }
 }
 

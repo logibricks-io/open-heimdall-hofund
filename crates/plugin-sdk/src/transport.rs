@@ -356,16 +356,14 @@ async fn read_body(
 }
 
 fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
-    const MAX_RETRY_AFTER: Duration = Duration::from_hours(1);
-    let delay = value
+    value
         .parse::<u64>()
         .map(Duration::from_secs)
         .ok()
         .or_else(|| {
             let at = httpdate::parse_http_date(value).ok()?;
             at.duration_since(now).ok()
-        })?;
-    Some(delay.min(MAX_RETRY_AFTER))
+        })
 }
 
 /// A text response. Plugins return this from [`InboundSurface::handle`](hofund_plugin_api::InboundSurface::handle).
@@ -439,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_is_bounded_and_attached_to_status_errors() {
+    fn retry_after_is_unbounded_and_attached_to_status_errors() {
         let now = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let date = httpdate::fmt_http_date(now + Duration::from_secs(120));
         assert_eq!(
@@ -452,7 +450,11 @@ mod tests {
         );
         assert_eq!(
             parse_retry_after("7200", now),
-            Some(Duration::from_secs(3600))
+            Some(Duration::from_secs(7200))
+        );
+        assert_eq!(
+            parse_retry_after(&u64::MAX.to_string(), now),
+            Some(Duration::from_secs(u64::MAX))
         );
         assert_eq!(parse_retry_after("invalid", now), None);
         let error =

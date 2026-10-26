@@ -17,23 +17,20 @@ use crate::error::ProviderError;
 use crate::stream::SseEvents;
 pub(crate) use crate::stream::{map_transport, message_from};
 
-const MAX_RETRY_AFTER: Duration = Duration::from_hours(1);
-
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
     parse_retry_after(value, std::time::SystemTime::now())
 }
 
 fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
-    let delay = value
+    value
         .parse::<u64>()
         .map(Duration::from_secs)
         .ok()
         .or_else(|| {
             let at = httpdate::parse_http_date(value).ok()?;
             at.duration_since(now).ok()
-        })?;
-    Some(delay.min(MAX_RETRY_AFTER))
+        })
 }
 
 /// Where an API key is written.
@@ -653,7 +650,11 @@ mod tests {
         );
         assert_eq!(
             parse_retry_after("7200", now),
-            Some(Duration::from_secs(3600))
+            Some(Duration::from_secs(7200))
+        );
+        assert_eq!(
+            parse_retry_after(&u64::MAX.to_string(), now),
+            Some(Duration::from_secs(u64::MAX))
         );
         assert_eq!(parse_retry_after("invalid", now), None);
         assert_eq!(

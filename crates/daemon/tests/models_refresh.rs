@@ -233,7 +233,7 @@ async fn failed_refresh_waits_for_interval_cap_and_retry_after() {
         ("no-header", "10m", 429, None, 600_000),
         ("header", "10m", 429, Some(3600), 3_600_000),
         ("short-header", "10m", 429, Some(60), 600_000),
-        ("retry-after-cap", "10m", 429, Some(864_000), 3_600_000),
+        ("retry-after-cap", "10m", 429, Some(864_000), 86_400_000),
     ] {
         let server = MockServer::start().await;
         let mut failure = ResponseTemplate::new(status);
