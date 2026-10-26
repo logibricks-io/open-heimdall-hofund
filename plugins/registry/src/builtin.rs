@@ -634,6 +634,25 @@ mod tests {
     }
 
     #[test]
+    fn vertex_preflight_error_has_only_the_credentials_path() {
+        let missing = std::env::temp_dir().join(format!(
+            "hofund-registry-missing-credentials-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        let mut vertex = raw("vertex");
+        vertex.insert("project", RawValue::String("example-project".to_owned()));
+        vertex.insert(
+            "credentials",
+            RawValue::String(missing.to_string_lossy().into_owned()),
+        );
+        let config = UpstreamFactory::validate(&VertexFactory, &vertex).expect("config");
+        let error = UpstreamFactory::preflight(&VertexFactory, &config).expect_err("missing file");
+        assert_eq!(error.path(), "credentials");
+        assert!(!error.message().contains("credentials:"), "{error}");
+    }
+
+    #[test]
     fn schemas_list_only_that_plugins_options() {
         let vertex = UpstreamFactory::config_schema(&VertexFactory);
         let names = vertex.field_names();
