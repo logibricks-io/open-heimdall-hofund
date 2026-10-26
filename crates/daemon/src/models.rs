@@ -557,7 +557,7 @@ impl ModelsHost {
         };
         let upstream = self.configured(provider, &planned, &endpoint, config_path)?;
         let protocol = ProtocolId::try_from(protocol_of(planned.wire)).map_err(show)?;
-        let learned = self.learned_auth(&provider.id, planned.wire);
+        let learned = self.learned_auth(provider, planned.wire);
         let extra = self.extra_body(provider)?;
         let results = futures_util::stream::iter(selected.into_iter().map(|selected| {
             let upstream = Arc::clone(&upstream);
@@ -861,7 +861,7 @@ impl ModelsHost {
             let auth_key = format!(
                 "{}\0{:?}\0{:?}",
                 endpoint.api_key,
-                self.learned_auth(&provider.id, wire),
+                self.learned_auth(provider, wire),
                 endpoint.headers
             );
             if !seen_bases.insert((base.trim_end_matches('/').to_owned(), auth_key)) {
@@ -889,7 +889,7 @@ impl ModelsHost {
                     }
                 }
             };
-            let query = match self.learned_auth(&provider.id, wire) {
+            let query = match self.learned_auth(provider, wire) {
                 Some(choice) if wire == Wire::Messages => ListQuery::new().with_auth_choice(choice),
                 _ => ListQuery::new(),
             };
@@ -913,7 +913,7 @@ impl ModelsHost {
                         "{}\0{:?}\0{:?}",
                         endpoint.api_key,
                         list.auth_choice()
-                            .or_else(|| self.learned_auth(&provider.id, wire)),
+                            .or_else(|| self.learned_auth(provider, wire)),
                         endpoint.headers
                     );
                     let answered = list
@@ -1220,7 +1220,7 @@ impl ModelsHost {
     ) -> Result<ProviderModels, DaemonError> {
         let redactor = Redactor::new(provider, endpoint, Some(url));
         let learning = messages_only && self.exact_learning(provider, planned, endpoint);
-        let learned = Arc::new(Mutex::new(self.learned_auth(&provider.id, planned.wire)));
+        let learned = Arc::new(Mutex::new(self.learned_auth(provider, planned.wire)));
         let learned_for_page = Arc::clone(&learned);
         let rows = after_id(url, |page| {
             let learned = Arc::clone(&learned_for_page);
@@ -1477,14 +1477,14 @@ impl ModelsHost {
         )
     }
 
-    fn learned_auth(&self, provider: &str, wire: Wire) -> Option<AuthChoice> {
-        if wire != Wire::Messages {
+    fn learned_auth(&self, provider: &hofund_config::Provider, wire: Wire) -> Option<AuthChoice> {
+        if wire != Wire::Messages || pinned_auth(provider) {
             return None;
         }
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .get(provider)
+            .get(&provider.id)
             .auth
             .map(Into::into)
     }
@@ -1928,7 +1928,21 @@ fn exact_call(
             Some(AuthChoice::Both) => CredentialStyle::MessagesBoth,
             _ => style,
         };
-        if style != CredentialStyle::MessagesBoth || !pinned_auth(provider) {
+        // A user-pinned auth header wins over the credential header it would
+        // duplicate; other credential headers still apply.
+        let pinned = |name: &str| {
+            provider
+                .headers
+                .keys()
+                .any(|header| header.eq_ignore_ascii_case(name))
+        };
+        let collides = match &style {
+            CredentialStyle::Bearer => pinned("authorization"),
+            CredentialStyle::XApiKey => pinned("x-api-key"),
+            CredentialStyle::MessagesBoth => pinned_auth(provider),
+            _ => false,
+        };
+        if !collides {
             call = call.credential(style, &secret)?;
         }
     }
