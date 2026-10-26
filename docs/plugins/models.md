@@ -8,7 +8,11 @@ Preset status in [providers.md](../coverage/providers.md) stays as it is until a
 
 ## Two layers
 
-One configured `[[providers]]` entry has an `id`, `preset`, `protocol`, `base_url`, `api_key`, `headers`, and `options` (`crates/config/src/lib.rs` lines 121-149). Hofund builds exactly one plugin instance for it, on `planned.wire` (`crates/daemon/src/lib.rs` lines 241-306 and 321-347). `openai-compat`, `anthropic`, and `generative` are separate factories (`plugins/registry/src/builtin.rs` lines 26-54). A factory spec's `ListKind` is an upper bound on what the plugin can do, and the conformance kit keys on it (RFC 0001 lines 313 and 798). Code pull request 1 sets `Live` for `openai-compat`, `anthropic`, and `generative`, and `Catalog` for Vertex and Bedrock Converse. It also adds `Deployments` to the non-exhaustive `ListKind` enum in `crates/plugin-api/src/upstream.rs` for Azure. The host resolves each instance's kind (`Catalog`, `Deployments`, or `Live`) from its preset, region, and options, never above the spec's bound. A preset that resolves to `Catalog` is not dialled even when the spec says `Live`.
+One configured `[[providers]]` entry has an `id`, `preset`, `protocol`, `base_url`, `api_key`, `headers`, and `options` (`crates/config/src/lib.rs` lines 121-149). Hofund builds exactly one plugin instance for it, on `planned.wire` (`crates/daemon/src/lib.rs` lines 241-306 and 321-347). `openai-compat`, `anthropic`, and `generative` are separate factories (`plugins/registry/src/builtin.rs` lines 26-54). A factory spec's `ListKind` is an upper bound on what the plugin can do, and the conformance kit keys on it (RFC 0001 lines 313 and 798). Code pull request 1 sets `Live` for `openai-compat`, `anthropic`, and `generative`, and adds `Deployments` to the non-exhaustive `ListKind` enum in `crates/plugin-api/src/upstream.rs` for Azure.
+
+The total order is `Unsupported < Catalog < Deployments < Live`. `Deployments` dials the vendor but returns only the account's deployment names, so it is narrower than a general live list. An Azure instance on the `openai-compat` spec (`Live`) therefore resolves to `Deployments` without exceeding its bound. The host resolves each instance's kind from its preset, region, and options. A preset that resolves to `Catalog` is not dialled even when the spec says `Live`.
+
+Vertex and Bedrock Converse are unmigrated constructors today, with no factory or `UpstreamSpec` (`crates/daemon/src/lib.rs` lines 266-296 and 484-487). Until a later factory-migration pull request moves them behind factories, code pull request 1 has the host serve their compiled static catalog directly; no spec is involved.
 
 `UpstreamProvider::list_models` lists that one wire at that instance's base. It does not walk the preset's other bases, skip OpenRouter, or keep a side from a previous fetch. A plugin stays encapsulated behind its own base.
 
@@ -19,8 +23,8 @@ Which bases to ask, how to merge them, OpenRouter's skip, `fixV1`, and dead side
 | Kind | When |
 | --- | --- |
 | Catalog | The preset sets `no_list`, and the matched region does not set `lists`. `google-vertex` and `bedrock` are this kind, including when `bedrock` is built on the chat wire through `openai-compat`. The static `models` array is the list. No `GET /models`. Vertex then keeps the ids `Vertex::models_for(location)` allows. Bedrock does not call control-plane `ListFoundationModels`. |
-| Deployments | Preset `azure`. See the Azure section. |
-| Live | Every other preset, including `bedrock-mantle`. Also a `no_list` preset whose matched region sets `lists` (`baidu-qianfan` and `volcengine`, region `api`), and a `no_list` preset whose `models_url` is set. |
+| Deployments | Preset `azure`, or a custom chat or responses base whose host `AzureHost` recognizes, matching magpie's `IsAzure` (`azure.go` lines 27-53). See the Azure section. |
+| Live | Every other preset, including `bedrock-mantle`. Also a `no_list` preset whose matched region sets `lists` (`baidu-qianfan` and `volcengine`, region `api`), and a `no_list` preset whose `models_url` is set. An Anthropic-wire Azure instance is Live on its own `/models` and `/v1/models` candidates: magpie's deployment branch requires chat or responses, and its Anthropic base otherwise uses the ordinary live path (`models.go` lines 661-667 and 697-758; `azure.go` lines 126-160). |
 
 Region match is by path, as `listRegion` and `atRegion` do (`models.go` lines 974-994). The host may differ. `bedrock-mantle` is live: its preset comment says the runtime has no list and Mantle lists at `/v1/models` (`presets.go` lines 395-402). A chat or responses call still uses `MantleBase` (`provider.go` lines 1698-1708): a model is asked at `/v1` or `/openai/v1`, and the other prefix is retried when the first is refused. The list itself is asked at `/v1/models`. `/openai/v1/models` is not a list.
 
@@ -44,7 +48,7 @@ Auth on those lists, from `fetchPage`:
 - Anthropic bases also send `anthropic-version: 2023-06-01`. Anthropic still accepts that value. A newer version string is not what this client sends.
 - A caller header overrides a default of the same name.
 
-If a 401 body refuses both headers, the page is asked again with `x-api-key` alone and then with `Bearer` alone (`internal/catalog/live.go` lines 530-541; `internal/catalog/authheader.go` lines 20-41). The winner is kept for the rest of that list. This is listing behaviour, not a per-preset extra.
+If a 401 body refuses both headers, the page is asked again with `x-api-key` alone and then with `Bearer` alone (`internal/catalog/live.go` lines 530-541; `internal/catalog/authheader.go` lines 20-41). The winner is learned per configured provider, persisted in host state, and used by later lists and probes, not just the rest of that list. A user-pinned header in `headers` always wins over a learned one. This is listing behaviour, not a per-preset extra.
 
 Official shapes:
 
@@ -52,7 +56,7 @@ Official shapes:
 - Anthropic lists with `GET /v1/models`, `x-api-key`, `anthropic-version: 2023-06-01`, `data[].id`, `has_more`, `first_id`, and `last_id`. The next page uses `after_id` and `limit`. `limit` is 1 to 1000 and defaults to 20. `before_id` exists on the official API and is not what the pager sends (<https://platform.claude.com/docs/en/api/models/list>).
 - A compat body that uses `models` instead of `data` is read the same way. `data` wins when it is non-empty. An object contributes `id`, then `name`.
 
-The OpenAI and Anthropic pager is `Paged` (`live.go` lines 459-489). The first request is the URL as written. The whole list has an 8 second budget. A response body is capped at 8 MiB. A page with `has_more` repeats the URL with `after_id` set to `last_id` and `limit=1000`. At most 20 pages are read. When the 20th page still sets `has_more`, the list fails and no 21st request is sent. A page that sets `has_more` without a new `last_id` fails the list. A partial list is a failure, so a later page is not mistaken for models the vendor dropped. A JSON error message is cut at 160 runes (`live.go` lines 637-662).
+The OpenAI and Anthropic pager is `Paged` (`live.go` lines 459-489). The first request is the URL as written. Each candidate list URL has its own 8 second budget across its pages (`live.go` lines 422-437); it is not one budget across every candidate. A response body is capped at 8 MiB. A page with `has_more` repeats the URL with `after_id` set to `last_id` and `limit=1000`. At most 20 pages are read. When the 20th page still sets `has_more`, the list fails and no 21st request is sent. A page that sets `has_more` without a new `last_id` fails the list. A partial list is a failure, so a later page is not mistaken for models the vendor dropped. A JSON error message is cut at 160 runes (`live.go` lines 637-662).
 
 Gemini native follows `gemini_list.go` and `models.list` (<https://ai.google.dev/api/models#method:-models.list>):
 
@@ -61,15 +65,15 @@ Gemini native follows `gemini_list.go` and `models.list` (<https://ai.google.dev
 - When the 20th page still has a token, the rows already read are returned and the call does not fail. That differs from `Paged`.
 - An empty list is an error (`no models listed`).
 - Each id is `name` with a leading `models/` removed.
-- A row whose `supportedGenerationMethods` is non-empty is kept when that array contains `generateContent`. A row with an empty methods array is kept. Embedding (`embedContent`), Imagen (`predict`), and Veo (`predictLongRunning`) are dropped.
+- A row whose `supportedGenerationMethods` is non-empty is kept when that array contains `generateContent`. A row with an empty methods array is kept. Embedding (`embedContent`), Imagen (`predict`), and Veo (`predictLongRunning`) are dropped. Magpie applies only this filter to Gemini pages (`gemini_list.go` lines 60-106); hofund's additional common classification is below.
 
-#59's `next_cursor` reads `next_page_token`, `nextPageToken`, `cursor`, and `next`. The Gemini walker can use it for `nextPageToken`. Gemini ids come from `name`, so the reader strips `models/` itself. `string_items` keeps objects with `id`. OpenAI and Anthropic pages use `has_more` and `last_id`, which that helper does not read. The code pull request adds an `after_id` pager and the Gemini walker to `hofund-plugin-sdk`, beside #59's helpers. Azure keeps the pager it already has.
+#59's `next_cursor` reads `next_page_token`, `nextPageToken`, `cursor`, and `next`. The Gemini walker can use it for `nextPageToken`. Gemini ids come from `name`, so the reader strips `models/` itself. `string_items` keeps objects with `id` and bare string elements (`crates/plugin-sdk/src/page.rs` line 63 in #59). OpenAI and Anthropic pages use `has_more` and `last_id`, which that helper does not read. The code pull request adds an `after_id` pager and the Gemini walker to `hofund-plugin-sdk`, beside #59's helpers. Azure keeps the pager it already has.
 
 ### Azure deployments
 
 `list_deployments` stays: `GET {root}/deployments?api-version=2022-12-01`, then `GET {base}/models`, header `api-key`. `root` is the v1 base with a trailing `/v1` removed. That is the same pair `azureModels` asks (`azure.go` lines 130-161).
 
-Microsoft's page for the 2022-12-01 data-plane deployments list now returns 404. The replacement Microsoft documents is the management-plane deployments API, which needs ARM and Entra ID. Magpie still calls the data-plane URL, and field reports say a resource key still gets an answer. This plan keeps that call and records the risk: it can stop answering without a docs page to follow. The second URL stays. For the usual Azure base that ends in `/openai/v1`, that URL is `/openai/v1/models`. It lists base models. It lists deployment names only when the resource owner named each deployment after its model. The id a chat call must send is the deployment name, so a fallback hit is reported as base models, not as deployments. When both URLs fail, the message ends with `type your deployments' names in as model ids`, which is Azure's own suffix, not the generic one below.
+Microsoft's page for the 2022-12-01 data-plane deployments list now returns 404. The replacement Microsoft documents is the management-plane deployments API, which needs ARM and Entra ID. Magpie still calls the data-plane URL, and field reports say a resource key still gets an answer. This plan keeps that call and records the risk: it can stop answering without a docs page to follow. The second URL stays. For the usual Azure base that ends in `/openai/v1`, that URL is `/openai/v1/models`. It lists base models. It lists deployment names only when the resource owner named each deployment after its model. The id a chat call must send is the deployment name, so a fallback hit is reported as base models, not as deployments. That explicit label is a deliberate difference: magpie returns the fallback rows without distinguishing them (`azure.go` lines 130-154). When both URLs fail, the message ends with `type your deployments' names in as model ids`, which is Azure's own suffix, not the generic one below.
 
 ### Rows that are not chat models
 
@@ -77,7 +81,7 @@ Microsoft's page for the 2022-12-01 data-plane deployments list now returns 404.
 
 - The id, as the vendor spelled it, is dropped when it contains any of `embed`, `-tts`, `image`, `audio`, `-live`, `robotics`, `computer-use`, `deep-research`, `transcribe`, `realtime`, `moderation`, `whisper`, `dall-e`, or `sora`. The check does not lowercase the id first. Embedding (`embed`), TTS (`-tts`), Whisper, Sora, realtime, and moderation are in this list. `tts-1` does not contain `-tts`, so the substring test does not drop it.
 
-`textModel` also drops a models.dev catalog row whose output modalities are present and contain no `text` (`catalog.go` line 931). A plugin does not fetch models.dev, and a live page does not pass modalities into `textModel`, so a live row is not dropped only because its output modalities omit `text`. Those modalities are still stored on the row.
+`textModel` also drops a models.dev catalog row whose output modalities are present and contain no `text` (`catalog.go` line 931). A plugin does not fetch models.dev, and a live page does not pass modalities into `textModel`, so a live row is not dropped only because its output modalities omit `text`. Those modalities are still stored on the row. In magpie, the live-page filter and tags run only on OpenAI-compatible and Anthropic pages (`live.go` lines 571-613); `geminiPage` does not call them. The models.dev path is the other `textModel` caller.
 
 Tagging, still recorded when the probe cannot use the row yet:
 
@@ -85,7 +89,9 @@ Tagging, still recorded when the probe cannot use the row yet:
 - Film: the row's kind is `video`.
 - Drawing: the row is not a film or a decision, and either its kind is `image` or `DrawsID` matches and the id does not contain `deep-research`. `DrawsID` lowercases the id and looks for `image`, `imagen`, `imagine`, `dall-e`, `flux`, `seedream`, `cogview`, `stable-diffusion`, `sdxl`, `wanx`, `kolors`, `hidream`, or `banana`.
 
-A tagged drawing, film, or decision stays on the result and is marked. The chat-facing list omits it, and auto-include does not add it to chat picks. An id that fails the substring test and is not tagged is absent from both. `text-embedding-3-small` contains `embed` and is not tagged, so it is absent. `gpt-4o-mini-tts` contains `-tts` and is absent the same way. `dall-e-3` and `gpt-image-2` match `DrawsID`, so they are drawings, not chat models. An OpenAI-compatible page of `gpt-5.5`, `gpt-image-2`, `flux-kontext-pro`, and `text-embedding-3-small` yields the chat id `gpt-5.5` and the drawings `gpt-image-2` and `flux-kontext-pro`. The same filter runs on Anthropic pages. Gemini's `generateContent` filter is in addition to this one.
+A tagged drawing, film, or decision stays on the result and is marked. The chat-facing list omits it, and auto-include does not add it to chat picks. An id that fails the substring test and is not tagged is absent from both. `text-embedding-3-small` contains `embed` and is not tagged, so it is absent. `gpt-4o-mini-tts` contains `-tts` and is absent the same way. `dall-e-3` and `gpt-image-2` match `DrawsID`, so they are drawings, not chat models. An OpenAI-compatible page of `gpt-5.5`, `gpt-image-2`, `flux-kontext-pro`, and `text-embedding-3-small` yields the chat id `gpt-5.5` and the drawings `gpt-image-2` and `flux-kontext-pro`. The same filter runs on Anthropic pages.
+
+Hofund deliberately applies the text filter and tags to Gemini rows too, after the generation-method filter. One classification rule for every wire means a drawing or speech id never becomes a chat route because a Gemini base listed it. When the same id arrives from several bases, a drop from any base wins; otherwise the drawing, film, and decision tags are the union of every base's tags. This conservative rule matches the AND image-input rule. Mock group T covers a Gemini/OpenAI-compatible duplicate where one side drops the id and another tags it.
 
 ### Metadata one row carries
 
@@ -107,30 +113,49 @@ Today `ModelSpec` is an id and an optional display name. The code pull request e
 | `service_tiers` | `service_tiers` |
 | `price` | `magpie_price`: `input`, `output`, `cache_read`, `cache_write`, `cache_write_1h`, and `tiers`. Kept when the object is present and sane: no part is NaN, below zero, or above 1e6, and each tier's `above` is positive |
 
-Gemini rows fill `id`, `display_name`, `context` (`inputTokenLimit`), and `max_output` (`outputTokenLimit`). Price and endpoints stay empty. Rows 1.6 and 2.8 read `context` and `max_output` from this record. They do not fetch models.dev from the plugin.
+Gemini rows fill `id`, `display_name`, `context` (`inputTokenLimit`), and `max_output` (`outputTokenLimit`). Price and endpoints stay empty. Rows 1.6 and 2.8 read `context` and `max_output` from this record. They do not fetch models.dev from the plugin. Catalog decoration is deferred to the models.dev catalog pull request for row 2.8: the aggregator will then apply `Decorate` to live rows and `Named` after it, filling names, efforts, context, and output; Azure gets `Decorate` without `Named`, preserving deployment names (`live.go` lines 781-822; `models.go` lines 83-97).
 
 ## What the aggregator adds
 
-For the configured wire, the aggregator calls the existing instance's `list_models`. For every other base the region-resolved preset row declares for chat, responses, Anthropic, or generative, the host builds a list-only instance for that base's wire through the registry factory. It uses the existing `DynUpstreamFactory::validate_and_build` entry point (`crates/plugin-api/src/upstream.rs` lines 182-220), with the same `api_key`, `headers`, and `options`. No new plugin-api entry point is needed. Code pull request 1 adds this host construction. A list-only instance is never a router member, is never sent `execute`, and is dropped after the sweep.
+For the configured wire, the aggregator calls the existing instance's `list_models`. For every other base the region-resolved preset row declares for chat, responses, Anthropic, or generative, code pull request 1 adds a daemon list-only build path through the existing `DynUpstreamFactory::validate_and_build` entry point (`crates/plugin-api/src/upstream.rs` lines 182-220). No new plugin-api entry point or factory schema key is needed.
+
+Each list-only `RawTable` contains exactly:
+
+- `id`: `<provider id>#list:<wire>`. It cannot collide with the configured instance, never reaches the router, and is never logged as a route; host logs use the configured provider id.
+- `base_url`: the region-resolved preset row's base for that wire.
+- `protocol`: `chat` or `responses` only; Anthropic and generative factories take no protocol key.
+- `credential`: the credential for that wire.
+- `api_key`: the configured key after secret resolution. The same key also reaches the plugin through `runtime_host` (`crates/daemon/src/lib.rs` lines 339-346; `crates/plugin-host/src/lib.rs` lines 82-103).
+- `headers`: the configured headers.
+- `quirks`: only when the preset row names a profile.
+
+These are the only keys the builtin factories accept (`plugins/registry/src/builtin.rs` lines 187-195). The host-owned `[providers.models]` keys below are never put in a `RawTable`. Today's daemon passes no `provider.options` to any factory: `build_plugin` chooses `raw_from_preset` or `raw_from_endpoint`, whose fields are fixed (`crates/daemon/src/lib.rs` lines 321-393). Code pull request 1 keeps that boundary for list-only builds. When a later pull request passes `options` to a factory, a list-only instance gets the same `options` as the configured instance, so both are validated by the same plugin schema. A list-only instance is never a router member, is never sent `execute`, and is dropped after the sweep.
+
+The host-owned listing keys live in a `[providers.models]` table that `hofund-config` adds beside `options`: string `refresh`, string array `auto_include`, and string `url`. They are kernel keys, not vendor settings. RFC 0001 keeps kernel keys in `hofund-config` and leaves the opaque `options` table to the plugin, which validates it (RFC 0001 lines 319-321; `crates/config/src/lib.rs` lines 117-149). Putting host keys in `options` would make the host read inside a plugin-owned table. Code pull request 1 adds the table with all three keys; the refresh job that reads `refresh` and `auto_include` arrives in code pull request 2. This document calls them `models_url`, `models_refresh`, and `models_auto_include` below.
 
 When the user set `base_url` on the provider, only the configured wire is listed. The key must not go to the preset's other hosts after the user pointed the provider elsewhere. This is a deliberate difference from magpie. Magpie exposes chat, responses, Anthropic, Gemini, and Decide as separate fields (`internal/provider/provider.go` lines 84-104), and `fetchOne` walks the bases that are set (`internal/provider/models.go` lines 640-660 and 697-758).
 
 The aggregator merges by id, in protocol order, within that one configured provider.
 
 - The same list URL, asked with the same auth, is fetched once.
-- A duplicate id keeps one row. Image input follows `sharedImageInput` (`models.go` lines 1331-1344). An explicit text-only answer from either base wins. Image input is kept only when both bases report it. If either side left it unknown, the merged value stays unknown, unless the other side is explicitly text-only. `anyImageInput` (`models.go` lines 1346-1350), where either side having image input is enough, is the rule for groups. It is not the rule for two bases of one preset. A mock where one base says text-only and the other says image expects text-only.
+- A duplicate id keeps one row. Image input follows `sharedImageInput` (`models.go` lines 1331-1344). An explicit text-only answer from either base wins. Image input is kept only when both bases report it. If either side left it unknown, the merged value stays unknown, unless the other side is explicitly text-only. `anyImageInput` (`models.go` lines 1346-1350), where either side having image input is enough, is the rule for groups. It is not the rule for two bases of one preset. A mock where one base says text-only and the other says image expects text-only. Drops and tags follow the cross-wire precedence above.
 - OpenRouter's Anthropic base is skipped when the provider also has a chat or responses base (`models.go` lines 754-763). With `anthropic-version`, that host returns its catalog under an `anthropic/` prefix. When that Anthropic base is the only base, it is asked, and a namespaced answer is an error that names `https://openrouter.ai/api/v1`.
 - A base that fails keeps the models it listed last time, and only those (`keepDeadSides`, `models.go` lines 927-968), once the picks store exists. Until that store exists, a failed base contributes nothing.
-- `fixV1` (`models.go` lines 1138-1167): when the list was found only at `{base}/v1/models`, the base has no version segment, and the protocol is chat or responses, the stored base gains `/v1`. A versioned base is left as written. The aggregator returns the corrected base. The refresh job writes it back onto the provider. A request to the unfixed base would miss the models the list just found.
+- `fixV1` (`models.go` lines 1138-1167): when the list was found only at `{base}/v1/models`, the base has no version segment, and the protocol is chat or responses, the stored base gains `/v1`. A versioned base is left as written. The aggregator returns the corrected base and persists it in host state, not in the user's TOML. A request to the unfixed base would miss the models the list just found.
 
-`models_url`, when the user set it, is the only URL asked (`models.go` lines 648-660). It also makes a `no_list` preset list live (`lists`, lines 170-176). The value is an option the aggregator reads. Factories do not grow a schema key for it. A query string on that URL is redacted in every error.
+`models_url`, when the user set it, is the only URL asked (`models.go` lines 648-660). It also makes a `no_list` preset list live (`lists`, lines 170-176). A query string on that URL is redacted in every error.
+
+After a normal or `models_url` fetch, the aggregator applies the public-drawer rule for an AIHubMix base host. It fetches `https://aihubmix.com/api/v1/models` without a key, keeps matching image rows as drawings, and appends ids the keyed list omitted. A public-feed failure adds nothing (`public.go` lines 14-94; `models.go` lines 659 and 816-824).
+
+The unsaved add-provider preview (`Provider.List`, `models.go` lines 408-433) is deferred to the desktop add-provider pull request. That pull request adds a dry-run over an unsaved provider table through the same aggregator, with no picks or refresh-state writes.
 
 `planModels` (`models.go` lines 1038-1091) runs in the aggregator after the merge:
 
 - A region's `models` replace the preset's `models` when the instance sits on that region.
 - Vertex replaces them with `vertexModels(location)`, which hofund already implements as `Vertex::models_for`.
 - When the preset sets `only`, live ids are kept only when they start with that prefix. `clinepass` sets `only = "cline-pass/"`. When the filtered list is empty, the static ids are the list.
-- A `no_list` preset with a static `models` array and no live rows returns those ids.
+- When `only` is empty and the live list is non-empty, static preset and region models are ignored (`models.go` lines 1050-1051). A `no_list` preset with a static `models` array and no live rows returns those ids.
+- Zero `context` and `max_output` values are filled from the kernel's models.dev cache with `ContextOf` and `OutputOf`; the `only` prefix is stripped for that lookup (`models.go` lines 1077-1088). Plugins do not fetch models.dev.
 - Region embedding, drawing, and video lists are deferred to the embeddings, drawing, and video pull requests.
 - Cline's extra free-model list is part of the Cline preset pull request, not this filter.
 
@@ -146,14 +171,17 @@ The job follows `KeepListsFresh` (`internal/provider/autolist.go` lines 239-290)
 
 - It starts 30 seconds after process start, then ticks every 1 minute.
 - Each tick walks providers one after another.
-- A provider with a blank interval, or `off`, `never`, `no`, `none`, `0`, or `-`, is skipped. `Nd` is a number of days. Any other value is a Go duration. Shorter than 10 minutes is a config error (`MinRefreshEvery`, `internal/provider/autolist.go` lines 37-65).
+- A provider with a blank `models_refresh`, or `off`, `never`, `no`, `none`, `0`, or `-`, is skipped. `Nd` is a number of days and accepts fractions, such as `0.5d`. Any other value is a Go duration. Shorter than 10 minutes is a config error (`MinRefreshEvery`, `internal/provider/autolist.go` lines 37-65).
 - Every configured `[[providers]]` entry is in scope. Every hofund provider is already a plugin instance, so none is skipped for being plugin-backed. There is no hofund equivalent of a magpie external plugin provider today. Subscription members from `[[subscriptions]]` are refreshed by their subscription under row H, not by this job. A disabled provider, a decide-only provider, and a preset with nothing to refresh are skipped. This replaces magpie's `ownList` account and external-plugin exclusions (`internal/provider/autolist.go` lines 70-85) while keeping its `Off` skip (`internal/provider/autolist.go` lines 255-274).
 - Due is computed from the stored fetch time. A list younger than the provider's interval is left alone.
 - A failed fetch records the try and waits `min(interval, 15 minutes)` (`listRetry`, `internal/provider/autolist.go` lines 222-234 and 266-274). A `Retry-After` delay raises that wait when it is longer. A 429 without that header uses the normal retry wait. Every retry still waits at least 10 minutes.
 - One fetch is capped at 1 minute.
-- The job holds, per configured provider id: last success time, last try time, the picks, the delisted ids, and the per-base sides.
 
-Auto-include runs inside this job. A rule is a glob (`*`, the whole id, case-insensitive) or `re:` plus a regular expression matched against the whole id. A `re:` rule is case-insensitive unless the expression contains `(?-i)` (`compilePattern`, `groupmatch.go` lines 38-55). A match adds a model the new list has and the previous list lacked. A model the user left unticked stays unticked. Rules only add.
+The job persists per configured provider id: last success, last try, picks, delisted ids, per-base sides, the learned auth header, and the `fixV1` result. The host-owned file is `<root>/host/models/<provider id>.json`, where `<root>` is `.hofund` beside the config (`crates/daemon/src/lib.rs` lines 339-343 and 587-597). It is not a plugin `state_dir` (`crates/plugin-host/src/lib.rs` lines 681-692). Due times survive a restart, so a restart does not refetch every provider 30 seconds after start.
+
+Neither `fixV1` nor auth learning rewrites the user's TOML. This is a deliberate difference from magpie, which writes `AuthHeader` and the fixed base back into its config (`internal/provider/authheader.go` lines 80-100; `internal/provider/models.go` lines 1138-1167): the user's TOML is the user's, and the daemon never edits it. A user-pinned header wins over host state.
+
+Auto-include runs inside this job using `models_auto_include`. A rule is a glob (`*`, the whole id, case-insensitive) or `re:` plus a regular expression matched against the whole id. A `re:` rule is case-insensitive unless the expression contains `(?-i)` (`compilePattern`, `groupmatch.go` lines 38-55). A match adds a model the new list has and the previous list lacked. A model the user left unticked stays unticked. Rules only add.
 
 A model the previous list had and the new list lacks leaves the picks and is stored as delisted (`models.go` lines 301-358). When a later list contains it again, it returns to the picks. A hand-typed id that was never in a fetched list stays. A fetch that fails, or that returns no model, changes nothing.
 
@@ -161,16 +189,20 @@ A model the previous list had and the new list lacks leaves the picks and is sto
 
 Probes run only when the user asks. The refresh job never probes. A configured provider has one wire, so its normal connectivity probe is one paid call for 16 output tokens. A host batch tests at most four models at a time, as `TestModels` does (`internal/provider/test.go` lines 239-257).
 
-The host selects the model. `probe` on the plugin sends the one request the host named. The host does what `Provider.Test` does (`internal/provider/test.go` lines 37-94 and 405-442):
+The host selects the model. `probe` on the plugin sends the one request the host named. The host does what `Provider.Test` does (`internal/provider/test.go` lines 37-94 and 405-449):
 
 1. Refresh the configured provider's aggregated list first.
-2. Pick a model for the configured wire: the first exposed model the key can see, else the first listed model it can see. On Anthropic, prefer an id that starts with `claude`. Skip a disabled id. Skip an id `ImagesAPI` matches (`internal/catalog/catalog.go` lines 1499-1509): the lowercased id contains `gpt-image`, `chatgpt-image`, `dall-e`, `imagen`, `imagine`, `qwen-image`, `wanx`, `wan2`, `seedream`, `cogview`, `flux`, `stable-diffusion`, `sdxl`, `kolors`, or `hidream`. A chat model whose id merely ends in `-image`, such as `gemini-2.5-flash-image`, is not in that list. OpenCode's public key tries only a free model, on chat unless the id is Claude.
+2. Pick a model for the configured wire from exposed models, then listed models. The first pass skips an id `ImagesAPI` matches (`internal/catalog/catalog.go` lines 1499-1509): the lowercased id contains `gpt-image`, `chatgpt-image`, `dall-e`, `imagen`, `imagine`, `qwen-image`, `wanx`, `wan2`, `seedream`, `cogview`, `flux`, `stable-diffusion`, `sdxl`, `kolors`, or `hidream`. A chat model whose id merely ends in `-image`, such as `gemini-2.5-flash-image`, is not in that list. An id whose `APIs(id)` includes the configured wire is preferred. Anthropic prefers `claude` after stripping any namespace through the last `/`, and `NamedOnlyOn` applies. The second pass accepts any otherwise eligible id, including an image id. Both passes skip disabled and Decide models and enforce key visibility. OpenCode's public key tries only a free model, on an API the id serves (`test.go` lines 405-449).
 3. Map the id with `UpstreamName` before it is written into the body (`internal/provider/test.go` line 79; `internal/provider/modelprefs.go` lines 908-941).
 4. Call the configured plugin instance's `probe` with its wire and that upstream name.
 
 A probe always runs on the configured provider's one wire, through that configured instance. It never uses a list-only instance, so no paid call goes to a base the user did not configure as a member. For a named model, when the aggregated list's endpoint metadata names protocols and does not include the configured wire, the host returns an error saying the model is not served on this protocol and sends nothing. Multi-key selection and drawing or Decide branches stay with their deferred pull requests.
 
 This is a deliberate difference from magpie. Magpie's `Test` probes every protocol one provider speaks, and `testOne` can select any of those protocols from the list's endpoint metadata (`internal/provider/test.go` lines 34-94 and 290-356). In hofund each protocol is a separate configured provider, so a full parity check is one probe per configured provider.
+
+Endpoint detection is deferred to the endpoint-detection pull request. That pull request carries `Detect`, `DetectBase`, `DetectModels`, `DetectDecide`, and the `api_detect` log kind (`internal/provider/detect.go` lines 28-120 and 179-348; `internal/probelog/probelog.go` lines 21-27), completing feature-parity row 2.10 rather than only its ordinary probe.
+
+Test-as Codex and Claude Code is deferred to the client test-as pull request. It owns `TestAs`, `asClient`, `clientHeaders`, and `SawClient`, including persisted client header shapes and streamed client-shaped bodies (`internal/provider/test_as.go` lines 33-65 and 101-216).
 
 When no model can be chosen, the error is `no model to try: expose one, or refresh the model list`, and nothing is sent. `ProbeQuery::new` still rejects an empty string with `probe model is empty`.
 
@@ -188,7 +220,7 @@ The body is `tinyBody` (`test.go` lines 184-206), then `tested` (`extrabody.go` 
 
 `vertexTest` is unary `:generateContent`. The gateway's `:streamGenerateContent` path is a different call.
 
-Auth follows `AuthHeaders` (`test.go` lines 457-488), unless listing already learned a single header for that host:
+Auth follows `AuthHeaders` (`test.go` lines 457-488), unless listing already learned a single header for this configured provider. A user-pinned header still wins:
 
 - Vertex, and any provider with an empty key, sends no API-key header. Vertex sends the Google access token from its mint.
 - Azure on Anthropic sends `x-api-key`. Every other Azure call sends `api-key`.
@@ -197,13 +229,13 @@ Auth follows `AuthHeaders` (`test.go` lines 457-488), unless listing already lea
 - Every other Anthropic-compatible route sends both `x-api-key` and `Authorization: Bearer`.
 - Every remaining route sends `Authorization: Bearer`.
 
-An Anthropic probe that sent both headers also retries with one header when a 401 body refuses the pair. It remembers the winner. A user header that replaced a default disables that retry. This is `RetryOneAuth` (`internal/provider/authheader.go` lines 35-105; `internal/provider/test.go` lines 529-538).
+An Anthropic probe that sent both headers also retries with one header when a 401 body refuses the pair. It remembers the winner per provider in host state for later lists and probes. A user header that replaced a default disables that retry. This is `RetryOneAuth` (`internal/provider/authheader.go` lines 35-74; `internal/provider/test.go` lines 529-538).
 
 A 2xx unary body is success. `streams` (`test.go` lines 573-578) reads the request body. A request whose JSON has `stream: true` is read until the first text, thought, or tool, or until an error event, and at most 1 MiB. A stream that ends with none of those still counts as answered. The stored snippet is at most `PROBE_CAP` (4096 bytes). A non-2xx response reads at most 4096 bytes, and the message shown from that body is cut at 300 runes (`apiError`, lines 826-828). The probe does not retry a 429.
 
-The kernel wraps `list_models` and `probe` in the spans RFC 0001 describes, and redacts before a span field or a captured body is stored. The probe posts bytes through the pooled client, so that wrap sits at the kernel call site. Those spans are not on the daemon path today (RFC line 879). The code pull request adds them. Feature-parity row 2.10 also asks that a probe be logged like any other request. The host log uses the same two kinds magpie writes, `list` and `test` (`ownRequests`, `test.go` lines 492-498).
+The kernel wraps `list_models` and `probe` in the spans RFC 0001 describes, and redacts before a span field or a captured body is stored. The probe posts bytes through the pooled client, so that wrap sits at the kernel call site. Those spans are not on the daemon path today (RFC line 879). The code pull request adds them. Feature-parity row 2.10 also asks that a probe be logged like any other request. The host log uses magpie's `model_list` and `provider_test` kinds (`internal/probelog/probelog.go` lines 21-27; `ownRequests`, `test.go` lines 492-498). Detection adds `api_detect` in its deferred pull request.
 
-`kits/upstream` is the conformance suite for a live list's paging and for one minimal probe (RFC line 798). The code pull request extends that kit. A unit mock does not replace it.
+`kits/upstream` keys its cases on the factory spec's `ListKind`. For a `Live` spec it runs the paging cases against a mock and runs one minimal probe (RFC line 798). An Azure `Deployments` instance on that `Live` spec is instead tested by the host aggregator's Azure mock group D, not by the kit, because the kit never sees presets. The code pull request extends the kit. A unit mock does not replace it.
 
 ## Errors and secrets
 
@@ -218,6 +250,8 @@ Per-URL failures are joined into one `PluginError`. Mapping:
 | A body that is not a model list or a completion | `Decode` | none | none |
 | A catalog preset asked to call the network, or a wire with no list method | `Unsupported` | none | none |
 
+The `Status` message keeps magpie's three `APIError` hints: an edge-block page adds `BlockedHint`, a Google account-verification refusal adds its HTTPS verification link, and Command Code's Go-plan refusal adds `CommandCodeGoHint` (`internal/provider/test.go` lines 633-726). The kind and status stay as the table says; only the displayed message gains the hint. Mock group E covers all three.
+
 The CLI prints `PluginError`'s message. Values are removed before the message is built:
 
 - `Authorization`, `api-key`, `x-api-key`, `x-goog-api-key`, and every other header value.
@@ -231,24 +265,29 @@ Every listing, probing, and refresh behaviour has one disposition here. A deferr
 | Behaviour | Magpie source (file:lines) | Hofund status | Section of this doc |
 | --- | --- | --- | --- |
 | `listURLs` candidates and the repeated suffix walk | `internal/catalog/live.go:351-376` | Covered: code PR 1 | What one wire's `list_models` does |
-| `Versioned` detects a version path segment | `internal/catalog/live.go:378-395` | Covered: code PR 1 | What one wire's `list_models` does |
+| `Versioned` detects a version path segment | `internal/catalog/live.go:378-396` | Covered: code PR 1 | What one wire's `list_models` does |
 | `Paged`, its 20-page cap, and its `has_more` and `last_id` rules | `internal/catalog/live.go:407-489` | Covered: code PR 1 | What one wire's `list_models` does |
-| The 8 second list budget and 8 MiB body cap | `internal/catalog/live.go:422-437,495-524`; `internal/catalog/gemini_list.go:60-80` | Covered: code PR 1 | What one wire's `list_models` does |
+| The 8 second list budget per URL and 8 MiB body cap | `internal/catalog/live.go:422-437,495-524`; `internal/catalog/gemini_list.go:60-80` | Covered: code PR 1 | What one wire's `list_models` does |
 | The 160-rune list error cap | `internal/catalog/live.go:637-662` | Covered: code PR 1 | What one wire's `list_models` does |
 | Gemini's pager and partial result at 20 pages | `internal/catalog/gemini_list.go:23-49` | Covered: code PR 1 | What one wire's `list_models` does |
-| Gemini's `generateContent` filter | `internal/catalog/gemini_list.go:94-106` | Covered: code PR 1 | What one wire's `list_models` does |
-| Single-header list auth learning with `BothAuthRefused` and `OneAuthOrder` | `internal/catalog/live.go:495-541`; `internal/catalog/authheader.go:9-73` | Covered: code PR 1 | What one wire's `list_models` does |
-| The `textModel` substring filter | `internal/catalog/live.go:571-588`; `internal/catalog/catalog.go:1448-1467` | Covered: code PR 1 | Rows that are not chat models |
+| Gemini's generation-method-only filter | `internal/catalog/gemini_list.go:60-106` | Covered: code PR 1 | What one wire's `list_models` does |
+| Single-header list auth learning with `BothAuthRefused` and `OneAuthOrder`, per provider and pinned by the user | `internal/catalog/live.go:495-541`; `internal/catalog/authheader.go:9-73`; `internal/provider/authheader.go:78-106` | Covered: code PR 1 | What one wire's `list_models` does |
+| Learned auth and `fixV1` write back to the config file | `internal/provider/authheader.go:80-100`; `internal/provider/models.go:1138-1167` | Deliberate difference: host state holds them because the user's TOML is the user's and the daemon never edits it | Refresh |
+| The `textModel` substring filter | `internal/catalog/live.go:571-588`; `internal/catalog/catalog.go:931,1448-1467` | Covered: code PR 1 | Rows that are not chat models |
 | `Draws`, `Films`, and `Decides` tagging | `internal/catalog/live.go:580-613`; `internal/catalog/catalog.go:1485-1497` | Covered: code PR 1 | Rows that are not chat models |
+| Applying the text filter and tags to Gemini rows | `internal/catalog/gemini_list.go:60-106`; `internal/catalog/live.go:571-613` | Deliberate difference: one classification rule for every wire, so a drawing or speech id never becomes a chat route because it was listed by a Gemini base | Rows that are not chat models |
 | `X-Magpie-Drawers` keeps every row from another gateway's list, including rows the normal filter would drop | `internal/catalog/live.go:580-587`; `internal/provider/remote_magpie.go:21-25,50-64,109-123` | Deferred: remote-gateway preset PR; its `resolve` implementation is missing today | Rows that are not chat models |
 | Row metadata, modalities, endpoints, limits, efforts, tiers, and price | `internal/catalog/live.go:589-632,664-739` | Covered: code PR 1 | Metadata one row carries |
+| `Decorate` and `Named`, with Azure decorated without `Named` | `internal/catalog/live.go:781-822`; `internal/provider/models.go:83-97` | Deferred: models.dev catalog PR (row 2.8) | Metadata one row carries |
 | `sharedImageInput` for bases versus `anyImageInput` for groups | `internal/provider/models.go:672-683,1331-1360` | Covered: code PR 1 | What the aggregator adds |
 | One fetch per list URL and auth, with `ErrAsked` for nothing new | `internal/catalog/live.go:230-349`; `internal/provider/models.go:687-696,764-780` | Covered: code PR 1 | What the aggregator adds |
 | OpenRouter's Anthropic skip and namespaced-list error | `internal/provider/models.go:741-763,837-880` | Covered: code PR 1 | What the aggregator adds |
 | `keepDeadSides` | `internal/provider/models.go:809-815,900-968` | Covered: code PR 2 | What the aggregator adds |
 | `fixV1` | `internal/provider/models.go:782-793,1129-1167` | Covered: code PR 1 | What the aggregator adds |
 | `ModelsURL` is the only URL, and `lists()` lets it override `NoList` | `internal/provider/models.go:168-176,646-660` | Covered: code PR 1 | What the aggregator adds |
-| `planModels`: region models, `vertexModels`, `only`, and static fallback | `internal/provider/models.go:996-1091` | Covered: code PR 1 | What the aggregator adds |
+| AIHubMix public drawers with `PublicDrawers` and `WithDrawers` | `internal/catalog/public.go:14-94`; `internal/provider/models.go:659,816-824` | Covered: code PR 1 | What the aggregator adds |
+| Unsaved add-provider preview `List` | `internal/provider/models.go:408-433` | Deferred: desktop add-provider PR | What the aggregator adds |
+| `planModels`: region models, `vertexModels`, `only`, static fallback, and models.dev limits | `internal/provider/models.go:996-1091` | Covered: code PR 1 | What the aggregator adds |
 | Cline's separate feed and free-model append | `internal/provider/models.go:380-385,1053-1076`; `internal/provider/cline.go:56-128` | Deferred: Cline preset PR | What the aggregator adds |
 | Kilo's paged list, free-only public view, and tool and output filters | `internal/provider/models.go:387-395`; `internal/provider/kilo.go:60-99,149-173` | Deferred: Kilo preset PR | What one wire's `list_models` does |
 | OpenCode skips a separate Gemini list and uses the other APIs' shared list | `internal/provider/models.go:699-708` | Not applicable: today's OpenCode preset rows declare no generative base; row H owns account-added bases | What the aggregator adds |
@@ -257,15 +296,20 @@ Every listing, probing, and refresh behaviour has one disposition here. A deferr
 | `fetchPerKey`, per-model key visibility, and `keyFor` | `internal/provider/models.go:1169-1209`; `internal/provider/test.go:316-385` | Deferred: multi-key PR | What the aggregator adds; Probe |
 | Delist and relist | `internal/provider/models.go:297-358` | Covered: code PR 2 | Refresh |
 | `KeepListsFresh`: 30 second start, 1 minute tick, sequential sweep, `Fetched` due, `listsTried` retry, 1 minute cap, and `Off` skip | `internal/provider/autolist.go:222-290` | Covered: code PR 2 | Refresh |
-| `MinRefreshEvery` and interval parsing | `internal/provider/autolist.go:37-79` | Covered: code PR 2 | Refresh |
+| Persistent fetch time, list, and per-base sides | `internal/provider/models.go:127-155`; `internal/catalog/live.go:73-109,160-184` | Covered: code PR 2 | Refresh |
+| `MinRefreshEvery` and interval parsing, including fractional days | `internal/provider/autolist.go:37-79` | Covered: code PR 2 | Refresh |
 | Auto-include glob and `re:` rules, including `(?-i)` | `internal/provider/autolist.go:114-219`; `internal/provider/groupmatch.go:25-57` | Covered: code PR 2 | Refresh |
-| Azure `azureModels`, its deployment list, and base-model fallback | `internal/provider/azure.go:121-161` | Covered: code PR 1 | Azure deployments |
+| Azure detection by preset or `AzureHost` | `internal/provider/azure.go:27-53` | Covered: code PR 1 | Two layers |
+| Azure `azureModels` and its deployment list | `internal/provider/azure.go:121-161` | Covered: code PR 1 | Azure deployments |
+| Labelling the Azure `/models` fallback as base models | `internal/provider/azure.go:130-154` | Deliberate difference: the fallback does not prove that its ids are deployment names | Azure deployments |
 | Bedrock's static list instead of a runtime list call | `internal/provider/models.go:374-379`; `internal/provider/presets.go:380-392` | Covered: code PR 1 | Two layers |
 | Mantle lists at `/v1/models`, not `/openai/v1/models` | `internal/provider/presets.go:393-409`; `internal/provider/provider.go:1692-1715` | Covered: code PR 1 | Two layers |
 | `Test` refreshes the list before selecting a model | `internal/provider/test.go:34-80` | Covered: code PR 1 | Probe |
-| `testModel` selection, disabled and image-API skips, and Zen's public-key rule | `internal/provider/test.go:387-449`; `internal/catalog/catalog.go:1499-1509` | Covered: code PR 1 | Probe |
+| `testModel` two-pass selection, endpoint preference, namespace handling, disabled, Decide, and image-API skips, `NamedOnlyOn`, and Zen's public-key rule | `internal/provider/test.go:387-449`; `internal/catalog/catalog.go:1499-1509` | Covered: code PR 1 | Probe |
 | Per-model protocol selection from listed endpoints | `internal/provider/test.go:290-356` | Deliberate difference: one configured provider is one wire | Probe |
 | Test probes every protocol a provider speaks | `internal/provider/test.go:34-94` | Deliberate difference: one configured provider is one wire | Probe |
+| Endpoint detection with `Detect`, `DetectBase`, `DetectModels`, `DetectDecide`, and `api_detect` | `internal/provider/detect.go:28-120,179-348`; `internal/probelog/probelog.go:21-27` | Deferred: endpoint-detection PR | Probe |
+| Test-as Codex and Claude Code with `TestAs`, `asClient`, `clientHeaders`, and `SawClient` | `internal/provider/test_as.go:33-65,101-216` | Deferred: client test-as PR | Probe |
 | `UpstreamName` mapping | `internal/provider/test.go:57,79,352`; `internal/provider/modelprefs.go:908-941` | Covered: code PR 1 | Probe |
 | `tinyBody` for each protocol, including both Mantle prefixes | `internal/provider/test.go:175-206` | Covered: code PR 1 | Probe |
 | `tested`, the extra body, a fresh session, and `Prepare` | `internal/provider/extrabody.go:202-207`; `internal/provider/test.go:57-58,79-80` | Covered: code PR 1 | Probe |
@@ -273,8 +317,9 @@ Every listing, probing, and refresh behaviour has one disposition here. A deferr
 | `AuthHeaders` | `internal/provider/test.go:452-488` | Covered: code PR 1 | Probe |
 | Request-body stream detection and the 1 MiB stream read | `internal/provider/test.go:555-631` | Covered: code PR 1 | Probe |
 | Probe errors read 4096 bytes and `apiError` cuts the message to 300 runes | `internal/provider/test.go:567-578,649-667,789-830` | Covered: code PR 1 | Probe |
+| `APIError` edge-block, Google verification, and Command Code Go-plan hints | `internal/provider/test.go:633-726` | Covered: code PR 1 | Errors and secrets |
 | `TestModels` concurrency is four | `internal/provider/test.go:239-257` | Covered: code PR 1 | Probe |
-| `probelog` kinds `list` and `test` | `internal/provider/models.go:238-240`; `internal/provider/test.go:37-38,490-498` | Covered: code PR 1 | Probe |
+| `probelog` kinds `model_list` and `provider_test` | `internal/probelog/probelog.go:21-27`; `internal/provider/models.go:238-240`; `internal/provider/test.go:37-38,490-498` | Covered: code PR 1 | Probe |
 | The final list error suffix | `internal/provider/models.go:801-807` | Covered: code PR 1 | What the aggregator adds |
 | Azure's deployment-name error suffix | `internal/provider/azure.go:149-160` | Covered: code PR 1 | Azure deployments |
 | Probe `RetryOneAuth` | `internal/provider/test.go:529-538`; `internal/provider/authheader.go:35-74` | Covered: code PR 1 | Probe |
@@ -298,16 +343,26 @@ Azure stays partial until the probe, the refresh job, and this acceptance list a
 
 ### Mock groups
 
-| Group | List shape to mock |
+| Group | Behaviour to mock |
 | --- | --- |
 | V | A versioned OpenAI-compatible chat or responses base is asked only at `{base}/models`. |
 | U | An unversioned or suffixed OpenAI-compatible base uses `{base}/models`, `{base}/v1/models`, then the root `/v1/models` and `/models` fallback chain. This also covers a custom `base_url`. |
-| A | An Anthropic-protocol base uses its own `/models`, `/v1/models`, and suffix-stripped root candidates. The pager and single-header auth learning are included. |
-| G | The Gemini native pager uses `pageSize=1000` and `pageToken`. The method filter and partial result at 20 pages are included. |
+| A | An Anthropic-protocol base uses its own `/models`, `/v1/models`, and suffix-stripped root candidates. The pager and single-header auth learning are included. An Anthropic-wire Azure base stays on this live path. |
+| G | The Gemini native pager uses `pageSize=1000` and `pageToken`. The method filter, common text filter and tags, and partial result at 20 pages are included. |
+| T | The same id arrives from Gemini and OpenAI-compatible bases. A drop on either side wins; otherwise tags union. |
+| I | A list-only build has the exact allowed `RawTable`, a non-route id, and no host-owned options. Vertex and Bedrock static catalogs need no spec or network. |
 | S | A static catalog returns the compiled ids without a network call. Region and Vertex location filtering are included where they apply. |
-| D | Azure tries deployments, then `/openai/v1/models`. The fallback is identified as base models, not deployments. |
+| D | Azure is recognized by preset and by Azure resource host. It tries deployments, then `/openai/v1/models`; the fallback is identified as base models, not deployments. This group, not the conformance kit, covers a `Deployments` instance on a `Live` spec. |
 | M | Mantle lists at `/v1/models`. A test proves that `/openai/v1/models` is not asked. |
 | R | A `no_list` preset is static outside its `lists = true` region and live in that region. Both outcomes are tested. |
+| P | AIHubMix's public feed adds only matching image rows not already keyed, and a feed failure adds nothing. |
+| E | Probe errors produce the edge-block, Google verification, and Command Code Go-plan hints without changing error kind or status. |
+| J | Refresh state survives a restart, preserves due times and learned host state, and never writes TOML. |
+| Q | Probe selection covers both passes, endpoint preference, namespaced Claude ids, `NamedOnlyOn`, and disabled and Decide skips. |
+| L | The models.dev catalog PR mocks `Decorate`, `Named`, and Azure decoration without `Named`. |
+| O | The desktop add-provider PR mocks an unsaved dry-run and proves that it writes no picks or refresh state. |
+| N | The endpoint-detection PR mocks Chat, Responses, Anthropic, Gemini, and Decide detection and the `api_detect` log kind. |
+| W | The client test-as PR mocks Codex and Claude Code headers and streamed bodies. |
 | C | Cline's recommendation feed, its fallback to the ordinary list, and free-model handling are mocked. |
 | K | Kilo's paged list, free-only public view, and tool and output filters are mocked. |
 | X | `resolve` rejects the preset today. The named blocker must land before list or probe acceptance can run. |
@@ -320,7 +375,7 @@ The list kind is per configured instance. `V + A` means one mock for each declar
 | --- | --- | --- | --- | --- |
 | `anthropic` | Live | A | Anthropic | None. |
 | `openai` | Live | V | Chat, Responses | The shared URL and auth are fetched once. |
-| `google` | Live | V + G | Chat, Gemini native | Merge chat and Gemini rows. |
+| `google` | Live | V + G + T | Chat, Gemini native | Merge chat and Gemini rows with the common filter and cross-wire precedence. |
 | `google-vertex` | Catalog | S | Vertex Gemini | Filter static ids by location. Test unary thinking rules. |
 | `deepseek` | Live | V + A | Chat, Responses, Anthropic | None. |
 | `xai` | Live | V + A | Chat, Responses, Anthropic | None. |
@@ -347,7 +402,7 @@ The list kind is per configured instance. `V + A` means one mock for each declar
 | `groq` | Live | V | Chat, Responses | None. |
 | `bedrock` | Catalog | S | Chat, Responses, Anthropic | Test every region. No control-plane list call. |
 | `bedrock-mantle` | Live | M + A | Chat, Responses, Anthropic | Test every region and model-dependent Chat and Responses prefixes. |
-| `azure` | Deployments | D | Chat, Responses | Keep the retired-data-plane risk and base-model fallback result. |
+| `azure` | Deployments on chat and responses; Live on Anthropic | D; A on Anthropic | Chat, Responses; Anthropic on a custom Anthropic base | Match Azure resource hosts. Keep the retired-data-plane risk and base-model fallback result. |
 | `ollama-cloud` | Live | V + A | Chat, Anthropic | Decide listing and probe wait for the Decide PR. |
 | `nous` | Live | V | Chat | None. |
 | `openrouter` | Live | V + A | Chat, Anthropic | Test the Anthropic skip and only-base namespaced error. Decide waits for the Decide PR. |
@@ -355,13 +410,13 @@ The list kind is per configured instance. `V + A` means one mock for each declar
 | `clinepass` | Live with `only` and static fallback | V; C with the Cline preset PR | Chat | Test `cline-pass/`, fallback ids, free-model append, and the streamed 1024-token probe. The last three wait for the Cline preset PR. |
 | `opencode-zen` | Live | V + A | Chat, Responses, Anthropic | Public-key model selection is covered. Client and free-body variants wait for the OpenCode preset PR. Decide waits for the Decide PR. |
 | `kilo` | Live | K with the Kilo preset PR | Chat | Custom list and client variants wait for the Kilo preset PR. |
-| `commandcode` | Live | V + A | Chat, Responses, Anthropic | None. |
+| `commandcode` | Live | V + A | Chat, Responses, Anthropic | E covers the Go-plan hint. |
 | `together` | Live | V | Chat | None. |
 | `fireworks` | Live | V | Chat | None. |
 | `siliconflow` | Live | V | Chat | Test `cn` and `intl`. |
 | `nvidia` | Live | V | Chat | None. |
 | `modelscope` | Live | V | Chat, Responses | None. |
-| `aihubmix` | Live | V + A | Chat, Anthropic | None. |
+| `aihubmix` | Live | V + A + P | Chat, Anthropic | Public image drawer feed adds rows the keyed list omits. |
 | `pipellm` | Live | V + A | Chat, Responses, Anthropic | Test the different Chat and Responses base paths. |
 | `302ai` | Live | V + A | Chat, Anthropic | None. |
 | `cherryin` | Live | V + A | Chat, Responses, Anthropic | None. |
@@ -385,8 +440,8 @@ Live vendor tests come last. The owner runs them by hand with test keys the owne
 
 ## Code pull requests
 
-1. After #59 is on `main`: the `after_id` pager and the Gemini walker in `hofund-plugin-sdk`. `list_models` and `probe` on one wire for `openai-compat`, `anthropic`, `generative`, Azure, Vertex, and Bedrock. The host aggregator: configured-provider identity, list-only factory builds with the same credentials and options, the custom-`base_url` restriction, kind from the preset and region, the merge rule, the non-text filter, the metadata fields, OpenRouter's skip, `models_url`, auth-header learning, `only` and region models, and `fixV1`. The host probe selector and four-wide model-test batch. Kernel spans, redaction, and the `list` and `test` log kinds. Conformance in `kits/upstream`. Mocks for the text-only merge, the embedding filter, the 20th page, the Gemini partial page, the 401 body that echoes a key, a static preset that does not dial out, and `bedrock-mantle` listing live while `bedrock` does not. The scheduler does not start.
-2. The host refresh job, the picks store, delist and restore, auto-include, dead sides, and the 429 delay.
-3. Each `Deferred` row in the behaviour inventory, inside the pull request named there.
+1. After #59 is on `main`: the `after_id` pager and the Gemini walker in `hofund-plugin-sdk`. `list_models` and `probe` on one wire for `openai-compat`, `anthropic`, `generative`, and Azure; probes for the unmigrated Vertex and Bedrock constructors; and the host's static-catalog path for those two constructors. The host aggregator: configured-provider identity; the exact list-only `RawTable` build with no `provider.options`; host-owned `models_url`, `models_refresh`, and `models_auto_include`; the custom-`base_url` restriction; the ordered kind bound and Azure host detection; merge, drop, and tag precedence; metadata; OpenRouter's skip; AIHubMix public drawers; auth-header learning; `only`, region models, and models.dev limits; and `fixV1` in host state. The two-pass host probe selector and four-wide model-test batch. `APIError` hints. Kernel spans, redaction, and the `model_list` and `provider_test` log kinds. Conformance in `kits/upstream`. Mocks I, T, P, E, and Q, plus the text-only merge, embedding filter, 20th page, Gemini partial page, 401 body that echoes a key, static preset that does not dial out, Azure host and fallback cases, and `bedrock-mantle` listing live while `bedrock` does not. The scheduler does not start.
+2. The host refresh job, persistent host-owned state and due times, the picks store, delist and restore, auto-include, dead sides, and the 429 delay. Mock J proves restart persistence and that learned auth and `fixV1` never rewrite TOML.
+3. Each `Deferred` row in the behaviour inventory, inside the pull request named there, with mocks L, O, N, and W where those rows apply.
 
 #28 rebases onto `list_models` and `probe` after the first of those pull requests. It stays unmerged until then. It does not define the trait.
