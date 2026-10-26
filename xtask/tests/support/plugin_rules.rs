@@ -141,6 +141,31 @@ fn plugin_seam_matches_the_contract() {
 }
 
 #[test]
+fn data_only_agent_trees_pass_but_empty_agent_directories_fail() {
+    let root = std::env::temp_dir().join(format!(
+        "hofund-data-only-agent-rules-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let plugins = root.join("plugins");
+    fs::create_dir_all(plugins.join("agents/example")).expect("agent");
+    fs::write(
+        plugins.join("agents/example/agent.toml"),
+        "id = \"example\"\n",
+    )
+    .expect("agent manifest");
+    assert!(plugin_tree_violations(&plugins).is_empty());
+
+    fs::create_dir_all(plugins.join("agents/empty")).expect("empty agent");
+    let violations = plugin_tree_violations(&plugins).join("\n");
+    assert!(
+        violations.contains("agent.toml or plugin.toml"),
+        "{violations}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn plugin_rules_reject_a_bad_tree() {
     assert!(
         !denies_lint("// unreachable_pub\nfn value() {}\n", "unreachable_pub"),
@@ -1430,6 +1455,19 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                 violations.push(format!("{kind}/{id} uses a reserved plugin id"));
             }
             let manifest_path = path.join("Cargo.toml");
+            if kind == "agents" {
+                let agent = path.join("agent.toml").is_file();
+                let plugin_manifest = path.join("plugin.toml").is_file();
+                if agent && !plugin_manifest && !manifest_path.exists() {
+                    continue;
+                }
+                if !agent && !plugin_manifest {
+                    violations.push(format!(
+                        "agents/{id} must contain agent.toml or plugin.toml"
+                    ));
+                    continue;
+                }
+            }
             if !manifest_path.is_file() {
                 violations.push(format!("{kind}/{id} manifest is missing"));
                 continue;

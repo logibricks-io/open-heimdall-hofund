@@ -1,0 +1,13 @@
+{
+  "keep_user": true,
+  "models": {
+    "route-a": {
+      "name": "route-a",
+      "variants": {}
+    },
+    "route-b": {
+      "name": "route-b",
+      "variants": {}
+    }
+  }
+}

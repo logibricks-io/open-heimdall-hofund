@@ -61,6 +61,7 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<(String, PathBuf)>, String
         return Err(format!("{} is not a directory", plugins.display()));
     }
     let mut names = Vec::new();
+    let mut data_only = false;
     let entries = std::fs::read_dir(plugins)
         .map_err(|error| format!("read {}: {error}", plugins.display()))?;
     for entry in entries {
@@ -92,6 +93,19 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<(String, PathBuf)>, String
             }
             let id = child.file_name().to_string_lossy().into_owned();
             let manifest_path = child.path().join("Cargo.toml");
+            if kind == "agents" {
+                let agent = child.path().join("agent.toml").is_file();
+                let plugin = child.path().join("plugin.toml").is_file();
+                if agent && !plugin && !manifest_path.exists() {
+                    data_only = true;
+                    continue;
+                }
+                if !agent && !plugin {
+                    return Err(format!(
+                        "agents/{id} must contain agent.toml or plugin.toml"
+                    ));
+                }
+            }
             if !manifest_path.is_file() {
                 return Err(format!("{kind}/{id} manifest is missing"));
             }
@@ -110,7 +124,7 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<(String, PathBuf)>, String
             names.push((name.to_owned(), child.path()));
         }
     }
-    if names.is_empty() {
+    if names.is_empty() && !data_only {
         return Err(format!(
             "{} exists but contains no plugin packages",
             plugins.display()
@@ -412,6 +426,32 @@ fn clippy_plugin(package: &str, dir: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{load_plugin_packages, resolved_kernel_feature, workspace_root};
+
+    #[test]
+    fn data_only_agents_pass_but_empty_agent_directories_fail() {
+        let root = std::env::temp_dir().join(format!(
+            "hofund-data-only-agent-packages-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let plugins = root.join("plugins");
+        std::fs::create_dir_all(plugins.join("agents/example")).expect("agent");
+        std::fs::write(
+            plugins.join("agents/example/agent.toml"),
+            "id = \"example\"\n",
+        )
+        .expect("agent manifest");
+        assert!(
+            load_plugin_packages(&plugins)
+                .expect("data-only")
+                .is_empty()
+        );
+
+        std::fs::create_dir_all(plugins.join("agents/empty")).expect("empty agent");
+        let error = load_plugin_packages(&plugins).expect_err("empty agent");
+        assert!(error.contains("agent.toml or plugin.toml"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn plugin_packages_fail_closed() {

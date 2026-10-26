@@ -1,0 +1,44 @@
+id = "fixture-toml-agent"
+display_name = "Fixture TOML Agent"
+binary = "fixture-toml"
+
+[[file]]
+id = "config"
+kind = "toml"
+linux = "~/.fixture-toml/config.toml"
+macos = "~/.fixture-toml/config.toml"
+windows = "~/.fixture-toml/config.toml"
+env_override = "FIXTURE_TOML_HOME"
+
+[[set]]
+file = "config"
+key = "model_provider"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "config"
+key = "model_providers.hofund.name"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "config"
+key = "model_providers.hofund.base_url"
+slot = "v1"
+
+[[set]]
+file = "config"
+key = "model_providers.hofund.wire_api"
+slot = { literal = "responses" }
+
+[[set]]
+file = "config"
+key = "model_providers.hofund.experimental_bearer_token"
+slot = "token"
+
+[model]
+file = "config"
+key = "model"
+
+[effort]
+file = "config"
+key = "model_reasoning_effort"

@@ -1,0 +1,5 @@
+{
+  "keep_user": true,
+  "model": { "name": "fixture-fable-5" },
+  "legacy_model": "legacy-model"
+}

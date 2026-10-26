@@ -7,9 +7,10 @@
 
 use std::path::PathBuf;
 
-use hofund_agent::{GatewayTarget, Session, adapters, find};
+use hofund_agent::{GatewayTarget, Session, catalog};
 use hofund_daemon::{
-    Running, configured_listen, ensure_config_file, local_gateway, route_models, usage_report,
+    Running, agent_descriptions, configured_listen, ensure_config_file, local_gateway,
+    route_models, usage_report,
 };
 use serde::Serialize;
 
@@ -135,6 +136,10 @@ fn separator(id: &str) -> MenuEntry {
     }
 }
 
+fn agent_catalog() -> Result<hofund_agent::Catalog, String> {
+    catalog(agent_descriptions()).map_err(|error| error.to_string())
+}
+
 /// The gateway process and the config path the menu is editing.
 pub(crate) struct Control {
     config_path: PathBuf,
@@ -192,7 +197,8 @@ impl Control {
         connect: bool,
     ) -> Result<(), String> {
         let result = (|| -> Result<Vec<String>, String> {
-            let Some(adapter) = find(id) else {
+            let catalog = agent_catalog()?;
+            let Some(adapter) = catalog.find(id) else {
                 return Err(format!("unknown agent `{id}`"));
             };
             if connect {
@@ -230,7 +236,7 @@ impl Control {
         self.store(result)
     }
 
-    /// Current status. Agent rows follow [`adapters`] order.
+    /// Current status. Agent rows follow [`hofund_agent::Catalog`] order.
     pub(crate) fn snapshot(&mut self, session: &Session) -> Snapshot {
         let target = local_gateway(&self.config_path).ok().map(|local| {
             GatewayTarget::new(
@@ -240,25 +246,34 @@ impl Control {
             )
         });
         let mut agents = Vec::new();
-        for adapter in adapters() {
-            let connected = match &target {
-                Some(target) => match adapter.status(session, target) {
-                    Ok(status) => status.connected(),
-                    Err(error) => {
-                        if self.message.is_empty() {
-                            self.message = error.to_string();
-                        }
-                        false
-                    }
-                },
-                None => false,
-            };
-            agents.push(AgentRow {
-                id: adapter.id().to_owned(),
-                display_name: adapter.display_name().to_owned(),
-                installed: adapter.detect(session),
-                connected,
-            });
+        match agent_catalog() {
+            Ok(catalog) => {
+                for adapter in catalog.adapters() {
+                    let connected = match &target {
+                        Some(target) => match adapter.status(session, target) {
+                            Ok(status) => status.connected(),
+                            Err(error) => {
+                                if self.message.is_empty() {
+                                    self.message = error.to_string();
+                                }
+                                false
+                            }
+                        },
+                        None => false,
+                    };
+                    agents.push(AgentRow {
+                        id: adapter.id().to_owned(),
+                        display_name: adapter.display_name().to_owned(),
+                        installed: adapter.detect(session),
+                        connected,
+                    });
+                }
+            }
+            Err(error) => {
+                if self.message.is_empty() {
+                    self.message = error;
+                }
+            }
         }
         Snapshot {
             running: self.server.is_some(),
@@ -301,9 +316,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use hofund_agent::{Session, adapters};
+    use hofund_agent::{Session, catalog};
+    use hofund_daemon::agent_descriptions;
 
     use super::{Control, menu_entries};
+
+    fn agent_catalog() -> hofund_agent::Catalog {
+        catalog(agent_descriptions()).expect("agent catalog")
+    }
 
     fn scratch(name: &str) -> PathBuf {
         static TICK: AtomicU64 = AtomicU64::new(0);
@@ -366,9 +386,10 @@ mod tests {
             .iter()
             .filter(|entry| entry.id.starts_with("agent:"))
             .collect();
-        let catalog = adapters();
-        assert_eq!(toggles.len(), catalog.len());
-        for (entry, adapter) in toggles.iter().zip(catalog) {
+        let catalog = agent_catalog();
+        let adapters = catalog.adapters();
+        assert_eq!(toggles.len(), adapters.len());
+        for (entry, adapter) in toggles.iter().zip(adapters) {
             assert_eq!(entry.id, format!("agent:{}", adapter.id()));
             assert_eq!(entry.label, adapter.display_name());
             assert_eq!(entry.checked, Some(false));
@@ -385,7 +406,8 @@ mod tests {
         fs::write(&path, "listen = \"127.0.0.1:3425\"\n").expect("config");
         let mut control = Control::open(&path);
         let session = Session::new(&home);
-        let id = adapters()[0].id();
+        let catalog = agent_catalog();
+        let id = catalog.adapters()[0].id();
         control.set_agent(&session, id, true).expect("connect");
         let snapshot = control.snapshot(&session);
         let row = snapshot

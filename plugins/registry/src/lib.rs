@@ -22,8 +22,23 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/registry.rs"));
 }
 
+mod agent_descriptions {
+    include!(concat!(env!("OUT_DIR"), "/agents.rs"));
+}
+
+#[cfg(feature = "test-fixtures")]
+mod fixture_agent_descriptions {
+    include!(concat!(env!("OUT_DIR"), "/fixture_agents.rs"));
+}
+
+#[cfg(test)]
+mod agent_toml;
+
 use check::path_matches;
 
+pub use agent_descriptions::{agent, agents};
+#[cfg(feature = "test-fixtures")]
+pub use fixture_agent_descriptions::fixture_agents;
 pub use generated::{
     CompiledPreset, CompiledRoute, compiled_presets, compiled_routes, contributions,
 };

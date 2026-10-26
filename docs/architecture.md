@@ -122,10 +122,11 @@ adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.
 `plugin-host` so it can call `factory` and build a `HostContext`. It depends on
 `plugin-sdk` for the bounded pager used by an exact configured model-list URL.
 `gateway` depends on `plugin-host` so it can build a `SurfaceHost`.
-The agent and subscription kits depend only on `plugin-host`. The upstream kit
-also depends on `plugin-api` for the factory contract. The kits are not on the
+The subscription kit depends only on `plugin-host`. The agent kit also depends
+on `agent` for the shared engine and `plugin-api` for descriptions. The upstream
+kit depends on `plugin-api` for the factory contract. The kits are not on the
 diagram. `plugin-relay` and `plugin-registry` dev-depend on `kit-upstream` for
-conformance tests.
+conformance tests; the registry also dev-depends on `kit-agent`.
 
 | Package | May depend on |
 | --- | --- |
@@ -137,11 +138,11 @@ conformance tests.
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-provider`, `hofund-quirks`, `hofund-kit-upstream` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-provider`, `hofund-quirks`, `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
 | `hofund-kit-upstream` | `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-kit-subscription` | `hofund-plugin-host` |
-| `hofund-kit-agent` | `hofund-plugin-host` |
+| `hofund-kit-agent` | `hofund-agent`, `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-quirks` |
 | `hofund-router` | `hofund-ir`, `hofund-plugin-api` |
 | `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-usage` |
@@ -149,7 +150,7 @@ conformance tests.
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
-| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry`, `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry`, `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent` (tests) |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |

@@ -1,0 +1,16 @@
+{
+  "keep_user": true,
+  "model": {
+    "name": "user-model"
+  },
+  "legacy_model": "legacy-model",
+  "origin": "http://127.0.0.1:3425",
+  "token": "old-token",
+  "literal": "value",
+  "selected": {
+    "model": "legacy-model"
+  },
+  "tiers": {
+    "opus": "user-model"
+  }
+}
