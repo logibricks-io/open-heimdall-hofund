@@ -28,6 +28,10 @@ impl ProviderAdapter {
             inner,
         }
     }
+
+    pub(crate) fn upstream(&self) -> Arc<dyn UpstreamProvider> {
+        Arc::clone(&self.inner)
+    }
 }
 
 #[async_trait]

@@ -1604,6 +1604,7 @@ dependencies = [
 name = "hofund-config"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "serde",
  "thiserror 2.0.21",
  "toml_edit 0.25.17+spec-1.1.0",
@@ -1629,8 +1630,11 @@ dependencies = [
  "hofund-router",
  "hofund-secrets",
  "hofund-usage",
+ "regex",
  "reqwest 0.12.28",
+ "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tower",
  "tracing",

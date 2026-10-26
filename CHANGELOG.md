@@ -24,9 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   List and probe bodies are bounded, credentials are redacted, and Anthropic
   single-header authentication can be learned and reported to the host.
 - Daemon model aggregation across preset wires with answering-URL deduplication,
-  exact custom list URLs, in-memory learned bases and authentication, two-pass
-  probe selection, and four-wide batch probes. `[providers.models]` stores
-  refresh, auto-include, and URL settings without starting a refresh job.
+  exact custom list URLs, learned bases and authentication, two-pass probe
+  selection, and four-wide batch probes.
+- Host model-list refresh with persistent state under `.hofund/host/models`,
+  including due and retry times, picks, delist/restore, auto-include, dead-side
+  retention, and 429-aware retry delays.
 - `hofund-kit-upstream` conformance for live paging and minimal probes, static
   catalogs without network access, and unsupported model lists.
 - Provider plugins share SigV4, OAuth token parsing, form bodies, and JSON
@@ -39,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hints require verification evidence, and Azure double failures retain the
   last HTTP status. A per-URL Azure timeout still tries the second URL; a
   cancelled call does not.
+- `fixV1` host state is keyed per provider and wire, so only the configured
+  wire's learned base affects its requests (#84). Model lists and probes reuse
+  the daemon's configured instance when its base is current (#86).
+- `models.auto_include` glob and regular-expression rules are validated when
+  configuration loads.
 - Built-in factory specs advertise `Live` lists for OpenAI-compatible,
   Anthropic, and Generative wires, and `Catalog` lists for Vertex and Bedrock.
 - `[providers.options]` is forwarded to the plugin factory. Each factory has

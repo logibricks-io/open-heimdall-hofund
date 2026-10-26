@@ -20,7 +20,7 @@ SigV4's result contains the access key id. That is what AWS puts in `Authorizati
 
 - Out-of-tree or dynamically loaded plugins.
 - PKCE, a loopback callback, device-flow polling, and the fixed Codex port. Those belong to subscription plugins (row H). This slice only parses a token response and builds a refresh form. OAuth token caching, refresh, and single-flight become an SDK helper in row H; Vertex keeps its own cache until then.
-- Moving the 58 URL presets into individual provider plugin crates. Per-wire `/models` and minimal probes are implemented in `hofund-provider`; host aggregation and probe model selection live in `hofund-daemon`. Refresh, persistence, and auto-include remain separate work.
+- Moving the 58 URL presets into individual provider plugin crates. Per-wire `/models` and minimal probes are implemented in `hofund-provider`; host aggregation, probe model selection, refresh, persistent state, and auto-include live in `hofund-daemon`.
 - A live call to Google or AWS. Tests use a local mock.
 - Moving the Chat, Responses, Messages, Generative, and Converse transports into the SDK and streaming response bodies through `HttpHandle::send`. That call currently buffers the body. The target is the first row E PR that moves an adapter into its own plugin crate (E3, Vertex).
 - Lifting Vertex's JWT, ADC, and impersonation mint out of `hofund-provider`. The mint calls the SDK parser. The vendor flow stays next to the adapter.

@@ -15,7 +15,7 @@ use hofund_plugin_api::{
     UpstreamProvider,
 };
 use hofund_plugin_host::HttpLimits;
-use hofund_plugin_sdk::{Call, PageError, after_id};
+use hofund_plugin_sdk::{Call, PageError, PageErrorKind, after_id};
 use hofund_provider::{Credential, Endpoint, ModelPlan, Vertex, Wire};
 use tracing::Instrument;
 
@@ -28,6 +28,13 @@ use super::{
 const NO_MODEL: &str = "no model to try: expose one, or refresh the model list";
 const ALL_FAILED: &str = "type its model ids in by hand, or give the URL its list is at";
 const PUBLIC_DRAWERS: &str = "https://aihubmix.com/api/v1/models";
+const START_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+const TICK: std::time::Duration = std::time::Duration::from_secs(60);
+const FETCH_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+const RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const MIN_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Limits an upstream-directed retry delay to one day, including after restart.
+const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 const IMAGE_APIS: &[&str] = &[
     "gpt-image",
     "chatgpt-image",
@@ -65,6 +72,72 @@ pub struct ProviderModels {
     pub base_model_fallback: bool,
 }
 
+/// Refresh-loop timings, with a test constructor for short local runs.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct RefreshTiming {
+    start_delay: std::time::Duration,
+    tick: std::time::Duration,
+    fetch_cap: std::time::Duration,
+}
+
+impl RefreshTiming {
+    /// Constructs timing for a local lifecycle test.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        start_delay: std::time::Duration,
+        tick: std::time::Duration,
+        fetch_cap: std::time::Duration,
+    ) -> Self {
+        Self {
+            start_delay,
+            tick,
+            fetch_cap,
+        }
+    }
+}
+
+impl Default for RefreshTiming {
+    fn default() -> Self {
+        Self {
+            start_delay: START_DELAY,
+            tick: TICK,
+            fetch_cap: FETCH_CAP,
+        }
+    }
+}
+
+/// The host-owned model picks for one configured provider.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Picks {
+    picks: Vec<String>,
+    picked_from: Vec<String>,
+    delisted: Vec<String>,
+}
+
+impl Picks {
+    /// Model ids picked for exposure, in their saved order.
+    #[must_use]
+    pub fn picks(&self) -> &[String] {
+        &self.picks
+    }
+
+    /// Ids in the saved list when the picks were last written.
+    #[must_use]
+    pub fn picked_from(&self) -> &[String] {
+        &self.picked_from
+    }
+
+    /// Former picks absent from the latest non-empty list.
+    #[must_use]
+    pub fn delisted(&self) -> &[String] {
+        &self.delisted
+    }
+}
+
 /// One selected model and its probe result.
 #[derive(Clone, Debug)]
 pub struct ProbeOutcome {
@@ -74,13 +147,23 @@ pub struct ProbeOutcome {
     pub report: ProbeReport,
 }
 
-#[derive(Default)]
-struct HostState {
-    bases: HashMap<String, String>,
-    auth: HashMap<String, AuthChoice>,
+struct RegisteredInstance {
+    upstream: Arc<dyn UpstreamProvider>,
+    built_base: String,
 }
 
-/// Host-side model list and probe composition, with process-local learned state.
+struct Fetched {
+    models: ProviderModels,
+    sides: std::collections::BTreeMap<String, Vec<ModelSpec>>,
+}
+
+struct Applied {
+    models: ProviderModels,
+    dropped: Vec<String>,
+    taken: Vec<String>,
+}
+
+/// Host-side model list and probe composition, with optional persistent state.
 pub struct ModelsHost {
     limits: HttpLimits,
     catalog_limits: Option<Arc<dyn ModelLimits>>,
@@ -88,11 +171,12 @@ pub struct ModelsHost {
     public_drawers_override: bool,
     plan_overrides: HashMap<String, ModelPlan>,
     host_overrides: HashMap<String, String>,
-    state: Mutex<HostState>,
+    instances: HashMap<String, RegisteredInstance>,
+    state: Mutex<super::models_state::StateStore>,
 }
 
 impl ModelsHost {
-    /// Creates a host with no models.dev limits lookup.
+    /// Creates a host with no models.dev limits lookup and in-memory learned state.
     #[must_use]
     pub fn new(connect_timeout: std::time::Duration, read_timeout: std::time::Duration) -> Self {
         Self {
@@ -102,8 +186,64 @@ impl ModelsHost {
             public_drawers_override: false,
             plan_overrides: HashMap::new(),
             host_overrides: HashMap::new(),
-            state: Mutex::new(HostState::default()),
+            instances: HashMap::new(),
+            state: Mutex::new(super::models_state::StateStore::new(None)),
         }
+    }
+
+    /// Stores learned state under `root/host/models` and reloads it lazily by provider id.
+    ///
+    /// Without this builder, state lasts only for this host instance. The daemon
+    /// passes `.hofund` beside the active configuration file.
+    #[must_use]
+    pub fn with_state_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.state = Mutex::new(super::models_state::StateStore::new(Some(root.into())));
+        self
+    }
+
+    /// Reuses the configured daemon instance when its exact built base still matches.
+    ///
+    /// A missing entry or a different current base falls back to a fresh list/probe build.
+    pub fn register_instance(
+        &mut self,
+        id: impl Into<String>,
+        upstream: Arc<dyn UpstreamProvider>,
+        built_base: impl Into<String>,
+    ) {
+        self.instances.insert(
+            id.into(),
+            RegisteredInstance {
+                upstream,
+                built_base: built_base.into(),
+            },
+        );
+    }
+
+    /// Reads a provider's picks, source-list ids, and delisted ids.
+    #[must_use]
+    pub fn picks(&self, provider_id: &str) -> Picks {
+        let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let state = store.get(provider_id);
+        Picks {
+            picks: state.picks.clone(),
+            picked_from: state.picked_from.clone(),
+            delisted: state.delisted.clone(),
+        }
+    }
+
+    /// Saves picked ids in the supplied order and restores them from delisted.
+    pub fn set_picks(&self, provider_id: &str, ids: &[String]) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .update(provider_id, |state| {
+                state.picks = ids.to_vec();
+                state.picked_from = super::models_state::models(&state.list)
+                    .iter()
+                    .map(|model| model.id().to_owned())
+                    .collect();
+                state.delisted.retain(|id| !ids.contains(id));
+            });
     }
 
     /// Installs the limits seam used only by the static-fallback planning path.
@@ -140,6 +280,156 @@ impl ModelsHost {
         self
     }
 
+    /// Fetches each due provider in configuration order and returns the ids asked.
+    #[doc(hidden)]
+    pub async fn refresh_due(
+        &self,
+        config: &Config,
+        config_path: &Path,
+        now: std::time::SystemTime,
+    ) -> Vec<String> {
+        self.refresh_due_with_timing(config, config_path, now, RefreshTiming::default())
+            .await
+    }
+
+    pub(super) fn spawn_refresh(
+        self: &Arc<Self>,
+        config: Config,
+        config_path: std::path::PathBuf,
+        timing: RefreshTiming,
+    ) -> tokio::task::JoinHandle<()> {
+        let host = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(timing.start_delay).await;
+            loop {
+                let now = std::time::SystemTime::now();
+                host.refresh_due_with_timing(&config, &config_path, now, timing)
+                    .await;
+                tokio::time::sleep(timing.tick).await;
+            }
+        })
+    }
+
+    async fn refresh_due_with_timing(
+        &self,
+        config: &Config,
+        config_path: &Path,
+        now: std::time::SystemTime,
+        timing: RefreshTiming,
+    ) -> Vec<String> {
+        let now = system_ms(now);
+        let mut asked = Vec::new();
+        for provider in &config.providers {
+            let Some(interval) = provider.model_list.refresh_interval() else {
+                continue;
+            };
+            let refreshable = (|| {
+                let planned = self.planned(provider)?;
+                let model_plan = self.model_plan(provider)?;
+                let configured_plugin = plugin_for(provider, planned.wire);
+                self.kind(provider, &planned, model_plan.as_ref(), &configured_plugin)
+            })();
+            let Ok(kind) = refreshable else {
+                tracing::warn!(
+                    provider.id = provider.id,
+                    "scheduled model list fetch could not resolve the provider"
+                );
+                continue;
+            };
+            // Disabled and decide-only providers do not exist in hofund yet.
+            if matches!(kind, ListKind::Catalog | ListKind::Unsupported) {
+                continue;
+            }
+            let (fetched_at, retry_at) = {
+                let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                let state = store.get(&provider.id);
+                (state.fetched_at, state.retry_at)
+            };
+            if retry_at.is_some_and(|retry| retry > now)
+                || fetched_at.is_some_and(|fetched| {
+                    u128::from(now.saturating_sub(fetched)) < interval.as_millis()
+                })
+            {
+                continue;
+            }
+            let retry_at = now.saturating_add(duration_ms(Self::retry_wait(interval, None)));
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .update(&provider.id, |state| {
+                    state.tried_at = Some(now);
+                    state.retry_at = Some(retry_at);
+                });
+            asked.push(provider.id.clone());
+            let fetched = tokio::time::timeout(
+                timing.fetch_cap,
+                self.fetch_applied(
+                    config_path,
+                    provider,
+                    now,
+                    Some(&provider.model_list.auto_include),
+                ),
+            )
+            .await;
+            match fetched {
+                Ok(Ok(applied)) => {
+                    tracing::info!(
+                        kind = "model_refresh",
+                        provider.id = provider.id,
+                        model_count = applied.models.models.len(),
+                        taken = ?applied.taken,
+                        dropped = ?applied.dropped,
+                        outcome = "success"
+                    );
+                }
+                Ok(Err(error)) => {
+                    self.record_refresh_retry(&provider.id, now, interval, error.retry_after());
+                }
+                Err(_) => {
+                    self.record_refresh_retry(&provider.id, now, interval, None);
+                }
+            }
+        }
+        asked
+    }
+
+    fn retry_wait(
+        interval: std::time::Duration,
+        retry_after: Option<std::time::Duration>,
+    ) -> std::time::Duration {
+        interval
+            .min(RETRY_CAP)
+            .max(retry_after.unwrap_or_default().min(MAX_RETRY_AFTER))
+            .max(MIN_RETRY)
+    }
+
+    fn record_refresh_retry(
+        &self,
+        provider: &str,
+        now: u64,
+        interval: std::time::Duration,
+        retry_after: Option<std::time::Duration>,
+    ) {
+        let wait = Self::retry_wait(interval, retry_after);
+        let retry_at = now.saturating_add(duration_ms(wait));
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .update(provider, |state| {
+                state.retry_at = Some(retry_at);
+            });
+        let empty: &[String] = &[];
+        tracing::info!(
+            kind = "model_refresh",
+            provider.id = provider,
+            model_count = 0,
+            taken = ?empty,
+            dropped = ?empty,
+            retry_in_ms = duration_ms(wait),
+            outcome = "error"
+        );
+    }
+
     /// Lists one configured provider, never merging it with another provider.
     ///
     /// # Errors
@@ -165,8 +455,14 @@ impl ModelsHost {
         );
         async {
             let result = self
-                .list_inner(config_path, provider, &planned, &endpoint)
-                .await;
+                .fetch_applied(
+                    config_path,
+                    provider,
+                    unix_ms(),
+                    Some(&provider.model_list.auto_include),
+                )
+                .await
+                .map(|applied| applied.models);
             match &result {
                 Ok(models) => {
                     tracing::Span::current().record("kind", format_args!("{:?}", models.kind));
@@ -243,17 +539,34 @@ impl ModelsHost {
         let models = listed
             .as_ref()
             .map_or(&[][..], |list| list.models.as_slice());
+        let picks = self.picks(provider_id);
         let selected = if named.is_empty() {
-            vec![select_model(config, provider, &planned, models, None)?]
+            vec![select_model(
+                config,
+                provider,
+                &planned,
+                models,
+                picks.picks(),
+                None,
+            )?]
         } else {
             named
                 .into_iter()
-                .map(|name| select_model(config, provider, &planned, models, Some(name)))
+                .map(|name| {
+                    select_model(
+                        config,
+                        provider,
+                        &planned,
+                        models,
+                        picks.picks(),
+                        Some(name),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?
         };
         let upstream = self.configured(provider, &planned, &endpoint, config_path)?;
         let protocol = ProtocolId::try_from(protocol_of(planned.wire)).map_err(show)?;
-        let learned = self.learned_auth(&provider.id, planned.wire);
+        let learned = self.learned_auth(provider, planned.wire);
         let extra = self.extra_body(provider)?;
         let results = futures_util::stream::iter(selected.into_iter().map(|selected| {
             let upstream = Arc::clone(&upstream);
@@ -274,13 +587,144 @@ impl ModelsHost {
         Ok(results)
     }
 
+    async fn fetch_applied(
+        &self,
+        path: &Path,
+        provider: &hofund_config::Provider,
+        now: u64,
+        auto_include: Option<&[String]>,
+    ) -> Result<Applied, DaemonError> {
+        let planned = self.planned(provider)?;
+        let endpoint = endpoint_for(provider, &planned)?;
+        let rules = auto_include
+            .unwrap_or(&[])
+            .iter()
+            .map(|rule| hofund_config::compile_auto_include(rule).map_err(show))
+            .collect::<Result<Vec<_>, _>>()?;
+        let fetched = self.list_inner(path, provider, &planned, &endpoint).await;
+        match fetched {
+            Ok(fetched) => Ok(self.apply_success(provider, fetched, now, rules)),
+            Err(error) => {
+                self.state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .update(&provider.id, |state| state.tried_at = Some(now));
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_success(
+        &self,
+        provider: &hofund_config::Provider,
+        fetched: Fetched,
+        now: u64,
+        auto_include: Vec<regex::Regex>,
+    ) -> Applied {
+        let listed = super::models_state::rows(&fetched.models.models);
+        let now_ids = listed
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<HashSet<_>>();
+        let chat_ids = fetched
+            .models
+            .models
+            .iter()
+            .filter(|model| !model.draws() && !model.films() && !model.decides())
+            .map(|model| model.id().to_owned())
+            .collect::<Vec<_>>();
+        let mut dropped = Vec::new();
+        let mut taken = Vec::new();
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .update(&provider.id, |state| {
+                state.tried_at = Some(now);
+                if listed.is_empty() {
+                    return;
+                }
+                state.retry_at = None;
+                let before = state
+                    .list
+                    .iter()
+                    .map(|row| row.id.clone())
+                    .collect::<HashSet<_>>();
+                let mut kept = Vec::new();
+                for id in &state.picks {
+                    if before.contains(id) && !now_ids.contains(id) {
+                        dropped.push(id.clone());
+                    } else {
+                        kept.push(id.clone());
+                    }
+                }
+                for id in &dropped {
+                    if !state.delisted.contains(id) {
+                        state.delisted.push(id.clone());
+                    }
+                }
+                state.picks = kept;
+                // Restore after dropping, unlike the reference gateway,
+                // internal/provider/models.go:317-335, which can lose a
+                // restored pick when one fetch also drops another.
+                let restored = state
+                    .delisted
+                    .iter()
+                    .filter(|id| now_ids.contains(*id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                state.delisted.retain(|id| !now_ids.contains(id));
+                for id in restored {
+                    if !state.picks.contains(&id) {
+                        state.picks.push(id);
+                    }
+                }
+                if !auto_include.is_empty() {
+                    let served = if !state.picks.is_empty() {
+                        state.picks.clone()
+                    } else if state.delisted.is_empty() {
+                        chat_ids.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    for id in &chat_ids {
+                        if before.contains(id)
+                            || served.contains(id)
+                            || taken.contains(id)
+                            || !auto_include.iter().any(|rule| rule.is_match(id))
+                        {
+                            continue;
+                        }
+                        taken.push(id.clone());
+                    }
+                    if !taken.is_empty() {
+                        let mut picks = taken.clone();
+                        picks.extend(served);
+                        state.picks = picks;
+                        state.picked_from = chat_ids.clone();
+                    }
+                }
+                state.fetched_at = Some(now);
+                state.list = listed;
+                state.sides = fetched
+                    .sides
+                    .iter()
+                    .map(|(base, models)| (base.clone(), super::models_state::rows(models)))
+                    .collect();
+            });
+        Applied {
+            models: fetched.models,
+            dropped,
+            taken,
+        }
+    }
+
     async fn list_inner(
         &self,
         path: &Path,
         provider: &hofund_config::Provider,
         planned: &Planned,
         endpoint: &Endpoint,
-    ) -> Result<ProviderModels, DaemonError> {
+    ) -> Result<Fetched, DaemonError> {
         let model_plan = self.model_plan(provider)?;
         let configured_plugin = plugin_for(provider, planned.wire);
         let kind = self.kind(provider, planned, model_plan.as_ref(), &configured_plugin)?;
@@ -291,17 +735,23 @@ impl ModelsHost {
             None
         } else {
             Some(hofund_secrets::resolve(provider.model_list.url.trim()).map_err(show)?)
-        };
+        }
+        .filter(|_| kind != ListKind::Catalog);
+        let previous = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&provider.id)
+            .clone();
         let redactor = Redactor::new(provider, endpoint, custom_url.as_deref());
-        let result = if let Some(url) = custom_url.as_deref().filter(|_| kind != ListKind::Catalog)
-        {
+        let result = if let Some(url) = custom_url.as_deref() {
             let messages_only = planned.wire == Wire::Messages
                 && model_plan.as_ref().is_none_or(|plan| {
                     plan.chat.trim().is_empty() && plan.responses.trim().is_empty()
                 });
             self.fetch_exact(provider, planned, endpoint, &host, url, messages_only)
                 .await
-                .map(|list| (list, url.to_owned()))
+                .map(|list| (list, url.to_owned(), std::collections::BTreeMap::new()))
         } else {
             self.fetch_bases(
                 path,
@@ -312,10 +762,12 @@ impl ModelsHost {
                 kind,
                 configured,
                 &configured_plugin,
+                &previous,
             )
             .await
         };
-        let (mut merged, winning_base) = result.map_err(|error| redactor.clean_error(error))?;
+        let (mut merged, winning_base, sides) =
+            result.map_err(|error| redactor.clean_error(error))?;
         let models = self.plan_models(
             provider,
             model_plan.as_ref(),
@@ -325,7 +777,10 @@ impl ModelsHost {
         self.append_public_drawers(&host, &winning_base, &mut merged.models)
             .await;
         merged.kind = kind;
-        Ok(merged)
+        Ok(Fetched {
+            models: merged,
+            sides,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -339,7 +794,15 @@ impl ModelsHost {
         kind: ListKind,
         configured: Arc<dyn UpstreamProvider>,
         configured_plugin: &str,
-    ) -> Result<(ProviderModels, String), DaemonError> {
+        previous: &super::models_state::ProviderState,
+    ) -> Result<
+        (
+            ProviderModels,
+            String,
+            std::collections::BTreeMap<String, Vec<ModelSpec>>,
+        ),
+        DaemonError,
+    > {
         if kind == ListKind::Catalog {
             let models = if matches!(planned.wire, Wire::Vertex | Wire::Converse) {
                 configured
@@ -359,6 +822,7 @@ impl ModelsHost {
                     base_model_fallback: false,
                 },
                 planned.base_url.clone(),
+                std::collections::BTreeMap::new(),
             ));
         }
 
@@ -372,6 +836,11 @@ impl ModelsHost {
                 (Wire::Messages, &model_plan.anthropic),
                 (Wire::Generative, &model_plan.generative),
             ] {
+                let base = if wire == planned.wire {
+                    &planned.base_url
+                } else {
+                    base
+                };
                 if !base.trim().is_empty() {
                     sides.push((wire, base.clone(), wire == planned.wire));
                 }
@@ -381,6 +850,9 @@ impl ModelsHost {
             sides.push((planned.wire, planned.base_url.clone(), true));
         }
 
+        let mut asked = 0;
+        let mut dead = Vec::new();
+        let mut side_lists = std::collections::BTreeMap::new();
         let has_openai = sides
             .iter()
             .any(|(wire, _, _)| matches!(wire, Wire::Chat | Wire::Responses));
@@ -388,6 +860,7 @@ impl ModelsHost {
         let mut merged_lists = HashSet::new();
         let mut merged = Merged::default();
         let mut errors = Vec::new();
+        let mut retry_after: Option<std::time::Duration> = None;
         let mut winning_base = None;
         let mut corrected_base = None;
         let mut fallback = false;
@@ -402,12 +875,13 @@ impl ModelsHost {
             let auth_key = format!(
                 "{}\0{:?}\0{:?}",
                 endpoint.api_key,
-                self.learned_auth(&provider.id, wire),
+                self.learned_auth(provider, wire),
                 endpoint.headers
             );
             if !seen_bases.insert((base.trim_end_matches('/').to_owned(), auth_key)) {
                 continue;
             }
+            asked += 1;
             let upstream = if is_configured {
                 Arc::clone(&configured)
             } else {
@@ -424,11 +898,12 @@ impl ModelsHost {
                     Ok(upstream) => upstream,
                     Err(error) => {
                         errors.push(error.to_string());
+                        dead.push(base.clone());
                         continue;
                     }
                 }
             };
-            let query = match self.learned_auth(&provider.id, wire) {
+            let query = match self.learned_auth(provider, wire) {
                 Some(choice) if wire == Wire::Messages => ListQuery::new().with_auth_choice(choice),
                 _ => ListQuery::new(),
             };
@@ -445,13 +920,14 @@ impl ModelsHost {
                             "{}: with the Anthropic version header this base answers with OpenRouter's own catalog namespaced under `anthropic/`, which is not a list of models to serve; give this provider OpenRouter's Chat base (https://openrouter.ai/api/v1), which lists those models under the ids OpenRouter serves",
                             safe_url(&base)
                         ));
+                        dead.push(base.clone());
                         continue;
                     }
                     let auth_key = format!(
                         "{}\0{:?}\0{:?}",
                         endpoint.api_key,
                         list.auth_choice()
-                            .or_else(|| self.learned_auth(&provider.id, wire)),
+                            .or_else(|| self.learned_auth(provider, wire)),
                         endpoint.headers
                     );
                     let answered = list
@@ -469,25 +945,39 @@ impl ModelsHost {
                         self.set_auth(&provider.id, choice);
                     }
                     fallback |= list.base_model_fallback();
-                    if winning_base.is_none() {
-                        winning_base = Some(base.clone());
-                        if list.v1_fallback() && matches!(wire, Wire::Chat | Wire::Responses) {
-                            let fixed = format!("{}/v1", base.trim_end_matches('/'));
-                            self.state
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner())
-                                .bases
-                                .insert(provider.id.clone(), fixed.clone());
-                            corrected_base = Some(fixed);
+                    let mut side_base = base.clone();
+                    if list.v1_fallback() && matches!(wire, Wire::Chat | Wire::Responses) {
+                        let fixed = format!("{}/v1", base.trim_end_matches('/'));
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .update(&provider.id, |state| {
+                                state
+                                    .bases
+                                    .insert(wire_name(wire).to_owned(), fixed.clone());
+                            });
+                        if wire == planned.wire {
+                            corrected_base = Some(fixed.clone());
+                            side_base = fixed;
                         }
                     }
+                    if winning_base.is_none() {
+                        winning_base = Some(side_base.clone());
+                    }
+                    side_lists.insert(side_base, list.models().to_vec());
                     merged.add(list.models(), list.dropped());
                 }
                 Err(error) => {
+                    retry_after = match (retry_after, error.retry_after()) {
+                        (Some(left), Some(right)) => Some(left.max(right)),
+                        (None, right) => right,
+                        (left, None) => left,
+                    };
                     let message = error.to_string();
                     if !errors.contains(&message) {
                         errors.push(message);
                     }
+                    dead.push(base.clone());
                 }
             }
         }
@@ -498,13 +988,38 @@ impl ModelsHost {
                     provider.id
                 )));
             }
-            if kind == ListKind::Deployments {
-                return Err(DaemonError::new(errors.join("; ")));
-            }
-            return Err(DaemonError::new(format!(
-                "{} — {ALL_FAILED}",
+            let message = if kind == ListKind::Deployments {
                 errors.join("; ")
-            )));
+            } else {
+                format!("{} — {ALL_FAILED}", errors.join("; "))
+            };
+            return Err(DaemonError::new(message).with_retry_after(retry_after));
+        }
+        // reference: internal/provider/models.go:809-822 and 927-968
+        if !dead.is_empty() {
+            let answering = side_lists
+                .values()
+                .flatten()
+                .map(|model| model.id().to_owned())
+                .collect::<HashSet<_>>();
+            let previous_list = super::models_state::models(&previous.list);
+            for base in dead {
+                if let Some(saved) = previous.sides.get(&base) {
+                    let part = super::models_state::models(saved);
+                    side_lists.insert(base, part.clone());
+                    merged.add(&part, &[]);
+                } else if previous.sides.is_empty() {
+                    let part = previous_list
+                        .iter()
+                        .filter(|model| !answering.contains(model.id()))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    merged.add(&part, &[]);
+                }
+            }
+        }
+        if asked <= 1 {
+            side_lists.clear();
         }
         Ok((
             ProviderModels {
@@ -514,6 +1029,7 @@ impl ModelsHost {
                 base_model_fallback: fallback,
             },
             winning_base.unwrap_or_else(|| planned.base_url.clone()),
+            side_lists,
         ))
     }
 
@@ -559,14 +1075,22 @@ impl ModelsHost {
         endpoint: &Endpoint,
         path: &Path,
     ) -> Result<Arc<dyn UpstreamProvider>, DaemonError> {
+        if let Some(instance) = self
+            .instances
+            .get(&provider.id)
+            .filter(|instance| instance.built_base == planned.base_url)
+        {
+            return Ok(Arc::clone(&instance.upstream));
+        }
         let plugin_id = plugin_for(provider, planned.wire);
-        let raw = if let Some(preset) = &provider.preset
+        let mut raw = if let Some(preset) = &provider.preset
             && let Some(compiled) = hofund_plugin_registry::preset(preset)
         {
             super::raw_from_preset(compiled, provider)?
         } else {
             super::raw_from_endpoint(provider, planned, endpoint)?
         };
+        raw.insert("base_url", RawValue::String(planned.base_url.clone()));
         build_raw_plugin(
             provider,
             &plugin_id,
@@ -604,7 +1128,10 @@ impl ModelsHost {
             .or_else(|| url_host(base))
     }
 
-    fn planned(&self, provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
+    pub(super) fn planned(
+        &self,
+        provider: &hofund_config::Provider,
+    ) -> Result<Planned, DaemonError> {
         let mut planned = plan(provider)?;
         if provider.base_url.trim().is_empty()
             && let Some(model_plan) = self.model_plan(provider)?
@@ -619,13 +1146,16 @@ impl ModelsHost {
                 planned.base_url = base;
             }
         }
+        let wire = wire_name(planned.wire);
         if let Some(base) = self
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .bases
             .get(&provider.id)
+            .bases
+            .get(wire)
             .cloned()
+            .filter(|base| *base == format!("{}/v1", planned.base_url.trim_end_matches('/')))
         {
             planned.base_url = base;
         }
@@ -704,7 +1234,7 @@ impl ModelsHost {
     ) -> Result<ProviderModels, DaemonError> {
         let redactor = Redactor::new(provider, endpoint, Some(url));
         let learning = messages_only && self.exact_learning(provider, planned, endpoint);
-        let learned = Arc::new(Mutex::new(self.learned_auth(&provider.id, planned.wire)));
+        let learned = Arc::new(Mutex::new(self.learned_auth(provider, planned.wire)));
         let learned_for_page = Arc::clone(&learned);
         let rows = after_id(url, |page| {
             let learned = Arc::clone(&learned_for_page);
@@ -747,8 +1277,11 @@ impl ModelsHost {
                 Ok(reply.into_body())
             }
         })
-        .await
-        .map_err(|error| redactor.clean(error.0))?;
+        .await;
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => return Err(redactor.clean(error.0)),
+        };
         if let Some(choice) = *learned.lock().unwrap_or_else(|error| error.into_inner()) {
             self.set_auth(&provider.id, choice);
         }
@@ -958,25 +1491,23 @@ impl ModelsHost {
         )
     }
 
-    fn learned_auth(&self, provider: &str, wire: Wire) -> Option<AuthChoice> {
-        (wire == Wire::Messages)
-            .then(|| {
-                self.state
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .auth
-                    .get(provider)
-                    .copied()
-            })
-            .flatten()
+    fn learned_auth(&self, provider: &hofund_config::Provider, wire: Wire) -> Option<AuthChoice> {
+        if wire != Wire::Messages || pinned_auth(provider) {
+            return None;
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&provider.id)
+            .auth
+            .map(Into::into)
     }
 
     fn set_auth(&self, provider: &str, choice: AuthChoice) {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .auth
-            .insert(provider.to_owned(), choice);
+            .update(provider, |state| state.auth = Some(choice.into()));
     }
 
     fn extra_body(
@@ -1166,6 +1697,7 @@ fn select_model(
     provider: &hofund_config::Provider,
     planned: &Planned,
     listed: &[ModelSpec],
+    picks: &[String],
     named: Option<&str>,
 ) -> Result<Selected, DaemonError> {
     if let Some(named) = named {
@@ -1197,7 +1729,15 @@ fn select_model(
     }
 
     let mut pools = Vec::new();
-    let exposed = exposed(config, &provider.id);
+    let mut exposed = exposed(config, &provider.id);
+    for id in picks {
+        if !exposed
+            .iter()
+            .any(|(route, upstream)| route == id || upstream == id)
+        {
+            exposed.push((id.clone(), id.clone()));
+        }
+    }
     if !exposed.is_empty() {
         pools.push(exposed);
     }
@@ -1402,7 +1942,21 @@ fn exact_call(
             Some(AuthChoice::Both) => CredentialStyle::MessagesBoth,
             _ => style,
         };
-        if style != CredentialStyle::MessagesBoth || !pinned_auth(provider) {
+        // A user-pinned auth header wins over the credential header it would
+        // duplicate; other credential headers still apply.
+        let pinned = |name: &str| {
+            provider
+                .headers
+                .keys()
+                .any(|header| header.eq_ignore_ascii_case(name))
+        };
+        let collides = match &style {
+            CredentialStyle::Bearer => pinned("authorization"),
+            CredentialStyle::XApiKey => pinned("x-api-key"),
+            CredentialStyle::MessagesBoth => pinned_auth(provider),
+            _ => false,
+        };
+        if !collides {
             call = call.credential(style, &secret)?;
         }
     }
@@ -1417,7 +1971,7 @@ struct ListFailure(PluginError);
 impl From<PageError> for ListFailure {
     fn from(error: PageError) -> Self {
         let message = error.to_string();
-        if message.contains("time budget") {
+        if error.kind() == PageErrorKind::Budget {
             Self(PluginError::timeout(message))
         } else {
             Self(PluginError::decode(message))
@@ -1459,11 +2013,11 @@ impl Redactor {
     }
 
     fn clean(&self, error: PluginError) -> DaemonError {
-        DaemonError::new(self.text(error.message()))
+        DaemonError::new(self.text(error.message())).with_retry_after(error.retry_after())
     }
 
     fn clean_error(&self, error: DaemonError) -> DaemonError {
-        DaemonError::new(self.text(&error.to_string()))
+        DaemonError::new(self.text(&error.to_string())).with_retry_after(error.retry_after())
     }
 
     fn text(&self, text: &str) -> String {
@@ -1495,6 +2049,22 @@ fn url_host(url: &str) -> Option<String> {
     url::Url::parse(url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+}
+
+fn unix_ms() -> u64 {
+    system_ms(std::time::SystemTime::now())
+}
+
+fn system_ms(now: std::time::SystemTime) -> u64 {
+    let millis = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn duration_ms(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn wire_name(wire: Wire) -> &'static str {
