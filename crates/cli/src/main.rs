@@ -6,10 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use hofund_agent::{GatewayTarget, Session, adapters, find};
+use hofund_agent::{GatewayTarget, Session, catalog};
 use hofund_daemon::{
-    check, local_gateway, route_models, serve_blocking, token_rotate, token_show, usage_report,
-    user_config_path,
+    agent_descriptions, check, local_gateway, route_models, serve_blocking, token_rotate,
+    token_show, usage_report, user_config_path,
 };
 
 fn main() -> ExitCode {
@@ -35,10 +35,7 @@ fn main() -> ExitCode {
         Command::TokenShow => token_show(&config).map(|token| println!("{token}")),
         Command::TokenRotate => return finish(rotate_token(&config)),
         Command::Usage => usage_report(&config).map(|table| print!("{table}")),
-        Command::AgentList => {
-            print_agent_list();
-            return ExitCode::SUCCESS;
-        }
+        Command::AgentList => return finish(print_agent_list()),
         Command::AgentConnect { name, dry_run } => {
             return agent_command(&name, |adapter| connect(adapter, &config, dry_run));
         }
@@ -309,21 +306,30 @@ fn finish<E: std::fmt::Display>(result: Result<(), E>) -> ExitCode {
     }
 }
 
+fn agent_catalog() -> Result<hofund_agent::Catalog, String> {
+    catalog(agent_descriptions()).map_err(|error| error.to_string())
+}
+
 fn agent_command(
     name: &str,
     run: impl FnOnce(&dyn hofund_agent::AgentAdapter) -> Result<(), String>,
 ) -> ExitCode {
-    let Some(adapter) = find(name) else {
+    let catalog = match agent_catalog() {
+        Ok(catalog) => catalog,
+        Err(error) => return finish(Err(error)),
+    };
+    let Some(adapter) = catalog.find(name) else {
         eprintln!("unknown agent `{name}`");
         return ExitCode::from(2);
     };
     finish(run(adapter))
 }
 
-fn print_agent_list() {
+fn print_agent_list() -> Result<(), String> {
+    let catalog = agent_catalog()?;
     let session = Session::from_process_env();
     println!("id\tname\tinstalled");
-    for adapter in adapters() {
+    for adapter in catalog.adapters() {
         let installed = if adapter.detect(&session) {
             "yes"
         } else {
@@ -331,6 +337,7 @@ fn print_agent_list() {
         };
         println!("{}\t{}\t{installed}", adapter.id(), adapter.display_name());
     }
+    Ok(())
 }
 
 fn check_config(config: &Path) -> Result<(), String> {
@@ -344,13 +351,14 @@ fn check_config(config: &Path) -> Result<(), String> {
 }
 
 fn rotate_token(config: &Path) -> Result<(), String> {
+    let catalog = agent_catalog()?;
     let session = Session::from_process_env();
     let local = local_gateway(config).map_err(|error| error.to_string())?;
     let models = route_models(config).map_err(|error| error.to_string())?;
     let previous = GatewayTarget::new(local.base_url.clone(), local.token, models.clone());
     let mut connected = Vec::new();
     let mut failed = Vec::new();
-    for adapter in adapters() {
+    for adapter in catalog.adapters() {
         match adapter.status(&session, &previous) {
             Ok(status) if status.connected() => connected.push(adapter.id()),
             Ok(_) => {}
@@ -362,7 +370,7 @@ fn rotate_token(config: &Path) -> Result<(), String> {
     eprintln!("a running gateway reads the token file on the next request");
     let updated = GatewayTarget::new(local.base_url, token, models);
     for id in connected {
-        let Some(adapter) = find(id) else {
+        let Some(adapter) = catalog.find(id) else {
             continue;
         };
         match adapter.refresh_token(&session, &updated) {
@@ -478,10 +486,11 @@ fn disconnect(adapter: &dyn hofund_agent::AgentAdapter, force: bool) -> Result<(
 }
 
 fn agent_status(config: &Path) -> Result<(), String> {
+    let catalog = agent_catalog()?;
     let session = Session::from_process_env();
     let target = gateway_target(config)?;
     println!("id\tinstalled\tconnected");
-    for adapter in adapters() {
+    for adapter in catalog.adapters() {
         let status = adapter
             .status(&session, &target)
             .map_err(|error| error.to_string())?;

@@ -3,7 +3,13 @@
 //! Paths and keys were checked against each tool's own docs on 2026-10-24.
 //! The citations sit on each description below.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+use hofund_plugin_api::{
+    AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, Slot as ApiSlot, TierId,
+    Visible,
+};
 
 use crate::DisconnectOutcome;
 use crate::edit::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
@@ -13,7 +19,7 @@ use crate::store::{
 };
 use crate::{
     AgentAdapter, AgentError, ConfigFile, ConnectionStatus, FileChange, GatewayTarget, Plan,
-    Session,
+    Session, TargetOs,
 };
 
 /// Claude Code user settings.
@@ -373,10 +379,50 @@ enum Slot {
     ClaudeModel,
     /// Claude Code tier env value. `fable` is skipped unless the model id is Fable.
     ClaudeTier(&'static str),
+    /// Test-only API `ModelIfUnset` with an arbitrary source key. The fixture's
+    /// `legacy_model` source is not representable by `GeminiModel`.
+    #[cfg(test)]
+    ModelIfUnset(Option<&'static str>),
+    /// Test-only API `ModelTier` with an arbitrary needle. The fixture's
+    /// `fixture-fable-` needle is not representable by `ClaudeTier`.
+    #[cfg(test)]
+    ModelTier {
+        tier: &'static str,
+        when_model_matches: Option<&'static str>,
+    },
 }
 
 struct Described {
     description: &'static Description,
+}
+
+/// An adapter backed by a compiled static agent description.
+#[derive(Clone, Copy, Debug)]
+pub struct Compiled {
+    description: &'static AgentDescription,
+    os: TargetOs,
+}
+
+impl Compiled {
+    /// Uses the path templates for the current operating system.
+    #[must_use]
+    pub const fn new(description: &'static AgentDescription) -> Self {
+        Self {
+            description,
+            os: TargetOs::current(),
+        }
+    }
+
+    /// Selects path templates for `os`, independently of the host system.
+    #[must_use]
+    pub const fn with_os(mut self, os: TargetOs) -> Self {
+        self.os = os;
+        self
+    }
+
+    fn engine(&self, session: &Session) -> Result<Engine, AgentError> {
+        Engine::compiled(self.description, self.os, session)
+    }
 }
 
 const CLAUDE: Described = Described {
@@ -404,11 +450,597 @@ pub fn find(name: &str) -> Option<&'static dyn AgentAdapter> {
     adapters().into_iter().find(|adapter| adapter.id() == name)
 }
 
-struct Chosen<'a> {
-    file: &'a str,
+/// Built-in adapters followed by a set of compiled descriptions.
+pub struct Catalog {
+    adapters: Vec<Box<dyn AgentAdapter>>,
+}
+
+impl Catalog {
+    /// All adapters in catalog order.
+    #[must_use]
+    pub fn adapters(&self) -> Vec<&dyn AgentAdapter> {
+        self.adapters.iter().map(Box::as_ref).collect()
+    }
+
+    /// Finds an adapter by its stable id.
+    #[must_use]
+    pub fn find(&self, name: &str) -> Option<&dyn AgentAdapter> {
+        self.adapters()
+            .into_iter()
+            .find(|adapter| adapter.id() == name)
+    }
+}
+
+/// Composes the four built-ins with compiled adapters and rejects duplicate ids.
+///
+/// # Errors
+///
+/// Returns an error when a compiled id duplicates a built-in or another
+/// compiled id.
+pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog, AgentError> {
+    let mut ids = adapters()
+        .into_iter()
+        .map(|adapter| adapter.id().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut composed: Vec<Box<dyn AgentAdapter>> = vec![
+        Box::new(Described {
+            description: &CLAUDE_CODE,
+        }),
+        Box::new(Described {
+            description: &CODEX,
+        }),
+        Box::new(Described {
+            description: &GEMINI,
+        }),
+        Box::new(Described {
+            description: &OPENCODE,
+        }),
+    ];
+    for description in compiled {
+        if !ids.insert(description.id().as_str().to_owned()) {
+            return Err(AgentError::message(format!(
+                "agent id `{}` collides with another catalog entry",
+                description.id().as_str()
+            )));
+        }
+        composed.push(Box::new(Compiled::new(description)));
+    }
+    Ok(Catalog { adapters: composed })
+}
+
+/// Resolves one compiled file location against a session.
+#[must_use]
+pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
+    let template = match os {
+        TargetOs::Linux => file.linux(),
+        TargetOs::Macos => file.macos(),
+        TargetOs::Windows => file.windows(),
+    };
+    let override_value = file.env_override().and_then(|name| {
+        session
+            .env(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    let (root, remainder) = if let Some(value) = override_value {
+        let prefix = file.env_replaces().unwrap_or_else(|| {
+            template
+                .rsplit_once('/')
+                .map_or("~", |(directory, _)| directory)
+        });
+        let remainder = template
+            .strip_prefix(prefix)
+            .unwrap_or(template)
+            .trim_start_matches('/');
+        (rooted(session, &value), remainder)
+    } else {
+        (
+            session.home.clone(),
+            template
+                .strip_prefix("~")
+                .unwrap_or(template)
+                .trim_start_matches('/'),
+        )
+    };
+    remainder
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .fold(root, |path, segment| path.join(segment))
+}
+
+struct EngineLocation {
+    file: &'static str,
     path: PathBuf,
     kind: FileKind,
-    sets: Vec<&'a Set>,
+    create: bool,
+}
+
+struct EngineSet {
+    file: &'static str,
+    key: &'static str,
+    slot: ApiSlot,
+}
+
+struct Engine {
+    id: &'static str,
+    display_name: &'static str,
+    binary: &'static str,
+    locations: Vec<EngineLocation>,
+    sets: Vec<EngineSet>,
+    model: Option<ModelKey>,
+    visible: Visible,
+    route: AgentRoute,
+}
+
+impl Engine {
+    fn described(description: &'static Description, session: &Session) -> Self {
+        let locations = description
+            .locations
+            .iter()
+            .map(|location| EngineLocation {
+                file: location.file,
+                path: (location.resolve)(session),
+                kind: location.kind,
+                create: location.create,
+            })
+            .collect();
+        let sets = description
+            .sets
+            .iter()
+            .map(|set| EngineSet {
+                file: set.file,
+                key: set.key,
+                slot: match set.slot {
+                    Slot::Origin => ApiSlot::Origin,
+                    Slot::V1 => ApiSlot::V1,
+                    Slot::Token => ApiSlot::Token,
+                    Slot::Literal(value) => ApiSlot::Literal(value),
+                    Slot::GeminiModel => ApiSlot::model_if_unset(Some("model")),
+                    Slot::OpenCodeModels => ApiSlot::CatalogModels,
+                    Slot::ClaudeModel => ApiSlot::model_if_unset(None),
+                    Slot::ClaudeTier(tier) => ApiSlot::ModelTier {
+                        tier: TierId::from_static(tier),
+                        when_model_matches: (tier == "fable")
+                            .then(|| hofund_plugin_api::MatchNeedle::new("claude-fable-")),
+                    },
+                    #[cfg(test)]
+                    Slot::ModelIfUnset(from) => ApiSlot::model_if_unset(from),
+                    #[cfg(test)]
+                    Slot::ModelTier {
+                        tier,
+                        when_model_matches,
+                    } => ApiSlot::ModelTier {
+                        tier: TierId::from_static(tier),
+                        when_model_matches: when_model_matches
+                            .map(hofund_plugin_api::MatchNeedle::new),
+                    },
+                },
+            })
+            .collect();
+        Self {
+            id: description.id,
+            display_name: description.display_name,
+            binary: description.binary,
+            locations,
+            sets,
+            model: description.model,
+            visible: Visible::All,
+            route: AgentRoute::Gateway,
+        }
+    }
+
+    fn compiled(
+        description: &'static AgentDescription,
+        os: TargetOs,
+        session: &Session,
+    ) -> Result<Self, AgentError> {
+        let locations = description
+            .files()
+            .iter()
+            .map(|file| {
+                let kind = match file.kind() {
+                    ApiFileKind::Json => FileKind::Json,
+                    ApiFileKind::Toml => FileKind::Toml,
+                    ApiFileKind::Env => FileKind::Env,
+                    _ => {
+                        return Err(AgentError::message(format!(
+                            "agent `{}` file `{}` has an unsupported file kind",
+                            description.id().as_str(),
+                            file.id()
+                        )));
+                    }
+                };
+                Ok(EngineLocation {
+                    file: file.id(),
+                    path: resolve(file, os, session),
+                    kind,
+                    create: file.create(),
+                })
+            })
+            .collect::<Result<Vec<_>, AgentError>>()?;
+        let sets = description
+            .sets()
+            .iter()
+            .map(|set| EngineSet {
+                file: set.file(),
+                key: set.key(),
+                slot: set.slot().clone(),
+            })
+            .collect();
+        let model_file = description.model_file().or_else(|| {
+            let mut ids = description.files().iter().map(AgentFile::id);
+            let first = ids.next()?;
+            ids.all(|id| id == first).then_some(first)
+        });
+        let model = description
+            .model_key()
+            .zip(model_file)
+            .map(|(key, file)| ModelKey { file, key });
+        Ok(Self {
+            id: description.id().as_str(),
+            display_name: description.display_name(),
+            binary: description.binary(),
+            locations,
+            sets,
+            model,
+            visible: description.visible(),
+            route: description.route(),
+        })
+    }
+
+    fn detect(&self, session: &Session) -> bool {
+        binary_on_path(session, self.binary)
+            || self
+                .locations
+                .iter()
+                .any(|location| location.path.is_file())
+    }
+
+    fn read(&self) -> Result<Vec<ConfigFile>, AgentError> {
+        let mut files = Vec::new();
+        for chosen in self.chosen()? {
+            let bytes = read_optional(&chosen.path)?;
+            files.push(ConfigFile {
+                path: chosen.path,
+                bytes,
+            });
+        }
+        Ok(files)
+    }
+
+    fn plan(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
+        let mut changes = Vec::new();
+        for Chosen {
+            path, kind, sets, ..
+        } in self.chosen()?
+        {
+            let before = read_optional(&path)?;
+            let text = match &before {
+                Some(bytes) => Some(utf8(&path, bytes)?),
+                None => None,
+            };
+            let assignments = self.assignments_for(&sets, kind, target, text);
+            let after = render(kind, text, &assignments).map_err(|error| annotate(&path, error))?;
+            let before_bytes = before.unwrap_or_default();
+            if before_bytes != after {
+                let diff = unified_diff(&path, &before_bytes, &after);
+                changes.push(FileChange::new(path, before_bytes, after, diff));
+            }
+        }
+        Ok(Plan::new(changes))
+    }
+
+    fn apply(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
+        let plan = self.plan(target)?;
+        for change in plan.changes() {
+            backup_once(change.path())?;
+        }
+        let snapshots = self.snapshot_inputs(target)?;
+        for change in plan.changes() {
+            write_atomic(change.path(), change.after())?;
+        }
+        for (path, kind, assignments) in snapshots {
+            if marker_present(&path) {
+                snapshot_wrote(&path, kind, &assignments)?;
+            }
+        }
+        Ok(plan)
+    }
+
+    fn revert(&self) -> Result<(), AgentError> {
+        let mut restored = false;
+        for location in &self.locations {
+            if revert_path(&location.path)? {
+                restored = true;
+            }
+        }
+        if restored {
+            Ok(())
+        } else {
+            Err(AgentError::message(format!(
+                "nothing to restore for `{}`",
+                self.id
+            )))
+        }
+    }
+
+    fn status(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+    ) -> Result<ConnectionStatus, AgentError> {
+        let mut connected = true;
+        let mut paths = Vec::new();
+        for chosen in self.chosen()? {
+            paths.push(chosen.path.clone());
+            let Chosen {
+                path, kind, sets, ..
+            } = chosen;
+            if !connected {
+                continue;
+            }
+            let Some(bytes) = read_optional(&path)? else {
+                connected = false;
+                continue;
+            };
+            let text = utf8(&path, &bytes)?;
+            for set in sets {
+                let Some(expected) = self.slot_value(set, kind, target, Some(text)) else {
+                    continue;
+                };
+                let current = get(kind, text, set.key).map_err(|error| annotate(&path, error))?;
+                if current.as_deref() != Some(expected.as_str()) {
+                    connected = false;
+                    break;
+                }
+            }
+        }
+        Ok(ConnectionStatus::new(
+            self.id,
+            self.display_name,
+            self.detect(session),
+            connected,
+            paths,
+        ))
+    }
+
+    fn disconnect(&self, session: &Session, force: bool) -> Result<DisconnectOutcome, AgentError> {
+        let mut changed = false;
+        let mut warnings = Vec::new();
+        let preserve = preserve_dirs(session);
+        for location in &self.locations {
+            let path = &location.path;
+            if !marker_present(path) {
+                continue;
+            }
+            if force {
+                if revert_path(path)? {
+                    changed = true;
+                    if !path.exists() {
+                        remove_empty_parents(path, &preserve)?;
+                    }
+                }
+                continue;
+            }
+            warnings.extend(merge_owned_keys(
+                path,
+                location.kind,
+                self.owned_keys(location.file),
+                &preserve,
+                self.id,
+            )?);
+            changed = true;
+        }
+        Ok(DisconnectOutcome::new(changed, warnings))
+    }
+
+    fn refresh_token(&self, target: &GatewayTarget) -> Result<Vec<PathBuf>, AgentError> {
+        let mut updated = Vec::new();
+        for chosen in self.chosen()? {
+            let token_sets: Vec<&EngineSet> = chosen
+                .sets
+                .iter()
+                .copied()
+                .filter(|set| matches!(set.slot, ApiSlot::Token))
+                .collect();
+            if token_sets.is_empty() {
+                continue;
+            }
+            let Some(before) = read_optional(&chosen.path)? else {
+                continue;
+            };
+            let text = utf8(&chosen.path, &before)?;
+            let assignments = self.assignments_for(&token_sets, chosen.kind, target, Some(text));
+            let after = render(chosen.kind, Some(text), &assignments)
+                .map_err(|error| annotate(&chosen.path, error))?;
+            if before != after {
+                write_atomic(&chosen.path, &after)?;
+                refresh_wrote(&chosen.path, chosen.kind, &assignments)?;
+                updated.push(chosen.path);
+            }
+        }
+        Ok(updated)
+    }
+
+    fn configured_model(&self) -> Result<Option<String>, AgentError> {
+        let Some(model) = self.model else {
+            return Ok(None);
+        };
+        for chosen in self.chosen()? {
+            if chosen.file != model.file {
+                continue;
+            }
+            let Some(bytes) = read_optional(&chosen.path)? else {
+                return Ok(None);
+            };
+            let text = utf8(&chosen.path, &bytes)?;
+            return string_at(chosen.kind, text, model.key)
+                .map_err(|error| annotate(&chosen.path, error));
+        }
+        Ok(None)
+    }
+
+    fn snapshot_inputs(
+        &self,
+        target: &GatewayTarget,
+    ) -> Result<Vec<(PathBuf, FileKind, Vec<Assignment>)>, AgentError> {
+        let mut snapshots = Vec::new();
+        for chosen in self.chosen()? {
+            let bytes = read_optional(&chosen.path)?;
+            let text = match &bytes {
+                Some(bytes) => Some(utf8(&chosen.path, bytes)?),
+                None => None,
+            };
+            let assignments = self.assignments_for(&chosen.sets, chosen.kind, target, text);
+            snapshots.push((chosen.path, chosen.kind, assignments));
+        }
+        Ok(snapshots)
+    }
+
+    fn chosen(&self) -> Result<Vec<Chosen<'_>>, AgentError> {
+        let mut chosen = Vec::new();
+        for file in self.file_ids() {
+            let location = self
+                .choose(file)
+                .ok_or_else(|| AgentError::message(format!("`{file}` has no config location")))?;
+            let sets = self.sets.iter().filter(|set| set.file == file).collect();
+            chosen.push(Chosen {
+                file,
+                path: location.path.clone(),
+                kind: location.kind,
+                sets,
+            });
+        }
+        Ok(chosen)
+    }
+
+    fn file_ids(&self) -> Vec<&'static str> {
+        let mut ids = Vec::new();
+        for location in &self.locations {
+            if !ids.contains(&location.file) {
+                ids.push(location.file);
+            }
+        }
+        ids
+    }
+
+    fn choose(&self, file: &str) -> Option<&EngineLocation> {
+        let mut creator = None;
+        let mut fallback = None;
+        for location in self
+            .locations
+            .iter()
+            .filter(|location| location.file == file)
+        {
+            if location.path.is_file() {
+                return Some(location);
+            }
+            if location.create && creator.is_none() {
+                creator = Some(location);
+            }
+            if fallback.is_none() {
+                fallback = Some(location);
+            }
+        }
+        creator.or(fallback)
+    }
+
+    fn assignments_for(
+        &self,
+        sets: &[&EngineSet],
+        kind: FileKind,
+        target: &GatewayTarget,
+        existing: Option<&str>,
+    ) -> Vec<Assignment> {
+        sets.iter()
+            .filter_map(|set| {
+                let value = self.slot_value(set, kind, target, existing)?;
+                Some(Assignment {
+                    key: set.key,
+                    value,
+                    raw_json: matches!(set.slot, ApiSlot::CatalogModels),
+                })
+            })
+            .collect()
+    }
+
+    fn slot_value(
+        &self,
+        set: &EngineSet,
+        kind: FileKind,
+        target: &GatewayTarget,
+        existing: Option<&str>,
+    ) -> Option<String> {
+        let models = self.models(target);
+        let gateway = self.route == AgentRoute::Gateway;
+        match &set.slot {
+            ApiSlot::Origin if gateway => Some(origin(target.base_url())),
+            ApiSlot::V1 if gateway => Some(format!("{}/v1", origin(target.base_url()))),
+            ApiSlot::Token if gateway => Some(target.token().to_owned()),
+            ApiSlot::Literal(text) => Some((*text).to_owned()),
+            ApiSlot::ModelIfUnset { from } => {
+                model_if_unset(kind, existing, set.key, *from, &models)
+            }
+            ApiSlot::ModelTier {
+                when_model_matches, ..
+            } => {
+                let main = self.tier_model(set, kind, existing, &models)?;
+                if when_model_matches
+                    .is_some_and(|needle| !main.to_ascii_lowercase().contains(needle.as_str()))
+                {
+                    return None;
+                }
+                Some(main)
+            }
+            ApiSlot::CatalogModels if gateway => Some(catalog_models_json(&models)),
+            _ => None,
+        }
+    }
+
+    fn models(&self, target: &GatewayTarget) -> Vec<String> {
+        match self.visible {
+            Visible::All => target.models().to_vec(),
+            Visible::Only(only) => target
+                .models()
+                .iter()
+                .filter(|id| only.contains(&id.as_str()))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn tier_model(
+        &self,
+        set: &EngineSet,
+        kind: FileKind,
+        existing: Option<&str>,
+        models: &[String],
+    ) -> Option<String> {
+        if let Some(model) = self.model
+            && model.file == set.file
+            && let Some(text) = existing
+            && let Some(value) = string_value(kind, text, model.key)
+        {
+            return Some(value);
+        }
+        single_model(models)
+    }
+
+    fn owned_keys(&self, file: &str) -> Vec<&'static str> {
+        self.sets
+            .iter()
+            .filter(|set| set.file == file)
+            .map(|set| set.key)
+            .collect()
+    }
+}
+
+struct Chosen<'a> {
+    file: &'static str,
+    path: PathBuf,
+    kind: FileKind,
+    sets: Vec<&'a EngineSet>,
 }
 
 impl AgentAdapter for Described {
@@ -421,152 +1053,27 @@ impl AgentAdapter for Described {
     }
 
     fn detect(&self, session: &Session) -> bool {
-        binary_on_path(session, self.description.binary)
-            || self
-                .description
-                .locations
-                .iter()
-                .any(|location| (location.resolve)(session).is_file())
+        Engine::described(self.description, session).detect(session)
     }
 
     fn read(&self, session: &Session) -> Result<Vec<ConfigFile>, AgentError> {
-        let mut files = Vec::new();
-        for chosen in self.chosen(session)? {
-            let path = chosen.path;
-            let bytes = read_optional(&path)?;
-            files.push(ConfigFile { path, bytes });
-        }
-        Ok(files)
+        Engine::described(self.description, session).read()
     }
 
     fn plan(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, AgentError> {
-        let mut changes = Vec::new();
-        for Chosen {
-            path, kind, sets, ..
-        } in self.chosen(session)?
-        {
-            let before = read_optional(&path)?;
-            let text = match &before {
-                Some(bytes) => Some(std::str::from_utf8(bytes).map_err(|_| {
-                    AgentError::message(format!("{} is not UTF-8", path.display()))
-                })?),
-                None => None,
-            };
-            let assignments = assignments_for(&sets, target, text);
-            let after = render(kind, text, &assignments).map_err(|error| annotate(&path, error))?;
-            let before_bytes = before.unwrap_or_default();
-            if before_bytes != after {
-                let diff = unified_diff(&path, &before_bytes, &after);
-                changes.push(FileChange::new(path, before_bytes, after, diff));
-            }
-        }
-        Ok(Plan::new(changes))
+        Engine::described(self.description, session).plan(target)
     }
 
     fn apply(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, AgentError> {
-        let plan = self.plan(session, target)?;
-        for change in plan.changes() {
-            backup_once(change.path())?;
-        }
-        let snapshots = self.snapshot_inputs(session, target)?;
-        for change in plan.changes() {
-            write_atomic(change.path(), change.after())?;
-        }
-        for (path, kind, assignments) in snapshots {
-            if marker_present(&path) {
-                snapshot_wrote(&path, kind, &assignments)?;
-            }
-        }
-        Ok(plan)
+        Engine::described(self.description, session).apply(target)
     }
 
     fn revert(&self, session: &Session) -> Result<(), AgentError> {
-        let mut restored = false;
-        for location in self.description.locations {
-            let path = (location.resolve)(session);
-            if revert_path(&path)? {
-                restored = true;
-            }
-        }
-        if restored {
-            Ok(())
-        } else {
-            Err(AgentError::message(format!(
-                "nothing to restore for `{}`",
-                self.description.id
-            )))
-        }
-    }
-
-    fn status(
-        &self,
-        session: &Session,
-        target: &GatewayTarget,
-    ) -> Result<ConnectionStatus, AgentError> {
-        let mut connected = true;
-        let mut paths = Vec::new();
-        for chosen in self.chosen(session)? {
-            paths.push(chosen.path.clone());
-            let Chosen {
-                path, kind, sets, ..
-            } = chosen;
-            if !connected {
-                continue;
-            }
-            let Some(bytes) = read_optional(&path)? else {
-                connected = false;
-                continue;
-            };
-            let text = std::str::from_utf8(&bytes)
-                .map_err(|_| AgentError::message(format!("{} is not UTF-8", path.display())))?;
-            for set in sets {
-                let Some(expected) = slot_value(&set.slot, target, Some(text)) else {
-                    continue;
-                };
-                let current = get(kind, text, set.key).map_err(|error| annotate(&path, error))?;
-                if current.as_deref() != Some(expected.as_str()) {
-                    connected = false;
-                    break;
-                }
-            }
-        }
-        Ok(ConnectionStatus::new(
-            self.description.id,
-            self.description.display_name,
-            self.detect(session),
-            connected,
-            paths,
-        ))
+        Engine::described(self.description, session).revert()
     }
 
     fn disconnect(&self, session: &Session, force: bool) -> Result<DisconnectOutcome, AgentError> {
-        let mut changed = false;
-        let mut warnings = Vec::new();
-        let preserve = preserve_dirs(session);
-        for location in self.description.locations {
-            let path = (location.resolve)(session);
-            if !marker_present(&path) {
-                continue;
-            }
-            if force {
-                if revert_path(&path)? {
-                    changed = true;
-                    if !path.exists() {
-                        remove_empty_parents(&path, &preserve)?;
-                    }
-                }
-                continue;
-            }
-            warnings.extend(merge_owned_keys(
-                &path,
-                location.kind,
-                owned_keys(self.description, location.file),
-                &preserve,
-                self.description.id,
-            )?);
-            changed = true;
-        }
-        Ok(DisconnectOutcome::new(changed, warnings))
+        Engine::described(self.description, session).disconnect(session, force)
     }
 
     fn refresh_token(
@@ -574,198 +1081,103 @@ impl AgentAdapter for Described {
         session: &Session,
         target: &GatewayTarget,
     ) -> Result<Vec<PathBuf>, AgentError> {
-        let mut updated = Vec::new();
-        for chosen in self.chosen(session)? {
-            let token_sets: Vec<&Set> = chosen
-                .sets
-                .iter()
-                .copied()
-                .filter(|set| matches!(set.slot, Slot::Token))
-                .collect();
-            if token_sets.is_empty() {
-                continue;
-            }
-            let Some(before) = read_optional(&chosen.path)? else {
-                continue;
-            };
-            let text = std::str::from_utf8(&before).map_err(|_| {
-                AgentError::message(format!("{} is not UTF-8", chosen.path.display()))
-            })?;
-            let assignments = assignments_for(&token_sets, target, Some(text));
-            let after = render(chosen.kind, Some(text), &assignments)
-                .map_err(|error| annotate(&chosen.path, error))?;
-            if before != after {
-                write_atomic(&chosen.path, &after)?;
-                refresh_wrote(&chosen.path, chosen.kind, &assignments)?;
-                updated.push(chosen.path);
-            }
-        }
-        Ok(updated)
+        Engine::described(self.description, session).refresh_token(target)
     }
 
     fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError> {
-        let Some(model) = self.description.model else {
-            return Ok(None);
-        };
-        for chosen in self.chosen(session)? {
-            if chosen.file != model.file {
-                continue;
-            }
-            let Some(bytes) = read_optional(&chosen.path)? else {
-                return Ok(None);
-            };
-            let text = std::str::from_utf8(&bytes).map_err(|_| {
-                AgentError::message(format!("{} is not UTF-8", chosen.path.display()))
-            })?;
-            return string_at(chosen.kind, text, model.key)
-                .map_err(|error| annotate(&chosen.path, error));
-        }
-        Ok(None)
+        Engine::described(self.description, session).configured_model()
     }
-}
 
-impl Described {
-    fn snapshot_inputs(
+    fn status(
         &self,
         session: &Session,
         target: &GatewayTarget,
-    ) -> Result<Vec<(PathBuf, FileKind, Vec<Assignment>)>, AgentError> {
-        let mut snapshots = Vec::new();
-        for chosen in self.chosen(session)? {
-            let bytes = read_optional(&chosen.path)?;
-            let text = match &bytes {
-                Some(bytes) => Some(std::str::from_utf8(bytes).map_err(|_| {
-                    AgentError::message(format!("{} is not UTF-8", chosen.path.display()))
-                })?),
-                None => None,
-            };
-            let assignments = assignments_for(&chosen.sets, target, text);
-            snapshots.push((chosen.path, chosen.kind, assignments));
-        }
-        Ok(snapshots)
-    }
-
-    fn chosen(&self, session: &Session) -> Result<Vec<Chosen<'_>>, AgentError> {
-        let mut chosen = Vec::new();
-        for file in file_ids(self.description) {
-            let location = choose(self.description, session, file)
-                .ok_or_else(|| AgentError::message(format!("`{file}` has no config location")))?;
-            let sets = self
-                .description
-                .sets
-                .iter()
-                .filter(|set| set.file == file)
-                .collect();
-            chosen.push(Chosen {
-                file,
-                path: (location.resolve)(session),
-                kind: location.kind,
-                sets,
-            });
-        }
-        Ok(chosen)
+    ) -> Result<ConnectionStatus, AgentError> {
+        Engine::described(self.description, session).status(session, target)
     }
 }
 
-fn file_ids(description: &Description) -> Vec<&str> {
-    let mut ids = Vec::new();
-    for location in description.locations {
-        if !ids.contains(&location.file) {
-            ids.push(location.file);
-        }
+impl AgentAdapter for Compiled {
+    fn id(&self) -> &str {
+        self.description.id().as_str()
     }
-    ids
+
+    fn display_name(&self) -> &str {
+        self.description.display_name()
+    }
+
+    fn detect(&self, session: &Session) -> bool {
+        self.engine(session)
+            .is_ok_and(|engine| engine.detect(session))
+    }
+
+    fn read(&self, session: &Session) -> Result<Vec<ConfigFile>, AgentError> {
+        self.engine(session)?.read()
+    }
+
+    fn plan(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, AgentError> {
+        self.engine(session)?.plan(target)
+    }
+
+    fn apply(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, AgentError> {
+        self.engine(session)?.apply(target)
+    }
+
+    fn revert(&self, session: &Session) -> Result<(), AgentError> {
+        self.engine(session)?.revert()
+    }
+
+    fn disconnect(&self, session: &Session, force: bool) -> Result<DisconnectOutcome, AgentError> {
+        self.engine(session)?.disconnect(session, force)
+    }
+
+    fn refresh_token(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+    ) -> Result<Vec<PathBuf>, AgentError> {
+        self.engine(session)?.refresh_token(target)
+    }
+
+    fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError> {
+        self.engine(session)?.configured_model()
+    }
+
+    fn status(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+    ) -> Result<ConnectionStatus, AgentError> {
+        self.engine(session)?.status(session, target)
+    }
 }
 
-fn choose<'a>(description: &'a Description, session: &Session, file: &str) -> Option<&'a Location> {
-    let mut creator = None;
-    let mut fallback = None;
-    for location in description
-        .locations
-        .iter()
-        .filter(|location| location.file == file)
-    {
-        if (location.resolve)(session).is_file() {
-            return Some(location);
-        }
-        if location.create && creator.is_none() {
-            creator = Some(location);
-        }
-        if fallback.is_none() {
-            fallback = Some(location);
-        }
-    }
-    creator.or(fallback)
-}
-
-fn assignments_for(
-    sets: &[&Set],
-    target: &GatewayTarget,
+fn model_if_unset(
+    kind: FileKind,
     existing: Option<&str>,
-) -> Vec<Assignment> {
-    sets.iter()
-        .filter_map(|set| {
-            let value = slot_value(&set.slot, target, existing)?;
-            Some(Assignment {
-                key: set.key,
-                value,
-                raw_json: matches!(set.slot, Slot::OpenCodeModels),
-            })
-        })
-        .collect()
-}
-
-fn slot_value(slot: &Slot, target: &GatewayTarget, existing: Option<&str>) -> Option<String> {
-    match slot {
-        Slot::Origin => Some(origin(target.base_url())),
-        Slot::V1 => Some(format!("{}/v1", origin(target.base_url()))),
-        Slot::Token => Some(target.token().to_owned()),
-        Slot::Literal(text) => Some((*text).to_owned()),
-        Slot::GeminiModel => gemini_model(existing, target.models()),
-        Slot::OpenCodeModels => Some(opencode_models_json(target.models())),
-        Slot::ClaudeModel => claude_model_to_write(existing, target.models()),
-        Slot::ClaudeTier(tier) => claude_tier(existing, target.models(), tier),
-    }
-}
-
-fn gemini_model(existing: Option<&str>, models: &[String]) -> Option<String> {
+    key: &str,
+    from: Option<&str>,
+    models: &[String],
+) -> Option<String> {
     if let Some(text) = existing
-        && json_string_at(text, "model.name").is_some()
+        && string_value(kind, text, key).is_some()
     {
         return None;
     }
-    if let Some(text) = existing
-        && let Some(name) = json_string_at(text, "model")
+    if let Some(source) = from
+        && let Some(text) = existing
+        && let Some(value) = string_value(kind, text, source)
     {
-        return Some(name);
+        return Some(value);
     }
     single_model(models)
 }
 
-fn claude_model_to_write(existing: Option<&str>, models: &[String]) -> Option<String> {
-    if existing
-        .is_some_and(|text| json_string_at(text, "model").is_some_and(|name| !name.is_empty()))
-    {
-        return None;
-    }
-    single_model(models)
-}
-
-fn claude_tier(existing: Option<&str>, models: &[String], tier: &str) -> Option<String> {
-    let main = claude_main(existing, models)?;
-    if tier == "fable" && !main.to_ascii_lowercase().contains("claude-fable-") {
-        return None;
-    }
-    Some(main)
-}
-
-fn claude_main(existing: Option<&str>, models: &[String]) -> Option<String> {
-    if let Some(text) = existing
-        && let Some(name) = json_string_at(text, "model")
-    {
-        return Some(name);
-    }
-    single_model(models)
+fn string_value(kind: FileKind, text: &str, key: &str) -> Option<String> {
+    string_at(kind, text, key)
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty())
 }
 
 fn single_model(models: &[String]) -> Option<String> {
@@ -774,15 +1186,7 @@ fn single_model(models: &[String]) -> Option<String> {
     ids.next().is_none().then_some(first)
 }
 
-fn json_string_at(text: &str, key: &str) -> Option<String> {
-    let root = crate::edit::json_root(text).ok()?;
-    crate::edit::json_string(&root, key)
-        .ok()
-        .flatten()
-        .filter(|value| !value.is_empty())
-}
-
-fn opencode_models_json(models: &[String]) -> String {
+fn catalog_models_json(models: &[String]) -> String {
     let mut root = serde_json::Map::new();
     for id in models {
         if id.is_empty() || root.contains_key(id) {
@@ -801,15 +1205,6 @@ fn opencode_models_json(models: &[String]) -> String {
 
 fn origin(base_url: &str) -> String {
     base_url.trim_end_matches('/').to_owned()
-}
-
-fn owned_keys<'a>(description: &'a Description, file: &str) -> Vec<&'a str> {
-    description
-        .sets
-        .iter()
-        .filter(|set| set.file == file)
-        .map(|set| set.key)
-        .collect()
 }
 
 /// Records the bytes apply would write onto the pre-connect file.
@@ -1057,4 +1452,375 @@ fn opencode_json(session: &Session) -> PathBuf {
 
 fn opencode_jsonc(session: &Session) -> PathBuf {
     opencode_dir(session).join("opencode.jsonc")
+}
+
+#[cfg(test)]
+const FIXTURE_TOML_AGENT: Description = Description {
+    id: "fixture-toml-agent",
+    display_name: "Fixture TOML Agent",
+    binary: "fixture-toml",
+    locations: &[Location {
+        file: "config",
+        kind: FileKind::Toml,
+        create: true,
+        resolve: fixture_toml_config,
+    }],
+    sets: &[
+        Set {
+            file: "config",
+            key: "model_provider",
+            slot: Slot::Literal("hofund"),
+        },
+        Set {
+            file: "config",
+            key: "model_providers.hofund.name",
+            slot: Slot::Literal("hofund"),
+        },
+        Set {
+            file: "config",
+            key: "model_providers.hofund.base_url",
+            slot: Slot::V1,
+        },
+        Set {
+            file: "config",
+            key: "model_providers.hofund.wire_api",
+            slot: Slot::Literal("responses"),
+        },
+        Set {
+            file: "config",
+            key: "model_providers.hofund.experimental_bearer_token",
+            slot: Slot::Token,
+        },
+    ],
+    model: Some(ModelKey {
+        file: "config",
+        key: "model",
+    }),
+};
+
+/// The private engine does not read effort keys. This retains the fixture's
+/// effort file and key beside its equivalent `Description`.
+#[cfg(test)]
+const FIXTURE_TOML_EFFORT: ModelKey = ModelKey {
+    file: "config",
+    key: "model_reasoning_effort",
+};
+
+#[cfg(test)]
+const FIXTURE_JSON_AGENT: Description = Description {
+    id: "fixture-json-agent",
+    display_name: "Fixture JSON Agent",
+    binary: "fixture-json",
+    locations: &[
+        Location {
+            file: "settings",
+            kind: FileKind::Json,
+            create: true,
+            resolve: fixture_json_settings,
+        },
+        Location {
+            file: "env",
+            kind: FileKind::Env,
+            create: true,
+            resolve: fixture_json_env,
+        },
+        Location {
+            file: "config",
+            kind: FileKind::Json,
+            create: false,
+            resolve: fixture_json_config_jsonc,
+        },
+        Location {
+            file: "config",
+            kind: FileKind::Json,
+            create: true,
+            resolve: fixture_json_config_json,
+        },
+    ],
+    sets: &[
+        Set {
+            file: "settings",
+            key: "origin",
+            slot: Slot::Origin,
+        },
+        Set {
+            file: "settings",
+            key: "token",
+            slot: Slot::Token,
+        },
+        Set {
+            file: "settings",
+            key: "literal",
+            slot: Slot::Literal("value"),
+        },
+        Set {
+            file: "settings",
+            key: "model.name",
+            slot: Slot::ClaudeModel,
+        },
+        Set {
+            file: "settings",
+            key: "selected.model",
+            slot: Slot::ModelIfUnset(Some("legacy_model")),
+        },
+        Set {
+            file: "settings",
+            key: "tiers.opus",
+            slot: Slot::ModelTier {
+                tier: "opus",
+                when_model_matches: None,
+            },
+        },
+        Set {
+            file: "settings",
+            key: "tiers.fable",
+            slot: Slot::ModelTier {
+                tier: "fable",
+                when_model_matches: Some("fixture-fable-"),
+            },
+        },
+        Set {
+            file: "env",
+            key: "FIXTURE_TOKEN",
+            slot: Slot::Token,
+        },
+        Set {
+            file: "env",
+            key: "FIXTURE_ORIGIN",
+            slot: Slot::Origin,
+        },
+        Set {
+            file: "env",
+            key: "FIXTURE_LITERAL",
+            slot: Slot::Literal("value"),
+        },
+        Set {
+            file: "config",
+            key: "models",
+            slot: Slot::OpenCodeModels,
+        },
+    ],
+    model: Some(ModelKey {
+        file: "settings",
+        key: "model.name",
+    }),
+};
+
+#[cfg(test)]
+fn fixture_toml_config(session: &Session) -> PathBuf {
+    session
+        .env("FIXTURE_TOML_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map_or_else(
+            || session.home.join(".fixture-toml"),
+            |path| rooted(session, &path),
+        )
+        .join("config.toml")
+}
+
+#[cfg(test)]
+fn fixture_json_settings(session: &Session) -> PathBuf {
+    session.home.join(".fixture-json").join("settings.json")
+}
+
+#[cfg(test)]
+fn fixture_json_env(session: &Session) -> PathBuf {
+    session.home.join(".fixture-json").join("fixture.env")
+}
+
+#[cfg(test)]
+fn fixture_json_config_jsonc(session: &Session) -> PathBuf {
+    session
+        .home
+        .join(".config")
+        .join("fixture-json")
+        .join("config.jsonc")
+}
+
+#[cfg(test)]
+fn fixture_json_config_json(session: &Session) -> PathBuf {
+    session
+        .home
+        .join(".config")
+        .join("fixture-json")
+        .join("config.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{Described, FIXTURE_JSON_AGENT, FIXTURE_TOML_AGENT, FIXTURE_TOML_EFFORT};
+    use crate::{AgentAdapter, GatewayTarget, Plan, Session};
+
+    #[derive(Default)]
+    struct GoldenCase {
+        env: BTreeMap<String, String>,
+        routes: Vec<String>,
+        base_url: String,
+        token: String,
+    }
+
+    #[test]
+    fn const_fixture_descriptions_replay_compiled_goldens() {
+        assert_eq!(FIXTURE_TOML_EFFORT.file, "config");
+        for (id, description) in [
+            ("fixture-toml-agent", &FIXTURE_TOML_AGENT),
+            ("fixture-json-agent", &FIXTURE_JSON_AGENT),
+        ] {
+            let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../plugins/registry/tests/fixtures/agents")
+                .join(id)
+                .join("fixtures");
+            for os in ["linux", "macos", "windows"] {
+                let mut cases = fs::read_dir(fixtures.join(os))
+                    .expect("golden OS directory")
+                    .map(|entry| entry.expect("golden case").path())
+                    .filter(|path| path.join("case.toml").is_file())
+                    .collect::<Vec<_>>();
+                cases.sort();
+                assert!(!cases.is_empty(), "{id} has no {os} cases");
+                for case in cases {
+                    replay_case(description, &case);
+                }
+            }
+        }
+    }
+
+    fn replay_case(description: &'static super::Description, case_dir: &Path) {
+        let label = format!("{} / {}", description.id, case_dir.display());
+        let case = read_case(&case_dir.join("case.toml"));
+        let home = scratch();
+        let before_dir = case_dir.join("before");
+        if before_dir.is_dir() {
+            copy_tree(&before_dir, &home);
+        }
+        let before = tree(&home);
+        let after = tree(&case_dir.join("after"));
+        let mut session = Session::new(&home);
+        for (name, value) in case.env {
+            session = session.with_env(name, value.replace("{tmp}", &home.to_string_lossy()));
+        }
+        let target = GatewayTarget::new(case.base_url, case.token, case.routes);
+        let adapter = Described { description };
+        let plan = adapter.plan(&session, &target).expect("const plan");
+        verify_plan(&label, &home, &plan, &after);
+        let applied = adapter.apply(&session, &target).expect("const apply");
+        verify_plan(&label, &home, &applied, &after);
+        let mut expected = before;
+        expected.extend(after);
+        assert_eq!(managed_tree(&home), expected, "{label}: const apply tree");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    fn verify_plan(label: &str, home: &Path, plan: &Plan, after: &BTreeMap<PathBuf, Vec<u8>>) {
+        let mut planned = Vec::new();
+        for change in plan.changes() {
+            let relative = change.path().strip_prefix(home).expect("plan relative");
+            planned.push(relative.to_path_buf());
+            assert_eq!(
+                change.after(),
+                after.get(relative).map_or(&[][..], Vec::as_slice),
+                "{label}: plan after bytes for {relative:?}"
+            );
+        }
+        planned.sort();
+        let mut golden = after.keys().cloned().collect::<Vec<_>>();
+        golden.sort();
+        assert_eq!(planned, golden, "{label}: plan paths");
+    }
+
+    fn read_case(path: &Path) -> GoldenCase {
+        let text = fs::read_to_string(path).expect("case.toml");
+        let mut case = GoldenCase::default();
+        let mut in_env = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line == "[env]" {
+                in_env = true;
+                continue;
+            }
+            let Some((key, raw)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let raw = raw.trim();
+            if key == "routes" {
+                case.routes = serde_json::from_str(raw).expect("case routes");
+            } else if key == "base_url" {
+                case.base_url = serde_json::from_str(raw).expect("case base URL");
+            } else if key == "token" {
+                case.token = serde_json::from_str(raw).expect("case token");
+            } else if in_env {
+                case.env.insert(
+                    key.to_owned(),
+                    serde_json::from_str(raw).expect("case env value"),
+                );
+            }
+        }
+        case
+    }
+
+    fn managed_tree(home: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        tree(home)
+            .into_iter()
+            .filter(|(path, _)| {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                ![".hofund.bak", ".hofund.absent", ".hofund.wrote"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+            })
+            .collect()
+    }
+
+    fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        collect_files(root, root, &mut files);
+        files
+    }
+
+    fn collect_files(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("golden entry").path();
+            if path.is_dir() {
+                collect_files(root, &path, files);
+            } else if path.is_file() {
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("golden relative")
+                        .to_path_buf(),
+                    fs::read(path).expect("golden file"),
+                );
+            }
+        }
+    }
+
+    fn copy_tree(source: &Path, destination: &Path) {
+        for (relative, bytes) in tree(source) {
+            let path = destination.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("before parent");
+            }
+            fs::write(path, bytes).expect("before file");
+        }
+    }
+
+    fn scratch() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("hofund-const-golden-{}-{id}", std::process::id()));
+        fs::create_dir_all(&path).expect("const golden temp dir");
+        path
+    }
 }

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Compiled agent descriptions now support dotenv files, ordered file-location
+  candidates, environment path overrides, conditional model writes, and model
+  catalogs. `hofund-agent` can compose the four built-in adapters with static
+  compiled descriptions through the same editing engine. The registry compiles
+  validated data-only `agent.toml` descriptions and delivers them through the
+  daemon to the CLI and desktop.
+- `hofund-kit-agent` now runs per-OS golden conformance for planning, apply and
+  backup safety, token refresh, and disconnect drift. Registry fixtures replay
+  the same committed goldens through compiled and const descriptions.
 - The plugin API's preflight hook lets `config check` validate external
   resources named by a resolved provider configuration without starting them.
 - The SDK's `IamAccessToken` retains an IAM access token and its optional
@@ -37,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Agent model-match needles are required to be lowercase; tier matching itself
+  remains ASCII case-insensitive. Compiled descriptions can explicitly identify
+  model and effort files, unsupported file kinds are errors, and `Session`
+  debug output lists environment names without exposing their values.
 - Model lists require HTTP 200, display names fall back to ids, verification
   hints require verification evidence, and Azure double failures retain the
   last HTTP status. A per-URL Azure timeout still tries the second URL; a

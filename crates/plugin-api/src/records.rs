@@ -1100,7 +1100,7 @@ impl SubscriptionSpec {
     }
 }
 
-/// A non-empty substring a tier slot matches against the model id.
+/// A non-empty, lowercase substring a tier slot matches against the model id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MatchNeedle {
@@ -1108,17 +1108,26 @@ pub struct MatchNeedle {
 }
 
 impl MatchNeedle {
-    /// A non-empty needle such as `example-fable-`.
+    /// A non-empty lowercase needle such as `example-fable-`.
     ///
     /// Generated descriptions call this while building a [`Slot`].
     ///
     /// # Panics
     ///
-    /// Panics when `value` is empty.
+    /// Panics when `value` is empty or contains an uppercase ASCII character.
     #[doc(hidden)]
     #[must_use]
     pub const fn new(value: &'static str) -> Self {
         assert!(!value.is_empty(), "model match needle is empty");
+        let bytes = value.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            assert!(
+                !bytes[index].is_ascii_uppercase(),
+                "model match needle must be lowercase"
+            );
+            index += 1;
+        }
         Self { value }
     }
 
@@ -1145,7 +1154,23 @@ pub enum Slot {
     /// A fixed string.
     #[doc(hidden)]
     Literal(&'static str),
-    /// A tier environment variable. The needle skips the write when it does not match.
+    /// Writes a model only when the set key has no non-empty string.
+    ///
+    /// The value comes from the non-empty string at `from` in the same file,
+    /// when present. Otherwise it comes from the only non-empty visible route;
+    /// if there is not exactly one, the write is skipped.
+    #[doc(hidden)]
+    ModelIfUnset {
+        /// Another key in the same file from which to take the model.
+        from: Option<&'static str>,
+    },
+    /// A tier environment variable.
+    ///
+    /// The value is the non-empty string at the description's model key when
+    /// that key is in the same logical file, otherwise the only non-empty
+    /// visible route. The write is skipped when neither exists. When
+    /// `when_model_matches` is set, the value is written only when it contains
+    /// the needle, using ASCII case-insensitive matching.
     #[doc(hidden)]
     ModelTier {
         /// Tier name, such as `fable`.
@@ -1153,9 +1178,21 @@ pub enum Slot {
         /// When set, the write runs only if the model id contains this text.
         when_model_matches: Option<MatchNeedle>,
     },
-    /// One models object per visible route.
+    /// A JSON object with one entry per distinct non-empty visible model.
+    ///
+    /// Each entry has the shape `{ "name": "<id>", "variants": {} }`. The
+    /// object is written as raw JSON, and this slot is valid only in JSON files.
     #[doc(hidden)]
     CatalogModels,
+}
+
+impl Slot {
+    /// A model write guarded by an existing value at the destination key.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn model_if_unset(from: Option<&'static str>) -> Self {
+        Self::ModelIfUnset { from }
+    }
 }
 
 /// How many models an agent file lists.
@@ -1186,9 +1223,18 @@ pub enum FileKind {
     Toml,
     /// JSON.
     Json,
+    /// A dotenv file containing `KEY=VALUE` assignments.
+    Env,
 }
 
-/// One file an agent description manages.
+/// One ordered candidate location for a logical agent file.
+///
+/// Entries may share an id. The engine picks the first candidate whose path
+/// is an existing file, otherwise the first with `create = true`, otherwise
+/// the first candidate.
+///
+/// Path templates use `/` separators and start with `~` as the home segment.
+/// They contain no drive letters, `..`, empty segments, or backslashes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AgentFile {
@@ -1198,11 +1244,13 @@ pub struct AgentFile {
     macos: &'static str,
     windows: &'static str,
     env_override: Option<&'static str>,
+    create: bool,
+    env_replaces: Option<&'static str>,
 }
 
 impl AgentFile {
     /// A managed file. Paths are the template strings, not expanded paths.
-    /// Generated code calls this.
+    /// Generated code calls this. Files are created by default.
     ///
     /// # Panics
     ///
@@ -1232,7 +1280,25 @@ impl AgentFile {
             macos,
             windows,
             env_override,
+            create: true,
+            env_replaces: None,
         }
+    }
+
+    /// Sets whether the engine may create this candidate.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_create(mut self, create: bool) -> Self {
+        self.create = create;
+        self
+    }
+
+    /// Sets the leading path-template prefix replaced by `env_override`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_env_replaces(mut self, prefix: &'static str) -> Self {
+        self.env_replaces = Some(prefix);
+        self
     }
 
     /// File id inside the description.
@@ -1269,6 +1335,21 @@ impl AgentFile {
     #[must_use]
     pub const fn env_override(&self) -> Option<&'static str> {
         self.env_override
+    }
+
+    /// Whether the engine may create this candidate.
+    #[must_use]
+    pub const fn create(&self) -> bool {
+        self.create
+    }
+
+    /// Leading path-template prefix replaced by `env_override`.
+    ///
+    /// When this is `None`, the prefix is the directory of the selected OS
+    /// path template, meaning everything before its final `/`.
+    #[must_use]
+    pub const fn env_replaces(&self) -> Option<&'static str> {
+        self.env_replaces
     }
 }
 
@@ -1326,7 +1407,9 @@ pub struct AgentDescription {
     files: &'static [AgentFile],
     sets: &'static [AgentSet],
     model_key: Option<&'static str>,
+    model_file: Option<&'static str>,
     effort_key: Option<&'static str>,
+    effort_file: Option<&'static str>,
     visible: Visible,
     route: AgentRoute,
     requires: &'static [crate::id::SurfaceId],
@@ -1371,11 +1454,31 @@ impl AgentDescription {
             files,
             sets,
             model_key,
+            model_file: None,
             effort_key,
+            effort_file: None,
             visible,
             route,
             requires,
         }
+    }
+
+    /// Sets the logical file containing the model key.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_model_file(mut self, file: &'static str) -> Self {
+        assert!(!file.is_empty(), "model file is empty");
+        self.model_file = Some(file);
+        self
+    }
+
+    /// Sets the logical file containing the effort key.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_effort_file(mut self, file: &'static str) -> Self {
+        assert!(!file.is_empty(), "effort file is empty");
+        self.effort_file = Some(file);
+        self
     }
 
     /// Plugin id.
@@ -1414,10 +1517,22 @@ impl AgentDescription {
         self.model_key
     }
 
+    /// Logical file containing the model key, when explicitly assigned.
+    #[must_use]
+    pub const fn model_file(&self) -> Option<&'static str> {
+        self.model_file
+    }
+
     /// Optional effort key.
     #[must_use]
     pub const fn effort_key(&self) -> Option<&'static str> {
         self.effort_key
+    }
+
+    /// Logical file containing the effort key, when explicitly assigned.
+    #[must_use]
+    pub const fn effort_file(&self) -> Option<&'static str> {
+        self.effort_file
     }
 
     /// Which models the file lists.
@@ -1442,8 +1557,8 @@ impl AgentDescription {
 #[cfg(test)]
 mod tests {
     use super::{
-        Account, AuthChoice, BinaryName, ListQuery, ModelList, ModelSpec, ProbeQuery, QuotaWindow,
-        SignInChallenge, StaticUrl,
+        Account, AuthChoice, BinaryName, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
+        QuotaWindow, SignInChallenge, StaticUrl,
     };
     use crate::ListKind;
     use crate::id::{AccountId, PluginId, ProtocolId};
@@ -1541,6 +1656,12 @@ mod tests {
         assert_eq!(request.model, "gpt-test");
         assert!(!request.stream);
         assert_eq!(request.messages.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "model match needle must be lowercase")]
+    fn model_match_needle_rejects_uppercase() {
+        let _ = MatchNeedle::new("Example-");
     }
 
     #[test]

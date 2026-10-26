@@ -43,6 +43,7 @@ url = "2.5.7"
 workspace = true
 
 [dev-dependencies]
+hofund-agent = { workspace = true }
 hofund-daemon = { path = ".", features = ["test-util"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }

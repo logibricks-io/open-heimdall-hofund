@@ -1,0 +1,92 @@
+id = "fixture-json-agent"
+display_name = "Fixture JSON Agent"
+binary = "fixture-json"
+visible = "all"
+
+[[file]]
+id = "settings"
+kind = "json"
+linux = "~/.fixture-json/settings.json"
+macos = "~/.fixture-json/settings.json"
+windows = "~/.fixture-json/settings.json"
+
+[[file]]
+id = "env"
+kind = "env"
+linux = "~/.fixture-json/fixture.env"
+macos = "~/.fixture-json/fixture.env"
+windows = "~/.fixture-json/fixture.env"
+
+[[file]]
+id = "config"
+kind = "json"
+linux = "~/.config/fixture-json/config.jsonc"
+macos = "~/.config/fixture-json/config.jsonc"
+windows = "~/.config/fixture-json/config.jsonc"
+create = false
+
+[[file]]
+id = "config"
+kind = "json"
+linux = "~/.config/fixture-json/config.json"
+macos = "~/.config/fixture-json/config.json"
+windows = "~/.config/fixture-json/config.json"
+
+[[set]]
+file = "settings"
+key = "origin"
+slot = "origin"
+
+[[set]]
+file = "settings"
+key = "token"
+slot = "token"
+
+[[set]]
+file = "settings"
+key = "literal"
+slot = { literal = "value" }
+
+[[set]]
+file = "settings"
+key = "model.name"
+slot = { model_if_unset = {} }
+
+[[set]]
+file = "settings"
+key = "selected.model"
+slot = { model_if_unset = { from = "legacy_model" } }
+
+[[set]]
+file = "settings"
+key = "tiers.opus"
+slot = { model_tier = { tier = "opus" } }
+
+[[set]]
+file = "settings"
+key = "tiers.fable"
+slot = { model_tier = { tier = "fable", when_model_matches = "fixture-fable-" } }
+
+[[set]]
+file = "env"
+key = "FIXTURE_TOKEN"
+slot = "token"
+
+[[set]]
+file = "env"
+key = "FIXTURE_ORIGIN"
+slot = "origin"
+
+[[set]]
+file = "env"
+key = "FIXTURE_LITERAL"
+slot = { literal = "value" }
+
+[[set]]
+file = "config"
+key = "models"
+slot = "catalog_models"
+
+[model]
+file = "settings"
+key = "model.name"

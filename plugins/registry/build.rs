@@ -3,6 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod agent_toml {
+    include!("src/agent_toml.rs");
+}
+use agent_toml::{AgentToml, parse, render};
+
 include!("src/check.rs");
 
 struct Listed {
@@ -30,6 +35,7 @@ fn run() -> Result<(), String> {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     println!("cargo:rerun-if-changed=plugins.toml");
     println!("cargo:rerun-if-changed=src/check.rs");
+    println!("cargo:rerun-if-changed=src/agent_toml.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
     let text = fs::read_to_string("plugins.toml").map_err(|error| error.to_string())?;
     let listed = parse_list(&workspace, &text)?;
@@ -97,9 +103,29 @@ fn run() -> Result<(), String> {
         return Err(format!("duplicate preset id {id}"));
     }
     check_features(&listed)?;
-    let generated = emit(&listed);
+    let plugin_ids: Vec<String> = listed.iter().map(|plugin| plugin.id.clone()).collect();
+    let inbound_ids: Vec<String> = listed
+        .iter()
+        .filter(|plugin| plugin.kind == "inbound")
+        .map(|plugin| plugin.id.clone())
+        .collect();
+    let agents = load_agents(&workspace, "plugins/agents", &plugin_ids, &[], &inbound_ids)?;
     let out = PathBuf::from(std::env::var("OUT_DIR").map_err(|error| error.to_string())?);
-    fs::write(out.join("registry.rs"), generated).map_err(|error| error.to_string())?;
+    fs::write(out.join("registry.rs"), emit(&listed)).map_err(|error| error.to_string())?;
+    fs::write(out.join("agents.rs"), emit_agents(&agents, false))
+        .map_err(|error| error.to_string())?;
+    if std::env::var_os("CARGO_FEATURE_TEST_FIXTURES").is_some() {
+        let agent_ids: Vec<String> = agents.iter().map(|agent| agent.id.clone()).collect();
+        let fixtures = load_agents(
+            &workspace,
+            "plugins/registry/tests/fixtures/agents",
+            &plugin_ids,
+            &agent_ids,
+            &inbound_ids,
+        )?;
+        fs::write(out.join("fixture_agents.rs"), emit_agents(&fixtures, true))
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -254,8 +280,22 @@ fn discover(workspace: &Path) -> Result<Vec<String>, String> {
         let entries = fs::read_dir(&dir).map_err(|error| error.to_string())?;
         for entry in entries {
             let entry = entry.map_err(|error| error.to_string())?;
+            if !entry.path().is_dir() {
+                continue;
+            }
             let manifest = entry.path().join("plugin.toml");
             if !manifest.is_file() {
+                if kind == "agents" {
+                    let data_only = entry.path().join("agent.toml").is_file()
+                        && !entry.path().join("Cargo.toml").exists();
+                    if data_only {
+                        continue;
+                    }
+                    return Err(format!(
+                        "plugins/agents/{} must contain agent.toml or plugin.toml",
+                        entry.file_name().to_string_lossy()
+                    ));
+                }
                 continue;
             }
             println!(
@@ -268,6 +308,84 @@ fn discover(workspace: &Path) -> Result<Vec<String>, String> {
         }
     }
     Ok(ids)
+}
+
+fn load_agents(
+    workspace: &Path,
+    root: &str,
+    plugin_ids: &[String],
+    agent_ids: &[String],
+    inbound_ids: &[String],
+) -> Result<Vec<AgentToml>, String> {
+    println!("cargo:rerun-if-changed=../../{root}");
+    let directory = workspace.join(root);
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.join("agent.toml").is_file() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    let mut occupied = agent_ids.to_vec();
+    let mut agents = Vec::new();
+    for path in paths {
+        let id = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| format!("{} has no directory name", path.display()))?;
+        println!("cargo:rerun-if-changed=../../{root}/{id}/agent.toml");
+        let source = format!("{root}/{id}/agent.toml");
+        let text = fs::read_to_string(path.join("agent.toml"))
+            .map_err(|error| format!("read {source}: {error}"))?;
+        let agent = parse(&text, &source, &id, plugin_ids, &occupied, inbound_ids)?;
+        occupied.push(agent.id.clone());
+        agents.push(agent);
+    }
+    Ok(agents)
+}
+
+fn emit_agents(agents: &[AgentToml], fixtures: bool) -> String {
+    let mut statics = String::new();
+    let mut names = Vec::new();
+    for agent in agents {
+        let (name, source) = render(agent);
+        names.push(name);
+        statics.push_str(&source);
+    }
+    let list = names
+        .iter()
+        .map(|name| format!("&{name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let functions = if fixtures {
+        r#"/// Test-only compiled agent descriptions, sorted by id.
+#[doc(hidden)]
+#[must_use]
+pub fn fixture_agents() -> &'static [&'static hofund_plugin_api::AgentDescription] {
+    DESCRIPTIONS
+}
+"#
+    } else {
+        r#"/// Every compiled agent description, sorted by id.
+#[must_use]
+pub fn agents() -> &'static [&'static hofund_plugin_api::AgentDescription] {
+    DESCRIPTIONS
+}
+
+/// The compiled agent description for `id`.
+#[must_use]
+pub fn agent(id: &str) -> Option<&'static hofund_plugin_api::AgentDescription> {
+    agents().iter().copied().find(|agent| agent.id().as_str() == id)
+}
+"#
+    };
+    format!(
+        "// @generated by plugins/registry/build.rs. Do not edit.\n\n{statics}\nstatic DESCRIPTIONS: &[&hofund_plugin_api::AgentDescription] = &[{list}];\n\n{functions}"
+    )
 }
 
 fn check_features(listed: &[Listed]) -> Result<(), String> {

@@ -1,0 +1,5 @@
+{
+  "keep_user": true,
+  "model": { "name": "user-model" },
+  "legacy_model": "legacy-model"
+}
