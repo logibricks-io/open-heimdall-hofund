@@ -358,6 +358,12 @@ impl ModelClient {
             }
             PluginErrorKind::Decode => PluginError::decode(message),
             PluginErrorKind::Unsupported => PluginError::unsupported(message),
+            PluginErrorKind::Auth => PluginError::auth(message),
+            PluginErrorKind::Quota => PluginError::quota(message),
+            PluginErrorKind::Config => PluginError::config(message),
+            PluginErrorKind::Cancelled => PluginError::cancelled(message),
+            PluginErrorKind::Io => PluginError::io(message),
+            PluginErrorKind::Internal => PluginError::internal(message),
             _ => PluginError::decode(message),
         };
         if let Some(after) = error.retry_after() {
@@ -895,5 +901,18 @@ mod tests {
         assert!(super::both_auth_refused(401, body.as_bytes()));
         assert!(!super::both_auth_refused(403, body.as_bytes()));
         assert!(!super::both_auth_refused(401, b"x-api-key only"));
+    }
+
+    #[test]
+    fn redaction_preserves_cancellation_and_hides_the_api_key() {
+        let mut endpoint = crate::http::Endpoint::new("azure", "https://example.test/openai/v1");
+        endpoint.api_key = "SECRET-API-KEY".to_owned();
+        let client = super::ModelClient::new(&endpoint).expect("client");
+        let error = client.redact_error(hofund_plugin_api::PluginError::cancelled(
+            "cancel SECRET-API-KEY",
+        ));
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Cancelled);
+        assert_eq!(error.message(), "cancel [redacted]");
+        assert!(!error.message().contains("SECRET-API-KEY"));
     }
 }
