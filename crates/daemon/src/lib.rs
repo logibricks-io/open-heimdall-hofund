@@ -161,6 +161,7 @@ pub async fn start(path: &Path) -> Result<Running, DaemonError> {
 /// # Errors
 ///
 /// Returns [`DaemonError`] when startup fails.
+#[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub async fn start_for_test(path: &Path) -> Result<Running, DaemonError> {
     start_inner(path, Some(0)).await

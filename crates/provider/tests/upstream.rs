@@ -1137,7 +1137,7 @@ async fn vertex_rejects_a_missing_file_workload_identity_and_an_api_key() {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&missing);
-    let provider = Vertex::new(
+    let error = Vertex::new(
         Endpoint::new(
             "vertex",
             "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global",
@@ -1145,17 +1145,8 @@ async fn vertex_rejects_a_missing_file_workload_identity_and_an_api_key() {
         missing.display().to_string(),
         "",
     )
-    .expect("build");
-    let Err(error) = provider
-        .execute(user_request(false), "generative-language")
-        .await
-    else {
-        panic!("a missing credentials file should fail");
-    };
-    assert!(
-        error.to_string().contains("no Google credentials"),
-        "{error}"
-    );
+    .expect_err("missing credentials");
+    assert!(error.to_string().contains("existing file"), "{error}");
 
     let server = MockServer::start().await;
     let creds = creds_file(

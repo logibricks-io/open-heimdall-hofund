@@ -255,6 +255,7 @@ pub trait UpstreamFactory: Send + Sync + 'static {
 pub trait DynUpstreamFactory: Send + Sync + 'static {
     fn spec(&self) -> &'static UpstreamSpec;
     fn config_schema(&self) -> Schema;
+    fn validate(&self, raw: &RawTable) -> Result<(), ConfigError>;
     fn validate_and_build(
         &self,
         raw: &RawTable,

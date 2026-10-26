@@ -163,6 +163,11 @@ pub trait UpstreamFactory: Send + Sync + 'static {
 
     /// Checks `raw` before any provider exists.
     ///
+    /// The daemon calls this twice: before resolving `env:` references, and again
+    /// on the resolved table through `validate_and_build`. Both passes must check
+    /// only shape: keys and value types. Value checks belong in `build`, which
+    /// runs after the second pass.
+    ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when `raw` is not valid for this plugin.
@@ -189,6 +194,11 @@ pub trait DynUpstreamFactory: Send + Sync + 'static {
     fn config_schema(&self) -> Schema;
 
     /// Validates `raw` without building a provider.
+    ///
+    /// The daemon calls this before resolving `env:` references.
+    /// `validate_and_build` repeats validation on the resolved table before
+    /// calling `build`. Both passes must check only shape: keys and value types.
+    /// Value checks belong in `build`.
     ///
     /// # Errors
     ///

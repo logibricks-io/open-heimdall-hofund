@@ -87,11 +87,7 @@ impl std::error::Error for TokenError {}
 /// Returns [`TokenError`] when the body is not a JSON object or has no
 /// string `access_token`. The body is not included in the error.
 pub fn parse_access_token(body: &[u8]) -> Result<AccessToken, TokenError> {
-    let value: Value =
-        serde_json::from_slice(body).map_err(|_| TokenError::new("token response is not JSON"))?;
-    let Some(object) = value.as_object() else {
-        return Err(TokenError::new("token response is not a JSON object"));
-    };
+    let object = token_object(body)?;
     let token = object
         .get("access_token")
         .and_then(Value::as_str)
@@ -109,6 +105,40 @@ pub fn parse_access_token(body: &[u8]) -> Result<AccessToken, TokenError> {
         token: SecretString::from(token),
         expires_in: Duration::from_secs(expires_in),
     })
+}
+
+/// Reads `accessToken` from an IAM Credentials `generateAccessToken` JSON body.
+///
+/// IAM uses an RFC 3339 `expireTime`, not OAuth's `expires_in`; callers that
+/// need the absolute expiry read that field separately. The returned token has
+/// the same redaction and one-hour default lifetime as an OAuth token.
+///
+/// # Errors
+///
+/// Returns [`TokenError`] when the body is not a JSON object or has no non-empty
+/// string `accessToken`. The body is not included in the error.
+pub fn parse_iam_access_token(body: &[u8]) -> Result<AccessToken, TokenError> {
+    let object = token_object(body)?;
+    let token = object
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .ok_or(TokenError::new(
+            "IAM Credentials token response has no accessToken",
+        ))?;
+    Ok(AccessToken {
+        token: SecretString::from(token),
+        expires_in: Duration::from_secs(DEFAULT_EXPIRES_SECS),
+    })
+}
+
+fn token_object(body: &[u8]) -> Result<serde_json::Map<String, Value>, TokenError> {
+    let value: Value =
+        serde_json::from_slice(body).map_err(|_| TokenError::new("token response is not JSON"))?;
+    let Value::Object(object) = value else {
+        return Err(TokenError::new("token response is not a JSON object"));
+    };
+    Ok(object)
 }
 
 /// `application/x-www-form-urlencoded` for `pairs`.
@@ -152,7 +182,46 @@ fn form_escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{form_body, parse_access_token, refresh_form};
+    use super::{form_body, parse_access_token, parse_iam_access_token, refresh_form};
+
+    #[test]
+    fn an_iam_token_response_parses_and_redacts() {
+        let token = parse_iam_access_token(
+            br#"{"accessToken":"iam-SECRET-TOKEN","expireTime":"2026-10-25T08:00:00Z"}"#,
+        )
+        .expect("token");
+        assert_eq!(token.expose_secret(), "iam-SECRET-TOKEN");
+        assert_eq!(token.expires_in().as_secs(), 3600);
+        let rendered = format!("{token:?} {token}");
+        assert!(!rendered.contains("iam-SECRET-TOKEN"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    #[test]
+    fn an_iam_token_response_requires_a_token() {
+        let error = parse_iam_access_token(br#"{"expireTime":"2026-10-25T08:00:00Z"}"#)
+            .expect_err("missing");
+        assert_eq!(
+            error.to_string(),
+            "IAM Credentials token response has no accessToken"
+        );
+    }
+
+    #[test]
+    fn an_iam_token_response_rejects_an_empty_token() {
+        let error = parse_iam_access_token(br#"{"accessToken":""}"#).expect_err("empty");
+        assert_eq!(
+            error.to_string(),
+            "IAM Credentials token response has no accessToken"
+        );
+    }
+
+    #[test]
+    fn a_bad_iam_token_response_does_not_echo_the_body() {
+        let error = parse_iam_access_token(b"not-json SECRET-IAM-BODY").expect_err("json");
+        assert_eq!(error.to_string(), "token response is not JSON");
+        assert!(!error.to_string().contains("SECRET-IAM-BODY"));
+    }
 
     #[test]
     fn a_token_response_parses_and_redacts() {

@@ -1618,6 +1618,7 @@ dependencies = [
  "futures-util",
  "hofund-codec",
  "hofund-config",
+ "hofund-daemon",
  "hofund-gateway",
  "hofund-plugin-api",
  "hofund-plugin-host",
