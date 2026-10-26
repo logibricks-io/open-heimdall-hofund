@@ -11,8 +11,11 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hofund-plugin-api = { workspace = true }
 hofund-plugin-host = { workspace = true }
+serde_json = "1.0.154"
 tokio = { version = "1.52.2", features = ["rt", "time"] }
+wiremock = "0.6.5"
 
 [lints]
 workspace = true

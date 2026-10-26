@@ -11,7 +11,9 @@ use std::sync::Arc;
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
 use hofund_config::{Config, Value, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
-use hofund_plugin_api::{DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue};
+use hofund_plugin_api::{
+    DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue, UpstreamProvider,
+};
 use hofund_plugin_host::HttpLimits;
 
 pub use hofund_gateway::Running;
@@ -23,6 +25,9 @@ use hofund_usage::Ledger;
 
 mod adapt;
 mod membership;
+mod models;
+
+pub use models::{ModelLimits, ModelsHost, ProbeOutcome, ProviderModels};
 
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
@@ -276,22 +281,7 @@ fn providers(
     let mut built = BTreeMap::new();
     for provider in &config.providers {
         let planned = plan(provider)?;
-        let mut endpoint = Endpoint::new(provider.id.clone(), planned.base_url.clone());
-        endpoint.api_key = hofund_secrets::resolve(&provider.api_key).map_err(show)?;
-        endpoint.credential = planned.credential;
-        endpoint.headers = provider
-            .headers
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        if let Some(profile) = &provider.quirks {
-            endpoint.quirks = Some(named(profile).ok_or_else(|| {
-                DaemonError::new(format!(
-                    "provider `{}` names unknown quirk profile `{profile}`",
-                    provider.id
-                ))
-            })?);
-        }
+        let endpoint = endpoint_for(provider, &planned)?;
         let timeout = endpoint.timeout;
         let protocol = protocol_of(planned.wire);
         let plugin_id = plugin_for(provider, planned.wire);
@@ -312,6 +302,29 @@ fn providers(
     Ok(built)
 }
 
+fn endpoint_for(
+    provider: &hofund_config::Provider,
+    planned: &Planned,
+) -> Result<Endpoint, DaemonError> {
+    let mut endpoint = Endpoint::new(provider.id.clone(), planned.base_url.clone());
+    endpoint.api_key = hofund_secrets::resolve(&provider.api_key).map_err(show)?;
+    endpoint.credential = planned.credential;
+    endpoint.headers = provider
+        .headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    if let Some(profile) = &provider.quirks {
+        endpoint.quirks = Some(named(profile).ok_or_else(|| {
+            DaemonError::new(format!(
+                "provider `{}` names unknown quirk profile `{profile}`",
+                provider.id
+            ))
+        })?);
+    }
+    Ok(endpoint)
+}
+
 fn plugin_for(provider: &hofund_config::Provider, wire: Wire) -> String {
     if let Some(preset) = &provider.preset
         && let Some(compiled) = hofund_plugin_registry::preset(preset)
@@ -330,30 +343,55 @@ fn build_plugin(
     mode: Mode,
 ) -> Result<adapt::ProviderAdapter, DaemonError> {
     let plugin_id = plugin_for(provider, planned.wire);
-    let factory = hofund_plugin_registry::factory(&plugin_id)
-        .ok_or_else(|| DaemonError::new(format!("no factory for plugin `{plugin_id}`")))?;
-    let mut raw = if let Some(preset) = &provider.preset
+    let raw = if let Some(preset) = &provider.preset
         && let Some(compiled) = hofund_plugin_registry::preset(preset)
     {
         raw_from_preset(compiled, provider)?
     } else {
         raw_from_endpoint(provider, planned, endpoint)?
     };
+    let upstream = build_raw_plugin(
+        provider,
+        &plugin_id,
+        raw,
+        &endpoint.api_key,
+        path,
+        limits,
+        true,
+        matches!(mode, Mode::Check),
+    )?;
+    Ok(adapt::ProviderAdapter::new(provider.id.clone(), upstream))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_raw_plugin(
+    provider: &hofund_config::Provider,
+    plugin_id: &str,
+    mut raw: RawTable,
+    api_key: &str,
+    path: &Path,
+    limits: HttpLimits,
+    resolve_own_options: bool,
+    preflight: bool,
+) -> Result<Arc<dyn UpstreamProvider>, DaemonError> {
+    let factory = hofund_plugin_registry::factory(plugin_id)
+        .ok_or_else(|| DaemonError::new(format!("no factory for plugin `{plugin_id}`")))?;
     factory.validate(&raw).map_err(show)?;
-    resolve_options(&mut raw, provider)?;
-    if matches!(mode, Mode::Check) {
+    if resolve_own_options {
+        resolve_options(&mut raw, provider)?;
+    }
+    if preflight {
         factory.preflight(&raw).map_err(show)?;
     }
-    let plugin = PluginId::try_from(plugin_id.as_str()).map_err(show)?;
+    let plugin = PluginId::try_from(plugin_id).map_err(show)?;
     let host = hofund_plugin_host::runtime_host(
         plugin,
-        endpoint.api_key.clone(),
+        api_key.to_owned(),
         beside(path, ".hofund"),
         limits,
     )
     .map_err(show)?;
-    let upstream = factory.validate_and_build(&raw, &host).map_err(show)?;
-    Ok(adapt::ProviderAdapter::new(provider.id.clone(), upstream))
+    factory.validate_and_build(&raw, &host).map_err(show)
 }
 
 fn raw_from_preset(
@@ -504,6 +542,7 @@ fn implementation_id(wire: Wire) -> &'static str {
     }
 }
 
+#[derive(Clone)]
 struct Planned {
     base_url: String,
     wire: Wire,

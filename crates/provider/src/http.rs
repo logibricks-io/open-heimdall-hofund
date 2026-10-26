@@ -45,7 +45,7 @@ pub enum Credential {
 }
 
 /// Connection settings for one upstream endpoint.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Endpoint {
     /// Id recorded on usage rows and failover traces.
     pub id: String,
@@ -69,6 +69,37 @@ pub struct Endpoint {
     /// The registry factory sets this from [`pooled_reqwest`] so connect and
     /// idle-read timeouts are the daemon's `HttpLimits`.
     pub client: Option<reqwest::Client>,
+}
+
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Endpoint")
+            .field("id", &self.id)
+            .field(
+                "base_url",
+                &self
+                    .base_url
+                    .split_once('?')
+                    .map_or(self.base_url.clone(), |(base, _)| {
+                        format!("{base}?<redacted>")
+                    }),
+            )
+            .field("api_key", &"[redacted]")
+            .field("credential", &self.credential)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| (name, "[redacted]"))
+                    .collect::<Vec<_>>(),
+            )
+            .field("quirks", &self.quirks)
+            .field("timeout", &self.timeout)
+            .field("client", &self.client)
+            .finish()
+    }
 }
 
 impl Endpoint {
@@ -97,13 +128,34 @@ pub fn pooled_reqwest(value: &dyn std::any::Any) -> Option<reqwest::Client> {
     value.downcast_ref::<reqwest::Client>().cloned()
 }
 
-#[derive(Debug)]
 pub(crate) struct Upstream {
     pub id: String,
     client: reqwest::Client,
     url: String,
     headers: HeaderMap,
     quirks: Option<&'static Profile>,
+}
+
+impl std::fmt::Debug for Upstream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = self
+            .url
+            .split_once('?')
+            .map_or(self.url.clone(), |(base, _)| format!("{base}?<redacted>"));
+        let headers = self
+            .headers
+            .keys()
+            .map(|name| (name, "[redacted]"))
+            .collect::<Vec<_>>();
+        formatter
+            .debug_struct("Upstream")
+            .field("id", &self.id)
+            .field("client", &self.client)
+            .field("url", &url)
+            .field("headers", &headers)
+            .field("quirks", &self.quirks)
+            .finish()
+    }
 }
 
 impl Upstream {
@@ -134,7 +186,7 @@ impl Upstream {
                     )));
                 }
             };
-            let header_value = match HeaderValue::try_from(value.as_str()) {
+            let mut header_value = match HeaderValue::try_from(value.as_str()) {
                 Ok(header_value) => header_value,
                 Err(_) => {
                     return Err(ProviderError::decode(format!(
@@ -142,6 +194,7 @@ impl Upstream {
                     )));
                 }
             };
+            header_value.set_sensitive(true);
             headers.insert(header_name, header_value);
         }
         let client = match endpoint.client.clone() {

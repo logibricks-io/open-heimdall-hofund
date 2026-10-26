@@ -14,8 +14,10 @@ mod error;
 mod generative;
 mod http;
 mod mantle;
+mod models;
 mod openai_compat;
 mod presets;
+mod probe;
 mod stream;
 mod vertex;
 
@@ -25,8 +27,11 @@ pub use bedrock::Bedrock;
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;
 pub use http::{Credential, Endpoint, pooled_reqwest};
+pub use models::{azure_host, both_auth_applies, both_auth_refused, parse_model_rows};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
-pub use presets::{PresetError, Resolve, Resolved, Wire, catalog_commit, resolve};
+pub use presets::{
+    ModelPlan, PresetError, Resolve, Resolved, Wire, catalog_commit, model_plan, resolve,
+};
 pub use vertex::{Vertex, check_credentials_file as check_vertex_credentials_file};
 
 pub use hofund_plugin_api::{
@@ -107,4 +112,36 @@ pub trait Provider: Send + Sync {
         request: Request,
         inbound_protocol: &str,
     ) -> Result<Completion, ProviderError>;
+
+    /// Lists models on this adapter's configured wire.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`](hofund_plugin_api::PluginError) when the list
+    /// fails or this adapter has no list.
+    async fn list_models(
+        &self,
+        query: &hofund_plugin_api::ListQuery,
+    ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+        let _ = query;
+        Err(hofund_plugin_api::PluginError::unsupported(
+            "this upstream has no model list",
+        ))
+    }
+
+    /// Sends one minimal request on this adapter's configured wire.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`](hofund_plugin_api::PluginError) when the probe
+    /// fails or is unsupported.
+    async fn probe(
+        &self,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
+        let _ = query;
+        Err(hofund_plugin_api::PluginError::unsupported(
+            "this upstream has no probe",
+        ))
+    }
 }

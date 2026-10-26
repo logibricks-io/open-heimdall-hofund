@@ -41,6 +41,7 @@ pub enum CountOutcome {
 pub struct ProbeReport {
     snippet: String,
     truncated: bool,
+    auth_choice: Option<crate::AuthChoice>,
 }
 
 impl ProbeReport {
@@ -49,7 +50,18 @@ impl ProbeReport {
     pub fn new(snippet: impl Into<String>) -> Self {
         let snippet = snippet.into();
         let (snippet, truncated) = cap_snippet(snippet);
-        Self { snippet, truncated }
+        Self {
+            snippet,
+            truncated,
+            auth_choice: None,
+        }
+    }
+
+    /// Sets the Anthropic-wire authentication choice learned by this probe.
+    #[must_use]
+    pub const fn with_auth_choice(mut self, choice: crate::AuthChoice) -> Self {
+        self.auth_choice = Some(choice);
+        self
     }
 
     /// Reads a unary body, the first stream event, or the first raw chunk.
@@ -102,6 +114,12 @@ impl ProbeReport {
     #[must_use]
     pub const fn truncated(&self) -> bool {
         self.truncated
+    }
+
+    /// The learned Anthropic-wire authentication choice, when one was learned.
+    #[must_use]
+    pub const fn auth_choice(&self) -> Option<crate::AuthChoice> {
+        self.auth_choice
     }
 }
 

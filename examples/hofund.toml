@@ -31,6 +31,14 @@ api_key = "replace-me"
 # preset = "openai"
 # protocol = "openai-responses"
 # api_key = "env:OPENAI_API_KEY"
+# Optional host-owned model listing settings. url is an exact list URL and may
+# be env:NAME; its resolved value and query are redacted. refresh accepts off,
+# fractional days, or a duration of at least 10m. auto_include is stored for the
+# later refresh job; this version does not start that job or apply the rules.
+# [providers.models]
+# refresh = "1h"
+# auto_include = ["gpt-*", "re:claude"]
+# url = "env:OPENAI_MODELS_URL"
 
 [[providers]]
 id = "backup"

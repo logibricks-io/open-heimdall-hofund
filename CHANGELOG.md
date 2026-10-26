@@ -9,12 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ListKind::Deployments`, explicit `ListKind::rank()` capability ordering,
+  and answering-URL metadata on `ModelList`, with the additive plugin API
+  surface recorded in the public-API snapshot.
+- SDK `after_id` and Gemini model-list walkers with page limits, bounded
+  response bodies, and list deadlines. Gemini returns partial rows for a
+  repeated token or a token on the twentieth page.
+- Per-wire live model lists, Azure deployments, static Vertex and Bedrock
+  catalogs, and minimal connectivity probes in the built-in provider plugins.
+  List and probe bodies are bounded, credentials are redacted, and Anthropic
+  single-header authentication can be learned and reported to the host.
+- Daemon model aggregation across preset wires with answering-URL deduplication,
+  exact custom list URLs, in-memory learned bases and authentication, two-pass
+  probe selection, and four-wide batch probes. `[providers.models]` stores
+  refresh, auto-include, and URL settings without starting a refresh job.
+- `hofund-kit-upstream` conformance for live paging and minimal probes, static
+  catalogs without network access, and unsupported model lists.
 - Provider plugins share SigV4, OAuth token parsing, form bodies, and JSON
   page cursors from `hofund-plugin-sdk`. Parse errors do not include the
   response body. Token `Debug` is redacted.
 
 ### Changed
 
+- Model lists require HTTP 200, display names fall back to ids, verification
+  hints require verification evidence, and Azure double failures retain the
+  last HTTP status. A per-URL Azure timeout still tries the second URL; a
+  cancelled call does not.
+- Built-in factory specs advertise `Live` lists for OpenAI-compatible,
+  Anthropic, and Generative wires, and `Catalog` lists for Vertex and Bedrock.
 - `[providers.options]` is forwarded to the plugin factory. Each factory has
   an option schema. An unknown key or a wrong type is a check error that
   names the provider and the key and does not include the value.

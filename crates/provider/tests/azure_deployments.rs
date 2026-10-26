@@ -137,7 +137,8 @@ async fn both_lists_refusing_the_key_names_the_deployments() {
     let error = list_deployments(&format!("{}/openai/v1", server.uri()), "wrong", &[])
         .await
         .expect_err("refused");
-    assert_eq!(error.kind, ProviderErrorKind::Decode);
+    assert_eq!(error.kind, ProviderErrorKind::Status);
+    assert_eq!(error.status, Some(401));
     assert!(
         error.message.contains("deployments' names"),
         "{}",

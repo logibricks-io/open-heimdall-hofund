@@ -30,6 +30,7 @@ pub struct OpenAiCompat {
     upstream: Upstream,
     /// Set only when the base URL is a Mantle `/v1` root.
     mantle: Option<Mantle>,
+    models: crate::models::ModelClient,
 }
 
 #[derive(Debug)]
@@ -63,10 +64,13 @@ impl OpenAiCompat {
             endpoint.credential,
             http::Credential::Bearer,
         )?;
+        let models = crate::models::ModelClient::new(&endpoint)
+            .map_err(|error| ProviderError::decode(error.message()))?;
         Ok(Self {
             protocol,
             upstream: Upstream::open(endpoint, path, headers)?,
             mantle,
+            models,
         })
     }
 
@@ -152,6 +156,24 @@ impl Provider for OpenAiCompat {
             }
             other => other,
         }
+    }
+
+    async fn list_models(
+        &self,
+        query: &hofund_plugin_api::ListQuery,
+    ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+        if self.models.is_azure() {
+            crate::azure::azure_list(&self.models.endpoint).await
+        } else {
+            self.models.live_list(query, false).await
+        }
+    }
+
+    async fn probe(
+        &self,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
+        self.models.openai_probe(self.protocol, query).await
     }
 }
 

@@ -207,12 +207,36 @@ impl QuotaObservation {
     }
 }
 
+/// The authentication headers learned for an Anthropic-wire call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthChoice {
+    /// Send both `x-api-key` and `Authorization: Bearer`.
+    Both,
+    /// Send only `x-api-key`.
+    XApiKey,
+    /// Send only `Authorization: Bearer`.
+    Bearer,
+}
+
 /// One model a list call returned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ModelSpec {
     id: String,
     display_name: Option<String>,
+    context: u64,
+    max_output: u64,
+    input_modalities: Vec<String>,
+    output_modalities: Vec<String>,
+    image_input: Option<bool>,
+    endpoints: Vec<String>,
+    draws: bool,
+    films: bool,
+    decides: bool,
+    efforts: Vec<String>,
+    web_search: Option<String>,
+    service_tiers: Vec<String>,
 }
 
 impl ModelSpec {
@@ -226,7 +250,107 @@ impl ModelSpec {
         if id.is_empty() {
             return Err(PluginError::config("model id is empty"));
         }
-        Ok(Self { id, display_name })
+        Ok(Self {
+            id,
+            display_name,
+            context: 0,
+            max_output: 0,
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            image_input: None,
+            endpoints: Vec::new(),
+            draws: false,
+            films: false,
+            decides: false,
+            efforts: Vec::new(),
+            web_search: None,
+            service_tiers: Vec::new(),
+        })
+    }
+
+    /// Sets the positive context-window size. Zero leaves it unknown.
+    #[must_use]
+    pub fn with_context(mut self, context: u64) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// Sets the positive maximum output size. Zero leaves it unknown.
+    #[must_use]
+    pub fn with_max_output(mut self, max_output: u64) -> Self {
+        self.max_output = max_output;
+        self
+    }
+
+    /// Sets the input modalities reported by the vendor.
+    #[must_use]
+    pub fn with_input_modalities(mut self, modalities: Vec<String>) -> Self {
+        self.input_modalities = modalities;
+        self
+    }
+
+    /// Sets the output modalities reported by the vendor.
+    #[must_use]
+    pub fn with_output_modalities(mut self, modalities: Vec<String>) -> Self {
+        self.output_modalities = modalities;
+        self
+    }
+
+    /// Sets whether image input is supported, or `None` when it is unknown.
+    #[must_use]
+    pub const fn with_image_input(mut self, image_input: Option<bool>) -> Self {
+        self.image_input = image_input;
+        self
+    }
+
+    /// Sets the endpoint names reported by the vendor.
+    #[must_use]
+    pub fn with_endpoints(mut self, endpoints: Vec<String>) -> Self {
+        self.endpoints = endpoints;
+        self
+    }
+
+    /// Marks whether the model draws images.
+    #[must_use]
+    pub const fn with_draws(mut self, draws: bool) -> Self {
+        self.draws = draws;
+        self
+    }
+
+    /// Marks whether the model makes films.
+    #[must_use]
+    pub const fn with_films(mut self, films: bool) -> Self {
+        self.films = films;
+        self
+    }
+
+    /// Marks whether the model is a decision model.
+    #[must_use]
+    pub const fn with_decides(mut self, decides: bool) -> Self {
+        self.decides = decides;
+        self
+    }
+
+    /// Sets the supported reasoning effort names.
+    #[must_use]
+    pub fn with_efforts(mut self, efforts: Vec<String>) -> Self {
+        self.efforts = efforts;
+        self
+    }
+
+    /// Sets native web search. Any other value leaves web search unspecified.
+    #[must_use]
+    pub fn with_web_search(mut self, web_search: impl Into<String>) -> Self {
+        let web_search = web_search.into();
+        self.web_search = (web_search == "native").then_some(web_search);
+        self
+    }
+
+    /// Sets the service tiers reported by the vendor.
+    #[must_use]
+    pub fn with_service_tiers(mut self, service_tiers: Vec<String>) -> Self {
+        self.service_tiers = service_tiers;
+        self
     }
 
     /// The model id.
@@ -240,21 +364,164 @@ impl ModelSpec {
     pub fn display_name(&self) -> Option<&str> {
         self.display_name.as_deref()
     }
+
+    /// The context-window size, or zero when unknown.
+    #[must_use]
+    pub const fn context(&self) -> u64 {
+        self.context
+    }
+
+    /// The maximum output size, or zero when unknown.
+    #[must_use]
+    pub const fn max_output(&self) -> u64 {
+        self.max_output
+    }
+
+    /// Input modalities, empty when the vendor omitted them.
+    #[must_use]
+    pub fn input_modalities(&self) -> &[String] {
+        &self.input_modalities
+    }
+
+    /// Output modalities, empty when the vendor omitted them.
+    #[must_use]
+    pub fn output_modalities(&self) -> &[String] {
+        &self.output_modalities
+    }
+
+    /// Whether image input is supported, or `None` when unknown.
+    #[must_use]
+    pub const fn image_input(&self) -> Option<bool> {
+        self.image_input
+    }
+
+    /// Endpoint names, empty when the vendor omitted them.
+    #[must_use]
+    pub fn endpoints(&self) -> &[String] {
+        &self.endpoints
+    }
+
+    /// Whether the model draws images.
+    #[must_use]
+    pub const fn draws(&self) -> bool {
+        self.draws
+    }
+
+    /// Whether the model makes films.
+    #[must_use]
+    pub const fn films(&self) -> bool {
+        self.films
+    }
+
+    /// Whether the model is a decision model.
+    #[must_use]
+    pub const fn decides(&self) -> bool {
+        self.decides
+    }
+
+    /// Supported reasoning effort names.
+    #[must_use]
+    pub fn efforts(&self) -> &[String] {
+        &self.efforts
+    }
+
+    /// `native` when native web search was reported.
+    #[must_use]
+    pub fn web_search(&self) -> Option<&str> {
+        self.web_search.as_deref()
+    }
+
+    /// Service tiers, empty when the vendor omitted them.
+    #[must_use]
+    pub fn service_tiers(&self) -> &[String] {
+        &self.service_tiers
+    }
 }
 
-/// A page of models.
+/// A page of models and the facts a host learned while obtaining it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ModelList {
     models: Vec<ModelSpec>,
+    dropped: Vec<String>,
     next: Option<String>,
+    kind: crate::ListKind,
+    base_model_fallback: bool,
+    v1_fallback: bool,
+    auth_choice: Option<AuthChoice>,
+    source_url: Option<String>,
 }
 
 impl ModelList {
-    /// A page. `next` is the token for the following page.
+    /// A live-list page. `next` is the token for the following page.
     #[must_use]
     pub fn new(models: Vec<ModelSpec>, next: Option<String>) -> Self {
-        Self { models, next }
+        Self {
+            models,
+            dropped: Vec::new(),
+            next,
+            kind: crate::ListKind::Live,
+            base_model_fallback: false,
+            v1_fallback: false,
+            auth_choice: None,
+            source_url: None,
+        }
+    }
+
+    /// Records the list URL that answered, for host-side response deduplication.
+    ///
+    /// Any query is replaced by `<redacted>` and any fragment is removed, so
+    /// this value is safe for the derived `Debug` output.
+    #[must_use]
+    pub fn with_source_url(mut self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        let without_fragment = url.split('#').next().unwrap_or(&url);
+        self.source_url = Some(match without_fragment.split_once('?') {
+            Some((base, _)) => format!("{base}?<redacted>"),
+            None => without_fragment.to_owned(),
+        });
+        self
+    }
+
+    /// Records ids removed by the plugin's model classifier.
+    #[must_use]
+    pub fn with_dropped(mut self, dropped: Vec<String>) -> Self {
+        self.dropped = dropped;
+        self
+    }
+
+    /// Ids removed by the plugin's model classifier.
+    #[must_use]
+    pub fn dropped(&self) -> &[String] {
+        &self.dropped
+    }
+
+    /// Sets the kind of result actually returned.
+    #[must_use]
+    pub const fn with_kind(mut self, kind: crate::ListKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Labels an Azure base-model result as `base models`, not deployments.
+    #[must_use]
+    pub const fn with_base_model_fallback(mut self, fallback: bool) -> Self {
+        self.base_model_fallback = fallback;
+        self
+    }
+
+    /// Marks a list found only at `{base}/v1/models` for an unversioned base.
+    #[must_use]
+    pub const fn with_v1_fallback(mut self, fallback: bool) -> Self {
+        self.v1_fallback = fallback;
+        self
+    }
+
+    /// Sets the learned Anthropic-wire authentication choice.
+    #[must_use]
+    pub const fn with_auth_choice(mut self, choice: AuthChoice) -> Self {
+        self.auth_choice = Some(choice);
+        self
     }
 
     /// Models on this page.
@@ -268,6 +535,36 @@ impl ModelList {
     pub fn next(&self) -> Option<&str> {
         self.next.as_deref()
     }
+
+    /// The list URL that answered, with any query redacted.
+    #[must_use]
+    pub fn source_url(&self) -> Option<&str> {
+        self.source_url.as_deref()
+    }
+
+    /// The kind of result actually returned.
+    #[must_use]
+    pub const fn kind(&self) -> crate::ListKind {
+        self.kind
+    }
+
+    /// Whether this is an Azure `base models` fallback, not a deployment list.
+    #[must_use]
+    pub const fn base_model_fallback(&self) -> bool {
+        self.base_model_fallback
+    }
+
+    /// Whether only the `/v1/models` candidate of an unversioned base answered.
+    #[must_use]
+    pub const fn v1_fallback(&self) -> bool {
+        self.v1_fallback
+    }
+
+    /// The learned Anthropic-wire authentication choice, when one was learned.
+    #[must_use]
+    pub const fn auth_choice(&self) -> Option<AuthChoice> {
+        self.auth_choice
+    }
 }
 
 /// A page request for [`crate::UpstreamProvider::list_models`].
@@ -276,15 +573,17 @@ impl ModelList {
 pub struct ListQuery {
     limit: Option<u32>,
     page: Option<String>,
+    auth_choice: Option<AuthChoice>,
 }
 
 impl ListQuery {
-    /// The first page, with no limit.
+    /// The first page, with no limit or learned authentication choice.
     #[must_use]
     pub fn new() -> Self {
         Self {
             limit: None,
             page: None,
+            auth_choice: None,
         }
     }
 
@@ -302,6 +601,13 @@ impl ListQuery {
         self
     }
 
+    /// Sets the learned Anthropic-wire authentication choice.
+    #[must_use]
+    pub const fn with_auth_choice(mut self, choice: AuthChoice) -> Self {
+        self.auth_choice = Some(choice);
+        self
+    }
+
     /// The page size, when the caller set one.
     #[must_use]
     pub const fn limit(&self) -> Option<u32> {
@@ -313,6 +619,12 @@ impl ListQuery {
     pub fn page(&self) -> Option<&str> {
         self.page.as_deref()
     }
+
+    /// The learned Anthropic-wire authentication choice supplied by the host.
+    #[must_use]
+    pub const fn auth_choice(&self) -> Option<AuthChoice> {
+        self.auth_choice
+    }
 }
 
 impl Default for ListQuery {
@@ -322,11 +634,13 @@ impl Default for ListQuery {
 }
 
 /// What `probe` sends. One minimal request for one protocol.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProbeQuery {
     protocol: ProtocolId,
     model: String,
+    auth_choice: Option<AuthChoice>,
+    extra_body: Option<bytes::Bytes>,
 }
 
 impl ProbeQuery {
@@ -340,13 +654,50 @@ impl ProbeQuery {
         if model.is_empty() {
             return Err(PluginError::config("probe model is empty"));
         }
-        Ok(Self { protocol, model })
+        Ok(Self {
+            protocol,
+            model,
+            auth_choice: None,
+            extra_body: None,
+        })
     }
 
     /// The protocol under test.
     #[must_use]
     pub const fn protocol(&self) -> ProtocolId {
         self.protocol
+    }
+
+    /// The upstream model id to probe.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Sets the learned Anthropic-wire authentication choice.
+    #[must_use]
+    pub const fn with_auth_choice(mut self, choice: AuthChoice) -> Self {
+        self.auth_choice = Some(choice);
+        self
+    }
+
+    /// Sets opaque JSON object bytes for the plugin to validate and merge.
+    #[must_use]
+    pub fn with_extra_body(mut self, body: bytes::Bytes) -> Self {
+        self.extra_body = Some(body);
+        self
+    }
+
+    /// The learned Anthropic-wire authentication choice supplied by the host.
+    #[must_use]
+    pub const fn auth_choice(&self) -> Option<AuthChoice> {
+        self.auth_choice
+    }
+
+    /// Opaque extra JSON object bytes, validated by the plugin or SDK merger.
+    #[must_use]
+    pub fn extra_body(&self) -> Option<&bytes::Bytes> {
+        self.extra_body.as_ref()
     }
 
     /// A unary request with one short user message.
@@ -357,6 +708,18 @@ impl ProbeQuery {
         message.content.push(ContentPart::text("hi"));
         request.messages.push(message);
         request
+    }
+}
+
+impl std::fmt::Debug for ProbeQuery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProbeQuery")
+            .field("protocol", &self.protocol)
+            .field("model", &self.model)
+            .field("auth_choice", &self.auth_choice)
+            .field("extra_body", &self.extra_body.as_ref().map(|_| "<opaque>"))
+            .finish()
     }
 }
 
@@ -1079,9 +1442,83 @@ impl AgentDescription {
 #[cfg(test)]
 mod tests {
     use super::{
-        Account, BinaryName, ModelSpec, ProbeQuery, QuotaWindow, SignInChallenge, StaticUrl,
+        Account, AuthChoice, BinaryName, ListQuery, ModelList, ModelSpec, ProbeQuery, QuotaWindow,
+        SignInChallenge, StaticUrl,
     };
+    use crate::ListKind;
     use crate::id::{AccountId, PluginId, ProtocolId};
+
+    #[test]
+    fn model_metadata_round_trips_and_unknown_values_stay_empty() {
+        let model = ModelSpec::new("model", Some("Model".to_owned()))
+            .expect("model")
+            .with_context(32_000)
+            .with_max_output(4096)
+            .with_input_modalities(vec!["text".to_owned(), "image".to_owned()])
+            .with_output_modalities(vec!["text".to_owned()])
+            .with_image_input(Some(true))
+            .with_endpoints(vec!["chat".to_owned()])
+            .with_draws(true)
+            .with_films(true)
+            .with_decides(true)
+            .with_efforts(vec!["low".to_owned(), "high".to_owned()])
+            .with_web_search("native")
+            .with_service_tiers(vec!["default".to_owned()]);
+        assert_eq!(model.context(), 32_000);
+        assert_eq!(model.max_output(), 4096);
+        assert_eq!(model.input_modalities(), ["text", "image"]);
+        assert_eq!(model.output_modalities(), ["text"]);
+        assert_eq!(model.image_input(), Some(true));
+        assert_eq!(model.endpoints(), ["chat"]);
+        assert!(model.draws());
+        assert!(model.films());
+        assert!(model.decides());
+        assert_eq!(model.efforts(), ["low", "high"]);
+        assert_eq!(model.web_search(), Some("native"));
+        assert_eq!(model.service_tiers(), ["default"]);
+
+        let unknown = ModelSpec::new("model", None)
+            .expect("model")
+            .with_context(0)
+            .with_max_output(0)
+            .with_web_search("unsupported");
+        assert_eq!(unknown.context(), 0);
+        assert_eq!(unknown.max_output(), 0);
+        assert_eq!(unknown.image_input(), None);
+        assert_eq!(unknown.web_search(), None);
+    }
+
+    #[test]
+    fn list_result_labels_and_learned_auth_round_trip() {
+        let list = ModelList::new(Vec::new(), None)
+            .with_kind(ListKind::Deployments)
+            .with_base_model_fallback(true)
+            .with_v1_fallback(true)
+            .with_auth_choice(AuthChoice::XApiKey);
+        assert_eq!(list.kind(), ListKind::Deployments);
+        assert!(list.base_model_fallback());
+        assert!(list.v1_fallback());
+        assert_eq!(list.auth_choice(), Some(AuthChoice::XApiKey));
+
+        let query = ListQuery::new().with_auth_choice(AuthChoice::Bearer);
+        assert_eq!(query.auth_choice(), Some(AuthChoice::Bearer));
+    }
+
+    #[test]
+    fn probe_carries_learned_auth_and_redacts_extra_body() {
+        let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "claude-test")
+            .expect("query")
+            .with_auth_choice(AuthChoice::XApiKey)
+            .with_extra_body(bytes::Bytes::from_static(br#"{"key":"SECRET-BODY"}"#));
+        assert_eq!(query.auth_choice(), Some(AuthChoice::XApiKey));
+        assert_eq!(
+            query.extra_body().map(bytes::Bytes::as_ref),
+            Some(&br#"{"key":"SECRET-BODY"}"#[..])
+        );
+        let debug = format!("{query:?}");
+        assert!(!debug.contains("SECRET-BODY"));
+        assert!(debug.contains("<opaque>"));
+    }
 
     #[test]
     fn account_label_and_quota_limit_are_checked() {

@@ -20,8 +20,7 @@ SigV4's result contains the access key id. That is what AWS puts in `Authorizati
 
 - Out-of-tree or dynamically loaded plugins.
 - PKCE, a loopback callback, device-flow polling, and the fixed Codex port. Those belong to subscription plugins (row H). This slice only parses a token response and builds a refresh form. OAuth token caching, refresh, and single-flight become an SDK helper in row H; Vertex keeps its own cache until then.
-- Moving the 58 URL presets, per-preset `/models`, or a connectivity probe. That is the next pull request.
-- A paging loop with a page limit and repeated-cursor guard. That helper arrives in PR E2 (model listing).
+- Moving the 58 URL presets into individual provider plugin crates. Per-wire `/models` and minimal probes are implemented in `hofund-provider`; host aggregation and probe model selection live in `hofund-daemon`. Refresh, persistence, and auto-include remain separate work.
 - A live call to Google or AWS. Tests use a local mock.
 - Moving the Chat, Responses, Messages, Generative, and Converse transports into the SDK and streaming response bodies through `HttpHandle::send`. That call currently buffers the body. The target is the first row E PR that moves an adapter into its own plugin crate (E3, Vertex).
 - Lifting Vertex's JWT, ADC, and impersonation mint out of `hofund-provider`. The mint calls the SDK parser. The vendor flow stays next to the adapter.
@@ -39,7 +38,9 @@ An adapter constructed in a unit test, with no pooled client attached, still bui
 
 `plan` still reads `project`, `location`, and `region` as strings so `resolve` can build a catalog URL. A wrong type fails there, with the provider id and the key, before the factory runs. The factory repeats the check for a raw table that did not come from `plan`. `google-vertex` and `bedrock` are not compiled presets. `resolve` still owns their URLs. The factory owns construction.
 
-`list_models` stays unsupported. The paging helper only reads a JSON page. It does not send a request.
+`list_models` and `probe` use the adapter's pooled endpoint client. The SDK pager owns cursor rules; the provider transport enforces body caps while reading. The relay remains unsupported. For `[providers.models].url`, the daemon fetches that exact URL through `HostContext` and the SDK pager rather than treating it as a plugin base. It redacts the resolved URL, its query, and every query value.
+
+The daemon probe selector uses route mappings and listed endpoint metadata. `NamedOnlyOn` applies to OpenCode's Generative wire when that metadata exists. There is no models.dev cache yet, so catalog-only API decoration and the fallback limits cache are absent; `ModelsHost::with_catalog_limits` is the seam for row 2.8. Disabled-model state and per-key visibility do not exist in this slice. The daemon emits `model_list` and `provider_test` tracing events because there is no separate probe request-log store.
 
 ## How options reach a factory
 

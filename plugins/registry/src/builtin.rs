@@ -39,35 +39,35 @@ static OPENAI_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     PluginId::from_static("openai-compat"),
     &[ProtocolId::OPENAI_CHAT, ProtocolId::OPENAI_RESPONSES],
     CredentialStyle::Bearer,
-    ListKind::Unsupported,
+    ListKind::Live,
 );
 
 static ANTHROPIC_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     PluginId::from_static("anthropic"),
     &[ProtocolId::ANTHROPIC_MESSAGES],
     CredentialStyle::XApiKey,
-    ListKind::Unsupported,
+    ListKind::Live,
 );
 
 static GENERATIVE_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     PluginId::from_static("generative"),
     &[ProtocolId::GENERATIVE_LANGUAGE],
     CredentialStyle::NamedHeader(hofund_plugin_api::HeaderName::new("x-goog-api-key")),
-    ListKind::Unsupported,
+    ListKind::Live,
 );
 
 static VERTEX_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     PluginId::from_static("google-vertex"),
     &[ProtocolId::GENERATIVE_LANGUAGE],
     CredentialStyle::Bearer,
-    ListKind::Unsupported,
+    ListKind::Catalog,
 );
 
 static BEDROCK_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     PluginId::from_static("bedrock"),
     &[ProtocolId::BEDROCK_CONVERSE],
     CredentialStyle::SigV4,
-    ListKind::Unsupported,
+    ListKind::Catalog,
 );
 
 const VERTEX_OPTIONS: &[&str] = &[
@@ -335,6 +335,20 @@ impl UpstreamProvider for Bridged {
             ProviderCount::Counted(tokens) => PluginCount::Counted(tokens),
             ProviderCount::Unsupported => PluginCount::Unsupported,
         })
+    }
+
+    async fn list_models(
+        &self,
+        query: &hofund_plugin_api::ListQuery,
+    ) -> Result<hofund_plugin_api::ModelList, PluginError> {
+        self.inner.list_models(query).await
+    }
+
+    async fn probe(
+        &self,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, PluginError> {
+        self.inner.probe(query).await
     }
 }
 
@@ -635,5 +649,58 @@ mod tests {
                 .field_names()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn builtin_specs_advertise_live_and_static_model_lists() {
+        use hofund_plugin_api::ListKind;
+        for (id, kind) in [
+            ("openai-compat", ListKind::Live),
+            ("anthropic", ListKind::Live),
+            ("generative", ListKind::Live),
+            ("google-vertex", ListKind::Catalog),
+            ("bedrock", ListKind::Catalog),
+        ] {
+            assert_eq!(
+                super::factory(id).expect("factory").spec().list_kind(),
+                kind,
+                "{id}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_forwards_model_list_and_probe_to_the_adapter() {
+        use hofund_plugin_api::{ListQuery, ProbeQuery, ProtocolId, UpstreamProvider};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "chat"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let endpoint = hofund_provider::Endpoint::new("test", format!("{}/v1", server.uri()));
+        let adapter =
+            hofund_provider::OpenAiCompat::new(hofund_provider::OpenAiProtocol::Chat, endpoint)
+                .expect("adapter");
+        let bridged = super::Bridged {
+            inner: std::sync::Arc::new(adapter),
+        };
+        let listed = bridged.list_models(&ListQuery::new()).await.expect("list");
+        assert_eq!(listed.models()[0].id(), "chat");
+        let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "chat").expect("query");
+        bridged.probe(&query).await.expect("probe");
+        assert_eq!(server.received_requests().await.expect("requests").len(), 2);
     }
 }
