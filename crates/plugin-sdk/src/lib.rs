@@ -30,8 +30,9 @@ pub mod transport;
 
 pub use oauth::{AccessToken, TokenError, form_body, parse_access_token, refresh_form};
 pub use page::{
-    BODY_CAP, ERROR_RUNES, LIST_BUDGET, MAX_PAGES, PAGE_LIMIT, PageError, after_id, cursor_pages,
-    gemini_models, gemini_models_with_dropped, json_error_message, next_cursor, string_items,
+    BODY_CAP, ERROR_RUNES, LIST_BUDGET, MAX_PAGES, PAGE_LIMIT, PageError, PageErrorKind, after_id,
+    cursor_pages, gemini_models, gemini_models_with_dropped, json_error_message, next_cursor,
+    string_items,
 };
 pub use register::Contribution;
 pub use transport::{Call, HttpRequest, HttpResponse, Reply, text_response};

@@ -61,8 +61,10 @@ pub struct Endpoint {
     pub quirks: Option<&'static Profile>,
     /// Idle deadline the kernel enforces between body chunks.
     ///
-    /// Reqwest's read timeout is slightly longer, so a stall is reported by
-    /// the kernel. A stream that keeps sending is not cut off.
+    /// A pooled client's reqwest read timeout is instead the daemon-wide
+    /// `HttpLimits` read budget. When this deadline exceeds that budget,
+    /// reqwest fires first. A private test client uses a read timeout slightly
+    /// longer than this deadline. A stream that keeps sending is not cut off.
     pub timeout: Duration,
     /// Host pool client. `None` builds a private client for unit tests.
     ///

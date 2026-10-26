@@ -1,7 +1,7 @@
 //! Azure OpenAI deployment names and base-model fallback.
 
 use hofund_plugin_api::{ListKind, ModelList, ModelSpec, PluginError, PluginErrorKind};
-use hofund_plugin_sdk::{PageError, after_id};
+use hofund_plugin_sdk::{PageError, PageErrorKind, after_id};
 use serde_json::Value;
 
 use crate::error::{ProviderError, ProviderErrorKind};
@@ -30,7 +30,7 @@ struct AzureFailure(PluginError);
 impl From<PageError> for AzureFailure {
     fn from(error: PageError) -> Self {
         let message = error.to_string();
-        if message.contains("time budget") {
+        if error.kind() == PageErrorKind::Budget {
             Self(PluginError::timeout(message))
         } else {
             Self(PluginError::decode(message))
@@ -117,7 +117,7 @@ async fn azure_list_inner(endpoint: &Endpoint) -> Result<AzureList, PluginError>
             }
             Err(error) => {
                 let error = client.redact_error(error);
-                let stop = error.kind() == PluginErrorKind::Cancelled;
+                let stop = stop_after_url_error(&error);
                 errors.push(error);
                 // reference: internal/provider/azure.go:149-158
                 // In Rust, a dropped call future is the caller-cancellation signal.
@@ -132,6 +132,10 @@ async fn azure_list_inner(endpoint: &Endpoint) -> Result<AzureList, PluginError>
         "azure model list failed",
         " — type your deployments' names in as model ids",
     ))
+}
+
+fn stop_after_url_error(error: &PluginError) -> bool {
+    error.kind() == PluginErrorKind::Cancelled
 }
 
 fn azure_rows(
@@ -171,5 +175,20 @@ fn provider_error(error: PluginError) -> ProviderError {
         kind,
         message: error.message().to_owned(),
         status: error.status(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hofund_plugin_api::PluginError;
+
+    use super::stop_after_url_error;
+
+    #[test]
+    fn a_cancelled_url_error_stops_before_the_second_url() {
+        assert!(stop_after_url_error(&PluginError::cancelled("stop")));
+        assert!(!stop_after_url_error(&PluginError::timeout(
+            "try the fallback"
+        )));
     }
 }

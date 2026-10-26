@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The plugin API's preflight hook lets `config check` validate external
+  resources named by a resolved provider configuration without starting them.
+- The SDK's `IamAccessToken` retains an IAM access token and its optional
+  absolute expiry; `parse_iam_access_token` returns this type.
 - `ListKind::Deployments`, explicit `ListKind::rank()` capability ordering,
   and answering-URL metadata on `ModelList`, with the additive plugin API
   surface recorded in the public-API snapshot.
@@ -47,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[providers.options]` and `[subscriptions.options]` are opaque TOML tables.
   A value may be a string, an integer, a boolean, an array, or a nested
   table. A value of the wrong type names the provider and the key.
+- `config check` verifies that an explicitly configured Vertex credentials file
+  exists. Daemon startup no longer fails merely because that file is missing.
+
+### Security
+
+- Token URLs containing userinfo are rejected.
 
 ### Deprecated
 

@@ -224,7 +224,7 @@ impl UpstreamFactory for VertexFactory {
 
     fn preflight(&self, cfg: &Self::Config) -> Result<(), ConfigError> {
         hofund_provider::check_vertex_credentials_file(&cfg.endpoint.id, &cfg.credentials)
-            .map_err(|error| ConfigError::new(error.to_string()))
+            .map_err(|error| ConfigError::new(error.to_string()).with_path("credentials"))
     }
 
     fn build(
@@ -631,6 +631,25 @@ mod tests {
             RawValue::String("env:HOFUND_VERTEX_TEST_URL".to_owned()),
         );
         UpstreamFactory::validate(&VertexFactory, &vertex).expect("shape");
+    }
+
+    #[test]
+    fn vertex_preflight_error_has_only_the_credentials_path() {
+        let missing = std::env::temp_dir().join(format!(
+            "hofund-registry-missing-credentials-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        let mut vertex = raw("vertex");
+        vertex.insert("project", RawValue::String("example-project".to_owned()));
+        vertex.insert(
+            "credentials",
+            RawValue::String(missing.to_string_lossy().into_owned()),
+        );
+        let config = UpstreamFactory::validate(&VertexFactory, &vertex).expect("config");
+        let error = UpstreamFactory::preflight(&VertexFactory, &config).expect_err("missing file");
+        assert_eq!(error.path(), "credentials");
+        assert!(!error.message().contains("credentials:"), "{error}");
     }
 
     #[test]
