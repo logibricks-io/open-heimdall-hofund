@@ -9,6 +9,7 @@ LIST_BUDGET
 MAX_PAGES
 PAGE_LIMIT
 PageError
+PageErrorKind
 Reply
 TokenError
 after_id
@@ -49,6 +50,16 @@ oauth::fn parse_access_token (body : & [u8]) -> Result < AccessToken , TokenErro
 oauth::fn parse_iam_access_token (body : & [u8]) -> Result < IamAccessToken , TokenError >
 oauth::fn refresh_form (client_id : & str , client_secret : & str , refresh_token : & str) -> String
 page::PageError derives(Clone, Copy, Debug, PartialEq, Eq)
+page::PageError::const fn kind (& self) -> PageErrorKind
+page::PageErrorKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+page::PageErrorKind::Budget
+page::PageErrorKind::Cursor
+page::PageErrorKind::Decode
+page::PageErrorKind::EmptyList
+page::PageErrorKind::InvalidInput
+page::PageErrorKind::InvalidUrl
+page::PageErrorKind::PageLimit
+page::PageErrorKind::Size
 page::async fn after_id < F , Fut , E > (first_url : & str , mut fetch : F) -> Result < Vec < Value > , E > where F : FnMut (String) -> Fut , Fut : Future < Output = Result < Vec < u8 > , E > > , E : From < PageError > ,
 page::async fn cursor_pages < F , U , Fut , E > (first_url : & str , max_pages : usize , mut next_url : U , mut fetch : F ,) -> Result < Vec < Value > , E > where F : FnMut (String) -> Fut , U : FnMut (& str , & str) -> String , Fut : Future < Output = Result < Vec < u8 > , E > > , E : From < PageError > ,
 page::async fn gemini_models < F , Fut , E > (base : & str , fetch : F) -> Result < Vec < Value > , E > where F : FnMut (String) -> Fut , Fut : Future < Output = Result < Vec < u8 > , E > > , E : From < PageError > ,

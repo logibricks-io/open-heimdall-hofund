@@ -6,7 +6,9 @@ use futures_util::StreamExt;
 use hofund_plugin_api::{
     AuthChoice, ListKind, ListQuery, ModelList, ModelSpec, PluginError, PluginErrorKind,
 };
-use hofund_plugin_sdk::{PageError, after_id, gemini_models_with_dropped, json_error_message};
+use hofund_plugin_sdk::{
+    PageError, PageErrorKind, after_id, gemini_models_with_dropped, json_error_message,
+};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
@@ -52,7 +54,7 @@ struct ListFailure(PluginError);
 impl From<PageError> for ListFailure {
     fn from(error: PageError) -> Self {
         let message = error.to_string();
-        if message.contains("time budget") {
+        if error.kind() == PageErrorKind::Budget {
             Self(PluginError::timeout(message))
         } else {
             Self(PluginError::decode(message))

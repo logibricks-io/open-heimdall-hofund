@@ -511,19 +511,13 @@ mod tests {
         );
     }
 
-    fn aws_suite_input<'a>(
-        payload: &'a [u8],
-        headers: &'a [(&'a str, &'a str)],
-    ) -> SignInput<'a> {
+    fn aws_suite_input<'a>(payload: &'a [u8], headers: &'a [(&'a str, &'a str)]) -> SignInput<'a> {
         SignInput::new()
             .method("POST")
             .canonical_uri("/")
             .amz_date("20150830T123600Z")
             .scope("us-east-1", "service")
-            .credentials(
-                "AKIDEXAMPLE",
-                "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
-            )
+            .credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
             .payload(payload)
             .headers(headers)
     }

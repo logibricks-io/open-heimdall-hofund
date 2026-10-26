@@ -25,15 +25,44 @@ pub const BODY_CAP: usize = 8 * 1024 * 1024;
 /// The greatest number of Unicode scalar values retained from a JSON error.
 pub const ERROR_RUNES: usize = 160;
 
+/// The category of a page-reading failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PageErrorKind {
+    /// The walker exceeded its time budget.
+    Budget,
+    /// The response body exceeded the size cap.
+    Size,
+    /// The response was not valid JSON or had an unexpected shape.
+    Decode,
+    /// A successful walk returned no models.
+    EmptyList,
+    /// A required cursor was absent or repeated.
+    Cursor,
+    /// The walker reached its page limit.
+    PageLimit,
+    /// A list URL was absent or invalid.
+    InvalidUrl,
+    /// A caller supplied an invalid argument.
+    InvalidInput,
+}
+
 /// Why a page could not be read. The message is a fixed sentence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageError {
+    kind: PageErrorKind,
     message: &'static str,
 }
 
 impl PageError {
-    const fn new(message: &'static str) -> Self {
-        Self { message }
+    const fn new(kind: PageErrorKind, message: &'static str) -> Self {
+        Self { kind, message }
+    }
+
+    /// The category of this failure.
+    #[must_use]
+    pub const fn kind(&self) -> PageErrorKind {
+        self.kind
     }
 }
 
@@ -78,14 +107,20 @@ pub fn next_cursor(page: &[u8]) -> Result<Option<String>, PageError> {
 /// in the error.
 pub fn string_items(page: &[u8], key: &str) -> Result<Vec<String>, PageError> {
     if key.is_empty() {
-        return Err(PageError::new("page item key is empty"));
+        return Err(PageError::new(
+            PageErrorKind::InvalidInput,
+            "page item key is empty",
+        ));
     }
     let object = object(page)?;
     let Some(value) = object.get(key) else {
         return Ok(Vec::new());
     };
     let Some(items) = value.as_array() else {
-        return Err(PageError::new("page items are not an array"));
+        return Err(PageError::new(
+            PageErrorKind::Decode,
+            "page items are not an array",
+        ));
     };
     let mut ids = Vec::new();
     for item in items {
@@ -135,7 +170,10 @@ where
             };
             let bytes = fetch(at).await?;
             if bytes.len() > BODY_CAP {
-                return Err(E::from(PageError::new("model list body is too large")));
+                return Err(E::from(PageError::new(
+                    PageErrorKind::Size,
+                    "model list body is too large",
+                )));
             }
             let page = object(&bytes).map_err(E::from)?;
             rows.extend(after_id_rows(&page).map_err(E::from)?);
@@ -145,19 +183,29 @@ where
                 .unwrap_or(false)
             {
                 if rows.is_empty() {
-                    return Err(E::from(PageError::new("no models listed")));
+                    return Err(E::from(PageError::new(
+                        PageErrorKind::EmptyList,
+                        "no models listed",
+                    )));
                 }
                 return Ok(rows);
             }
             let last = page.get("last_id").and_then(Value::as_str).unwrap_or("");
             if last.is_empty() {
-                return Err(E::from(PageError::new("paged model list has no last_id")));
+                return Err(E::from(PageError::new(
+                    PageErrorKind::Cursor,
+                    "paged model list has no last_id",
+                )));
             }
             if after.as_deref() == Some(last) || !cursors.insert(last.to_owned()) {
-                return Err(E::from(PageError::new("model list cursor repeated")));
+                return Err(E::from(PageError::new(
+                    PageErrorKind::Cursor,
+                    "model list cursor repeated",
+                )));
             }
             if page_number + 1 == MAX_PAGES {
                 return Err(E::from(PageError::new(
+                    PageErrorKind::PageLimit,
                     "model list is still paging after 20 pages",
                 )));
             }
@@ -166,7 +214,12 @@ where
         unreachable!("the page cap returns from the loop")
     })
     .await
-    .map_err(|_| E::from(PageError::new("model list exceeded its time budget")))?
+    .map_err(|_| {
+        E::from(PageError::new(
+            PageErrorKind::Budget,
+            "model list exceeded its time budget",
+        ))
+    })?
 }
 
 /// Reads a Gemini native model list.
@@ -215,7 +268,10 @@ where
 {
     let base = base.trim().trim_end_matches('/');
     if base.is_empty() {
-        return Err(E::from(PageError::new("no base URL")));
+        return Err(E::from(PageError::new(
+            PageErrorKind::InvalidUrl,
+            "no base URL",
+        )));
     }
     let first_url = format!("{base}/models");
     let mut rows = Vec::new();
@@ -226,9 +282,17 @@ where
         let at = gemini_url(&first_url, token.as_deref()).map_err(E::from)?;
         let bytes = tokio::time::timeout(LIST_BUDGET, fetch(at))
             .await
-            .map_err(|_| E::from(PageError::new("Gemini page exceeded its time budget")))??;
+            .map_err(|_| {
+                E::from(PageError::new(
+                    PageErrorKind::Budget,
+                    "Gemini page exceeded its time budget",
+                ))
+            })??;
         if bytes.len() > BODY_CAP {
-            return Err(E::from(PageError::new("model list body is too large")));
+            return Err(E::from(PageError::new(
+                PageErrorKind::Size,
+                "model list body is too large",
+            )));
         }
         let page = object(&bytes).map_err(E::from)?;
         let (mut page_rows, mut page_dropped) = gemini_rows(&page).map_err(E::from)?;
@@ -247,7 +311,10 @@ where
         }
     }
     if rows.is_empty() {
-        return Err(E::from(PageError::new("no models listed")));
+        return Err(E::from(PageError::new(
+            PageErrorKind::EmptyList,
+            "no models listed",
+        )));
     }
     Ok((rows, dropped))
 }
@@ -277,7 +344,10 @@ where
     E: From<PageError>,
 {
     if max_pages == 0 {
-        return Err(E::from(PageError::new("model list page limit is zero")));
+        return Err(E::from(PageError::new(
+            PageErrorKind::InvalidInput,
+            "model list page limit is zero",
+        )));
     }
     let mut pages = Vec::new();
     let mut cursors = HashSet::new();
@@ -285,12 +355,18 @@ where
     for page_number in 0..max_pages {
         let bytes = fetch(at).await?;
         if bytes.len() > BODY_CAP {
-            return Err(E::from(PageError::new("model list body is too large")));
+            return Err(E::from(PageError::new(
+                PageErrorKind::Size,
+                "model list body is too large",
+            )));
         }
         let page: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| E::from(PageError::new("page is not JSON")))?;
+            .map_err(|_| E::from(PageError::new(PageErrorKind::Decode, "page is not JSON")))?;
         if !page.is_object() {
-            return Err(E::from(PageError::new("page is not a JSON object")));
+            return Err(E::from(PageError::new(
+                PageErrorKind::Decode,
+                "page is not a JSON object",
+            )));
         }
         let next = next_cursor(&bytes).map_err(E::from)?;
         let Some(cursor) = next else {
@@ -298,10 +374,16 @@ where
             break;
         };
         if !cursors.insert(cursor.clone()) {
-            return Err(E::from(PageError::new("model list cursor repeated")));
+            return Err(E::from(PageError::new(
+                PageErrorKind::Cursor,
+                "model list cursor repeated",
+            )));
         }
         if page_number + 1 == max_pages {
-            return Err(E::from(PageError::new("model list reached its page limit")));
+            return Err(E::from(PageError::new(
+                PageErrorKind::PageLimit,
+                "model list reached its page limit",
+            )));
         }
         at = next_url(first_url, &cursor);
         pages.push(page);
@@ -348,7 +430,8 @@ fn cut_error_message(message: &str) -> String {
 }
 
 fn after_id_url(first_url: &str, cursor: &str) -> Result<String, PageError> {
-    let mut url = Url::parse(first_url).map_err(|_| PageError::new("invalid model list URL"))?;
+    let mut url = Url::parse(first_url)
+        .map_err(|_| PageError::new(PageErrorKind::InvalidUrl, "invalid model list URL"))?;
     let kept = url
         .query_pairs()
         .filter(|(key, _)| key != "after_id" && key != "limit")
@@ -363,7 +446,8 @@ fn after_id_url(first_url: &str, cursor: &str) -> Result<String, PageError> {
 }
 
 fn gemini_url(first_url: &str, token: Option<&str>) -> Result<String, PageError> {
-    let mut url = Url::parse(first_url).map_err(|_| PageError::new("invalid model list URL"))?;
+    let mut url = Url::parse(first_url)
+        .map_err(|_| PageError::new(PageErrorKind::InvalidUrl, "invalid model list URL"))?;
     url.query_pairs_mut()
         .append_pair("pageSize", &PAGE_LIMIT.to_string());
     if let Some(token) = token {
@@ -401,7 +485,10 @@ fn page_items<'a>(
     match page.get(key) {
         None | Some(Value::Null) => Ok(&[]),
         Some(Value::Array(rows)) => Ok(rows),
-        Some(_) => Err(PageError::new("page items are not an array")),
+        Some(_) => Err(PageError::new(
+            PageErrorKind::Decode,
+            "page items are not an array",
+        )),
     }
 }
 
@@ -418,11 +505,19 @@ fn gemini_rows(
             None | Some(Value::Null) => &[][..],
             Some(Value::Array(methods)) => {
                 if methods.iter().any(|method| !method.is_string()) {
-                    return Err(PageError::new("generation methods are not strings"));
+                    return Err(PageError::new(
+                        PageErrorKind::Decode,
+                        "generation methods are not strings",
+                    ));
                 }
                 methods
             }
-            Some(_) => return Err(PageError::new("generation methods are not an array")),
+            Some(_) => {
+                return Err(PageError::new(
+                    PageErrorKind::Decode,
+                    "generation methods are not an array",
+                ));
+            }
         };
         let Some(name) = row.get("name").and_then(Value::as_str) else {
             continue;
@@ -447,12 +542,12 @@ fn gemini_rows(
 }
 
 fn object(page: &[u8]) -> Result<serde_json::Map<String, Value>, PageError> {
-    let value: Value =
-        serde_json::from_slice(page).map_err(|_| PageError::new("page is not JSON"))?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or(PageError::new("page is not a JSON object"))
+    let value: Value = serde_json::from_slice(page)
+        .map_err(|_| PageError::new(PageErrorKind::Decode, "page is not JSON"))?;
+    value.as_object().cloned().ok_or(PageError::new(
+        PageErrorKind::Decode,
+        "page is not a JSON object",
+    ))
 }
 
 #[cfg(test)]
@@ -463,8 +558,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BODY_CAP, ERROR_RUNES, MAX_PAGES, PageError, after_id, cursor_pages, gemini_models,
-        json_error_message, next_cursor, string_items,
+        BODY_CAP, ERROR_RUNES, MAX_PAGES, PageError, PageErrorKind, after_id, cursor_pages,
+        gemini_models, json_error_message, next_cursor, string_items,
     };
 
     #[test]
@@ -487,11 +582,16 @@ mod tests {
     #[test]
     fn a_bad_page_does_not_echo_the_body() {
         let error = next_cursor(br"not-json SECRET-PAGE").expect_err("json");
+        assert_eq!(error.kind(), PageErrorKind::Decode);
         assert_eq!(error.to_string(), "page is not JSON");
         assert!(!error.to_string().contains("SECRET-PAGE"));
         let error = string_items(br#"{"models":"SECRET-SHAPE"}"#, "models").expect_err("shape");
+        assert_eq!(error.kind(), PageErrorKind::Decode);
         assert_eq!(error.to_string(), "page items are not an array");
         assert!(!error.to_string().contains("SECRET-SHAPE"));
+        let error = string_items(b"{}", "").expect_err("empty key");
+        assert_eq!(error.kind(), PageErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "page item key is empty");
     }
 
     #[tokio::test]
@@ -655,6 +755,7 @@ mod tests {
         .expect_err("deadline");
         assert_eq!(started.elapsed(), Duration::from_secs(8));
         assert_eq!(requests.get(), 2);
+        assert_eq!(error.kind(), PageErrorKind::Budget);
         assert_eq!(error.to_string(), "model list exceeded its time budget");
     }
 
@@ -667,6 +768,7 @@ mod tests {
         })
         .await
         .expect_err("body cap");
+        assert_eq!(error.kind(), PageErrorKind::Size);
         assert_eq!(error.to_string(), "model list body is too large");
     }
 

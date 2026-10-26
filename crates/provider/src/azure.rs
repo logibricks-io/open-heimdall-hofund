@@ -1,7 +1,7 @@
 //! Azure OpenAI deployment names and base-model fallback.
 
 use hofund_plugin_api::{ListKind, ModelList, ModelSpec, PluginError, PluginErrorKind};
-use hofund_plugin_sdk::{PageError, after_id};
+use hofund_plugin_sdk::{PageError, PageErrorKind, after_id};
 use serde_json::Value;
 
 use crate::error::{ProviderError, ProviderErrorKind};
@@ -30,7 +30,7 @@ struct AzureFailure(PluginError);
 impl From<PageError> for AzureFailure {
     fn from(error: PageError) -> Self {
         let message = error.to_string();
-        if message.contains("time budget") {
+        if error.kind() == PageErrorKind::Budget {
             Self(PluginError::timeout(message))
         } else {
             Self(PluginError::decode(message))
