@@ -59,7 +59,16 @@ fn vertex_urls_and_credentials_are_checked() {
     let text = error.to_string();
     assert!(text.contains("provider `vertex-check`"), "{text}");
     assert!(text.contains("option `credentials`"), "{text}");
-    assert!(text.contains("existing file"), "{text}");
+    assert!(text.contains("names no file"), "{text}");
+    assert!(
+        text.contains(
+            "create it, correct the path, or clear it to use Application Default Credentials"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains(missing.to_string_lossy().as_ref()), "{text}");
+    fs::write(&missing, "existence is the only preflight check").expect("credentials");
+    check(&path).expect("existing credentials");
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -69,7 +78,12 @@ fn a_resolved_environment_url_is_checked() {
     let path = config(&dir, &format!("token_url = \"env:{ENV_URL}\""));
     let output_path = dir.join("child-error.txt");
     let output = Command::new(std::env::current_exe().expect("test executable"))
-        .args(["--exact", "resolved_environment_url_child", "--nocapture"])
+        .args([
+            "--ignored",
+            "--exact",
+            "resolved_environment_url_child",
+            "--nocapture",
+        ])
         .env(CHILD_CONFIG, &path)
         .env(CHILD_OUTPUT, &output_path)
         .env(ENV_URL, "not a url")
@@ -89,12 +103,13 @@ fn a_resolved_environment_url_is_checked() {
 }
 
 #[test]
+#[ignore = "helper: run by a_resolved_environment_url_is_checked in a child process"]
 fn resolved_environment_url_child() {
     let (Some(path), Some(output)) = (
         std::env::var_os(CHILD_CONFIG),
         std::env::var_os(CHILD_OUTPUT),
     ) else {
-        return;
+        panic!("child helper requires its config and output environment variables");
     };
     let error = check(Path::new(&path)).expect_err("resolved invalid URL");
     fs::write(output, error.to_string()).expect("error output");

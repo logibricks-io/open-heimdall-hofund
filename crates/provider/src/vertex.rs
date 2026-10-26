@@ -194,8 +194,8 @@ impl Vertex {
         }
         let credentials = credentials.trim().to_owned();
         let impersonate = impersonate.trim().to_ascii_lowercase();
-        check_resolved_options(&endpoint.id, &credentials, &token_url, &iam_root)?;
-        check_settings(&credentials, &impersonate)?;
+        check_token_urls(&endpoint.id, &token_url, &iam_root)?;
+        check_settings(&endpoint.id, &credentials, &impersonate)?;
         let base = endpoint.base_url.trim().trim_end_matches('/').to_owned();
         if base.is_empty() {
             return Err(ProviderError::decode("provider base URL is empty"));
@@ -352,12 +352,7 @@ fn location_ok(location: &str) -> bool {
     })
 }
 
-fn check_resolved_options(
-    provider: &str,
-    credentials: &str,
-    token_url: &str,
-    iam_root: &str,
-) -> Result<(), ProviderError> {
+fn check_token_urls(provider: &str, token_url: &str, iam_root: &str) -> Result<(), ProviderError> {
     for (key, value) in [("token_url", token_url), ("iam_root", iam_root)] {
         if !value.is_empty() && !https_or_loopback(value) {
             return Err(ProviderError::decode(format!(
@@ -365,14 +360,30 @@ fn check_resolved_options(
             )));
         }
     }
+    Ok(())
+}
+
+fn check_credentials_path(provider: &str, credentials: &str) -> Result<(), ProviderError> {
+    if !credentials.is_empty() && !credentials_path_ok(credentials) {
+        return Err(ProviderError::decode(format!(
+            "provider `{provider}` option `credentials` must be a full path (absolute or starting with ~/)"
+        )));
+    }
+    Ok(())
+}
+
+/// Checks that a configured credentials file exists for `hofund config check`.
+///
+/// Provider construction and request signing do not call this check.
+///
+/// # Errors
+///
+/// Returns [`ProviderError`] when the path cannot be expanded or names no file.
+pub fn check_credentials_file(provider: &str, credentials: &str) -> Result<(), ProviderError> {
     if credentials.is_empty() {
         return Ok(());
     }
-    if !credentials_path_ok(credentials) {
-        return Err(ProviderError::decode(format!(
-            "provider `{provider}` option `credentials` must be a full path"
-        )));
-    }
+    check_credentials_path(provider, credentials)?;
     let file = expand_home(credentials).map_err(|error| {
         ProviderError::decode(format!(
             "provider `{provider}` option `credentials`: {error}"
@@ -380,7 +391,7 @@ fn check_resolved_options(
     })?;
     if !file.is_file() {
         return Err(ProviderError::decode(format!(
-            "provider `{provider}` option `credentials` must name an existing file"
+            "provider `{provider}` option `credentials` names no file: create it, correct the path, or clear it to use Application Default Credentials"
         )));
     }
     Ok(())
@@ -390,6 +401,9 @@ fn https_or_loopback(value: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(value) else {
         return false;
     };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
     match parsed.scheme() {
         "https" => parsed.host().is_some(),
         "http" => parsed.host_str().is_some_and(|host| {
@@ -403,12 +417,12 @@ fn https_or_loopback(value: &str) -> bool {
     }
 }
 
-pub(crate) fn check_settings(credentials: &str, impersonate: &str) -> Result<(), ProviderError> {
-    if !credentials.is_empty() && !credentials_path_ok(credentials) {
-        return Err(ProviderError::decode(format!(
-            "give the credentials file's full path, not {credentials:?}"
-        )));
-    }
+pub(crate) fn check_settings(
+    provider: &str,
+    credentials: &str,
+    impersonate: &str,
+) -> Result<(), ProviderError> {
+    check_credentials_path(provider, credentials)?;
     if !impersonate.is_empty() && !account_ok(impersonate) {
         return Err(ProviderError::decode(format!(
             "{impersonate:?} is no service account's email"
@@ -1131,13 +1145,11 @@ async fn impersonate_for(
             )));
         }
     };
-    let access = hofund_plugin_sdk::oauth::parse_iam_access_token(&bytes)
+    let iam = hofund_plugin_sdk::oauth::parse_iam_access_token(&bytes)
         .map_err(|error| ProviderError::decode(format!("impersonating {account}: {error}")))?;
-    let expiry = serde_json::from_slice::<Value>(&bytes)
-        .ok()
-        .as_ref()
-        .and_then(|value| value.get("expireTime"))
-        .and_then(Value::as_str)
+    let access = iam.access_token();
+    let expiry = iam
+        .expire_time()
         .and_then(parse_rfc3339_utc)
         .unwrap_or_else(|| SystemTime::now() + access.expires_in());
     Ok((access.expose_secret().to_owned(), expiry))
@@ -1251,7 +1263,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GoogleCreds, base_url, check_resolved_options, check_settings, host, impersonated_account,
+        GoogleCreds, base_url, check_settings, check_token_urls, host, impersonated_account,
         method_path, parse_rfc3339_utc, pem_to_pkcs8, percent_decode, service_assertion,
     };
     use base64::Engine;
@@ -1332,15 +1344,19 @@ mod tests {
         } else {
             "/tmp/adc.json"
         };
-        check_settings(absolute, "").expect("absolute");
-        check_settings("~/adc.json", "worker@example.com").expect("home");
-        assert!(check_settings("adc.json", "").is_err());
-        assert!(check_settings(absolute, "not-an-email").is_err());
+        check_settings("vertex", absolute, "").expect("absolute");
+        check_settings("vertex", "~/adc.json", "worker@example.com").expect("home");
+        let error = check_settings("vertex", "adc.json", "").expect_err("relative path");
+        assert_eq!(
+            error.to_string(),
+            "provider `vertex` option `credentials` must be a full path (absolute or starting with ~/)"
+        );
+        assert!(check_settings("vertex", absolute, "not-an-email").is_err());
     }
 
     #[test]
     fn resolved_token_urls_require_https_or_a_loopback_host() {
-        check_resolved_options("vertex", "", "", "").expect("Google defaults");
+        check_token_urls("vertex", "", "").expect("Google defaults");
         for key in ["token_url", "iam_root"] {
             for value in [
                 "http://localhost:9/token",
@@ -1353,21 +1369,24 @@ mod tests {
                 } else {
                     ("", value)
                 };
-                check_resolved_options("vertex", "", token_url, iam_root).expect(value);
+                check_token_urls("vertex", token_url, iam_root).expect(value);
             }
             for value in [
                 "not a url",
                 "http://example.com/token",
                 "ftp://example.com/token",
                 "https://",
+                "https://user:pass@example.com/token",
+                "https://user@example.com/token",
+                "http://user:pass@127.0.0.1:9/token",
             ] {
                 let (token_url, iam_root) = if key == "token_url" {
                     (value, "")
                 } else {
                     ("", value)
                 };
-                let error = check_resolved_options("vertex", "", token_url, iam_root)
-                    .expect_err("invalid URL");
+                let error =
+                    check_token_urls("vertex", token_url, iam_root).expect_err("invalid URL");
                 let text = error.to_string();
                 assert!(text.contains("provider `vertex`"), "{text}");
                 assert!(text.contains(&format!("option `{key}`")), "{text}");
@@ -1377,23 +1396,18 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_credentials_file_is_rejected_when_the_adapter_opens() {
+    fn a_missing_credentials_file_is_allowed_when_the_adapter_opens() {
         let missing = std::env::temp_dir()
             .join(format!("hofund-vertex-missing-{}", std::process::id()))
             .join("adc.json");
-        let error = super::Vertex::with_overrides(
+        super::Vertex::with_overrides(
             crate::Endpoint::new("vertex-check", "http://127.0.0.1:9"),
             missing.to_string_lossy(),
             "",
             "",
             "",
         )
-        .expect_err("missing credentials");
-        let text = error.to_string();
-        assert!(text.contains("provider `vertex-check`"), "{text}");
-        assert!(text.contains("option `credentials`"), "{text}");
-        assert!(text.contains("existing file"), "{text}");
-        assert!(!text.contains(missing.to_string_lossy().as_ref()), "{text}");
+        .expect("missing credentials stay lazy");
     }
 
     #[test]

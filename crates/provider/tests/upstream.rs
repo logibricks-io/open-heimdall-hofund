@@ -1131,13 +1131,136 @@ async fn vertex_impersonation_forbidden_names_the_token_creator_role() {
 }
 
 #[tokio::test]
+async fn vertex_impersonation_token_errors_redact_tokens_and_response_bodies() {
+    const SOURCE_TOKEN: &str = "SENTINEL-SOURCE-TOKEN-7731";
+    const BODY_SENTINEL: &str = "SENTINEL-BODY-7731";
+    let bodies = [
+        (
+            json!({"detail": BODY_SENTINEL}).to_string(),
+            "no accessToken",
+        ),
+        (format!("not-json {BODY_SENTINEL}"), "not JSON"),
+    ];
+    for (index, (body, expected)) in bodies.into_iter().enumerate() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": SOURCE_TOKEN,
+                "expires_in": 3600
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/iam/v1/projects/-/serviceAccounts/worker@example.com:generateAccessToken",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let creds = creds_file(
+            &format!("impersonation-error-{index}"),
+            &json!({
+                "type": "authorized_user",
+                "client_id": "client",
+                "refresh_token": "refresh-token"
+            }),
+        );
+        let provider = vertex_at(&server, &creds, "worker@example.com");
+        let Err(error) = provider
+            .execute(user_request(false), "generative-language")
+            .await
+        else {
+            panic!("an invalid IAM token response must fail");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("impersonating worker@example.com"),
+            "{message}"
+        );
+        assert!(message.contains(expected), "{message}");
+        assert!(!message.contains(BODY_SENTINEL), "{message}");
+        assert!(!message.contains(SOURCE_TOKEN), "{message}");
+        let _ = std::fs::remove_dir_all(creds.parent().expect("parent"));
+    }
+}
+
+#[tokio::test]
+async fn vertex_uses_a_credentials_file_created_after_construction() {
+    let dir = std::env::temp_dir().join(format!("hofund-vertex-{}-late-file", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let credentials = dir.join("adc.json");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "ya29.late-file",
+            "expires_in": 3600
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/demo-project/locations/global/publishers/google/models/demo:generateContent",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "hello"}]},
+                "finishReason": "STOP"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = vertex_at(&server, &credentials, "");
+    let Err(error) = provider
+        .execute(user_request(false), "generative-language")
+        .await
+    else {
+        panic!("the missing credentials file must fail at request time");
+    };
+    let message = error.to_string();
+    assert!(message.contains("no Google credentials at"), "{message}");
+    assert!(
+        message.contains("clear it to use Application Default Credentials"),
+        "{message}"
+    );
+
+    let pem = include_str!("fixtures/vertex-sa-pkcs8.pem");
+    std::fs::write(
+        &credentials,
+        serde_json::to_vec(&json!({
+            "type": "service_account",
+            "client_email": "sa@example.com",
+            "private_key": pem,
+            "private_key_id": "key-1"
+        }))
+        .expect("json"),
+    )
+    .expect("late credentials");
+    let completion = provider
+        .execute(user_request(false), "generative-language")
+        .await
+        .expect("late file is read without rebuilding");
+    assert_eq!(text_of(completion).await, "hello");
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(bearer(&requests[1]), "Bearer ya29.late-file");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn vertex_rejects_a_missing_file_workload_identity_and_an_api_key() {
     let missing = std::env::temp_dir().join(format!(
         "hofund-vertex-missing-{}-adc.json",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&missing);
-    let error = Vertex::new(
+    let provider = Vertex::new(
         Endpoint::new(
             "vertex",
             "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global",
@@ -1145,8 +1268,23 @@ async fn vertex_rejects_a_missing_file_workload_identity_and_an_api_key() {
         missing.display().to_string(),
         "",
     )
-    .expect_err("missing credentials");
-    assert!(error.to_string().contains("existing file"), "{error}");
+    .expect("build");
+    let Err(error) = provider
+        .execute(user_request(false), "generative-language")
+        .await
+    else {
+        panic!("missing credentials must fail at request time");
+    };
+    assert!(
+        error.to_string().contains("no Google credentials at"),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("clear it to use Application Default Credentials"),
+        "{error}"
+    );
 
     let server = MockServer::start().await;
     let creds = creds_file(

@@ -12,7 +12,7 @@ The config file is trusted to name an endpoint. It is not trusted to invent opti
 
 The factory validates option keys and value types before the daemon resolves any option string. Only then are strings trimmed and passed through `hofund_secrets::resolve`. `env:NAME` becomes the variable's value or an error that names the provider id, option key, and variable. The resolved text is not copied into that error. Reserved kernel keys (`id`, `base_url`, `api_key`, `credential`, `quirks`, `headers`, `protocol`) are rejected if they appear inside `options`, so an option cannot overwrite the endpoint the daemon already resolved.
 
-`token_url` and `iam_root` on the Vertex factory choose where the token request is sent. A config author who sets them is the same trust as a config author who sets `base_url`. After `env:` resolution, `config check` requires each non-empty override to be an HTTPS URL; HTTP is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, or `::1`). A non-empty `credentials` value must name an existing file at check time. These value errors name the provider id and option key without copying the value. The token request body is not logged. Production config leaves both URL overrides unset, and the factory uses Google's hosts.
+`token_url` and `iam_root` on the Vertex factory choose where the token request is sent. A config author who sets them is the same trust as a config author who sets `base_url`. After `env:` resolution, each non-empty override must be an HTTPS URL without userinfo; HTTP is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, or `::1`). A non-empty `credentials` value must be a full path. `config check` also requires the file to exist, but daemon startup does not: request signing reads it lazily, so a file created later is used by the next request. These value errors name the provider id and option key without copying the value. The token request body is not logged. Production config leaves both URL overrides unset, and the factory uses Google's hosts.
 
 SigV4's result contains the access key id. That is what AWS puts in `Authorization`. The secret access key is an input and is not copied into the result. OAuth parsing returns the access token as a secret. `Debug` and `Display` redact it. Parse errors use a fixed sentence and do not include the response body.
 
@@ -48,8 +48,8 @@ An adapter constructed in a unit test, with no pooled client attached, still bui
 3. `plan` reads `project`, `location`, and `region` when it resolves a catalog URL. A missing key is empty. Any other shape is `provider `{id}` option `{key}` must be a string`.
 4. The daemon builds a `RawTable`: `id`, `base_url`, the resolved `api_key`, `credential`, `quirks`, `headers`, and `protocol` (`chat` or `responses` only). It then copies `options` without resolving their strings. A reserved key is `provider `{id}` option `{key}` is reserved`.
 5. `factory.validate` checks the unresolved table against the kernel keys plus that plugin's schema. Anything else is `provider `{id}` has unknown option `{key}``. A non-string on a string field is `provider `{id}` option `{key}` must be a string`.
-6. Only after validation, each option string is trimmed and `env:`-resolved. Resolution errors name the provider id and option key. The factory validates the resolved table again.
-7. `factory.build` attaches the pooled client and constructs the adapter.
+6. Only after validation, each option string is trimmed and `env:`-resolved. Resolution errors name the provider id and option key. `config check` then calls `factory.preflight` on the resolved table; startup skips this step.
+7. The factory validates the resolved table again, and `factory.build` attaches the pooled client and constructs the adapter.
 
 | Factory | Option keys, all strings, all optional |
 | --- | --- |

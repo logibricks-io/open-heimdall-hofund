@@ -107,17 +107,54 @@ pub fn parse_access_token(body: &[u8]) -> Result<AccessToken, TokenError> {
     })
 }
 
-/// Reads `accessToken` from an IAM Credentials `generateAccessToken` JSON body.
+/// An IAM Credentials access token and its optional absolute expiry.
+/// `Debug` and `Display` redact the token.
+pub struct IamAccessToken {
+    access: AccessToken,
+    expire_time: Option<String>,
+}
+
+impl IamAccessToken {
+    /// The access token, with the one-hour fallback lifetime.
+    #[must_use]
+    pub const fn access_token(&self) -> &AccessToken {
+        &self.access
+    }
+
+    /// The IAM `expireTime` value, when the response supplied a string.
+    #[must_use]
+    pub fn expire_time(&self) -> Option<&str> {
+        self.expire_time.as_deref()
+    }
+}
+
+impl fmt::Debug for IamAccessToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IamAccessToken")
+            .field("access", &self.access)
+            .field("expire_time", &self.expire_time)
+            .finish()
+    }
+}
+
+impl fmt::Display for IamAccessToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+/// Reads `accessToken` and `expireTime` from an IAM Credentials
+/// `generateAccessToken` JSON body with one parse.
 ///
-/// IAM uses an RFC 3339 `expireTime`, not OAuth's `expires_in`; callers that
-/// need the absolute expiry read that field separately. The returned token has
-/// the same redaction and one-hour default lifetime as an OAuth token.
+/// IAM uses an RFC 3339 `expireTime`, not OAuth's `expires_in`. The returned
+/// token has the same redaction and one-hour default lifetime as an OAuth token.
 ///
 /// # Errors
 ///
 /// Returns [`TokenError`] when the body is not a JSON object or has no non-empty
 /// string `accessToken`. The body is not included in the error.
-pub fn parse_iam_access_token(body: &[u8]) -> Result<AccessToken, TokenError> {
+pub fn parse_iam_access_token(body: &[u8]) -> Result<IamAccessToken, TokenError> {
     let object = token_object(body)?;
     let token = object
         .get("accessToken")
@@ -126,9 +163,16 @@ pub fn parse_iam_access_token(body: &[u8]) -> Result<AccessToken, TokenError> {
         .ok_or(TokenError::new(
             "IAM Credentials token response has no accessToken",
         ))?;
-    Ok(AccessToken {
-        token: SecretString::from(token),
-        expires_in: Duration::from_secs(DEFAULT_EXPIRES_SECS),
+    let expire_time = object
+        .get("expireTime")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok(IamAccessToken {
+        access: AccessToken {
+            token: SecretString::from(token),
+            expires_in: Duration::from_secs(DEFAULT_EXPIRES_SECS),
+        },
+        expire_time,
     })
 }
 
@@ -190,8 +234,9 @@ mod tests {
             br#"{"accessToken":"iam-SECRET-TOKEN","expireTime":"2026-10-25T08:00:00Z"}"#,
         )
         .expect("token");
-        assert_eq!(token.expose_secret(), "iam-SECRET-TOKEN");
-        assert_eq!(token.expires_in().as_secs(), 3600);
+        assert_eq!(token.access_token().expose_secret(), "iam-SECRET-TOKEN");
+        assert_eq!(token.access_token().expires_in().as_secs(), 3600);
+        assert_eq!(token.expire_time(), Some("2026-10-25T08:00:00Z"));
         let rendered = format!("{token:?} {token}");
         assert!(!rendered.contains("iam-SECRET-TOKEN"), "{rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");

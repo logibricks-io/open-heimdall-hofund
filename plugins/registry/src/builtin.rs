@@ -222,6 +222,11 @@ impl UpstreamFactory for VertexFactory {
         })
     }
 
+    fn preflight(&self, cfg: &Self::Config) -> Result<(), ConfigError> {
+        hofund_provider::check_vertex_credentials_file(&cfg.endpoint.id, &cfg.credentials)
+            .map_err(|error| ConfigError::new(error.to_string()))
+    }
+
     fn build(
         &self,
         cfg: &Self::Config,
