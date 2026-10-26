@@ -222,8 +222,12 @@ table owns one shared book and injects it into every published `Router`, so
 cooldowns and failure ladders survive `Snapshot::store`. The default policy in
 `crates/router/src/cooldown.rs` covers generic and rate-limit ladders,
 `Retry-After` hints, quota and credit rests, passive observations, and timed
-panic rests. New events never shorten a longer active rest. The daemon records
-call and stream outcomes; the router only orders members, putting ready members
+panic rests. Non-positive header hints are absent, and positive header hints
+are capped at one hour for every failure cause. A passive observation rests a
+member only when its window is exhausted; its stated reset is capped at eight
+days. New events never shorten a longer active rest. The daemon records call
+and stream outcomes, but counts never record success and cool only on 429 or
+transport-class failures. The router only orders members, putting ready members
 first and retaining the soonest cooling member as a probe.
 
 ## What is intentionally absent
