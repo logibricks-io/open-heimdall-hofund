@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-member cooldowns with generic, rate-limit, quota, credit, observation,
+  and panic policies. Routing tries ready members first and retains only the
+  soonest cooling member as a probe; shared state survives router republishes.
+- A passive observation backend bound to one member, so plugins can report
+  quota and retry hints without selecting which member receives them.
+- `Retry-After` delta-seconds and HTTP-date parsing on provider and SDK status
+  errors. Transport parsing does not cap hints; the cooldown policy applies
+  the appropriate limit.
+- Timed panic cooldowns that temporarily omit a failed member and republish it
+  when its rest expires, with newer panics extending the exclusion.
 - The plugin API's preflight hook lets `config check` validate external
   resources named by a resolved provider configuration without starting them.
 - The SDK's `IamAccessToken` retains an IAM access token and its optional

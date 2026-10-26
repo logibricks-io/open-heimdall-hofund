@@ -445,7 +445,7 @@ Feature-parity row 2.12 models keys as router members. Row 3.7 does the same for
 2. At startup, and again on every membership change (sign-in, sign-out, config reload), the daemon loads the factory, calls `upstream` once per selected account, and adapts each result to a `Member`.
 3. The `MemberId` is `MemberId::from_parts(subscription, account)`. It is stable across snapshots.
 
-Failover and order exist today (ordered failover). Cooldown does not. [architecture.md](../architecture.md) line 151: "There is no rest timer and no process-global route counter." Cooldown is a new kernel mechanism, PR K, and it merges before any subscription plugin. A plugin pull request does not edit `crates/router`.
+Ordered failover and PR K's cooldown exist today; [architecture.md](../architecture.md) describes the member cooldown book. Cooldown is a kernel mechanism and merges before any subscription plugin. A plugin pull request does not edit `crates/router`.
 
 Row 3.8 is the shared quota model: windows, resets, and credits. Two feeds, both kernel-owned:
 
@@ -886,7 +886,7 @@ PR C puts the router on `Member` and `PluginError`. These are the places the cod
 - A same-protocol body, including Converse, is `Completion::Raw`. The gateway forwards the bytes. It asks the codec to read token usage across chunk boundaries and to rewrite the model field to the name the client sent. A leading in-band failure is a status error, so the router can fail over. A failure after the first event is that protocol's error frame. A partial frame is closed with a blank line first. The content type comes from the codec. Cross-protocol still decodes and strips extensions.
 - `BodyStream::resume` puts a peeked raw chunk back so failover can look at the first chunk and a success still delivers it. The router re-exports `PluginError`, `Request`, `Completion`, and `MemberId`. It also imports `PluginErrorKind`, `CountOutcome`, and `BodyStream`. `xtask` rejects any other plugin-api import, and it rejects `UpstreamProvider` and `HostContext`.
 - `criterion` benches for decode, encode, stream relay, and the raw passthrough tap live in `crates/codec/benches/relay.rs` and run in CI. Magpie is not a dependency.
-- The `ArcSwap` snapshot is stored while the membership lock is held. A panic in the call or while polling the stream publishes a snapshot that omits that member. There is no cooldown timer. Config hot reload is pull request L. Duplicate member ids fail startup.
+- The `ArcSwap` snapshot is stored while the membership lock is held. A panic in the call or while polling the stream publishes a snapshot that omits that member. There is no cooldown timer. PR K adds it. Config hot reload is pull request L. Duplicate member ids fail startup.
 
 Quirks stay in the kernel for the whole sequence. A new `Rule` variant is a kernel pull request. Vendor behavior stays in the plugin that calls `quirks::apply` through the SDK.
 
@@ -932,6 +932,17 @@ E1 is the first slice of row E. The threat model is [docs/plugins/providers.md](
 - After that validation, the daemon trims string options and resolves `env:`; resolution errors name the provider and key. It rejects a reserved kernel key inside `options`. `plan` still reads `project`, `location`, and `region` to build catalog URLs.
 - Built-in adapters take the pooled `reqwest` client from a kernel-only host-handle method, so `HttpLimits` apply. `HttpHandle::send` is unchanged. Moving the five protocol transports into the SDK and streaming through `HttpHandle::send` is targeted at the first row E PR that moves an adapter into its own plugin crate (E3, Vertex), which also removes the raw-client method.
 - `google-vertex` and `bedrock` are not compiled presets. `resolve` still owns their URLs. Per-preset `/models` and the connectivity probe are the next pull request.
+
+### PR K notes
+
+PR K lands the member cooldown book and passive observation path. These are the design choices and the places the code differs from the RFC text.
+
+- `hofund_router::Cooldowns` is keyed by stable `MemberId`. The daemon membership table owns one `Arc<Cooldowns>` and injects it into every published `Router`, so breaker state survives `Snapshot::store` even when every member instance is replaced. The book owns the generic, rate-limit, quota, credit, observation, and panic policies. Ready members keep configured order and go first; only the soonest cooling member remains as a probe, and a lone member is always tried.
+- The daemon's tower cooldown layer in `crates/daemon/src/membership.rs` records every call outcome. Unary and count success clear cooldown state; errors record failures. A stream succeeds when its first item arrives without error, while a stream error before or after that item records a failure. A revision captured before the call guards success recording, so an older success cannot clear a failure, panic, or observation that landed during the call.
+- A contained panic records a timed generic-ladder cooldown, advances the member's failed generation, and republishes a snapshot without that member. A task waits until the rest ends and republishes the member only if its generation is unchanged. A newer panic therefore keeps the member out and doubles the cooldown instead of allowing an older timer to restore it.
+- Passive observation uses a per-member `ObserveBackend` bound by the daemon and passed through `hofund_plugin_host::runtime_host_with_observe`. The production backend calls `Cooldowns::observe` for that member. Plugins submit observations but cannot name or select a member.
+- Provider execute and count status errors and SDK status errors parse `Retry-After` as delta-seconds or an HTTP date. Transport parsing deliberately applies no cap; the cooldown book caps each hint according to its policy. This keeps the raw upstream hint intact across the provider and plugin error conversions.
+- Request-shaped 4xx responses, `Cancelled`, `Config`, and `Unsupported` deliberately do not cool a member, unlike the reference gateway's broader treatment. There are no per-provider cooldown configuration knobs yet; `CooldownPolicy::default()` supplies the policy. Exposing cooldown times in the routing view is deferred. Success-header vendor feeds are left to subscription plugins in H rather than adding vendor-specific parsing to the kernel.
 
 ### Parallel work plan
 

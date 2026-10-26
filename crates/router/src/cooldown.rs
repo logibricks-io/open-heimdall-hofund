@@ -1,4 +1,25 @@
 //! Member cooldown state shared across immutable router snapshots.
+//!
+//! # Default policy
+//!
+//! | Event | Cooldown and ladder |
+//! | --- | --- |
+//! | Generic failure | Starts at 1 minute and doubles for each consecutive failure since the last success, capped at 10 minutes. Connection, timeout, transport, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses. |
+//! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. |
+//! | Exhausted quota | Uses the retry hint capped at 8 days, or 15 minutes without a hint. |
+//! | HTTP 402 | Uses 30 minutes, or the retry hint capped at 1 hour when that is longer. |
+//! | Passive observation | Exhausted quota uses the retry hint capped at 8 days, or 15 minutes without one. Any other observation with a retry hint uses that hint capped at 1 hour. Remaining quota without a hint does not cool the member. Observations do not advance either failure ladder. |
+//! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
+//!
+//! Cancelled, unsupported, configuration, internal, unknown future, and other
+//! request-shaped HTTP 4xx errors do not cool a member. A new failure,
+//! observation, or panic never shortens an existing longer cooldown.
+//!
+//! Routing keeps ready members first in configured order, then keeps only the
+//! cooling member whose rest ends soonest as a probe. Configured order breaks a
+//! tie, other cooling members are skipped for that request, and a route with one
+//! member always tries that member. If every member is cooling, only the
+//! soonest probe is tried.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -210,21 +231,31 @@ impl Cooldowns {
     }
 
     /// Clears all cooldown and ladder state after a successful call.
+    ///
+    /// This unconditional clear also advances the revision, preventing an older
+    /// in-flight call from clearing state recorded after this success.
     pub fn record_success(&self, id: &MemberId) {
         let mut states = self.lock();
         let state = states.entry(id.clone()).or_default();
         clear(state);
     }
 
-    /// Returns the member's state revision for conditional success recording.
-    #[doc(hidden)]
+    /// Captures the member's state revision before starting a call.
+    ///
+    /// Pass the returned revision to [`Self::record_success_if_unchanged`] when
+    /// the call succeeds so it cannot erase a newer failure, panic, or
+    /// observation.
     #[must_use]
     pub fn revision(&self, id: &MemberId) -> u64 {
         self.lock().get(id).map_or(0, |state| state.revision)
     }
 
-    /// Clears state only when no failure or observation arrived during a call.
-    #[doc(hidden)]
+    /// Records success only if no failure, panic, or observation landed during
+    /// the call that captured `revision`.
+    ///
+    /// The revision guard prevents an older successful call from clearing newer
+    /// cooldown or ladder state. When the revision still matches, this clears
+    /// the same state as [`Self::record_success`].
     pub fn record_success_if_unchanged(&self, id: &MemberId, revision: u64) {
         let mut states = self.lock();
         let state = states.entry(id.clone()).or_default();
