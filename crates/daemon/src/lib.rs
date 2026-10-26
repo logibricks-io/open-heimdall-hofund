@@ -363,6 +363,7 @@ fn build_plugin(
     Ok(adapt::ProviderAdapter::new(provider.id.clone(), upstream))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_raw_plugin(
     provider: &hofund_config::Provider,
     plugin_id: &str,

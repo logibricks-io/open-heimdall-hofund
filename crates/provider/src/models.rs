@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use hofund_plugin_api::{
     AuthChoice, ListKind, ListQuery, ModelList, ModelSpec, PluginError, PluginErrorKind,
 };
-use hofund_plugin_sdk::{PageError, after_id, gemini_models, json_error_message};
+use hofund_plugin_sdk::{PageError, after_id, gemini_models_with_dropped, json_error_message};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
@@ -138,16 +138,18 @@ impl ModelClient {
     }
 
     pub async fn gemini_list(&self) -> Result<ModelList, PluginError> {
-        let rows = gemini_models(&self.endpoint.base_url, |url| async move {
-            let headers = self
-                .auth_headers(AuthChoice::Both, false, true)
-                .map_err(ListFailure)?;
-            let page = self.fetch_page(&url, headers).await.map_err(ListFailure)?;
-            self.page_bytes(&url, page, false).map_err(ListFailure)
-        })
-        .await
-        .map_err(|error| self.redact_error(error.0))?;
-        let (models, dropped) = model_specs(&rows, true)?;
+        let (rows, method_dropped) =
+            gemini_models_with_dropped(&self.endpoint.base_url, |url| async move {
+                let headers = self
+                    .auth_headers(AuthChoice::Both, false, true)
+                    .map_err(ListFailure)?;
+                let page = self.fetch_page(&url, headers).await.map_err(ListFailure)?;
+                self.page_bytes(&url, page, false).map_err(ListFailure)
+            })
+            .await
+            .map_err(|error| self.redact_error(error.0))?;
+        let (models, mut dropped) = model_specs(&rows, true)?;
+        dropped.extend(method_dropped);
         if models.is_empty() {
             return Err(PluginError::decode("no models listed"));
         }

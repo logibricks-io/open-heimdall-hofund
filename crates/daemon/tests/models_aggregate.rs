@@ -46,7 +46,8 @@ async fn cross_wire_merge_unions_tags_and_text_only_wins() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 {"id": "shared", "display_name": "chat first", "modalities": {"input": ["text"]}},
-                {"id": "drawn", "kind": "image"}
+                {"id": "drawn", "kind": "image"},
+                {"id": "method-only"}
             ]
         })))
         .expect(1)
@@ -58,7 +59,8 @@ async fn cross_wire_merge_unions_tags_and_text_only_wins() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "models": [
                 {"name": "models/shared", "displayName": "gemini second", "inputTokenLimit": 1000},
-                {"name": "models/drawn", "supportedGenerationMethods": ["generateContent"]}
+                {"name": "models/drawn", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/method-only", "supportedGenerationMethods": ["embedContent"]}
             ]
         })))
         .expect(1)

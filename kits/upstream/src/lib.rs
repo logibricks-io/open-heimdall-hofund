@@ -2,9 +2,13 @@
 //!
 //! This crate is unpublished and is only a dev-dependency of an upstream
 //! plugin. [`test_host`] builds a `hofund_plugin_host::HostContext` with fake
-//! backends. Mandatory conformance tests are later.
-//! [`block_on`] drives an async plugin call without a plugin depending on tokio.
+//! backends. [`check_list_and_probe`] runs the mandatory model-list and probe
+//! contract against local mock servers. [`block_on`] drives an async plugin
+//! call without a plugin depending on tokio.
 
+mod conformance;
+
+pub use conformance::check_list_and_probe;
 pub use hofund_plugin_host::{
     RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler, RecordingSecrets,
     TestHost, test_host,

@@ -1698,8 +1698,11 @@ dependencies = [
 name = "hofund-kit-upstream"
 version = "0.1.0"
 dependencies = [
+ "hofund-plugin-api",
  "hofund-plugin-host",
+ "serde_json",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]
@@ -1754,6 +1757,7 @@ name = "hofund-plugin-registry"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "hofund-kit-upstream",
  "hofund-plugin-api",
  "hofund-plugin-echo",
  "hofund-plugin-relay",

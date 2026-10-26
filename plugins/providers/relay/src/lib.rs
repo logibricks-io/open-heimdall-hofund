@@ -119,7 +119,7 @@ impl UpstreamProvider for Relay {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use hofund_kit_upstream::{TestHost, block_on};
+    use hofund_kit_upstream::{TestHost, block_on, check_list_and_probe};
     use hofund_plugin_api::{
         Completion, DynUpstreamFactory, PluginErrorKind, PluginId, ProtocolId, RawTable, RawValue,
         Request, UpstreamFactory,
@@ -215,6 +215,16 @@ mod tests {
             assert_eq!(error.kind(), PluginErrorKind::Auth);
             assert!(host.http().calls().is_empty());
         });
+    }
+
+    #[test]
+    fn unsupported_factory_passes_list_conformance() {
+        block_on(check_list_and_probe(
+            &RelayFactory,
+            options,
+            ProtocolId::OPENAI_CHAT,
+            "",
+        ));
     }
 
     #[test]

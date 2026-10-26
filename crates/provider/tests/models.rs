@@ -689,7 +689,7 @@ fn vertex_credentials() -> std::path::PathBuf {
 }
 
 #[tokio::test]
-async fn vertex_probe_mints_a_token_and_applies_thinking_rules() {
+async fn vertex_probe_reads_lazy_credentials_and_applies_thinking_rules() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/token"))
@@ -716,6 +716,7 @@ async fn vertex_probe_mints_a_token_and_applies_thinking_rules() {
             .await;
     }
     let credentials = vertex_credentials();
+    std::fs::remove_file(&credentials).expect("remove credentials before construction");
     let provider = Vertex::with_token_endpoints(
         vertex_endpoint(&server),
         credentials.display().to_string(),
@@ -724,6 +725,14 @@ async fn vertex_probe_mints_a_token_and_applies_thinking_rules() {
         format!("{}/iam", server.uri()),
     )
     .expect("vertex");
+    std::fs::write(
+        &credentials,
+        serde_json::to_vec(&json!({
+            "type": "authorized_user", "client_id": "client", "client_secret": "secret", "refresh_token": "refresh"
+        }))
+        .expect("json"),
+    )
+    .expect("create credentials after construction");
     for model in [
         "gemini-3-flash",
         "gemini-2.5-pro",

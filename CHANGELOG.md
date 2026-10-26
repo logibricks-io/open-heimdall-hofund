@@ -21,12 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-memory learned bases and authentication, two-pass probe selection, and
   four-wide batch probes. `[providers.models]` stores refresh, auto-include,
   and URL settings without starting a refresh job.
+- `hofund-kit-upstream` conformance for live paging and minimal probes, static
+  catalogs without network access, and unsupported model lists.
 - Provider plugins share SigV4, OAuth token parsing, form bodies, and JSON
   page cursors from `hofund-plugin-sdk`. Parse errors do not include the
   response body. Token `Debug` is redacted.
 
 ### Changed
 
+- Built-in factory specs advertise `Live` lists for OpenAI-compatible,
+  Anthropic, and Generative wires, and `Catalog` lists for Vertex and Bedrock.
 - `[providers.options]` is forwarded to the plugin factory. Each factory has
   an option schema. An unknown key or a wrong type is a check error that
   names the provider and the key and does not include the value.

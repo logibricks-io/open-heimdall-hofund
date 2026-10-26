@@ -184,7 +184,30 @@ where
 /// through `E` for an empty base, invalid page URL, oversized or malformed
 /// page, empty list, repeated cursor, or elapsed page budget. No partial list
 /// is returned for those failures.
-pub async fn gemini_models<F, Fut, E>(base: &str, mut fetch: F) -> Result<Vec<Value>, E>
+pub async fn gemini_models<F, Fut, E>(base: &str, fetch: F) -> Result<Vec<Value>, E>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, E>>,
+    E: From<PageError>,
+{
+    Ok(gemini_models_with_dropped(base, fetch).await?.0)
+}
+
+/// Reads a Gemini native model list and reports ids removed by its method filter.
+///
+/// Paging, metadata, limits, and errors are the same as [`gemini_models`]. The
+/// second return value contains normalized ids whose non-empty generation
+/// methods did not include `generateContent`. Hosts merging several wires can
+/// use those ids to prevent another wire from reintroducing a dropped model.
+///
+/// # Errors
+///
+/// Returns the transport error or [`PageError`] through `E` under the same
+/// conditions as [`gemini_models`].
+pub async fn gemini_models_with_dropped<F, Fut, E>(
+    base: &str,
+    mut fetch: F,
+) -> Result<(Vec<Value>, Vec<String>), E>
 where
     F: FnMut(String) -> Fut,
     Fut: Future<Output = Result<Vec<u8>, E>>,
@@ -196,6 +219,7 @@ where
     }
     let first_url = format!("{base}/models");
     let mut rows = Vec::new();
+    let mut dropped = Vec::new();
     let mut cursors = HashSet::new();
     let mut token = None;
     for page_number in 0..MAX_PAGES {
@@ -207,7 +231,9 @@ where
             return Err(E::from(PageError::new("model list body is too large")));
         }
         let page = object(&bytes).map_err(E::from)?;
-        rows.extend(gemini_rows(&page).map_err(E::from)?);
+        let (mut page_rows, mut page_dropped) = gemini_rows(&page).map_err(E::from)?;
+        rows.append(&mut page_rows);
+        dropped.append(&mut page_dropped);
         token = next_cursor(&bytes).map_err(E::from)?;
         let Some(next) = token.as_deref() else {
             break;
@@ -222,7 +248,7 @@ where
     if rows.is_empty() {
         return Err(E::from(PageError::new("no models listed")));
     }
-    Ok(rows)
+    Ok((rows, dropped))
 }
 
 /// Reads generic cursor pages with explicit bounds and cycle detection.
@@ -378,8 +404,11 @@ fn page_items<'a>(
     }
 }
 
-fn gemini_rows(page: &serde_json::Map<String, Value>) -> Result<Vec<Value>, PageError> {
+fn gemini_rows(
+    page: &serde_json::Map<String, Value>,
+) -> Result<(Vec<Value>, Vec<String>), PageError> {
     let mut rows = Vec::new();
+    let mut dropped = Vec::new();
     for row in page_items(page, "models")? {
         let Value::Object(row) = row else {
             continue;
@@ -394,13 +423,6 @@ fn gemini_rows(page: &serde_json::Map<String, Value>) -> Result<Vec<Value>, Page
             }
             Some(_) => return Err(PageError::new("generation methods are not an array")),
         };
-        if !methods.is_empty()
-            && !methods
-                .iter()
-                .any(|method| method.as_str() == Some("generateContent"))
-        {
-            continue;
-        }
         let Some(name) = row.get("name").and_then(Value::as_str) else {
             continue;
         };
@@ -408,11 +430,19 @@ fn gemini_rows(page: &serde_json::Map<String, Value>) -> Result<Vec<Value>, Page
         if id.is_empty() {
             continue;
         }
+        if !methods.is_empty()
+            && !methods
+                .iter()
+                .any(|method| method.as_str() == Some("generateContent"))
+        {
+            dropped.push(id.to_owned());
+            continue;
+        }
         let mut row = row.clone();
         row.insert("id".to_owned(), Value::String(id.to_owned()));
         rows.push(Value::Object(row));
     }
-    Ok(rows)
+    Ok((rows, dropped))
 }
 
 fn object(page: &[u8]) -> Result<serde_json::Map<String, Value>, PageError> {
@@ -672,8 +702,10 @@ mod tests {
 
     #[tokio::test]
     async fn gemini_filters_methods_and_strips_the_model_prefix() {
-        let rows = gemini_models::<_, _, PageError>("https://example.test/v1beta/", |_| async {
-            Ok(serde_json::to_vec(&json!({
+        let (rows, dropped) = super::gemini_models_with_dropped::<_, _, PageError>(
+            "https://example.test/v1beta/",
+            |_| async {
+                Ok(serde_json::to_vec(&json!({
                 "models": [
                     {
                         "name": "models/chat",
@@ -690,10 +722,12 @@ mod tests {
                 ]
             }))
             .expect("page"))
-        })
+            },
+        )
         .await
         .expect("rows");
         assert_eq!(rows.len(), 3);
+        assert_eq!(dropped, ["embed", "image", "video"]);
         assert_eq!(rows[0]["id"], "chat");
         assert_eq!(rows[0]["displayName"], "Chat");
         assert_eq!(rows[0]["inputTokenLimit"], 100);
