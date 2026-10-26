@@ -109,7 +109,7 @@ fn resolved_environment_url_child() {
         std::env::var_os(CHILD_CONFIG),
         std::env::var_os(CHILD_OUTPUT),
     ) else {
-        panic!("child helper requires its config and output environment variables");
+        return;
     };
     let error = check(Path::new(&path)).expect_err("resolved invalid URL");
     fs::write(output, error.to_string()).expect("error output");
