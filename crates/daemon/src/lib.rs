@@ -12,7 +12,8 @@ use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, Ope
 use hofund_config::{Config, Value, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 use hofund_plugin_api::{
-    DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue, UpstreamProvider,
+    AgentDescription, DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue,
+    UpstreamProvider,
 };
 use hofund_plugin_host::HttpLimits;
 
@@ -135,6 +136,12 @@ pub use hofund_config::ensure_config_file;
 #[must_use]
 pub fn configured_listen(path: &Path) -> Option<String> {
     load_path(path).ok().map(|config| config.listen.to_string())
+}
+
+/// Static agent descriptions compiled into the plugin registry.
+#[must_use]
+pub fn agent_descriptions() -> &'static [&'static AgentDescription] {
+    hofund_plugin_registry::agents()
 }
 
 /// Model names declared in `path`'s routes.

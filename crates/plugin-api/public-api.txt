@@ -18,15 +18,19 @@ AgentDescription
 AgentDescription #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 AgentDescription::const fn binary (& self) -> & 'static str
 AgentDescription::const fn display_name (& self) -> & 'static str
+AgentDescription::const fn effort_file (& self) -> Option < & 'static str >
 AgentDescription::const fn effort_key (& self) -> Option < & 'static str >
 AgentDescription::const fn files (& self) -> & 'static [AgentFile]
 AgentDescription::const fn from_static (id : PluginId , display_name : & 'static str , binary : & 'static str , files : & 'static [AgentFile] , sets : & 'static [AgentSet] , model_key : Option < & 'static str > , effort_key : Option < & 'static str > , visible : Visible , route : AgentRoute , requires : & 'static [crate :: id :: SurfaceId] ,) -> Self
 AgentDescription::const fn id (& self) -> & PluginId
+AgentDescription::const fn model_file (& self) -> Option < & 'static str >
 AgentDescription::const fn model_key (& self) -> Option < & 'static str >
 AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: SurfaceId]
 AgentDescription::const fn route (& self) -> AgentRoute
 AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
 AgentDescription::const fn visible (& self) -> Visible
+AgentDescription::const fn with_effort_file (mut self , file : & 'static str) -> Self
+AgentDescription::const fn with_model_file (mut self , file : & 'static str) -> Self
 AgentFactory
 AgentFactory::Config
 AgentFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn AgentIntegration > , BuildError >
@@ -35,13 +39,17 @@ AgentFactory::fn description (& self) -> & 'static AgentDescription
 AgentFactory::fn validate (& self , raw : & RawTable) -> Result < Self :: Config , ConfigError >
 AgentFile
 AgentFile #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentFile::const fn create (& self) -> bool
 AgentFile::const fn env_override (& self) -> Option < & 'static str >
+AgentFile::const fn env_replaces (& self) -> Option < & 'static str >
 AgentFile::const fn from_static (id : & 'static str , kind : FileKind , linux : & 'static str , macos : & 'static str , windows : & 'static str , env_override : Option < & 'static str > ,) -> Self
 AgentFile::const fn id (& self) -> & 'static str
 AgentFile::const fn kind (& self) -> FileKind
 AgentFile::const fn linux (& self) -> & 'static str
 AgentFile::const fn macos (& self) -> & 'static str
 AgentFile::const fn windows (& self) -> & 'static str
+AgentFile::const fn with_create (mut self , create : bool) -> Self
+AgentFile::const fn with_env_replaces (mut self , prefix : & 'static str) -> Self
 AgentIntegration
 AgentIntegration::fn custom_write (& self , ctx : & WriteCtx , target : & GatewayTarget ,) -> Result < Option < Plan > , PluginError >
 AgentIntegration::fn description (& self) -> & 'static AgentDescription
@@ -152,6 +160,7 @@ FileChange::fn new (path : impl Into < PathBuf > , before : Vec < u8 > , after :
 FileChange::fn path (& self) -> & Path
 FileKind
 FileKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+FileKind::Env
 FileKind::Json
 FileKind::Toml
 GatewayTarget
@@ -476,10 +485,12 @@ Slot
 Slot #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 Slot::CatalogModels
 Slot::Literal
+Slot::ModelIfUnset
 Slot::ModelTier
 Slot::Origin
 Slot::Token
 Slot::V1
+Slot::const fn model_if_unset (from : Option < & 'static str >) -> Self
 SpawnRequest
 SpawnRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SpawnRequest::fn args (& self) -> & [OsString]

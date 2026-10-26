@@ -1,0 +1,17 @@
+{
+  "keep_user": true,
+  "model": {
+    "name": "fixture-fable-5"
+  },
+  "legacy_model": "legacy-model",
+  "origin": "http://127.0.0.1:3425",
+  "token": "old-token",
+  "literal": "value",
+  "selected": {
+    "model": "legacy-model"
+  },
+  "tiers": {
+    "opus": "fixture-fable-5",
+    "fable": "fixture-fable-5"
+  }
+}

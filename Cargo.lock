@@ -1617,6 +1617,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures-util",
+ "hofund-agent",
  "hofund-codec",
  "hofund-config",
  "hofund-daemon",
@@ -1688,7 +1689,12 @@ dependencies = [
 name = "hofund-kit-agent"
 version = "0.1.0"
 dependencies = [
+ "hofund-agent",
+ "hofund-plugin-api",
  "hofund-plugin-host",
+ "serde",
+ "serde_json",
+ "toml 0.8.2",
 ]
 
 [[package]]
@@ -1761,13 +1767,16 @@ name = "hofund-plugin-registry"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "hofund-kit-agent",
  "hofund-kit-upstream",
  "hofund-plugin-api",
  "hofund-plugin-echo",
+ "hofund-plugin-registry",
  "hofund-plugin-relay",
  "hofund-plugin-sdk",
  "hofund-provider",
  "hofund-quirks",
+ "serde",
  "serde_json",
  "tokio",
  "toml 0.8.2",

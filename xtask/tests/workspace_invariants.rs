@@ -50,6 +50,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-config" => &[],
         "hofund-desktop" => &["hofund-agent", "hofund-daemon"],
         "hofund-daemon" => &[
+            "hofund-agent",
             "hofund-codec",
             "hofund-config",
             "hofund-gateway",
@@ -72,7 +73,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-usage",
         ],
         "hofund-ir" => &[],
-        "hofund-kit-agent" => &["hofund-plugin-host"],
+        "hofund-kit-agent" => &["hofund-agent", "hofund-plugin-api", "hofund-plugin-host"],
         "hofund-kit-subscription" => &["hofund-plugin-host"],
         "hofund-kit-upstream" => &["hofund-plugin-api", "hofund-plugin-host"],
         "hofund-plugin-api" => &["hofund-ir"],
@@ -80,6 +81,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-echo" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-fixture" => &["hofund-plugin-api"],
         "hofund-plugin-registry" => &[
+            "hofund-kit-agent",
             "hofund-kit-upstream",
             "hofund-plugin-api",
             "hofund-plugin-echo",

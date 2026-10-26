@@ -1,6 +1,6 @@
 [package]
 name = "hofund-kit-agent"
-description = "Test host for agent plugins. Unpublished."
+description = "Golden conformance and test host for agent plugins. Unpublished."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -11,7 +11,12 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hofund-agent = { workspace = true }
+hofund-plugin-api = { workspace = true }
 hofund-plugin-host = { workspace = true }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "0.8.2"
 
 [lints]
 workspace = true

@@ -41,7 +41,8 @@
 //!   <https://opencode.ai/docs/config/>,
 //!   <https://opencode.ai/docs/providers/>.
 
-use std::ffi::OsString;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 // Referenced so this crate's manifest dependency is compiled, not merely declared.
@@ -56,20 +57,66 @@ mod catalog;
 mod edit;
 mod store;
 
-pub use catalog::{adapters, find};
+pub use catalog::{Catalog, Compiled, adapters, catalog, find, resolve};
+
+/// The operating system path template selected by a compiled adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetOs {
+    /// Linux and other Unix-like systems.
+    Linux,
+    /// macOS.
+    Macos,
+    /// Windows.
+    Windows,
+}
+
+impl TargetOs {
+    /// The operating system running this process.
+    #[must_use]
+    pub const fn current() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            return Self::Macos;
+        }
+        #[cfg(windows)]
+        {
+            return Self::Windows;
+        }
+        #[cfg(all(not(target_os = "macos"), not(windows)))]
+        {
+            Self::Linux
+        }
+    }
+}
 
 /// The home directory and optional path overrides an adapter reads.
 ///
 /// Tests build a session with [`Session::new`] and never touch the real home
 /// directory. [`Session::from_process_env`] is what the CLI uses.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Session {
     home: PathBuf,
     path: Option<OsString>,
+    env: BTreeMap<OsString, OsString>,
     claude_config_dir: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     gemini_cli_home: Option<PathBuf>,
     xdg_config_home: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Session")
+            .field("home", &self.home)
+            .field("path", &self.path)
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("claude_config_dir", &self.claude_config_dir)
+            .field("codex_home", &self.codex_home)
+            .field("gemini_cli_home", &self.gemini_cli_home)
+            .field("xdg_config_home", &self.xdg_config_home)
+            .finish()
+    }
 }
 
 impl Session {
@@ -79,6 +126,7 @@ impl Session {
         Self {
             home: home.into(),
             path: None,
+            env: BTreeMap::new(),
             claude_config_dir: None,
             codex_home: None,
             gemini_cli_home: None,
@@ -86,13 +134,13 @@ impl Session {
         }
     }
 
-    /// Reads `HOME` or `USERPROFILE`, `PATH`, `CLAUDE_CONFIG_DIR`,
-    /// `CODEX_HOME`, `GEMINI_CLI_HOME`, and `XDG_CONFIG_HOME`.
+    /// Captures the process environment and reads the home directory and `PATH`.
     #[must_use]
     pub fn from_process_env() -> Self {
         Self {
             home: home_dir(),
             path: std::env::var_os("PATH"),
+            env: std::env::vars_os().collect(),
             claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
             codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
             gemini_cli_home: std::env::var_os("GEMINI_CLI_HOME").map(PathBuf::from),
@@ -102,9 +150,23 @@ impl Session {
         }
     }
 
+    /// Returns an environment value captured in this session.
+    #[must_use]
+    pub fn env(&self, name: impl AsRef<OsStr>) -> Option<&OsStr> {
+        self.env.get(name.as_ref()).map(OsString::as_os_str)
+    }
+
+    /// Sets an environment value in this session.
+    #[must_use]
+    pub fn with_env(mut self, name: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
+        self.env
+            .insert(name.as_ref().to_os_string(), value.as_ref().to_os_string());
+        self
+    }
+
     /// Sets the `PATH` used to detect an installed binary.
     #[must_use]
-    pub fn with_path(mut self, path: impl AsRef<std::ffi::OsStr>) -> Self {
+    pub fn with_path(mut self, path: impl AsRef<OsStr>) -> Self {
         self.path = Some(path.as_ref().to_os_string());
         self
     }
@@ -113,6 +175,12 @@ impl Session {
     #[must_use]
     pub fn with_claude_config_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.claude_config_dir = Some(path.into());
+        if let Some(path) = &self.claude_config_dir {
+            self.env.insert(
+                OsString::from("CLAUDE_CONFIG_DIR"),
+                path.as_os_str().to_os_string(),
+            );
+        }
         self
     }
 
@@ -120,6 +188,12 @@ impl Session {
     #[must_use]
     pub fn with_codex_home(mut self, path: impl Into<PathBuf>) -> Self {
         self.codex_home = Some(path.into());
+        if let Some(path) = &self.codex_home {
+            self.env.insert(
+                OsString::from("CODEX_HOME"),
+                path.as_os_str().to_os_string(),
+            );
+        }
         self
     }
 
@@ -127,6 +201,12 @@ impl Session {
     #[must_use]
     pub fn with_gemini_cli_home(mut self, path: impl Into<PathBuf>) -> Self {
         self.gemini_cli_home = Some(path.into());
+        if let Some(path) = &self.gemini_cli_home {
+            self.env.insert(
+                OsString::from("GEMINI_CLI_HOME"),
+                path.as_os_str().to_os_string(),
+            );
+        }
         self
     }
 
@@ -137,6 +217,12 @@ impl Session {
     #[must_use]
     pub fn with_xdg_config_home(mut self, path: impl Into<PathBuf>) -> Self {
         self.xdg_config_home = Some(path.into());
+        if let Some(path) = &self.xdg_config_home {
+            self.env.insert(
+                OsString::from("XDG_CONFIG_HOME"),
+                path.as_os_str().to_os_string(),
+            );
+        }
         self
     }
 }
@@ -267,4 +353,20 @@ fn home_dir() -> PathBuf {
     #[cfg(not(windows))]
     let found = std::env::var_os("HOME");
     found.map_or_else(|| PathBuf::from("."), PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Session;
+
+    #[test]
+    fn debug_shows_environment_names_without_values() {
+        let session = Session::new("home")
+            .with_env("SECRET_NAME", "do-not-print-this")
+            .with_codex_home("relative");
+        let debug = format!("{session:?}");
+        assert!(debug.contains("SECRET_NAME"), "{debug}");
+        assert!(debug.contains("codex_home"), "{debug}");
+        assert!(!debug.contains("do-not-print-this"), "{debug}");
+    }
 }
