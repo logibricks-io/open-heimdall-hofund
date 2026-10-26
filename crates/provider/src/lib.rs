@@ -27,7 +27,7 @@ pub use generative::Generative;
 pub use http::{Credential, Endpoint, pooled_reqwest};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
 pub use presets::{PresetError, Resolve, Resolved, Wire, catalog_commit, resolve};
-pub use vertex::Vertex;
+pub use vertex::{Vertex, check_credentials_file as check_vertex_credentials_file};
 
 pub use hofund_plugin_api::{
     DynSubscriptionFactory, DynUpstreamFactory, InboundSurface, Subscription, SubscriptionFactory,

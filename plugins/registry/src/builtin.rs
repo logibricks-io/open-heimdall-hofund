@@ -111,8 +111,8 @@ impl UpstreamFactory for OpenAiFactory {
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        let mut config = read_endpoint(raw, true, &[])?;
-        config.protocol = Some(read_protocol(raw)?);
+        let mut config = read_endpoint(UpstreamFactory::spec(self), raw, true, &[])?;
+        config.protocol = Some(read_protocol(raw, &config.endpoint.id)?);
         Ok(config)
     }
 
@@ -143,7 +143,7 @@ impl UpstreamFactory for AnthropicFactory {
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        read_endpoint(raw, false, &[])
+        read_endpoint(UpstreamFactory::spec(self), raw, false, &[])
     }
 
     fn build(
@@ -172,7 +172,7 @@ impl UpstreamFactory for GenerativeFactory {
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        read_endpoint(raw, false, &[])
+        read_endpoint(UpstreamFactory::spec(self), raw, false, &[])
     }
 
     fn build(
@@ -211,14 +211,20 @@ impl UpstreamFactory for VertexFactory {
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        let config = read_endpoint(raw, false, VERTEX_OPTIONS)?;
+        let config = read_endpoint(UpstreamFactory::spec(self), raw, false, VERTEX_OPTIONS)?;
+        let id = config.endpoint.id.as_str();
         Ok(VertexConfig {
+            credentials: option_string(raw, "credentials", id)?,
+            impersonate: option_string(raw, "impersonate", id)?,
+            token_url: option_string(raw, "token_url", id)?,
+            iam_root: option_string(raw, "iam_root", id)?,
             endpoint: config.endpoint,
-            credentials: option_string(raw, "credentials")?,
-            impersonate: option_string(raw, "impersonate")?,
-            token_url: option_string(raw, "token_url")?,
-            iam_root: option_string(raw, "iam_root")?,
         })
+    }
+
+    fn preflight(&self, cfg: &Self::Config) -> Result<(), ConfigError> {
+        hofund_provider::check_vertex_credentials_file(&cfg.endpoint.id, &cfg.credentials)
+            .map_err(|error| ConfigError::new(error.to_string()))
     }
 
     fn build(
@@ -264,13 +270,14 @@ impl UpstreamFactory for BedrockFactory {
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        let config = read_endpoint(raw, false, BEDROCK_OPTIONS)?;
+        let config = read_endpoint(UpstreamFactory::spec(self), raw, false, BEDROCK_OPTIONS)?;
+        let id = config.endpoint.id.as_str();
         Ok(BedrockConfig {
+            region: option_string(raw, "region", id)?,
+            access_key_id: option_string(raw, "access_key_id", id)?,
+            secret_access_key: option_string(raw, "secret_access_key", id)?,
+            session_token: option_string(raw, "session_token", id)?,
             endpoint: config.endpoint,
-            region: option_string(raw, "region")?,
-            access_key_id: option_string(raw, "access_key_id")?,
-            secret_access_key: option_string(raw, "secret_access_key")?,
-            session_token: option_string(raw, "session_token")?,
         })
     }
 
@@ -331,8 +338,12 @@ impl UpstreamProvider for Bridged {
     }
 }
 
-fn reject_options(raw: &RawTable, protocol: bool, options: &[&str]) -> Result<(), ConfigError> {
-    let id = provider_id(raw);
+fn reject_options(
+    raw: &RawTable,
+    id: &str,
+    protocol: bool,
+    options: &[&str],
+) -> Result<(), ConfigError> {
     for key in raw.keys() {
         if is_kernel(key, protocol) {
             continue;
@@ -360,10 +371,13 @@ fn is_kernel(key: &str, protocol: bool) -> bool {
     ) || (protocol && key == "protocol")
 }
 
-fn provider_id(raw: &RawTable) -> &str {
+fn required_id<'a>(raw: &'a RawTable, spec: &UpstreamSpec) -> Result<&'a str, ConfigError> {
     match raw.get("id") {
-        Some(RawValue::String(id)) if !id.is_empty() => id.as_str(),
-        _ => "unknown",
+        Some(RawValue::String(id)) if !id.is_empty() => Ok(id.as_str()),
+        _ => Err(
+            ConfigError::new(format!("`{}` provider has no `id`", spec.plugin().as_str()))
+                .with_path("id"),
+        ),
     }
 }
 
@@ -375,8 +389,8 @@ fn option_schema(fields: &[&str]) -> Schema {
     Schema::object(listed, &[]).expect("option schema")
 }
 
-fn option_string(raw: &RawTable, key: &str) -> Result<String, ConfigError> {
-    Ok(optional_string(raw, key)?.unwrap_or_default())
+fn option_string(raw: &RawTable, key: &str, id: &str) -> Result<String, ConfigError> {
+    Ok(optional_string(raw, key, id)?.unwrap_or_default())
 }
 
 fn attach_client(endpoint: &mut Endpoint, host: &HostContext) {
@@ -389,21 +403,22 @@ fn attach_client(endpoint: &mut Endpoint, host: &HostContext) {
 }
 
 fn read_endpoint(
+    spec: &'static UpstreamSpec,
     raw: &RawTable,
     protocol: bool,
     options: &[&str],
 ) -> Result<EndpointConfig, ConfigError> {
-    reject_options(raw, protocol, options)?;
-    let id = required_string(raw, "id")?;
-    let base_url = required_string(raw, "base_url")?;
+    let id = required_id(raw, spec)?;
+    reject_options(raw, id, protocol, options)?;
+    let base_url = required_string(raw, "base_url", id)?;
     let mut endpoint = Endpoint::new(id, base_url);
-    if let Some(value) = optional_string(raw, "api_key")? {
+    if let Some(value) = optional_string(raw, "api_key", id)? {
         endpoint.api_key = value;
     }
-    if let Some(value) = optional_string(raw, "credential")? {
+    if let Some(value) = optional_string(raw, "credential", id)? {
         endpoint.credential = read_credential(&value)?;
     }
-    if let Some(value) = optional_string(raw, "quirks")? {
+    if let Some(value) = optional_string(raw, "quirks", id)? {
         endpoint.quirks = Some(
             named(&value)
                 .ok_or_else(|| ConfigError::new("unknown quirk profile").with_path("quirks"))?,
@@ -416,8 +431,8 @@ fn read_endpoint(
     })
 }
 
-fn read_protocol(raw: &RawTable) -> Result<OpenAiProtocol, ConfigError> {
-    match optional_string(raw, "protocol")? {
+fn read_protocol(raw: &RawTable, id: &str) -> Result<OpenAiProtocol, ConfigError> {
+    match optional_string(raw, "protocol", id)? {
         Some(value) if value == "chat" => Ok(OpenAiProtocol::Chat),
         Some(value) if value == "responses" => Ok(OpenAiProtocol::Responses),
         Some(_) => {
@@ -456,20 +471,19 @@ fn read_headers(raw: &RawTable) -> Result<Vec<(String, String)>, ConfigError> {
     Ok(headers)
 }
 
-fn required_string(raw: &RawTable, key: &str) -> Result<String, ConfigError> {
-    match optional_string(raw, key)? {
+fn required_string(raw: &RawTable, key: &str, id: &str) -> Result<String, ConfigError> {
+    match optional_string(raw, key, id)? {
         Some(value) if !value.is_empty() => Ok(value),
         _ => Err(ConfigError::new("missing string").with_path(key)),
     }
 }
 
-fn optional_string(raw: &RawTable, key: &str) -> Result<Option<String>, ConfigError> {
+fn optional_string(raw: &RawTable, key: &str, id: &str) -> Result<Option<String>, ConfigError> {
     match raw.get(key) {
         None => Ok(None),
         Some(RawValue::String(value)) => Ok(Some(value.clone())),
         Some(_) => Err(ConfigError::new(format!(
-            "provider `{}` option `{key}` must be a string",
-            provider_id(raw)
+            "provider `{id}` option `{key}` must be a string"
         ))
         .with_path(key)),
     }
@@ -561,6 +575,48 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("demo-project"), "{text}");
+    }
+
+    #[test]
+    fn a_missing_empty_or_mistyped_id_is_rejected_before_options() {
+        for id in [
+            None,
+            Some(RawValue::String(String::new())),
+            Some(RawValue::Integer(1)),
+        ] {
+            let mut vertex = match id {
+                Some(id) => {
+                    let mut table = raw("temporary");
+                    table.insert("id", id);
+                    table
+                }
+                None => RawTable::new(),
+            };
+            vertex.insert(
+                "unknown_option",
+                RawValue::String("SENTINEL-UNKNOWN-OPTION".to_owned()),
+            );
+            let Err(error) = UpstreamFactory::validate(&VertexFactory, &vertex) else {
+                panic!("invalid id was accepted");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("`google-vertex` provider has no `id`"),
+                "{error}"
+            );
+            assert!(!error.to_string().contains("SENTINEL-UNKNOWN-OPTION"));
+        }
+    }
+
+    #[test]
+    fn raw_environment_references_pass_the_shape_check() {
+        let mut vertex = raw("vertex");
+        vertex.insert(
+            "token_url",
+            RawValue::String("env:HOFUND_VERTEX_TEST_URL".to_owned()),
+        );
+        UpstreamFactory::validate(&VertexFactory, &vertex).expect("shape");
     }
 
     #[test]

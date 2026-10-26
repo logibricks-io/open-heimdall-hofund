@@ -163,10 +163,27 @@ pub trait UpstreamFactory: Send + Sync + 'static {
 
     /// Checks `raw` before any provider exists.
     ///
+    /// The daemon calls this twice: before resolving `env:` references, and again
+    /// on the resolved table through `validate_and_build`. Both passes must check
+    /// only shape: keys and value types. Value checks belong in `build`, which
+    /// runs after the second pass.
+    ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when `raw` is not valid for this plugin.
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError>;
+
+    /// Checks the environment that the resolved config names, such as files,
+    /// for `hofund config check` only. Daemon startup never calls this method,
+    /// so providers stay lazy about resources that may appear later.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when the named environment is not usable.
+    fn preflight(&self, cfg: &Self::Config) -> Result<(), ConfigError> {
+        let _ = cfg;
+        Ok(())
+    }
 
     /// Builds the provider. `cfg` has already been validated.
     ///
@@ -190,10 +207,23 @@ pub trait DynUpstreamFactory: Send + Sync + 'static {
 
     /// Validates `raw` without building a provider.
     ///
+    /// The daemon calls this before resolving `env:` references.
+    /// `validate_and_build` repeats validation on the resolved table before
+    /// calling `build`. Both passes must check only shape: keys and value types.
+    /// Value checks belong in `build`.
+    ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when the raw table fails the factory schema.
     fn validate(&self, raw: &RawTable) -> Result<(), ConfigError>;
+
+    /// Validates resolved `raw` and checks the environment it names for
+    /// `hofund config check` only. Daemon startup never calls this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when validation or the environment check fails.
+    fn preflight(&self, raw: &RawTable) -> Result<(), ConfigError>;
 
     /// Validates `raw` and builds the provider.
     ///
@@ -222,6 +252,11 @@ where
 
     fn validate(&self, raw: &RawTable) -> Result<(), ConfigError> {
         UpstreamFactory::validate(self, raw).map(drop)
+    }
+
+    fn preflight(&self, raw: &RawTable) -> Result<(), ConfigError> {
+        let cfg = UpstreamFactory::validate(self, raw)?;
+        UpstreamFactory::preflight(self, &cfg)
     }
 
     fn validate_and_build(

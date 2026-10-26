@@ -41,6 +41,8 @@ pub struct Bedrock {
     access_key_id: String,
     secret_access_key: String,
     session_token: String,
+    #[cfg(test)]
+    signing: Option<(SystemTime, String)>,
 }
 
 impl std::fmt::Debug for Bedrock {
@@ -100,7 +102,15 @@ impl Bedrock {
             access_key_id,
             secret_access_key,
             session_token,
+            #[cfg(test)]
+            signing: None,
         })
+    }
+
+    #[cfg(test)]
+    fn with_signing(mut self, time: SystemTime, host: &str) -> Self {
+        self.signing = Some((time, host.to_owned()));
+        self
     }
 }
 
@@ -126,8 +136,15 @@ impl Provider for Bedrock {
             .map_err(|error| ProviderError::decode(format!("provider URL is invalid: {error}")))?;
         let codec = Converse;
         let body = http::prepare_body(&self.upstream, &codec, request, None, inbound_protocol)?;
+        #[cfg(test)]
+        let (signing_time, signing_host) = self
+            .signing
+            .clone()
+            .unwrap_or_else(|| (SystemTime::now(), host_header(&parsed)));
+        #[cfg(not(test))]
+        let (signing_time, signing_host) = (SystemTime::now(), host_header(&parsed));
         let amz_date = sigv4::amz_date(
-            SystemTime::now()
+            signing_time
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0),
@@ -135,7 +152,7 @@ impl Provider for Bedrock {
         let hash = sigv4::payload_hash(&body);
         let mut ours = vec![
             ("content-type".to_owned(), "application/json".to_owned()),
-            ("host".to_owned(), host_header(&parsed)),
+            ("host".to_owned(), signing_host),
             ("x-amz-content-sha256".to_owned(), hash),
             ("x-amz-date".to_owned(), amz_date.clone()),
         ];
@@ -344,7 +361,7 @@ mod tests {
         .expect("client");
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path_regex(
-                "/model/anthropic\\.claude-3-sonnet-20240229-v1(?::|%3A)0/converse",
+                "/model/anthropic\\.claude-3-sonnet-20240229-v1%3A0/converse",
             ))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -382,6 +399,72 @@ mod tests {
         let body: serde_json::Value = requests[0].body_json().expect("body");
         assert_eq!(body["messages"][0]["content"][0]["text"], "hi");
         assert!(body.get("model").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_adapter_signs_a_colon_path_with_the_botocore_vector() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/model/anthropic.claude-3-5-sonnet-20240620-v1%3A0/converse",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": {"message": {"role": "assistant", "content": [{"text": "ok"}]}},
+                    "stopReason": "end_turn",
+                    "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2}
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider = Bedrock::new(
+            Endpoint::new("bedrock", server.uri()),
+            "us-east-1",
+            "AKIDEXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "SESSIONTOKENEXAMPLE",
+        )
+        .expect("client")
+        .with_signing(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_440_938_160),
+            "bedrock-runtime.us-east-1.amazonaws.com",
+        );
+        let mut request = Request::new("anthropic.claude-3-5-sonnet-20240620-v1:0");
+        let mut user = hofund_ir::Message::new(Role::User);
+        user.content.push(ContentPart::text("hi"));
+        request.messages = vec![user];
+        provider
+            .execute(request, "openai-chat")
+            .await
+            .expect("execute");
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(
+            requests[0].body,
+            br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}]}"#
+        );
+        // botocore 1.43.118 SigV4Auth for service bedrock, with the port-free
+        // signing host pinned above so the expected value is independent of the
+        // ephemeral test-server port.
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("authorization")
+                .expect("authorization")
+                .to_str()
+                .expect("text"),
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=9acaa85e4b0b79f684cb81d4050d66206f71f74d9b7145bfbaa74b72a2c04655"
+        );
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("x-amz-date")
+                .expect("date")
+                .to_str()
+                .expect("text"),
+            "20150830T123600Z"
+        );
     }
 
     #[test]

@@ -719,6 +719,24 @@ upstreams = [\"vertex\"]
 }
 
 #[tokio::test]
+async fn vertex_startup_allows_a_credentials_file_that_does_not_exist_yet() {
+    let dir = scratch();
+    let missing = dir.join("not-created-yet.json");
+    let config = dir.join("hofund.toml");
+    fs::write(
+        &config,
+        format!(
+            "listen = \"127.0.0.1:0\"\ntoken_file = \"token\"\nusage_file = \"usage.sqlite\"\n[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n[providers.options]\nproject = \"demo-project\"\ncredentials = {:?}\n",
+            missing.to_string_lossy()
+        ),
+    )
+    .expect("config");
+    let running = start_for_test(&config).await.expect("lazy startup");
+    running.shutdown().await;
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn closed_idle_connection_is_retried() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
