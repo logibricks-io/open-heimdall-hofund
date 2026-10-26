@@ -25,6 +25,8 @@ pub enum CredentialStyle {
     XApiKey,
     /// Both the Messages `x-api-key` header and a bearer token.
     MessagesBoth,
+    /// AWS Signature Version 4, computed by the plugin rather than placed by the SDK.
+    SigV4,
     /// A header name the plugin supplies, such as `x-acme-key`.
     NamedHeader(HeaderName),
 }
@@ -186,6 +188,13 @@ pub trait DynUpstreamFactory: Send + Sync + 'static {
     /// The form the desktop renders.
     fn config_schema(&self) -> Schema;
 
+    /// Validates `raw` without building a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when the raw table fails the factory schema.
+    fn validate(&self, raw: &RawTable) -> Result<(), ConfigError>;
+
     /// Validates `raw` and builds the provider.
     ///
     /// # Errors
@@ -211,12 +220,16 @@ where
         UpstreamFactory::config_schema(self)
     }
 
+    fn validate(&self, raw: &RawTable) -> Result<(), ConfigError> {
+        UpstreamFactory::validate(self, raw).map(drop)
+    }
+
     fn validate_and_build(
         &self,
         raw: &RawTable,
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
-        let cfg = self.validate(raw)?;
+        let cfg = UpstreamFactory::validate(self, raw)?;
         self.build(&cfg, host)
     }
 }

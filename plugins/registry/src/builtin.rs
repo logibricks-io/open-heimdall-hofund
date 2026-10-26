@@ -63,12 +63,10 @@ static VERTEX_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     ListKind::Unsupported,
 );
 
-/// Bedrock signs with SigV4. `CredentialStyle` has no signed variant, and the
-/// adapter rejects an API key. The style is not consulted at build time.
 static BEDROCK_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     PluginId::from_static("bedrock"),
     &[ProtocolId::BEDROCK_CONVERSE],
-    CredentialStyle::Bearer,
+    CredentialStyle::SigV4,
     ListKind::Unsupported,
 );
 

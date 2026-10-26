@@ -2,6 +2,8 @@
 //!
 //! `list_models` and the connectivity probe use this. The helper does not
 //! send a request. Error text is a fixed sentence and does not include the body.
+//! A paging loop with a page limit and repeated-cursor guard is deferred to
+//! PR E2 (model listing).
 
 use std::fmt;
 

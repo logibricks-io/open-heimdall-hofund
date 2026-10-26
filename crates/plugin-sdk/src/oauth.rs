@@ -3,7 +3,8 @@
 //! This is the piece a provider needs when it trades a refresh token or a
 //! signed JWT. PKCE, the loopback callback, and device-flow polling are not
 //! here. Error text is a fixed sentence. The response body is never copied
-//! into it.
+//! into it. OAuth token caching, refresh, and single-flight move into this
+//! module in row H (subscription plugins); Vertex keeps its own cache until then.
 
 use std::fmt;
 use std::time::Duration;

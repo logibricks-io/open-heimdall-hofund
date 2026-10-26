@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use hofund_daemon::{check, start};
+use hofund_daemon::{check, start_for_test};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -114,7 +114,7 @@ upstreams = ["primary"]
 async fn listen(dir: &Path, text: &str) -> (hofund_daemon::Running, String) {
     let config = dir.join("hofund.toml");
     fs::write(&config, text).expect("config");
-    let running = start(&config).await.expect("start");
+    let running = start_for_test(&config).await.expect("start");
     let token = fs::read_to_string(dir.join("token")).expect("token");
     (running, token.trim().to_owned())
 }

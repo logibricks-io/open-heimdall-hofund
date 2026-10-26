@@ -17,7 +17,7 @@ relay = ["dep:hofund-plugin-relay"]
 
 [dependencies]
 futures-util = "0.3.32"
-hofund-plugin-api = { workspace = true }
+hofund-plugin-api = { workspace = true, features = ["kernel-internal"] }
 hofund-plugin-sdk = { workspace = true }
 hofund-plugin-echo = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }
