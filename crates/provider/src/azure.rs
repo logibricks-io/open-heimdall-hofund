@@ -138,21 +138,6 @@ fn stop_after_url_error(error: &PluginError) -> bool {
     error.kind() == PluginErrorKind::Cancelled
 }
 
-#[cfg(test)]
-mod tests {
-    use hofund_plugin_api::PluginError;
-
-    use super::stop_after_url_error;
-
-    #[test]
-    fn a_cancelled_url_error_stops_before_the_second_url() {
-        assert!(stop_after_url_error(&PluginError::cancelled("stop")));
-        assert!(!stop_after_url_error(&PluginError::timeout(
-            "try the fallback"
-        )));
-    }
-}
-
 fn azure_rows(
     rows: &[Value],
     deployments: bool,
@@ -190,5 +175,20 @@ fn provider_error(error: PluginError) -> ProviderError {
         kind,
         message: error.message().to_owned(),
         status: error.status(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hofund_plugin_api::PluginError;
+
+    use super::stop_after_url_error;
+
+    #[test]
+    fn a_cancelled_url_error_stops_before_the_second_url() {
+        assert!(stop_after_url_error(&PluginError::cancelled("stop")));
+        assert!(!stop_after_url_error(&PluginError::timeout(
+            "try the fallback"
+        )));
     }
 }
