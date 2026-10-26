@@ -7,6 +7,7 @@
 //! The daemon adapts each member into a service and wraps that service in the
 //! kernel layers.
 
+mod cooldown;
 mod member;
 mod snapshot;
 
@@ -19,6 +20,7 @@ use hofund_ir::{StreamEvent, estimate_input_tokens};
 use hofund_plugin_api::{BodyStream, CountOutcome, PluginErrorKind};
 use tracing::Instrument;
 
+pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::Member;
 pub use snapshot::Snapshot;
@@ -88,6 +90,7 @@ pub struct Router {
     routes: BTreeMap<String, Vec<Hop>>,
     providers: BTreeSet<String>,
     policy: FailoverPolicy,
+    cooldowns: Option<Arc<Cooldowns>>,
 }
 
 /// A counted input.
@@ -142,7 +145,21 @@ impl Router {
             routes,
             providers,
             policy,
+            cooldowns: None,
         }
+    }
+
+    /// Shares cooldown state with this router and later snapshots.
+    #[must_use]
+    pub fn with_cooldowns(mut self, cooldowns: Arc<Cooldowns>) -> Self {
+        self.cooldowns = Some(cooldowns);
+        self
+    }
+
+    /// Cooldown state used to order members, when configured.
+    #[must_use]
+    pub const fn cooldowns(&self) -> Option<&Arc<Cooldowns>> {
+        self.cooldowns.as_ref()
     }
 
     /// Member ids on the current routes, in first-seen order.
@@ -195,7 +212,10 @@ impl Router {
         inbound_protocol: &str,
     ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
-        let resolved = self.resolve(&asked)?;
+        let mut resolved = self.resolve(&asked)?;
+        if let Some(cooldowns) = &self.cooldowns {
+            resolved.hops = order_hops(resolved.hops, cooldowns);
+        }
         let policy = self.policy.clone();
         let mut last = None;
         for (index, hop) in resolved.hops.iter().enumerate() {
@@ -250,7 +270,10 @@ impl Router {
         request: &Request,
         inbound_protocol: &str,
     ) -> Result<InputCount, RouterError> {
-        let resolved = self.resolve(&request.model)?;
+        let mut resolved = self.resolve(&request.model)?;
+        if let Some(cooldowns) = &self.cooldowns {
+            resolved.hops = order_hops(resolved.hops, cooldowns);
+        }
         let policy = self.policy.clone();
         let mut last = None;
         let mut unsupported = false;
@@ -411,6 +434,37 @@ pub enum RouterError {
     },
 }
 
+fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns) -> Vec<Hop> {
+    let mut ready = Vec::with_capacity(hops.len());
+    let mut cooling = Vec::new();
+    for hop in hops {
+        if let Some(state) = cooldowns.cooling(hop.member.id()) {
+            cooling.push((hop, state.until()));
+        } else {
+            ready.push(hop);
+        }
+    }
+    let mut probe = None;
+    for (index, (_, until)) in cooling.iter().enumerate() {
+        if probe.is_none_or(|(_, soonest): (usize, Instant)| *until < soonest) {
+            probe = Some((index, *until));
+        }
+    }
+    let probe = probe.map(|(index, _)| index);
+    for (index, (hop, until)) in cooling.into_iter().enumerate() {
+        if probe == Some(index) {
+            ready.push(hop);
+        } else {
+            tracing::debug!(
+                "member.id" = %hop.member.id(),
+                "cooldown.until" = ?until,
+                "member_cooldown_skip"
+            );
+        }
+    }
+    ready
+}
+
 fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {
     request.model = hop.wire_model.clone().unwrap_or_else(|| bare.to_owned());
     if request.params.max_tokens.is_none() {
@@ -516,4 +570,120 @@ fn result_status(error: Option<&PluginError>) -> String {
 
 fn u128_as_u64(value: u128) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use async_trait::async_trait;
+    use hofund_plugin_api::{MemberKey, PresetId};
+
+    use super::{
+        CooldownPolicy, Cooldowns, Hop, Member, MemberId, PluginError, Request, order_hops,
+    };
+
+    struct Fake {
+        id: MemberId,
+        route_id: &'static str,
+    }
+
+    #[async_trait]
+    impl Member for Fake {
+        fn id(&self) -> &MemberId {
+            &self.id
+        }
+
+        fn route_id(&self) -> &str {
+            self.route_id
+        }
+
+        fn protocol(&self) -> &str {
+            "test"
+        }
+
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound: &str,
+        ) -> Result<super::Completion, PluginError> {
+            Err(PluginError::internal("not called"))
+        }
+    }
+
+    fn fixture() -> (Cooldowns, Vec<Hop>) {
+        let now = Arc::new(Mutex::new(Instant::now()));
+        let clock = Arc::clone(&now);
+        let book = Cooldowns::with_clock(
+            CooldownPolicy::default(),
+            Arc::new(move || *clock.lock().expect("clock")),
+        );
+        let hops = ["first", "second", "third", "fourth"]
+            .into_iter()
+            .map(|id| Hop {
+                member: Arc::new(Fake {
+                    id: MemberId::from_preset(
+                        PresetId::from_static(id),
+                        MemberKey::from_static("row"),
+                    ),
+                    route_id: id,
+                }),
+                wire_model: None,
+                max_output_tokens: None,
+            })
+            .collect();
+        (book, hops)
+    }
+
+    fn cool(book: &Cooldowns, hop: &Hop, seconds: u64) {
+        book.observe(hop.member.id(), Some(Duration::from_secs(seconds)), Some(0));
+    }
+
+    #[test]
+    fn ready_members_keep_order_and_only_the_soonest_cooling_member_probes() {
+        let (book, hops) = fixture();
+        cool(&book, &hops[0], 300);
+        cool(&book, &hops[2], 60);
+        let ordered = order_hops(hops, &book);
+        let ids = ordered
+            .iter()
+            .map(|hop| hop.member.route_id())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["second", "fourth", "third"]);
+    }
+
+    #[test]
+    fn equal_cooldowns_keep_the_first_configured_probe() {
+        let (book, hops) = fixture();
+        let hops = hops.into_iter().take(3).collect::<Vec<_>>();
+        for hop in &hops {
+            cool(&book, hop, 60);
+        }
+        let ordered = order_hops(hops, &book);
+        assert_eq!(ordered[0].member.route_id(), "first");
+        assert_eq!(ordered.len(), 1);
+    }
+
+    #[test]
+    fn a_lone_cooling_member_is_still_tried() {
+        let (book, hops) = fixture();
+        let hops = vec![hops.into_iter().next().expect("hop")];
+        cool(&book, &hops[0], 60);
+        let ordered = order_hops(hops, &book);
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].member.route_id(), "first");
+    }
+
+    #[test]
+    fn all_cooling_members_reduce_to_the_soonest_probe() {
+        let (book, hops) = fixture();
+        let hops = hops.into_iter().take(3).collect::<Vec<_>>();
+        cool(&book, &hops[0], 300);
+        cool(&book, &hops[1], 60);
+        cool(&book, &hops[2], 120);
+        let ordered = order_hops(hops, &book);
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].member.route_id(), "second");
+    }
 }
