@@ -161,7 +161,7 @@ fn quota_and_credit_use_their_own_limits() {
     book.record_success(&id);
     let quota = PluginError::quota("empty").with_retry_after(Duration::from_secs(9 * DAY));
     book.record_failure(&id, &quota).expect("quota");
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(8 * DAY));
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
     book.record_success(&id);
     let credit = book
         .record_failure(&id, &PluginError::status_error(402, "credit"))
@@ -200,13 +200,18 @@ fn observations_follow_exhaustion_and_retry_hint_rules() {
     book.observe(&id, Some(Duration::from_secs(9 * DAY)), Some(0));
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(8 * DAY));
     book.record_success(&id);
-    book.observe(&id, Some(Duration::from_secs(2 * HOUR)), None);
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
+    book.observe(&id, Some(Duration::ZERO), Some(0));
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(900));
     book.record_success(&id);
-    book.observe(&id, Some(Duration::from_secs(120)), Some(5));
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(120));
-    book.record_success(&id);
+    assert_eq!(
+        book.observe(&id, Some(Duration::from_secs(120)), Some(5)),
+        None
+    );
     assert_eq!(book.observe(&id, None, Some(5)), None);
+    assert_eq!(
+        book.observe(&id, Some(Duration::from_secs(120)), None),
+        None
+    );
     assert_eq!(book.observe(&id, None, None), None);
 }
 
@@ -252,14 +257,14 @@ fn expiry_hides_cooldowns_and_entries() {
 // A non-positive retry hint is absent, so the standard quota rest applies.
 #[test]
 fn zero_retry_after_on_quota_still_rests() {
-    let (book, id, _) = fixture();
+    let (book, id, clock) = fixture();
     let _ = book.record_failure(
         &id,
         &PluginError::quota("used up").with_retry_after(Duration::ZERO),
     );
-    assert!(
-        book.cooling(&id).is_some(),
-        "quota with Retry-After: 0 did not rest"
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(15 * MINUTE)
     );
 }
 
@@ -271,7 +276,7 @@ fn quota_header_retry_after_is_capped_at_one_hour() {
         &id,
         &PluginError::quota("used up").with_retry_after(Duration::from_secs(3 * DAY)),
     );
-    assert!(remaining(&book, &id, &clock) <= Duration::from_secs(HOUR));
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
 }
 
 // A reset hint alone does not cool a member whose window still has capacity.
@@ -280,4 +285,29 @@ fn observation_with_remaining_quota_does_not_rest() {
     let (book, id, _) = fixture();
     let _ = book.observe(&id, Some(Duration::from_secs(30 * MINUTE)), Some(500));
     assert_eq!(book.cooling(&id), None);
+}
+
+#[test]
+fn overflowing_policy_durations_still_cool_far_into_the_future() {
+    let (_, id, clock) = fixture();
+    let mut policy = CooldownPolicy::default();
+    policy.base = Duration::MAX;
+    policy.generic_max = Duration::MAX;
+    policy.quota_default = Duration::MAX;
+    policy.quota_max = Duration::MAX;
+    let manual_clock = Arc::clone(&clock);
+    let book = Cooldowns::with_clock(
+        policy,
+        Arc::new(move || *manual_clock.lock().expect("clock")),
+    );
+    let now = *clock.lock().expect("clock");
+    let quota = book
+        .record_failure(&id, &PluginError::quota("used up"))
+        .expect("quota");
+    assert!(quota.until().duration_since(now) > Duration::from_secs(365 * DAY));
+    let generic = book
+        .record_failure(&id, &PluginError::connect("down"))
+        .expect("generic");
+    assert!(generic.until().duration_since(now) > Duration::from_secs(365 * DAY));
+    assert!(book.cooling(&id).is_some());
 }

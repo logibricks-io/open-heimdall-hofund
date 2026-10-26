@@ -31,6 +31,7 @@ fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration
             let at = httpdate::parse_http_date(value).ok()?;
             at.duration_since(now).ok()
         })
+        .filter(|after| !after.is_zero())
 }
 
 /// Where an API key is written.
@@ -657,10 +658,8 @@ mod tests {
             Some(Duration::from_secs(u64::MAX))
         );
         assert_eq!(parse_retry_after("invalid", now), None);
-        assert_eq!(
-            parse_retry_after(&httpdate::fmt_http_date(now), now),
-            Some(Duration::ZERO)
-        );
+        assert_eq!(parse_retry_after("0", now), None);
+        assert_eq!(parse_retry_after(&httpdate::fmt_http_date(now), now), None);
     }
 
     #[test]

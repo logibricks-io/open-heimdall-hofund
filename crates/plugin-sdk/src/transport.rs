@@ -364,6 +364,7 @@ fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration
             let at = httpdate::parse_http_date(value).ok()?;
             at.duration_since(now).ok()
         })
+        .filter(|after| !after.is_zero())
 }
 
 /// A text response. Plugins return this from [`InboundSurface::handle`](hofund_plugin_api::InboundSurface::handle).
@@ -457,6 +458,8 @@ mod tests {
             Some(Duration::from_secs(u64::MAX))
         );
         assert_eq!(parse_retry_after("invalid", now), None);
+        assert_eq!(parse_retry_after("0", now), None);
+        assert_eq!(parse_retry_after(&httpdate::fmt_http_date(now), now), None);
         let error =
             classify(429, Some(Duration::from_secs(120)), b"slow".to_vec()).expect_err("status");
         assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));

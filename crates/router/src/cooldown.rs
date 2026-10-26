@@ -6,9 +6,9 @@
 //! | --- | --- |
 //! | Generic failure | Starts at 1 minute and doubles for each consecutive failure since the last success, capped at 10 minutes. Connection, timeout, transport, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses. |
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. |
-//! | Exhausted quota | Uses the retry hint capped at 8 days, or 15 minutes without a hint. |
+//! | Exhausted quota | Uses the header retry hint capped at 1 hour, or 15 minutes without a positive hint. |
 //! | HTTP 402 | Uses 30 minutes, or the retry hint capped at 1 hour when that is longer. |
-//! | Passive observation | Exhausted quota uses the retry hint capped at 8 days, or 15 minutes without one. Any other observation with a retry hint uses that hint capped at 1 hour. Remaining quota without a hint does not cool the member. Observations do not advance either failure ladder. |
+//! | Passive observation | An exhausted window uses its stated reset capped at 8 days, or 15 minutes without a positive reset. Any other observation records nothing. Observations do not advance either failure ladder. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
@@ -39,16 +39,14 @@ pub struct CooldownPolicy {
     pub rate_max: Duration,
     /// Time after a rate-limit rest when its ladder is forgotten.
     pub rate_forget: Duration,
-    /// Maximum retry hint for rate-limit and credit failures.
+    /// Maximum HTTP retry hint for every failure cause.
     pub retry_after_max: Duration,
-    /// Cooldown for an exhausted quota without a retry hint.
+    /// Cooldown for an exhausted quota without a positive retry hint.
     pub quota_default: Duration,
-    /// Maximum retry hint for an exhausted quota.
+    /// Maximum vendor-stated reset for an exhausted quota window.
     pub quota_max: Duration,
     /// Minimum cooldown for insufficient credit.
     pub credit: Duration,
-    /// Maximum cooldown for a passive observation that is not exhausted.
-    pub observed_max: Duration,
 }
 
 impl Default for CooldownPolicy {
@@ -62,7 +60,6 @@ impl Default for CooldownPolicy {
             quota_default: Duration::from_secs(15 * 60),
             quota_max: Duration::from_secs(8 * 24 * 60 * 60),
             credit: Duration::from_secs(30 * 60),
-            observed_max: Duration::from_secs(60 * 60),
         }
     }
 }
@@ -201,16 +198,14 @@ impl Cooldowns {
             Failure::Generic(cause) => Self::generic(state, now, &self.policy, cause),
             Failure::RateLimit => self.rate_limit(state, now, error.retry_after()),
             Failure::Quota => {
-                let duration = error
-                    .retry_after()
+                let duration = positive_hint(error.retry_after())
                     .map_or(self.policy.quota_default, |after| {
-                        after.min(self.policy.quota_max)
+                        after.min(self.policy.retry_after_max)
                     });
                 cooling(now, duration, CooldownCause::Quota, state.failures)
             }
             Failure::Credit => {
-                let retry = error
-                    .retry_after()
+                let retry = positive_hint(error.retry_after())
                     .unwrap_or_default()
                     .min(self.policy.retry_after_max);
                 cooling(
@@ -269,20 +264,21 @@ impl Cooldowns {
         self.record_generic(id, CooldownCause::Panic)
     }
 
-    /// Applies quota headers observed on a successful call.
+    /// Applies an exhausted quota window observed on a successful call.
+    ///
+    /// Other observations record nothing and do not advance the state revision.
     pub fn observe(
         &self,
         id: &MemberId,
         retry_after: Option<Duration>,
         remaining: Option<u64>,
     ) -> Option<Cooling> {
-        let duration = match (remaining, retry_after) {
-            (Some(0), retry_after) => retry_after.map_or(self.policy.quota_default, |after| {
-                after.min(self.policy.quota_max)
-            }),
-            (_, Some(retry_after)) => retry_after.min(self.policy.observed_max),
-            _ => return None,
-        };
+        if remaining != Some(0) {
+            return None;
+        }
+        let duration = positive_hint(retry_after).map_or(self.policy.quota_default, |after| {
+            after.min(self.policy.quota_max)
+        });
         let now = (self.clock)();
         let mut states = self.lock();
         let state = states.entry(id.clone()).or_default();
@@ -365,7 +361,7 @@ impl Cooldowns {
             1
         };
         let rest = ladder(self.policy.base, self.policy.rate_max, state.rate_failures);
-        let retry = retry_after
+        let retry = positive_hint(retry_after)
             .unwrap_or_default()
             .min(self.policy.retry_after_max);
         cooling(
@@ -411,9 +407,23 @@ fn ladder(base: Duration, cap: Duration, failures: u32) -> Duration {
     base.saturating_mul(multiplier).min(cap)
 }
 
+fn positive_hint(duration: Option<Duration>) -> Option<Duration> {
+    duration.filter(|duration| !duration.is_zero())
+}
+
+/// Keeps an overflowing rest active at a far deadline rather than failing open.
+fn saturating_deadline(now: Instant, rest: Duration) -> Instant {
+    const CENTURY: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+    const YEAR: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+    now.checked_add(rest)
+        .or_else(|| now.checked_add(CENTURY))
+        .or_else(|| now.checked_add(YEAR))
+        .unwrap_or(now)
+}
+
 fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32) -> Cooling {
     Cooling {
-        until: now.checked_add(duration).unwrap_or(now),
+        until: saturating_deadline(now, duration),
         cause,
         failures,
     }
