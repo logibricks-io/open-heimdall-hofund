@@ -172,8 +172,8 @@ where
 /// Reads a Gemini native model list.
 ///
 /// The first URL is `{base}/models?pageSize=1000`; later pages replace
-/// `pageToken`. Every page has its own [`LIST_BUDGET`]. A token on the twentieth
-/// page returns the rows already read instead of failing. Each returned object
+/// `pageToken`. Every page has its own [`LIST_BUDGET`]. A repeated token or a
+/// token on the twentieth page returns the rows already read instead of failing. Each returned object
 /// retains its metadata and gains an `id` field derived from `name` by removing
 /// one leading `models/`. Rows with generation methods are retained only when
 /// they contain `generateContent`.
@@ -182,8 +182,8 @@ where
 ///
 /// Returns the transport error when a fetch fails. Returns [`PageError`]
 /// through `E` for an empty base, invalid page URL, oversized or malformed
-/// page, empty list, repeated cursor, or elapsed page budget. No partial list
-/// is returned for those failures.
+/// page, empty list, or elapsed page budget. No partial list is returned for
+/// those failures.
 pub async fn gemini_models<F, Fut, E>(base: &str, fetch: F) -> Result<Vec<Value>, E>
 where
     F: FnMut(String) -> Fut,
@@ -241,8 +241,9 @@ where
         if page_number + 1 == MAX_PAGES {
             break;
         }
+        // reference: internal/catalog/gemini_list.go:30-44
         if !cursors.insert(next.to_owned()) {
-            return Err(E::from(PageError::new("model list cursor repeated")));
+            break;
         }
     }
     if rows.is_empty() {

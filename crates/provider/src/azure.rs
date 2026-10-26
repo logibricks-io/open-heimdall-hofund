@@ -29,7 +29,12 @@ struct AzureFailure(PluginError);
 
 impl From<PageError> for AzureFailure {
     fn from(error: PageError) -> Self {
-        Self(PluginError::decode(error.to_string()))
+        let message = error.to_string();
+        if message.contains("time budget") {
+            Self(PluginError::timeout(message))
+        } else {
+            Self(PluginError::decode(message))
+        }
     }
 }
 
@@ -106,20 +111,27 @@ async fn azure_list_inner(endpoint: &Endpoint) -> Result<AzureList, PluginError>
                 }
                 let list = ModelList::new(specs, None)
                     .with_kind(ListKind::Deployments)
-                    .with_base_model_fallback(index == 1);
+                    .with_base_model_fallback(index == 1)
+                    .with_source_url(&url);
                 return Ok(AzureList { list, deployments });
             }
-            Err(error) => errors.push(client.redact_error(error)),
+            Err(error) => {
+                let error = client.redact_error(error);
+                let stop = error.kind() == PluginErrorKind::Cancelled;
+                errors.push(error);
+                // reference: internal/provider/azure.go:149-158
+                // In Rust, a dropped call future is the caller-cancellation signal.
+                if stop {
+                    break;
+                }
+            }
         }
     }
-    let details = errors
-        .iter()
-        .map(|error| error.message())
-        .collect::<Vec<_>>()
-        .join("; ");
-    Err(PluginError::decode(format!(
-        "{details} — type your deployments' names in as model ids"
-    )))
+    Err(crate::models::join_errors(
+        errors,
+        "azure model list failed",
+        " — type your deployments' names in as model ids",
+    ))
 }
 
 fn azure_rows(

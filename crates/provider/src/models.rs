@@ -125,7 +125,8 @@ impl ModelClient {
                     let mut list = ModelList::new(models, None)
                         .with_dropped(dropped)
                         .with_kind(ListKind::Live)
-                        .with_v1_fallback(candidate.v1_fallback);
+                        .with_v1_fallback(candidate.v1_fallback)
+                        .with_source_url(&candidate.url);
                     if let Some(choice) = learned {
                         list = list.with_auth_choice(choice);
                     }
@@ -134,7 +135,7 @@ impl ModelClient {
                 Err(error) => errors.push(self.redact_error(error)),
             }
         }
-        Err(join_errors(errors, "model list failed"))
+        Err(join_errors(errors, "model list failed", ""))
     }
 
     pub async fn gemini_list(&self) -> Result<ModelList, PluginError> {
@@ -155,7 +156,11 @@ impl ModelClient {
         }
         Ok(ModelList::new(models, None)
             .with_dropped(dropped)
-            .with_kind(ListKind::Live))
+            .with_kind(ListKind::Live)
+            .with_source_url(format!(
+                "{}/models",
+                self.endpoint.base_url.trim().trim_end_matches('/')
+            )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -208,7 +213,8 @@ impl ModelClient {
     }
 
     pub fn page_bytes(&self, url: &str, page: Page, probe: bool) -> Result<Vec<u8>, PluginError> {
-        if (200..300).contains(&page.status) {
+        // reference: internal/catalog/live.go:542 and internal/catalog/gemini_list.go:81
+        if page.status == 200 || (probe && (200..300).contains(&page.status)) {
             return Ok(page.body);
         }
         let detail = if probe {
@@ -311,12 +317,13 @@ impl ModelClient {
     }
 
     pub fn can_learn_auth(&self) -> bool {
-        !self.endpoint.api_key.is_empty()
-            && !self.endpoint.base_url.trim().is_empty()
-            && !self.is_azure()
-            && !self.is_official_anthropic()
-            && !self.is_bedrock()
-            && !self.pinned_auth()
+        both_auth_applies(
+            &url_host(&self.endpoint.base_url),
+            !self.endpoint.api_key.is_empty(),
+            !self.endpoint.base_url.trim().is_empty(),
+            self.endpoint.credential,
+            self.pinned_auth(),
+        )
     }
 
     pub fn is_azure(&self) -> bool {
@@ -400,15 +407,18 @@ fn list_urls(base: &str, anthropic: bool) -> Vec<Candidate> {
         add(direct_v1, true);
         let mut root = base.to_owned();
         const SUFFIXES: &[&str] = &[
+            "/anthropic",
             "/apps/anthropic",
             "/api/anthropic",
-            "/anthropic",
-            "/api/v1",
             "/v1",
             "/api",
+            "/api/v1",
         ];
-        while let Some(suffix) = SUFFIXES.iter().find(|suffix| root.ends_with(**suffix)) {
-            root.truncate(root.len() - suffix.len());
+        // reference: internal/catalog/live.go:366-371
+        for suffix in SUFFIXES {
+            if let Some(stripped) = root.strip_suffix(suffix) {
+                root = stripped.to_owned();
+            }
         }
         add(format!("{root}/v1/models"), false);
         add(format!("{root}/models"), false);
@@ -426,6 +436,31 @@ fn versioned(base: &str) -> bool {
             })
         })
     })
+}
+
+/// Whether Anthropic-compatible listing may learn a single auth header.
+///
+/// BothAuth requires a key and base, excludes Azure, the official Anthropic
+/// host, Bedrock runtime and Mantle, and respects user-pinned auth headers.
+#[must_use]
+pub fn both_auth_applies(
+    host: &str,
+    api_key_present: bool,
+    base_present: bool,
+    credential: Credential,
+    pinned_auth: bool,
+) -> bool {
+    let host = host.to_ascii_lowercase();
+    let bedrock = (host.starts_with("bedrock-runtime.") && host.ends_with(".amazonaws.com"))
+        || (host.starts_with("bedrock-mantle.") && host.ends_with(".amazonaws.com"))
+        || (host.starts_with("bedrock-mantle.") && host.ends_with(".api.aws"));
+    api_key_present
+        && base_present
+        && credential != Credential::ApiKey
+        && !azure_host(&host)
+        && !host.ends_with("anthropic.com")
+        && !bedrock
+        && !pinned_auth
 }
 
 pub(crate) fn azure_url(base: &str) -> bool {
@@ -487,7 +522,7 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
         if hofund_plugin_sdk::classify::classify_model(id, "").is_none() {
             return Ok(None);
         }
-        return ModelSpec::new(id, None).map(Some);
+        return ModelSpec::new(id, Some(id.to_owned())).map(Some);
     }
     let Some(row) = row.as_object() else {
         return Ok(None);
@@ -505,6 +540,7 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
     let Some(tags) = hofund_plugin_sdk::classify::classify_model(id, kind) else {
         return Ok(None);
     };
+    // reference: internal/catalog/live.go:589-603 and internal/catalog/gemini_list.go:100-103
     let name = if gemini {
         row.get("displayName").and_then(Value::as_str)
     } else {
@@ -515,8 +551,9 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
         })
     }
     .filter(|name| !name.is_empty())
-    .map(str::to_owned);
-    let mut model = ModelSpec::new(id, name)?
+    .unwrap_or(id)
+    .to_owned();
+    let mut model = ModelSpec::new(id, Some(name))?
         .with_draws(tags.draws())
         .with_films(tags.films())
         .with_decides(tags.decides());
@@ -596,7 +633,9 @@ fn named_values(value: Option<&Value>, key: &str) -> Vec<String> {
     values
 }
 
-pub(crate) fn both_auth_refused(status: u16, body: &[u8]) -> bool {
+/// Whether a 401 body says the two Anthropic-compatible auth headers cannot be sent together.
+#[must_use]
+pub fn both_auth_refused(status: u16, body: &[u8]) -> bool {
     if status != 401 {
         return false;
     }
@@ -712,22 +751,29 @@ fn cut_runes(text: &str, cap: usize) -> String {
     cut
 }
 
+const BLOCK_ADVICE: &str =
+    "the provider's network edge blocked this address; wait, or try another network or proxy";
+const VERIFY_ADVICE: &str = "this Google account needs verification";
+
 fn status_hint(body: &[u8]) -> String {
-    let lower = String::from_utf8_lossy(body).to_ascii_lowercase();
+    let text = String::from_utf8_lossy(body);
+    let lower = text.to_ascii_lowercase();
     if lower.contains("request has been blocked")
         || lower.contains("errors.aliyun.com")
-        || ((lower.contains("cloudflare") || lower.contains("cf-chl"))
-            && lower.contains("challenge"))
+        || lower.contains(&BLOCK_ADVICE.to_ascii_lowercase())
     {
-        return " — the provider's network edge blocked this address; wait, or try another network or proxy".to_owned();
+        return format!(" — {BLOCK_ADVICE}");
     }
-    if let Some(link) = verification_link(body) {
-        return format!(
-            " — this Google account needs verification: open {link} in a browser, verify the account, then try again"
+    // reference: internal/provider/test.go:690-727
+    if let Some(link) = verification(body, &text, &lower) {
+        return link.map_or_else(
+            || format!(" — {VERIFY_ADVICE} before API access can work"),
+            |link| {
+                format!(
+                    " — {VERIFY_ADVICE}: open {link} in a browser, verify the account, then try again"
+                )
+            },
         );
-    }
-    if lower.contains("verify your account") || lower.contains("account verification required") {
-        return " — this Google account needs verification before API access can work".to_owned();
     }
     if lower.contains("go plan doesn") && lower.contains("include api access") {
         return " — this Go plan does not include Provider API access; use an API-enabled plan or a provider API key".to_owned();
@@ -735,52 +781,82 @@ fn status_hint(body: &[u8]) -> String {
     String::new()
 }
 
-fn verification_link(body: &[u8]) -> Option<String> {
-    let value: Value = serde_json::from_slice(body).ok()?;
-    let details = value.pointer("/error/details")?.as_array()?;
+fn verification(body: &[u8], text: &str, lower: &str) -> Option<Option<String>> {
+    let value: Option<Value> = serde_json::from_slice(body).ok();
+    let details = value
+        .as_ref()
+        .and_then(|value| value.pointer("/error/details"))
+        .and_then(Value::as_array);
+    let mut required = false;
     let mut help = None;
     let mut validation = None;
-    for detail in details {
+    for detail in details.into_iter().flatten() {
         for link in detail
             .get("links")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
         {
-            help = help.or_else(|| link.get("url").and_then(Value::as_str));
+            if help.is_none() {
+                help = link.get("url").and_then(Value::as_str).map(str::to_owned);
+            }
         }
         if detail.get("reason").and_then(Value::as_str) == Some("VALIDATION_REQUIRED") {
-            validation = detail
-                .get("metadata")
-                .and_then(Value::as_object)
-                .and_then(|metadata| {
-                    metadata
-                        .get("validation_url")
-                        .or_else(|| metadata.get("validationUrl"))
-                })
-                .and_then(Value::as_str)
-                .or(validation);
+            required = true;
+            if validation.is_none() {
+                validation = detail
+                    .get("metadata")
+                    .and_then(Value::as_object)
+                    .and_then(|metadata| {
+                        metadata
+                            .get("validation_url")
+                            .or_else(|| metadata.get("validationUrl"))
+                    })
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
         }
     }
-    let link = validation.or(help)?;
-    let url = reqwest::Url::parse(link).ok()?;
-    (url.scheme() == "https" && url.host_str().is_some()).then(|| link.to_owned())
+    let words = lower.contains("verify your account")
+        || lower.contains("account verification required")
+        || lower.contains(&VERIFY_ADVICE.to_ascii_lowercase());
+    if !required && !words {
+        return None;
+    }
+    let link = if required { validation.or(help) } else { None }
+        .or_else(|| own_advice_link(text))
+        .and_then(|link| {
+            let url = reqwest::Url::parse(&link).ok()?;
+            (url.scheme() == "https" && url.host_str().is_some()).then_some(link)
+        });
+    Some(link)
 }
 
-fn join_errors(errors: Vec<PluginError>, fallback: &str) -> PluginError {
+fn own_advice_link(text: &str) -> Option<String> {
+    let start = text.find(VERIFY_ADVICE)? + VERIFY_ADVICE.len();
+    let rest = text.get(start..)?.strip_prefix(": open ")?;
+    let end = rest
+        .find(|character: char| character.is_whitespace() || character == '"' || character == '\\')
+        .unwrap_or(rest.len());
+    Some(rest[..end].to_owned())
+}
+
+pub(crate) fn join_errors(errors: Vec<PluginError>, fallback: &str, suffix: &str) -> PluginError {
     let Some(last) = errors.last() else {
-        return PluginError::decode(fallback);
+        return PluginError::decode(format!("{fallback}{suffix}"));
     };
-    let message = errors
+    let mut message = errors
         .iter()
         .map(|error| error.message())
         .collect::<Vec<_>>()
         .join("; ");
+    message.push_str(suffix);
     let mut joined = match last.kind() {
         PluginErrorKind::Connect => PluginError::connect(message),
         PluginErrorKind::Timeout => PluginError::timeout(message),
         PluginErrorKind::Transport => PluginError::transport(message),
         PluginErrorKind::Status => PluginError::status_error(last.status().unwrap_or(502), message),
+        PluginErrorKind::Cancelled => PluginError::cancelled(message),
         _ => PluginError::decode(message),
     };
     if let Some(after) = last.retry_after() {

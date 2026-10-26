@@ -449,6 +449,7 @@ pub struct ModelList {
     base_model_fallback: bool,
     v1_fallback: bool,
     auth_choice: Option<AuthChoice>,
+    source_url: Option<String>,
 }
 
 impl ModelList {
@@ -463,7 +464,23 @@ impl ModelList {
             base_model_fallback: false,
             v1_fallback: false,
             auth_choice: None,
+            source_url: None,
         }
+    }
+
+    /// Records the list URL that answered, for host-side response deduplication.
+    ///
+    /// Any query is replaced by `<redacted>` and any fragment is removed, so
+    /// this value is safe for the derived `Debug` output.
+    #[must_use]
+    pub fn with_source_url(mut self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        let without_fragment = url.split('#').next().unwrap_or(&url);
+        self.source_url = Some(match without_fragment.split_once('?') {
+            Some((base, _)) => format!("{base}?<redacted>"),
+            None => without_fragment.to_owned(),
+        });
+        self
     }
 
     /// Records ids removed by the plugin's model classifier.
@@ -517,6 +534,12 @@ impl ModelList {
     #[must_use]
     pub fn next(&self) -> Option<&str> {
         self.next.as_deref()
+    }
+
+    /// The list URL that answered, with any query redacted.
+    #[must_use]
+    pub fn source_url(&self) -> Option<&str> {
+        self.source_url.as_deref()
     }
 
     /// The kind of result actually returned.

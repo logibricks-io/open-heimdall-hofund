@@ -105,7 +105,7 @@ async fn versioned_base_lists_only_models_and_classifies_rows_with_metadata() {
     assert!(listed.models()[2].draws());
     assert!(listed.models()[5].films());
     assert!(listed.models()[6].decides());
-    assert_eq!(listed.models()[7].display_name(), None);
+    assert_eq!(listed.models()[7].display_name(), Some("prefixed"));
     let requests = server.received_requests().await.expect("requests");
     assert_eq!(requests.len(), 1);
     assert_eq!(
@@ -468,11 +468,12 @@ async fn azure_plugin_returns_deployments_then_marks_the_base_model_fallback() {
     );
 }
 
+// reference: internal/provider/azure.go:149-160
 #[tokio::test]
-async fn azure_both_failures_end_with_deployment_name_guidance() {
+async fn azure_both_failures_keep_the_last_http_status_and_deployment_guidance() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(404))
+        .respond_with(ResponseTemplate::new(401))
         .expect(2)
         .mount(&server)
         .await;
@@ -482,6 +483,8 @@ async fn azure_both_failures_end_with_deployment_name_guidance() {
         .list_models(&ListQuery::new())
         .await
         .expect_err("failure");
+    assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Status);
+    assert_eq!(error.status(), Some(401));
     assert!(
         error
             .to_string()
@@ -902,6 +905,343 @@ async fn list_body_is_rejected_beyond_eight_mib() {
         .expect_err("too large");
     assert!(error.to_string().contains("too large"));
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}
+
+// reference: internal/catalog/live.go:366-371
+#[tokio::test]
+async fn list_url_suffixes_use_one_ordered_pass() {
+    let cases = [
+        (
+            "/apps/anthropic",
+            vec![
+                "/apps/anthropic/models",
+                "/apps/anthropic/v1/models",
+                "/apps/v1/models",
+            ],
+            "/apps/models",
+        ),
+        (
+            "/anthropic/v1",
+            vec!["/anthropic/v1/models", "/anthropic/v1/v1/models"],
+            "/anthropic/models",
+        ),
+        (
+            "/v1/api",
+            vec!["/v1/api/models", "/v1/api/v1/models", "/v1/v1/models"],
+            "/v1/models",
+        ),
+    ];
+    for (base, failures, answered) in cases {
+        let server = MockServer::start().await;
+        for candidate in failures {
+            Mock::given(method("GET"))
+                .and(path(candidate))
+                .respond_with(ResponseTemplate::new(404))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path(answered))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"id": "claude"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let listed = Anthropic::new(endpoint(&server, base))
+            .expect("anthropic")
+            .list_models(&ListQuery::new())
+            .await
+            .expect("reference-correct root");
+        assert_eq!(ids(&listed), ["claude"]);
+        server.verify().await;
+    }
+}
+
+// reference: internal/provider/test.go:690-727
+#[tokio::test]
+async fn verification_hints_require_validation_or_verify_words() {
+    let cases = [
+        (
+            json!({"error": {"message": "API is disabled", "details": [{
+                "reason": "SERVICE_DISABLED",
+                "links": [{"url": "https://accounts.example/enable"}]
+            }]}}),
+            None,
+            None,
+        ),
+        (
+            json!({"error": {"message": "denied", "details": [{
+                "reason": "VALIDATION_REQUIRED"
+            }]}}),
+            Some("needs verification"),
+            None,
+        ),
+        (
+            json!({"error": {"message": "denied", "details": [{
+                "reason": "VALIDATION_REQUIRED",
+                "links": [{"url": "https://accounts.example/verify"}]
+            }]}}),
+            Some("needs verification"),
+            Some("https://accounts.example/verify"),
+        ),
+    ];
+    for (body, hint, link) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = openai(endpoint(&server, "/v1"))
+            .probe(&probe(ProtocolId::OPENAI_CHAT, "gpt"))
+            .await
+            .expect_err("status");
+        let message = error.to_string();
+        assert_eq!(
+            message.contains("needs verification"),
+            hint.is_some(),
+            "{message}"
+        );
+        if let Some(link) = link {
+            assert!(message.contains(link), "{message}");
+        } else {
+            assert!(!message.contains("https://"), "{message}");
+        }
+    }
+}
+
+// reference: internal/provider/test.go:641-646
+#[tokio::test]
+async fn edge_block_hint_matches_reference_pages_and_is_idempotent() {
+    let cases = [
+        ("<html>Cloudflare cf-chl challenge</html>", false),
+        ("<html>see errors.aliyun.com</html>", true),
+        (
+            "the provider's network edge blocked this address; wait, or try another network or proxy",
+            true,
+        ),
+    ];
+    for (body, blocked) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403).set_body_string(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = openai(endpoint(&server, "/v1"))
+            .probe(&probe(ProtocolId::OPENAI_CHAT, "gpt"))
+            .await
+            .expect_err("status");
+        assert_eq!(error.to_string().contains("network edge blocked"), blocked);
+    }
+}
+
+// reference: internal/catalog/live.go:422-423
+#[tokio::test]
+async fn azure_per_url_timeout_still_tries_the_second_deployment_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/openai/deployments"))
+        .respond_with(ResponseTemplate::new(500).set_delay(std::time::Duration::from_millis(200)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/openai/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "base-gpt"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut endpoint = endpoint(&server, "/openai/v1");
+    endpoint.credential = Credential::ApiKey;
+    endpoint.timeout = std::time::Duration::from_millis(30);
+    let listed = openai(endpoint)
+        .list_models(&ListQuery::new())
+        .await
+        .expect("second URL after per-URL timeout");
+    assert_eq!(ids(&listed), ["base-gpt"]);
+    assert!(listed.base_model_fallback());
+    server.verify().await;
+}
+
+// reference: internal/provider/azure.go:149-158
+#[tokio::test]
+async fn azure_cancelling_the_call_never_requests_the_second_deployment_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/openai/deployments"))
+        .respond_with(ResponseTemplate::new(500).set_delay(std::time::Duration::from_millis(100)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/openai/v1/models"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let mut endpoint = endpoint(&server, "/openai/v1");
+    endpoint.credential = Credential::ApiKey;
+    let provider = openai(endpoint);
+    let call = tokio::spawn(async move { provider.list_models(&ListQuery::new()).await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if !server
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("first request started");
+    // Aborting drops the call future, which is Rust's caller-cancellation signal.
+    call.abort();
+    let _ = call.await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    server.verify().await;
+}
+
+// reference: internal/catalog/gemini_list.go:30-44
+#[tokio::test]
+async fn gemini_repeated_page_token_returns_two_pages_without_another_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .and(NoPageToken)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "models/first"}],
+            "nextPageToken": "same"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .and(query_param("pageToken", "same"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "models/second"}],
+            "nextPageToken": "same"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let listed = Generative::new(endpoint(&server, "/v1beta"))
+        .expect("generative")
+        .list_models(&ListQuery::new())
+        .await
+        .expect("partial list");
+    assert_eq!(ids(&listed), ["first", "second"]);
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+    server.verify().await;
+}
+
+// reference: internal/catalog/live.go:542
+#[tokio::test]
+async fn list_requires_http_200_and_tries_the_next_candidate() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let error = openai(endpoint(&server, "/v1"))
+        .list_models(&ListQuery::new())
+        .await
+        .expect_err("204 is not a list");
+    assert!(error.to_string().contains("HTTP 204"), "{error}");
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/relay/models"))
+        .respond_with(ResponseTemplate::new(203))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/relay/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "chat"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let listed = openai(endpoint(&server, "/relay"))
+        .list_models(&ListQuery::new())
+        .await
+        .expect("next candidate");
+    assert_eq!(ids(&listed), ["chat"]);
+    server.verify().await;
+}
+
+// reference: internal/catalog/live.go:589-603 and internal/catalog/gemini_list.go:100-103
+#[tokio::test]
+async fn every_list_shape_falls_back_to_the_id_for_its_display_name() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "openai-id"}, "bare-id"]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let openai = openai(endpoint(&server, "/v1"))
+        .list_models(&ListQuery::new())
+        .await
+        .expect("OpenAI list");
+    assert!(
+        openai
+            .models()
+            .iter()
+            .all(|model| { model.display_name() == Some(model.id()) })
+    );
+
+    Mock::given(method("GET"))
+        .and(path("/anthropic/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "claude-id"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let anthropic = Anthropic::new(endpoint(&server, "/anthropic/v1"))
+        .expect("anthropic")
+        .list_models(&ListQuery::new())
+        .await
+        .expect("Anthropic list");
+    assert_eq!(anthropic.models()[0].display_name(), Some("claude-id"));
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "models/gemini-id"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let gemini = Generative::new(endpoint(&server, "/v1beta"))
+        .expect("generative")
+        .list_models(&ListQuery::new())
+        .await
+        .expect("Gemini list");
+    assert_eq!(gemini.models()[0].display_name(), Some("gemini-id"));
+    server.verify().await;
 }
 
 struct NoQuery;

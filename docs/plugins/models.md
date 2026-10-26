@@ -40,7 +40,7 @@ OpenAI-compatible and Anthropic URL order is `listURLs` (`live.go` lines 353-376
 
 1. `{base}/models`.
 2. When the base is Anthropic, or the path has no version segment (`v` plus a digit: `v1`, `v1beta`, `v3`, `v4`), also `{base}/v1/models`.
-3. For those same bases, walk the suffixes `/anthropic`, `/apps/anthropic`, `/api/anthropic`, `/v1`, `/api`, `/api/v1` and strip each one that is currently the end of the path. Several can come off. A base ending in `/api/v1` loses `/v1` and then `/api`, and the root is what remains. Then try `{root}/v1/models` and `{root}/models`.
+3. For those same bases, make one ordered pass over `/anthropic`, `/apps/anthropic`, `/api/anthropic`, `/v1`, `/api`, `/api/v1`. At each suffix, strip it once if the current root ends with it; do not revisit an earlier suffix. A base ending in `/api/v1` loses `/v1` and then `/api`, and the root is what remains. Then try `{root}/v1/models` and `{root}/models`.
 
 A versioned OpenAI base (`…/v1`, `…/api/paas/v4`, `…/v1beta/openai`) is asked only at `{base}/models`. The first URL that returns a non-empty list wins for that base. An empty successful page fails that URL (`no models listed`). When every URL fails, the errors are joined.
 
@@ -58,13 +58,13 @@ Official shapes:
 - Anthropic lists with `GET /v1/models`, `x-api-key`, `anthropic-version: 2023-06-01`, `data[].id`, `has_more`, `first_id`, and `last_id`. The next page uses `after_id` and `limit`. `limit` is 1 to 1000 and defaults to 20. `before_id` exists on the official API and is not what the pager sends (<https://platform.claude.com/docs/en/api/models/list>).
 - A compat body that uses `models` instead of `data` is read the same way. `data` wins when it is non-empty. An object contributes `id`, then `name`.
 
-The OpenAI and Anthropic pager is `Paged` (`live.go` lines 459-489). The first request is the URL as written. Each candidate list URL has its own 8 second budget across its pages (`live.go` lines 422-437); it is not one budget across every candidate. A response body is capped at 8 MiB. A page with `has_more` repeats the URL with `after_id` set to `last_id` and `limit=1000`. At most 20 pages are read. When the 20th page still sets `has_more`, the list fails and no 21st request is sent. A page that sets `has_more` without a new `last_id` fails the list. A partial list is a failure, so a later page is not mistaken for models the vendor dropped. A JSON error message is cut at 160 runes (`live.go` lines 637-662).
+The OpenAI and Anthropic pager is `Paged` (`live.go` lines 459-489). The first request is the URL as written. Only HTTP 200 is a list response; another 2xx status fails that candidate with its status. Each candidate list URL has its own 8 second budget across its pages (`live.go` lines 422-437); it is not one budget across every candidate. A response body is capped at 8 MiB. A page with `has_more` repeats the URL with `after_id` set to `last_id` and `limit=1000`. At most 20 pages are read. When the 20th page still sets `has_more`, the list fails and no 21st request is sent. A page that sets `has_more` without a new `last_id` fails the list. A partial list is a failure, so a later page is not mistaken for models the vendor dropped. A JSON error message is cut at 160 runes (`live.go` lines 637-662).
 
 Gemini native follows `gemini_list.go` and `models.list` (<https://ai.google.dev/api/models#method:-models.list>):
 
 - `GET {base}/models?pageSize=1000` with `x-goog-api-key`.
 - Pages follow `nextPageToken` as `pageToken`, at most 20 pages. Each page has its own 8 second timeout.
-- When the 20th page still has a token, the rows already read are returned and the call does not fail. That differs from `Paged`.
+- A repeated token or a token on the 20th page returns the rows already read without another request and without failing. That differs from `Paged`.
 - An empty list is an error (`no models listed`).
 - Each id is `name` with a leading `models/` removed.
 - A row whose `supportedGenerationMethods` is non-empty is kept when that array contains `generateContent`. A row with an empty methods array is kept. Embedding (`embedContent`), Imagen (`predict`), and Veo (`predictLongRunning`) are dropped. Magpie applies only this filter to Gemini pages (`gemini_list.go` lines 60-106); hofund's additional common classification is below.
@@ -201,7 +201,7 @@ Probes run only when the user asks. The refresh job never probes. A configured p
 The host selects the model. `probe` on the plugin sends the one request the host named. The host does what `Provider.Test` does (`internal/provider/test.go` lines 37-94 and 405-449):
 
 1. Refresh the configured provider's aggregated list first.
-2. Pick a model for the configured wire from exposed models, then listed models. The first pass skips an id `ImagesAPI` matches (`internal/catalog/catalog.go` lines 1499-1509): the lowercased id contains `gpt-image`, `chatgpt-image`, `dall-e`, `imagen`, `imagine`, `qwen-image`, `wanx`, `wan2`, `seedream`, `cogview`, `flux`, `stable-diffusion`, `sdxl`, `kolors`, or `hidream`. A chat model whose id merely ends in `-image`, such as `gemini-2.5-flash-image`, is not in that list. An id whose `APIs(id)` includes the configured wire is preferred. Anthropic prefers `claude` after stripping any namespace through the last `/`, and `NamedOnlyOn` applies. The second pass accepts any otherwise eligible id, including an image id. Both passes skip disabled and Decide models and enforce key visibility. OpenCode's public key tries only a free model, on an API the id serves (`test.go` lines 405-449).
+2. Pick a model for the configured wire from exposed models, then listed models. The first pass skips an id `ImagesAPI` matches (`internal/catalog/catalog.go` lines 1499-1509): the lowercased id contains `gpt-image`, `chatgpt-image`, `dall-e`, `imagen`, `imagine`, `qwen-image`, `wanx`, `wan2`, `seedream`, `cogview`, `flux`, `stable-diffusion`, `sdxl`, `kolors`, or `hidream`. A chat model whose id merely ends in `-image`, such as `gemini-2.5-flash-image`, is not in that list. Each pool keeps its plain order; endpoint knowledge does not move a row ahead of an earlier row. A row with endpoint metadata is accepted only when it includes the configured wire. Without endpoints, Anthropic prefers `claude` after stripping any namespace through the last `/`, and `NamedOnlyOn` applies. An `anthropic` endpoint on Messages is sufficient without a `claude` id. The second pass accepts any otherwise eligible id, including an image id. Both passes skip disabled and Decide models and enforce key visibility. OpenCode's public key tries only a free model, on an API the id serves (`test.go` lines 405-449).
 3. Map the id with `UpstreamName` before it is written into the body (`internal/provider/test.go` line 79; `internal/provider/modelprefs.go` lines 908-941).
 4. Call the configured plugin instance's `probe` with its wire and that upstream name.
 
@@ -273,12 +273,12 @@ Every listing, probing, and refresh behaviour has one disposition here. A deferr
 
 | Behaviour | Magpie source (file:lines) | Hofund status | Section of this doc |
 | --- | --- | --- | --- |
-| `listURLs` candidates and the repeated suffix walk | `internal/catalog/live.go:351-376` | Covered: code PR 1 | What one wire's `list_models` does |
+| `listURLs` candidates and the single ordered suffix pass | `internal/catalog/live.go:351-376` | Covered: code PR 1 | What one wire's `list_models` does |
 | `Versioned` detects a version path segment | `internal/catalog/live.go:378-396` | Covered: code PR 1 | What one wire's `list_models` does |
 | `Paged`, its 20-page cap, and its `has_more` and `last_id` rules | `internal/catalog/live.go:407-489` | Covered: code PR 1 | What one wire's `list_models` does |
 | The 8 second list budget per URL and 8 MiB body cap | `internal/catalog/live.go:422-437,495-524`; `internal/catalog/gemini_list.go:60-80` | Covered: code PR 1 | What one wire's `list_models` does |
 | The 160-rune list error cap | `internal/catalog/live.go:637-662` | Covered: code PR 1 | What one wire's `list_models` does |
-| Gemini's pager and partial result at 20 pages | `internal/catalog/gemini_list.go:23-49` | Covered: code PR 1 | What one wire's `list_models` does |
+| Gemini's pager and partial result at a repeated token or 20 pages | `internal/catalog/gemini_list.go:23-49` | Covered: code PR 1 | What one wire's `list_models` does |
 | Gemini's generation-method-only filter | `internal/catalog/gemini_list.go:60-106` | Covered: code PR 1 | What one wire's `list_models` does |
 | Anthropic-wire-only single-header list auth learning for `BothAuth` providers, with `BothAuthRefused` and `OneAuthOrder`, Chinese and English refusal phrases, per-provider state, and user-pinned override | `internal/catalog/live.go:495-541`; `internal/catalog/authheader.go:9-73`; `internal/provider/authheader.go:78-106`; `internal/provider/models.go:648-655,737-740` | Covered: code PR 1 | What one wire's `list_models` does |
 | Learned auth and `fixV1` write back to the config file | `internal/provider/authheader.go:80-100`; `internal/provider/models.go:1138-1167` | Deliberate difference: host state holds them because the user's TOML is the user's and the daemon never edits it | Refresh |
@@ -286,7 +286,8 @@ Every listing, probing, and refresh behaviour has one disposition here. A deferr
 | `Draws`, `Films`, and `Decides` tagging | `internal/catalog/live.go:580-613`; `internal/catalog/catalog.go:1485-1497` | Covered: code PR 1 | Rows that are not chat models |
 | Applying the text filter and tags to Gemini rows | `internal/catalog/gemini_list.go:60-106`; `internal/catalog/live.go:571-613` | Deliberate difference: one classification rule for every wire, so a drawing or speech id never becomes a chat route because it was listed by a Gemini base | Rows that are not chat models |
 | `X-Magpie-Drawers` keeps every row from another gateway's list, including rows the normal filter would drop | `internal/catalog/live.go:580-587`; `internal/provider/remote_magpie.go:21-25,50-64,109-123` | Deferred: remote-gateway preset PR; its `resolve` implementation is missing today | Rows that are not chat models |
-| Row metadata, modalities, endpoints, limits, efforts, tiers, and price | `internal/catalog/live.go:589-632,664-739` | Covered: code PR 1 | Metadata one row carries |
+| Row metadata, modalities, endpoints, limits, efforts, and tiers | `internal/catalog/live.go:589-632,664-739` | Covered: code PR 1 | Metadata one row carries |
+| `magpie_label`, `magpie_price`, the `magpie` `web_search` value, and `plain` | `internal/catalog/live.go:589-632,664-739` | Deferred: remote-gateway preset PR | Metadata one row carries |
 | `Decorate` and `Named`, with Azure decorated without `Named` | `internal/catalog/live.go:781-822`; `internal/provider/models.go:83-97` | Deferred: models.dev catalog PR (row 2.8) | Metadata one row carries |
 | `sharedImageInput` for bases versus `anyImageInput` for groups | `internal/provider/models.go:672-683,1331-1360` | Covered: code PR 1 | What the aggregator adds |
 | One fetch per list URL and auth, with `ErrAsked` for nothing new | `internal/catalog/live.go:230-349`; `internal/provider/models.go:687-696,764-780` | Covered: code PR 1 | What the aggregator adds |

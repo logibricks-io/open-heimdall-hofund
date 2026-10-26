@@ -8,7 +8,7 @@ use hofund_plugin_api::ListKind;
 use hofund_provider::ModelPlan;
 use serde_json::json;
 use wiremock::matchers::{method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 fn load_config(source: &str) -> hofund_config::Config {
     hofund_config::load(source).expect("config")
@@ -36,6 +36,28 @@ fn plan(chat: &str, responses: &str, anthropic: &str, generative: &str) -> Model
 
 fn ids(models: &hofund_daemon::ProviderModels) -> Vec<&str> {
     models.models.iter().map(|model| model.id()).collect()
+}
+
+#[derive(Clone, Copy)]
+enum AuthMode {
+    Both,
+    XApiOnly,
+    BearerOnly,
+}
+
+impl Match for AuthMode {
+    fn matches(&self, request: &Request) -> bool {
+        let x_api = request.headers.contains_key("x-api-key");
+        let bearer = request
+            .headers
+            .get("authorization")
+            .is_some_and(|value| value == "Bearer test-key");
+        match self {
+            Self::Both => x_api && bearer,
+            Self::XApiOnly => x_api && !bearer,
+            Self::BearerOnly => bearer && !x_api,
+        }
+    }
 }
 
 #[tokio::test]
@@ -481,6 +503,112 @@ async fn identical_chat_and_responses_lists_are_fetched_once() {
         .await
         .expect("deduplicated list");
     assert_eq!(ids(&models), ["shared"]);
+    server.verify().await;
+}
+
+// reference: internal/provider/models.go:687-696 and 777-781
+#[tokio::test]
+async fn different_bases_answering_at_one_list_url_are_merged_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/relay/models"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/relay/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "shared"}]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let base = server.uri();
+    let host = make_host().with_model_plan(
+        "shared",
+        plan(
+            &format!("{base}/relay"),
+            "",
+            &format!("{base}/relay/v1"),
+            "",
+        ),
+    );
+    let config = load_config(
+        "[[providers]]\nid = \"shared\"\npreset = \"deepseek\"\nprotocol = \"openai-chat\"\napi_key = \"same-key\"\n",
+    );
+    let models = host
+        .list_models(&config, &config_path("answered-dedupe"), "shared")
+        .await
+        .expect("deduplicated response");
+    assert_eq!(ids(&models), ["shared"]);
+    server.verify().await;
+}
+
+// reference: internal/provider/models.go:651-654
+#[tokio::test]
+async fn models_url_learns_and_reuses_bearer_on_messages_only_providers() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/exact/models"))
+        .and(AuthMode::Both)
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_string("x-api-key and authorization cannot both be present"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/exact/models"))
+        .and(AuthMode::XApiOnly)
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/exact/models"))
+        .and(AuthMode::BearerOnly)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "claude"}]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let config = load_config(&format!(
+        "[[providers]]\nid = \"messages\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{0}/v1\"\napi_key = \"test-key\"\n[providers.models]\nurl = \"{0}/exact/models\"\n",
+        server.uri()
+    ));
+    let host = make_host();
+    for _ in 0..2 {
+        let models = host
+            .list_models(&config, &config_path("models-url-auth"), "messages")
+            .await
+            .expect("custom list");
+        assert_eq!(ids(&models), ["claude"]);
+    }
+    server.verify().await;
+}
+
+// reference: internal/catalog/live.go:542
+#[tokio::test]
+async fn models_url_rejects_a_non_200_success_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/exact/models"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config = load_config(&format!(
+        "[[providers]]\nid = \"custom\"\nprotocol = \"openai-chat\"\nbase_url = \"{0}/v1\"\napi_key = \"test-key\"\n[providers.models]\nurl = \"{0}/exact/models\"\n",
+        server.uri()
+    ));
+    let error = make_host()
+        .list_models(&config, &config_path("models-url-status"), "custom")
+        .await
+        .expect_err("204 is not a list");
+    assert!(error.to_string().contains("HTTP 204"), "{error}");
     server.verify().await;
 }
 

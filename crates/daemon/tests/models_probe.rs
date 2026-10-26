@@ -62,8 +62,9 @@ impl Match for ModelBody {
     }
 }
 
+// reference: internal/provider/test.go:405-442
 #[tokio::test]
-async fn selector_prefers_exposed_upstream_name_then_endpoint_and_second_pass() {
+async fn selector_prefers_exposed_then_plain_pool_order_over_endpoint_knowledge() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/models"))
@@ -82,14 +83,14 @@ async fn selector_prefers_exposed_upstream_name_then_endpoint_and_second_pass() 
         .and(path("/v1/chat/completions"))
         .and(ModelBody("chat-good"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices": []})))
-        .expect(3)
+        .expect(2)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .and(ModelBody("gemini-2.5-flash-image"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices": []})))
-        .expect(0)
+        .expect(1)
         .mount(&server)
         .await;
     let config = load_config(&format!(
@@ -109,13 +110,85 @@ async fn selector_prefers_exposed_upstream_name_then_endpoint_and_second_pass() 
     let endpoint = host
         .probe(&config, &config_path("selection"), "chat", None)
         .await
-        .expect("endpoint preference");
+        .expect("exposed model again");
     assert_eq!(endpoint.model, "alias");
     let listed = host
         .probe(&without_routes, &config_path("selection"), "chat", None)
         .await
-        .expect("listed endpoint preference");
-    assert_eq!(listed.model, "chat-good");
+        .expect("first eligible pool row");
+    assert_eq!(listed.model, "gemini-2.5-flash-image");
+    server.verify().await;
+}
+
+// reference: internal/provider/test.go:405-442
+#[tokio::test]
+async fn selector_treats_unrecognized_endpoints_as_no_endpoint_metadata() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "unknown-endpoint", "supported_endpoints": ["vendor-only"]},
+                {"id": "chat-good", "supported_endpoints": ["chat"]}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(ModelBody("unknown-endpoint"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices": []})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(ModelBody("chat-good"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let config = load_config(&format!(
+        "[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\n",
+        server.uri()
+    ));
+    let result = make_host()
+        .probe(&config, &config_path("unknown-endpoint"), "chat", None)
+        .await
+        .expect("unrecognized endpoints use the no-endpoints rule");
+    assert_eq!(result.model, "unknown-endpoint");
+    server.verify().await;
+}
+
+// reference: internal/provider/test.go:405-442
+#[tokio::test]
+async fn messages_selector_accepts_anthropic_endpoint_without_a_claude_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "vendor/text", "supported_endpoints": ["anthropic"]}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(ModelBody("vendor/text"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"content": []})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config = load_config(&format!(
+        "[[providers]]\nid = \"messages\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{}\"\napi_key = \"test-key\"\n",
+        server.uri()
+    ));
+    let result = make_host()
+        .probe(&config, &config_path("messages-endpoint"), "messages", None)
+        .await
+        .expect("Anthropic endpoint");
+    assert_eq!(result.model, "vendor/text");
     server.verify().await;
 }
 

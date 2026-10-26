@@ -295,7 +295,11 @@ impl ModelsHost {
         let redactor = Redactor::new(provider, endpoint, custom_url.as_deref());
         let result = if let Some(url) = custom_url.as_deref().filter(|_| kind != ListKind::Catalog)
         {
-            self.fetch_exact(provider, planned, endpoint, &host, url)
+            let messages_only = planned.wire == Wire::Messages
+                && model_plan.as_ref().is_none_or(|plan| {
+                    plan.chat.trim().is_empty() && plan.responses.trim().is_empty()
+                });
+            self.fetch_exact(provider, planned, endpoint, &host, url, messages_only)
                 .await
                 .map(|list| (list, url.to_owned()))
         } else {
@@ -380,7 +384,8 @@ impl ModelsHost {
         let has_openai = sides
             .iter()
             .any(|(wire, _, _)| matches!(wire, Wire::Chat | Wire::Responses));
-        let mut seen = HashSet::new();
+        let mut seen_bases = HashSet::new();
+        let mut merged_lists = HashSet::new();
         let mut merged = Merged::default();
         let mut errors = Vec::new();
         let mut winning_base = None;
@@ -400,7 +405,7 @@ impl ModelsHost {
                 self.learned_auth(&provider.id, wire),
                 endpoint.headers
             );
-            if !seen.insert((base.trim_end_matches('/').to_owned(), auth_key)) {
+            if !seen_bases.insert((base.trim_end_matches('/').to_owned(), auth_key)) {
                 continue;
             }
             let upstream = if is_configured {
@@ -440,6 +445,21 @@ impl ModelsHost {
                             "{}: with the Anthropic version header this base answers with OpenRouter's own catalog namespaced under `anthropic/`, which is not a list of models to serve; give this provider OpenRouter's Chat base (https://openrouter.ai/api/v1), which lists those models under the ids OpenRouter serves",
                             safe_url(&base)
                         ));
+                        continue;
+                    }
+                    let auth_key = format!(
+                        "{}\0{:?}\0{:?}",
+                        endpoint.api_key,
+                        list.auth_choice()
+                            .or_else(|| self.learned_auth(&provider.id, wire)),
+                        endpoint.headers
+                    );
+                    let answered = list
+                        .source_url()
+                        .unwrap_or_else(|| base.trim_end_matches('/'))
+                        .to_owned();
+                    // reference: internal/provider/models.go:687-696 and 777-781
+                    if !merged_lists.insert((answered, auth_key)) {
                         continue;
                     }
                     succeeded += 1;
@@ -680,21 +700,58 @@ impl ModelsHost {
         endpoint: &Endpoint,
         host: &HostContext,
         url: &str,
+        messages_only: bool,
     ) -> Result<ProviderModels, DaemonError> {
         let redactor = Redactor::new(provider, endpoint, Some(url));
-        let learned = self.learned_auth(&provider.id, planned.wire);
+        let learning = messages_only && self.exact_learning(provider, planned, endpoint);
+        let learned = Arc::new(Mutex::new(self.learned_auth(&provider.id, planned.wire)));
+        let learned_for_page = Arc::clone(&learned);
         let rows = after_id(url, |page| {
-            let call = exact_call(provider, planned, endpoint, &page, learned);
+            let learned = Arc::clone(&learned_for_page);
             async move {
-                call.map_err(ListFailure)?
-                    .send(host.http())
-                    .await
-                    .map(|reply| reply.into_body())
-                    .map_err(ListFailure)
+                let supplied = *learned.lock().unwrap_or_else(|error| error.into_inner());
+                let choice = supplied.unwrap_or(AuthChoice::Both);
+                let call = exact_call(provider, planned, endpoint, &page, supplied, learning);
+                let mut result = call.map_err(ListFailure)?.send(host.http()).await;
+                // reference: internal/provider/models.go:651-654 and internal/catalog/live.go:530-541
+                if learning
+                    && choice == AuthChoice::Both
+                    && result.as_ref().is_err_and(|error| {
+                        error.status() == Some(401)
+                            && hofund_provider::both_auth_refused(401, error.message().as_bytes())
+                    })
+                {
+                    for single in [AuthChoice::XApiKey, AuthChoice::Bearer] {
+                        result =
+                            exact_call(provider, planned, endpoint, &page, Some(single), learning)
+                                .map_err(ListFailure)?
+                                .send(host.http())
+                                .await;
+                        let refused = result
+                            .as_ref()
+                            .is_err_and(|error| matches!(error.status(), Some(401 | 403)));
+                        if !refused {
+                            *learned.lock().unwrap_or_else(|error| error.into_inner()) =
+                                Some(single);
+                            break;
+                        }
+                    }
+                }
+                let reply = result.map_err(ListFailure)?;
+                if reply.status() != 200 {
+                    return Err(ListFailure(PluginError::status_error(
+                        reply.status(),
+                        format!("{}: HTTP {}", safe_url(&page), reply.status()),
+                    )));
+                }
+                Ok(reply.into_body())
             }
         })
         .await
         .map_err(|error| redactor.clean(error.0))?;
+        if let Some(choice) = *learned.lock().unwrap_or_else(|error| error.into_inner()) {
+            self.set_auth(&provider.id, choice);
+        }
         let (models, dropped) = hofund_provider::parse_model_rows(&rows).map_err(show)?;
         let mut merged = Merged::default();
         merged.add(&models, &dropped);
@@ -883,6 +940,22 @@ impl ModelsHost {
         }
         .instrument(span)
         .await
+    }
+
+    fn exact_learning(
+        &self,
+        provider: &hofund_config::Provider,
+        planned: &Planned,
+        endpoint: &Endpoint,
+    ) -> bool {
+        let host = self.host(&planned.base_url).unwrap_or_default();
+        hofund_provider::both_auth_applies(
+            &host,
+            !endpoint.api_key.is_empty(),
+            !planned.base_url.trim().is_empty(),
+            endpoint.credential,
+            pinned_auth(provider),
+        )
     }
 
     fn learned_auth(&self, provider: &str, wire: Wire) -> Option<AuthChoice> {
@@ -1134,56 +1207,49 @@ fn select_model(
             .map(|model| (model.id().to_owned(), model.id().to_owned()))
             .collect(),
     );
+    // reference: internal/provider/test.go:405-442
     for first_pass in [true, false] {
         for pool in &pools {
-            for preferred in [true, false] {
-                if !first_pass && !preferred {
+            for (route, upstream) in pool {
+                let model = listed
+                    .iter()
+                    .find(|model| model.id() == *route || model.id() == *upstream);
+                if model.is_some_and(|model| model.decides()) {
                     continue;
                 }
-                for (route, upstream) in pool {
-                    let model = listed
-                        .iter()
-                        .find(|model| model.id() == *route || model.id() == *upstream);
-                    if model.is_some_and(|model| model.decides()) {
+                if first_pass {
+                    if image_api(route) || image_api(upstream) {
                         continue;
                     }
-                    if first_pass {
-                        if image_api(route) || image_api(upstream) {
-                            continue;
-                        }
-                        if let Some(model) = model {
-                            let named = names_protocols(model.endpoints());
-                            let serves = serves(planned.wire, model.endpoints());
-                            if (named && !serves)
-                                || (preferred && !serves)
-                                || (!preferred && serves)
-                            {
+                    let open_code = provider
+                        .preset
+                        .as_deref()
+                        .is_some_and(|preset| preset.starts_with("opencode"));
+                    let named_only = open_code && planned.wire == Wire::Generative;
+                    if let Some(model) = model {
+                        if names_protocols(model.endpoints()) {
+                            if !serves(planned.wire, model.endpoints()) {
                                 continue;
                             }
-                            if provider
-                                .preset
-                                .as_deref()
-                                .is_some_and(|preset| preset.starts_with("opencode"))
-                                && planned.wire == Wire::Generative
-                                && model.endpoints().is_empty()
-                            {
+                        } else if open_code {
+                            if named_only {
                                 continue;
                             }
-                        } else if preferred || (planned.wire == Wire::Messages && !claude(upstream))
+                        } else if (planned.wire == Wire::Messages
+                            && !claude(model.id())
+                            && !claude(upstream))
+                            || named_only
                         {
                             continue;
                         }
-                        if planned.wire == Wire::Messages
-                            && model.is_some_and(|model| !claude(model.id()) && !claude(upstream))
-                        {
-                            continue;
-                        }
+                    } else if (planned.wire == Wire::Messages && !claude(upstream)) || named_only {
+                        continue;
                     }
-                    return Ok(Selected {
-                        exposed: route.clone(),
-                        upstream: upstream.clone(),
-                    });
                 }
+                return Ok(Selected {
+                    exposed: route.clone(),
+                    upstream: upstream.clone(),
+                });
             }
         }
     }
@@ -1303,6 +1369,7 @@ fn exact_call(
     endpoint: &Endpoint,
     url: &str,
     learned: Option<AuthChoice>,
+    learning: bool,
 ) -> Result<Call, PluginError> {
     let mut call = Call::get(url).header("accept", "application/json");
     if planned.wire == Wire::Messages {
@@ -1310,7 +1377,7 @@ fn exact_call(
     }
     if !endpoint.api_key.is_empty() {
         let secret = SecretString::from(endpoint.api_key.clone());
-        let style = match endpoint.credential {
+        let mut style = match endpoint.credential {
             Credential::Default => match planned.wire {
                 Wire::Messages => CredentialStyle::XApiKey,
                 Wire::Generative => CredentialStyle::NamedHeader(
@@ -1326,9 +1393,13 @@ fn exact_call(
                 CredentialStyle::NamedHeader(hofund_plugin_api::HeaderName::new("x-goog-api-key"))
             }
         };
+        if learning && learned.is_none() {
+            style = CredentialStyle::MessagesBoth;
+        }
         let style = match learned {
             Some(AuthChoice::XApiKey) => CredentialStyle::XApiKey,
             Some(AuthChoice::Bearer) => CredentialStyle::Bearer,
+            Some(AuthChoice::Both) => CredentialStyle::MessagesBoth,
             _ => style,
         };
         if style != CredentialStyle::MessagesBoth || !pinned_auth(provider) {

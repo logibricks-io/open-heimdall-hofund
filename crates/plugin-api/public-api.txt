@@ -265,7 +265,9 @@ ModelList::fn dropped (& self) -> & [String]
 ModelList::fn models (& self) -> & [ModelSpec]
 ModelList::fn new (models : Vec < ModelSpec > , next : Option < String >) -> Self
 ModelList::fn next (& self) -> Option < & str >
+ModelList::fn source_url (& self) -> Option < & str >
 ModelList::fn with_dropped (mut self , dropped : Vec < String >) -> Self
+ModelList::fn with_source_url (mut self , url : impl Into < String >) -> Self
 ModelSpec
 ModelSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 ModelSpec::const fn context (& self) -> u64
