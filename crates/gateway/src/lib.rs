@@ -61,6 +61,7 @@ pub struct Running {
     pub local_addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    attached: Vec<tokio::task::JoinHandle<()>>,
 }
 
 /// The listener could not be bound.
@@ -197,13 +198,25 @@ impl Gateway {
             local_addr,
             shutdown: Some(shutdown),
             task: Some(task),
+            attached: Vec::new(),
         })
     }
 }
 
 impl Running {
-    /// Asks the server to stop and waits for it.
+    /// Attaches a background task aborted by both shutdown and drop.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_task(mut self, task: tokio::task::JoinHandle<()>) -> Self {
+        self.attached.push(task);
+        self
+    }
+
+    /// Asks the server to stop, aborts attached tasks, and waits for the server.
     pub async fn shutdown(mut self) {
+        for task in self.attached.drain(..) {
+            task.abort();
+        }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -215,6 +228,9 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
+        for task in self.attached.drain(..) {
+            task.abort();
+        }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }

@@ -26,20 +26,32 @@ use hofund_usage::Ledger;
 mod adapt;
 mod membership;
 mod models;
+mod models_state;
 
-pub use models::{ModelLimits, ModelsHost, ProbeOutcome, ProviderModels};
+pub use models::{ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming};
 
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
 pub struct DaemonError {
     message: String,
+    retry_after: Option<std::time::Duration>,
 }
 
 impl DaemonError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            retry_after: None,
         }
+    }
+
+    fn with_retry_after(mut self, retry_after: Option<std::time::Duration>) -> Self {
+        self.retry_after = retry_after;
+        self
+    }
+
+    fn retry_after(&self) -> Option<std::time::Duration> {
+        self.retry_after
     }
 }
 
@@ -59,7 +71,7 @@ impl std::error::Error for DaemonError {}
 pub fn check(path: &Path) -> Result<(), DaemonError> {
     let config = load_path(path).map_err(show)?;
     warn(&config);
-    let _ = providers(&config, path, None, Mode::Check)?;
+    let _ = providers(&config, path, None, Mode::Check, None)?;
     Ok(())
 }
 
@@ -155,7 +167,7 @@ pub fn usage_report(path: &Path) -> Result<String, DaemonError> {
 /// Returns [`DaemonError`] when startup fails. A later accept error stays on
 /// the server task.
 pub async fn start(path: &Path) -> Result<Running, DaemonError> {
-    start_inner(path, None).await
+    start_inner(path, None, None).await
 }
 
 /// Starts the daemon without retaining idle upstream sockets.
@@ -169,30 +181,50 @@ pub async fn start(path: &Path) -> Result<Running, DaemonError> {
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub async fn start_for_test(path: &Path) -> Result<Running, DaemonError> {
-    start_inner(path, Some(0)).await
+    start_inner(path, Some(0), None).await
+}
+
+/// Starts a test daemon with short refresh-loop timings.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub async fn start_for_test_with_refresh(
+    path: &Path,
+    timing: RefreshTiming,
+) -> Result<Running, DaemonError> {
+    start_inner(path, Some(0), Some(timing)).await
 }
 
 async fn start_inner(
     path: &Path,
     max_idle_per_host: Option<usize>,
+    refresh_timing: Option<RefreshTiming>,
 ) -> Result<Running, DaemonError> {
     let config = load_path(path).map_err(show)?;
     warn(&config);
     let token_path = beside(path, &config.token_file);
     let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
     let usage = Arc::new(Ledger::open(&beside(path, &config.usage_file)).map_err(show)?);
+    let mut models_host = ModelsHost::new(config.connect_timeout, config.read_timeout)
+        .with_state_root(beside(path, ".hofund"));
     let gateway = Gateway::with_token_file(
-        router(&config, path, max_idle_per_host)?,
+        router(&config, path, max_idle_per_host, Some(&mut models_host))?,
         token,
         token_path,
         inbound_codecs(),
         usage,
     )
     .with_surfaces(hofund_plugin_registry::surfaces());
-    gateway
+    let running = gateway
         .bind(config.listen)
         .await
-        .map_err(|error| DaemonError::new(error.to_string()))
+        .map_err(|error| DaemonError::new(error.to_string()))?;
+    let models_host = Arc::new(models_host);
+    let refresh = models_host.spawn_refresh(
+        config,
+        path.to_path_buf(),
+        refresh_timing.unwrap_or_default(),
+    );
+    Ok(running.with_task(refresh))
 }
 
 /// Serves until the process receives a shutdown signal.
@@ -230,8 +262,9 @@ fn router(
     config: &Config,
     path: &Path,
     max_idle_per_host: Option<usize>,
+    models_host: Option<&mut ModelsHost>,
 ) -> Result<Snapshot, DaemonError> {
-    let built = providers(config, path, max_idle_per_host, Mode::Serve)?;
+    let built = providers(config, path, max_idle_per_host, Mode::Serve, models_host)?;
     let caps: BTreeMap<&str, u64> = config
         .providers
         .iter()
@@ -273,6 +306,7 @@ fn providers(
     path: &Path,
     max_idle_per_host: Option<usize>,
     mode: Mode,
+    mut models_host: Option<&mut ModelsHost>,
 ) -> Result<BTreeMap<String, membership::BuiltProvider>, DaemonError> {
     let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
     if let Some(max_idle_per_host) = max_idle_per_host {
@@ -280,14 +314,23 @@ fn providers(
     }
     let mut built = BTreeMap::new();
     for provider in &config.providers {
-        let planned = plan(provider)?;
+        let planned = match models_host.as_deref() {
+            Some(host) => host.planned(provider)?,
+            None => plan(provider)?,
+        };
         let endpoint = endpoint_for(provider, &planned)?;
         let timeout = endpoint.timeout;
         let protocol = protocol_of(planned.wire);
         let plugin_id = plugin_for(provider, planned.wire);
-        let adapter: Arc<dyn Provider> = Arc::new(build_plugin(
-            provider, &planned, &endpoint, path, limits, mode,
-        )?);
+        let adapter = build_plugin(provider, &planned, &endpoint, path, limits, mode)?;
+        if let Some(host) = models_host.as_deref_mut() {
+            host.register_instance(
+                provider.id.clone(),
+                adapter.upstream(),
+                planned.base_url.clone(),
+            );
+        }
+        let adapter: Arc<dyn Provider> = Arc::new(adapter);
         built.insert(
             provider.id.clone(),
             membership::BuiltProvider {

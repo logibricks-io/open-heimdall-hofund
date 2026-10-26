@@ -155,15 +155,64 @@ pub struct Provider {
 #[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelList {
-    /// Refresh interval text. The refresh job is a later change.
+    /// Refresh interval text.
     #[serde(default)]
     pub refresh: String,
-    /// Rules retained for the later auto-include job.
+    /// Case-insensitive glob or `re:` rules used by the auto-include job.
     #[serde(default)]
     pub auto_include: Vec<String>,
     /// An exact model-list URL, or an `env:NAME` reference to one.
     #[serde(default)]
     pub url: String,
+}
+
+impl ModelList {
+    /// The parsed refresh interval, or `None` when refresh is off.
+    #[must_use]
+    pub fn refresh_interval(&self) -> Option<Duration> {
+        parse_refresh(&self.refresh)
+    }
+}
+
+/// Compiles one validated auto-include rule for a whole, case-insensitive id match.
+///
+/// A glob contains `*`; every other character is literal. A `re:` rule contains
+/// a regular expression and may use `(?-i)` to disable case folding from that
+/// point onward.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Invalid`] for a bare id, an empty expression, or an
+/// invalid glob or regular expression.
+pub fn compile_auto_include(rule: &str) -> Result<regex::Regex, ConfigError> {
+    let rule = rule.trim();
+    if let Some(expression) = rule.strip_prefix("re:") {
+        if expression.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "an auto-include `re:` rule needs a regular expression".to_owned(),
+            ));
+        }
+        return regex::Regex::new(&format!("(?i)^(?:{expression})$")).map_err(|error| {
+            ConfigError::Invalid(format!(
+                "auto-include rule `{rule}` is not a valid regular expression: {error}"
+            ))
+        });
+    }
+    if !rule.contains('*') {
+        return Err(ConfigError::Invalid(format!(
+            "auto-include rule `{rule}` is a bare model id; use `*` or a `re:` prefix"
+        )));
+    }
+    let glob = rule
+        .split('*')
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join(".*");
+    regex::Regex::new(&format!("(?i)^{glob}$")).map_err(|error| {
+        ConfigError::Invalid(format!(
+            "auto-include rule `{rule}` is not a valid glob: {error}"
+        ))
+    })
 }
 
 impl fmt::Debug for ModelList {
@@ -444,7 +493,10 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             )));
         }
         validate_refresh(&provider.id, &provider.models.refresh)?;
+        let auto_include = clean_auto_include(&provider.id, &provider.models.auto_include)?;
         let options = options_of(&provider, &mut warnings)?;
+        let mut model_list = provider.models;
+        model_list.auto_include = auto_include;
         providers.push(Provider {
             id: provider.id,
             preset: provider.preset,
@@ -455,7 +507,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             headers: provider.headers,
             max_output_tokens: provider.max_output_tokens,
             options,
-            model_list: provider.models,
+            model_list,
         });
     }
     let mut models = BTreeSet::new();
@@ -775,30 +827,55 @@ fn default_read_timeout_ms() -> u64 {
 }
 
 fn validate_refresh(provider: &str, value: &str) -> Result<(), ConfigError> {
-    let value = value.trim();
-    if value.is_empty()
-        || matches!(
-            value.to_ascii_lowercase().as_str(),
-            "off" | "never" | "no" | "none" | "0" | "-"
-        )
-    {
-        return Ok(());
-    }
-    let valid = if let Some(days) = value.strip_suffix('d') {
-        days.parse::<f64>()
-            .ok()
-            .filter(|days| days.is_finite() && *days > 0.0)
-            .and_then(|days| Duration::try_from_secs_f64(days * 86_400.0).ok())
-            .is_some_and(|duration| duration >= Duration::from_secs(600))
-    } else {
-        parse_duration(value).is_some_and(|duration| duration >= Duration::from_secs(600))
-    };
-    if valid {
+    if refresh_off(value) || parse_refresh(value).is_some() {
         return Ok(());
     }
     Err(ConfigError::Invalid(format!(
         "provider `{provider}` models.refresh must be off, a day count, or a duration of at least 10m"
     )))
+}
+
+fn refresh_off(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || matches!(
+            value.to_ascii_lowercase().as_str(),
+            "off" | "never" | "no" | "none" | "0" | "-"
+        )
+}
+
+fn parse_refresh(value: &str) -> Option<Duration> {
+    if refresh_off(value) {
+        return None;
+    }
+    let value = value.trim().to_ascii_lowercase();
+    let duration = if let Some(days) = value.strip_suffix('d') {
+        days.parse::<f64>()
+            .ok()
+            .filter(|days| days.is_finite() && *days > 0.0)
+            .and_then(|days| Duration::try_from_secs_f64(days * 86_400.0).ok())?
+    } else {
+        parse_duration(&value)?
+    };
+    (duration >= Duration::from_secs(600)).then_some(duration)
+}
+
+fn clean_auto_include(provider: &str, rules: &[String]) -> Result<Vec<String>, ConfigError> {
+    let mut seen = BTreeSet::new();
+    let mut cleaned = Vec::new();
+    for rule in rules {
+        let rule = rule.trim();
+        if rule.is_empty() || !seen.insert(rule.to_owned()) {
+            continue;
+        }
+        compile_auto_include(rule).map_err(|error| {
+            ConfigError::Invalid(format!(
+                "provider `{provider}` models.auto_include: {error}"
+            ))
+        })?;
+        cleaned.push(rule.to_owned());
+    }
+    Ok(cleaned)
 }
 
 fn parse_duration(value: &str) -> Option<Duration> {
@@ -1026,7 +1103,7 @@ mod tests {
     use super::{Accounts, load};
 
     #[test]
-    fn model_listing_settings_parse_and_refresh_is_validated() {
+    fn model_listing_settings_parse_refresh_and_clean_rules() {
         let config = load(
             r#"
             [[providers]]
@@ -1034,24 +1111,37 @@ mod tests {
             preset = "openai"
             [providers.models]
             refresh = "1h30m"
-            auto_include = ["gpt-*", "re:claude"]
+            auto_include = [" gpt-* ", "", "re:claude", "gpt-*"]
             url = "env:MODEL_LIST_URL"
             "#,
         )
         .expect("model settings");
         let models = &config.providers[0].model_list;
         assert_eq!(models.refresh, "1h30m");
+        assert_eq!(models.refresh_interval(), Some(Duration::from_secs(5400)));
         assert_eq!(models.auto_include, ["gpt-*", "re:claude"]);
         assert_eq!(models.url, "env:MODEL_LIST_URL");
         assert!(!format!("{config:?}").contains("MODEL_LIST_URL"));
 
-        for valid in ["", "off", "NEVER", "none", "-", "0.5d", "10m", "1h30m"] {
+        for (valid, expected) in [
+            ("0.5d", Some(Duration::from_secs(43_200))),
+            ("1h30m", Some(Duration::from_secs(5400))),
+            ("10m", Some(Duration::from_secs(600))),
+            ("", None),
+            ("off", None),
+            ("NEVER", None),
+            ("no", None),
+            ("none", None),
+            ("0", None),
+            ("-", None),
+        ] {
             let source = format!(
                 "[[providers]]\nid = \"primary\"\npreset = \"openai\"\n[providers.models]\nrefresh = \"{valid}\"\n"
             );
-            load(&source).unwrap_or_else(|error| panic!("refresh {valid}: {error}"));
+            let config = load(&source).unwrap_or_else(|error| panic!("refresh {valid}: {error}"));
+            assert_eq!(config.providers[0].model_list.refresh_interval(), expected);
         }
-        for invalid in ["1m", "0.001d", "tomorrow", "10", "1h30", "-1h"] {
+        for invalid in ["9m59s", "0.001d", "tomorrow", "10", "1h30", "-1h"] {
             let source = format!(
                 "[[providers]]\nid = \"primary\"\npreset = \"openai\"\n[providers.models]\nrefresh = \"{invalid}\"\n"
             );
@@ -1063,6 +1153,26 @@ mod tests {
         )
         .expect_err("unknown model setting");
         assert!(unknown.to_string().contains("unknown"), "{unknown}");
+    }
+
+    #[test]
+    fn auto_include_patterns_match_whole_ids_and_invalid_rules_are_rejected() {
+        let glob = super::compile_auto_include("gpt-*").expect("glob");
+        assert!(glob.is_match("GPT-5"));
+        assert!(!glob.is_match("xgpt-5"));
+        let expression = super::compile_auto_include("re:claude-.*").expect("expression");
+        assert!(expression.is_match("CLAUDE-x"));
+        let sensitive = super::compile_auto_include("re:(?-i)claude-.*").expect("expression");
+        assert!(sensitive.is_match("claude-x"));
+        assert!(!sensitive.is_match("Claude-x"));
+
+        for invalid in ["bare-id", "re:", "re:   ", "re:("] {
+            let source = format!(
+                "[[providers]]\nid = \"primary\"\npreset = \"openai\"\n[providers.models]\nauto_include = [\"{invalid}\"]\n"
+            );
+            let error = load(&source).expect_err("invalid auto-include rule");
+            assert!(error.to_string().contains("models.auto_include"), "{error}");
+        }
     }
 
     #[test]
