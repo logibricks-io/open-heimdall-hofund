@@ -337,54 +337,24 @@ async fn send_json(
     send_builder(builder).await
 }
 
-/// Sends `builder`, and once more when the pooled connection was already closed.
+/// Sends `builder`, retrying once only when connection establishment failed.
 ///
-/// The process-wide client keeps idle sockets. A mock, or an upstream that
-/// restarted, can take that socket's port. The first write then fails before
-/// a status arrives. One new connection is safe: the timed-out and answered
-/// calls are not sent again.
+/// A connect error proves that no request was sent. Errors after a write are
+/// never retried because the upstream may have processed a non-idempotent POST.
+/// Hyper separately retries requests it cancelled on an idle socket before
+/// writing them.
 pub(crate) async fn send_builder(
     builder: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, ProviderError> {
     let retry = builder.try_clone();
     match builder.send().await {
         Ok(response) => Ok(response),
-        Err(error) if connection_already_closed(&error) => match retry {
+        Err(error) if error.is_connect() => match retry {
             Some(again) => again.send().await.map_err(map_transport),
             None => Err(map_transport(error)),
         },
         Err(error) => Err(map_transport(error)),
     }
-}
-
-fn connection_already_closed(error: &reqwest::Error) -> bool {
-    if error.is_timeout() || error.is_status() || error.is_decode() || error.is_body() {
-        return false;
-    }
-    if error.is_connect() {
-        return true;
-    }
-    let mut current = std::error::Error::source(error);
-    while let Some(err) = current {
-        if let Some(io) = err.downcast_ref::<std::io::Error>() {
-            return matches!(
-                io.kind(),
-                std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::ConnectionRefused
-                    | std::io::ErrorKind::NotConnected
-            );
-        }
-        if err
-            .to_string()
-            .contains("connection closed before message completed")
-        {
-            return true;
-        }
-        current = err.source();
-    }
-    false
 }
 
 fn bearer_header(token: &str) -> Result<HeaderValue, ProviderError> {
@@ -584,7 +554,11 @@ fn note_dropped(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::note_dropped;
+    use std::time::Duration;
+
+    use tokio::io::AsyncReadExt;
+
+    use super::{note_dropped, send_builder};
 
     #[test]
     fn a_dropped_tool_is_noted_once() {
@@ -592,5 +566,61 @@ mod tests {
         assert!(note_dropped(&name));
         assert!(!note_dropped(&name));
         assert!(note_dropped(&format!("{name}-other")));
+    }
+
+    #[tokio::test]
+    async fn a_post_closed_after_the_full_request_is_not_replayed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("request connection");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = socket.read(&mut chunk).await.expect("read request");
+                assert_ne!(read, 0, "request ended before its body");
+                request.extend_from_slice(&chunk[..read]);
+                if complete_request(&request) {
+                    break;
+                }
+            }
+            assert!(request.starts_with(b"POST /v1/chat/completions HTTP/1.1\r\n"));
+            assert!(request.ends_with(b"{\"model\":\"demo\"}"));
+            listener
+        });
+        let client = reqwest::Client::new();
+        let result = send_builder(
+            client
+                .post(format!("http://{address}/v1/chat/completions"))
+                .body(r#"{"model":"demo"}"#),
+        )
+        .await;
+        assert!(result.is_err(), "a closed response connection must fail");
+        let listener = server.await.expect("server");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err(),
+            "the POST was replayed on a second connection"
+        );
+    }
+
+    fn complete_request(request: &[u8]) -> bool {
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let length = headers
+            .split("\r\n")
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        request.len() >= header_end + 4 + length
     }
 }

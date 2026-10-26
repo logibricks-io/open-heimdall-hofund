@@ -21,7 +21,6 @@
 //! (`external_account`), and express-mode API keys.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -65,8 +64,8 @@ const REGION_MODELS: &[&str] = &[
 ///
 /// The access token is cached on this value until five minutes before it
 /// expires, or until the credentials file's size or modification time
-/// changes. Overlapping calls can each mint a token; a later call reuses
-/// whichever finished last.
+/// changes. Concurrent cache misses share one mint, bounded by a 30 second
+/// total deadline on both pooled and private clients.
 pub struct Vertex {
     upstream: Upstream,
     base: String,
@@ -75,7 +74,8 @@ pub struct Vertex {
     token_url: String,
     iam_root: String,
     token_client: reqwest::Client,
-    cache: Mutex<Option<CachedToken>>,
+    mint_deadline: Duration,
+    cache: tokio::sync::Mutex<Option<CachedToken>>,
 }
 
 struct CachedToken {
@@ -217,7 +217,8 @@ impl Vertex {
             token_url,
             iam_root,
             token_client,
-            cache: Mutex::new(None),
+            mint_deadline: MINT_TIMEOUT,
+            cache: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -474,21 +475,25 @@ impl Vertex {
             ));
         }
         let stamp = file_stamp(&meta);
-        if let Some(token) = self.cached(&stamp) {
+        if let Some(token) = self.cached(&stamp).await {
             return Ok(token);
         }
-        let (token, expiry) = mint_file(
+        let mut cache = self.cache.lock().await;
+        if let Some(token) = cached_token(&cache, &stamp) {
+            return Ok(token);
+        }
+        let mint = mint_file(
             &self.token_client,
             &file,
             &self.impersonate,
             &self.token_url,
             &self.iam_root,
-        )
-        .await?;
-        let mut cache = self
-            .cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        );
+        let (token, expiry) = tokio::time::timeout(self.mint_deadline, mint)
+            .await
+            .map_err(|_| {
+                ProviderError::timeout("Google token mint exceeded its total deadline")
+            })??;
         *cache = Some(CachedToken {
             stamp,
             token: token.clone(),
@@ -497,21 +502,22 @@ impl Vertex {
         Ok(token)
     }
 
-    fn cached(&self, stamp: &str) -> Option<String> {
-        let cache = self
-            .cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let cached = cache.as_ref()?;
-        if cached.stamp != stamp {
-            return None;
-        }
-        let fresh_until = cached.expiry.checked_sub(REFRESH_LEAD)?;
-        if SystemTime::now() < fresh_until {
-            Some(cached.token.clone())
-        } else {
-            None
-        }
+    async fn cached(&self, stamp: &str) -> Option<String> {
+        let cache = self.cache.lock().await;
+        cached_token(&cache, stamp)
+    }
+}
+
+fn cached_token(cache: &Option<CachedToken>, stamp: &str) -> Option<String> {
+    let cached = cache.as_ref()?;
+    if cached.stamp != stamp {
+        return None;
+    }
+    let fresh_until = cached.expiry.checked_sub(REFRESH_LEAD)?;
+    if SystemTime::now() < fresh_until {
+        Some(cached.token.clone())
+    } else {
+        None
     }
 }
 
@@ -1091,22 +1097,25 @@ async fn post_token(
     }
     let response = http::send_builder(builder).await?;
     let status = response.status().as_u16();
-    let bytes = response.bytes().await.map_err(http::map_transport)?;
-    if bytes.len() > MAX_CREDENTIALS_BYTES as usize {
-        return Err(ProviderError::decode(
-            "the token response is larger than 1 MiB",
-        ));
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+        let chunk = chunk.map_err(http::map_transport)?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_CREDENTIALS_BYTES as usize {
+            return Err(ProviderError::decode(
+                "the token response is larger than 1 MiB",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
     }
     if !(200..300).contains(&status) {
-        return Err(ProviderError::status(
-            status,
-            format!(
-                "the sign-in was refused ({status}): {}",
-                token_message(status, &bytes)
-            ),
-        ));
+        let message = token_error_code(&bytes).map_or_else(
+            || format!("the sign-in was refused ({status})"),
+            |code| format!("the sign-in was refused ({status}): {code}"),
+        );
+        return Err(ProviderError::status(status, message));
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 fn bearer_value(token: &str) -> Result<reqwest::header::HeaderValue, ProviderError> {
@@ -1116,46 +1125,14 @@ fn bearer_value(token: &str) -> Result<reqwest::header::HeaderValue, ProviderErr
     Ok(value)
 }
 
-fn token_message(status: u16, bytes: &[u8]) -> String {
-    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-        let text = String::from_utf8_lossy(bytes);
-        let text = text.trim();
-        if text.is_empty() {
-            return http_status_text(status);
-        }
-        return text.to_owned();
-    };
-    for key in ["error_description", "detail", "message"] {
-        if let Some(text) = value.get(key).and_then(Value::as_str)
-            && !text.is_empty()
-        {
-            return text.to_owned();
-        }
-    }
-    match value.get("error") {
-        Some(Value::String(text)) if !text.is_empty() => text.clone(),
-        Some(Value::Object(map)) => map
-            .get("message")
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-            .unwrap_or(&http_status_text(status))
-            .to_owned(),
-        _ => http_status_text(status),
-    }
-}
-
-fn http_status_text(status: u16) -> String {
-    match status {
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        408 => "Request Timeout",
-        429 => "Too Many Requests",
-        500 => "Internal Server Error",
-        _ => return format!("HTTP {status}"),
-    }
-    .to_owned()
+fn token_error_code(bytes: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<Value>(bytes).ok()?;
+    let code = value.get("error")?.as_str()?;
+    let valid = (1..=64).contains(&code.len())
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
+    valid.then(|| code.to_owned())
 }
 
 fn parse_rfc3339_utc(text: &str) -> Option<SystemTime> {
@@ -1341,6 +1318,168 @@ mod tests {
             .as_secs();
         assert_eq!(seconds, 1_792_911_600);
         assert!(parse_rfc3339_utc("2026-10-25T07:00:00+00:00").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_slow_drip_token_response_hits_the_total_deadline() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("connection");
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\nconnection: close\r\n\r\n")
+                .await
+                .expect("headers");
+            for _ in 0..100 {
+                if socket.write_all(b"x").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+        let credentials = test_credentials("slow-drip");
+        let mut endpoint = crate::Endpoint::new("vertex", format!("http://{address}/v1"));
+        endpoint.client = Some(reqwest::Client::new());
+        let mut provider = super::Vertex::with_token_endpoints(
+            endpoint,
+            credentials.display().to_string(),
+            "",
+            format!("http://{address}/token"),
+            format!("http://{address}/iam/v1"),
+        )
+        .expect("vertex");
+        provider.mint_deadline = std::time::Duration::from_millis(100);
+        let error = provider.access_token().await.expect_err("deadline");
+        assert_eq!(error.kind, crate::ProviderErrorKind::Timeout);
+        assert!(error.to_string().contains("total deadline"));
+        server.abort();
+        let _ = std::fs::remove_dir_all(credentials.parent().expect("parent"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_cache_misses_mint_one_token() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/token"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(75))
+                    .set_body_json(serde_json::json!({
+                        "access_token": "shared-test-token",
+                        "expires_in": 3600
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let credentials = test_credentials("single-flight");
+        let provider = std::sync::Arc::new(
+            super::Vertex::with_token_endpoints(
+                crate::Endpoint::new("vertex", server.uri()),
+                credentials.display().to_string(),
+                "",
+                format!("{}/token", server.uri()),
+                format!("{}/iam/v1", server.uri()),
+            )
+            .expect("vertex"),
+        );
+        let calls = (0..8).map(|_| {
+            let provider = std::sync::Arc::clone(&provider);
+            async move { provider.access_token().await }
+        });
+        let tokens = futures_util::future::join_all(calls).await;
+        for token in tokens {
+            assert_eq!(token.expect("token"), "shared-test-token");
+        }
+        let _ = std::fs::remove_dir_all(credentials.parent().expect("parent"));
+    }
+
+    #[tokio::test]
+    async fn a_token_error_redacts_the_idp_body() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/invalid"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "SECRET-IDP-DESCRIPTION"
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/malformed"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400).set_body_string("SECRET-RAW-IDP-BODY"),
+            )
+            .mount(&server)
+            .await;
+        for (path, code) in [("/invalid", Some("invalid_grant")), ("/malformed", None)] {
+            let error = super::post_token(
+                &reqwest::Client::new(),
+                &format!("{}{path}", server.uri()),
+                "application/json",
+                None,
+                b"{}".to_vec(),
+            )
+            .await
+            .expect_err("refused");
+            let text = error.to_string();
+            assert!(text.contains("(400)"), "{text}");
+            assert_eq!(code.is_some_and(|code| text.contains(code)), code.is_some());
+            assert!(!text.contains("SECRET-"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_body_is_rejected_at_the_streaming_cap() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/token"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(vec![
+                b'x';
+                super::MAX_CREDENTIALS_BYTES
+                    as usize
+                    + 1
+            ]))
+            .mount(&server)
+            .await;
+        let error = super::post_token(
+            &reqwest::Client::new(),
+            &format!("{}/token", server.uri()),
+            "application/json",
+            None,
+            b"{}".to_vec(),
+        )
+        .await
+        .expect_err("too large");
+        assert!(error.to_string().contains("larger than 1 MiB"));
+    }
+
+    fn test_credentials(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("hofund-vertex-unit-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("adc.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "type": "authorized_user",
+                "client_id": "test-client",
+                "client_secret": "test-secret",
+                "refresh_token": "test-refresh"
+            }))
+            .expect("json"),
+        )
+        .expect("credentials");
+        path
     }
 
     fn sign(pkcs8: &[u8], message: &[u8]) -> Vec<u8> {
