@@ -139,6 +139,7 @@ DynSubscriptionFactory::fn spec (& self) -> & 'static SubscriptionSpec
 DynSubscriptionFactory::fn validate_and_build (& self , raw : & RawTable , host : & HostContext ,) -> Result < Arc < dyn Subscription > , BuildError >
 DynUpstreamFactory
 DynUpstreamFactory::fn config_schema (& self) -> Schema
+DynUpstreamFactory::fn preflight (& self , raw : & RawTable) -> Result < () , ConfigError >
 DynUpstreamFactory::fn spec (& self) -> & 'static UpstreamSpec
 DynUpstreamFactory::fn validate (& self , raw : & RawTable) -> Result < () , ConfigError >
 DynUpstreamFactory::fn validate_and_build (& self , raw : & RawTable , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
@@ -532,6 +533,7 @@ UpstreamFactory
 UpstreamFactory::Config
 UpstreamFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
 UpstreamFactory::fn config_schema (& self) -> Schema
+UpstreamFactory::fn preflight (& self , cfg : & Self :: Config) -> Result < () , ConfigError >
 UpstreamFactory::fn spec (& self) -> & 'static UpstreamSpec
 UpstreamFactory::fn validate (& self , raw : & RawTable) -> Result < Self :: Config , ConfigError >
 UpstreamProvider

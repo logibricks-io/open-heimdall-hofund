@@ -196,7 +196,8 @@ impl Vertex {
         }
         let credentials = credentials.trim().to_owned();
         let impersonate = impersonate.trim().to_ascii_lowercase();
-        check_settings(&credentials, &impersonate)?;
+        check_token_urls(&endpoint.id, &token_url, &iam_root)?;
+        check_settings(&endpoint.id, &credentials, &impersonate)?;
         let base = endpoint.base_url.trim().trim_end_matches('/').to_owned();
         if base.is_empty() {
             return Err(ProviderError::decode("provider base URL is empty"));
@@ -368,12 +369,77 @@ fn location_ok(location: &str) -> bool {
     })
 }
 
-pub(crate) fn check_settings(credentials: &str, impersonate: &str) -> Result<(), ProviderError> {
+fn check_token_urls(provider: &str, token_url: &str, iam_root: &str) -> Result<(), ProviderError> {
+    for (key, value) in [("token_url", token_url), ("iam_root", iam_root)] {
+        if !value.is_empty() && !https_or_loopback(value) {
+            return Err(ProviderError::decode(format!(
+                "provider `{provider}` option `{key}` must be an https URL, or an http URL on a loopback host"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn check_credentials_path(provider: &str, credentials: &str) -> Result<(), ProviderError> {
     if !credentials.is_empty() && !credentials_path_ok(credentials) {
         return Err(ProviderError::decode(format!(
-            "give the credentials file's full path, not {credentials:?}"
+            "provider `{provider}` option `credentials` must be a full path (absolute or starting with ~/)"
         )));
     }
+    Ok(())
+}
+
+/// Checks that a configured credentials file exists for `hofund config check`.
+///
+/// Provider construction and request signing do not call this check.
+///
+/// # Errors
+///
+/// Returns [`ProviderError`] when the path cannot be expanded or names no file.
+pub fn check_credentials_file(provider: &str, credentials: &str) -> Result<(), ProviderError> {
+    if credentials.is_empty() {
+        return Ok(());
+    }
+    check_credentials_path(provider, credentials)?;
+    let file = expand_home(credentials).map_err(|error| {
+        ProviderError::decode(format!(
+            "provider `{provider}` option `credentials`: {error}"
+        ))
+    })?;
+    if !file.is_file() {
+        return Err(ProviderError::decode(format!(
+            "provider `{provider}` option `credentials` names no file: create it, correct the path, or clear it to use Application Default Credentials"
+        )));
+    }
+    Ok(())
+}
+
+fn https_or_loopback(value: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+    match parsed.scheme() {
+        "https" => parsed.host().is_some(),
+        "http" => parsed.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        }),
+        _ => false,
+    }
+}
+
+pub(crate) fn check_settings(
+    provider: &str,
+    credentials: &str,
+    impersonate: &str,
+) -> Result<(), ProviderError> {
+    check_credentials_path(provider, credentials)?;
     if !impersonate.is_empty() && !account_ok(impersonate) {
         return Err(ProviderError::decode(format!(
             "{impersonate:?} is no service account's email"
@@ -736,7 +802,7 @@ async fn mint_file(
         token_url,
         iam_root,
     };
-    let account = creds.impersonated_email();
+    let account = creds.impersonated_email()?;
     let minted = match mint_creds(&urls, &creds, true).await {
         Ok(minted) => minted,
         Err(error) => {
@@ -808,7 +874,7 @@ async fn mint_creds_inner(
                     "an impersonation's source is another impersonation",
                 )));
             }
-            let account = creds.impersonated_email();
+            let account = creds.impersonated_email().map_err(MintFail::Other)?;
             if account.is_empty() {
                 return Err(MintFail::Other(ProviderError::decode(
                     "their service_account_impersonation_url names no service account",
@@ -849,41 +915,69 @@ fn classify_refresh(error: ProviderError) -> MintFail {
 }
 
 impl GoogleCreds {
-    fn impersonated_email(&self) -> String {
+    fn impersonated_email(&self) -> Result<String, ProviderError> {
         if self.r#type != "impersonated_service_account" {
-            return String::new();
+            return Ok(String::new());
         }
-        impersonated_account(&self.service_account_impersonation_url).unwrap_or_default()
+        Ok(impersonated_account(&self.service_account_impersonation_url)?.unwrap_or_default())
     }
 }
 
-fn impersonated_account(url: &str) -> Option<String> {
+fn impersonated_account(url: &str) -> Result<Option<String>, ProviderError> {
     let marker = "/serviceAccounts/";
-    let start = url.rfind(marker)? + marker.len();
-    let email = url[start..].strip_suffix(":generateAccessToken")?;
+    let Some(marker_start) = url.rfind(marker) else {
+        return Ok(None);
+    };
+    let start = marker_start + marker.len();
+    let Some(email) = url[start..].strip_suffix(":generateAccessToken") else {
+        return Ok(None);
+    };
     if email.is_empty() || email.contains('/') || email.contains(':') {
-        return None;
+        return Ok(None);
     }
-    Some(percent_decode(email))
+    percent_decode(email).map(Some)
 }
 
-fn percent_decode(text: &str) -> String {
+fn percent_decode(text: &str) -> Result<String, ProviderError> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            let hex = &text[index + 1..index + 3];
-            if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                out.push(byte);
-                index += 3;
-                continue;
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(ProviderError::decode(
+                    "service account impersonation URL has a truncated percent escape",
+                ));
             }
+            let Some(high) = hex_digit(bytes[index + 1]) else {
+                return Err(ProviderError::decode(
+                    "service account impersonation URL has a non-hex percent escape",
+                ));
+            };
+            let Some(low) = hex_digit(bytes[index + 2]) else {
+                return Err(ProviderError::decode(
+                    "service account impersonation URL has a non-hex percent escape",
+                ));
+            };
+            out.push((high << 4) | low);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
         }
-        out.push(bytes[index]);
-        index += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out).map_err(|_| {
+        ProviderError::decode("percent-decoded service account email is not valid UTF-8")
+    })
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn sign_in_again(file: &Path, account: &str) -> String {
@@ -1099,25 +1193,14 @@ async fn impersonate_for(
             )));
         }
     };
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-        ProviderError::decode(format!("impersonating {account}: IAM Credentials: {error}"))
-    })?;
-    let access = value
-        .get("accessToken")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    if access.is_empty() {
-        return Err(ProviderError::decode(format!(
-            "impersonating {account}: IAM Credentials gave no access token"
-        )));
-    }
-    let expiry = value
-        .get("expireTime")
-        .and_then(Value::as_str)
+    let iam = hofund_plugin_sdk::oauth::parse_iam_access_token(&bytes)
+        .map_err(|error| ProviderError::decode(format!("impersonating {account}: {error}")))?;
+    let access = iam.access_token();
+    let expiry = iam
+        .expire_time()
         .and_then(parse_rfc3339_utc)
-        .unwrap_or_else(|| SystemTime::now() + Duration::from_secs(3600));
-    Ok((access, expiry))
+        .unwrap_or_else(|| SystemTime::now() + access.expires_in());
+    Ok((access.expose_secret().to_owned(), expiry))
 }
 
 fn delegate_name(value: &str) -> String {
@@ -1228,8 +1311,8 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GoogleCreds, base_url, check_settings, host, method_path, parse_rfc3339_utc, pem_to_pkcs8,
-        service_assertion,
+        GoogleCreds, base_url, check_settings, check_token_urls, host, impersonated_account,
+        method_path, parse_rfc3339_utc, pem_to_pkcs8, percent_decode, service_assertion,
     };
     use base64::Engine;
     use ring::rand::SystemRandom;
@@ -1309,10 +1392,70 @@ mod tests {
         } else {
             "/tmp/adc.json"
         };
-        check_settings(absolute, "").expect("absolute");
-        check_settings("~/adc.json", "worker@example.com").expect("home");
-        assert!(check_settings("adc.json", "").is_err());
-        assert!(check_settings(absolute, "not-an-email").is_err());
+        check_settings("vertex", absolute, "").expect("absolute");
+        check_settings("vertex", "~/adc.json", "worker@example.com").expect("home");
+        let error = check_settings("vertex", "adc.json", "").expect_err("relative path");
+        assert_eq!(
+            error.to_string(),
+            "provider `vertex` option `credentials` must be a full path (absolute or starting with ~/)"
+        );
+        assert!(check_settings("vertex", absolute, "not-an-email").is_err());
+    }
+
+    #[test]
+    fn resolved_token_urls_require_https_or_a_loopback_host() {
+        check_token_urls("vertex", "", "").expect("Google defaults");
+        for key in ["token_url", "iam_root"] {
+            for value in [
+                "http://localhost:9/token",
+                "http://127.0.0.1:9/token",
+                "http://[::1]:9/token",
+                "https://example.com/token",
+            ] {
+                let (token_url, iam_root) = if key == "token_url" {
+                    (value, "")
+                } else {
+                    ("", value)
+                };
+                check_token_urls("vertex", token_url, iam_root).expect(value);
+            }
+            for value in [
+                "not a url",
+                "http://example.com/token",
+                "ftp://example.com/token",
+                "https://",
+                "https://user:pass@example.com/token",
+                "https://user@example.com/token",
+                "http://user:pass@127.0.0.1:9/token",
+            ] {
+                let (token_url, iam_root) = if key == "token_url" {
+                    (value, "")
+                } else {
+                    ("", value)
+                };
+                let error =
+                    check_token_urls("vertex", token_url, iam_root).expect_err("invalid URL");
+                let text = error.to_string();
+                assert!(text.contains("provider `vertex`"), "{text}");
+                assert!(text.contains(&format!("option `{key}`")), "{text}");
+                assert!(!text.contains(value), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_credentials_file_is_allowed_when_the_adapter_opens() {
+        let missing = std::env::temp_dir()
+            .join(format!("hofund-vertex-missing-{}", std::process::id()))
+            .join("adc.json");
+        super::Vertex::with_overrides(
+            crate::Endpoint::new("vertex-check", "http://127.0.0.1:9"),
+            missing.to_string_lossy(),
+            "",
+            "",
+            "",
+        )
+        .expect("missing credentials stay lazy");
     }
 
     #[test]
@@ -1355,6 +1498,35 @@ mod tests {
         let iat = claims["iat"].as_i64().expect("iat");
         let exp = claims["exp"].as_i64().expect("exp");
         assert_eq!(exp - iat, 3600);
+    }
+
+    #[test]
+    fn percent_decoding_accepts_multibyte_utf8_and_impersonation_urls() {
+        assert_eq!(percent_decode("%C3%A9").expect("UTF-8"), "\u{e9}");
+        assert_eq!(
+            impersonated_account(
+                "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/worker%40example.com:generateAccessToken"
+            )
+            .expect("valid URL"),
+            Some("worker@example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn percent_decoding_rejects_truncated_non_hex_and_non_ascii_escapes() {
+        for input in ["%", "%A", "%GG", "%\u{e9}", "%\u{e9}x"] {
+            let error = percent_decode(input).expect_err(input);
+            assert!(
+                error.to_string().contains("percent escape"),
+                "{input}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn percent_decoding_rejects_invalid_utf8() {
+        let error = percent_decode("%FF").expect_err("UTF-8");
+        assert!(error.to_string().contains("not valid UTF-8"), "{error}");
     }
 
     #[test]

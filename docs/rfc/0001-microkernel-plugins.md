@@ -245,6 +245,10 @@ pub trait UpstreamFactory: Send + Sync + 'static {
     fn spec(&self) -> &'static UpstreamSpec;
     fn config_schema(&self) -> Schema;
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError>;
+    fn preflight(&self, cfg: &Self::Config) -> Result<(), ConfigError> {
+        let _ = cfg;
+        Ok(())
+    }
     fn build(
         &self,
         cfg: &Self::Config,
@@ -255,6 +259,8 @@ pub trait UpstreamFactory: Send + Sync + 'static {
 pub trait DynUpstreamFactory: Send + Sync + 'static {
     fn spec(&self) -> &'static UpstreamSpec;
     fn config_schema(&self) -> Schema;
+    fn validate(&self, raw: &RawTable) -> Result<(), ConfigError>;
+    fn preflight(&self, raw: &RawTable) -> Result<(), ConfigError>;
     fn validate_and_build(
         &self,
         raw: &RawTable,

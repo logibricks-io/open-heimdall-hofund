@@ -59,7 +59,7 @@ impl std::error::Error for DaemonError {}
 pub fn check(path: &Path) -> Result<(), DaemonError> {
     let config = load_path(path).map_err(show)?;
     warn(&config);
-    let _ = providers(&config, path, None)?;
+    let _ = providers(&config, path, None, Mode::Check)?;
     Ok(())
 }
 
@@ -166,6 +166,7 @@ pub async fn start(path: &Path) -> Result<Running, DaemonError> {
 /// # Errors
 ///
 /// Returns [`DaemonError`] when startup fails.
+#[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub async fn start_for_test(path: &Path) -> Result<Running, DaemonError> {
     start_inner(path, Some(0)).await
@@ -230,7 +231,7 @@ fn router(
     path: &Path,
     max_idle_per_host: Option<usize>,
 ) -> Result<Snapshot, DaemonError> {
-    let built = providers(config, path, max_idle_per_host)?;
+    let built = providers(config, path, max_idle_per_host, Mode::Serve)?;
     let caps: BTreeMap<&str, u64> = config
         .providers
         .iter()
@@ -261,10 +262,17 @@ fn router(
     membership::open(&built, routes, policy)
 }
 
+#[derive(Clone, Copy)]
+enum Mode {
+    Check,
+    Serve,
+}
+
 fn providers(
     config: &Config,
     path: &Path,
     max_idle_per_host: Option<usize>,
+    mode: Mode,
 ) -> Result<BTreeMap<String, membership::BuiltProvider>, DaemonError> {
     let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
     if let Some(max_idle_per_host) = max_idle_per_host {
@@ -277,8 +285,9 @@ fn providers(
         let timeout = endpoint.timeout;
         let protocol = protocol_of(planned.wire);
         let plugin_id = plugin_for(provider, planned.wire);
-        let adapter: Arc<dyn Provider> =
-            Arc::new(build_plugin(provider, &planned, &endpoint, path, limits)?);
+        let adapter: Arc<dyn Provider> = Arc::new(build_plugin(
+            provider, &planned, &endpoint, path, limits, mode,
+        )?);
         built.insert(
             provider.id.clone(),
             membership::BuiltProvider {
@@ -331,6 +340,7 @@ fn build_plugin(
     endpoint: &Endpoint,
     path: &Path,
     limits: HttpLimits,
+    mode: Mode,
 ) -> Result<adapt::ProviderAdapter, DaemonError> {
     let plugin_id = plugin_for(provider, planned.wire);
     let raw = if let Some(preset) = &provider.preset
@@ -348,6 +358,7 @@ fn build_plugin(
         path,
         limits,
         true,
+        matches!(mode, Mode::Check),
     )?;
     Ok(adapt::ProviderAdapter::new(provider.id.clone(), upstream))
 }
@@ -360,12 +371,16 @@ fn build_raw_plugin(
     path: &Path,
     limits: HttpLimits,
     resolve_own_options: bool,
+    preflight: bool,
 ) -> Result<Arc<dyn UpstreamProvider>, DaemonError> {
     let factory = hofund_plugin_registry::factory(plugin_id)
         .ok_or_else(|| DaemonError::new(format!("no factory for plugin `{plugin_id}`")))?;
     factory.validate(&raw).map_err(show)?;
     if resolve_own_options {
         resolve_options(&mut raw, provider)?;
+    }
+    if preflight {
+        factory.preflight(&raw).map_err(show)?;
     }
     let plugin = PluginId::try_from(plugin_id).map_err(show)?;
     let host = hofund_plugin_host::runtime_host(
