@@ -1776,7 +1776,9 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-quirks",
  "http",
+ "ring",
  "secrecy",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -1792,6 +1794,7 @@ dependencies = [
  "hofund-codec",
  "hofund-ir",
  "hofund-plugin-api",
+ "hofund-plugin-sdk",
  "hofund-quirks",
  "reqwest 0.12.28",
  "ring",

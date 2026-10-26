@@ -145,4 +145,10 @@ mod tests {
         assert!(super::factory("missing").is_none());
         assert!(super::factory("relay").is_some());
     }
+
+    #[test]
+    fn bedrock_spec_declares_sigv4() {
+        let factory = super::factory("bedrock").expect("bedrock");
+        assert_eq!(factory.spec().credential(), CredentialStyle::SigV4);
+    }
 }

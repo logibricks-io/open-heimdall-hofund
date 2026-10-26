@@ -311,6 +311,10 @@ workspace = false
         manifest_enables_kernel(manifest),
         "the kernel feature on a target or normal dependency must be visible"
     );
+    assert!(
+        manifest_enables_kernel(&manifest.replace("\"kernel\"", "\"kernel-internal\"")),
+        "the kernel-internal feature must also be rejected"
+    );
 
     let renamed = r#"
 [package]
@@ -1543,7 +1547,11 @@ fn manifest_enables_kernel(manifest: &str) -> bool {
     let deps = manifest_dependencies(manifest);
     let keys = dep_keys(&deps);
     let dependency = deps.iter().any(|dep| {
-        dep.name == "hofund-plugin-api" && dep.features.iter().any(|feature| feature == "kernel")
+        dep.name == "hofund-plugin-api"
+            && dep
+                .features
+                .iter()
+                .any(|feature| matches!(feature.as_str(), "kernel" | "kernel-internal"))
     });
     dependency || feature_forwards_kernel(manifest, &keys)
 }
@@ -1598,7 +1606,7 @@ fn is_kernel_forward(text: &str, keys: &BTreeMap<String, String>) -> bool {
     };
     let dep = dep.strip_suffix('?').unwrap_or(dep);
     let package = keys.get(dep).map(String::as_str).unwrap_or(dep);
-    package == "hofund-plugin-api" && feature == "kernel"
+    package == "hofund-plugin-api" && matches!(feature, "kernel" | "kernel-internal")
 }
 
 fn manifest_dependencies(manifest: &str) -> Vec<DeclaredDep> {

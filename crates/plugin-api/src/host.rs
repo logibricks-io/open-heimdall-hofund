@@ -1,5 +1,7 @@
 //! Handles a plugin receives. Construction is `hofund_plugin_host::host_context`.
 
+#[cfg(feature = "kernel-internal")]
+use std::any::Any;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -36,6 +38,21 @@ impl HttpHandle {
         request: http::Request<Body>,
     ) -> Result<http::Response<BodyStream>, PluginError> {
         self.inner.send(request).await
+    }
+
+    /// The pooled client behind this handle, when the kernel built one.
+    ///
+    /// Built-in adapters still stream. [`Self::send`] buffers the body, so
+    /// those adapters downcast this value and send on the same client.
+    /// A recording test handle returns `None`.
+    ///
+    /// This is removed in row E, the first PR that moves an adapter into its
+    /// own plugin crate (E3, Vertex), when built-ins stream through [`Self::send`].
+    #[cfg(feature = "kernel-internal")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.inner.pooled_client()
     }
 }
 

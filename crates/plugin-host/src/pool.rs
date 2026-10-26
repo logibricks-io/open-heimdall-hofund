@@ -1,13 +1,16 @@
 //! Process-wide HTTP clients. One client per proxy and TLS profile.
 //!
-//! The pool is the only `reqwest` client in the plugin stack. Plugins call
+//! The pool is the `reqwest` client in the plugin stack. Plugins call
 //! [`crate::host_context`]'s [`HttpHandle`](hofund_plugin_api::HttpHandle), and
-//! the SDK builds the request. This module does not add a profile argument to
+//! the SDK builds the request. Built-in adapters that still stream take the
+//! same client from [`HttpBackend::pooled_client`](hofund_plugin_api::kernel::HttpBackend::pooled_client).
+//! This module does not add a profile argument to
 //! [`HttpBackend`](hofund_plugin_api::kernel::HttpBackend): the profile is
 //! chosen when the handle is built.
 
+use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -59,7 +62,7 @@ impl Default for HttpProfile {
     }
 }
 
-/// Host timeout config for the pooled client.
+/// Host timeout and idle-pool config for the pooled client.
 ///
 /// `connect` bounds DNS, TCP, and TLS setup. `read` is the idle time between
 /// socket reads and resets after each successful read, so a stream that keeps
@@ -68,13 +71,25 @@ impl Default for HttpProfile {
 pub struct HttpLimits {
     connect: Duration,
     read: Duration,
+    max_idle_per_host: usize,
 }
 
 impl HttpLimits {
     /// `connect` is the setup budget. `read` is the idle budget between reads.
     #[must_use]
     pub const fn new(connect: Duration, read: Duration) -> Self {
-        Self { connect, read }
+        Self {
+            connect,
+            read,
+            max_idle_per_host: MAX_IDLE_PER_HOST,
+        }
+    }
+
+    /// Sets the idle connections retained per host. Zero disables idle pooling.
+    #[must_use]
+    pub const fn with_max_idle_per_host(mut self, max_idle_per_host: usize) -> Self {
+        self.max_idle_per_host = max_idle_per_host;
+        self
     }
 
     /// DNS, TCP, and TLS budget.
@@ -87,6 +102,12 @@ impl HttpLimits {
     #[must_use]
     pub const fn read(self) -> Duration {
         self.read
+    }
+
+    /// Idle connections retained per host.
+    #[must_use]
+    pub const fn max_idle_per_host(self) -> usize {
+        self.max_idle_per_host
     }
 }
 
@@ -172,7 +193,7 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
     // successful read, so a long stream is not killed by a total budget.
     let mut builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .pool_max_idle_per_host(MAX_IDLE_PER_HOST)
+        .pool_max_idle_per_host(key.limits.max_idle_per_host())
         .connect_timeout(key.limits.connect())
         .read_timeout(key.limits.read())
         .danger_accept_invalid_certs(key.profile.insecure);
@@ -245,6 +266,12 @@ impl HttpBackend for PooledHttp {
         let mut output = HttpResponse::new(BodyStream::from_bytes(collected));
         *output.status_mut() = status;
         Ok(output)
+    }
+
+    fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        client_for(&self.profile, self.limits)
+            .ok()
+            .map(|client| Arc::new(client) as Arc<dyn Any + Send + Sync>)
     }
 }
 
@@ -328,6 +355,10 @@ mod tests {
             .ensure()
             .expect("limits again");
         assert_eq!(pooled_client_count(), direct + 3);
+        PooledHttp::with_limits(HttpProfile::direct(), slow.with_max_idle_per_host(0))
+            .ensure()
+            .expect("no idle pool");
+        assert_eq!(pooled_client_count(), direct + 4);
 
         let settled = pooled_client_count();
         let port = serve(vec![

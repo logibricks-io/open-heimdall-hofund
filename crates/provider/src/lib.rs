@@ -16,7 +16,6 @@ mod http;
 mod mantle;
 mod openai_compat;
 mod presets;
-mod sigv4;
 mod stream;
 mod vertex;
 
@@ -25,7 +24,7 @@ pub use azure::{AzureDeployment, list_deployments};
 pub use bedrock::Bedrock;
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;
-pub use http::{Credential, Endpoint};
+pub use http::{Credential, Endpoint, pooled_reqwest};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
 pub use presets::{PresetError, Resolve, Resolved, Wire, catalog_commit, resolve};
 pub use vertex::Vertex;

@@ -15,7 +15,7 @@ use hofund_plugin_api::{DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawV
 use hofund_plugin_host::HttpLimits;
 
 pub use hofund_gateway::Running;
-use hofund_provider::{Bedrock, Credential, Endpoint, Provider, Vertex, Wire, resolve};
+use hofund_provider::{Credential, Endpoint, Provider, Wire, resolve};
 use hofund_quirks::named;
 use hofund_router::{FailoverPolicy, Snapshot};
 use hofund_secrets::TokenFile;
@@ -54,7 +54,7 @@ impl std::error::Error for DaemonError {}
 pub fn check(path: &Path) -> Result<(), DaemonError> {
     let config = load_path(path).map_err(show)?;
     warn(&config);
-    let _ = providers(&config, path)?;
+    let _ = providers(&config, path, None)?;
     Ok(())
 }
 
@@ -150,13 +150,33 @@ pub fn usage_report(path: &Path) -> Result<String, DaemonError> {
 /// Returns [`DaemonError`] when startup fails. A later accept error stays on
 /// the server task.
 pub async fn start(path: &Path) -> Result<Running, DaemonError> {
+    start_inner(path, None).await
+}
+
+/// Starts the daemon without retaining idle upstream sockets.
+///
+/// This entry point is for integration tests whose mock servers release and
+/// reuse local ports. Production callers use [`start`].
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] when startup fails.
+#[doc(hidden)]
+pub async fn start_for_test(path: &Path) -> Result<Running, DaemonError> {
+    start_inner(path, Some(0)).await
+}
+
+async fn start_inner(
+    path: &Path,
+    max_idle_per_host: Option<usize>,
+) -> Result<Running, DaemonError> {
     let config = load_path(path).map_err(show)?;
     warn(&config);
     let token_path = beside(path, &config.token_file);
     let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
     let usage = Arc::new(Ledger::open(&beside(path, &config.usage_file)).map_err(show)?);
     let gateway = Gateway::with_token_file(
-        router(&config, path)?,
+        router(&config, path, max_idle_per_host)?,
         token,
         token_path,
         inbound_codecs(),
@@ -200,8 +220,12 @@ fn token_file(path: &Path) -> Result<TokenFile, DaemonError> {
     Ok(TokenFile::new(beside(path, &config.token_file)))
 }
 
-fn router(config: &Config, path: &Path) -> Result<Snapshot, DaemonError> {
-    let built = providers(config, path)?;
+fn router(
+    config: &Config,
+    path: &Path,
+    max_idle_per_host: Option<usize>,
+) -> Result<Snapshot, DaemonError> {
+    let built = providers(config, path, max_idle_per_host)?;
     let caps: BTreeMap<&str, u64> = config
         .providers
         .iter()
@@ -235,8 +259,12 @@ fn router(config: &Config, path: &Path) -> Result<Snapshot, DaemonError> {
 fn providers(
     config: &Config,
     path: &Path,
+    max_idle_per_host: Option<usize>,
 ) -> Result<BTreeMap<String, membership::BuiltProvider>, DaemonError> {
-    let limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
+    let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
+    if let Some(max_idle_per_host) = max_idle_per_host {
+        limits = limits.with_max_idle_per_host(max_idle_per_host);
+    }
     let mut built = BTreeMap::new();
     for provider in &config.providers {
         let planned = plan(provider)?;
@@ -259,42 +287,8 @@ fn providers(
         let timeout = endpoint.timeout;
         let protocol = protocol_of(planned.wire);
         let plugin_id = plugin_for(provider, planned.wire);
-        let adapter: Arc<dyn Provider> = match planned.wire {
-            Wire::Chat | Wire::Responses | Wire::Messages | Wire::Generative => {
-                Arc::new(build_plugin(provider, &planned, &endpoint, path, limits)?)
-            }
-            Wire::Vertex => Arc::new(
-                Vertex::new(
-                    endpoint,
-                    option(provider, "credentials")?,
-                    option(provider, "impersonate")?,
-                )
-                .map_err(show)?,
-            ),
-            Wire::Converse => {
-                let access_key_id = option(provider, "access_key_id")?;
-                let access_key_id = hofund_secrets::resolve(access_key_id.trim()).map_err(show)?;
-                let secret_access_key = option(provider, "secret_access_key")?;
-                let secret_access_key =
-                    hofund_secrets::resolve(secret_access_key.trim()).map_err(show)?;
-                let session_token = option(provider, "session_token")?.trim();
-                let session_token = if session_token.is_empty() {
-                    String::new()
-                } else {
-                    hofund_secrets::resolve(session_token).map_err(show)?
-                };
-                Arc::new(
-                    Bedrock::new(
-                        endpoint,
-                        option(provider, "region")?,
-                        &access_key_id,
-                        &secret_access_key,
-                        &session_token,
-                    )
-                    .map_err(show)?,
-                )
-            }
-        };
+        let adapter: Arc<dyn Provider> =
+            Arc::new(build_plugin(provider, &planned, &endpoint, path, limits)?);
         built.insert(
             provider.id.clone(),
             membership::BuiltProvider {
@@ -328,13 +322,15 @@ fn build_plugin(
     let plugin_id = plugin_for(provider, planned.wire);
     let factory = hofund_plugin_registry::factory(&plugin_id)
         .ok_or_else(|| DaemonError::new(format!("no factory for plugin `{plugin_id}`")))?;
-    let raw = if let Some(preset) = &provider.preset
+    let mut raw = if let Some(preset) = &provider.preset
         && let Some(compiled) = hofund_plugin_registry::preset(preset)
     {
-        raw_from_preset(compiled, provider)
+        raw_from_preset(compiled, provider)?
     } else {
-        raw_from_endpoint(provider, planned, endpoint)
+        raw_from_endpoint(provider, planned, endpoint)?
     };
+    factory.validate(&raw).map_err(show)?;
+    resolve_options(&mut raw, provider)?;
     let plugin = PluginId::try_from(plugin_id.as_str()).map_err(show)?;
     let host = hofund_plugin_host::runtime_host(
         plugin,
@@ -350,7 +346,7 @@ fn build_plugin(
 fn raw_from_preset(
     preset: &hofund_plugin_registry::CompiledPreset,
     provider: &hofund_config::Provider,
-) -> RawTable {
+) -> Result<RawTable, DaemonError> {
     let mut raw = RawTable::new();
     for (key, value) in preset.config {
         raw.insert((*key).to_owned(), RawValue::String((*value).to_owned()));
@@ -358,14 +354,15 @@ fn raw_from_preset(
     if !provider.base_url.is_empty() {
         raw.insert("base_url", RawValue::String(provider.base_url.clone()));
     }
-    raw
+    insert_options(&mut raw, provider)?;
+    Ok(raw)
 }
 
 fn raw_from_endpoint(
     provider: &hofund_config::Provider,
     planned: &Planned,
     endpoint: &Endpoint,
-) -> RawTable {
+) -> Result<RawTable, DaemonError> {
     let mut raw = RawTable::new();
     raw.insert("id", RawValue::String(provider.id.clone()));
     raw.insert("base_url", RawValue::String(endpoint.base_url.clone()));
@@ -389,7 +386,78 @@ fn raw_from_endpoint(
         Wire::Responses => raw.insert("protocol", RawValue::String("responses".to_owned())),
         Wire::Messages | Wire::Generative | Wire::Vertex | Wire::Converse => {}
     }
-    raw
+    insert_options(&mut raw, provider)?;
+    Ok(raw)
+}
+
+const RESERVED_OPTIONS: &[&str] = &[
+    "id",
+    "base_url",
+    "api_key",
+    "credential",
+    "quirks",
+    "headers",
+    "protocol",
+];
+
+fn insert_options(
+    raw: &mut RawTable,
+    provider: &hofund_config::Provider,
+) -> Result<(), DaemonError> {
+    for (key, value) in &provider.options {
+        if RESERVED_OPTIONS.contains(&key.as_str()) {
+            return Err(DaemonError::new(format!(
+                "provider `{}` option `{key}` is reserved",
+                provider.id
+            )));
+        }
+        raw.insert(key.clone(), raw_value(value, None)?);
+    }
+    Ok(())
+}
+
+fn resolve_options(
+    raw: &mut RawTable,
+    provider: &hofund_config::Provider,
+) -> Result<(), DaemonError> {
+    for (key, value) in &provider.options {
+        raw.insert(
+            key.clone(),
+            raw_value(value, Some((provider.id.as_str(), key.as_str())))?,
+        );
+    }
+    Ok(())
+}
+
+fn raw_value(value: &Value, environment: Option<(&str, &str)>) -> Result<RawValue, DaemonError> {
+    Ok(match value {
+        Value::String(text) => {
+            let text = text.trim();
+            let resolved = match environment {
+                Some((provider, key)) => hofund_secrets::resolve(text).map_err(|error| {
+                    DaemonError::new(format!("provider `{provider}` option `{key}`: {error}"))
+                })?,
+                None => text.to_owned(),
+            };
+            RawValue::String(resolved)
+        }
+        Value::Integer(number) => RawValue::Integer(*number),
+        Value::Boolean(flag) => RawValue::Boolean(*flag),
+        Value::Array(items) => {
+            let mut raw_items = Vec::with_capacity(items.len());
+            for item in items {
+                raw_items.push(raw_value(item, environment)?);
+            }
+            RawValue::Array(raw_items)
+        }
+        Value::Table(table) => {
+            let mut nested = RawTable::new();
+            for (key, item) in table {
+                nested.insert(key.clone(), raw_value(item, environment)?);
+            }
+            RawValue::Table(nested)
+        }
+    })
 }
 
 fn credential_name(credential: Credential) -> &'static str {
@@ -481,12 +549,10 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
     })
 }
 
-/// Option keys the unmigrated Vertex and Bedrock constructors still read.
-/// Config does not name them. E deletes this once those plugins validate
-/// `options` themselves.
+/// String options `plan` still reads while it builds a catalog URL.
 ///
 /// A missing key is an empty string. Any other shape is an error that names
-/// the provider and the key. Vertex and Bedrock require strings.
+/// the provider and the key. The factory repeats this check for its schema.
 fn option<'a>(provider: &'a hofund_config::Provider, key: &str) -> Result<&'a str, DaemonError> {
     match provider.options.get(key) {
         None => Ok(""),
@@ -732,6 +798,30 @@ mod tests {
                 .contains("provider `vertex` option `project` must be a string"),
             "{error}"
         );
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"primary\"\npreset = \"openai\"\napi_key = \"test\"\n[providers.options]\nsecret_access_key = \"SENTINEL-OPTION-VALUE\"\n",
+        )
+        .expect("write");
+        let error = check(&path).expect_err("aws key on openai");
+        let text = error.to_string();
+        assert!(
+            text.contains("provider `primary` has unknown option `secret_access_key`"),
+            "{text}"
+        );
+        assert!(!text.contains("SENTINEL-OPTION-VALUE"), "{text}");
+        std::fs::write(
+            &path,
+            "[[providers]]\nid = \"primary\"\npreset = \"openai\"\napi_key = \"test\"\n[providers.options]\nunknown_key = \"env:HOFUND_UNKNOWN_OPTION_UNSET_692A\"\n",
+        )
+        .expect("write");
+        let error = check(&path).expect_err("unknown option before env resolution");
+        let text = error.to_string();
+        assert!(
+            text.contains("provider `primary` has unknown option `unknown_key`"),
+            "{text}"
+        );
+        assert!(!text.contains("environment variable"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -750,11 +840,14 @@ mod tests {
         )
         .expect("write");
         let error = check(&path).expect_err("access key");
+        let text = error.to_string();
         assert!(
-            error
-                .to_string()
-                .contains("environment variable `HOFUND_CONFIG_AWS_KEY_UNSET_692A` is unset"),
-            "{error}"
+            text.contains("provider `aws` option `access_key_id`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("environment variable `HOFUND_CONFIG_AWS_KEY_UNSET_692A` is unset"),
+            "{text}"
         );
         std::fs::write(
             &path,
