@@ -15,7 +15,7 @@ use hofund_plugin_api::{
     UpstreamProvider,
 };
 use hofund_plugin_host::HttpLimits;
-use hofund_plugin_sdk::{Call, PageError, after_id};
+use hofund_plugin_sdk::{Call, PageError, PageErrorKind, after_id};
 use hofund_provider::{Credential, Endpoint, ModelPlan, Vertex, Wire};
 use tracing::Instrument;
 
@@ -1943,7 +1943,7 @@ struct ListFailure(PluginError);
 impl From<PageError> for ListFailure {
     fn from(error: PageError) -> Self {
         let message = error.to_string();
-        if message.contains("time budget") {
+        if error.kind() == PageErrorKind::Budget {
             Self(PluginError::timeout(message))
         } else {
             Self(PluginError::decode(message))
