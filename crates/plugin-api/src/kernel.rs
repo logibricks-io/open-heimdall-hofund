@@ -8,6 +8,8 @@
 //! kernel calls is `hofund_plugin_host::host_context`. `xtask` rejects
 //! `from_backends` outside that crate.
 
+#[cfg(feature = "kernel-internal")]
+use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -46,6 +48,17 @@ pub trait HttpBackend: Send + Sync {
         &self,
         request: HttpRequest<Body>,
     ) -> Result<HttpResponse<BodyStream>, PluginError>;
+
+    /// The process-wide `reqwest` client, when this backend is the pool.
+    ///
+    /// The default is `None`. Streaming adapters downcast the value so they
+    /// use the same client as [`HttpBackend::send`], including its connect
+    /// and idle-read limits. [`HttpBackend::send`] still buffers the body.
+    #[cfg(feature = "kernel-internal")]
+    #[must_use]
+    fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
 }
 
 /// Reads a secret for one plugin. The handle does not cache the secret itself.

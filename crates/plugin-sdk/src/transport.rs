@@ -4,6 +4,10 @@
 //! client. [`Call::send`] uses [`HttpHandle::send`](hofund_plugin_api::HttpHandle::send).
 //! A status of 400 or higher becomes [`PluginErrorKind::Status`].
 //!
+//! The Chat, Responses, Messages, Generative, and Converse transports move here,
+//! with streaming through `HttpHandle::send`, in the first row E PR that moves
+//! an adapter into its own plugin crate (E3, Vertex).
+//!
 //! [`Call::send_with_retry`] retries at most three times. [`PluginErrorKind::Connect`]
 //! (the request was not sent) is retried for every method. [`PluginErrorKind::Timeout`]
 //! and [`PluginErrorKind::Transport`] are retried only for an idempotent method,
@@ -174,6 +178,22 @@ impl Call {
     pub fn bytes(mut self, body: impl AsRef<[u8]>) -> Self {
         self.body = body.as_ref().to_vec();
         self
+    }
+
+    /// Sets a JSON body and `content-type: application/json` when that header
+    /// is not already present.
+    #[must_use]
+    pub fn json(self, body: impl AsRef<[u8]>) -> Self {
+        let call = if self
+            .headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("content-type"))
+        {
+            self
+        } else {
+            self.header("content-type", "application/json")
+        };
+        call.bytes(body)
     }
 
     /// Sends the call once.
@@ -416,6 +436,16 @@ mod tests {
         let plain = Call::post("https://example.test");
         assert!(!plain.idempotent);
         assert!(!format!("{plain:?}").contains("secret"));
+        let json = Call::post("https://example.test").json(br#"{"model":"demo"}"#);
+        let rendered = format!("{json:?}");
+        assert!(rendered.contains("content-type"), "{rendered}");
+        assert!(rendered.contains("body_len"), "{rendered}");
+        let kept = Call::post("https://example.test")
+            .header("Content-Type", "application/json")
+            .json(br"{}");
+        let names = format!("{kept:?}");
+        assert_eq!(names.matches("content-type").count(), 0);
+        assert_eq!(names.matches("Content-Type").count(), 1, "{names}");
     }
 
     #[test]

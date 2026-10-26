@@ -14,6 +14,9 @@ rust-version.workspace = true
 # Kernel backends and the constructors only `hofund-plugin-host` may call.
 # A plugin that enables this feature is rejected by `xtask`.
 kernel = []
+# The temporary raw-client escape hatch for the host and built-in registry.
+# A plugin that enables this feature is rejected by `xtask`.
+kernel-internal = []
 
 [dependencies]
 hofund-ir = { workspace = true }

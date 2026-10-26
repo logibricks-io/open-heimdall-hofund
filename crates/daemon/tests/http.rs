@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use hofund_daemon::{check, start};
+use hofund_daemon::{check, start_for_test};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -114,7 +114,7 @@ upstreams = ["primary"]
 async fn listen(dir: &Path, text: &str) -> (hofund_daemon::Running, String) {
     let config = dir.join("hofund.toml");
     fs::write(&config, text).expect("config");
-    let running = start(&config).await.expect("start");
+    let running = start_for_test(&config).await.expect("start");
     let token = fs::read_to_string(dir.join("token")).expect("token");
     (running, token.trim().to_owned())
 }
@@ -642,6 +642,229 @@ upstreams = [\"primary\"]
         running.shutdown().await;
         fs::remove_dir_all(&dir).ok();
     }
+}
+
+#[tokio::test]
+async fn vertex_generate_content_runs_through_the_factory() {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("client");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"access_token":"ya29.test","expires_in":3600}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let generate = "/v1/projects/demo-project/locations/us-central1/publishers/google/models/demo:generateContent";
+    Mock::given(method("POST"))
+        .and(path(generate))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = scratch();
+    let credentials = dir.join("adc.json");
+    fs::write(
+        &credentials,
+        r#"{"type":"authorized_user","client_id":"client","client_secret":"secret","refresh_token":"refresh-token"}"#,
+    )
+    .expect("credentials");
+    let text = format!(
+        "\
+listen = \"127.0.0.1:0\"
+token_file = \"token\"
+usage_file = \"usage.sqlite\"
+[[providers]]
+id = \"vertex\"
+preset = \"google-vertex\"
+base_url = \"{base}\"
+[providers.options]
+project = \"demo-project\"
+location = \"us-central1\"
+credentials = \"{creds}\"
+token_url = \"{base}/token\"
+[[routes]]
+model = \"demo\"
+upstreams = [\"vertex\"]
+",
+        base = server.uri(),
+        creds = credentials.to_string_lossy().replace('\\', "/"),
+    );
+    let (running, token) = listen(&dir, &text).await;
+    let chat = r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#;
+    let body = post_text(&client, &running, "/v1/chat/completions", &token, chat).await;
+    assert!(body.contains("ok"), "{body}");
+    let seen = server.received_requests().await.expect("requests");
+    let generate_request = seen
+        .iter()
+        .find(|request| request.url.path() == generate)
+        .expect("generate");
+    let authorization = generate_request
+        .headers
+        .get("authorization")
+        .expect("authorization")
+        .to_str()
+        .expect("authorization text");
+    assert_eq!(authorization, "Bearer ya29.test");
+    running.shutdown().await;
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn closed_idle_connection_is_retried() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&release);
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
+        let (mut stream, _) = listener.accept().expect("accept");
+        drop(listener);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let mut buf = [0_u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write");
+        stream.write_all(body.as_bytes()).expect("write");
+        while !flag.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("client");
+    let dir = scratch();
+    let text = format!(
+        "
+listen = \"127.0.0.1:0\"
+token_file = \"token\"
+usage_file = \"usage.sqlite\"
+[[providers]]
+id = \"primary\"
+protocol = \"openai-chat\"
+base_url = \"http://127.0.0.1:{port}\"
+api_key = \"test-key\"
+[[routes]]
+model = \"demo\"
+upstreams = [\"primary\"]
+"
+    );
+    let (running, token) = listen(&dir, &text).await;
+    let chat = r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#;
+    let first = post_text(&client, &running, "/v1/chat/completions", &token, chat).await;
+    assert!(first.contains("ok"), "{first}");
+
+    let again = std::net::TcpListener::bind(("127.0.0.1", port)).expect("rebind");
+    let second = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = again.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let mut buf = [0_u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write");
+        stream.write_all(body.as_bytes()).expect("write");
+    });
+    release.store(true, std::sync::atomic::Ordering::Relaxed);
+    let retried = post_text(&client, &running, "/v1/chat/completions", &token, chat).await;
+    assert!(retried.contains("ok"), "{retried}");
+    second.join().expect("second server");
+    running.shutdown().await;
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn builtin_read_timeout_follows_http_limits() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let port = listener.local_addr().expect("addr").port();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&stop);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        use std::sync::atomic::Ordering;
+        while !flag.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let mut buf = [0_u8; 2048];
+                    let _ = stream.read(&mut buf);
+                    while !flag.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .expect("client");
+    let dir = scratch();
+    let text = format!(
+        "\
+listen = \"127.0.0.1:0\"
+token_file = \"token\"
+usage_file = \"usage.sqlite\"
+connect_timeout_ms = 1000
+read_timeout_ms = 400
+[failover]
+connect_errors = false
+statuses = []
+[[providers]]
+id = \"primary\"
+protocol = \"openai-chat\"
+base_url = \"http://127.0.0.1:{port}\"
+api_key = \"test\"
+[[routes]]
+model = \"demo\"
+upstreams = [\"primary\"]
+"
+    );
+    let (running, token) = listen(&dir, &text).await;
+    let started = std::time::Instant::now();
+    let response = client
+        .post(format!("http://{}/v1/chat/completions", running.local_addr))
+        .header("authorization", format!("Bearer {token}"))
+        .body(r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await
+        .expect("daemon answered before the test client gave up");
+    let elapsed = started.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "read budget was not the pooled limit: {elapsed:?}"
+    );
+    assert_ne!(response.status().as_u16(), 200);
+    running.shutdown().await;
+    fs::remove_dir_all(&dir).ok();
 }
 
 async fn post_text(

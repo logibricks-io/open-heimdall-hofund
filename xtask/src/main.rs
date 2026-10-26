@@ -198,7 +198,7 @@ fn push_dep_keys(value: &toml::Value, keys: &mut std::collections::BTreeMap<Stri
                         items
                             .iter()
                             .filter_map(toml::Value::as_str)
-                            .any(|feature| feature == "kernel")
+                            .any(|feature| matches!(feature, "kernel" | "kernel-internal"))
                     });
                 if name == "hofund-plugin-api" && enables_kernel {
                     keys.insert("__kernel__".to_owned(), "direct".to_owned());
@@ -261,7 +261,7 @@ fn is_kernel_forward(text: &str, keys: &std::collections::BTreeMap<String, Strin
     };
     let dep = dep.strip_suffix('?').unwrap_or(dep);
     let package = keys.get(dep).map(String::as_str).unwrap_or(dep);
-    package == "hofund-plugin-api" && feature == "kernel"
+    package == "hofund-plugin-api" && matches!(feature, "kernel" | "kernel-internal")
 }
 
 fn resolved_kernel_feature(package: &str) -> Result<bool, String> {
@@ -289,9 +289,10 @@ fn resolved_kernel_feature(package: &str) -> Result<bool, String> {
         ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .lines()
-        .any(|line| line.contains("hofund-plugin-api feature \"kernel\"")))
+    Ok(stdout.lines().any(|line| {
+        line.contains("hofund-plugin-api feature \"kernel\"")
+            || line.contains("hofund-plugin-api feature \"kernel-internal\"")
+    }))
 }
 
 fn check_plugins() -> ExitCode {
@@ -501,6 +502,16 @@ mod tests {
         .expect("weak manifest");
         let weak_error = load_plugin_packages(&weak).expect_err("weak");
         assert!(weak_error.contains("kernel"), "{weak_error}");
+
+        let internal = root.join("internal");
+        std::fs::create_dir_all(internal.join("providers/internal")).expect("internal");
+        std::fs::write(
+            internal.join("providers/internal/Cargo.toml"),
+            "[package]\nname = \"internal\"\n[dependencies]\nhofund-plugin-api = { workspace = true, features = [\"kernel-internal\"] }\n",
+        )
+        .expect("internal manifest");
+        let internal_error = load_plugin_packages(&internal).expect_err("internal");
+        assert!(internal_error.contains("kernel"), "{internal_error}");
 
         let tokio = root.join("tokio");
         std::fs::create_dir_all(tokio.join("providers/tk")).expect("tokio");

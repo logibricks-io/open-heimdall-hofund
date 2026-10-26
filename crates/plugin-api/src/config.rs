@@ -105,7 +105,7 @@ impl From<BuildError> for PluginError {
 ///
 /// Numbers are integers. A later variant can add a float without a breaking
 /// match, because the enum is `#[non_exhaustive]`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RawValue {
     /// A string.
@@ -120,11 +120,35 @@ pub enum RawValue {
     Table(RawTable),
 }
 
+impl std::fmt::Debug for RawValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::String(_) => formatter
+                .debug_tuple("String")
+                .field(&"<redacted>")
+                .finish(),
+            Self::Integer(value) => formatter.debug_tuple("Integer").field(value).finish(),
+            Self::Boolean(value) => formatter.debug_tuple("Boolean").field(value).finish(),
+            Self::Array(values) => formatter.debug_tuple("Array").field(values).finish(),
+            Self::Table(table) => formatter.debug_tuple("Table").field(table).finish(),
+        }
+    }
+}
+
 /// The opaque `[providers.options]` or `[subscriptions.options]` table.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RawTable {
     entries: BTreeMap<String, RawValue>,
+}
+
+impl std::fmt::Debug for RawTable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RawTable")
+            .field("entries", &self.entries)
+            .finish()
+    }
 }
 
 impl RawTable {
@@ -320,6 +344,26 @@ mod tests {
         let keys: Vec<_> = table.keys().collect();
         assert_eq!(keys, ["a", "b"]);
         assert!(table.iter().any(|(key, _)| key == "a"));
+    }
+
+    #[test]
+    fn raw_value_debug_redacts_every_string_but_keeps_keys() {
+        let mut nested = RawTable::new();
+        nested.insert(
+            "secret_access_key",
+            RawValue::String("SECRET-RAW-VALUE".to_owned()),
+        );
+        let mut table = RawTable::new();
+        table.insert("nested", RawValue::Table(nested));
+        table.insert(
+            "array",
+            RawValue::Array(vec![RawValue::String("SECRET-ARRAY-VALUE".to_owned())]),
+        );
+        let rendered = format!("{table:?}");
+        assert!(rendered.contains("secret_access_key"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains("SECRET-RAW-VALUE"), "{rendered}");
+        assert!(!rendered.contains("SECRET-ARRAY-VALUE"), "{rendered}");
     }
 
     #[test]
