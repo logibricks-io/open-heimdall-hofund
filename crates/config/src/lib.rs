@@ -147,6 +147,34 @@ pub struct Provider {
     ///
     /// See [`Value`] for which TOML shapes load and for the empty-string rule.
     pub options: BTreeMap<String, Value>,
+    /// Host-owned model listing settings.
+    pub model_list: ModelList,
+}
+
+/// Host-owned model listing settings from `[providers.models]`.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelList {
+    /// Refresh interval text. The refresh job is a later change.
+    #[serde(default)]
+    pub refresh: String,
+    /// Rules retained for the later auto-include job.
+    #[serde(default)]
+    pub auto_include: Vec<String>,
+    /// An exact model-list URL, or an `env:NAME` reference to one.
+    #[serde(default)]
+    pub url: String,
+}
+
+impl fmt::Debug for ModelList {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModelList")
+            .field("refresh", &self.refresh)
+            .field("auto_include", &self.auto_include)
+            .field("url", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Which accounts of one subscription become router members.
@@ -227,6 +255,7 @@ impl fmt::Debug for Provider {
             .field("headers", &RedactedPairs(&self.headers))
             .field("max_output_tokens", &self.max_output_tokens)
             .field("options", &self.options)
+            .field("models", &self.model_list)
             .finish()
     }
 }
@@ -414,6 +443,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
                 provider.id
             )));
         }
+        validate_refresh(&provider.id, &provider.models.refresh)?;
         let options = options_of(&provider, &mut warnings)?;
         providers.push(Provider {
             id: provider.id,
@@ -425,6 +455,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             headers: provider.headers,
             max_output_tokens: provider.max_output_tokens,
             options,
+            model_list: provider.models,
         });
     }
     let mut models = BTreeSet::new();
@@ -743,6 +774,69 @@ fn default_read_timeout_ms() -> u64 {
     60_000
 }
 
+fn validate_refresh(provider: &str, value: &str) -> Result<(), ConfigError> {
+    let value = value.trim();
+    if value.is_empty()
+        || matches!(
+            value.to_ascii_lowercase().as_str(),
+            "off" | "never" | "no" | "none" | "0" | "-"
+        )
+    {
+        return Ok(());
+    }
+    let valid = if let Some(days) = value.strip_suffix('d') {
+        days.parse::<f64>()
+            .ok()
+            .filter(|days| days.is_finite() && *days > 0.0)
+            .and_then(|days| Duration::try_from_secs_f64(days * 86_400.0).ok())
+            .is_some_and(|duration| duration >= Duration::from_secs(600))
+    } else {
+        parse_duration(value).is_some_and(|duration| duration >= Duration::from_secs(600))
+    };
+    if valid {
+        return Ok(());
+    }
+    Err(ConfigError::Invalid(format!(
+        "provider `{provider}` models.refresh must be off, a day count, or a duration of at least 10m"
+    )))
+}
+
+fn parse_duration(value: &str) -> Option<Duration> {
+    let mut rest = value;
+    let mut seconds = 0.0;
+    let mut parts = 0;
+    while !rest.is_empty() {
+        let digits = rest
+            .char_indices()
+            .take_while(|(_, character)| character.is_ascii_digit() || *character == '.')
+            .map(|(index, character)| index + character.len_utf8())
+            .last()
+            .unwrap_or(0);
+        let number = rest[..digits].parse::<f64>().ok()?;
+        if !number.is_finite() || number < 0.0 {
+            return None;
+        }
+        rest = &rest[digits..];
+        let (unit, scale) = [
+            ("ns", 1e-9),
+            ("us", 1e-6),
+            ("\u{b5}s", 1e-6),
+            ("ms", 1e-3),
+            ("s", 1.0),
+            ("m", 60.0),
+            ("h", 3600.0),
+        ]
+        .into_iter()
+        .find(|(unit, _)| rest.starts_with(unit))?;
+        seconds += number * scale;
+        rest = &rest[unit.len()..];
+        parts += 1;
+    }
+    (parts > 0 && seconds.is_finite())
+        .then(|| Duration::try_from_secs_f64(seconds).ok())
+        .flatten()
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFile {
@@ -811,6 +905,8 @@ struct RawProvider {
     max_output_tokens: Option<u64>,
     #[serde(default)]
     options: BTreeMap<String, Value>,
+    #[serde(default)]
+    models: ModelList,
     /// Accepted for one release, then copied into [`Self::options`].
     #[serde(default)]
     project: Option<String>,
@@ -870,6 +966,7 @@ impl fmt::Debug for RawProvider {
             .field("headers", &RedactedPairs(&self.headers))
             .field("max_output_tokens", &self.max_output_tokens)
             .field("options", &self.options)
+            .field("models", &self.models)
             .field("project", &redacted_opt(&self.project))
             .field("location", &redacted_opt(&self.location))
             .field("credentials", &redacted_opt(&self.credentials))
@@ -927,6 +1024,46 @@ mod tests {
     use std::time::Duration;
 
     use super::{Accounts, load};
+
+    #[test]
+    fn model_listing_settings_parse_and_refresh_is_validated() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            preset = "openai"
+            [providers.models]
+            refresh = "1h30m"
+            auto_include = ["gpt-*", "re:claude"]
+            url = "env:MODEL_LIST_URL"
+            "#,
+        )
+        .expect("model settings");
+        let models = &config.providers[0].model_list;
+        assert_eq!(models.refresh, "1h30m");
+        assert_eq!(models.auto_include, ["gpt-*", "re:claude"]);
+        assert_eq!(models.url, "env:MODEL_LIST_URL");
+        assert!(!format!("{config:?}").contains("MODEL_LIST_URL"));
+
+        for valid in ["", "off", "NEVER", "none", "-", "0.5d", "10m", "1h30m"] {
+            let source = format!(
+                "[[providers]]\nid = \"primary\"\npreset = \"openai\"\n[providers.models]\nrefresh = \"{valid}\"\n"
+            );
+            load(&source).unwrap_or_else(|error| panic!("refresh {valid}: {error}"));
+        }
+        for invalid in ["1m", "0.001d", "tomorrow", "10", "1h30", "-1h"] {
+            let source = format!(
+                "[[providers]]\nid = \"primary\"\npreset = \"openai\"\n[providers.models]\nrefresh = \"{invalid}\"\n"
+            );
+            let error = load(&source).expect_err("invalid refresh");
+            assert!(error.to_string().contains("models.refresh"), "{error}");
+        }
+        let unknown = load(
+            "[[providers]]\nid = \"primary\"\npreset = \"openai\"\n[providers.models]\nunknown = true\n",
+        )
+        .expect_err("unknown model setting");
+        assert!(unknown.to_string().contains("unknown"), "{unknown}");
+    }
 
     #[test]
     fn defaults_and_a_route_parse() {

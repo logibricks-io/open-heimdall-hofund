@@ -114,7 +114,7 @@ impl ModelClient {
             let learned = *learned.lock().unwrap_or_else(|error| error.into_inner());
             match result {
                 Ok(rows) => {
-                    let models = model_specs(&rows, false)?;
+                    let (models, dropped) = model_specs(&rows, false)?;
                     if models.is_empty() {
                         errors.push(PluginError::decode(format!(
                             "{}: no models listed",
@@ -123,6 +123,7 @@ impl ModelClient {
                         continue;
                     }
                     let mut list = ModelList::new(models, None)
+                        .with_dropped(dropped)
                         .with_kind(ListKind::Live)
                         .with_v1_fallback(candidate.v1_fallback);
                     if let Some(choice) = learned {
@@ -146,11 +147,13 @@ impl ModelClient {
         })
         .await
         .map_err(|error| self.redact_error(error.0))?;
-        let models = model_specs(&rows, true)?;
+        let (models, dropped) = model_specs(&rows, true)?;
         if models.is_empty() {
             return Err(PluginError::decode("no models listed"));
         }
-        Ok(ModelList::new(models, None).with_kind(ListKind::Live))
+        Ok(ModelList::new(models, None)
+            .with_dropped(dropped)
+            .with_kind(ListKind::Live))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -450,14 +453,31 @@ pub(crate) fn url_host(base: &str) -> String {
         .unwrap_or_default()
 }
 
-fn model_specs(rows: &[Value], gemini: bool) -> Result<Vec<ModelSpec>, PluginError> {
+fn model_specs(rows: &[Value], gemini: bool) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
     let mut models = Vec::new();
+    let mut dropped = Vec::new();
     for row in rows {
+        let id = row.as_str().or_else(|| {
+            row.get("id")
+                .and_then(Value::as_str)
+                .or_else(|| row.get("name").and_then(Value::as_str))
+        });
         if let Some(model) = model_spec(row, gemini)? {
             models.push(model);
+        } else if let Some(id) = id.filter(|id| !id.is_empty()) {
+            dropped.push(id.to_owned());
         }
     }
-    Ok(models)
+    Ok((models, dropped))
+}
+
+/// Parses OpenAI-compatible or Anthropic model rows and reports dropped ids.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when a row has an invalid model id.
+pub fn parse_model_rows(rows: &[Value]) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
+    model_specs(rows, false)
 }
 
 pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>, PluginError> {

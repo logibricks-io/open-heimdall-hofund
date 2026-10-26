@@ -65,6 +65,80 @@ pub struct Resolved {
     pub credential: Credential,
 }
 
+/// Region-resolved preset data used by the host model aggregator.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelPlan {
+    /// Chat Completions base URL.
+    pub chat: String,
+    /// Responses base URL.
+    pub responses: String,
+    /// Anthropic Messages base URL.
+    pub anthropic: String,
+    /// Generative Language base URL.
+    pub generative: String,
+    /// Whether the preset has no ordinary live list.
+    pub no_list: bool,
+    /// Whether this region enables a live list despite `no_list`.
+    pub lists: bool,
+    /// Required live-id prefix, empty when there is none.
+    pub only: String,
+    /// Static ids, with a region's ids replacing the preset's ids.
+    pub models: Vec<String>,
+    /// Optional quirk profile name recorded by the preset.
+    pub quirks: Option<String>,
+    /// Optional JSON object merged into a probe body.
+    pub extra_body: Option<String>,
+}
+
+/// Resolves the model policy and per-wire bases for one preset region.
+///
+/// # Errors
+///
+/// Returns [`PresetError`] when the preset or region is unknown.
+pub fn model_plan(id: &str, region: Option<&str>) -> Result<Option<ModelPlan>, PresetError> {
+    let catalog = catalog();
+    let Some((preset, alias_region)) = catalog
+        .preset
+        .iter()
+        .find(|preset| preset.id == id)
+        .map(|preset| (preset, None))
+        .or_else(|| {
+            catalog.alias.iter().find_map(|alias| {
+                (alias.id == id).then(|| {
+                    let preset = catalog
+                        .preset
+                        .iter()
+                        .find(|preset| preset.id == alias.preset)
+                        .expect("validated alias");
+                    (preset, alias.region.as_deref())
+                })
+            })
+        })
+    else {
+        return Ok(None);
+    };
+    let region = match region.or(alias_region) {
+        Some(region) => Some(region_of(preset, region)?),
+        None => None,
+    };
+    let endpoints = Endpoints::of(preset, region);
+    let models = region
+        .and_then(|region| region.models.clone())
+        .unwrap_or_else(|| preset.models.clone());
+    Ok(Some(ModelPlan {
+        chat: endpoints.chat.to_owned(),
+        responses: endpoints.responses.to_owned(),
+        anthropic: endpoints.messages.to_owned(),
+        generative: endpoints.generative.to_owned(),
+        no_list: preset.no_list,
+        lists: region.is_some_and(|region| region.lists),
+        only: preset.only.clone(),
+        models,
+        quirks: None,
+        extra_body: None,
+    }))
+}
+
 /// The catalog could not build an endpoint.
 #[derive(Debug)]
 pub struct PresetError {
@@ -283,7 +357,7 @@ fn credential(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
         return Credential::GoogApiKey;
     }
     let host = host_of(base_url);
-    if preset_id == "azure" || azure_host(&host) {
+    if preset_id == "azure" || crate::models::azure_host(&host) {
         return match wire {
             Wire::Messages => Credential::XApiKey,
             Wire::Chat | Wire::Responses | Wire::Vertex | Wire::Converse => Credential::ApiKey,
@@ -332,23 +406,12 @@ pub fn azure_base(raw: &str) -> Result<String, PresetError> {
     } else {
         format!("{host}.openai.azure.com")
     };
-    if !azure_host(&host) {
+    if !crate::models::azure_host(&host) {
         return Err(PresetError::new(format!(
             "preset `azure` base URL `{raw}` is not an Azure OpenAI host"
         )));
     }
     Ok(format!("https://{host}/openai/v1"))
-}
-
-fn azure_host(host: &str) -> bool {
-    const SUFFIXES: &[&str] = &[
-        ".openai.azure.com",
-        ".cognitiveservices.azure.com",
-        ".services.ai.azure.com",
-    ];
-    SUFFIXES
-        .iter()
-        .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len())
 }
 
 fn is_bedrock(host: &str) -> bool {
@@ -549,7 +612,7 @@ struct Region {
     #[serde(default)]
     catalog: String,
     #[serde(default)]
-    models: Vec<String>,
+    models: Option<Vec<String>>,
     #[serde(default)]
     embeddings: Vec<String>,
     #[serde(default)]

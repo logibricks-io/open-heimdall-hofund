@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catalogs, and minimal connectivity probes in the built-in provider plugins.
   List and probe bodies are bounded, credentials are redacted, and Anthropic
   single-header authentication can be learned and reported to the host.
+- Daemon model aggregation across preset wires, exact custom list URLs,
+  in-memory learned bases and authentication, two-pass probe selection, and
+  four-wide batch probes. `[providers.models]` stores refresh, auto-include,
+  and URL settings without starting a refresh job.
 - Provider plugins share SigV4, OAuth token parsing, form bodies, and JSON
   page cursors from `hofund-plugin-sdk`. Parse errors do not include the
   response body. Token `Debug` is redacted.

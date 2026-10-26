@@ -27,9 +27,11 @@ pub use bedrock::Bedrock;
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;
 pub use http::{Credential, Endpoint, pooled_reqwest};
-pub use models::azure_host;
+pub use models::{azure_host, parse_model_rows};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
-pub use presets::{PresetError, Resolve, Resolved, Wire, catalog_commit, resolve};
+pub use presets::{
+    ModelPlan, PresetError, Resolve, Resolved, Wire, catalog_commit, model_plan, resolve,
+};
 pub use vertex::Vertex;
 
 pub use hofund_plugin_api::{

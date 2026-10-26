@@ -443,6 +443,7 @@ impl ModelSpec {
 #[non_exhaustive]
 pub struct ModelList {
     models: Vec<ModelSpec>,
+    dropped: Vec<String>,
     next: Option<String>,
     kind: crate::ListKind,
     base_model_fallback: bool,
@@ -456,12 +457,26 @@ impl ModelList {
     pub fn new(models: Vec<ModelSpec>, next: Option<String>) -> Self {
         Self {
             models,
+            dropped: Vec::new(),
             next,
             kind: crate::ListKind::Live,
             base_model_fallback: false,
             v1_fallback: false,
             auth_choice: None,
         }
+    }
+
+    /// Records ids removed by the plugin's model classifier.
+    #[must_use]
+    pub fn with_dropped(mut self, dropped: Vec<String>) -> Self {
+        self.dropped = dropped;
+        self
+    }
+
+    /// Ids removed by the plugin's model classifier.
+    #[must_use]
+    pub fn dropped(&self) -> &[String] {
+        &self.dropped
     }
 
     /// Sets the kind of result actually returned.

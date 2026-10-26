@@ -95,6 +95,7 @@ flowchart BT
   daemon --> pluginApi
   daemon --> pluginHost
   daemon --> pluginRegistry
+  daemon --> pluginSdk
   daemon --> usage
   agent --> config
   agent --> pluginApi
@@ -118,7 +119,8 @@ HTTP client lives in `plugin-host`. `plugin-registry` depends on `plugin-api`,
 for the built-in factories. Those factories still call the `provider`
 adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.
 `daemon` depends on `plugin-registry` and
-`plugin-host` so it can call `factory` and build a `HostContext`.
+`plugin-host` so it can call `factory` and build a `HostContext`. It depends on
+`plugin-sdk` for the bounded pager used by an exact configured model-list URL.
 `gateway` depends on `plugin-host` so it can build a `SurfaceHost`.
 The three kits depend only on `plugin-host` and are not on the diagram.
 `plugin-relay` dev-depends on `kit-upstream` so its tests can build a host.
@@ -145,7 +147,7 @@ The three kits depend only on `plugin-host` and are not on the diagram.
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
-| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry`, `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |

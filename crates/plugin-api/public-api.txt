@@ -260,9 +260,11 @@ ModelList::const fn with_auth_choice (mut self , choice : AuthChoice) -> Self
 ModelList::const fn with_base_model_fallback (mut self , fallback : bool) -> Self
 ModelList::const fn with_kind (mut self , kind : crate :: ListKind) -> Self
 ModelList::const fn with_v1_fallback (mut self , fallback : bool) -> Self
+ModelList::fn dropped (& self) -> & [String]
 ModelList::fn models (& self) -> & [ModelSpec]
 ModelList::fn new (models : Vec < ModelSpec > , next : Option < String >) -> Self
 ModelList::fn next (& self) -> Option < & str >
+ModelList::fn with_dropped (mut self , dropped : Vec < String >) -> Self
 ModelSpec
 ModelSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 ModelSpec::const fn context (& self) -> u64

@@ -1622,6 +1622,7 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-host",
  "hofund-plugin-registry",
+ "hofund-plugin-sdk",
  "hofund-provider",
  "hofund-quirks",
  "hofund-router",
@@ -1631,6 +1632,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "tracing",
+ "url",
  "wiremock",
 ]
 
