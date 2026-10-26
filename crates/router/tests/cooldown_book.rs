@@ -248,3 +248,36 @@ fn expiry_hides_cooldowns_and_entries() {
     assert_eq!(book.cooling(&id), None);
     assert!(book.entries().is_empty());
 }
+
+// A non-positive retry hint is absent, so the standard quota rest applies.
+#[test]
+fn zero_retry_after_on_quota_still_rests() {
+    let (book, id, _) = fixture();
+    let _ = book.record_failure(
+        &id,
+        &PluginError::quota("used up").with_retry_after(Duration::ZERO),
+    );
+    assert!(
+        book.cooling(&id).is_some(),
+        "quota with Retry-After: 0 did not rest"
+    );
+}
+
+// Header retry hints have the short trust cap, not the longer quota-reset cap.
+#[test]
+fn quota_header_retry_after_is_capped_at_one_hour() {
+    let (book, id, clock) = fixture();
+    let _ = book.record_failure(
+        &id,
+        &PluginError::quota("used up").with_retry_after(Duration::from_secs(3 * DAY)),
+    );
+    assert!(remaining(&book, &id, &clock) <= Duration::from_secs(HOUR));
+}
+
+// A reset hint alone does not cool a member whose window still has capacity.
+#[test]
+fn observation_with_remaining_quota_does_not_rest() {
+    let (book, id, _) = fixture();
+    let _ = book.observe(&id, Some(Duration::from_secs(30 * MINUTE)), Some(500));
+    assert_eq!(book.cooling(&id), None);
+}

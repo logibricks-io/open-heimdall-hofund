@@ -366,21 +366,37 @@ where
         let id = self.id.clone();
         let cooldowns = Arc::clone(&self.cooldowns);
         let revision = cooldowns.revision(&id);
+        let is_count = matches!(job, Job::Count(..));
         Box::pin(async move {
             match inner.call(job).await {
                 Ok(Out::Execute(completion)) => Ok(Out::Execute(record_completion(
                     completion, id, cooldowns, revision,
                 ))),
-                Ok(out) => {
-                    cooldowns.record_success_if_unchanged(&id, revision);
+                Ok(out @ Out::Count(_)) => {
+                    // A count is never a served request.
                     Ok(out)
                 }
                 Err(error) => {
-                    cooldowns.record_failure(&id, &error);
+                    if !is_count || count_cools(&error) {
+                        cooldowns.record_failure(&id, &error);
+                    }
                     Err(error)
                 }
             }
         })
+    }
+}
+
+fn count_cools(error: &PluginError) -> bool {
+    use hofund_plugin_api::PluginErrorKind;
+
+    match error.kind() {
+        PluginErrorKind::Status => error.status() == Some(429),
+        PluginErrorKind::Connect
+        | PluginErrorKind::Timeout
+        | PluginErrorKind::Transport
+        | PluginErrorKind::Io => true,
+        _ => false,
     }
 }
 
@@ -1375,4 +1391,186 @@ mod tests {
         assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(root);
     }
+
+    // An unsupported count does not contact upstream or clear a member's rest.
+    #[tokio::test(start_paused = true)]
+    async fn an_unsupported_count_does_not_clear_a_rate_limit_rest() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                built_member(
+                    "first",
+                    Arc::new(Scripted {
+                        id: "first",
+                        hits: Arc::clone(&first_hits),
+                        answers: std::sync::Mutex::new(
+                            [
+                                Err(ProviderError::status(429, "slow")
+                                    .with_retry_after(Duration::from_secs(120))),
+                                Ok(raw_ok()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    }),
+                ),
+            ),
+            (
+                "second".to_owned(),
+                built_member(
+                    "second",
+                    Arc::new(Scripted {
+                        id: "second",
+                        hits: Arc::clone(&second_hits),
+                        answers: std::sync::Mutex::new(
+                            [Ok(raw_ok()), Ok(raw_ok())].into_iter().collect(),
+                        ),
+                    }),
+                ),
+            ),
+        ]);
+        let (snapshot, _table) = super::open_with_table(
+            &built,
+            route(&["first", "second"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("failover");
+        assert_eq!(routed.upstream_id, "second");
+        // One count_tokens request, 1 second later; nothing reaches upstream.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let _ = snapshot
+            .load()
+            .count(&Request::new("demo"), "anthropic-messages")
+            .await;
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("second dispatch");
+        assert_eq!(
+            routed.upstream_id, "second",
+            "count Unsupported cleared the Retry-After rest of `first`"
+        );
+    }
+
+    struct Counts {
+        answer: std::sync::Mutex<Option<Result<hofund_provider::CountOutcome, ProviderError>>>,
+    }
+
+    #[async_trait]
+    impl Provider for Counts {
+        fn id(&self) -> &str {
+            "count"
+        }
+
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<Completion, ProviderError> {
+            Ok(raw_ok())
+        }
+
+        async fn count_input(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<hofund_provider::CountOutcome, ProviderError> {
+            self.answer
+                .lock()
+                .expect("count answer")
+                .take()
+                .expect("one count")
+        }
+    }
+
+    async fn run_count(
+        answer: Result<hofund_provider::CountOutcome, ProviderError>,
+        book: Arc<Cooldowns>,
+    ) {
+        let built = BTreeMap::from([(
+            "count".to_owned(),
+            built_member(
+                "count",
+                Arc::new(Counts {
+                    answer: std::sync::Mutex::new(Some(answer)),
+                }),
+            ),
+        )]);
+        let snapshot =
+            open(&built, route(&["count"]), FailoverPolicy::default(), book).expect("snapshot");
+        let _ = snapshot
+            .load()
+            .count(&Request::new("demo"), "openai-chat")
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_counted_count_does_not_clear_a_rate_limit_rest() {
+        let book = cooldowns();
+        let id = super::member_id("count");
+        let _ = book.record_failure(
+            &id,
+            &hofund_plugin_api::PluginError::status_error(429, "slow")
+                .with_retry_after(Duration::from_secs(120)),
+        );
+        let before = book.cooling(&id);
+
+        run_count(
+            Ok(hofund_provider::CountOutcome::Counted(4)),
+            Arc::clone(&book),
+        )
+        .await;
+
+        assert_eq!(book.cooling(&id), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_error_count_does_not_cool_a_ready_member() {
+        let book = cooldowns();
+
+        run_count(
+            Err(ProviderError::status(503, "unavailable")),
+            Arc::clone(&book),
+        )
+        .await;
+
+        assert_eq!(book.cooling(&super::member_id("count")), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limited_count_cools_the_member() {
+        let book = cooldowns();
+
+        run_count(Err(ProviderError::status(429, "slow")), Arc::clone(&book)).await;
+
+        let cooling = book.cooling(&super::member_id("count")).expect("rate rest");
+        assert_eq!(cooling.cause(), hofund_router::CooldownCause::RateLimit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_and_transport_count_failures_cool_the_member() {
+        for error in [
+            ProviderError::connect("refused"),
+            ProviderError::transport("reset"),
+        ] {
+            let book = cooldowns();
+
+            run_count(Err(error), Arc::clone(&book)).await;
+
+            let cooling = book
+                .cooling(&super::member_id("count"))
+                .expect("transport rest");
+            assert_eq!(cooling.cause(), hofund_router::CooldownCause::Failure);
+        }
+    }
+
 }
