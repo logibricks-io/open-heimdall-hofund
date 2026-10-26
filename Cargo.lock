@@ -1791,6 +1791,7 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-quirks",
  "http",
+ "httpdate",
  "quote",
  "ring",
  "secrecy",

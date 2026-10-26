@@ -77,27 +77,28 @@ fn protocol(inbound: &str) -> Result<ProtocolId, ProviderError> {
     ProtocolId::try_from(inbound).map_err(|_| ProviderError::decode("unknown protocol id"))
 }
 
-fn provider_error(error: PluginError) -> ProviderError {
-    match error.kind() {
+pub(crate) fn provider_error(error: PluginError) -> ProviderError {
+    let mut converted = match error.kind() {
         PluginErrorKind::Connect => ProviderError::connect(error.message()),
         PluginErrorKind::Timeout => ProviderError::timeout(error.message()),
+        PluginErrorKind::Transport => ProviderError::transport(error.message()),
         PluginErrorKind::Status => {
             ProviderError::status(error.status().unwrap_or(502), error.message())
         }
-        PluginErrorKind::Decode | PluginErrorKind::Transport => {
-            // Transport means the request was already sent. Provider has no
-            // separate kind, and Connect would let the member stack send it again.
-            ProviderError::decode(error.message())
-        }
-        PluginErrorKind::Auth
+        PluginErrorKind::Auth => ProviderError::auth(error.message()),
+        PluginErrorKind::Quota => ProviderError::quota(error.message()),
+        PluginErrorKind::Decode
         | PluginErrorKind::Config
         | PluginErrorKind::Unsupported
-        | PluginErrorKind::Quota
         | PluginErrorKind::Cancelled
         | PluginErrorKind::Io
         | PluginErrorKind::Internal
         | _ => ProviderError::decode(error.message()),
+    };
+    if let Some(after) = error.retry_after() {
+        converted = converted.with_retry_after(after);
     }
+    converted
 }
 
 fn provider_completion(completion: PluginCompletion) -> Completion {
@@ -121,6 +122,7 @@ fn provider_completion(completion: PluginCompletion) -> Completion {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use hofund_plugin_api::{
@@ -148,12 +150,12 @@ mod tests {
             _request: Request,
             _inbound: ProtocolId,
         ) -> Result<CountOutcome, PluginError> {
-            Err(PluginError::auth("missing api key"))
+            Err(PluginError::auth("missing api key").with_retry_after(Duration::from_secs(120)))
         }
     }
 
     #[tokio::test]
-    async fn the_adapter_keeps_the_provider_id_and_maps_auth_to_decode() {
+    async fn the_adapter_keeps_the_provider_id_auth_and_retry_hint() {
         let adapter = ProviderAdapter::new("openai", Arc::new(Echo));
         assert_eq!(adapter.id(), "openai");
         let Ok(hofund_provider::Completion::Raw(_)) =
@@ -167,8 +169,9 @@ mod tests {
         else {
             panic!("auth");
         };
-        assert_eq!(error.kind, ProviderErrorKind::Decode);
+        assert_eq!(error.kind, ProviderErrorKind::Auth);
         assert_eq!(error.message, "missing api key");
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
         let Err(error) = adapter
             .execute(Request::new("demo"), "not-a-protocol")
             .await

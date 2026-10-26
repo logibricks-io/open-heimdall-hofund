@@ -508,14 +508,22 @@ fn build_error(error: ProviderError) -> BuildError {
 }
 
 fn plugin_error(error: ProviderError) -> PluginError {
-    match error.kind {
+    let retry_after = error.retry_after;
+    let mut converted = match error.kind {
         hofund_provider::ProviderErrorKind::Connect => PluginError::connect(error.message),
         hofund_provider::ProviderErrorKind::Timeout => PluginError::timeout(error.message),
+        hofund_provider::ProviderErrorKind::Transport => PluginError::transport(error.message),
         hofund_provider::ProviderErrorKind::Status => {
             PluginError::status_error(error.status.unwrap_or(502), error.message)
         }
         hofund_provider::ProviderErrorKind::Decode => PluginError::decode(error.message),
+        hofund_provider::ProviderErrorKind::Auth => PluginError::auth(error.message),
+        hofund_provider::ProviderErrorKind::Quota => PluginError::quota(error.message),
+    };
+    if let Some(after) = retry_after {
+        converted = converted.with_retry_after(after);
     }
+    converted
 }
 
 fn plugin_completion(completion: ProviderCompletion) -> PluginCompletion {

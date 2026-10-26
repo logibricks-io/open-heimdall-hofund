@@ -205,8 +205,8 @@ impl Call {
     pub async fn send(self, http: &HttpHandle) -> Result<Reply, PluginError> {
         let request = self.request()?;
         let response = http.send(request).await?;
-        let (status, body) = read_body(response).await?;
-        classify(status, body)
+        let (status, retry_after, body) = read_body(response).await?;
+        classify(status, retry_after, body)
     }
 
     /// Sends the call up to `attempts` times, including the first try.
@@ -317,7 +317,11 @@ fn full_jitter(cap: Duration) -> Duration {
     Duration::from_nanos(hasher.finish() % cap_nanos)
 }
 
-fn classify(status: u16, body: Vec<u8>) -> Result<Reply, PluginError> {
+fn classify(
+    status: u16,
+    retry_after: Option<Duration>,
+    body: Vec<u8>,
+) -> Result<Reply, PluginError> {
     if status >= 400 {
         let snippet = String::from_utf8_lossy(&body);
         let snippet = snippet.chars().take(STATUS_SNIPPET).collect::<String>();
@@ -326,18 +330,42 @@ fn classify(status: u16, body: Vec<u8>) -> Result<Reply, PluginError> {
         } else {
             snippet
         };
-        return Err(PluginError::status_error(status, message));
+        let error = PluginError::status_error(status, message);
+        return Err(match retry_after {
+            Some(after) => error.with_retry_after(after),
+            None => error,
+        });
     }
     Ok(Reply { status, body })
 }
 
-async fn read_body(mut response: HttpResponse) -> Result<(u16, Vec<u8>), PluginError> {
+async fn read_body(
+    mut response: HttpResponse,
+) -> Result<(u16, Option<Duration>, Vec<u8>), PluginError> {
     let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after(value, std::time::SystemTime::now()));
     let mut body = Vec::new();
     while let Some(chunk) = response.body_mut().next_chunk().await {
         body.extend_from_slice(&chunk?);
     }
-    Ok((status, body))
+    Ok((status, retry_after, body))
+}
+
+fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
+    const MAX_RETRY_AFTER: Duration = Duration::from_hours(1);
+    let delay = value
+        .parse::<u64>()
+        .map(Duration::from_secs)
+        .ok()
+        .or_else(|| {
+            let at = httpdate::parse_http_date(value).ok()?;
+            at.duration_since(now).ok()
+        })?;
+    Some(delay.min(MAX_RETRY_AFTER))
 }
 
 /// A text response. Plugins return this from [`InboundSurface::handle`](hofund_plugin_api::InboundSurface::handle).
@@ -352,9 +380,11 @@ pub fn text_response(status: u16, body: impl AsRef<[u8]>) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use hofund_plugin_api::{CredentialStyle, HeaderName, PluginErrorKind, SecretString};
 
-    use super::{Call, backoff, classify, retries, text_response};
+    use super::{Call, backoff, classify, parse_retry_after, retries, text_response};
 
     fn secret(value: &str) -> SecretString {
         SecretString::from(value)
@@ -409,12 +439,36 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_is_bounded_and_attached_to_status_errors() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let date = httpdate::fmt_http_date(now + Duration::from_secs(120));
+        assert_eq!(
+            parse_retry_after("120", now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_retry_after(&date, now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_retry_after("7200", now),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(parse_retry_after("invalid", now), None);
+        let error =
+            classify(429, Some(Duration::from_secs(120)), b"slow".to_vec()).expect_err("status");
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+        let missing = classify(429, None, b"slow".to_vec()).expect_err("status");
+        assert_eq!(missing.retry_after(), None);
+    }
+
+    #[test]
     fn status_400_is_an_error_and_retry_follows_the_method() {
-        let error = classify(401, b"nope".to_vec()).expect_err("status");
+        let error = classify(401, None, b"nope".to_vec()).expect_err("status");
         assert_eq!(error.kind(), PluginErrorKind::Status);
         assert_eq!(error.status(), Some(401));
         assert_eq!(error.message(), "nope");
-        let ok = classify(200, b"pong".to_vec()).expect("ok");
+        let ok = classify(200, None, b"pong".to_vec()).expect("ok");
         assert_eq!(ok.status(), 200);
         assert_eq!(ok.body(), b"pong");
         for method in ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"] {

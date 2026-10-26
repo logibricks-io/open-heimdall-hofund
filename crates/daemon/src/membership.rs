@@ -429,15 +429,23 @@ fn map_count(outcome: ProviderCount) -> CountOutcome {
     }
 }
 
-fn into_plugin(error: ProviderError) -> PluginError {
-    match error.kind {
+pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
+    let retry_after = error.retry_after;
+    let mut converted = match error.kind {
         ProviderErrorKind::Connect => PluginError::connect(error.message),
         ProviderErrorKind::Timeout => PluginError::timeout(error.message),
+        ProviderErrorKind::Transport => PluginError::transport(error.message),
         ProviderErrorKind::Status => {
             PluginError::status_error(error.status.unwrap_or(502), error.message)
         }
         ProviderErrorKind::Decode => PluginError::decode(error.message),
+        ProviderErrorKind::Auth => PluginError::auth(error.message),
+        ProviderErrorKind::Quota => PluginError::quota(error.message),
+    };
+    if let Some(after) = retry_after {
+        converted = converted.with_retry_after(after);
     }
+    converted
 }
 
 fn member_id(provider_id: &str) -> MemberId {
@@ -484,6 +492,28 @@ mod tests {
     use hofund_plugin_api::Request;
     use hofund_provider::{Completion, Provider, ProviderError};
     use hofund_router::FailoverPolicy;
+
+    #[test]
+    fn provider_errors_round_trip_with_kinds_status_and_retry_hints() {
+        for error in [
+            ProviderError::transport("reset"),
+            ProviderError::auth("denied"),
+            ProviderError::quota("empty"),
+            ProviderError::status(429, "slow"),
+        ] {
+            let error = error.with_retry_after(Duration::from_secs(120));
+            let kind = error.kind;
+            let message = error.message.clone();
+            let status = error.status;
+            let plugin = super::into_plugin(error);
+            assert_eq!(plugin.retry_after(), Some(Duration::from_secs(120)));
+            let restored = crate::adapt::provider_error(plugin);
+            assert_eq!(restored.kind, kind);
+            assert_eq!(restored.message, message);
+            assert_eq!(restored.status, status);
+            assert_eq!(restored.retry_after(), Some(Duration::from_secs(120)));
+        }
+    }
 
     struct Boom {
         hits: Arc<AtomicUsize>,

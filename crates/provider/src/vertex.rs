@@ -34,7 +34,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::ProviderError;
-use crate::generative::{self, classify_count};
+use crate::generative;
 use crate::http::{self, Endpoint, Upstream};
 use crate::{Completion, CountOutcome, Provider};
 
@@ -489,8 +489,9 @@ impl Provider for Vertex {
         )?;
         let response = http::post_bearer(&self.upstream, &url, body, &token).await?;
         let status = response.status().as_u16();
+        let retry_after = http::retry_after(response.headers());
         let bytes = response.bytes().await.map_err(http::map_transport)?;
-        classify_count(status, &bytes)
+        generative::classify_count(status, retry_after, &bytes)
     }
 
     async fn execute(
@@ -526,14 +527,22 @@ impl Provider for Vertex {
         tokio::time::timeout(crate::probe::PROBE_WAIT, async {
             let token = self.access_token().await.map_err(|error| {
                 use hofund_plugin_api::PluginError;
-                match error.kind {
+                let retry_after = error.retry_after;
+                let mut converted = match error.kind {
                     crate::ProviderErrorKind::Connect => PluginError::connect(error.message),
                     crate::ProviderErrorKind::Timeout => PluginError::timeout(error.message),
+                    crate::ProviderErrorKind::Transport => PluginError::transport(error.message),
                     crate::ProviderErrorKind::Status => {
                         PluginError::status_error(error.status.unwrap_or(502), error.message)
                     }
                     crate::ProviderErrorKind::Decode => PluginError::decode(error.message),
+                    crate::ProviderErrorKind::Auth => PluginError::auth(error.message),
+                    crate::ProviderErrorKind::Quota => PluginError::quota(error.message),
+                };
+                if let Some(after) = retry_after {
+                    converted = converted.with_retry_after(after);
                 }
+                converted
             })?;
             self.models.vertex_probe(query, &token).await
         })
@@ -1228,6 +1237,7 @@ async fn post_token(
     }
     let response = http::send_builder(builder).await?;
     let status = response.status().as_u16();
+    let retry_after = http::retry_after(response.headers());
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
@@ -1244,7 +1254,11 @@ async fn post_token(
             || format!("the sign-in was refused ({status})"),
             |code| format!("the sign-in was refused ({status}): {code}"),
         );
-        return Err(ProviderError::status(status, message));
+        let error = ProviderError::status(status, message);
+        return Err(match retry_after {
+            Some(after) => error.with_retry_after(after),
+            None => error,
+        });
     }
     Ok(bytes)
 }

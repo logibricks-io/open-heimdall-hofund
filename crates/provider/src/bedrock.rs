@@ -141,11 +141,13 @@ impl Provider for Bedrock {
         let response = self.converse_response(&request.model, body, stream).await?;
         let status = response.status();
         if !status.is_success() {
+            let retry_after = http::retry_after(response.headers());
             let bytes = response.bytes().await.unwrap_or_default();
-            return Err(ProviderError::status(
-                status.as_u16(),
-                http::message_from(&bytes),
-            ));
+            let error = ProviderError::status(status.as_u16(), http::message_from(&bytes));
+            return Err(match retry_after {
+                Some(after) => error.with_retry_after(after),
+                None => error,
+            });
         }
         if codec.id() == inbound_protocol {
             return http::raw_completion(response, stream, &codec).await;
@@ -302,14 +304,22 @@ impl Bedrock {
 
 fn plugin_error(error: ProviderError) -> hofund_plugin_api::PluginError {
     use hofund_plugin_api::PluginError;
-    match error.kind {
+    let retry_after = error.retry_after;
+    let mut converted = match error.kind {
         crate::ProviderErrorKind::Connect => PluginError::connect(error.message),
         crate::ProviderErrorKind::Timeout => PluginError::timeout(error.message),
+        crate::ProviderErrorKind::Transport => PluginError::transport(error.message),
         crate::ProviderErrorKind::Status => {
             PluginError::status_error(error.status.unwrap_or(502), error.message)
         }
         crate::ProviderErrorKind::Decode => PluginError::decode(error.message),
+        crate::ProviderErrorKind::Auth => PluginError::auth(error.message),
+        crate::ProviderErrorKind::Quota => PluginError::quota(error.message),
+    };
+    if let Some(after) = retry_after {
+        converted = converted.with_retry_after(after);
     }
+    converted
 }
 
 /// Strips an OpenAI or Messages suffix so a pasted runtime URL is the root

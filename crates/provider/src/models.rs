@@ -673,20 +673,7 @@ pub(crate) async fn read_page(
     exact_cap: bool,
 ) -> Result<Page, PluginError> {
     let status = response.status().as_u16();
-    let retry_after = response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value
-                .parse::<u64>()
-                .map(Duration::from_secs)
-                .ok()
-                .or_else(|| {
-                    let at = httpdate::parse_http_date(value).ok()?;
-                    at.duration_since(std::time::SystemTime::now()).ok()
-                })
-        });
+    let retry_after = crate::http::retry_after(response.headers());
     if exact_cap
         && response
             .content_length()
