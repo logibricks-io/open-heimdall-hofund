@@ -1,0 +1,112 @@
+AccessToken
+BODY_CAP
+Call
+Contribution
+ERROR_RUNES
+HttpRequest
+HttpResponse
+LIST_BUDGET
+MAX_PAGES
+PAGE_LIMIT
+PageError
+Reply
+TokenError
+after_id
+apply_quirks
+async_trait
+classify::ModelTags #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
+classify::ModelTags::const fn decides (self) -> bool
+classify::ModelTags::const fn draws (self) -> bool
+classify::ModelTags::const fn films (self) -> bool
+classify::fn classify_model (id : & str , kind : & str) -> Option < ModelTags >
+const page::BODY_CAP
+const page::ERROR_RUNES
+const page::LIST_BUDGET
+const page::MAX_PAGES
+const page::PAGE_LIMIT
+cursor_pages
+form_body
+gemini_models
+gemini_models_with_dropped
+json_error_message
+mod classify
+mod oauth
+mod page
+mod register
+mod sigv4
+mod transport
+next_cursor
+oauth::AccessToken
+oauth::AccessToken::const fn expires_in (& self) -> Duration
+oauth::AccessToken::fn expose_secret (& self) -> & str
+oauth::IamAccessToken
+oauth::IamAccessToken::const fn access_token (& self) -> & AccessToken
+oauth::IamAccessToken::fn expire_time (& self) -> Option < & str >
+oauth::TokenError derives(Clone, Copy, Debug, PartialEq, Eq)
+oauth::TokenError::const fn message (self) -> & 'static str
+oauth::fn form_body (pairs : & [(& str , & str)]) -> String
+oauth::fn parse_access_token (body : & [u8]) -> Result < AccessToken , TokenError >
+oauth::fn parse_iam_access_token (body : & [u8]) -> Result < IamAccessToken , TokenError >
+oauth::fn refresh_form (client_id : & str , client_secret : & str , refresh_token : & str) -> String
+page::PageError derives(Clone, Copy, Debug, PartialEq, Eq)
+page::async fn after_id < F , Fut , E > (first_url : & str , mut fetch : F) -> Result < Vec < Value > , E > where F : FnMut (String) -> Fut , Fut : Future < Output = Result < Vec < u8 > , E > > , E : From < PageError > ,
+page::async fn cursor_pages < F , U , Fut , E > (first_url : & str , max_pages : usize , mut next_url : U , mut fetch : F ,) -> Result < Vec < Value > , E > where F : FnMut (String) -> Fut , U : FnMut (& str , & str) -> String , Fut : Future < Output = Result < Vec < u8 > , E > > , E : From < PageError > ,
+page::async fn gemini_models < F , Fut , E > (base : & str , fetch : F) -> Result < Vec < Value > , E > where F : FnMut (String) -> Fut , Fut : Future < Output = Result < Vec < u8 > , E > > , E : From < PageError > ,
+page::async fn gemini_models_with_dropped < F , Fut , E > (base : & str , mut fetch : F ,) -> Result < (Vec < Value > , Vec < String >) , E > where F : FnMut (String) -> Fut , Fut : Future < Output = Result < Vec < u8 > , E > > , E : From < PageError > ,
+page::fn json_error_message (body : & [u8]) -> String
+page::fn next_cursor (page : & [u8]) -> Result < Option < String > , PageError >
+page::fn string_items (page : & [u8] , key : & str) -> Result < Vec < String > , PageError >
+parse_access_token
+refresh_form
+register::Contribution derives(Default)
+register::Contribution::fn new () -> Self
+register::Contribution::fn surface (mut self , surface : impl InboundSurface) -> Self
+register::Contribution::fn surfaces (& self) -> & [Arc < dyn InboundSurface >]
+register::Contribution::fn upstream (mut self , factory : impl DynUpstreamFactory) -> Self
+register::Contribution::fn upstreams (& self) -> & [Arc < dyn DynUpstreamFactory >]
+sigv4::SignError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+sigv4::SignError::InvalidAmzDate
+sigv4::SignError::InvalidCanonicalUri
+sigv4::SignError::MissingInput
+sigv4::SignInput #[non_exhaustive]
+sigv4::SignInput::const fn amz_date (mut self , amz_date : & 'a str) -> Self
+sigv4::SignInput::const fn canonical_query (mut self , canonical_query : & 'a str) -> Self
+sigv4::SignInput::const fn canonical_uri (mut self , canonical_uri : & 'a str) -> Self
+sigv4::SignInput::const fn credentials (mut self , access_key_id : & 'a str , secret_access_key : & 'a str) -> Self
+sigv4::SignInput::const fn headers (mut self , headers : & 'a [(& 'a str , & 'a str)]) -> Self
+sigv4::SignInput::const fn method (mut self , method : & 'a str) -> Self
+sigv4::SignInput::const fn new () -> Self
+sigv4::SignInput::const fn payload (mut self , payload : & 'a [u8]) -> Self
+sigv4::SignInput::const fn scope (mut self , region : & 'a str , service : & 'a str) -> Self
+sigv4::Signature #[non_exhaustive] derives(Debug)
+sigv4::Signature::fn authorization (& self) -> & str
+sigv4::UriEncoding #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+sigv4::UriEncoding::Double
+sigv4::UriEncoding::Single
+sigv4::fn amz_date (unix_secs : u64) -> String
+sigv4::fn canonical_uri (wire_path : & str , encoding : UriEncoding) -> String
+sigv4::fn model_wire_uri (model : & str , stream : bool) -> String
+sigv4::fn payload_hash (payload : & [u8]) -> String
+sigv4::fn sign (input : & SignInput < '_ >) -> Result < Signature , SignError >
+string_items
+text_response
+tracing
+transport::Call derives(Clone)
+transport::Call::async fn send (self , http : & HttpHandle) -> Result < Reply , PluginError >
+transport::Call::async fn send_with_retry (self , http : & HttpHandle , attempts : u8 ,) -> Result < Reply , PluginError >
+transport::Call::fn bearer (self , token : & SecretString) -> Result < Self , PluginError >
+transport::Call::fn bytes (mut self , body : impl AsRef < [u8] >) -> Self
+transport::Call::fn credential (self , style : CredentialStyle , secret : & SecretString ,) -> Result < Self , PluginError >
+transport::Call::fn get (uri : impl Into < String >) -> Self
+transport::Call::fn header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
+transport::Call::fn idempotent (mut self , idempotent : bool) -> Self
+transport::Call::fn json (self , body : impl AsRef < [u8] >) -> Self
+transport::Call::fn post (uri : impl Into < String >) -> Self
+transport::Call::fn sensitive_header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
+transport::HttpRequest
+transport::HttpResponse
+transport::Reply derives(Clone, Debug, PartialEq, Eq)
+transport::Reply::fn body (& self) -> & [u8]
+transport::Reply::fn into_body (self) -> Vec < u8 >
+transport::Reply::fn status (& self) -> u16
+transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse
