@@ -8,6 +8,7 @@ mod agent_toml {
 }
 use agent_toml::{AgentToml, parse, render};
 
+include!("src/reserved_agent_ids.rs");
 include!("src/check.rs");
 
 struct Listed {

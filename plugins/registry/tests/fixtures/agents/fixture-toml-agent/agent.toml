@@ -5,9 +5,9 @@ binary = "fixture-toml"
 [[file]]
 id = "config"
 kind = "toml"
-linux = "~/.fixture-toml/config.toml"
-macos = "~/.fixture-toml/config.toml"
-windows = "~/.fixture-toml/config.toml"
+linux = "~/.config/fixture-toml/config.toml"
+macos = "~/Library/Preferences/fixture-toml/config.toml"
+windows = "~/AppData/Local/fixture-toml/config.toml"
 env_override = "FIXTURE_TOML_HOME"
 
 [[set]]

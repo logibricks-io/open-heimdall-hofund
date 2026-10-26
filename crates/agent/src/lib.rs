@@ -141,9 +141,15 @@ impl Session {
             home: home_dir(),
             path: std::env::var_os("PATH"),
             env: std::env::vars_os().collect(),
-            claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
-            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
-            gemini_cli_home: std::env::var_os("GEMINI_CLI_HOME").map(PathBuf::from),
+            claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
+            codex_home: std::env::var_os("CODEX_HOME")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
+            gemini_cli_home: std::env::var_os("GEMINI_CLI_HOME")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
             xdg_config_home: std::env::var_os("XDG_CONFIG_HOME")
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from),
@@ -171,57 +177,77 @@ impl Session {
         self
     }
 
-    /// Sets `CLAUDE_CONFIG_DIR`. A relative path is joined to the home directory.
+    /// Sets `CLAUDE_CONFIG_DIR`. An empty path is treated as unset. A relative
+    /// path is joined to the home directory.
     #[must_use]
     pub fn with_claude_config_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.claude_config_dir = Some(path.into());
+        let path = path.into();
+        self.claude_config_dir = (!path.as_os_str().is_empty()).then_some(path);
         if let Some(path) = &self.claude_config_dir {
             self.env.insert(
                 OsString::from("CLAUDE_CONFIG_DIR"),
                 path.as_os_str().to_os_string(),
             );
+        } else {
+            self.env
+                .insert(OsString::from("CLAUDE_CONFIG_DIR"), OsString::new());
         }
         self
     }
 
-    /// Sets `CODEX_HOME`. A relative path is joined to the home directory.
+    /// Sets `CODEX_HOME`. An empty path is treated as unset. A relative path is
+    /// joined to the home directory.
     #[must_use]
     pub fn with_codex_home(mut self, path: impl Into<PathBuf>) -> Self {
-        self.codex_home = Some(path.into());
+        let path = path.into();
+        self.codex_home = (!path.as_os_str().is_empty()).then_some(path);
         if let Some(path) = &self.codex_home {
             self.env.insert(
                 OsString::from("CODEX_HOME"),
                 path.as_os_str().to_os_string(),
             );
+        } else {
+            self.env
+                .insert(OsString::from("CODEX_HOME"), OsString::new());
         }
         self
     }
 
-    /// Sets `GEMINI_CLI_HOME`. A relative path is joined to the home directory.
+    /// Sets `GEMINI_CLI_HOME`. An empty path is treated as unset. A relative
+    /// path is joined to the home directory.
     #[must_use]
     pub fn with_gemini_cli_home(mut self, path: impl Into<PathBuf>) -> Self {
-        self.gemini_cli_home = Some(path.into());
+        let path = path.into();
+        self.gemini_cli_home = (!path.as_os_str().is_empty()).then_some(path);
         if let Some(path) = &self.gemini_cli_home {
             self.env.insert(
                 OsString::from("GEMINI_CLI_HOME"),
                 path.as_os_str().to_os_string(),
             );
+        } else {
+            self.env
+                .insert(OsString::from("GEMINI_CLI_HOME"), OsString::new());
         }
         self
     }
 
-    /// Sets `XDG_CONFIG_HOME`. A relative path is joined to the home directory.
+    /// Sets `XDG_CONFIG_HOME`. An empty path is treated as unset. A relative
+    /// path is joined to the home directory.
     ///
     /// OpenCode reads `$XDG_CONFIG_HOME/opencode` when this is set. Other
     /// agents ignore it.
     #[must_use]
     pub fn with_xdg_config_home(mut self, path: impl Into<PathBuf>) -> Self {
-        self.xdg_config_home = Some(path.into());
+        let path = path.into();
+        self.xdg_config_home = (!path.as_os_str().is_empty()).then_some(path);
         if let Some(path) = &self.xdg_config_home {
             self.env.insert(
                 OsString::from("XDG_CONFIG_HOME"),
                 path.as_os_str().to_os_string(),
             );
+        } else {
+            self.env
+                .insert(OsString::from("XDG_CONFIG_HOME"), OsString::new());
         }
         self
     }

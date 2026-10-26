@@ -20,8 +20,8 @@ fn fixture_agents_preserve_files_sets_slots_and_key_files() {
     assert_eq!(agent("fixture-json-agent"), None);
 
     let json = fixtures[0];
-    assert_eq!(json.files().len(), 4);
-    assert_eq!(json.sets().len(), 11);
+    assert_eq!(json.files().len(), 5);
+    assert_eq!(json.sets().len(), 12);
     assert_eq!(json.model_file(), Some("settings"));
     assert_eq!(json.model_key(), Some("model.name"));
     assert_eq!(json.effort_file(), None);
@@ -29,9 +29,10 @@ fn fixture_agents_preserve_files_sets_slots_and_key_files() {
     assert_eq!(json.visible(), Visible::All);
     assert_eq!(json.files()[0].kind(), FileKind::Json);
     assert_eq!(json.files()[1].kind(), FileKind::Env);
-    assert_eq!(json.files()[2].id(), "config");
-    assert!(!json.files()[2].create());
-    assert!(json.files()[3].create());
+    assert_eq!(json.files()[2].id(), "origin");
+    assert_eq!(json.files()[3].id(), "config");
+    assert!(!json.files()[3].create());
+    assert!(json.files()[4].create());
     assert!(matches!(json.sets()[0].slot(), Slot::Origin));
     assert!(matches!(
         json.sets()[3].slot(),
@@ -50,7 +51,7 @@ fn fixture_agents_preserve_files_sets_slots_and_key_files() {
             ..
         } if needle.as_str() == "fixture-fable-"
     ));
-    assert!(matches!(json.sets()[10].slot(), Slot::CatalogModels));
+    assert!(matches!(json.sets()[11].slot(), Slot::CatalogModels));
 
     let toml = fixtures[1];
     assert_eq!(toml.files().len(), 1);

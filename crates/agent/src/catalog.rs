@@ -509,6 +509,9 @@ pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog
 }
 
 /// Resolves one compiled file location against a session.
+///
+/// An empty environment override is treated as unset, so the default template
+/// is used. A non-empty relative override is joined to the session home.
 #[must_use]
 pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
     let template = match os {
@@ -1525,6 +1528,12 @@ const FIXTURE_JSON_AGENT: Description = Description {
             resolve: fixture_json_env,
         },
         Location {
+            file: "origin",
+            kind: FileKind::Env,
+            create: true,
+            resolve: fixture_json_origin,
+        },
+        Location {
             file: "config",
             kind: FileKind::Json,
             create: false,
@@ -1595,6 +1604,11 @@ const FIXTURE_JSON_AGENT: Description = Description {
             slot: Slot::Literal("value"),
         },
         Set {
+            file: "origin",
+            key: "FIXTURE_BASE",
+            slot: Slot::Origin,
+        },
+        Set {
             file: "config",
             key: "models",
             slot: Slot::OpenCodeModels,
@@ -1612,21 +1626,61 @@ fn fixture_toml_config(session: &Session) -> PathBuf {
         .env("FIXTURE_TOML_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .map_or_else(
-            || session.home.join(".fixture-toml"),
-            |path| rooted(session, &path),
-        )
+        .map_or_else(|| fixture_toml_dir(session), |path| rooted(session, &path))
         .join("config.toml")
 }
 
 #[cfg(test)]
+fn fixture_toml_dir(session: &Session) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        session
+            .home
+            .join("Library")
+            .join("Preferences")
+            .join("fixture-toml")
+    } else if cfg!(target_os = "windows") {
+        session
+            .home
+            .join("AppData")
+            .join("Local")
+            .join("fixture-toml")
+    } else {
+        session.home.join(".config").join("fixture-toml")
+    }
+}
+
+#[cfg(test)]
 fn fixture_json_settings(session: &Session) -> PathBuf {
-    session.home.join(".fixture-json").join("settings.json")
+    fixture_json_dir(session).join("settings.json")
 }
 
 #[cfg(test)]
 fn fixture_json_env(session: &Session) -> PathBuf {
-    session.home.join(".fixture-json").join("fixture.env")
+    fixture_json_dir(session).join("fixture.env")
+}
+
+#[cfg(test)]
+fn fixture_json_origin(session: &Session) -> PathBuf {
+    fixture_json_dir(session).join("origin.env")
+}
+
+#[cfg(test)]
+fn fixture_json_dir(session: &Session) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        session
+            .home
+            .join("Library")
+            .join("Application Support")
+            .join("fixture-json")
+    } else if cfg!(target_os = "windows") {
+        session
+            .home
+            .join("AppData")
+            .join("Roaming")
+            .join("fixture-json")
+    } else {
+        session.home.join(".fixture-json")
+    }
 }
 
 #[cfg(test)]
@@ -1655,7 +1709,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{Described, FIXTURE_JSON_AGENT, FIXTURE_TOML_AGENT, FIXTURE_TOML_EFFORT};
-    use crate::{AgentAdapter, GatewayTarget, Plan, Session};
+    use crate::{AgentAdapter, GatewayTarget, Plan, Session, TargetOs};
 
     #[derive(Default)]
     struct GoldenCase {
@@ -1665,9 +1719,16 @@ mod tests {
         token: String,
     }
 
+    /// Shared cases run everywhere; OS-specific cases run where their const
+    /// resolver selects the same host-OS paths as the compiled description.
     #[test]
     fn const_fixture_descriptions_replay_compiled_goldens() {
         assert_eq!(FIXTURE_TOML_EFFORT.file, "config");
+        let host_directory = match TargetOs::current() {
+            TargetOs::Linux => "linux",
+            TargetOs::Macos => "macos",
+            TargetOs::Windows => "windows",
+        };
         for (id, description) in [
             ("fixture-toml-agent", &FIXTURE_TOML_AGENT),
             ("fixture-json-agent", &FIXTURE_JSON_AGENT),
@@ -1676,18 +1737,22 @@ mod tests {
                 .join("../../plugins/registry/tests/fixtures/agents")
                 .join(id)
                 .join("fixtures");
-            for os in ["linux", "macos", "windows"] {
-                let mut cases = fs::read_dir(fixtures.join(os))
-                    .expect("golden OS directory")
+            let mut replayed = 0;
+            for directory in ["all", host_directory] {
+                let Ok(entries) = fs::read_dir(fixtures.join(directory)) else {
+                    continue;
+                };
+                let mut cases = entries
                     .map(|entry| entry.expect("golden case").path())
                     .filter(|path| path.join("case.toml").is_file())
                     .collect::<Vec<_>>();
                 cases.sort();
-                assert!(!cases.is_empty(), "{id} has no {os} cases");
                 for case in cases {
                     replay_case(description, &case);
+                    replayed += 1;
                 }
             }
+            assert!(replayed > 0, "{id} has no host or shared cases");
         }
     }
 

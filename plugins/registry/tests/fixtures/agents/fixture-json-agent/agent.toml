@@ -7,15 +7,22 @@ visible = "all"
 id = "settings"
 kind = "json"
 linux = "~/.fixture-json/settings.json"
-macos = "~/.fixture-json/settings.json"
-windows = "~/.fixture-json/settings.json"
+macos = "~/Library/Application Support/fixture-json/settings.json"
+windows = "~/AppData/Roaming/fixture-json/settings.json"
 
 [[file]]
 id = "env"
 kind = "env"
 linux = "~/.fixture-json/fixture.env"
-macos = "~/.fixture-json/fixture.env"
-windows = "~/.fixture-json/fixture.env"
+macos = "~/Library/Application Support/fixture-json/fixture.env"
+windows = "~/AppData/Roaming/fixture-json/fixture.env"
+
+[[file]]
+id = "origin"
+kind = "env"
+linux = "~/.fixture-json/origin.env"
+macos = "~/Library/Application Support/fixture-json/origin.env"
+windows = "~/AppData/Roaming/fixture-json/origin.env"
 
 [[file]]
 id = "config"
@@ -81,6 +88,11 @@ slot = "origin"
 file = "env"
 key = "FIXTURE_LITERAL"
 slot = { literal = "value" }
+
+[[set]]
+file = "origin"
+key = "FIXTURE_BASE"
+slot = "origin"
 
 [[set]]
 file = "config"

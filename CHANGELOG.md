@@ -16,8 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validated data-only `agent.toml` descriptions and delivers them through the
   daemon to the CLI and desktop.
 - `hofund-kit-agent` now runs per-OS golden conformance for planning, apply and
-  backup safety, token refresh, and disconnect drift. Registry fixtures replay
-  the same committed goldens through compiled and const descriptions.
+  backup safety, token refresh, and disconnect drift. Shared `all/` cases run
+  on every OS, OS-specific cases run only on their own OS, and regeneration
+  deduplicates identical three-OS trees. Status and configured models are
+  checked throughout the connection lifecycle (#108, #111). Registry fixtures
+  replay the same committed goldens through compiled and const descriptions.
+- Agent registration rejects ids reserved by the built-in catalog, mixed file
+  kinds under one file id, empty model-source keys, and empty or duplicate
+  visible-model entries. The reserved-id list is checked against the built-in
+  catalog by a daemon test (#111).
 - The plugin API's preflight hook lets `config check` validate external
   resources named by a resolved provider configuration without starting them.
 - The SDK's `IamAccessToken` retains an IAM access token and its optional
@@ -101,6 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Empty agent environment overrides now mean unset everywhere, including the
+  named `Session` setters and const adapters, so const and compiled plans use
+  the same default paths. Relative overrides are unchanged (#109).
+- Agent conformance compares the exact trimmed origin, `/v1` URL, and current
+  and refreshed tokens after disconnect, including a dedicated origin-only
+  dotenv golden file, so surviving gateway values cannot pass unnoticed (#110).
 - Gemini CLI connect writes `model.name`. A string `model` is moved there.
 - OpenCode `models` lists each gateway route, with `name` and an empty
   `variants` object. Modalities, limits, and reasoning levels are not

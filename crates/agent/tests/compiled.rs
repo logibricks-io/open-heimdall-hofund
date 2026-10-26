@@ -350,6 +350,76 @@ fn path_resolution_selects_os_and_handles_environment_overrides() {
 }
 
 #[test]
+fn empty_overrides_use_default_paths_for_const_and_compiled_adapters() {
+    let target = target_with(&["route-a"]);
+    for description in DESCRIPTIONS {
+        let id = description.id().as_str();
+        let const_adapter = find(id).expect("static adapter");
+        let compiled = Compiled::new(description);
+        for named_setter in [true, false] {
+            let context = format!("{id} / named_setter={named_setter}");
+            let const_default_home = scratch();
+            let compiled_default_home = scratch();
+            let const_empty_home = scratch();
+            let compiled_empty_home = scratch();
+            let const_default = Session::new(&const_default_home);
+            let compiled_default = Session::new(&compiled_default_home);
+            let const_empty = empty_override_session(&const_empty_home, id, named_setter);
+            let compiled_empty = empty_override_session(&compiled_empty_home, id, named_setter);
+
+            let const_default_plan = const_adapter
+                .plan(&const_default, &target)
+                .expect("const default plan");
+            let const_empty_plan = const_adapter
+                .plan(&const_empty, &target)
+                .expect("const empty plan");
+            let compiled_default_plan = compiled
+                .plan(&compiled_default, &target)
+                .expect("compiled default plan");
+            let compiled_empty_plan = compiled
+                .plan(&compiled_empty, &target)
+                .expect("compiled empty plan");
+            assert_plan(
+                &const_default_plan,
+                &const_empty_plan,
+                &const_default_home,
+                &const_empty_home,
+                &context,
+            );
+            assert_plan(
+                &compiled_default_plan,
+                &compiled_empty_plan,
+                &compiled_default_home,
+                &compiled_empty_home,
+                &context,
+            );
+            assert_plan(
+                &const_empty_plan,
+                &compiled_empty_plan,
+                &const_empty_home,
+                &compiled_empty_home,
+                &context,
+            );
+        }
+    }
+}
+
+fn empty_override_session(home: &Path, id: &str, named_setter: bool) -> Session {
+    let session = Session::new(home);
+    match (id, named_setter) {
+        ("claude-code", true) => session.with_claude_config_dir(""),
+        ("codex", true) => session.with_codex_home(""),
+        ("gemini-cli", true) => session.with_gemini_cli_home(""),
+        ("opencode", true) => session.with_xdg_config_home(""),
+        ("claude-code", false) => session.with_env("CLAUDE_CONFIG_DIR", ""),
+        ("codex", false) => session.with_env("CODEX_HOME", ""),
+        ("gemini-cli", false) => session.with_env("GEMINI_CLI_HOME", ""),
+        ("opencode", false) => session.with_env("XDG_CONFIG_HOME", ""),
+        _ => panic!("unknown description {id}"),
+    }
+}
+
+#[test]
 fn catalog_checks_collisions_and_keeps_builtins_first() {
     let empty = catalog(&[]).expect("empty compiled catalog");
     assert_eq!(empty.adapters().len(), 4);
