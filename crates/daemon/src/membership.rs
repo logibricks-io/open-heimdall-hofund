@@ -666,8 +666,13 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
             PluginError::status_error(error.status.unwrap_or(502), error.message)
         }
         ProviderErrorKind::Decode => PluginError::decode(error.message),
+        ProviderErrorKind::Unsupported => PluginError::unsupported(error.message),
         ProviderErrorKind::Auth => PluginError::auth(error.message),
         ProviderErrorKind::Quota => PluginError::quota(error.message),
+        ProviderErrorKind::Config => PluginError::config(error.message),
+        ProviderErrorKind::Cancelled => PluginError::cancelled(error.message),
+        ProviderErrorKind::Io => PluginError::io(error.message),
+        ProviderErrorKind::Internal => PluginError::internal(error.message),
     };
     if let Some(after) = retry_after {
         converted = converted.with_retry_after(after);
@@ -730,9 +735,17 @@ mod tests {
     #[test]
     fn provider_errors_round_trip_with_kinds_status_and_retry_hints() {
         for error in [
+            ProviderError::connect("refused"),
+            ProviderError::timeout("slow"),
             ProviderError::transport("reset"),
+            ProviderError::decode("invalid"),
+            ProviderError::unsupported("no count"),
             ProviderError::auth("denied"),
             ProviderError::quota("empty"),
+            ProviderError::config("bad"),
+            ProviderError::cancelled("client left"),
+            ProviderError::io("disk"),
+            ProviderError::internal("bug"),
             ProviderError::status(429, "slow"),
         ] {
             let error = error.with_retry_after(Duration::from_secs(120));
@@ -1573,4 +1586,39 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_plugin_member_error_does_not_cool_the_member() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([(
+            "cancelled".to_owned(),
+            built_member(
+                "cancelled",
+                Arc::new(Scripted {
+                    id: "cancelled",
+                    hits,
+                    answers: std::sync::Mutex::new(
+                        [Err(ProviderError::cancelled("client left"))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                }),
+            ),
+        )]);
+        let book = cooldowns();
+        let snapshot = open(
+            &built,
+            route(&["cancelled"]),
+            FailoverPolicy::default(),
+            Arc::clone(&book),
+        )
+        .expect("snapshot");
+
+        let result = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(book.cooling(&super::member_id("cancelled")), None);
+    }
 }

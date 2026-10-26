@@ -170,8 +170,14 @@ fn provider_error(error: PluginError) -> ProviderError {
         PluginErrorKind::Timeout => ProviderErrorKind::Timeout,
         PluginErrorKind::Transport => ProviderErrorKind::Transport,
         PluginErrorKind::Status => ProviderErrorKind::Status,
+        PluginErrorKind::Decode => ProviderErrorKind::Decode,
+        PluginErrorKind::Unsupported => ProviderErrorKind::Unsupported,
         PluginErrorKind::Auth => ProviderErrorKind::Auth,
         PluginErrorKind::Quota => ProviderErrorKind::Quota,
+        PluginErrorKind::Config => ProviderErrorKind::Config,
+        PluginErrorKind::Cancelled => ProviderErrorKind::Cancelled,
+        PluginErrorKind::Io => ProviderErrorKind::Io,
+        PluginErrorKind::Internal => ProviderErrorKind::Internal,
         _ => ProviderErrorKind::Decode,
     };
     ProviderError {

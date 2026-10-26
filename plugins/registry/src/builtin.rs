@@ -517,8 +517,13 @@ fn plugin_error(error: ProviderError) -> PluginError {
             PluginError::status_error(error.status.unwrap_or(502), error.message)
         }
         hofund_provider::ProviderErrorKind::Decode => PluginError::decode(error.message),
+        hofund_provider::ProviderErrorKind::Unsupported => PluginError::unsupported(error.message),
         hofund_provider::ProviderErrorKind::Auth => PluginError::auth(error.message),
         hofund_provider::ProviderErrorKind::Quota => PluginError::quota(error.message),
+        hofund_provider::ProviderErrorKind::Config => PluginError::config(error.message),
+        hofund_provider::ProviderErrorKind::Cancelled => PluginError::cancelled(error.message),
+        hofund_provider::ProviderErrorKind::Io => PluginError::io(error.message),
+        hofund_provider::ProviderErrorKind::Internal => PluginError::internal(error.message),
     };
     if let Some(after) = retry_after {
         converted = converted.with_retry_after(after);

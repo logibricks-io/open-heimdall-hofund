@@ -536,8 +536,15 @@ impl Provider for Vertex {
                         PluginError::status_error(error.status.unwrap_or(502), error.message)
                     }
                     crate::ProviderErrorKind::Decode => PluginError::decode(error.message),
+                    crate::ProviderErrorKind::Unsupported => {
+                        PluginError::unsupported(error.message)
+                    }
                     crate::ProviderErrorKind::Auth => PluginError::auth(error.message),
                     crate::ProviderErrorKind::Quota => PluginError::quota(error.message),
+                    crate::ProviderErrorKind::Config => PluginError::config(error.message),
+                    crate::ProviderErrorKind::Cancelled => PluginError::cancelled(error.message),
+                    crate::ProviderErrorKind::Io => PluginError::io(error.message),
+                    crate::ProviderErrorKind::Internal => PluginError::internal(error.message),
                 };
                 if let Some(after) = retry_after {
                     converted = converted.with_retry_after(after);

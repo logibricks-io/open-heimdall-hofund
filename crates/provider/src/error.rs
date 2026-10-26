@@ -35,10 +35,20 @@ pub enum ProviderErrorKind {
     Status,
     /// The body was not a response this adapter's protocol understands.
     Decode,
+    /// The provider does not implement this call.
+    Unsupported,
     /// Authentication or authorization failed.
     Auth,
     /// The upstream quota is exhausted.
     Quota,
+    /// Configuration did not validate.
+    Config,
+    /// The caller cancelled the call.
+    Cancelled,
+    /// The filesystem or a process call failed.
+    Io,
+    /// The provider hit an internal failure.
+    Internal,
 }
 
 impl ProviderError {
@@ -77,6 +87,12 @@ impl ProviderError {
         Self::new(ProviderErrorKind::Decode, message)
     }
 
+    /// The provider does not implement this call.
+    #[must_use]
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Unsupported, message)
+    }
+
     /// An authentication or authorization failure.
     #[must_use]
     pub fn auth(message: impl Into<String>) -> Self {
@@ -87,6 +103,30 @@ impl ProviderError {
     #[must_use]
     pub fn quota(message: impl Into<String>) -> Self {
         Self::new(ProviderErrorKind::Quota, message)
+    }
+
+    /// A configuration validation failure.
+    #[must_use]
+    pub fn config(message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Config, message)
+    }
+
+    /// A call cancelled by the caller.
+    #[must_use]
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Cancelled, message)
+    }
+
+    /// A filesystem or process failure.
+    #[must_use]
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Io, message)
+    }
+
+    /// An internal provider failure.
+    #[must_use]
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Internal, message)
     }
 
     /// Attaches an upstream-directed retry delay.

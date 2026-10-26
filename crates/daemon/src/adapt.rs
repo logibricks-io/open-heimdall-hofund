@@ -85,15 +85,15 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
         PluginErrorKind::Status => {
             ProviderError::status(error.status().unwrap_or(502), error.message())
         }
+        PluginErrorKind::Decode => ProviderError::decode(error.message()),
+        PluginErrorKind::Unsupported => ProviderError::unsupported(error.message()),
         PluginErrorKind::Auth => ProviderError::auth(error.message()),
         PluginErrorKind::Quota => ProviderError::quota(error.message()),
-        PluginErrorKind::Decode
-        | PluginErrorKind::Config
-        | PluginErrorKind::Unsupported
-        | PluginErrorKind::Cancelled
-        | PluginErrorKind::Io
-        | PluginErrorKind::Internal
-        | _ => ProviderError::decode(error.message()),
+        PluginErrorKind::Config => ProviderError::config(error.message()),
+        PluginErrorKind::Cancelled => ProviderError::cancelled(error.message()),
+        PluginErrorKind::Io => ProviderError::io(error.message()),
+        PluginErrorKind::Internal => ProviderError::internal(error.message()),
+        _ => ProviderError::decode(error.message()),
     };
     if let Some(after) = error.retry_after() {
         converted = converted.with_retry_after(after);
@@ -179,5 +179,21 @@ mod tests {
             panic!("protocol");
         };
         assert_eq!(error.kind, ProviderErrorKind::Decode);
+    }
+
+    // Kinds that do not cool a member must survive the plugin-provider round trip.
+    #[test]
+    fn non_cooling_kinds_survive_the_plugin_round_trip() {
+        use hofund_plugin_api::PluginError;
+        for error in [
+            PluginError::unsupported("no count"),
+            PluginError::cancelled("client left"),
+            PluginError::config("bad"),
+            PluginError::internal("bug"),
+        ] {
+            let before = error.kind();
+            let after = crate::membership::into_plugin(super::provider_error(error)).kind();
+            assert_eq!(after, before, "{before:?} became {after:?}");
+        }
     }
 }
