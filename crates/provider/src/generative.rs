@@ -29,6 +29,7 @@ use crate::{Completion, CountOutcome, Provider};
 pub struct Generative {
     upstream: Upstream,
     base: String,
+    models: crate::models::ModelClient,
 }
 
 impl Generative {
@@ -55,8 +56,14 @@ impl Generative {
         )?;
         // The call URL depends on the model, so the path opened here is only
         // a parse check. `execute` posts to the URL it builds.
+        let models = crate::models::ModelClient::new(&endpoint)
+            .map_err(|error| ProviderError::decode(error.message()))?;
         let upstream = Upstream::open(endpoint, "", headers)?;
-        Ok(Self { upstream, base })
+        Ok(Self {
+            upstream,
+            base,
+            models,
+        })
     }
 
     fn url_for(&self, model: &str, stream: bool) -> Result<String, ProviderError> {
@@ -106,6 +113,20 @@ impl Provider for Generative {
             inbound_protocol,
         )
         .await
+    }
+
+    async fn list_models(
+        &self,
+        _query: &hofund_plugin_api::ListQuery,
+    ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+        self.models.gemini_list().await
+    }
+
+    async fn probe(
+        &self,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
+        self.models.generative_probe(query).await
     }
 }
 

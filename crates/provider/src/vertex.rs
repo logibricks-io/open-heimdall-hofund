@@ -69,6 +69,8 @@ const REGION_MODELS: &[&str] = &[
 pub struct Vertex {
     upstream: Upstream,
     base: String,
+    location: String,
+    models: crate::models::ModelClient,
     credentials: String,
     impersonate: String,
     token_url: String,
@@ -208,10 +210,25 @@ impl Vertex {
                 .build()
                 .map_err(|error| ProviderError::connect(error.to_string()))?,
         };
+        let models = crate::models::ModelClient::new(&endpoint)
+            .map_err(|error| ProviderError::decode(error.message()))?;
+        let location = reqwest::Url::parse(&base)
+            .ok()
+            .and_then(|url| {
+                let segments = url.path_segments()?.collect::<Vec<_>>();
+                segments
+                    .iter()
+                    .position(|segment| *segment == "locations")
+                    .and_then(|index| segments.get(index + 1))
+                    .map(|location| (*location).to_owned())
+            })
+            .unwrap_or_default();
         let upstream = Upstream::open(endpoint, "", reqwest::header::HeaderMap::new())?;
         Ok(Self {
             upstream,
             base,
+            location,
+            models,
             credentials,
             impersonate,
             token_url,
@@ -427,6 +444,37 @@ impl Provider for Vertex {
             &token,
         )
         .await
+    }
+
+    async fn list_models(
+        &self,
+        _query: &hofund_plugin_api::ListQuery,
+    ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+        crate::models::static_models(Self::models_for(&self.location))
+    }
+
+    async fn probe(
+        &self,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
+        tokio::time::timeout(crate::probe::PROBE_WAIT, async {
+            let token = self.access_token().await.map_err(|error| {
+                use hofund_plugin_api::PluginError;
+                match error.kind {
+                    crate::ProviderErrorKind::Connect => PluginError::connect(error.message),
+                    crate::ProviderErrorKind::Timeout => PluginError::timeout(error.message),
+                    crate::ProviderErrorKind::Status => {
+                        PluginError::status_error(error.status.unwrap_or(502), error.message)
+                    }
+                    crate::ProviderErrorKind::Decode => PluginError::decode(error.message),
+                }
+            })?;
+            self.models.vertex_probe(query, &token).await
+        })
+        .await
+        .map_err(|_| {
+            hofund_plugin_api::PluginError::timeout("provider probe exceeded 20 seconds")
+        })?
     }
 }
 

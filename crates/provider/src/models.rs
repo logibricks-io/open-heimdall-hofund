@@ -1,0 +1,799 @@
+//! Bounded live model lists and shared row metadata.
+
+use std::time::Duration;
+
+use futures_util::StreamExt;
+use hofund_plugin_api::{
+    AuthChoice, ListKind, ListQuery, ModelList, ModelSpec, PluginError, PluginErrorKind,
+};
+use hofund_plugin_sdk::{PageError, after_id, gemini_models, json_error_message};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde_json::Value;
+
+use crate::http::{Credential, Endpoint};
+
+const VERSION: &str = "2023-06-01";
+
+// reference: internal/catalog/authheader.go:20-41
+const BOTH_AUTH_REFUSALS: &[&str] = &[
+    "\u{540c}\u{65f6}",
+    "\u{5e76}\u{5b58}",
+    "\u{5171}\u{5b58}",
+    "\u{53ea}\u{80fd}\u{4f7f}\u{7528}\u{4e00}\u{4e2a}",
+    "\u{53ea}\u{80fd}\u{9009}\u{62e9}\u{4e00}\u{4e2a}",
+    "\u{53ea}\u{80fd}\u{6709}\u{4e00}\u{4e2a}",
+    "cannot both",
+    "can't both",
+    "can not both",
+    "cannot be both",
+    "not both",
+    "together",
+    "at the same time",
+    "simultaneous",
+    "mutually exclusive",
+    "only one of",
+    "only one auth",
+    "only one header",
+    "both present",
+    "both be present",
+    "both provided",
+    "both be provided",
+];
+
+#[derive(Clone, Debug)]
+pub(crate) struct ModelClient {
+    pub endpoint: Endpoint,
+    pub client: reqwest::Client,
+    pub mantle: bool,
+}
+
+struct ListFailure(PluginError);
+
+impl From<PageError> for ListFailure {
+    fn from(error: PageError) -> Self {
+        let message = error.to_string();
+        if message.contains("time budget") {
+            Self(PluginError::timeout(message))
+        } else {
+            Self(PluginError::decode(message))
+        }
+    }
+}
+
+pub(crate) struct Page {
+    pub status: u16,
+    pub retry_after: Option<Duration>,
+    pub body: Vec<u8>,
+}
+
+impl ModelClient {
+    pub fn new(endpoint: &Endpoint) -> Result<Self, PluginError> {
+        let client = match endpoint.client.clone() {
+            Some(client) => client,
+            None => reqwest::Client::builder()
+                .connect_timeout(endpoint.timeout)
+                .read_timeout(crate::http::socket_backstop(endpoint.timeout))
+                .build()
+                .map_err(|_| PluginError::connect("could not build the provider HTTP client"))?,
+        };
+        Ok(Self {
+            endpoint: endpoint.clone(),
+            client,
+            mantle: crate::mantle::is_mantle_root(&endpoint.base_url),
+        })
+    }
+
+    pub async fn live_list(
+        &self,
+        query: &ListQuery,
+        anthropic: bool,
+    ) -> Result<ModelList, PluginError> {
+        let azure = self.is_azure();
+        let learning = anthropic && self.can_learn_auth();
+        let mut errors = Vec::new();
+        for candidate in list_urls(&self.endpoint.base_url, anthropic) {
+            let learned = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let learned_for_page = std::sync::Arc::clone(&learned);
+            let result = after_id(&candidate.url, |url| {
+                let learned = std::sync::Arc::clone(&learned_for_page);
+                async move {
+                    self.fetch_list_page(
+                        &url,
+                        anthropic,
+                        azure,
+                        learning,
+                        query.auth_choice(),
+                        &learned,
+                    )
+                    .await
+                    .map_err(ListFailure)
+                }
+            })
+            .await
+            .map_err(|error| error.0);
+            let learned = *learned.lock().unwrap_or_else(|error| error.into_inner());
+            match result {
+                Ok(rows) => {
+                    let models = model_specs(&rows, false)?;
+                    if models.is_empty() {
+                        errors.push(PluginError::decode(format!(
+                            "{}: no models listed",
+                            self.safe_url(&candidate.url)
+                        )));
+                        continue;
+                    }
+                    let mut list = ModelList::new(models, None)
+                        .with_kind(ListKind::Live)
+                        .with_v1_fallback(candidate.v1_fallback);
+                    if let Some(choice) = learned {
+                        list = list.with_auth_choice(choice);
+                    }
+                    return Ok(list);
+                }
+                Err(error) => errors.push(self.redact_error(error)),
+            }
+        }
+        Err(join_errors(errors, "model list failed"))
+    }
+
+    pub async fn gemini_list(&self) -> Result<ModelList, PluginError> {
+        let rows = gemini_models(&self.endpoint.base_url, |url| async move {
+            let headers = self
+                .auth_headers(AuthChoice::Both, false, true)
+                .map_err(ListFailure)?;
+            let page = self.fetch_page(&url, headers).await.map_err(ListFailure)?;
+            self.page_bytes(&url, page, false).map_err(ListFailure)
+        })
+        .await
+        .map_err(|error| self.redact_error(error.0))?;
+        let models = model_specs(&rows, true)?;
+        if models.is_empty() {
+            return Err(PluginError::decode("no models listed"));
+        }
+        Ok(ModelList::new(models, None).with_kind(ListKind::Live))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_list_page(
+        &self,
+        url: &str,
+        anthropic: bool,
+        azure: bool,
+        learning: bool,
+        supplied: Option<AuthChoice>,
+        learned: &std::sync::Mutex<Option<AuthChoice>>,
+    ) -> Result<Vec<u8>, PluginError> {
+        let initial = if azure {
+            AuthChoice::XApiKey
+        } else {
+            supplied.unwrap_or(AuthChoice::Both)
+        };
+        let mut choice = initial;
+        let mut page = self
+            .fetch_page(url, self.auth_headers(choice, anthropic, false)?)
+            .await?;
+        if learning && initial == AuthChoice::Both && both_auth_refused(page.status, &page.body) {
+            for single in [AuthChoice::XApiKey, AuthChoice::Bearer] {
+                choice = single;
+                page = self
+                    .fetch_page(url, self.auth_headers(choice, anthropic, false)?)
+                    .await?;
+                if page.status != 401 && page.status != 403 {
+                    *learned.lock().unwrap_or_else(|error| error.into_inner()) = Some(single);
+                    break;
+                }
+            }
+        }
+        self.page_bytes(url, page, false)
+    }
+
+    async fn fetch_page(&self, url: &str, headers: HeaderMap) -> Result<Page, PluginError> {
+        self.get(url, headers, hofund_plugin_sdk::BODY_CAP).await
+    }
+
+    pub async fn get(
+        &self,
+        url: &str,
+        headers: HeaderMap,
+        cap: usize,
+    ) -> Result<Page, PluginError> {
+        let builder = self.client.get(url).headers(headers);
+        let response = send(builder).await?;
+        read_page(response, cap, true).await
+    }
+
+    pub fn page_bytes(&self, url: &str, page: Page, probe: bool) -> Result<Vec<u8>, PluginError> {
+        if (200..300).contains(&page.status) {
+            return Ok(page.body);
+        }
+        let detail = if probe {
+            probe_error_message(&page.body)
+        } else {
+            json_error_message(&page.body)
+        };
+        let mut message = format!("{}: HTTP {}", self.safe_url(url), page.status);
+        if !detail.is_empty() {
+            message.push_str(&format!(" ({detail})"));
+        }
+        message = self.redact(&message);
+        message.push_str(&self.redact(&status_hint(&page.body)));
+        let mut error = PluginError::status_error(page.status, message);
+        if let Some(after) = page.retry_after {
+            error = error.with_retry_after(after);
+        }
+        Err(error)
+    }
+
+    pub fn auth_headers(
+        &self,
+        choice: AuthChoice,
+        anthropic: bool,
+        gemini: bool,
+    ) -> Result<HeaderMap, PluginError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("application/json"),
+        );
+        if anthropic {
+            headers.insert(
+                HeaderName::from_static("anthropic-version"),
+                HeaderValue::from_static(VERSION),
+            );
+        }
+        if !self.endpoint.api_key.is_empty() {
+            if gemini {
+                insert_secret(&mut headers, "x-goog-api-key", &self.endpoint.api_key)?;
+            } else {
+                match choice {
+                    AuthChoice::Both => {
+                        insert_secret(&mut headers, "x-api-key", &self.endpoint.api_key)?;
+                        insert_secret(
+                            &mut headers,
+                            "authorization",
+                            &format!("Bearer {}", self.endpoint.api_key),
+                        )?;
+                    }
+                    AuthChoice::XApiKey => {
+                        insert_secret(&mut headers, "x-api-key", &self.endpoint.api_key)?;
+                    }
+                    AuthChoice::Bearer => {
+                        insert_secret(
+                            &mut headers,
+                            "authorization",
+                            &format!("Bearer {}", self.endpoint.api_key),
+                        )?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.user_headers(headers)
+    }
+
+    pub fn azure_headers(&self) -> Result<HeaderMap, PluginError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("application/json"),
+        );
+        if !self.endpoint.api_key.is_empty() {
+            insert_secret(&mut headers, "api-key", &self.endpoint.api_key)?;
+        }
+        self.user_headers(headers)
+    }
+
+    pub fn bearer_headers(&self) -> Result<HeaderMap, PluginError> {
+        self.auth_headers(AuthChoice::Bearer, false, false)
+    }
+
+    pub fn user_headers(&self, mut headers: HeaderMap) -> Result<HeaderMap, PluginError> {
+        for (name, value) in &self.endpoint.headers {
+            let name = HeaderName::try_from(name.as_str())
+                .map_err(|_| PluginError::config("provider header name is invalid"))?;
+            let mut value = HeaderValue::try_from(value.as_str())
+                .map_err(|_| PluginError::config("provider header value is invalid"))?;
+            value.set_sensitive(true);
+            headers.insert(name, value);
+        }
+        Ok(headers)
+    }
+
+    pub fn pinned_auth(&self) -> bool {
+        self.endpoint.headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-api-key")
+        })
+    }
+
+    pub fn can_learn_auth(&self) -> bool {
+        !self.endpoint.api_key.is_empty()
+            && !self.endpoint.base_url.trim().is_empty()
+            && !self.is_azure()
+            && !self.is_official_anthropic()
+            && !self.is_bedrock()
+            && !self.pinned_auth()
+    }
+
+    pub fn is_azure(&self) -> bool {
+        self.endpoint.credential == Credential::ApiKey || azure_url(&self.endpoint.base_url)
+    }
+
+    pub fn is_bedrock(&self) -> bool {
+        let host = url_host(&self.endpoint.base_url);
+        (host.starts_with("bedrock-runtime.") && host.ends_with(".amazonaws.com"))
+            || (host.starts_with("bedrock-mantle.") && host.ends_with(".amazonaws.com"))
+            || (host.starts_with("bedrock-mantle.") && host.ends_with(".api.aws"))
+    }
+
+    pub fn is_mantle(&self) -> bool {
+        self.mantle
+    }
+
+    pub fn is_official_anthropic(&self) -> bool {
+        url_host(&self.endpoint.base_url).ends_with("anthropic.com")
+    }
+
+    pub fn redact_error(&self, error: PluginError) -> PluginError {
+        let message = self.redact(error.message());
+        let mut clean = match error.kind() {
+            PluginErrorKind::Connect => PluginError::connect(message),
+            PluginErrorKind::Timeout => PluginError::timeout(message),
+            PluginErrorKind::Transport => PluginError::transport(message),
+            PluginErrorKind::Status => {
+                PluginError::status_error(error.status().unwrap_or(502), message)
+            }
+            PluginErrorKind::Decode => PluginError::decode(message),
+            PluginErrorKind::Unsupported => PluginError::unsupported(message),
+            _ => PluginError::decode(message),
+        };
+        if let Some(after) = error.retry_after() {
+            clean = clean.with_retry_after(after);
+        }
+        clean
+    }
+
+    pub fn redact(&self, text: &str) -> String {
+        let mut clean = text.to_owned();
+        for secret in std::iter::once(&self.endpoint.api_key)
+            .chain(self.endpoint.headers.iter().map(|(_, value)| value))
+            .filter(|value| !value.is_empty())
+        {
+            clean = clean.replace(secret, "[redacted]");
+        }
+        clean
+    }
+
+    pub fn safe_url(&self, url: &str) -> String {
+        let without_fragment = url.split('#').next().unwrap_or(url);
+        match without_fragment.split_once('?') {
+            Some((base, _)) => format!("{base}?<redacted>"),
+            None => without_fragment.to_owned(),
+        }
+    }
+}
+
+pub(crate) struct Candidate {
+    url: String,
+    v1_fallback: bool,
+}
+
+// reference: internal/catalog/live.go:351-396
+fn list_urls(base: &str, anthropic: bool) -> Vec<Candidate> {
+    let base = base.trim().trim_end_matches('/');
+    let mut candidates = Vec::new();
+    let mut add = |url: String, v1_fallback: bool| {
+        if !candidates
+            .iter()
+            .any(|candidate: &Candidate| candidate.url == url)
+        {
+            candidates.push(Candidate { url, v1_fallback });
+        }
+    };
+    add(format!("{base}/models"), false);
+    if anthropic || !versioned(base) {
+        let direct_v1 = format!("{base}/v1/models");
+        add(direct_v1, true);
+        let mut root = base.to_owned();
+        const SUFFIXES: &[&str] = &[
+            "/apps/anthropic",
+            "/api/anthropic",
+            "/anthropic",
+            "/api/v1",
+            "/v1",
+            "/api",
+        ];
+        while let Some(suffix) = SUFFIXES.iter().find(|suffix| root.ends_with(**suffix)) {
+            root.truncate(root.len() - suffix.len());
+        }
+        add(format!("{root}/v1/models"), false);
+        add(format!("{root}/models"), false);
+    }
+    candidates
+}
+
+fn versioned(base: &str) -> bool {
+    reqwest::Url::parse(base).is_ok_and(|url| {
+        url.path_segments().is_some_and(|segments| {
+            segments.into_iter().any(|segment| {
+                let mut chars = segment.chars();
+                matches!(chars.next(), Some('v' | 'V'))
+                    && chars.next().is_some_and(|digit| digit.is_ascii_digit())
+            })
+        })
+    })
+}
+
+pub(crate) fn azure_url(base: &str) -> bool {
+    azure_host(&url_host(base))
+}
+
+/// Whether `host` is an Azure OpenAI resource host, with an optional port.
+///
+// reference: internal/provider/azure.go:27-53
+#[must_use]
+pub fn azure_host(host: &str) -> bool {
+    const SUFFIXES: &[&str] = &[
+        ".openai.azure.com",
+        ".cognitiveservices.azure.com",
+        ".services.ai.azure.com",
+    ];
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    SUFFIXES
+        .iter()
+        .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len())
+}
+
+pub(crate) fn url_host(base: &str) -> String {
+    reqwest::Url::parse(base)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default()
+}
+
+fn model_specs(rows: &[Value], gemini: bool) -> Result<Vec<ModelSpec>, PluginError> {
+    let mut models = Vec::new();
+    for row in rows {
+        if let Some(model) = model_spec(row, gemini)? {
+            models.push(model);
+        }
+    }
+    Ok(models)
+}
+
+pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>, PluginError> {
+    if let Value::String(id) = row {
+        if hofund_plugin_sdk::classify::classify_model(id, "").is_none() {
+            return Ok(None);
+        }
+        return ModelSpec::new(id, None).map(Some);
+    }
+    let Some(row) = row.as_object() else {
+        return Ok(None);
+    };
+    let Some(id) = row
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .or_else(|| row.get("name").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
+    let Some(tags) = hofund_plugin_sdk::classify::classify_model(id, kind) else {
+        return Ok(None);
+    };
+    let name = if gemini {
+        row.get("displayName").and_then(Value::as_str)
+    } else {
+        row.get("display_name").and_then(Value::as_str).or_else(|| {
+            row.get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.contains(": "))
+        })
+    }
+    .filter(|name| !name.is_empty())
+    .map(str::to_owned);
+    let mut model = ModelSpec::new(id, name)?
+        .with_draws(tags.draws())
+        .with_films(tags.films())
+        .with_decides(tags.decides());
+    if gemini {
+        model = model
+            .with_context(positive(row.get("inputTokenLimit")))
+            .with_max_output(positive(row.get("outputTokenLimit")));
+        return Ok(Some(model));
+    }
+    model = model
+        .with_context(positive(row.get("context_length")))
+        .with_max_output(positive(row.get("max_output_tokens")))
+        .with_efforts(named_values(
+            row.get("supported_reasoning_levels"),
+            "effort",
+        ))
+        .with_service_tiers(named_values(row.get("service_tiers"), "id"));
+    if let Some(search) = row.get("web_search").and_then(Value::as_str) {
+        model = model.with_web_search(search);
+    }
+    if let Some(modalities) = row.get("modalities").and_then(Value::as_object) {
+        let input = string_array(modalities.get("input"));
+        let output = string_array(modalities.get("output"));
+        if modalities.get("input").and_then(Value::as_array).is_some() {
+            model = model.with_image_input(Some(input.iter().any(|item| item == "image")));
+        }
+        model = model
+            .with_input_modalities(input)
+            .with_output_modalities(output);
+    }
+    let native = string_array(row.get("native_endpoints"));
+    let supported = string_array(row.get("supported_endpoints"));
+    let endpoints = if !native.is_empty() {
+        native
+    } else if !supported.is_empty() {
+        supported
+    } else {
+        string_array(row.get("type_target"))
+    };
+    model = model.with_endpoints(endpoints);
+    Ok(Some(model))
+}
+
+fn positive(value: Option<&Value>) -> u64 {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= u64::MAX as f64)
+        .map(|value| value as u64)
+        .unwrap_or(0)
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(value)) if !value.is_empty() => vec![value.clone()],
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn named_values(value: Option<&Value>, key: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for value in value.and_then(Value::as_array).into_iter().flatten() {
+        let named = value
+            .as_str()
+            .or_else(|| value.get(key).and_then(Value::as_str));
+        if let Some(named) = named.filter(|named| !named.is_empty())
+            && !values.iter().any(|present| present == named)
+        {
+            values.push(named.to_owned());
+        }
+    }
+    values
+}
+
+pub(crate) fn both_auth_refused(status: u16, body: &[u8]) -> bool {
+    if status != 401 {
+        return false;
+    }
+    let body = String::from_utf8_lossy(body).to_lowercase();
+    body.contains("x-api-key")
+        && body.contains("authorization")
+        && BOTH_AUTH_REFUSALS
+            .iter()
+            .any(|phrase| body.contains(phrase))
+}
+
+async fn send(builder: reqwest::RequestBuilder) -> Result<reqwest::Response, PluginError> {
+    builder.send().await.map_err(|error| {
+        if error.is_timeout() {
+            PluginError::timeout("upstream request exceeded its deadline")
+        } else if error.is_connect() {
+            PluginError::connect("could not connect to the upstream")
+        } else {
+            PluginError::transport("upstream transport failed")
+        }
+    })
+}
+
+pub(crate) async fn read_page(
+    response: reqwest::Response,
+    cap: usize,
+    exact_cap: bool,
+) -> Result<Page, PluginError> {
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .parse::<u64>()
+                .map(Duration::from_secs)
+                .ok()
+                .or_else(|| {
+                    let at = httpdate::parse_http_date(value).ok()?;
+                    at.duration_since(std::time::SystemTime::now()).ok()
+                })
+        });
+    if exact_cap
+        && response
+            .content_length()
+            .is_some_and(|length| length > cap as u64)
+    {
+        return Err(PluginError::decode("response body is too large"));
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            if error.is_timeout() {
+                PluginError::timeout("upstream response exceeded its read deadline")
+            } else {
+                PluginError::transport("could not read the upstream response")
+            }
+        })?;
+        let remaining = cap
+            .saturating_add(usize::from(exact_cap))
+            .saturating_sub(body.len());
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if body.len() > cap {
+            return Err(PluginError::decode("response body is too large"));
+        }
+        if body.len() == cap && !exact_cap {
+            break;
+        }
+    }
+    Ok(Page {
+        status,
+        retry_after,
+        body,
+    })
+}
+
+pub(crate) fn probe_error_message(body: &[u8]) -> String {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        for pointer in [
+            "/error/message",
+            "/message",
+            "/msg",
+            "/detail",
+            "/errors/0/message",
+        ] {
+            if let Some(message) = value.pointer(pointer).and_then(Value::as_str)
+                && !message.trim().is_empty()
+            {
+                return cut_runes(message.trim(), 300);
+            }
+        }
+        if let Some(message) = value.get("error").and_then(Value::as_str) {
+            return cut_runes(message.trim(), 300);
+        }
+    }
+    let text = String::from_utf8_lossy(body);
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() || compact.starts_with('<') {
+        String::new()
+    } else {
+        cut_runes(&compact, 300)
+    }
+}
+
+fn cut_runes(text: &str, cap: usize) -> String {
+    if text.chars().count() <= cap {
+        return text.to_owned();
+    }
+    let mut cut = text.chars().take(cap).collect::<String>();
+    cut.push('…');
+    cut
+}
+
+fn status_hint(body: &[u8]) -> String {
+    let lower = String::from_utf8_lossy(body).to_ascii_lowercase();
+    if lower.contains("request has been blocked")
+        || lower.contains("errors.aliyun.com")
+        || ((lower.contains("cloudflare") || lower.contains("cf-chl"))
+            && lower.contains("challenge"))
+    {
+        return " — the provider's network edge blocked this address; wait, or try another network or proxy".to_owned();
+    }
+    if let Some(link) = verification_link(body) {
+        return format!(
+            " — this Google account needs verification: open {link} in a browser, verify the account, then try again"
+        );
+    }
+    if lower.contains("verify your account") || lower.contains("account verification required") {
+        return " — this Google account needs verification before API access can work".to_owned();
+    }
+    if lower.contains("go plan doesn") && lower.contains("include api access") {
+        return " — this Go plan does not include Provider API access; use an API-enabled plan or a provider API key".to_owned();
+    }
+    String::new()
+}
+
+fn verification_link(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let details = value.pointer("/error/details")?.as_array()?;
+    let mut help = None;
+    let mut validation = None;
+    for detail in details {
+        for link in detail
+            .get("links")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            help = help.or_else(|| link.get("url").and_then(Value::as_str));
+        }
+        if detail.get("reason").and_then(Value::as_str) == Some("VALIDATION_REQUIRED") {
+            validation = detail
+                .get("metadata")
+                .and_then(Value::as_object)
+                .and_then(|metadata| {
+                    metadata
+                        .get("validation_url")
+                        .or_else(|| metadata.get("validationUrl"))
+                })
+                .and_then(Value::as_str)
+                .or(validation);
+        }
+    }
+    let link = validation.or(help)?;
+    let url = reqwest::Url::parse(link).ok()?;
+    (url.scheme() == "https" && url.host_str().is_some()).then(|| link.to_owned())
+}
+
+fn join_errors(errors: Vec<PluginError>, fallback: &str) -> PluginError {
+    let Some(last) = errors.last() else {
+        return PluginError::decode(fallback);
+    };
+    let message = errors
+        .iter()
+        .map(|error| error.message())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut joined = match last.kind() {
+        PluginErrorKind::Connect => PluginError::connect(message),
+        PluginErrorKind::Timeout => PluginError::timeout(message),
+        PluginErrorKind::Transport => PluginError::transport(message),
+        PluginErrorKind::Status => PluginError::status_error(last.status().unwrap_or(502), message),
+        _ => PluginError::decode(message),
+    };
+    if let Some(after) = last.retry_after() {
+        joined = joined.with_retry_after(after);
+    }
+    joined
+}
+
+fn insert_secret(
+    headers: &mut HeaderMap,
+    name: &'static str,
+    value: &str,
+) -> Result<(), PluginError> {
+    let mut value = HeaderValue::try_from(value)
+        .map_err(|_| PluginError::config("API key is not valid header text"))?;
+    value.set_sensitive(true);
+    headers.insert(HeaderName::from_static(name), value);
+    Ok(())
+}
+
+pub(crate) fn static_models(ids: Vec<String>) -> Result<ModelList, PluginError> {
+    let models = ids
+        .into_iter()
+        .map(|id| ModelSpec::new(id, None))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ModelList::new(models, None).with_kind(ListKind::Catalog))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn both_auth_refusal_keeps_escaped_non_english_markers() {
+        let body = "x-api-key Authorization \u{540c}\u{65f6}";
+        assert!(super::both_auth_refused(401, body.as_bytes()));
+        assert!(!super::both_auth_refused(403, body.as_bytes()));
+        assert!(!super::both_auth_refused(401, b"x-api-key only"));
+    }
+}

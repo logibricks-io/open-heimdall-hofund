@@ -56,6 +56,11 @@ AgentSet::const fn file (& self) -> & 'static str
 AgentSet::const fn from_static (file : & 'static str , key : & 'static str , slot : Slot) -> Self
 AgentSet::const fn key (& self) -> & 'static str
 AgentSet::const fn slot (& self) -> & Slot
+AuthChoice
+AuthChoice #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AuthChoice::Bearer
+AuthChoice::Both
+AuthChoice::XApiKey
 AuthResult
 AuthResult #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AuthResult::const fn accepted (self) -> bool
@@ -208,11 +213,16 @@ JobSpec::fn new (name : impl Into < String > , every : Duration) -> Result < Sel
 ListKind
 ListKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 ListKind::Catalog
+ListKind::Deployments
 ListKind::Live
 ListKind::Unsupported
+ListKind::const fn rank (self) -> u8
+ListKind::const fn within (self , bound : Self) -> bool
 ListQuery
 ListQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ListQuery::const fn auth_choice (& self) -> Option < AuthChoice >
 ListQuery::const fn limit (& self) -> Option < u32 >
+ListQuery::const fn with_auth_choice (mut self , choice : AuthChoice) -> Self
 ListQuery::fn new () -> Self
 ListQuery::fn page (& self) -> Option < & str >
 ListQuery::fn with_limit (mut self , limit : u32) -> Self
@@ -242,14 +252,46 @@ Method::Post
 Method::Put
 ModelList
 ModelList #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ModelList::const fn auth_choice (& self) -> Option < AuthChoice >
+ModelList::const fn base_model_fallback (& self) -> bool
+ModelList::const fn kind (& self) -> crate :: ListKind
+ModelList::const fn v1_fallback (& self) -> bool
+ModelList::const fn with_auth_choice (mut self , choice : AuthChoice) -> Self
+ModelList::const fn with_base_model_fallback (mut self , fallback : bool) -> Self
+ModelList::const fn with_kind (mut self , kind : crate :: ListKind) -> Self
+ModelList::const fn with_v1_fallback (mut self , fallback : bool) -> Self
 ModelList::fn models (& self) -> & [ModelSpec]
 ModelList::fn new (models : Vec < ModelSpec > , next : Option < String >) -> Self
 ModelList::fn next (& self) -> Option < & str >
 ModelSpec
 ModelSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ModelSpec::const fn context (& self) -> u64
+ModelSpec::const fn decides (& self) -> bool
+ModelSpec::const fn draws (& self) -> bool
+ModelSpec::const fn films (& self) -> bool
+ModelSpec::const fn image_input (& self) -> Option < bool >
+ModelSpec::const fn max_output (& self) -> u64
+ModelSpec::const fn with_decides (mut self , decides : bool) -> Self
+ModelSpec::const fn with_draws (mut self , draws : bool) -> Self
+ModelSpec::const fn with_films (mut self , films : bool) -> Self
+ModelSpec::const fn with_image_input (mut self , image_input : Option < bool >) -> Self
 ModelSpec::fn display_name (& self) -> Option < & str >
+ModelSpec::fn efforts (& self) -> & [String]
+ModelSpec::fn endpoints (& self) -> & [String]
 ModelSpec::fn id (& self) -> & str
+ModelSpec::fn input_modalities (& self) -> & [String]
 ModelSpec::fn new (id : impl Into < String > , display_name : Option < String >) -> Result < Self , PluginError >
+ModelSpec::fn output_modalities (& self) -> & [String]
+ModelSpec::fn service_tiers (& self) -> & [String]
+ModelSpec::fn web_search (& self) -> Option < & str >
+ModelSpec::fn with_context (mut self , context : u64) -> Self
+ModelSpec::fn with_efforts (mut self , efforts : Vec < String >) -> Self
+ModelSpec::fn with_endpoints (mut self , endpoints : Vec < String >) -> Self
+ModelSpec::fn with_input_modalities (mut self , modalities : Vec < String >) -> Self
+ModelSpec::fn with_max_output (mut self , max_output : u64) -> Self
+ModelSpec::fn with_output_modalities (mut self , modalities : Vec < String >) -> Self
+ModelSpec::fn with_service_tiers (mut self , service_tiers : Vec < String >) -> Self
+ModelSpec::fn with_web_search (mut self , web_search : impl Into < String >) -> Self
 ObserveHandle
 ObserveHandle #[non_exhaustive] derives(Clone)
 ObserveHandle::fn observation (& self) -> QuotaObservation
@@ -302,14 +344,21 @@ PresetId
 PresetId::as_str
 PresetId::from_static
 ProbeQuery
-ProbeQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+ProbeQuery #[non_exhaustive] derives(Clone, PartialEq, Eq)
+ProbeQuery::const fn auth_choice (& self) -> Option < AuthChoice >
 ProbeQuery::const fn protocol (& self) -> ProtocolId
+ProbeQuery::const fn with_auth_choice (mut self , choice : AuthChoice) -> Self
+ProbeQuery::fn extra_body (& self) -> Option < & bytes :: Bytes >
 ProbeQuery::fn minimal_request (& self) -> Request
+ProbeQuery::fn model (& self) -> & str
 ProbeQuery::fn new (protocol : ProtocolId , model : impl Into < String >) -> Result < Self , PluginError >
+ProbeQuery::fn with_extra_body (mut self , body : bytes :: Bytes) -> Self
 ProbeReport
 ProbeReport #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 ProbeReport::async fn from_completion (completion : Completion) -> Result < Self , PluginError >
+ProbeReport::const fn auth_choice (& self) -> Option < crate :: AuthChoice >
 ProbeReport::const fn truncated (& self) -> bool
+ProbeReport::const fn with_auth_choice (mut self , choice : crate :: AuthChoice) -> Self
 ProbeReport::fn new (snippet : impl Into < String >) -> Self
 ProbeReport::fn snippet (& self) -> & str
 ProcessHandle

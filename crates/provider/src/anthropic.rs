@@ -15,6 +15,7 @@ const VERSION: &str = "2023-06-01";
 #[derive(Debug)]
 pub struct Anthropic {
     upstream: Upstream,
+    models: crate::models::ModelClient,
 }
 
 impl Anthropic {
@@ -38,8 +39,11 @@ impl Anthropic {
             endpoint.credential,
             http::Credential::XApiKey,
         )?;
+        let models = crate::models::ModelClient::new(&endpoint)
+            .map_err(|error| ProviderError::decode(error.message()))?;
         Ok(Self {
             upstream: Upstream::open(endpoint, "v1/messages", headers)?,
+            models,
         })
     }
 }
@@ -83,6 +87,20 @@ impl Provider for Anthropic {
             inbound_protocol,
         )
         .await
+    }
+
+    async fn list_models(
+        &self,
+        query: &hofund_plugin_api::ListQuery,
+    ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+        self.models.live_list(query, true).await
+    }
+
+    async fn probe(
+        &self,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
+        self.models.anthropic_probe(query).await
     }
 }
 

@@ -66,10 +66,10 @@ pub use id::{
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use records::{
-    Account, AgentDescription, AgentFile, AgentRoute, AgentSet, BinaryName, FileKind, ListQuery,
-    MatchNeedle, ModelList, ModelSpec, ProbeQuery, QuotaObservation, QuotaQuery, QuotaWindow,
-    SignInChallenge, SignInCtx, SignInFlow, SignInProof, Slot, StaticUrl, SubscriptionSpec,
-    Visible,
+    Account, AgentDescription, AgentFile, AgentRoute, AgentSet, AuthChoice, BinaryName, FileKind,
+    ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery, QuotaObservation, QuotaQuery,
+    QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof, Slot, StaticUrl,
+    SubscriptionSpec, Visible,
 };
 pub use secrecy::SecretString;
 pub use subscription::{DynSubscriptionFactory, Subscription, SubscriptionFactory};

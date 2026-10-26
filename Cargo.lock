@@ -1756,7 +1756,10 @@ dependencies = [
  "hofund-plugin-sdk",
  "hofund-provider",
  "hofund-quirks",
+ "serde_json",
+ "tokio",
  "toml 0.8.2",
+ "wiremock",
 ]
 
 [[package]]
@@ -1781,6 +1784,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1796,6 +1800,7 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "hofund-quirks",
+ "httpdate",
  "reqwest 0.12.28",
  "ring",
  "serde",

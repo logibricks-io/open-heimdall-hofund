@@ -37,6 +37,7 @@ use hofund_plugin_sdk::sigv4::{self, SignInput};
 pub struct Bedrock {
     upstream: Upstream,
     base: String,
+    models: crate::models::ModelClient,
     region: String,
     access_key_id: String,
     secret_access_key: String,
@@ -92,10 +93,13 @@ impl Bedrock {
             return Err(ProviderError::decode("provider base URL is empty"));
         }
         let region = signing_region(region, &base)?;
+        let models = crate::models::ModelClient::new(&endpoint)
+            .map_err(|error| ProviderError::decode(error.message()))?;
         let upstream = Upstream::open(endpoint, "", HeaderMap::new())?;
         Ok(Self {
             upstream,
             base,
+            models,
             region,
             access_key_id,
             secret_access_key,
@@ -115,17 +119,125 @@ impl Provider for Bedrock {
         request: Request,
         inbound_protocol: &str,
     ) -> Result<Completion, ProviderError> {
-        if request.model.is_empty() {
+        let stream = request.stream;
+        let codec = Converse;
+        let body = http::prepare_body(
+            &self.upstream,
+            &codec,
+            request.clone(),
+            None,
+            inbound_protocol,
+        )?;
+        let response = self.converse_response(&request.model, body, stream).await?;
+        let status = response.status();
+        if !status.is_success() {
+            let bytes = response.bytes().await.unwrap_or_default();
+            return Err(ProviderError::status(
+                status.as_u16(),
+                http::message_from(&bytes),
+            ));
+        }
+        if codec.id() == inbound_protocol {
+            return http::raw_completion(response, stream, &codec).await;
+        }
+        if stream {
+            let events = crate::stream::SseEvents::new(
+                response.bytes_stream(),
+                codec.stream_decoder(),
+                true,
+            );
+            return Ok(Completion::Stream(Box::pin(events)));
+        }
+        let bytes = response.bytes().await.map_err(http::map_transport)?;
+        let mut decoded = codec
+            .decode_response(&bytes)
+            .map_err(|error| ProviderError::decode(error.to_string()))?;
+        decoded.strip_extensions();
+        Ok(Completion::Unary(Box::new(decoded)))
+    }
+
+    async fn list_models(
+        &self,
+        _query: &hofund_plugin_api::ListQuery,
+    ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+        crate::models::static_models(
+            crate::presets::preset_models("bedrock")
+                .map(<[String]>::to_vec)
+                .unwrap_or_default(),
+        )
+    }
+
+    async fn probe(
+        &self,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
+        tokio::time::timeout(crate::probe::PROBE_WAIT, self.probe_inner(query))
+            .await
+            .map_err(|_| {
+                hofund_plugin_api::PluginError::timeout("provider probe exceeded 20 seconds")
+            })?
+    }
+}
+
+impl Bedrock {
+    async fn probe_inner(
+        &self,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
+        use hofund_plugin_api::PluginError;
+        let mut body = serde_json::json!({
+            "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+            "inferenceConfig": {"maxTokens": 16},
+        });
+        if let Some(extra) = query.extra_body() {
+            let extra: serde_json::Value = serde_json::from_slice(extra)
+                .map_err(|_| PluginError::decode("probe extra body is not JSON"))?;
+            let extra = extra
+                .as_object()
+                .ok_or_else(|| PluginError::decode("probe extra body is not a JSON object"))?;
+            for (key, value) in extra {
+                body[key] = value.clone();
+            }
+        }
+        let stream = body
+            .get("stream")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let bytes = serde_json::to_vec(&body)
+            .map_err(|_| PluginError::decode("could not encode probe body"))?;
+        let response = self
+            .converse_response(query.model(), bytes, stream)
+            .await
+            .map_err(plugin_error)?;
+        let status = response.status().as_u16();
+        let cap = if (200..300).contains(&status) && stream {
+            1024 * 1024
+        } else {
+            4096
+        };
+        let page = crate::models::read_page(response, cap, false).await?;
+        let url = format!(
+            "{}{}",
+            self.base.trim_end_matches('/'),
+            sigv4::model_wire_uri(query.model(), stream)
+        );
+        self.models.probe_report(&url, page, stream)
+    }
+
+    async fn converse_response(
+        &self,
+        model: &str,
+        body: Vec<u8>,
+        stream: bool,
+    ) -> Result<reqwest::Response, ProviderError> {
+        if model.is_empty() {
             return Err(ProviderError::status(400, "model is empty"));
         }
-        let stream = request.stream;
-        let path = sigv4::model_wire_uri(&request.model, stream);
+        let path = sigv4::model_wire_uri(model, stream);
         let canonical_path = sigv4::canonical_uri(&path, sigv4::UriEncoding::Double);
         let url = format!("{}{path}", self.base.trim_end_matches('/'));
         let parsed = reqwest::Url::parse(&url)
             .map_err(|error| ProviderError::decode(format!("provider URL is invalid: {error}")))?;
-        let codec = Converse;
-        let body = http::prepare_body(&self.upstream, &codec, request, None, inbound_protocol)?;
         let amz_date = sigv4::amz_date(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -167,33 +279,19 @@ impl Provider for Bedrock {
         let signed = sigv4::sign(&input)
             .map_err(|error| ProviderError::decode(format!("Converse signing: {error}")))?;
         let headers = request_headers(&pairs, signed.authorization())?;
-        let cross_protocol = codec.id() != inbound_protocol;
-        let response = http::post_with_headers(&self.upstream, &url, body, headers).await?;
-        let status = response.status();
-        if !status.is_success() {
-            let bytes = response.bytes().await.unwrap_or_default();
-            return Err(ProviderError::status(
-                status.as_u16(),
-                http::message_from(&bytes),
-            ));
+        http::post_with_headers(&self.upstream, &url, body, headers).await
+    }
+}
+
+fn plugin_error(error: ProviderError) -> hofund_plugin_api::PluginError {
+    use hofund_plugin_api::PluginError;
+    match error.kind {
+        crate::ProviderErrorKind::Connect => PluginError::connect(error.message),
+        crate::ProviderErrorKind::Timeout => PluginError::timeout(error.message),
+        crate::ProviderErrorKind::Status => {
+            PluginError::status_error(error.status.unwrap_or(502), error.message)
         }
-        if !cross_protocol {
-            return http::raw_completion(response, stream, &codec).await;
-        }
-        if stream {
-            let events = crate::stream::SseEvents::new(
-                response.bytes_stream(),
-                codec.stream_decoder(),
-                true,
-            );
-            return Ok(Completion::Stream(Box::pin(events)));
-        }
-        let bytes = response.bytes().await.map_err(http::map_transport)?;
-        let mut decoded = codec
-            .decode_response(&bytes)
-            .map_err(|error| ProviderError::decode(error.to_string()))?;
-        decoded.strip_extensions();
-        Ok(Completion::Unary(Box::new(decoded)))
+        crate::ProviderErrorKind::Decode => PluginError::decode(error.message),
     }
 }
 

@@ -81,16 +81,42 @@ const fn is_header(value: &str) -> bool {
     true
 }
 
-/// Whether `list_models` is live, a static catalog, or absent.
+/// Whether `list_models` is live, a static catalog, deployments, or absent.
+///
+/// Callers outside this crate must map unknown future variants to
+/// [`ListKind::Unsupported`] when matching. [`ListKind::rank`] and
+/// [`ListKind::within`] already apply that rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ListKind {
-    /// The plugin calls the vendor.
+    /// The plugin calls the vendor and returns its general model list.
     Live,
     /// The plugin returns a compiled catalog.
     Catalog,
+    /// The plugin dials the vendor but returns only the account's deployment names.
+    Deployments,
     /// There is no list.
     Unsupported,
+}
+
+impl ListKind {
+    /// The explicit capability rank, independent of declaration order.
+    #[must_use]
+    #[allow(unreachable_patterns)]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Catalog => 1,
+            Self::Deployments => 2,
+            Self::Live => 3,
+            Self::Unsupported | _ => 0,
+        }
+    }
+
+    /// Whether this capability is no broader than `bound`.
+    #[must_use]
+    pub const fn within(self, bound: Self) -> bool {
+        self.rank() <= bound.rank()
+    }
 }
 
 /// Static metadata for one upstream implementation.
@@ -330,7 +356,25 @@ pub trait UpstreamProvider: Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use super::HeaderName;
+    use super::{HeaderName, ListKind};
+
+    #[test]
+    fn list_kind_rank_has_the_explicit_capability_order() {
+        assert_eq!(ListKind::Unsupported.rank(), 0);
+        assert_eq!(ListKind::Catalog.rank(), 1);
+        assert_eq!(ListKind::Deployments.rank(), 2);
+        assert_eq!(ListKind::Live.rank(), 3);
+        assert!(ListKind::Unsupported.rank() < ListKind::Catalog.rank());
+        assert!(ListKind::Catalog.rank() < ListKind::Deployments.rank());
+        assert!(ListKind::Deployments.rank() < ListKind::Live.rank());
+    }
+
+    #[test]
+    fn deployments_fit_live_but_not_catalog_bounds() {
+        assert!(ListKind::Deployments.within(ListKind::Live));
+        assert!(!ListKind::Deployments.within(ListKind::Catalog));
+        assert!(ListKind::Catalog.within(ListKind::Deployments));
+    }
 
     #[test]
     fn header_names_are_lowercase_tokens() {

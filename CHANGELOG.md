@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ListKind::Deployments` and explicit `ListKind::rank()` capability ordering,
+  with the additive plugin API surface recorded in the public-API snapshot.
+- SDK `after_id` and Gemini model-list walkers with page limits, repeated-cursor
+  guards, bounded response bodies, and list deadlines.
+- Per-wire live model lists, Azure deployments, static Vertex and Bedrock
+  catalogs, and minimal connectivity probes in the built-in provider plugins.
+  List and probe bodies are bounded, credentials are redacted, and Anthropic
+  single-header authentication can be learned and reported to the host.
 - Provider plugins share SigV4, OAuth token parsing, form bodies, and JSON
   page cursors from `hofund-plugin-sdk`. Parse errors do not include the
   response body. Token `Debug` is redacted.
