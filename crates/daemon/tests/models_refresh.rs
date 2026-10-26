@@ -118,9 +118,9 @@ fn state(directory: &Path, provider: &str) -> Value {
     serde_json::from_slice(&std::fs::read(path).expect("state")).expect("JSON")
 }
 
-fn set_picks(host: &ModelsHost, config_path: &Path, provider: &str, picks: &[&str]) {
+fn set_picks(host: &ModelsHost, provider: &str, picks: &[&str]) {
     let picks = picks.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
-    host.set_picks(config_path, provider, &picks);
+    host.set_picks(provider, &picks);
 }
 
 #[tokio::test]
@@ -233,6 +233,7 @@ async fn failed_refresh_waits_for_interval_cap_and_retry_after() {
         ("no-header", "10m", 429, None, 600_000),
         ("header", "10m", 429, Some(3600), 3_600_000),
         ("short-header", "10m", 429, Some(60), 600_000),
+        ("retry-after-cap", "10m", 429, Some(864_000), 86_400_000),
     ] {
         let server = MockServer::start().await;
         let mut failure = ResponseTemplate::new(status);
@@ -478,7 +479,7 @@ async fn all_failed_bases_leave_list_sides_picks_and_fetch_time_unchanged() {
     host.list_models(&config, &config_path, "multi")
         .await
         .expect("initial sides");
-    set_picks(&host, &config_path, "multi", &["chat"]);
+    set_picks(&host, "multi", &["chat"]);
     let before = state(&directory, "multi");
     host.list_models(&config, &config_path, "multi")
         .await
@@ -518,31 +519,26 @@ async fn delist_restore_and_combined_updates_preserve_hand_typed_picks() {
     host.list_models(&config, &config_path, "chat")
         .await
         .expect("first list");
-    set_picks(
-        &host,
-        &config_path,
-        "chat",
-        &["drop", "restore", "keep", "typed"],
-    );
+    set_picks(&host, "chat", &["drop", "restore", "keep", "typed"]);
 
     host.list_models(&config, &config_path, "chat")
         .await
         .expect("delist restore candidate");
-    let picks = host.picks(&config_path, "chat");
+    let picks = host.picks("chat");
     assert_eq!(picks.picks(), ["drop", "keep", "typed"]);
     assert_eq!(picks.delisted(), ["restore"]);
 
     host.list_models(&config, &config_path, "chat")
         .await
         .expect("combined drop and restore");
-    let picks = host.picks(&config_path, "chat");
+    let picks = host.picks("chat");
     assert_eq!(picks.picks(), ["keep", "typed", "restore"]);
     assert_eq!(picks.delisted(), ["drop"]);
 
     host.list_models(&config, &config_path, "chat")
         .await
         .expect("restore dropped pick");
-    let picks = host.picks(&config_path, "chat");
+    let picks = host.picks("chat");
     assert_eq!(picks.picks(), ["keep", "typed", "restore", "drop"]);
     assert!(picks.delisted().is_empty());
     let _ = std::fs::remove_dir_all(directory);
@@ -563,7 +559,7 @@ async fn empty_answer_is_an_error_and_changes_no_saved_state() {
     host.list_models(&config, &config_path, "chat")
         .await
         .expect("first list");
-    set_picks(&host, &config_path, "chat", &["model"]);
+    set_picks(&host, "chat", &["model"]);
     let before = state(&directory, "chat");
     let error = host
         .list_models(&config, &config_path, "chat")
@@ -613,11 +609,11 @@ async fn auto_include_takes_only_new_matching_chat_rows() {
     .expect("config");
 
     host.refresh_due(&config, &config_path, at(NOW)).await;
-    assert!(host.picks(&config_path, "chat").picks().is_empty());
-    set_picks(&host, &config_path, "chat", &["existing"]);
+    assert!(host.picks("chat").picks().is_empty());
+    set_picks(&host, "chat", &["existing"]);
     host.refresh_due(&config, &config_path, at(NOW + 600_000))
         .await;
-    let picks = host.picks(&config_path, "chat");
+    let picks = host.picks("chat");
     assert_eq!(picks.picks(), ["GPT-new", "claude-case", "existing"]);
     assert_eq!(
         picks.picked_from(),
@@ -625,6 +621,38 @@ async fn auto_include_takes_only_new_matching_chat_rows() {
     );
     assert!(!picks.picks().contains(&"gpt-old".to_owned()));
     assert!(!picks.picks().contains(&"gpt-image-2".to_owned()));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[tokio::test]
+async fn manual_list_auto_includes_new_matching_rows() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/v1/models",
+        vec![rows(&["existing"]), rows(&["existing", "new-x"])],
+    )
+    .await;
+    let directory = scratch("manual-auto-include");
+    let config_path = directory.join("hofund.toml");
+    let host = host(&directory);
+    let config = hofund_config::load(&format!(
+        "[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\n[providers.models]\nrefresh = \"off\"\nauto_include = [\"new-*\"]\n",
+        server.uri()
+    ))
+    .expect("config");
+
+    host.list_models(&config, &config_path, "chat")
+        .await
+        .expect("initial list");
+    set_picks(&host, "chat", &["existing"]);
+    host.list_models(&config, &config_path, "chat")
+        .await
+        .expect("manual list");
+
+    let picks = host.picks("chat");
+    assert_eq!(picks.picks(), ["new-x", "existing"]);
+    assert_eq!(picks.picked_from(), ["existing", "new-x"]);
     let _ = std::fs::remove_dir_all(directory);
 }
 
@@ -646,7 +674,7 @@ async fn probe_pool_puts_saved_picks_after_routes_and_before_the_list() {
     host.list_models(&config, &config_path, "chat")
         .await
         .expect("list");
-    set_picks(&host, &config_path, "chat", &["picked"]);
+    set_picks(&host, "chat", &["picked"]);
     let probed = host
         .probe(&config, &config_path, "chat", None)
         .await

@@ -253,8 +253,34 @@ fn read_state(root: &Path, id: &str) -> (ProviderState, bool) {
             (ProviderState::new(id), true)
         }
         Err(error) => {
-            tracing::warn!(provider.id = id, %error, "ignoring unreadable model state");
-            (ProviderState::new(id), false)
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("models-state.json");
+            let millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let corrupt_name = format!("{name}.corrupt-{millis}");
+            match std::fs::rename(&path, path.with_file_name(&corrupt_name)) {
+                Ok(()) => {
+                    tracing::warn!(
+                        provider.id = id,
+                        corrupt.file = corrupt_name,
+                        "moved unreadable model state aside"
+                    );
+                    (ProviderState::new(id), false)
+                }
+                Err(rename_error) => {
+                    tracing::warn!(
+                        provider.id = id,
+                        %error,
+                        %rename_error,
+                        "could not move unreadable model state aside; it will not be overwritten"
+                    );
+                    (ProviderState::new(id), true)
+                }
+            }
         }
     }
 }
@@ -264,7 +290,14 @@ fn save_state(root: &Path, state: &ProviderState) -> io::Result<()> {
     let directory = path
         .parent()
         .unwrap_or_else(|| unreachable!("the state path always has a parent"));
-    std::fs::create_dir_all(directory)?;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(directory)?;
     let bytes = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = directory.join(format!(
@@ -275,8 +308,27 @@ fn save_state(root: &Path, state: &ProviderState) -> io::Result<()> {
         std::process::id(),
         sequence
     ));
-    std::fs::write(&temporary, bytes)?;
-    std::fs::rename(temporary, path)
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, &path)?;
+        #[cfg(unix)]
+        std::fs::File::open(directory)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn state_path(root: &Path, id: &str) -> PathBuf {
@@ -428,6 +480,76 @@ mod tests {
         });
         assert_eq!(std::fs::read(&path).expect("existing bytes"), bytes);
         assert_eq!(store.get("wanted").picks, ["model"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_state_uses_private_modes_and_leaves_no_temp_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("private-modes");
+        let mut store = StateStore::new(Some(root.clone()));
+        store.update("wanted", |state| {
+            state.picks = vec!["first".to_owned()];
+        });
+        store.update("wanted", |state| {
+            state.picks = vec!["second".to_owned()];
+        });
+        let path = state_path(&root, "wanted");
+        let directory = path.parent().expect("state directory");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("state metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(directory)
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert!(
+            std::fs::read_dir(directory)
+                .expect("directory entries")
+                .all(|entry| entry
+                    .expect("entry")
+                    .path()
+                    .extension()
+                    .and_then(|part| part.to_str())
+                    != Some("tmp"))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_rename_removes_the_temp_file() {
+        let root = temp_root("failed-rename");
+        let path = state_path(&root, "wanted");
+        std::fs::create_dir_all(&path).expect("destination directory");
+        std::fs::write(path.join("occupied"), "keep").expect("destination contents");
+
+        super::save_state(&root, &ProviderState::new("wanted")).expect_err("rename must fail");
+        let directory = path.parent().expect("state directory");
+        assert!(
+            std::fs::read_dir(directory)
+                .expect("directory entries")
+                .all(|entry| entry
+                    .expect("entry")
+                    .path()
+                    .extension()
+                    .and_then(|part| part.to_str())
+                    != Some("tmp"))
+        );
+        assert_eq!(
+            std::fs::read(path.join("occupied")).expect("contents"),
+            b"keep"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

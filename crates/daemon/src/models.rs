@@ -33,6 +33,8 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(60);
 const FETCH_CAP: std::time::Duration = std::time::Duration::from_secs(60);
 const RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const MIN_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Limits an upstream-directed retry delay to one day, including after restart.
+const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 const IMAGE_APIS: &[&str] = &[
     "gpt-image",
     "chatgpt-image",
@@ -218,11 +220,8 @@ impl ModelsHost {
     }
 
     /// Reads a provider's picks, source-list ids, and delisted ids.
-    ///
-    /// `config_path` is accepted for API symmetry and is unused. The state root
-    /// is fixed by [`Self::with_state_root`].
     #[must_use]
-    pub fn picks(&self, _config_path: &Path, provider_id: &str) -> Picks {
+    pub fn picks(&self, provider_id: &str) -> Picks {
         let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let state = store.get(provider_id);
         Picks {
@@ -233,9 +232,7 @@ impl ModelsHost {
     }
 
     /// Saves picked ids in the supplied order and restores them from delisted.
-    ///
-    /// `config_path` is accepted for API symmetry and is unused.
-    pub fn set_picks(&self, _config_path: &Path, provider_id: &str, ids: &[String]) {
+    pub fn set_picks(&self, provider_id: &str, ids: &[String]) {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -355,7 +352,7 @@ impl ModelsHost {
             {
                 continue;
             }
-            let retry_at = now.saturating_add(duration_ms(interval.min(RETRY_CAP)));
+            let retry_at = now.saturating_add(duration_ms(Self::retry_wait(interval, None)));
             self.state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -396,6 +393,16 @@ impl ModelsHost {
         asked
     }
 
+    fn retry_wait(
+        interval: std::time::Duration,
+        retry_after: Option<std::time::Duration>,
+    ) -> std::time::Duration {
+        interval
+            .min(RETRY_CAP)
+            .max(retry_after.unwrap_or_default().min(MAX_RETRY_AFTER))
+            .max(MIN_RETRY)
+    }
+
     fn record_refresh_retry(
         &self,
         provider: &str,
@@ -403,10 +410,7 @@ impl ModelsHost {
         interval: std::time::Duration,
         retry_after: Option<std::time::Duration>,
     ) {
-        let wait = interval
-            .min(RETRY_CAP)
-            .max(retry_after.unwrap_or_default())
-            .max(MIN_RETRY);
+        let wait = Self::retry_wait(interval, retry_after);
         let retry_at = now.saturating_add(duration_ms(wait));
         self.state
             .lock()
@@ -451,7 +455,12 @@ impl ModelsHost {
         );
         async {
             let result = self
-                .fetch_applied(config_path, provider, unix_ms(), None)
+                .fetch_applied(
+                    config_path,
+                    provider,
+                    unix_ms(),
+                    Some(&provider.model_list.auto_include),
+                )
                 .await
                 .map(|applied| applied.models);
             match &result {
@@ -530,7 +539,7 @@ impl ModelsHost {
         let models = listed
             .as_ref()
             .map_or(&[][..], |list| list.models.as_slice());
-        let picks = self.picks(config_path, provider_id);
+        let picks = self.picks(provider_id);
         let selected = if named.is_empty() {
             vec![select_model(
                 config,
@@ -827,6 +836,11 @@ impl ModelsHost {
                 (Wire::Messages, &model_plan.anthropic),
                 (Wire::Generative, &model_plan.generative),
             ] {
+                let base = if wire == planned.wire {
+                    &planned.base_url
+                } else {
+                    base
+                };
                 if !base.trim().is_empty() {
                     sides.push((wire, base.clone(), wire == planned.wire));
                 }
