@@ -82,10 +82,10 @@ impl Bedrock {
         let access_key_id = access_key_id.trim().to_owned();
         let secret_access_key = secret_access_key.trim().to_owned();
         let session_token = session_token.trim().to_owned();
-        header_safe(&access_key_id, "access key id")?;
-        header_safe(&secret_access_key, "secret access key")?;
+        header_safe(&endpoint.id, &access_key_id, "access key id")?;
+        header_safe(&endpoint.id, &secret_access_key, "secret access key")?;
         if !session_token.is_empty() {
-            header_safe(&session_token, "session token")?;
+            header_safe(&endpoint.id, &session_token, "session token")?;
         }
         let base = runtime_root(&endpoint.base_url);
         if base.is_empty() {
@@ -119,7 +119,8 @@ impl Provider for Bedrock {
             return Err(ProviderError::status(400, "model is empty"));
         }
         let stream = request.stream;
-        let path = sigv4::canonical_model_uri(&request.model, stream);
+        let path = sigv4::model_wire_uri(&request.model, stream);
+        let canonical_path = sigv4::canonical_uri(&path, sigv4::UriEncoding::Double);
         let url = format!("{}{path}", self.base.trim_end_matches('/'));
         let parsed = reqwest::Url::parse(&url)
             .map_err(|error| ProviderError::decode(format!("provider URL is invalid: {error}")))?;
@@ -155,19 +156,17 @@ impl Provider for Bedrock {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
-        let signed = sigv4::sign(&SignInput {
-            method: "POST",
-            canonical_uri: &path,
-            canonical_query: "",
-            amz_date: &amz_date,
-            region: &self.region,
-            service: "bedrock",
-            access_key_id: &self.access_key_id,
-            secret_access_key: &self.secret_access_key,
-            payload: &body,
-            headers: &borrowed,
-        });
-        let headers = request_headers(&pairs, &signed.authorization)?;
+        let input = SignInput::new()
+            .method("POST")
+            .canonical_uri(&canonical_path)
+            .amz_date(&amz_date)
+            .scope(&self.region, "bedrock")
+            .credentials(&self.access_key_id, &self.secret_access_key)
+            .payload(&body)
+            .headers(&borrowed);
+        let signed = sigv4::sign(&input)
+            .map_err(|error| ProviderError::decode(format!("Converse signing: {error}")))?;
+        let headers = request_headers(&pairs, signed.authorization())?;
         let cross_protocol = codec.id() != inbound_protocol;
         let response = http::post_with_headers(&self.upstream, &url, body, headers).await?;
         let status = response.status();
@@ -247,16 +246,18 @@ fn check_region(region: &str) -> Result<(), ProviderError> {
     }
 }
 
-fn header_safe(value: &str, what: &str) -> Result<(), ProviderError> {
+fn header_safe(provider: &str, value: &str, what: &str) -> Result<(), ProviderError> {
     if value.is_empty() {
-        return Err(ProviderError::decode(format!("Converse {what} is empty")));
+        return Err(ProviderError::decode(format!(
+            "provider `{provider}`: Converse {what} is empty"
+        )));
     }
     if value
         .bytes()
         .any(|byte| byte.is_ascii_control() || byte == b' ')
     {
         return Err(ProviderError::decode(format!(
-            "Converse {what} is not valid header text"
+            "provider `{provider}`: Converse {what} is not valid header text"
         )));
     }
     Ok(())
@@ -390,5 +391,20 @@ mod tests {
         endpoint.api_key = "ABSK".to_owned();
         let error = Bedrock::new(endpoint, "us-east-1", "AKIA", "secret", "").expect_err("key");
         assert!(error.to_string().contains("not an API key"));
+    }
+
+    #[test]
+    fn an_empty_credential_names_the_provider() {
+        let endpoint = Endpoint::new(
+            "aws-production",
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+        );
+        let error = Bedrock::new(endpoint, "us-east-1", "", "secret", "").expect_err("empty");
+        assert!(
+            error
+                .to_string()
+                .contains("provider `aws-production`: Converse access key id is empty"),
+            "{error}"
+        );
     }
 }
