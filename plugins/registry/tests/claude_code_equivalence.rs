@@ -155,6 +155,13 @@ fn shipped_claude_code_matches_frozen_const_across_the_full_lifecycle() {
             source: OverrideSource::Named,
         },
         Scenario {
+            name: "bare-fable-route",
+            initial: Some(NO_MODEL_CONFIG),
+            models: &["fable-x"],
+            override_kind: OverrideKind::None,
+            source: OverrideSource::Named,
+        },
+        Scenario {
             name: "several-routes",
             initial: Some(NO_MODEL_CONFIG),
             models: &["route-a", "route-b"],
@@ -429,13 +436,17 @@ fn shipped_claude_code_read_and_revert_cover_existing_and_missing_files() {
                 .revert(&legacy_session)
                 .expect("legacy revert");
             compiled.revert(&compiled_session).expect("compiled revert");
-            assert_eq!(tree(&legacy_home), before, "{context}: legacy revert");
             assert_eq!(
+                tree(&legacy_home),
                 tree(&compiled_home),
-                before,
-                "{context}: revert did not restore the initial tree"
+                "{context}: revert tree"
             );
             if let Some(initial) = initial {
+                assert_eq!(
+                    tree(&compiled_home),
+                    before,
+                    "{context}: revert did not restore the initial tree"
+                );
                 assert_eq!(
                     fs::read(&compiled_path).expect("compiled reverted bytes"),
                     initial.as_bytes(),
@@ -443,6 +454,10 @@ fn shipped_claude_code_read_and_revert_cover_existing_and_missing_files() {
                 );
             } else {
                 assert!(!compiled_path.exists(), "{context}: created file remains");
+                assert!(
+                    compiled_home.join(".claude").is_dir(),
+                    "{context}: revert removed the empty directory"
+                );
             }
         }
     }
@@ -501,6 +516,69 @@ fn shipped_claude_code_detects_a_binary_without_a_settings_file() {
             compiled.detect(&compiled_session),
             "{context}: binary alone was not detected"
         );
+    }
+}
+
+#[test]
+fn shipped_claude_code_disconnect_removes_the_empty_directory_it_created() {
+    let description = hofund_plugin_registry::agent("claude-code").expect("shipped claude-code");
+    for os in [TargetOs::Linux, TargetOs::Macos, TargetOs::Windows] {
+        for (name, override_dir) in [("default", None), ("environment", Some("absolute-claude"))] {
+            let context = format!("{os:?} / {name}");
+            let legacy_home = scratch();
+            let compiled_home = scratch();
+            let root = |home: &Path| home.join(override_dir.unwrap_or(".claude"));
+            assert!(!root(&legacy_home).exists(), "{context}: legacy root");
+            assert!(!root(&compiled_home).exists(), "{context}: compiled root");
+            let session = |home: &Path| {
+                let session = Session::new(home);
+                match override_dir {
+                    Some(directory) => session.with_env("CLAUDE_CONFIG_DIR", home.join(directory)),
+                    None => session,
+                }
+            };
+            let legacy_session = session(&legacy_home);
+            let compiled_session = session(&compiled_home);
+            let legacy_adapter = legacy::claude_code();
+            let compiled = Compiled::new(description).with_os(os);
+            let target = gateway_target("local-token");
+            legacy_adapter
+                .apply(&legacy_session, &target)
+                .expect("legacy apply");
+            compiled
+                .apply(&compiled_session, &target)
+                .expect("compiled apply");
+            assert!(root(&legacy_home).join("settings.json").is_file());
+            assert!(root(&compiled_home).join("settings.json").is_file());
+
+            let legacy_outcome = legacy_adapter
+                .disconnect(&legacy_session, false)
+                .expect("legacy disconnect");
+            let compiled_outcome = compiled
+                .disconnect(&compiled_session, false)
+                .expect("compiled disconnect");
+            assert_eq!(
+                normalized_outcome(&legacy_home, &legacy_outcome),
+                normalized_outcome(&compiled_home, &compiled_outcome),
+                "{context}: outcome"
+            );
+            assert!(compiled_outcome.changed(), "{context}: unchanged");
+            assert!(
+                compiled_outcome.warnings().is_empty(),
+                "{context}: warnings"
+            );
+            assert!(!root(&legacy_home).exists(), "{context}: legacy root");
+            assert!(
+                !root(&compiled_home).exists(),
+                "{context}: compiled root remains"
+            );
+            assert_eq!(
+                tree(&legacy_home),
+                tree(&compiled_home),
+                "{context}: final tree"
+            );
+            assert!(tree(&compiled_home).is_empty(), "{context}: final tree");
+        }
     }
 }
 
@@ -827,6 +905,14 @@ fn compare_scenario(description: &'static AgentDescription, os: TargetOs, scenar
         tree(&compiled_home),
         "{context}: apply and backups"
     );
+    if scenario.name == "bare-fable-route" {
+        let settings = fs::read_to_string(compiled_home.join(".claude/settings.json"))
+            .expect("bare Fable settings");
+        assert!(
+            !settings.contains("ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            "{context}: bare Fable route set the Fable tier"
+        );
+    }
     assert_eq!(
         normalized_status(
             &legacy_home,
@@ -1093,6 +1179,13 @@ fn collect_files(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Ve
     for entry in entries {
         let path = entry.expect("tree entry").path();
         if path.is_dir() {
+            let mut relative = path
+                .strip_prefix(root)
+                .expect("relative")
+                .as_os_str()
+                .to_os_string();
+            relative.push("/");
+            files.insert(PathBuf::from(relative), Vec::new());
             collect_files(root, &path, files);
         } else if path.is_file() {
             files.insert(
@@ -1105,7 +1198,11 @@ fn collect_files(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Ve
 
 fn copy_tree(source: &Path, destination: &Path) {
     for (relative, bytes) in tree(source) {
-        let path = destination.join(relative);
+        let path = destination.join(&relative);
+        if relative.as_os_str().to_string_lossy().ends_with('/') {
+            fs::create_dir_all(path).expect("copy directory");
+            continue;
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("copy parent");
         }
