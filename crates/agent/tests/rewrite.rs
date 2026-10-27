@@ -24,10 +24,10 @@ fn target_with(models: &[&str]) -> GatewayTarget {
 }
 
 fn adapter(id: &str) -> &'static dyn hofund_agent::AgentAdapter {
-    if id == "codex" {
-        legacy::codex()
-    } else {
-        find(id).expect(id)
+    match id {
+        "claude-code" => legacy::claude_code(),
+        "codex" => legacy::codex(),
+        _ => find(id).expect(id),
     }
 }
 
@@ -202,7 +202,7 @@ fn gemini_cli_home_controls_both_files_and_unusable_values_use_home() {
 fn creating_a_missing_file_reverts_by_deleting_it() {
     let home = scratch();
     let session = Session::new(&home);
-    let adapter = find("claude-code").expect("claude");
+    let adapter = legacy::claude_code();
     assert!(!adapter.detect(&session));
     adapter.apply(&session, &target()).expect("apply");
     let path = home.join(".claude").join("settings.json");
@@ -254,7 +254,7 @@ fn overrides_and_path_detection_do_not_use_the_real_home() {
     let home = scratch();
     let elsewhere = scratch();
     let session = Session::new(&home).with_claude_config_dir(elsewhere.join("claude-dir"));
-    let adapter = find("claude-code").expect("claude");
+    let adapter = legacy::claude_code();
     adapter.apply(&session, &target()).expect("apply");
     let path = elsewhere.join("claude-dir").join("settings.json");
     assert!(path.is_file());
@@ -336,7 +336,7 @@ fn disconnect_refuses_a_broken_file_until_force() {
 fn disconnect_removes_an_empty_directory_it_created() {
     let home = scratch();
     let session = Session::new(&home);
-    let adapter = find("claude-code").expect("claude");
+    let adapter = legacy::claude_code();
     adapter.apply(&session, &target()).expect("apply");
     let path = home.join(".claude").join("settings.json");
     assert!(path.is_file());
@@ -468,7 +468,7 @@ fn disconnect_keeps_a_value_the_user_changed() {
         r#"{"env":{"ANTHROPIC_BASE_URL":"https://my-proxy.example","ANTHROPIC_AUTH_TOKEN":"sk-existing"}}"#,
     );
     let session = Session::new(&home);
-    let adapter = find("claude-code").expect("claude");
+    let adapter = legacy::claude_code();
     adapter.apply(&session, &target()).expect("apply");
     let edited = read(&path).replace("local-token", "user-edited-token");
     fs::write(&path, edited).expect("edit");
@@ -587,8 +587,7 @@ fn opencode_lists_each_route_without_invented_catalog_fields() {
 fn claude_writes_tier_models_and_leaves_subagent_and_effort_unset() {
     let home = scratch();
     let session = Session::new(&home);
-    find("claude-code")
-        .expect("claude")
+    legacy::claude_code()
         .apply(&session, &target_with(&["route-a"]))
         .expect("apply");
     let path = home.join(".claude").join("settings.json");
@@ -612,8 +611,7 @@ fn claude_writes_tier_models_and_leaves_subagent_and_effort_unset() {
     let path = home.join(".claude").join("settings.json");
     write(&path, "{\n  \"model\": \"claude-fable-5\"\n}\n");
     let session = Session::new(&home);
-    find("claude-code")
-        .expect("claude")
+    legacy::claude_code()
         .apply(&session, &target_with(&["route-a", "route-b"]))
         .expect("apply");
     let value: serde_json::Value = serde_json::from_str(&read(&path)).expect("json");

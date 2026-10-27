@@ -223,10 +223,10 @@ static OPENCODE: AgentDescription = AgentDescription::from_static(
 static DESCRIPTIONS: &[&AgentDescription] = &[&CLAUDE, &CODEX, &GEMINI, &OPENCODE];
 
 fn const_adapter(id: &str) -> &'static dyn AgentAdapter {
-    if id == "codex" {
-        hofund_agent::legacy::codex()
-    } else {
-        find(id).expect("static adapter")
+    match id {
+        "claude-code" => hofund_agent::legacy::claude_code(),
+        "codex" => hofund_agent::legacy::codex(),
+        _ => find(id).expect("static adapter"),
     }
 }
 
@@ -262,7 +262,7 @@ static EXTRA: AgentDescription = AgentDescription::from_static(
     &[],
 );
 
-static CODEX_AND_EXTRA_LIST: &[&AgentDescription] = &[&CODEX, &EXTRA];
+static MIGRATED_AND_EXTRA_LIST: &[&AgentDescription] = &[&CLAUDE, &CODEX, &EXTRA];
 static CLAUDE_LIST: &[&AgentDescription] = &[&CLAUDE];
 static DUPLICATE_LIST: &[&AgentDescription] = &[&EXTRA, &EXTRA];
 
@@ -510,7 +510,7 @@ fn expected_absolute_paths(id: &str) -> Vec<PathBuf> {
     paths.iter().map(PathBuf::from).collect()
 }
 
-#[cfg(feature = "legacy-codex-const")]
+#[cfg(feature = "legacy-agent-consts")]
 #[test]
 fn catalog_without_compiled_codex_uses_the_legacy_fallback() {
     let catalog = catalog(&[]).expect("legacy codex fallback");
@@ -520,7 +520,7 @@ fn catalog_without_compiled_codex_uses_the_legacy_fallback() {
 
 #[test]
 fn catalog_checks_collisions_and_keeps_builtins_first() {
-    let with_extra = catalog(CODEX_AND_EXTRA_LIST).expect("extra catalog");
+    let with_extra = catalog(MIGRATED_AND_EXTRA_LIST).expect("extra catalog");
     let ids = with_extra
         .adapters()
         .into_iter()
@@ -536,7 +536,7 @@ fn catalog_checks_collisions_and_keeps_builtins_first() {
             "compiled-extra"
         ]
     );
-    assert!(catalog(CLAUDE_LIST).is_err());
+    assert!(catalog(CLAUDE_LIST).is_ok());
     assert!(catalog(DUPLICATE_LIST).is_err());
 }
 

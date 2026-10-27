@@ -6,8 +6,14 @@ use hofund_plugin_api::{AgentRoute, FileKind, Slot, Visible};
 use hofund_plugin_registry::{agent, agents, fixture_agents};
 
 #[test]
-fn production_agent_list_contains_codex() {
-    assert_eq!(agents().len(), 1);
+fn production_agent_list_contains_migrated_agents() {
+    assert_eq!(agents().len(), 2);
+    assert_eq!(agents()[0].id().as_str(), "claude-code");
+    assert_eq!(agents()[1].id().as_str(), "codex");
+    assert_eq!(
+        agent("claude-code").expect("claude-code").id().as_str(),
+        "claude-code"
+    );
     assert_eq!(agent("codex").expect("codex").id().as_str(), "codex");
     assert!(agent("missing").is_none());
 }

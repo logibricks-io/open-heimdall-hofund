@@ -12,7 +12,7 @@ rust-version.workspace = true
 
 [features]
 default = []
-legacy-codex-const = []
+legacy-agent-consts = []
 
 [dependencies]
 hofund-config = { workspace = true }
@@ -22,7 +22,7 @@ thiserror = "2.0.21"
 toml_edit = "0.25.17"
 
 [dev-dependencies]
-hofund-agent = { path = ".", features = ["legacy-codex-const"] }
+hofund-agent = { path = ".", features = ["legacy-agent-consts"] }
 sha2 = "0.10.9"
 
 [lints]

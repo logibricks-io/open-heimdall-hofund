@@ -268,7 +268,7 @@ fn dependency_graph_matches_architecture() {
         );
         assert!(
             legacy_codex_feature_is_allowed(&name, &package_manifest),
-            "package {name} enables legacy-codex-const outside dev-dependencies"
+            "package {name} enables legacy-agent-consts outside dev-dependencies"
         );
         assert!(seen.insert(name), "duplicate package name");
     }
@@ -634,7 +634,7 @@ fn legacy_codex_feature_is_allowed(package: &str, manifest: &str) -> bool {
         let Some((key, value)) = trimmed.split_once('=') else {
             continue;
         };
-        if (agent_table || key.trim() == "hofund-agent") && value.contains("legacy-codex-const") {
+        if (agent_table || key.trim() == "hofund-agent") && value.contains("legacy-agent-consts") {
             return false;
         }
     }
@@ -645,7 +645,7 @@ fn legacy_codex_feature_is_allowed(package: &str, manifest: &str) -> bool {
 fn legacy_codex_feature_is_rejected_in_normal_dependencies() {
     let manifest = r#"
 [dependencies]
-hofund-agent = { workspace = true, features = ["legacy-codex-const"] }
+hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
 "#;
     assert!(!legacy_codex_feature_is_allowed(
         "hofund-plugin-registry",
@@ -657,7 +657,7 @@ hofund-agent = { workspace = true, features = ["legacy-codex-const"] }
 fn legacy_codex_feature_is_allowed_in_dev_dependencies() {
     let manifest = r#"
 [dev-dependencies]
-hofund-agent = { workspace = true, features = ["legacy-codex-const"] }
+hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
 "#;
     assert!(legacy_codex_feature_is_allowed(
         "hofund-plugin-registry",
@@ -670,7 +670,7 @@ fn dependency_table_form_is_detected() {
     let manifest = r#"
 [dependencies.hofund-agent]
 workspace = true
-features = ["legacy-codex-const"]
+features = ["legacy-agent-consts"]
 "#;
     assert!(workspace_deps(manifest, DependencySection::Normal).contains("hofund-agent"));
     assert!(!legacy_codex_feature_is_allowed(
