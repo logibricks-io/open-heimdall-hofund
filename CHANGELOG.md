@@ -70,7 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and compiled adapters therefore use the same default paths.
 - Agent golden layouts reject unknown top-level entries, missing OS coverage,
   incomplete per-OS case sets, and case directories without `case.toml`.
-  OS-specific cases can declare their exact targets with `only`, and golden
+  OS-specific cases can declare their exact targets with `only` (a non-empty,
+  duplicate-free subset that is not every OS; shared cases use `all/`), and golden
   regeneration is enabled only by `UPDATE_GOLDEN=1`.
 - Agent model-match needles are required to be lowercase; tier matching itself
   remains ASCII case-insensitive. Compiled descriptions can explicitly identify
@@ -127,6 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Windows agent environment names now compare ASCII-case-insensitively for
+  `PATH`, path overrides, and compiled environment lookups.
 - Empty agent environment overrides now mean unset everywhere, including the
   named `Session` setters and const adapters, so const and compiled plans use
   the same default paths (#109). Relative overrides are also treated as unset;

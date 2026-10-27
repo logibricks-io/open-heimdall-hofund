@@ -569,7 +569,7 @@ struct MatrixCase {
     name: &'static str,
     existing: Existing,
     models: &'static [&'static str],
-    override_dir: Option<&'static str>,
+    override_dir: Option<Override>,
     jsonc: bool,
 }
 
@@ -615,14 +615,14 @@ fn compiled_matches_const_adapters_across_the_edit_lifecycle() {
             name: "relative-env-override",
             existing: Existing::Absent,
             models: &["route-a"],
-            override_dir: Some("relative-root"),
+            override_dir: Some(Override::Relative("relative-root")),
             jsonc: false,
         },
         MatrixCase {
             name: "override-user-keys",
             existing: Existing::User,
             models: &[],
-            override_dir: Some("another-root"),
+            override_dir: Some(Override::UnderHome("another-root")),
             jsonc: false,
         },
         MatrixCase {
@@ -697,6 +697,7 @@ fn compiled_matches_const_adapters_across_the_edit_lifecycle() {
                     .any(|path| { path.as_os_str().to_string_lossy().contains(".hofund.") }),
                 "{context}: markers missing from comparison"
             );
+            assert_override_placement(case.override_dir, &before, &applied, &context);
 
             let const_force = scratch();
             let compiled_force = scratch();
@@ -862,7 +863,28 @@ fn prepare(home: &Path, description: &AgentDescription, case: &MatrixCase) {
     }
 }
 
-fn override_root(home: &Path, id: &str, _override_dir: Option<&str>) -> PathBuf {
+/// Environment override used by a lifecycle matrix case.
+#[derive(Clone, Copy)]
+enum Override {
+    /// A relative value, which is unusable and must fall back to the default.
+    Relative(&'static str),
+    /// An absolute directory under the test home.
+    UnderHome(&'static str),
+}
+
+impl Override {
+    fn path(self, home: &Path) -> PathBuf {
+        match self {
+            Self::Relative(path) => PathBuf::from(path),
+            Self::UnderHome(path) => home.join(path),
+        }
+    }
+}
+
+fn override_root(home: &Path, id: &str, override_dir: Option<Override>) -> PathBuf {
+    if let Some(Override::UnderHome(path)) = override_dir {
+        return home.join(path);
+    }
     match id {
         "claude-code" => home.join(".claude"),
         "codex" => home.join(".codex"),
@@ -872,14 +894,66 @@ fn override_root(home: &Path, id: &str, _override_dir: Option<&str>) -> PathBuf 
     }
 }
 
-fn session_for(home: &Path, description: &AgentDescription, override_dir: Option<&str>) -> Session {
+fn session_for(
+    home: &Path,
+    description: &AgentDescription,
+    override_dir: Option<Override>,
+) -> Session {
     let session = Session::new(home);
-    match (description.id().as_str(), override_dir) {
+    match (
+        description.id().as_str(),
+        override_dir.map(|dir| dir.path(home)),
+    ) {
         ("claude-code", Some(path)) => session.with_claude_config_dir(path),
         ("codex", Some(path)) => session.with_codex_home(path),
         ("gemini-cli", Some(path)) => session.with_gemini_cli_home(path),
         ("opencode", Some(path)) => session.with_xdg_config_home(path),
         _ => session,
+    }
+}
+
+/// Checks that apply edits the prepared user files under an absolute
+/// override root and never writes under a relative override value.
+fn assert_override_placement(
+    override_dir: Option<Override>,
+    before: &BTreeMap<PathBuf, Vec<u8>>,
+    applied: &BTreeMap<PathBuf, Vec<u8>>,
+    context: &str,
+) {
+    let changed: Vec<&PathBuf> = applied
+        .iter()
+        .filter(|(path, contents)| before.get(*path) != Some(*contents))
+        .map(|(path, _)| path)
+        .collect();
+    assert!(!changed.is_empty(), "{context}: apply changed nothing");
+    match override_dir {
+        Some(Override::UnderHome(dir)) => {
+            assert!(
+                !before.is_empty() && before.keys().all(|path| path.starts_with(dir)),
+                "{context}: user files are not planted under the override root"
+            );
+            for path in &changed {
+                assert!(
+                    path.starts_with(dir),
+                    "{context}: {} written outside the override root",
+                    path.display()
+                );
+            }
+            assert!(
+                changed.iter().any(|path| before.contains_key(*path)),
+                "{context}: no user file under the override root was edited"
+            );
+        }
+        Some(Override::Relative(dir)) => {
+            for path in &changed {
+                assert!(
+                    !path.starts_with(dir),
+                    "{context}: {} written under a relative override",
+                    path.display()
+                );
+            }
+        }
+        None => {}
     }
 }
 

@@ -1708,6 +1708,7 @@ mod tests {
         routes: Vec<String>,
         base_url: String,
         token: String,
+        configured_model: Option<String>,
         only: Option<Vec<String>>,
     }
 
@@ -1848,23 +1849,37 @@ mod tests {
 
     fn case_targets(case: &Path) -> Result<Option<std::collections::BTreeSet<String>>, String> {
         let parsed = read_case(&case.join("case.toml"));
-        parsed
-            .only
-            .map(|only| {
-                only.into_iter()
-                    .map(|directory| {
-                        if ["linux", "macos", "windows"].contains(&directory.as_str()) {
-                            Ok(directory)
-                        } else {
-                            Err(format!(
-                                "case `{}` declares unknown OS `{directory}` in only",
-                                case.display()
-                            ))
-                        }
-                    })
-                    .collect()
-            })
-            .transpose()
+        let Some(only) = parsed.only else {
+            return Ok(None);
+        };
+        if only.is_empty() {
+            return Err(format!(
+                "case `{}` only must list at least one OS",
+                case.display()
+            ));
+        }
+        let mut targets = std::collections::BTreeSet::new();
+        for directory in only {
+            if !["linux", "macos", "windows"].contains(&directory.as_str()) {
+                return Err(format!(
+                    "case `{}` declares unknown OS `{directory}` in only",
+                    case.display()
+                ));
+            }
+            if !targets.insert(directory.clone()) {
+                return Err(format!(
+                    "case `{}` declares duplicate OS `{directory}` in only",
+                    case.display()
+                ));
+            }
+        }
+        if targets.len() == 3 {
+            return Err(format!(
+                "case `{}` only lists every OS; use all/ instead",
+                case.display()
+            ));
+        }
+        Ok(Some(targets))
     }
 
     /// Shared cases run everywhere; OS-specific cases run where their const
@@ -2001,6 +2016,19 @@ mod tests {
         assert!(error.contains("must not declare only"), "{error}");
         let _ = fs::remove_dir_all(&root);
 
+        for (only, expected) in [
+            (&[][..], "must list at least one OS"),
+            (&["linux", "linux"][..], "duplicate OS `linux`"),
+            (&["linux", "macos", "windows"][..], "use all/ instead"),
+        ] {
+            let root = scratch();
+            write_layout_case(&root, "all", "shared", None);
+            write_layout_case(&root, "linux", "selected", Some(only));
+            let error = layout_error(&root);
+            assert!(error.contains(expected), "{error}");
+            let _ = fs::remove_dir_all(root);
+        }
+
         let root = scratch();
         write_layout_case(&root, "all", "shared", None);
         write_layout_case(&root, "linux", "selected", Some(&["plan9"]));
@@ -2039,6 +2067,14 @@ mod tests {
         verify_plan(&label, &home, &plan, &after);
         let applied = adapter.apply(&session, &target).expect("const apply");
         verify_plan(&label, &home, &applied, &after);
+        assert_eq!(
+            adapter
+                .configured_model(&session)
+                .expect("const configured model")
+                .as_deref(),
+            case.configured_model.as_deref(),
+            "{label}: const configured model"
+        );
         let mut expected = before;
         expected.extend(after);
         assert_eq!(managed_tree(&home), expected, "{label}: const apply tree");
@@ -2086,6 +2122,9 @@ mod tests {
                 case.base_url = serde_json::from_str(raw).expect("case base URL");
             } else if key == "token" {
                 case.token = serde_json::from_str(raw).expect("case token");
+            } else if key == "configured_model" {
+                case.configured_model =
+                    Some(serde_json::from_str(raw).expect("case configured model"));
             } else if key == "only" {
                 case.only = Some(serde_json::from_str(raw).expect("case only"));
             } else if in_env {

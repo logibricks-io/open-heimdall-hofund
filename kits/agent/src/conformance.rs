@@ -222,26 +222,40 @@ fn case_targets(case: &Path) -> Result<Option<BTreeSet<String>>, String> {
         fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     let parsed: Case =
         toml::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))?;
-    parsed
-        .only
-        .map(|only| {
-            only.into_iter()
-                .map(|directory| {
-                    if OPERATING_SYSTEMS
-                        .iter()
-                        .any(|(candidate, _)| *candidate == directory)
-                    {
-                        Ok(directory)
-                    } else {
-                        Err(format!(
-                            "case `{}` declares unknown OS `{directory}` in only",
-                            case.display()
-                        ))
-                    }
-                })
-                .collect()
-        })
-        .transpose()
+    let Some(only) = parsed.only else {
+        return Ok(None);
+    };
+    if only.is_empty() {
+        return Err(format!(
+            "case `{}` only must list at least one OS",
+            case.display()
+        ));
+    }
+    let mut targets = BTreeSet::new();
+    for directory in only {
+        if !OPERATING_SYSTEMS
+            .iter()
+            .any(|(candidate, _)| *candidate == directory)
+        {
+            return Err(format!(
+                "case `{}` declares unknown OS `{directory}` in only",
+                case.display()
+            ));
+        }
+        if !targets.insert(directory.clone()) {
+            return Err(format!(
+                "case `{}` declares duplicate OS `{directory}` in only",
+                case.display()
+            ));
+        }
+    }
+    if targets.len() == OPERATING_SYSTEMS.len() {
+        return Err(format!(
+            "case `{}` only lists every OS; use all/ instead",
+            case.display()
+        ));
+    }
+    Ok(Some(targets))
 }
 
 fn case_name(case: &Path) -> &str {
@@ -439,6 +453,16 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
     let drifted = managed_tree(&home);
     let gateway_values = gateway_values(&case);
     for (path, bytes) in &drifted {
+        if description.files().iter().all(|file| {
+            resolve(file, os, &session).strip_prefix(&home).ok() != Some(path.as_path())
+        }) {
+            assert_eq!(
+                bytes,
+                before.get(path).expect("unmanaged file before apply"),
+                "{label}: unmanaged file changed in {path:?}"
+            );
+            continue;
+        }
         let text = std::str::from_utf8(bytes).expect("drift UTF-8");
         assert!(
             text.contains("user_added"),
@@ -589,12 +613,14 @@ fn add_user_edits(
     for (relative, bytes) in managed_tree(home) {
         let mut text = String::from_utf8(bytes).expect("edit UTF-8");
         text = text.replace(refreshed_token, "user-token");
-        let kind = description
+        let Some(kind) = description
             .files()
             .iter()
             .find(|file| resolve(file, os, session).strip_prefix(home).ok() == Some(&relative))
             .map(|file| file.kind())
-            .expect("managed file kind");
+        else {
+            continue;
+        };
         text = match kind {
             FileKind::Json => {
                 let mut value: serde_json::Value = serde_json::from_str(&text).expect("edit JSON");
@@ -879,6 +905,19 @@ mod tests {
         let error = layout_error(&root);
         assert!(error.contains("must not declare only"), "{error}");
         let _ = fs::remove_dir_all(&root);
+
+        for (only, expected) in [
+            (&[][..], "must list at least one OS"),
+            (&["linux", "linux"][..], "duplicate OS `linux`"),
+            (&["linux", "macos", "windows"][..], "use all/ instead"),
+        ] {
+            let root = scratch();
+            write_layout_case(&root, "all", "shared", None);
+            write_layout_case(&root, "linux", "selected", Some(only));
+            let error = layout_error(&root);
+            assert!(error.contains(expected), "{error}");
+            let _ = fs::remove_dir_all(root);
+        }
 
         let root = scratch();
         write_layout_case(&root, "all", "shared", None);
