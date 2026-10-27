@@ -272,7 +272,17 @@ impl HttpBackend for PooledHttp {
         let bytes = request.body().bytes().clone();
         let response = outbound.body(bytes).send().await.map_err(map_error)?;
         let status = response.status();
-        let headers = response.headers().clone();
+        // The body is collected here, so framing headers no longer describe it
+        // (a broken non-2xx body becomes empty). Other headers, such as
+        // Retry-After, reach the plugin unchanged.
+        let mut headers = response.headers().clone();
+        for name in [
+            reqwest::header::CONTENT_LENGTH,
+            reqwest::header::TRANSFER_ENCODING,
+            reqwest::header::CONNECTION,
+        ] {
+            headers.remove(name);
+        }
         let collected = if status.is_success() {
             response.bytes().await.map_err(map_body)?
         } else {
@@ -617,6 +627,12 @@ mod tests {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok()),
             Some("120")
+        );
+        assert!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .is_none()
         );
 
         for response in [COMPLETE, TRUNCATED] {

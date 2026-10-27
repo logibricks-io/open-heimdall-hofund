@@ -56,8 +56,8 @@ impl FailoverPolicy {
     /// `reference: internal/gateway/gateway.go:2854`). A transport failure has
     /// no reply and gives no evidence about what the upstream processed, so the
     /// request is not resent elsewhere. The wildcard is required because
-    /// [`PluginErrorKind`] is
-    /// `#[non_exhaustive]`: a new kind does not break this match.
+    /// [`PluginErrorKind`] is `#[non_exhaustive]`: a new kind does not break
+    /// this match.
     #[must_use]
     pub fn allows(&self, error: &PluginError) -> bool {
         match error.kind() {
