@@ -68,6 +68,8 @@ pub struct Endpoint {
     pub id: String,
     /// API root. The adapter appends its protocol path.
     pub base_url: String,
+    /// Catalog preset id, when this endpoint came from one.
+    pub preset: Option<String>,
     /// Credential sent with each call. Empty when the upstream does not use one.
     pub api_key: String,
     /// Which header carries [`Self::api_key`].
@@ -104,6 +106,7 @@ impl std::fmt::Debug for Endpoint {
                         format!("{base}?<redacted>")
                     }),
             )
+            .field("preset", &self.preset)
             .field("api_key", &"[redacted]")
             .field("credential", &self.credential)
             .field(
@@ -128,6 +131,7 @@ impl Endpoint {
         Self {
             id: id.into(),
             base_url: base_url.into(),
+            preset: None,
             api_key: String::new(),
             credential: Credential::Default,
             headers: Vec::new(),

@@ -364,6 +364,90 @@ async fn messages_unary_sends_version_and_key() {
 }
 
 #[tokio::test]
+async fn bedrock_messages_send_key_alone_fit_betas_and_drop_metadata() {
+    for (host, preset) in [
+        (Some("bedrock-runtime.us-east-1.amazonaws.com"), None),
+        (None, Some("bedrock")),
+        (None, Some("bedrock-mantle")),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hello"}],
+                "stop_reason": "end_turn"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = format!("{}/anthropic", server.uri());
+        let mut endpoint = host.map_or_else(
+            || Endpoint::new("bedrock", &base),
+            |host| {
+                let mut endpoint = Endpoint::new(
+                    "bedrock",
+                    format!("http://{host}:{}/anthropic", server.address().port()),
+                );
+                endpoint.client = Some(
+                    reqwest::Client::builder()
+                        .resolve(host, *server.address())
+                        .build()
+                        .expect("client"),
+                );
+                endpoint
+            },
+        );
+        endpoint.preset = preset.map(str::to_owned);
+        endpoint.api_key = "secret".to_owned();
+        endpoint.credential = Credential::MessagesBoth;
+        endpoint.headers = vec![(
+            "anthropic-beta".to_owned(),
+            concat!(
+                "advanced-tool-use-2025-11-20, prompt-caching-scope-2026-01-05,",
+                "redact-thinking-2026-02-12,context-1m-2025-08-07,",
+                "advanced-tool-use-2025-11-20"
+            )
+            .to_owned(),
+        )];
+        let provider = Anthropic::new(endpoint).expect("provider");
+        let mut request = user_request(false);
+        request.params.max_tokens = Some(16);
+        request
+            .extensions
+            .insert("metadata", json!({"user_id": "{\"device_id\":\"local\"}"}));
+        provider
+            .execute(request, "anthropic-messages")
+            .await
+            .expect("call");
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        let recorded = &requests[0];
+        assert_eq!(
+            recorded
+                .headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("secret")
+        );
+        assert!(recorded.headers.get("authorization").is_none());
+        assert_eq!(
+            recorded
+                .headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some("tool-search-tool-2025-10-19,context-1m-2025-08-07")
+        );
+        let body: Value = serde_json::from_slice(&recorded.body).expect("body");
+        assert!(body.get("metadata").is_none());
+    }
+}
+
+#[tokio::test]
 async fn messages_can_send_both_key_headers() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

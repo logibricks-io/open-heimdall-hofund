@@ -16,6 +16,7 @@ const VERSION: &str = "2023-06-01";
 pub struct Anthropic {
     upstream: Upstream,
     models: crate::models::ModelClient,
+    bedrock: bool,
 }
 
 impl Anthropic {
@@ -28,6 +29,13 @@ impl Anthropic {
     ///
     /// Returns [`ProviderError`] when the id, base URL, or a header is unusable.
     pub fn new(endpoint: Endpoint) -> Result<Self, ProviderError> {
+        let mut endpoint = endpoint;
+        crate::mantle::normalize(&mut endpoint, crate::Wire::Messages);
+        let bedrock = crate::mantle::is_bedrock(&endpoint);
+        if bedrock {
+            endpoint.credential = http::Credential::XApiKey;
+            fit_bedrock_headers(&mut endpoint.headers);
+        }
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("anthropic-version"),
@@ -44,7 +52,14 @@ impl Anthropic {
         Ok(Self {
             upstream: Upstream::open(endpoint, "v1/messages", headers)?,
             models,
+            bedrock,
         })
+    }
+
+    fn fit_request(&self, request: &mut Request) {
+        if self.bedrock {
+            fit_bedrock_request(request);
+        }
     }
 }
 
@@ -60,6 +75,7 @@ impl Provider for Anthropic {
         inbound_protocol: &str,
     ) -> Result<CountOutcome, ProviderError> {
         request.stream = false;
+        self.fit_request(&mut request);
         let body = omit_max_tokens(http::prepare_body(
             &self.upstream,
             &AnthropicMessages,
@@ -77,9 +93,10 @@ impl Provider for Anthropic {
 
     async fn execute(
         &self,
-        request: Request,
+        mut request: Request,
         inbound_protocol: &str,
     ) -> Result<Completion, ProviderError> {
+        self.fit_request(&mut request);
         http::execute(
             &self.upstream,
             &AnthropicMessages,
@@ -103,6 +120,49 @@ impl Provider for Anthropic {
     ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
         self.models.anthropic_probe(query).await
     }
+}
+
+// reference: internal/gateway/betas.go:23-35 and internal/gateway/gateway.go:4413-4420
+fn fit_bedrock_headers(headers: &mut Vec<(String, String)>) {
+    let mut fitted = Vec::with_capacity(headers.len());
+    for (name, value) in std::mem::take(headers) {
+        if name.eq_ignore_ascii_case("anthropic-beta") {
+            let betas = fit_betas(value.split(','));
+            if !betas.is_empty() {
+                fitted.push((name, betas.join(",")));
+            }
+        } else {
+            fitted.push((name, value));
+        }
+    }
+    *headers = fitted;
+}
+
+// reference: internal/gateway/gateway.go:4416-4420 and 5256-5259
+fn fit_bedrock_request(request: &mut Request) {
+    request.extensions.remove("metadata");
+}
+
+fn fit_betas<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut fitted = Vec::new();
+    for value in values {
+        let value = value.trim();
+        let value = match value {
+            "advanced-tool-use-2025-11-20" => "tool-search-tool-2025-10-19",
+            other => other,
+        };
+        if value.is_empty()
+            || matches!(
+                value,
+                "prompt-caching-scope-2026-01-05" | "redact-thinking-2026-02-12"
+            )
+            || fitted.iter().any(|present| present == value)
+        {
+            continue;
+        }
+        fitted.push(value.to_owned());
+    }
+    fitted
 }
 
 /// The count endpoint rejects `max_tokens`. Create still requires it, so the

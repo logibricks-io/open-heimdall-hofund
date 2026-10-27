@@ -128,6 +128,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Mantle route learning no longer replays a refusal on the remembered prefix or
+  forgets that prefix, and an empty model is never rerouted. Mantle detection
+  now honors the preset on relay overrides, restricts address detection to
+  `bedrock-mantle.<region>.api.aws`, and normalizes configured bases so model
+  listing uses `/v1/models`.
+- Bedrock Messages sends `x-api-key` alone, renames and drops unsupported beta
+  values on configured `anthropic-beta` headers, and removes top-level metadata
+  on execute and count requests, including same-protocol passthrough.
 - Windows agent environment names now compare ASCII-case-insensitively for
   `PATH`, path overrides, and compiled environment lookups.
 - Empty agent environment overrides now mean unset everywhere, including the

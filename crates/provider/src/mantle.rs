@@ -6,13 +6,16 @@
 //! on `/anthropic` and do not use this module.
 //!
 //! Hosts: <https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html>
-//! (checked 2026-10-25). The prefix split is the rule each model's card
+//! (checked 2026-10-27). The prefix split is the rule each model's card
 //! follows; a model asked at the other prefix is refused with a message that
 //! it is not supported on that route. The API key stays a bearer token
 //! (<https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html>).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+use crate::http::Endpoint;
+use crate::presets::Wire;
 
 /// Learned prefix overrides. `true` means the model was refused at the
 /// guessed prefix, so the next call uses the other one.
@@ -46,19 +49,67 @@ impl LearnedRoutes {
     }
 }
 
-/// Whether `base` is a Mantle chat or Responses root this adapter may retarget.
+/// Whether this endpoint is Mantle by preset or by an address-added provider.
+pub(crate) fn is_mantle(endpoint: &Endpoint) -> bool {
+    endpoint.preset.as_deref() == Some("bedrock-mantle")
+        || (endpoint.preset.as_deref().is_none_or(str::is_empty)
+            && is_mantle_host(&endpoint.base_url))
+}
+
+/// Whether the endpoint is Bedrock's runtime or Mantle for Messages behavior.
+pub(crate) fn is_bedrock(endpoint: &Endpoint) -> bool {
+    matches!(
+        endpoint.preset.as_deref(),
+        Some("bedrock" | "bedrock-mantle")
+    ) || is_bedrock_host(&host_of(&endpoint.base_url).unwrap_or_default())
+}
+
+pub(crate) fn is_bedrock_host(host: &str) -> bool {
+    (host.starts_with("bedrock-runtime.") && host.ends_with(".amazonaws.com"))
+        || (host.starts_with("bedrock-mantle.") && host.ends_with(".api.aws"))
+}
+
+fn is_mantle_host(base: &str) -> bool {
+    host_of(base)
+        .is_some_and(|host| host.starts_with("bedrock-mantle.") && host.ends_with(".api.aws"))
+}
+
+/// Whether this adapter may replace the OpenAI `/v1` prefix per model.
+pub(crate) fn is_mantle_root(endpoint: &Endpoint) -> bool {
+    is_mantle(endpoint) && v1_root(&endpoint.base_url).is_some()
+}
+
+/// Normalizes the one configured wire of an address-added Mantle provider.
 ///
-/// The host is `bedrock-mantle.<region>.api.aws`. The path ends in `/v1` or
-/// `/openai/v1`. A proxy host, the Bedrock runtime host, and any other path
-/// are left alone.
-pub(crate) fn is_mantle_root(base: &str) -> bool {
-    let Some(root) = v1_root(base) else {
-        return false;
+/// A preset override on another host keeps its path: only the prefix choice
+/// applies there. Another preset at a Mantle address keeps its own endpoints.
+// reference: internal/provider/provider.go:1710-1739
+pub(crate) fn normalize(endpoint: &mut Endpoint, wire: Wire) {
+    if !endpoint.preset.as_deref().is_none_or(str::is_empty)
+        && endpoint.preset.as_deref() != Some("bedrock-mantle")
+    {
+        return;
+    }
+    if !is_mantle_host(&endpoint.base_url) {
+        return;
+    }
+    let base = endpoint.base_url.trim().trim_end_matches('/');
+    let Some(root) = url_root(base) else {
+        return;
     };
-    let Some(host) = host_of(&root) else {
-        return false;
+    let path = &base[root.len()..];
+    let normalized = match wire {
+        Wire::Chat | Wire::Responses if matches!(path, "" | "/openai/v1" | "/anthropic") => {
+            Some(format!("{root}/v1"))
+        }
+        Wire::Messages if matches!(path, "" | "/v1" | "/openai/v1") => {
+            Some(format!("{root}/anthropic"))
+        }
+        _ => None,
     };
-    host.starts_with("bedrock-mantle.") && host.ends_with(".api.aws")
+    if let Some(normalized) = normalized {
+        endpoint.base_url = normalized;
+    }
 }
 
 /// The base a Mantle chat or Responses call for `model` uses.
@@ -108,6 +159,14 @@ fn v1_root(base: &str) -> Option<String> {
     )
 }
 
+fn url_root(base: &str) -> Option<String> {
+    let authority = base.find("://")? + 3;
+    let end = base[authority..]
+        .find(['/', '?', '#'])
+        .map_or(base.len(), |offset| authority + offset);
+    Some(base[..end].to_owned())
+}
+
 fn host_of(url: &str) -> Option<String> {
     let rest = url.split_once("://")?.1;
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
@@ -122,10 +181,17 @@ fn host_of(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{closed_model, is_mantle_root, mantle_base, wrong_route};
+    use super::{closed_model, is_mantle, is_mantle_root, mantle_base, normalize, wrong_route};
+    use crate::{Endpoint, Wire};
 
     const V1: &str = "https://bedrock-mantle.us-east-1.api.aws/v1";
     const OPENAI: &str = "https://bedrock-mantle.us-east-1.api.aws/openai/v1";
+
+    fn endpoint(preset: Option<&str>, base: &str) -> Endpoint {
+        let mut endpoint = Endpoint::new("test", base);
+        endpoint.preset = preset.map(str::to_owned);
+        endpoint
+    }
 
     #[test]
     fn a_closed_model_uses_the_openai_prefix() {
@@ -162,21 +228,93 @@ mod tests {
     }
 
     #[test]
-    fn only_a_mantle_host_is_retargeted() {
-        assert!(is_mantle_root(V1));
-        assert!(is_mantle_root(OPENAI));
-        assert!(is_mantle_root(
-            "https://bedrock-mantle.eu-west-1.api.aws/openai/v1/"
-        ));
-        assert!(!is_mantle_root(
-            "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
-        ));
-        assert!(!is_mantle_root("https://bedrock-mantle.example.com/v1"));
-        assert!(!is_mantle_root("https://api.aws/v1"));
-        assert!(!is_mantle_root(
-            "https://relay.example.com/bedrock-mantle.us-east-1.api.aws/v1"
-        ));
-        assert!(!is_mantle_root("https://api.openai.com/v1"));
+    fn only_a_mantle_host_is_retargeted_by_address() {
+        for base in [
+            V1,
+            OPENAI,
+            "https://bedrock-mantle.eu-west-1.api.aws/openai/v1/",
+        ] {
+            assert!(is_mantle_root(&endpoint(None, base)), "{base}");
+        }
+        for base in [
+            "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+            "https://bedrock-mantle.us-east-1.amazonaws.com/v1",
+            "https://bedrock-mantle.example.com/v1",
+            "https://api.aws/v1",
+            "https://relay.example.com/bedrock-mantle.us-east-1.api.aws/v1",
+            "https://api.openai.com/v1",
+        ] {
+            assert!(!is_mantle_root(&endpoint(None, base)), "{base}");
+        }
+    }
+
+    #[test]
+    fn the_mantle_preset_enables_routing_on_a_relay() {
+        let relay = endpoint(Some("bedrock-mantle"), "https://relay.example/v1");
+        assert!(is_mantle(&relay));
+        assert!(is_mantle_root(&relay));
+        assert!(!is_mantle(&endpoint(
+            Some("openrouter"),
+            "https://bedrock-mantle.us-east-1.api.aws/v1"
+        )));
+    }
+
+    #[test]
+    fn address_added_mantle_normalizes_each_configured_wire() {
+        let root = "https://bedrock-mantle.eu-west-1.api.aws";
+        for (wire, input, expected) in [
+            (Wire::Chat, V1, V1),
+            (
+                Wire::Chat,
+                "https://bedrock-mantle.us-east-1.api.aws/openai/v1/",
+                V1,
+            ),
+            (
+                Wire::Responses,
+                root,
+                "https://bedrock-mantle.eu-west-1.api.aws/v1",
+            ),
+            (
+                Wire::Responses,
+                "https://bedrock-mantle.eu-west-1.api.aws/anthropic",
+                "https://bedrock-mantle.eu-west-1.api.aws/v1",
+            ),
+            (
+                Wire::Messages,
+                root,
+                "https://bedrock-mantle.eu-west-1.api.aws/anthropic",
+            ),
+            (
+                Wire::Messages,
+                "https://bedrock-mantle.eu-west-1.api.aws/v1",
+                "https://bedrock-mantle.eu-west-1.api.aws/anthropic",
+            ),
+            (
+                Wire::Messages,
+                "https://bedrock-mantle.eu-west-1.api.aws/openai/v1",
+                "https://bedrock-mantle.eu-west-1.api.aws/anthropic",
+            ),
+        ] {
+            let mut endpoint = endpoint(None, input);
+            normalize(&mut endpoint, wire);
+            assert_eq!(endpoint.base_url, expected, "{wire:?} {input}");
+        }
+    }
+
+    #[test]
+    fn another_preset_or_an_unrelated_path_keeps_its_base() {
+        let mut other = endpoint(Some("openrouter"), V1);
+        normalize(&mut other, Wire::Chat);
+        assert_eq!(other.base_url, V1);
+        let mut relay = endpoint(Some("bedrock-mantle"), "https://relay.example/openai/v1");
+        normalize(&mut relay, Wire::Chat);
+        assert_eq!(relay.base_url, "https://relay.example/openai/v1");
+        let mut custom = endpoint(None, "https://bedrock-mantle.us-east-1.api.aws/custom");
+        normalize(&mut custom, Wire::Chat);
+        assert_eq!(
+            custom.base_url,
+            "https://bedrock-mantle.us-east-1.api.aws/custom"
+        );
     }
 
     #[test]

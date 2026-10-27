@@ -36,6 +36,7 @@ pub struct OpenAiCompat {
 #[derive(Debug)]
 struct Mantle {
     base: String,
+    /// One adapter speaks one protocol, so this per-model memory is per protocol too.
     routes: LearnedRoutes,
 }
 
@@ -49,11 +50,13 @@ impl OpenAiCompat {
     ///
     /// Returns [`ProviderError`] when the id, base URL, or a header is unusable.
     pub fn new(protocol: OpenAiProtocol, endpoint: Endpoint) -> Result<Self, ProviderError> {
-        let path = match protocol {
-            OpenAiProtocol::Chat => "chat/completions",
-            OpenAiProtocol::Responses => "responses",
+        let (path, wire) = match protocol {
+            OpenAiProtocol::Chat => ("chat/completions", crate::Wire::Chat),
+            OpenAiProtocol::Responses => ("responses", crate::Wire::Responses),
         };
-        let mantle = mantle::is_mantle_root(&endpoint.base_url).then(|| Mantle {
+        let mut endpoint = endpoint;
+        mantle::normalize(&mut endpoint, wire);
+        let mantle = mantle::is_mantle_root(&endpoint).then(|| Mantle {
             base: endpoint.base_url.clone(),
             routes: LearnedRoutes::default(),
         });
@@ -130,7 +133,11 @@ impl Provider for OpenAiCompat {
         )
         .await
         {
-            Err(error) if mantle::wrong_route(error.status, &error.message) => {
+            Err(error)
+                if !model.is_empty()
+                    && !mantle.routes.other(&model)
+                    && mantle::wrong_route(error.status, &error.message) =>
+            {
                 mantle.routes.learn_other(&model);
                 let url = self.url_for(&model);
                 match http::execute_at(
@@ -181,7 +188,6 @@ impl Provider for OpenAiCompat {
 mod tests {
     use super::{OpenAiCompat, OpenAiProtocol};
     use crate::http::Endpoint;
-    use crate::mantle::LearnedRoutes;
     use crate::{Completion, Provider};
     use hofund_ir::{ContentPart, Message, Request, Role};
 
@@ -265,12 +271,9 @@ mod tests {
             .await;
 
         let mut endpoint = Endpoint::new("mantle", &base);
+        endpoint.preset = Some("bedrock-mantle".to_owned());
         endpoint.api_key = "ABSK-test".to_owned();
-        let mut provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
-        provider.mantle = Some(super::Mantle {
-            base,
-            routes: LearnedRoutes::default(),
-        });
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
 
         let first = provider
             .execute(say("newmaker.model-1"), "openai-chat")
@@ -317,12 +320,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut provider = OpenAiCompat::new(OpenAiProtocol::Chat, Endpoint::new("mantle", &base))
-            .expect("provider");
-        provider.mantle = Some(super::Mantle {
-            base,
-            routes: LearnedRoutes::default(),
-        });
+        let mut endpoint = Endpoint::new("mantle", &base);
+        endpoint.preset = Some("bedrock-mantle".to_owned());
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
 
         let Err(error) = provider
             .execute(say("newmaker.model-1"), "openai-chat")
@@ -338,5 +338,84 @@ mod tests {
             panic!("the guess was not restored");
         };
         assert!(again.message.contains("isn't supported on this route"));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_on_the_learned_prefix_is_not_retried_or_forgotten() {
+        let server = wiremock::MockServer::start().await;
+        let base = format!("{}/v1", server.uri());
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/openai/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": {"message": "learned route isn't supported on this route"}
+                })),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let mut endpoint = Endpoint::new("mantle", &base);
+        endpoint.preset = Some("bedrock-mantle".to_owned());
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+        provider
+            .mantle
+            .as_ref()
+            .expect("mantle")
+            .routes
+            .learn_other("newmaker.model-1");
+        for _ in 0..2 {
+            let Err(error) = provider
+                .execute(say("newmaker.model-1"), "openai-chat")
+                .await
+            else {
+                panic!("learned prefix was not refused");
+            };
+            assert!(error.message.contains("learned route"));
+        }
+        assert!(
+            provider
+                .mantle
+                .as_ref()
+                .expect("mantle")
+                .routes
+                .other("newmaker.model-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_model_is_never_rerouted() {
+        let server = wiremock::MockServer::start().await;
+        let base = format!("{}/v1", server.uri());
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": {"message": "model isn't supported on this route"}
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/openai/v1/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok()))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mut endpoint = Endpoint::new("mantle", &base);
+        endpoint.preset = Some("bedrock-mantle".to_owned());
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+        let Err(error) = provider.execute(say(""), "openai-chat").await else {
+            panic!("empty model was rerouted");
+        };
+        assert!(error.message.contains("isn't supported on this route"));
     }
 }
