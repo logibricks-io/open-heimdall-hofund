@@ -1255,7 +1255,11 @@ async fn post_token(
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
-        let chunk = chunk.map_err(http::map_body)?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(_) if !(200..300).contains(&status) => break,
+            Err(error) => return Err(http::map_body(error)),
+        };
         if bytes.len().saturating_add(chunk.len()) > MAX_CREDENTIALS_BYTES as usize {
             return Err(ProviderError::decode(
                 "the token response is larger than 1 MiB",
@@ -1683,6 +1687,68 @@ mod tests {
             assert_eq!(code.is_some_and(|code| text.contains(code)), code.is_some());
             assert!(!text.contains("SECRET-"), "{text}");
         }
+    }
+
+    async fn truncated_token(status: u16) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("connection");
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).await;
+            let status_line = match status {
+                200 => "200 OK",
+                429 => "429 Too Many Requests",
+                _ => panic!("unsupported test status"),
+            };
+            let headers = format!(
+                "HTTP/1.1 {status_line}\r\ncontent-length: 2\r\nretry-after: 120\r\nconnection: close\r\n\r\n"
+            );
+            socket.write_all(headers.as_bytes()).await.expect("headers");
+            socket.write_all(b"{").await.expect("partial body");
+        });
+        (format!("http://{address}/token"), server)
+    }
+
+    #[tokio::test]
+    async fn a_truncated_429_token_body_preserves_status_and_retry_after() {
+        let (url, server) = truncated_token(429).await;
+        let error = super::post_token(
+            &reqwest::Client::new(),
+            &url,
+            "application/json",
+            None,
+            b"{}".to_vec(),
+        )
+        .await
+        .expect_err("rate limited");
+        assert_eq!(error.kind, crate::ProviderErrorKind::Status);
+        assert_eq!(error.status, Some(429));
+        assert_eq!(
+            error.retry_after(),
+            Some(std::time::Duration::from_secs(120))
+        );
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn a_truncated_200_token_body_is_interrupted() {
+        let (url, server) = truncated_token(200).await;
+        let error = super::post_token(
+            &reqwest::Client::new(),
+            &url,
+            "application/json",
+            None,
+            b"{}".to_vec(),
+        )
+        .await
+        .expect_err("interrupted");
+        assert_eq!(error.kind, crate::ProviderErrorKind::Interrupted);
+        server.await.expect("server");
     }
 
     #[tokio::test]

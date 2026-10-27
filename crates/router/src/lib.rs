@@ -48,11 +48,15 @@ impl FailoverPolicy {
     /// member may be tried.
     ///
     /// Kinds other than connect, timeout, interrupted, and a listed status do
-    /// not fail over. An interrupted body keeps the existing pre-content
-    /// failover behavior (`reference: internal/gateway/fallback.go:1929-1934`,
-    /// `reference: internal/gateway/gateway.go:2929-2930`). A transport failure
-    /// means the request was already sent, so it does not try another member.
-    /// The wildcard is required because [`PluginErrorKind`] is
+    /// not fail over. An interrupted 2xx body has not reached the client yet:
+    /// failover occurs before a completion or first stream event is returned,
+    /// like the reference's held reply that ends short and goes to the next
+    /// candidate (`reference: internal/gateway/fallback.go:1859-1866`,
+    /// `reference: internal/gateway/fallback.go:2364-2368`,
+    /// `reference: internal/gateway/gateway.go:2854`). A transport failure has
+    /// no reply and gives no evidence about what the upstream processed, so the
+    /// request is not resent elsewhere. The wildcard is required because
+    /// [`PluginErrorKind`] is
     /// `#[non_exhaustive]`: a new kind does not break this match.
     #[must_use]
     pub fn allows(&self, error: &PluginError) -> bool {

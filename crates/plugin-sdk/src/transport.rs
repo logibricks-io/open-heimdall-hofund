@@ -290,7 +290,7 @@ fn retries(method: &str, idempotent: bool, kind: PluginErrorKind) -> bool {
     // A status proves the upstream received the request. Only idempotent calls
     // may repeat an interrupted body read on the same member. The reference
     // records when the body was written; a reply after that belongs to the vendor.
-    // reference: internal/gateway/gateway.go:2828-2833
+    // reference: internal/gateway/gateway.go:2753-2754
     match kind {
         PluginErrorKind::Connect => true,
         PluginErrorKind::Timeout | PluginErrorKind::Transport | PluginErrorKind::Interrupted => {

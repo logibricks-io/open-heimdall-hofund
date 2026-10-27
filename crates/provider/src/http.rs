@@ -418,7 +418,7 @@ async fn send_json(
 /// A connect error proves that no request was sent. Errors after a write are
 /// never retried because the upstream may have processed a non-idempotent POST.
 /// The reference records when the body was written; a reply after that belongs
-/// to the vendor (`reference: internal/gateway/gateway.go:2828-2833`). Body
+/// to the vendor (`reference: internal/gateway/gateway.go:2753-2754`). Body
 /// reads happen only after this function returns, so an interrupted body is
 /// never replayed here.
 /// Hyper separately retries requests it cancelled on an idle socket before

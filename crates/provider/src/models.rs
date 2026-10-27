@@ -680,13 +680,17 @@ pub(crate) async fn read_page(
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| {
-            if error.is_timeout() {
-                PluginError::interrupted("upstream response timed out while reading")
-            } else {
-                PluginError::interrupted("could not read the upstream response")
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(_) if !(200..300).contains(&status) => break,
+            Err(error) => {
+                return Err(if error.is_timeout() {
+                    PluginError::interrupted("upstream response timed out while reading")
+                } else {
+                    PluginError::interrupted("could not read the upstream response")
+                });
             }
-        })?;
+        };
         let remaining = cap
             .saturating_add(usize::from(exact_cap))
             .saturating_sub(body.len());
@@ -914,6 +918,70 @@ mod tests {
                 false,
             ));
         }
+    }
+
+    async fn truncated_page(status: u16) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("connection");
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).await;
+            let status_line = match status {
+                200 => "200 OK",
+                429 => "429 Too Many Requests",
+                _ => panic!("unsupported test status"),
+            };
+            let headers = format!(
+                "HTTP/1.1 {status_line}\r\ncontent-length: 2\r\nretry-after: 120\r\nconnection: close\r\n\r\n"
+            );
+            socket.write_all(headers.as_bytes()).await.expect("headers");
+            socket.write_all(b"{").await.expect("partial body");
+        });
+        (format!("http://{address}/models"), server)
+    }
+
+    #[tokio::test]
+    async fn a_truncated_429_page_preserves_status_and_retry_after() {
+        let (url, server) = truncated_page(429).await;
+        let endpoint = crate::Endpoint::new("models", "http://127.0.0.1");
+        let client = super::ModelClient::new(&endpoint).expect("client");
+        let page = client
+            .get(&url, reqwest::header::HeaderMap::new(), 1024)
+            .await
+            .expect("partial page");
+        assert_eq!(page.body, b"{");
+        let error = client.page_bytes(&url, page, false).expect_err("status");
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Status);
+        assert_eq!(error.status(), Some(429));
+        assert_eq!(
+            error.retry_after(),
+            Some(std::time::Duration::from_secs(120))
+        );
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn a_truncated_200_page_is_interrupted() {
+        let (url, server) = truncated_page(200).await;
+        let endpoint = crate::Endpoint::new("models", "http://127.0.0.1");
+        let client = super::ModelClient::new(&endpoint).expect("client");
+        let error = match client
+            .get(&url, reqwest::header::HeaderMap::new(), 1024)
+            .await
+        {
+            Ok(_) => panic!("expected an interrupted body"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            hofund_plugin_api::PluginErrorKind::Interrupted
+        );
+        server.await.expect("server");
     }
 
     #[test]

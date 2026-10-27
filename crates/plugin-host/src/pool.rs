@@ -272,9 +272,15 @@ impl HttpBackend for PooledHttp {
         let bytes = request.body().bytes().clone();
         let response = outbound.body(bytes).send().await.map_err(map_error)?;
         let status = response.status();
-        let collected = response.bytes().await.map_err(map_body)?;
+        let headers = response.headers().clone();
+        let collected = if status.is_success() {
+            response.bytes().await.map_err(map_body)?
+        } else {
+            response.bytes().await.unwrap_or_default()
+        };
         let mut output = HttpResponse::new(BodyStream::from_bytes(collected));
         *output.status_mut() = status;
+        *output.headers_mut() = headers;
         Ok(output)
     }
 
@@ -574,6 +580,57 @@ mod tests {
             .expect("retried");
         assert_eq!(reply.body(), b"ok");
         assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    fn raw(response: &'static [u8]) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = read_request(&mut stream, false);
+            let _ = stream.write_all(response);
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_429_preserves_status_and_retry_after_through_host_and_sdk() {
+        const COMPLETE: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 1\r\nretry-after: 120\r\nconnection: close\r\n\r\n{";
+        const TRUNCATED: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 4\r\nretry-after: 120\r\nconnection: close\r\n\r\n{";
+
+        let _guard = exclusive().await;
+        let port = raw(TRUNCATED);
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{port}/v1"))
+            .body(Body::from_bytes(b"hello".to_vec()))
+            .expect("request");
+        let response = PooledHttp::direct()
+            .send(request)
+            .await
+            .expect("status response");
+        assert_eq!(response.status().as_u16(), 429);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("120")
+        );
+
+        for response in [COMPLETE, TRUNCATED] {
+            let port = raw(response);
+            let context = http(HttpLimits::default());
+            let error = Call::post(format!("http://127.0.0.1:{port}/v1"))
+                .bytes(b"hello")
+                .send(context.http())
+                .await
+                .expect_err("rate limited");
+            assert_eq!(error.kind(), PluginErrorKind::Status);
+            assert_eq!(error.status(), Some(429));
+            assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

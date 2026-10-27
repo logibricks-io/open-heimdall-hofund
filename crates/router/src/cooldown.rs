@@ -168,7 +168,7 @@ impl Cooldowns {
 
     /// Records a failed call and returns its cooldown, if the error cools.
     /// Interrupted bodies use the generic failure policy
-    /// (`reference: internal/gateway/fallback.go:1406-1413`).
+    /// (`reference: internal/gateway/fallback.go:1347-1355`).
     pub fn record_failure(&self, id: &MemberId, error: &PluginError) -> Option<Cooling> {
         let failure = match error.kind() {
             PluginErrorKind::Connect
