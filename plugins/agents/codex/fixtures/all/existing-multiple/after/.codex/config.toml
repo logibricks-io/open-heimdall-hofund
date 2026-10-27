@@ -1,0 +1,10 @@
+# Several routes must not replace the user's model.
+model = "multiple-route-model"
+approval_policy = "on-request"
+model_provider = "hofund"
+
+[model_providers.hofund]
+name = "hofund"
+base_url = "http://127.0.0.1:3425/v1"
+wire_api = "responses"
+experimental_bearer_token = "old-token"

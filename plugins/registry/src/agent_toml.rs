@@ -813,4 +813,18 @@ key = "effort"
             assert!(error.contains("built-in agent id"), "{error}");
         }
     }
+
+    #[test]
+    fn validation_rejects_shipped_codex_fixture_collision() {
+        let error = parse(
+            &base().replacen("fixture-agent", "codex", 1),
+            "fixtures/agents/codex/agent.toml",
+            "codex",
+            &[],
+            &["codex".to_owned()],
+            &["echo".to_owned()],
+        )
+        .expect_err("shipped codex id");
+        assert!(error.contains("collides with another agent id"), "{error}");
+    }
 }

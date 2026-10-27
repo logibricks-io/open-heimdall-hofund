@@ -1568,6 +1568,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 name = "hofund-agent"
 version = "0.1.0"
 dependencies = [
+ "hofund-agent",
  "hofund-config",
  "hofund-plugin-api",
  "serde_json",
@@ -1767,6 +1768,7 @@ name = "hofund-plugin-registry"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "hofund-agent",
  "hofund-kit-agent",
  "hofund-kit-upstream",
  "hofund-plugin-api",

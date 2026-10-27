@@ -1,0 +1,16 @@
+# Keep this comment and all unrelated settings.
+model = "user-model"
+temperature = 0.2
+unrelated = "keep"
+model_provider = "hofund"
+
+[model_providers.other]
+name = "Other provider"
+base_url = "https://other.example/v1"
+extra = true
+
+[model_providers.hofund]
+name = "hofund"
+base_url = "http://127.0.0.1:3425/v1"
+wire_api = "responses"
+experimental_bearer_token = "old-token"

@@ -1,0 +1,12 @@
+model_provider = "openai"
+model = "stale-model"
+
+[model_providers.hofund]
+name = "old name"
+base_url = "https://stale.example/v1"
+wire_api = "chat"
+experimental_bearer_token = "stale-token"
+extra = "preserve me"
+
+[model_providers.other]
+name = "Other provider"
