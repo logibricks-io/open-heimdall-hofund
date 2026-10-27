@@ -55,7 +55,7 @@ pub use hofund_plugin_api::{
 
 mod catalog;
 mod edit;
-#[cfg(feature = "legacy-codex-const")]
+#[cfg(feature = "legacy-agent-consts")]
 #[doc(hidden)]
 pub mod legacy;
 mod store;

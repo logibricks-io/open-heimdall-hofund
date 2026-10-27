@@ -1,0 +1,6 @@
+{
+  "model": "configured-user-model",
+  "env": {
+    "KEEP": "yes"
+  }
+}

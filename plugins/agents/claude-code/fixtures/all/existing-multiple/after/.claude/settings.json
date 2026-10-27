@@ -1,0 +1,10 @@
+{
+  "env": {
+    "KEEP": "yes",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3425",
+    "ANTHROPIC_AUTH_TOKEN": "old-token"
+  },
+  "ui": {
+    "theme": "dark"
+  }
+}
