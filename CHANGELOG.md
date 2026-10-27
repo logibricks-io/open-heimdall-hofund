@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Docs: control plane (row L) plan.
 - Per-member cooldowns with generic, rate-limit, quota, credit, observation,
   and panic policies. Routing tries ready members first and retains only the
   soonest cooling member as a probe; shared state survives router republishes.

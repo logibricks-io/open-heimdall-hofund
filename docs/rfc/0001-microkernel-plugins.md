@@ -966,6 +966,17 @@ PR K lands the member cooldown book and passive observation path. These are the 
 - `Cancelled`, `Config`, `Unsupported`, and `Internal` are preserved across the plugin round trip and never cool. Request-shaped 4xx responses also deliberately do not cool a member, unlike the reference gateway's broader treatment. There are no per-provider cooldown configuration knobs yet; `CooldownPolicy::default()` supplies the policy. Exposing cooldown times in the routing view is deferred. Success-header vendor feeds are left to subscription plugins in H rather than adding vendor-specific parsing to the kernel.
 - Two cooldown choices deliberately diverge from magpie. A new event never shortens an active rest, whereas magpie overwrites the deadline (`routing.go:1158`, `restingUntil.m[id] = r.Until`); this prevents a short hint from cutting a long quota rest. Credit rest is `max(30 minutes, header hint capped at one hour)` rather than magpie's fixed 30 minutes, so a longer vendor hint is honoured.
 
+### PR L plan notes
+
+The implementation plan is [docs/plugins/control-plane.md](../plugins/control-plane.md). It keeps the accepted crate, client, process, and reload boundaries, with these clarifications and deviations:
+
+- The management API uses a separate loopback-only listener, not the model listener. The model gateway may bind a LAN address without exposing management routes.
+- Reload is triggered by a control call or SIGHUP, not by an initial file watcher. Validation and candidate construction finish before one ArcSwap publication.
+- SSE is the event transport. A bounded stream requests a fresh snapshot after lag; events are not durable across restarts.
+- Socket handoff and background-service installation are deferred to rows 16.3 and 16.4. This narrows the placement-table sentence that assigned them to L because listener transfer and service management are independent of the client boundary.
+- After L the CLI links `hofund-config`, `hofund-control-client`, and `hofund-secrets`, not `hofund-agent`. This narrows the dependency rule that allowed `hofund-agent` for offline commands: agent plans need registry descriptions that only `hofundd` links, so a dry-run plan goes through the control client. `hofund-secrets` serves local `token show`, which has no control route.
+- The CLI stays at `crates/cli` until row J. Desktop removal of the embedded daemon remains a follower of L.
+
 ### Parallel work plan
 
 B is alone. After B, B2 and C can proceed together. D starts after C, because both edit `providers` and C lands the snapshot those calls publish. K waits for C and must merge before H. L waits for D. H does not wait for L: until L, subscription commands stay on the in-process CLI path. H does wait for encrypted account storage. `PlaintextFileAccountStore` is not the store those plugins persist to.
