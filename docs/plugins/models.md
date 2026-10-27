@@ -260,8 +260,8 @@ Per-URL failures are joined into one `PluginError`. Mapping:
 | DNS, TCP, or TLS before the request is sent | `Connect` | none | none |
 | Connect or pre-header idle-read deadline | `Timeout` | none | none |
 | The connection failed after the request was sent and before a status arrived | `Transport` | none | none |
-| The body failed or stalled after a status arrived | `Interrupted` | none | none |
-| An HTTP status, including 401, 404, and 429 | `Status` | the status | `Retry-After` when the response sent one |
+| A 2xx body failed or stalled after the status arrived | `Interrupted` | none | none |
+| An HTTP status, including 401, 404, and 429, even when its body read fails | `Status` | the status | `Retry-After` when the response sent one |
 | A body that is not a model list or a completion | `Decode` | none | none |
 | A catalog preset asked to call the network, or a wire with no list method | `Unsupported` | none | none |
 

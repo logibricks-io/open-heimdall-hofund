@@ -490,7 +490,11 @@ impl Provider for Vertex {
         let response = http::post_bearer(&self.upstream, &url, body, &token).await?;
         let status = response.status().as_u16();
         let retry_after = http::retry_after(response.headers());
-        let bytes = response.bytes().await.map_err(http::map_body)?;
+        let bytes = if (200..300).contains(&status) {
+            response.bytes().await.map_err(http::map_body)?
+        } else {
+            response.bytes().await.unwrap_or_default()
+        };
         generative::classify_count(status, retry_after, &bytes)
     }
 

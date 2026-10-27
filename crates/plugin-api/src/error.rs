@@ -22,17 +22,17 @@ pub enum PluginErrorKind {
     /// A retry may repeat this kind only when the call is idempotent: `GET`,
     /// `HEAD`, `OPTIONS`, `PUT`, `DELETE`, or a call the caller marked
     /// idempotent. `POST` and `PATCH` are not retried on a timeout unless
-    /// that mark is set. A body-read timeout after a status is
+    /// that mark is set. A body-read timeout after a 2xx status is
     /// [`Interrupted`](Self::Interrupted).
     Timeout,
     /// The request was sent, then the connection failed before a status arrived.
     ///
     /// A retry may repeat it only when the call is idempotent, under the same
     /// rule as [`Timeout`](Self::Timeout). It is never retried for a
-    /// non-idempotent `POST` or `PATCH`. A body failure after a status is
+    /// non-idempotent `POST` or `PATCH`. A body failure after a 2xx status is
     /// [`Interrupted`](Self::Interrupted).
     Transport,
-    /// The upstream answered with a status, then its body failed or stalled before it was complete.
+    /// The upstream answered with a 2xx status, then its body failed or stalled before it was complete.
     /// The request was received, so it is never resent to the same member unless the call is idempotent.
     Interrupted,
     /// The upstream returned an HTTP status.

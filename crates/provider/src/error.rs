@@ -28,11 +28,11 @@ pub enum ProviderErrorKind {
     /// The connection could not be established before the request was sent.
     Connect,
     /// The upstream did not answer with a status within the configured time.
-    /// A body-read timeout after a status is [`Interrupted`](Self::Interrupted).
+    /// A body-read timeout after a 2xx status is [`Interrupted`](Self::Interrupted).
     Timeout,
     /// The request was sent, but its response failed before a status arrived.
     Transport,
-    /// The upstream answered with a status, then its body failed or stalled before it was complete.
+    /// The upstream answered with a 2xx status, then its body failed or stalled before it was complete.
     /// The request was received, so it is never resent to the same member unless the call is idempotent.
     Interrupted,
     /// The upstream returned an HTTP status.

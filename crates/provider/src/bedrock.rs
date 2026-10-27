@@ -142,7 +142,7 @@ impl Provider for Bedrock {
         let status = response.status();
         if !status.is_success() {
             let retry_after = http::retry_after(response.headers());
-            let bytes = response.bytes().await.map_err(http::map_body)?;
+            let bytes = response.bytes().await.unwrap_or_default();
             let error = ProviderError::status(status.as_u16(), http::message_from(&bytes));
             return Err(match retry_after {
                 Some(after) => error.with_retry_after(after),

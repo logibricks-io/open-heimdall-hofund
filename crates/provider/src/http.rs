@@ -416,9 +416,11 @@ async fn send_json(
 /// Sends `builder`, retrying once only when connection establishment failed.
 ///
 /// A connect error proves that no request was sent. Errors after a write are
-/// never retried because the upstream may have processed a non-idempotent POST
-/// (`reference: internal/gateway/gateway.go:2828-2833`). Body reads happen only
-/// after this function returns, so an interrupted body is never replayed here.
+/// never retried because the upstream may have processed a non-idempotent POST.
+/// The reference records when the body was written; a reply after that belongs
+/// to the vendor (`reference: internal/gateway/gateway.go:2828-2833`). Body
+/// reads happen only after this function returns, so an interrupted body is
+/// never replayed here.
 /// Hyper separately retries requests it cancelled on an idle socket before
 /// writing them.
 pub(crate) async fn send_builder(
@@ -597,7 +599,7 @@ async fn send<'a>(
     let status = response.status();
     if !status.is_success() {
         let retry_after = retry_after(response.headers());
-        let bytes = response.bytes().await.map_err(map_body)?;
+        let bytes = response.bytes().await.unwrap_or_default();
         let error = ProviderError::status(status.as_u16(), message_from(&bytes));
         return Err(match retry_after {
             Some(after) => error.with_retry_after(after),
