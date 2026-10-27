@@ -381,7 +381,7 @@ fn reject_options(
 fn is_kernel(key: &str, protocol: bool) -> bool {
     matches!(
         key,
-        "id" | "base_url" | "api_key" | "credential" | "quirks" | "headers"
+        "id" | "base_url" | "preset" | "api_key" | "credential" | "quirks" | "headers"
     ) || (protocol && key == "protocol")
 }
 
@@ -426,6 +426,9 @@ fn read_endpoint(
     reject_options(raw, id, protocol, options)?;
     let base_url = required_string(raw, "base_url", id)?;
     let mut endpoint = Endpoint::new(id, base_url);
+    if let Some(value) = optional_string(raw, "preset", id)? {
+        endpoint.preset = Some(value);
+    }
     if let Some(value) = optional_string(raw, "api_key", id)? {
         endpoint.api_key = value;
     }
@@ -558,6 +561,15 @@ mod tests {
             RawValue::String("https://example.test".to_owned()),
         );
         table
+    }
+
+    #[test]
+    fn preset_is_a_kernel_endpoint_field() {
+        let mut openai = raw("mantle");
+        openai.insert("preset", RawValue::String("bedrock-mantle".to_owned()));
+        openai.insert("protocol", RawValue::String("chat".to_owned()));
+        let config = UpstreamFactory::validate(&OpenAiFactory, &openai).expect("preset");
+        assert_eq!(config.endpoint.preset.as_deref(), Some("bedrock-mantle"));
     }
 
     #[test]

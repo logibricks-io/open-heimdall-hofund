@@ -1553,6 +1553,9 @@ fn list_only_raw(
         RawValue::String(format!("{}#list:{}", provider.id, wire_name(wire))),
     );
     raw.insert("base_url", RawValue::String(base.to_owned()));
+    if let Some(preset) = &provider.preset {
+        raw.insert("preset", RawValue::String(preset.clone()));
+    }
     match wire {
         Wire::Chat => raw.insert("protocol", RawValue::String("chat".to_owned())),
         Wire::Responses => raw.insert("protocol", RawValue::String("responses".to_owned())),
@@ -2125,6 +2128,7 @@ mod tests {
                 "headers",
                 "id",
                 "location",
+                "preset",
                 "protocol",
                 "quirks"
             ]
@@ -2164,6 +2168,7 @@ mod tests {
                 "credential",
                 "headers",
                 "id",
+                "preset",
                 "quirks"
             ]
         );
