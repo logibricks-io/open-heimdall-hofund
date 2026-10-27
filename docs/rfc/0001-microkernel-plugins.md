@@ -445,12 +445,12 @@ Feature-parity row 2.12 models keys as router members. Row 3.7 does the same for
 2. At startup, and again on every membership change (sign-in, sign-out, config reload), the daemon loads the factory, calls `upstream` once per selected account, and adapts each result to a `Member`.
 3. The `MemberId` is `MemberId::from_parts(subscription, account)`. It is stable across snapshots.
 
-Failover and order exist today (ordered failover). Cooldown does not. [architecture.md](../architecture.md) line 151: "There is no rest timer and no process-global route counter." Cooldown is a new kernel mechanism, PR K, and it merges before any subscription plugin. A plugin pull request does not edit `crates/router`.
+Ordered failover and PR K's cooldown exist today; [architecture.md](../architecture.md) describes the member cooldown book. Cooldown is a kernel mechanism and merges before any subscription plugin. A plugin pull request does not edit `crates/router`.
 
 Row 3.8 is the shared quota model: windows, resets, and credits. Two feeds, both kernel-owned:
 
 - Polled: `Subscription::quota` fills `QuotaWindow`. The scheduler refreshes it. An exhausted window cools that member down.
-- Passive: `PluginError::retry_after()` and `HostContext::observe(QuotaObservation)` report rate-limit headers seen on a call, including a successful response. PR K turns both into the same cooldown.
+- Passive: `PluginError::retry_after()` and `HostContext::observe(QuotaObservation)` report rate-limit headers seen on a call, including a successful response. PR K applies the header cap to error hints and rests a successful observation only when its window is exhausted.
 
 The plugin returns observations. It does not call the router, and it does not import `hofund-router`.
 
@@ -886,7 +886,7 @@ PR C puts the router on `Member` and `PluginError`. These are the places the cod
 - A same-protocol body, including Converse, is `Completion::Raw`. The gateway forwards the bytes. It asks the codec to read token usage across chunk boundaries and to rewrite the model field to the name the client sent. A leading in-band failure is a status error, so the router can fail over. A failure after the first event is that protocol's error frame. A partial frame is closed with a blank line first. The content type comes from the codec. Cross-protocol still decodes and strips extensions.
 - `BodyStream::resume` puts a peeked raw chunk back so failover can look at the first chunk and a success still delivers it. The router re-exports `PluginError`, `Request`, `Completion`, and `MemberId`. It also imports `PluginErrorKind`, `CountOutcome`, and `BodyStream`. `xtask` rejects any other plugin-api import, and it rejects `UpstreamProvider` and `HostContext`.
 - `criterion` benches for decode, encode, stream relay, and the raw passthrough tap live in `crates/codec/benches/relay.rs` and run in CI. Magpie is not a dependency.
-- The `ArcSwap` snapshot is stored while the membership lock is held. A panic in the call or while polling the stream publishes a snapshot that omits that member. There is no cooldown timer. Config hot reload is pull request L. Duplicate member ids fail startup.
+- The `ArcSwap` snapshot is stored while the membership lock is held. A panic in the call or while polling the stream publishes a snapshot that omits that member. There is no cooldown timer. PR K adds it. Config hot reload is pull request L. Duplicate member ids fail startup.
 
 Quirks stay in the kernel for the whole sequence. A new `Rule` variant is a kernel pull request. Vendor behavior stays in the plugin that calls `quirks::apply` through the SDK.
 
@@ -942,6 +942,18 @@ E1 is the first slice of row E. The threat model is [docs/plugins/providers.md](
 - After that validation, the daemon trims string options and resolves `env:`; resolution errors name the provider and key. It rejects a reserved kernel key inside `options`. `plan` still reads `project`, `location`, and `region` to build catalog URLs.
 - Built-in adapters take the pooled `reqwest` client from a kernel-only host-handle method, so `HttpLimits` apply. `HttpHandle::send` is unchanged. Moving the five protocol transports into the SDK and streaming through `HttpHandle::send` is targeted at the first row E PR that moves an adapter into its own plugin crate (E3, Vertex), which also removes the raw-client method.
 - `google-vertex` and `bedrock` are not compiled presets. `resolve` still owns their URLs. Per-preset `/models` and the connectivity probe are the next pull request.
+
+### PR K notes
+
+PR K lands the member cooldown book and passive observation path. These are the design choices and the places the code differs from the RFC text.
+
+- `hofund_router::Cooldowns` is keyed by stable `MemberId`. The daemon membership table owns one `Arc<Cooldowns>` and injects it into every published `Router`, so breaker state survives `Snapshot::store` even when every member instance is replaced. The book owns the generic, rate-limit, quota, credit, observation, and panic policies. Ready members keep configured order and go first; only the soonest cooling member remains as a probe, and a lone member is always tried.
+- The daemon's tower cooldown layer in `crates/daemon/src/membership.rs` records every call outcome. Unary success clears cooldown state. A count never records success and cools only on 429 and transport-class failures, matching magpie `gateway.go:1427-1461` at `5b4da5b` (`unsupportedCount` breaks without resting at 1444-1446, 429 rests at 1447-1452, and transport failures rest at 1431-1436). A stream succeeds when its first item arrives without error, while a stream error before or after that item records a failure. A revision captured before the call guards success recording, so an older success cannot clear a failure, panic, or observation that landed during the call.
+- A contained panic records a timed generic-ladder cooldown, advances the member's failed generation, and republishes a snapshot without that member. A task waits until the rest ends and republishes the member only if its generation is unchanged. A newer panic therefore keeps the member out and doubles the cooldown instead of allowing an older timer to restore it.
+- Passive observation uses a per-member `ObserveBackend` bound by the daemon and passed through `hofund_plugin_host::runtime_host_with_observe`. The production backend calls `Cooldowns::observe` for that member. Plugins submit observations but cannot name or select a member. Only an observation with `remaining == Some(0)` rests the member, as in magpie `routing.go:1011`; its stated reset is capped at eight days, with a 15-minute fallback. Other observations return without recording anything or advancing the revision.
+- Provider execute and count status errors and SDK status errors parse `Retry-After` as delta-seconds or an HTTP date. A zero delta or a date not strictly in the future is absent. Transport parsing deliberately applies no cap; the cooldown book caps every header hint at one hour for every cause, including quota (magpie `routing.go:166,1432-1435` at `5b4da5b`). The eight-day cap applies only to vendor-stated resets from passive observations with an exhausted window.
+- `Cancelled`, `Config`, `Unsupported`, and `Internal` are preserved across the plugin round trip and never cool. Request-shaped 4xx responses also deliberately do not cool a member, unlike the reference gateway's broader treatment. There are no per-provider cooldown configuration knobs yet; `CooldownPolicy::default()` supplies the policy. Exposing cooldown times in the routing view is deferred. Success-header vendor feeds are left to subscription plugins in H rather than adding vendor-specific parsing to the kernel.
+- Two cooldown choices deliberately diverge from magpie. A new event never shortens an active rest, whereas magpie overwrites the deadline (`routing.go:1158`, `restingUntil.m[id] = r.Until`); this prevents a short hint from cutting a long quota rest. Credit rest is `max(30 minutes, header hint capped at one hour)` rather than magpie's fixed 30 minutes, so a longer vendor hint is honoured.
 
 ### Parallel work plan
 

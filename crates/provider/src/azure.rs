@@ -168,13 +168,23 @@ fn provider_error(error: PluginError) -> ProviderError {
     let kind = match error.kind() {
         PluginErrorKind::Connect => ProviderErrorKind::Connect,
         PluginErrorKind::Timeout => ProviderErrorKind::Timeout,
+        PluginErrorKind::Transport => ProviderErrorKind::Transport,
         PluginErrorKind::Status => ProviderErrorKind::Status,
+        PluginErrorKind::Decode => ProviderErrorKind::Decode,
+        PluginErrorKind::Unsupported => ProviderErrorKind::Unsupported,
+        PluginErrorKind::Auth => ProviderErrorKind::Auth,
+        PluginErrorKind::Quota => ProviderErrorKind::Quota,
+        PluginErrorKind::Config => ProviderErrorKind::Config,
+        PluginErrorKind::Cancelled => ProviderErrorKind::Cancelled,
+        PluginErrorKind::Io => ProviderErrorKind::Io,
+        PluginErrorKind::Internal => ProviderErrorKind::Internal,
         _ => ProviderErrorKind::Decode,
     };
     ProviderError {
         kind,
         message: error.message().to_owned(),
         status: error.status(),
+        retry_after: error.retry_after(),
     }
 }
 

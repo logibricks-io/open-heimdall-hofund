@@ -20,7 +20,7 @@ use hofund_plugin_host::HttpLimits;
 pub use hofund_gateway::Running;
 use hofund_provider::{Credential, Endpoint, Provider, Wire, resolve};
 use hofund_quirks::named;
-use hofund_router::{FailoverPolicy, Snapshot};
+use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
 use hofund_secrets::TokenFile;
 use hofund_usage::Ledger;
 
@@ -72,7 +72,7 @@ impl std::error::Error for DaemonError {}
 pub fn check(path: &Path) -> Result<(), DaemonError> {
     let config = load_path(path).map_err(show)?;
     warn(&config);
-    let _ = providers(&config, path, None, Mode::Check, None)?;
+    let _ = providers(&config, path, None, Mode::Check, None, None)?;
     Ok(())
 }
 
@@ -271,7 +271,18 @@ fn router(
     max_idle_per_host: Option<usize>,
     models_host: Option<&mut ModelsHost>,
 ) -> Result<Snapshot, DaemonError> {
-    let built = providers(config, path, max_idle_per_host, Mode::Serve, models_host)?;
+    let cooldowns = Arc::new(Cooldowns::with_clock(
+        CooldownPolicy::default(),
+        Arc::new(|| tokio::time::Instant::now().into_std()),
+    ));
+    let built = providers(
+        config,
+        path,
+        max_idle_per_host,
+        Mode::Serve,
+        models_host,
+        Some(Arc::clone(&cooldowns)),
+    )?;
     let caps: BTreeMap<&str, u64> = config
         .providers
         .iter()
@@ -299,7 +310,7 @@ fn router(
         connect_errors: config.failover.connect_errors,
         statuses: config.failover.statuses.clone(),
     };
-    membership::open(&built, routes, policy)
+    membership::open(&built, routes, policy, cooldowns)
 }
 
 #[derive(Clone, Copy)]
@@ -314,6 +325,7 @@ fn providers(
     max_idle_per_host: Option<usize>,
     mode: Mode,
     mut models_host: Option<&mut ModelsHost>,
+    cooldowns: Option<Arc<Cooldowns>>,
 ) -> Result<BTreeMap<String, membership::BuiltProvider>, DaemonError> {
     let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
     if let Some(max_idle_per_host) = max_idle_per_host {
@@ -329,7 +341,15 @@ fn providers(
         let timeout = endpoint.timeout;
         let protocol = protocol_of(planned.wire);
         let plugin_id = plugin_for(provider, planned.wire);
-        let adapter = build_plugin(provider, &planned, &endpoint, path, limits, mode)?;
+        let adapter = build_plugin(
+            provider,
+            &planned,
+            &endpoint,
+            path,
+            limits,
+            mode,
+            cooldowns.clone(),
+        )?;
         if let Some(host) = models_host.as_deref_mut() {
             host.register_instance(
                 provider.id.clone(),
@@ -391,6 +411,7 @@ fn build_plugin(
     path: &Path,
     limits: HttpLimits,
     mode: Mode,
+    cooldowns: Option<Arc<Cooldowns>>,
 ) -> Result<adapt::ProviderAdapter, DaemonError> {
     let plugin_id = plugin_for(provider, planned.wire);
     let raw = if let Some(preset) = &provider.preset
@@ -409,6 +430,7 @@ fn build_plugin(
         limits,
         true,
         matches!(mode, Mode::Check),
+        cooldowns,
     )?;
     Ok(adapt::ProviderAdapter::new(provider.id.clone(), upstream))
 }
@@ -423,6 +445,7 @@ fn build_raw_plugin(
     limits: HttpLimits,
     resolve_own_options: bool,
     preflight: bool,
+    cooldowns: Option<Arc<Cooldowns>>,
 ) -> Result<Arc<dyn UpstreamProvider>, DaemonError> {
     let factory = hofund_plugin_registry::factory(plugin_id)
         .ok_or_else(|| DaemonError::new(format!("no factory for plugin `{plugin_id}`")))?;
@@ -434,12 +457,18 @@ fn build_raw_plugin(
         factory.preflight(&raw).map_err(show)?;
     }
     let plugin = PluginId::try_from(plugin_id).map_err(show)?;
-    let host = hofund_plugin_host::runtime_host(
-        plugin,
-        api_key.to_owned(),
-        beside(path, ".hofund"),
-        limits,
-    )
+    let root = beside(path, ".hofund");
+    let host = if let Some(cooldowns) = cooldowns {
+        hofund_plugin_host::runtime_host_with_observe(
+            plugin,
+            api_key.to_owned(),
+            root,
+            limits,
+            membership::observe_backend(&provider.id, cooldowns),
+        )
+    } else {
+        hofund_plugin_host::runtime_host(plugin, api_key.to_owned(), root, limits)
+    }
     .map_err(show)?;
     factory.validate_and_build(&raw, &host).map_err(show)
 }

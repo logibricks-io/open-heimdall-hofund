@@ -214,6 +214,22 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | `desktop` | Menu-bar shell at `apps/desktop`. Renders status and calls the daemon and the agent adapters. |
 | `xtask` | Local workspace tasks and the architecture tests. |
 
+## Member cooldowns
+
+`hofund_router::Cooldowns` is the cooldown book: explicit, thread-safe state
+keyed by stable `MemberId`, not a process-global counter. The daemon membership
+table owns one shared book and injects it into every published `Router`, so
+cooldowns and failure ladders survive `Snapshot::store`. The default policy in
+`crates/router/src/cooldown.rs` covers generic and rate-limit ladders,
+`Retry-After` hints, quota and credit rests, passive observations, and timed
+panic rests. Non-positive header hints are absent, and positive header hints
+are capped at one hour for every failure cause. A passive observation rests a
+member only when its window is exhausted; its stated reset is capped at eight
+days. New events never shorten a longer active rest. The daemon records call
+and stream outcomes, but counts never record success and cool only on 429 or
+transport-class failures. The router only orders members, putting ready members
+first and retaining the soonest cooling member as a probe.
+
 ## What is intentionally absent
 
 - Routing strategies other than ordered failover.
@@ -224,6 +240,6 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
   process does re-read the bearer token file on each request, so
   `hofund token rotate` takes effect without a restart. `GET /health` is
   unauthenticated and returns no secrets.
-- There is no rest timer and no process-global route counter.
+- There is no process-global route counter.
 - Language packs. A future i18n pack is the other place, besides
   `README.<lang>.md`, where a language other than English may appear.
