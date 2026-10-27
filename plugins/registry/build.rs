@@ -37,6 +37,7 @@ fn run() -> Result<(), String> {
     println!("cargo:rerun-if-changed=plugins.toml");
     println!("cargo:rerun-if-changed=src/check.rs");
     println!("cargo:rerun-if-changed=src/agent_toml.rs");
+    println!("cargo:rerun-if-changed=src/reserved_agent_ids.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
     let text = fs::read_to_string("plugins.toml").map_err(|error| error.to_string())?;
     let listed = parse_list(&workspace, &text)?;

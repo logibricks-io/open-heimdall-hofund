@@ -43,7 +43,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Referenced so this crate's manifest dependency is compiled, not merely declared.
 use hofund_config as _;
@@ -137,23 +137,24 @@ impl Session {
     /// Captures the process environment and reads the home directory and `PATH`.
     #[must_use]
     pub fn from_process_env() -> Self {
-        Self {
-            home: home_dir(),
-            path: std::env::var_os("PATH"),
-            env: std::env::vars_os().collect(),
-            claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from),
-            codex_home: std::env::var_os("CODEX_HOME")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from),
-            gemini_cli_home: std::env::var_os("GEMINI_CLI_HOME")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from),
-            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from),
+        Self::from_env_iter(home_dir(), std::env::vars_os())
+    }
+
+    /// Builds a session from `home` and environment pairs without reading the
+    /// process environment. Empty and relative path overrides remain in the raw
+    /// environment map but are treated as unset by adapters.
+    #[must_use]
+    pub fn from_env_iter<I, K, V>(home: impl Into<PathBuf>, variables: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        let mut session = Self::new(home);
+        for (name, value) in variables {
+            session.set_env(name.as_ref(), value.as_ref());
         }
+        session
     }
 
     /// Returns an environment value captured in this session.
@@ -165,9 +166,21 @@ impl Session {
     /// Sets an environment value in this session.
     #[must_use]
     pub fn with_env(mut self, name: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
-        self.env
-            .insert(name.as_ref().to_os_string(), value.as_ref().to_os_string());
+        self.set_env(name.as_ref(), value.as_ref());
         self
+    }
+
+    fn set_env(&mut self, name: &OsStr, value: &OsStr) {
+        self.env.insert(name.to_os_string(), value.to_os_string());
+        let path = usable_override(value).then(|| PathBuf::from(value));
+        match name.to_str() {
+            Some("PATH") => self.path = Some(value.to_os_string()),
+            Some("CLAUDE_CONFIG_DIR") => self.claude_config_dir = path,
+            Some("CODEX_HOME") => self.codex_home = path,
+            Some("GEMINI_CLI_HOME") => self.gemini_cli_home = path,
+            Some("XDG_CONFIG_HOME") => self.xdg_config_home = path,
+            _ => {}
+        }
     }
 
     /// Sets the `PATH` used to detect an installed binary.
@@ -177,80 +190,46 @@ impl Session {
         self
     }
 
-    /// Sets `CLAUDE_CONFIG_DIR`. An empty path is treated as unset. A relative
-    /// path is joined to the home directory.
+    /// Sets `CLAUDE_CONFIG_DIR`. Empty and relative paths are treated as unset.
     #[must_use]
     pub fn with_claude_config_dir(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        self.claude_config_dir = (!path.as_os_str().is_empty()).then_some(path);
-        if let Some(path) = &self.claude_config_dir {
-            self.env.insert(
-                OsString::from("CLAUDE_CONFIG_DIR"),
-                path.as_os_str().to_os_string(),
-            );
-        } else {
-            self.env
-                .insert(OsString::from("CLAUDE_CONFIG_DIR"), OsString::new());
-        }
+        self.set_env(OsStr::new("CLAUDE_CONFIG_DIR"), path.as_os_str());
         self
     }
 
-    /// Sets `CODEX_HOME`. An empty path is treated as unset. A relative path is
-    /// joined to the home directory.
+    /// Sets `CODEX_HOME`. Empty and relative paths are treated as unset.
     #[must_use]
     pub fn with_codex_home(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        self.codex_home = (!path.as_os_str().is_empty()).then_some(path);
-        if let Some(path) = &self.codex_home {
-            self.env.insert(
-                OsString::from("CODEX_HOME"),
-                path.as_os_str().to_os_string(),
-            );
-        } else {
-            self.env
-                .insert(OsString::from("CODEX_HOME"), OsString::new());
-        }
+        self.set_env(OsStr::new("CODEX_HOME"), path.as_os_str());
         self
     }
 
-    /// Sets `GEMINI_CLI_HOME`. An empty path is treated as unset. A relative
-    /// path is joined to the home directory.
+    /// Sets `GEMINI_CLI_HOME`. Empty and relative paths are treated as unset.
     #[must_use]
     pub fn with_gemini_cli_home(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        self.gemini_cli_home = (!path.as_os_str().is_empty()).then_some(path);
-        if let Some(path) = &self.gemini_cli_home {
-            self.env.insert(
-                OsString::from("GEMINI_CLI_HOME"),
-                path.as_os_str().to_os_string(),
-            );
-        } else {
-            self.env
-                .insert(OsString::from("GEMINI_CLI_HOME"), OsString::new());
-        }
+        self.set_env(OsStr::new("GEMINI_CLI_HOME"), path.as_os_str());
         self
     }
 
-    /// Sets `XDG_CONFIG_HOME`. An empty path is treated as unset. A relative
-    /// path is joined to the home directory.
+    /// Sets `XDG_CONFIG_HOME`. Empty and relative paths are treated as unset.
     ///
     /// OpenCode reads `$XDG_CONFIG_HOME/opencode` when this is set. Other
     /// agents ignore it.
     #[must_use]
     pub fn with_xdg_config_home(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        self.xdg_config_home = (!path.as_os_str().is_empty()).then_some(path);
-        if let Some(path) = &self.xdg_config_home {
-            self.env.insert(
-                OsString::from("XDG_CONFIG_HOME"),
-                path.as_os_str().to_os_string(),
-            );
-        } else {
-            self.env
-                .insert(OsString::from("XDG_CONFIG_HOME"), OsString::new());
-        }
+        self.set_env(OsStr::new("XDG_CONFIG_HOME"), path.as_os_str());
         self
     }
+}
+
+pub(crate) fn usable_override(value: &OsStr) -> bool {
+    !value.is_empty()
+        && (Path::new(value).is_absolute()
+            || (cfg!(windows) && matches!(value.as_encoded_bytes().first(), Some(b'\\' | b'/'))))
 }
 
 /// One managed file as it exists before an edit.
@@ -384,6 +363,26 @@ fn home_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::Session;
+
+    #[test]
+    fn from_env_iter_ignores_empty_and_relative_path_overrides() {
+        let names = [
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+            "GEMINI_CLI_HOME",
+            "XDG_CONFIG_HOME",
+        ];
+        for value in ["", "relative"] {
+            let session = Session::from_env_iter("home", names.map(|name| (name, value)));
+            assert_eq!(session.claude_config_dir, None);
+            assert_eq!(session.codex_home, None);
+            assert_eq!(session.gemini_cli_home, None);
+            assert_eq!(session.xdg_config_home, None);
+            for name in names {
+                assert_eq!(session.env(name), Some(std::ffi::OsStr::new(value)));
+            }
+        }
+    }
 
     #[test]
     fn debug_shows_environment_names_without_values() {

@@ -335,11 +335,11 @@ fn path_resolution_selects_os_and_handles_environment_overrides() {
     let session = Session::new(&home).with_env("EXAMPLE_HOME", "relative");
     assert_eq!(
         resolve(&PATH_FILE, TargetOs::Linux, &session),
-        home.join("relative").join("config.json")
+        home.join(".linux").join("config.json")
     );
     assert_eq!(
         resolve(&EXPLICIT_PATH_FILE, TargetOs::Linux, &session),
-        home.join("relative").join("example").join(".env")
+        home.join(".config").join("example").join(".env")
     );
 
     let session = Session::new(&home).with_env("EXAMPLE_HOME", "");
@@ -349,74 +349,157 @@ fn path_resolution_selects_os_and_handles_environment_overrides() {
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+enum OverrideSource {
+    NamedSetter,
+    WithEnv,
+    FromEnvIter,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OverrideValue {
+    Empty,
+    Absolute,
+    Relative,
+}
+
 #[test]
-fn empty_overrides_use_default_paths_for_const_and_compiled_adapters() {
+fn environment_overrides_match_for_const_and_compiled_adapters() {
     let target = target_with(&["route-a"]);
     for description in DESCRIPTIONS {
         let id = description.id().as_str();
         let const_adapter = find(id).expect("static adapter");
         let compiled = Compiled::new(description);
-        for named_setter in [true, false] {
-            let context = format!("{id} / named_setter={named_setter}");
-            let const_default_home = scratch();
-            let compiled_default_home = scratch();
-            let const_empty_home = scratch();
-            let compiled_empty_home = scratch();
-            let const_default = Session::new(&const_default_home);
-            let compiled_default = Session::new(&compiled_default_home);
-            let const_empty = empty_override_session(&const_empty_home, id, named_setter);
-            let compiled_empty = empty_override_session(&compiled_empty_home, id, named_setter);
+        for source in [
+            OverrideSource::NamedSetter,
+            OverrideSource::WithEnv,
+            OverrideSource::FromEnvIter,
+        ] {
+            for value_kind in [
+                OverrideValue::Empty,
+                OverrideValue::Absolute,
+                OverrideValue::Relative,
+            ] {
+                let context = format!("{id} / {source:?} / {value_kind:?}");
+                let const_default_home = scratch();
+                let compiled_default_home = scratch();
+                let const_override_home = scratch();
+                let compiled_override_home = scratch();
+                let const_default = Session::new(&const_default_home);
+                let compiled_default = Session::new(&compiled_default_home);
+                let const_value = override_value(&const_override_home, value_kind);
+                let compiled_value = override_value(&compiled_override_home, value_kind);
+                let const_override =
+                    override_session(&const_override_home, id, &const_value, source);
+                let compiled_override =
+                    override_session(&compiled_override_home, id, &compiled_value, source);
 
-            let const_default_plan = const_adapter
-                .plan(&const_default, &target)
-                .expect("const default plan");
-            let const_empty_plan = const_adapter
-                .plan(&const_empty, &target)
-                .expect("const empty plan");
-            let compiled_default_plan = compiled
-                .plan(&compiled_default, &target)
-                .expect("compiled default plan");
-            let compiled_empty_plan = compiled
-                .plan(&compiled_empty, &target)
-                .expect("compiled empty plan");
-            assert_plan(
-                &const_default_plan,
-                &const_empty_plan,
-                &const_default_home,
-                &const_empty_home,
-                &context,
-            );
-            assert_plan(
-                &compiled_default_plan,
-                &compiled_empty_plan,
-                &compiled_default_home,
-                &compiled_empty_home,
-                &context,
-            );
-            assert_plan(
-                &const_empty_plan,
-                &compiled_empty_plan,
-                &const_empty_home,
-                &compiled_empty_home,
-                &context,
-            );
+                let const_default_plan = const_adapter
+                    .plan(&const_default, &target)
+                    .expect("const default plan");
+                let compiled_default_plan = compiled
+                    .plan(&compiled_default, &target)
+                    .expect("compiled default plan");
+                let const_override_plan = const_adapter
+                    .plan(&const_override, &target)
+                    .expect("const override plan");
+                let compiled_override_plan = compiled
+                    .plan(&compiled_override, &target)
+                    .expect("compiled override plan");
+                if matches!(value_kind, OverrideValue::Absolute) {
+                    assert_eq!(
+                        planned_paths(&const_override_plan, &const_override_home),
+                        expected_absolute_paths(id),
+                        "{context}: const absolute paths"
+                    );
+                    assert_eq!(
+                        planned_paths(&compiled_override_plan, &compiled_override_home),
+                        expected_absolute_paths(id),
+                        "{context}: compiled absolute paths"
+                    );
+                } else {
+                    assert_plan(
+                        &const_default_plan,
+                        &const_override_plan,
+                        &const_default_home,
+                        &const_override_home,
+                        &context,
+                    );
+                    assert_plan(
+                        &compiled_default_plan,
+                        &compiled_override_plan,
+                        &compiled_default_home,
+                        &compiled_override_home,
+                        &context,
+                    );
+                }
+                assert_plan(
+                    &const_override_plan,
+                    &compiled_override_plan,
+                    &const_override_home,
+                    &compiled_override_home,
+                    &context,
+                );
+            }
         }
     }
 }
 
-fn empty_override_session(home: &Path, id: &str, named_setter: bool) -> Session {
+fn override_value(home: &Path, kind: OverrideValue) -> PathBuf {
+    match kind {
+        OverrideValue::Empty => PathBuf::new(),
+        OverrideValue::Absolute => home.join("absolute-override"),
+        OverrideValue::Relative => PathBuf::from("relative-override"),
+    }
+}
+
+fn override_session(home: &Path, id: &str, value: &Path, source: OverrideSource) -> Session {
+    let name = match id {
+        "claude-code" => "CLAUDE_CONFIG_DIR",
+        "codex" => "CODEX_HOME",
+        "gemini-cli" => "GEMINI_CLI_HOME",
+        "opencode" => "XDG_CONFIG_HOME",
+        _ => panic!("unknown description {id}"),
+    };
     let session = Session::new(home);
-    match (id, named_setter) {
-        ("claude-code", true) => session.with_claude_config_dir(""),
-        ("codex", true) => session.with_codex_home(""),
-        ("gemini-cli", true) => session.with_gemini_cli_home(""),
-        ("opencode", true) => session.with_xdg_config_home(""),
-        ("claude-code", false) => session.with_env("CLAUDE_CONFIG_DIR", ""),
-        ("codex", false) => session.with_env("CODEX_HOME", ""),
-        ("gemini-cli", false) => session.with_env("GEMINI_CLI_HOME", ""),
-        ("opencode", false) => session.with_env("XDG_CONFIG_HOME", ""),
+    match (id, source) {
+        (_, OverrideSource::WithEnv) => session.with_env(name, value),
+        (_, OverrideSource::FromEnvIter) => {
+            Session::from_env_iter(home, [(name, value.as_os_str())])
+        }
+        ("claude-code", OverrideSource::NamedSetter) => session.with_claude_config_dir(value),
+        ("codex", OverrideSource::NamedSetter) => session.with_codex_home(value),
+        ("gemini-cli", OverrideSource::NamedSetter) => session.with_gemini_cli_home(value),
+        ("opencode", OverrideSource::NamedSetter) => session.with_xdg_config_home(value),
         _ => panic!("unknown description {id}"),
     }
+}
+
+fn planned_paths(plan: &hofund_agent::Plan, home: &Path) -> Vec<PathBuf> {
+    plan.changes()
+        .iter()
+        .map(|change| {
+            change
+                .path()
+                .strip_prefix(home)
+                .expect("override path in home")
+                .to_path_buf()
+        })
+        .collect()
+}
+
+fn expected_absolute_paths(id: &str) -> Vec<PathBuf> {
+    let paths: &[&str] = match id {
+        "claude-code" => &["absolute-override/settings.json"],
+        "codex" => &["absolute-override/config.toml"],
+        "gemini-cli" => &[
+            "absolute-override/.gemini/settings.json",
+            "absolute-override/.gemini/.env",
+        ],
+        "opencode" => &["absolute-override/opencode/opencode.json"],
+        _ => panic!("unknown description {id}"),
+    };
+    paths.iter().map(PathBuf::from).collect()
 }
 
 #[test]
@@ -779,16 +862,12 @@ fn prepare(home: &Path, description: &AgentDescription, case: &MatrixCase) {
     }
 }
 
-fn override_root(home: &Path, id: &str, override_dir: Option<&str>) -> PathBuf {
-    match (id, override_dir) {
-        ("claude-code", Some(path)) => home.join(path),
-        ("claude-code", None) => home.join(".claude"),
-        ("codex", Some(path)) => home.join(path),
-        ("codex", None) => home.join(".codex"),
-        ("gemini-cli", Some(path)) => home.join(path),
-        ("gemini-cli", None) => home.to_path_buf(),
-        ("opencode", Some(path)) => home.join(path),
-        ("opencode", None) => home.join(".config"),
+fn override_root(home: &Path, id: &str, _override_dir: Option<&str>) -> PathBuf {
+    match id {
+        "claude-code" => home.join(".claude"),
+        "codex" => home.join(".codex"),
+        "gemini-cli" => home.to_path_buf(),
+        "opencode" => home.join(".config"),
         _ => panic!("unknown description {id}"),
     }
 }

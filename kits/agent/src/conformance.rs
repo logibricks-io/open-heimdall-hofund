@@ -22,6 +22,7 @@ struct Case {
     refreshed_token: String,
     #[serde(default)]
     configured_model: Option<String>,
+    only: Option<Vec<String>>,
 }
 
 const OPERATING_SYSTEMS: [(&str, TargetOs); 3] = [
@@ -34,6 +35,8 @@ const OPERATING_SYSTEMS: [(&str, TargetOs); 3] = [
 ///
 /// Cases under `all/` run on Linux, macOS, and Windows; cases under an OS
 /// directory run only on that OS. A case name cannot occur in both layouts.
+/// Per-OS cases must occur in every OS directory unless `only` names their
+/// exact directories; `only` is not valid in `all/`. Every OS needs coverage.
 /// Identical per-OS trees and shared cases whose resolved paths differ by OS
 /// are layout errors. Each case has a `case.toml`, an optional `before/` home
 /// tree, and an `after/` tree containing the files changed by connect. Status
@@ -44,15 +47,8 @@ const OPERATING_SYSTEMS: [(&str, TargetOs); 3] = [
 /// `UPDATE_GOLDEN=1` rewrites `after/`, then moves identical three-OS cases to
 /// `all/` and removes their duplicates.
 pub fn conformance(description: &'static AgentDescription, fixtures: &Path) {
-    let shared = golden_cases(&fixtures.join("all"));
-    let per_os = OPERATING_SYSTEMS
-        .map(|(directory, os)| (directory, os, golden_cases(&fixtures.join(directory))));
-    assert!(
-        !shared.is_empty() || per_os.iter().any(|(_, _, cases)| !cases.is_empty()),
-        "{} has no golden cases",
-        description.id().as_str()
-    );
-    validate_layout(description, fixtures, &shared, &per_os);
+    let (shared, per_os) = golden_layout(description, fixtures)
+        .unwrap_or_else(|error| panic!("{}: {error}", description.id().as_str()));
 
     for case in &shared {
         verify_shared_paths(description, case);
@@ -70,17 +66,56 @@ pub fn conformance(description: &'static AgentDescription, fixtures: &Path) {
     }
 }
 
-fn golden_cases(root: &Path) -> Vec<PathBuf> {
-    let mut cases = match fs::read_dir(root) {
-        Ok(entries) => entries
-            .map(|entry| entry.expect("read golden case").path())
-            .filter(|path| path.join("case.toml").is_file())
-            .collect::<Vec<_>>(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => panic!("read {}: {error}", root.display()),
-    };
+type GoldenLayout = (Vec<PathBuf>, [(&'static str, TargetOs, Vec<PathBuf>); 3]);
+
+fn golden_layout(
+    description: &'static AgentDescription,
+    fixtures: &Path,
+) -> Result<GoldenLayout, String> {
+    let shared = golden_cases(&fixtures.join("all"))?;
+    let per_os = [
+        (
+            "linux",
+            TargetOs::Linux,
+            golden_cases(&fixtures.join("linux"))?,
+        ),
+        (
+            "macos",
+            TargetOs::Macos,
+            golden_cases(&fixtures.join("macos"))?,
+        ),
+        (
+            "windows",
+            TargetOs::Windows,
+            golden_cases(&fixtures.join("windows"))?,
+        ),
+    ];
+    validate_layout(description, fixtures, &shared, &per_os)?;
+    Ok((shared, per_os))
+}
+
+fn golden_cases(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut cases = Vec::new();
+    match fs::read_dir(root) {
+        Ok(entries) => {
+            for entry in entries {
+                let path = entry
+                    .map_err(|error| format!("read {}: {error}", root.display()))?
+                    .path();
+                if !path.join("case.toml").is_file() {
+                    return Err(format!(
+                        "golden case directory {} must contain case.toml",
+                        path.display()
+                    ));
+                }
+                cases.push(path);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("read {}: {error}", root.display())),
+    }
     cases.sort();
-    cases
+    Ok(cases)
 }
 
 fn validate_layout(
@@ -88,39 +123,125 @@ fn validate_layout(
     fixtures: &Path,
     shared: &[PathBuf],
     per_os: &[(&str, TargetOs, Vec<PathBuf>); 3],
-) {
-    for case in shared {
-        let name = case_name(case);
-        for (directory, _, cases) in per_os {
-            assert!(
-                !cases.iter().any(|candidate| case_name(candidate) == name),
-                "{}: case `{name}` occurs in both all/ and {directory}/",
-                description.id().as_str()
-            );
+) -> Result<(), String> {
+    match fs::read_dir(fixtures) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry =
+                    entry.map_err(|error| format!("read {}: {error}", fixtures.display()))?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !OPERATING_SYSTEMS
+                    .iter()
+                    .any(|(directory, _)| *directory == name)
+                    && name != "all"
+                {
+                    return Err(format!(
+                        "unknown top-level fixture entry `{name}` at {}",
+                        entry.path().display()
+                    ));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("read {}: {error}", fixtures.display())),
+    }
+    for (directory, _, cases) in per_os {
+        if shared.is_empty() && cases.is_empty() {
+            return Err(format!("{directory} has no golden cases"));
         }
     }
-    if updating_goldens() {
-        return;
+    for case in shared {
+        if case_targets(case)?.is_some() {
+            return Err(format!(
+                "shared case `{}` must not declare only",
+                case.display()
+            ));
+        }
+        let name = case_name(case);
+        for (directory, _, cases) in per_os {
+            if cases.iter().any(|candidate| case_name(candidate) == name) {
+                return Err(format!(
+                    "{}: case `{name}` occurs in both all/ and {directory}/",
+                    description.id().as_str()
+                ));
+            }
+        }
     }
 
-    let mut by_name: BTreeMap<&str, Vec<&Path>> = BTreeMap::new();
-    for (_, _, cases) in per_os {
+    let mut by_name: BTreeMap<&str, Vec<(&str, &Path)>> = BTreeMap::new();
+    for (directory, _, cases) in per_os {
         for case in cases {
-            by_name.entry(case_name(case)).or_default().push(case);
+            by_name
+                .entry(case_name(case))
+                .or_default()
+                .push((directory, case));
         }
     }
     for (name, cases) in by_name {
-        if cases.len() < 2 {
-            continue;
+        let targets = case_targets(cases[0].1)?;
+        for (_, case) in cases.iter().skip(1) {
+            if case_targets(case)? != targets {
+                return Err(format!("case `{name}` has inconsistent only declarations"));
+            }
         }
-        let first = tree(cases[0]);
-        assert!(
-            cases.iter().skip(1).any(|case| tree(case) != first),
-            "{}: case `{name}` has byte-identical per-OS trees in {}; move it to all/",
-            description.id().as_str(),
-            fixtures.display()
+        let expected = targets.as_ref().map_or_else(
+            || {
+                OPERATING_SYSTEMS
+                    .iter()
+                    .map(|(directory, _)| (*directory).to_owned())
+                    .collect::<BTreeSet<_>>()
+            },
+            |targets| targets.clone(),
         );
+        let actual = cases
+            .iter()
+            .map(|(directory, _)| (*directory).to_owned())
+            .collect::<BTreeSet<_>>();
+        if actual != expected {
+            return Err(format!(
+                "case `{name}` occurs in {actual:?}, but its layout requires {expected:?}"
+            ));
+        }
+        if targets.is_none() && !updating_goldens() {
+            let first = tree(cases[0].1);
+            if cases.iter().skip(1).all(|(_, case)| tree(case) == first) {
+                return Err(format!(
+                    "{}: case `{name}` has byte-identical per-OS trees in {}; the trees must differ or the case must be shared via all/ for all three OS",
+                    description.id().as_str(),
+                    fixtures.display()
+                ));
+            }
+        }
     }
+    Ok(())
+}
+
+fn case_targets(case: &Path) -> Result<Option<BTreeSet<String>>, String> {
+    let path = case.join("case.toml");
+    let text =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let parsed: Case =
+        toml::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))?;
+    parsed
+        .only
+        .map(|only| {
+            only.into_iter()
+                .map(|directory| {
+                    if OPERATING_SYSTEMS
+                        .iter()
+                        .any(|(candidate, _)| *candidate == directory)
+                    {
+                        Ok(directory)
+                    } else {
+                        Err(format!(
+                            "case `{}` declares unknown OS `{directory}` in only",
+                            case.display()
+                        ))
+                    }
+                })
+                .collect()
+        })
+        .transpose()
 }
 
 fn case_name(case: &Path) -> &str {
@@ -199,7 +320,11 @@ fn dedupe_goldens(fixtures: &Path, per_os: &[(&str, TargetOs, Vec<PathBuf>); 3])
 }
 
 fn updating_goldens() -> bool {
-    std::env::var_os("UPDATE_GOLDEN").is_some()
+    updating_goldens_value(std::env::var_os("UPDATE_GOLDEN").as_deref())
+}
+
+fn updating_goldens_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
 }
 
 fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Path) {
@@ -215,7 +340,7 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
     let target = GatewayTarget::new(&case.base_url, &case.token, case.routes.clone());
     let adapter = Compiled::new(description).with_os(os);
     let after_dir = case_dir.join("after");
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+    if updating_goldens() {
         let plan = adapter.plan(&session, &target).expect("golden plan");
         update_golden(&home, &after_dir, &plan);
     }
@@ -363,14 +488,9 @@ fn read_case(case_dir: &Path) -> Case {
         .unwrap_or_else(|error| panic!("{label}: parse case.toml: {error}"))
 }
 
-fn gateway_values(case: &Case) -> [String; 4] {
+fn gateway_values(case: &Case) -> [String; 3] {
     let origin = case.base_url.trim_end_matches('/').to_owned();
-    [
-        origin.clone(),
-        format!("{origin}/v1"),
-        case.token.clone(),
-        case.refreshed_token.clone(),
-    ]
+    [origin, case.token.clone(), case.refreshed_token.clone()]
 }
 
 fn surviving_gateway_values<'a>(text: &str, values: &'a [String]) -> Vec<&'a str> {
@@ -623,8 +743,8 @@ mod tests {
     };
 
     use super::{
-        BTreeMap, Case, TargetOs, fs, gateway_values, run_case, scratch, surviving_gateway_values,
-        write,
+        BTreeMap, Case, TargetOs, fs, gateway_values, golden_layout, run_case, scratch,
+        surviving_gateway_values, updating_goldens_value, write,
     };
 
     static OS_FILES: [AgentFile; 1] = [AgentFile::from_static(
@@ -652,6 +772,132 @@ mod tests {
         &[],
     );
 
+    fn write_layout_case(
+        root: &std::path::Path,
+        directory: &str,
+        name: &str,
+        only: Option<&[&str]>,
+    ) {
+        let only = only.map_or_else(String::new, |directories| {
+            let directories = directories
+                .iter()
+                .map(|directory| format!("\"{directory}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("only = [{directories}]\n")
+        });
+        write(
+            &root.join(directory).join(name).join("case.toml"),
+            format!(
+                "routes = []\nbase_url = \"http://127.0.0.1:3425/\"\ntoken = \"old-token\"\nrefreshed_token = \"refreshed-token\"\n{only}"
+            )
+            .as_bytes(),
+        );
+        write(
+            &root
+                .join(directory)
+                .join(name)
+                .join("after")
+                .join(directory)
+                .join("fixture.env"),
+            b"FIXTURE_TOKEN=old-token\n",
+        );
+    }
+
+    fn layout_error(root: &std::path::Path) -> String {
+        golden_layout(&OS_DESCRIPTION, root)
+            .map(|_| ())
+            .expect_err("invalid fixture layout")
+    }
+
+    #[test]
+    fn fixture_layout_rejects_unknown_top_level_entry() {
+        let root = scratch();
+        for directory in ["linux", "macOS", "windows"] {
+            write_layout_case(&root, directory, "fresh", None);
+        }
+        let error = layout_error(&root);
+        assert!(error.contains("macOS"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fixture_layout_requires_every_os() {
+        let root = scratch();
+        for directory in ["linux", "macos"] {
+            write_layout_case(&root, directory, "fresh", None);
+        }
+        let error = layout_error(&root);
+        assert!(error.contains("windows has no golden cases"), "{error}");
+        let _ = fs::remove_dir_all(&root);
+
+        let root = scratch();
+        for directory in ["linux", "windows"] {
+            write_layout_case(&root, directory, "fresh", None);
+        }
+        let error = layout_error(&root);
+        assert!(error.contains("macos has no golden cases"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fixture_layout_requires_complete_per_os_cases() {
+        let root = scratch();
+        write_layout_case(&root, "all", "shared", None);
+        for directory in ["macos", "windows"] {
+            write_layout_case(&root, directory, "fresh", None);
+        }
+        let error = layout_error(&root);
+        assert!(error.contains("layout requires"), "{error}");
+        assert!(error.contains("linux"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fixture_layout_requires_case_toml() {
+        let root = scratch();
+        fs::create_dir_all(root.join("all").join("broken")).expect("case directory");
+        let error = layout_error(&root);
+        assert!(error.contains("must contain case.toml"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fixture_layout_enforces_only() {
+        let root = scratch();
+        write_layout_case(&root, "all", "shared", None);
+        for directory in ["linux", "windows"] {
+            write_layout_case(&root, directory, "selected", Some(&["linux", "windows"]));
+        }
+        golden_layout(&OS_DESCRIPTION, &root).expect("only layout");
+
+        write_layout_case(&root, "windows", "selected", Some(&["linux"]));
+        let error = layout_error(&root);
+        assert!(error.contains("inconsistent only"), "{error}");
+
+        write_layout_case(&root, "all", "shared", Some(&["linux"]));
+        let error = layout_error(&root);
+        assert!(error.contains("must not declare only"), "{error}");
+        let _ = fs::remove_dir_all(&root);
+
+        let root = scratch();
+        write_layout_case(&root, "all", "shared", None);
+        write_layout_case(&root, "linux", "selected", Some(&["plan9"]));
+        let error = layout_error(&root);
+        assert!(error.contains("unknown OS `plan9`"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn real_fixture_trees_pass_layout_validation() {
+        let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/registry/tests/fixtures/agents");
+        for id in ["fixture-toml-agent", "fixture-json-agent"] {
+            golden_layout(&OS_DESCRIPTION, &agents.join(id).join("fixtures"))
+                .unwrap_or_else(|error| panic!("{id}: {error}"));
+        }
+    }
+
     #[test]
     fn conformance_rejects_goldens_for_the_wrong_os() {
         let root = scratch();
@@ -678,6 +924,22 @@ refreshed_token = "refreshed-token"
     }
 
     #[test]
+    fn golden_updates_require_the_exact_value_one() {
+        for (value, expected) in [
+            (None, false),
+            (Some(""), false),
+            (Some("0"), false),
+            (Some("true"), false),
+            (Some("1"), true),
+        ] {
+            assert_eq!(
+                updating_goldens_value(value.map(std::ffi::OsStr::new)),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn drift_check_detects_origin_without_trailing_slash() {
         let case = Case {
             env: BTreeMap::new(),
@@ -686,8 +948,13 @@ refreshed_token = "refreshed-token"
             token: "old-token".to_owned(),
             refreshed_token: "refreshed-token".to_owned(),
             configured_model: None,
+            only: None,
         };
         let values = gateway_values(&case);
+        assert_eq!(
+            values,
+            ["http://127.0.0.1:3425", "old-token", "refreshed-token"]
+        );
         assert_eq!(
             surviving_gateway_values("FIXTURE_ORIGIN=http://127.0.0.1:3425\n", &values),
             vec!["http://127.0.0.1:3425"]

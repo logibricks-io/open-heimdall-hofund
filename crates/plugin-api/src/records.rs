@@ -1331,7 +1331,8 @@ impl AgentFile {
         self.windows
     }
 
-    /// Environment variable that replaces the path, when set.
+    /// Environment variable that replaces the path when its value is absolute.
+    /// Empty and relative values are treated as unset.
     #[must_use]
     pub const fn env_override(&self) -> Option<&'static str> {
         self.env_override
