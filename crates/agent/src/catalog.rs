@@ -109,7 +109,13 @@ const CLAUDE_CODE: Description = Description {
 ///
 /// User settings are `~/.gemini/settings.json`. `GEMINI_CLI_HOME` is the
 /// parent directory: `.gemini` is created inside it. `.gemini/.env` is loaded
-/// by the CLI and is not excluded.
+/// by the CLI and is not excluded. Gemini CLI's `homedir()` in
+/// `packages/core/src/utils/paths.ts` returns `GEMINI_CLI_HOME` when set, and
+/// `getGlobalGeminiDir` in `packages/core/src/config/storage.ts` joins that
+/// home with `.gemini`. Both files deliberately follow that resolution instead
+/// of always using the user home (`reference: internal/agent/gemini.go:28-31`);
+/// trace discovery uses the same override
+/// (`reference: internal/sessions/traces_gemini.go:17-22`).
 ///
 /// `security.auth.selectedType` is set to `gemini-api-key`. The string values
 /// of that enum are not listed in the public docs; they come from
