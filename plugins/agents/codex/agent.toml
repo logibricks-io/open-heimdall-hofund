@@ -1,0 +1,55 @@
+id = "codex"
+display_name = "Codex CLI"
+binary = "codex"
+
+# The file is ~/.codex/config.toml. CODEX_HOME replaces ~/.codex.
+# Provider ids openai, ollama, and lmstudio are reserved, so the provider id
+# here is hofund.
+[[file]]
+id = "config"
+kind = "toml"
+linux = "~/.codex/config.toml"
+macos = "~/.codex/config.toml"
+windows = "~/.codex/config.toml"
+env_override = "CODEX_HOME"
+env_replaces = "~/.codex"
+create = true
+
+# model_provider selects the hofund table. base_url includes /v1 because
+# wire_api = "responses" posts to {base_url}/responses.
+[[set]]
+file = "config"
+key = "model_provider"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "config"
+key = "model_providers.hofund.name"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "config"
+key = "model_providers.hofund.base_url"
+slot = "v1"
+
+[[set]]
+file = "config"
+key = "model_providers.hofund.wire_api"
+slot = { literal = "responses" }
+
+# experimental_bearer_token carries the gateway token. Codex documents that
+# field as discouraged next to env_key, and it must not be combined with
+# env_key or requires_openai_auth. The hofund token lives in a file, not in the
+# shell, so this is the documented field that connects without a separate
+# export. requires_openai_auth is not set.
+[[set]]
+file = "config"
+key = "model_providers.hofund.experimental_bearer_token"
+slot = "token"
+
+# The user's model key is left alone. Connect compares that string with route
+# names when it is set.
+# Source: https://developers.openai.com/codex/config-reference
+[model]
+file = "config"
+key = "model"

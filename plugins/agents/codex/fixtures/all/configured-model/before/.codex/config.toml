@@ -1,0 +1,2 @@
+model = "configured-user-model"
+# Model discovery must return the exact user string.

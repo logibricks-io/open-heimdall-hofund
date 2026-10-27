@@ -1,4 +1,4 @@
-//! Equivalence tests for compiled descriptions and the four const adapters.
+//! Equivalence tests for compiled descriptions and const-backed adapters.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -222,6 +222,14 @@ static OPENCODE: AgentDescription = AgentDescription::from_static(
 
 static DESCRIPTIONS: &[&AgentDescription] = &[&CLAUDE, &CODEX, &GEMINI, &OPENCODE];
 
+fn const_adapter(id: &str) -> &'static dyn AgentAdapter {
+    if id == "codex" {
+        hofund_agent::legacy::codex()
+    } else {
+        find(id).expect("static adapter")
+    }
+}
+
 static PATH_FILE: AgentFile = AgentFile::from_static(
     "config",
     FileKind::Json,
@@ -254,7 +262,7 @@ static EXTRA: AgentDescription = AgentDescription::from_static(
     &[],
 );
 
-static EXTRA_LIST: &[&AgentDescription] = &[&EXTRA];
+static CODEX_AND_EXTRA_LIST: &[&AgentDescription] = &[&CODEX, &EXTRA];
 static CLAUDE_LIST: &[&AgentDescription] = &[&CLAUDE];
 static DUPLICATE_LIST: &[&AgentDescription] = &[&EXTRA, &EXTRA];
 
@@ -368,7 +376,7 @@ fn environment_overrides_match_for_const_and_compiled_adapters() {
     let target = target_with(&["route-a"]);
     for description in DESCRIPTIONS {
         let id = description.id().as_str();
-        let const_adapter = find(id).expect("static adapter");
+        let const_adapter = const_adapter(id);
         let compiled = Compiled::new(description);
         for source in [
             OverrideSource::NamedSetter,
@@ -505,10 +513,10 @@ fn expected_absolute_paths(id: &str) -> Vec<PathBuf> {
 #[test]
 fn catalog_checks_collisions_and_keeps_builtins_first() {
     let empty = catalog(&[]).expect("empty compiled catalog");
-    assert_eq!(empty.adapters().len(), 4);
-    assert!(empty.find("codex").is_some());
+    assert_eq!(empty.adapters().len(), 3);
+    assert!(empty.find("codex").is_none());
 
-    let with_extra = catalog(EXTRA_LIST).expect("extra catalog");
+    let with_extra = catalog(CODEX_AND_EXTRA_LIST).expect("extra catalog");
     let ids = with_extra
         .adapters()
         .into_iter()
@@ -635,7 +643,7 @@ fn compiled_matches_const_adapters_across_the_edit_lifecycle() {
     ];
 
     for description in DESCRIPTIONS {
-        let const_adapter = find(description.id().as_str()).expect("static adapter");
+        let const_adapter = const_adapter(description.id().as_str());
         let compiled = Compiled::new(description).with_os(TargetOs::Linux);
         for case in &cases {
             let context = format!("{} / {}", description.id().as_str(), case.name);

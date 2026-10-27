@@ -1,0 +1,9 @@
+# The default path is used for an empty override.
+model = "empty-override-model"
+model_provider = "hofund"
+
+[model_providers.hofund]
+name = "hofund"
+base_url = "http://127.0.0.1:3425/v1"
+wire_api = "responses"
+experimental_bearer_token = "old-token"

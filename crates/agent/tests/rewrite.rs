@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hofund_agent::{DisconnectOutcome, GatewayTarget, Session, find};
+use hofund_agent::{DisconnectOutcome, GatewayTarget, Session, find, legacy};
 use sha2::{Digest, Sha256};
 
 fn scratch() -> PathBuf {
@@ -21,6 +21,14 @@ fn target() -> GatewayTarget {
 
 fn target_with(models: &[&str]) -> GatewayTarget {
     target().with_models(models.iter().map(|model| (*model).to_owned()).collect())
+}
+
+fn adapter(id: &str) -> &'static dyn hofund_agent::AgentAdapter {
+    if id == "codex" {
+        legacy::codex()
+    } else {
+        find(id).expect(id)
+    }
 }
 
 fn write(path: &Path, bytes: &str) {
@@ -88,7 +96,7 @@ fn apply_is_idempotent_and_revert_restores_the_original_bytes() {
         let untouched = home.join("notes.txt");
         write(&untouched, "leave me\n");
         let session = Session::new(&home);
-        let adapter = find(case.id).expect(case.id);
+        let adapter = adapter(case.id);
 
         let preview = adapter.plan(&session, &gateway).expect("plan");
         assert!(!preview.changes().is_empty(), "{}", case.id);
@@ -196,7 +204,7 @@ fn invalid_toml_does_not_leave_a_backup() {
     let path = home.join(".codex").join("config.toml");
     write(&path, "model_provider = [\n");
     let session = Session::new(&home);
-    let adapter = find("codex").expect("codex");
+    let adapter = legacy::codex();
     assert!(adapter.plan(&session, &target()).is_err());
     assert!(!sibling(&path, ".hofund.bak").exists());
     assert_eq!(read(&path), "model_provider = [\n");
@@ -217,7 +225,7 @@ fn overrides_and_path_detection_do_not_use_the_real_home() {
     let file_name = if cfg!(windows) { "codex.exe" } else { "codex" };
     write(&bin.join(file_name), "");
     let session = Session::new(&home).with_path(&bin);
-    assert!(find("codex").expect("codex").detect(&session));
+    assert!(legacy::codex().detect(&session));
     assert!(!find("gemini-cli").expect("gemini").detect(&session));
 }
 
@@ -227,10 +235,7 @@ fn codex_points_at_v1_responses_and_keeps_the_user_model() {
     let path = home.join(".codex").join("config.toml");
     write(&path, "model = \"gpt-5\"\n");
     let session = Session::new(&home);
-    find("codex")
-        .expect("codex")
-        .apply(&session, &target())
-        .expect("apply");
+    legacy::codex().apply(&session, &target()).expect("apply");
     let text = read(&path);
     assert!(text.contains("model = \"gpt-5\""));
     assert!(text.contains("model_provider = \"hofund\""));
@@ -246,7 +251,7 @@ fn disconnect_keeps_a_key_added_while_connected() {
     let path = home.join(".codex").join("config.toml");
     write(&path, "model = \"gpt-5\"\n");
     let session = Session::new(&home);
-    let adapter = find("codex").expect("codex");
+    let adapter = legacy::codex();
     adapter.apply(&session, &target()).expect("apply");
     let text = format!("sandbox_mode = \"workspace-write\"\n{}", read(&path));
     fs::write(&path, text).expect("edit");
@@ -270,7 +275,7 @@ fn disconnect_refuses_a_broken_file_until_force() {
     let path = home.join(".codex").join("config.toml");
     write(&path, "model = \"gpt-5\"\n");
     let session = Session::new(&home);
-    let adapter = find("codex").expect("codex");
+    let adapter = legacy::codex();
     adapter.apply(&session, &target()).expect("apply");
     fs::write(&path, "model_provider = [\n").expect("break");
     let error = adapter
@@ -306,7 +311,7 @@ fn disconnect_removes_an_empty_directory_it_created() {
 fn disconnect_keeps_a_directory_that_still_holds_a_file() {
     let home = scratch();
     let session = Session::new(&home);
-    let adapter = find("codex").expect("codex");
+    let adapter = legacy::codex();
     adapter.apply(&session, &target()).expect("apply");
     let path = home.join(".codex").join("config.toml");
     let extra = home.join(".codex").join("notes.txt");
@@ -339,7 +344,7 @@ fn refresh_token_rewrites_the_token_and_keeps_the_backup() {
     let path = home.join(".codex").join("config.toml");
     write(&path, "model = \"gpt-5\"\n");
     let session = Session::new(&home);
-    let adapter = find("codex").expect("codex");
+    let adapter = legacy::codex();
     adapter.apply(&session, &target()).expect("apply");
     let backup = fs::read(sibling(&path, ".hofund.bak")).expect("bak");
     let rotated = target().with_token("rotated-token");
@@ -393,7 +398,7 @@ fn clean_disconnect_restores_the_sha256_of_every_managed_file() {
         write(&path, original);
         let before = sha256(original.as_bytes());
         let session = Session::new(&home);
-        let adapter = find(id).expect(id);
+        let adapter = adapter(id);
         adapter.apply(&session, &target()).expect("apply");
         assert_ne!(sha256(&fs::read(&path).expect("connected")), before);
         let outcome = disconnect(adapter, &session, false);
@@ -591,7 +596,7 @@ fn configured_model_reads_the_tool_model() {
     let path = home.join(".codex").join("config.toml");
     write(&path, "model = \"gpt-5\"\n");
     let session = Session::new(&home);
-    let adapter = find("codex").expect("codex");
+    let adapter = legacy::codex();
     assert_eq!(
         adapter
             .configured_model(&session)

@@ -1,4 +1,4 @@
-//! Declarative descriptions of the four coding-agent adapters.
+//! Const-backed coding-agent descriptions and compiled catalog composition.
 //!
 //! Paths and keys were checked against each tool's own docs on 2026-10-24.
 //! The citations sit on each description below.
@@ -101,66 +101,6 @@ const CLAUDE_CODE: Description = Description {
     ],
     model: Some(ModelKey {
         file: "settings",
-        key: "model",
-    }),
-};
-
-/// OpenAI Codex CLI user config.
-///
-/// The file is `~/.codex/config.toml`. `CODEX_HOME` replaces `~/.codex`.
-/// Provider ids `openai`, `ollama`, and `lmstudio` are reserved, so the
-/// provider id here is `hofund`.
-///
-/// `model_provider` selects that table. `base_url` includes `/v1` because
-/// `wire_api = "responses"` posts to `{base_url}/responses`.
-/// `experimental_bearer_token` carries the gateway token.
-/// Codex documents that field as discouraged next to `env_key`, and it must
-/// not be combined with `env_key` or `requires_openai_auth`. The hofund token
-/// lives in a file, not in the shell, so this is the documented field that
-/// connects without a separate export. `requires_openai_auth` is not set.
-/// The user's `model` key is left alone. Connect compares that string with
-/// route names when it is set.
-///
-/// Source: <https://developers.openai.com/codex/config-reference>.
-const CODEX: Description = Description {
-    id: "codex",
-    display_name: "Codex CLI",
-    binary: "codex",
-    locations: &[Location {
-        file: "config",
-        kind: FileKind::Toml,
-        create: true,
-        resolve: codex_config,
-    }],
-    sets: &[
-        Set {
-            file: "config",
-            key: "model_provider",
-            slot: Slot::Literal("hofund"),
-        },
-        Set {
-            file: "config",
-            key: "model_providers.hofund.name",
-            slot: Slot::Literal("hofund"),
-        },
-        Set {
-            file: "config",
-            key: "model_providers.hofund.base_url",
-            slot: Slot::V1,
-        },
-        Set {
-            file: "config",
-            key: "model_providers.hofund.wire_api",
-            slot: Slot::Literal("responses"),
-        },
-        Set {
-            file: "config",
-            key: "model_providers.hofund.experimental_bearer_token",
-            slot: Slot::Token,
-        },
-    ],
-    model: Some(ModelKey {
-        file: "config",
         key: "model",
     }),
 };
@@ -337,36 +277,36 @@ const OPENCODE: Description = Description {
     }),
 };
 
-struct Description {
-    id: &'static str,
-    display_name: &'static str,
-    binary: &'static str,
-    locations: &'static [Location],
-    sets: &'static [Set],
+pub(crate) struct Description {
+    pub(crate) id: &'static str,
+    pub(crate) display_name: &'static str,
+    pub(crate) binary: &'static str,
+    pub(crate) locations: &'static [Location],
+    pub(crate) sets: &'static [Set],
     /// File id and key holding the tool's selected model, when it has one.
-    model: Option<ModelKey>,
+    pub(crate) model: Option<ModelKey>,
 }
 
 #[derive(Clone, Copy)]
-struct ModelKey {
-    file: &'static str,
-    key: &'static str,
+pub(crate) struct ModelKey {
+    pub(crate) file: &'static str,
+    pub(crate) key: &'static str,
 }
 
-struct Location {
-    file: &'static str,
-    kind: FileKind,
-    create: bool,
-    resolve: fn(&Session) -> PathBuf,
+pub(crate) struct Location {
+    pub(crate) file: &'static str,
+    pub(crate) kind: FileKind,
+    pub(crate) create: bool,
+    pub(crate) resolve: fn(&Session) -> PathBuf,
 }
 
-struct Set {
-    file: &'static str,
-    key: &'static str,
-    slot: Slot,
+pub(crate) struct Set {
+    pub(crate) file: &'static str,
+    pub(crate) key: &'static str,
+    pub(crate) slot: Slot,
 }
 
-enum Slot {
+pub(crate) enum Slot {
     Origin,
     V1,
     Token,
@@ -392,8 +332,8 @@ enum Slot {
     },
 }
 
-struct Described {
-    description: &'static Description,
+pub(crate) struct Described {
+    pub(crate) description: &'static Description,
 }
 
 /// An adapter backed by a compiled static agent description.
@@ -428,29 +368,27 @@ impl Compiled {
 const CLAUDE: Described = Described {
     description: &CLAUDE_CODE,
 };
-const CODEX_ADAPTER: Described = Described {
-    description: &CODEX,
-};
 const GEMINI_ADAPTER: Described = Described {
     description: &GEMINI,
 };
 const OPENCODE_ADAPTER: Described = Described {
     description: &OPENCODE,
 };
+const BUILTIN_ORDER: [&str; 4] = ["claude-code", "codex", "gemini-cli", "opencode"];
 
-/// The four built-in adapters, in CLI order.
+/// The const built-in adapters; codex is compiled and delivered separately.
 #[must_use]
-pub fn adapters() -> [&'static dyn AgentAdapter; 4] {
-    [&CLAUDE, &CODEX_ADAPTER, &GEMINI_ADAPTER, &OPENCODE_ADAPTER]
+pub fn adapters() -> [&'static dyn AgentAdapter; 3] {
+    [&CLAUDE, &GEMINI_ADAPTER, &OPENCODE_ADAPTER]
 }
 
-/// Finds an adapter by its stable id.
+/// Finds a const built-in adapter by its stable id; codex is compiled.
 #[must_use]
 pub fn find(name: &str) -> Option<&'static dyn AgentAdapter> {
     adapters().into_iter().find(|adapter| adapter.id() == name)
 }
 
-/// Built-in adapters followed by a set of compiled descriptions.
+/// Const and compiled adapters in catalog order.
 pub struct Catalog {
     adapters: Vec<Box<dyn AgentAdapter>>,
 }
@@ -471,31 +409,21 @@ impl Catalog {
     }
 }
 
-/// Composes the four built-ins with compiled adapters and rejects duplicate ids.
+/// Composes const and compiled adapters in CLI order and rejects duplicate ids.
+///
+/// Codex comes from the compiled list supplied by the daemon's
+/// `agent_descriptions()`. Other compiled ids follow the four built-in slots
+/// in input order.
 ///
 /// # Errors
 ///
-/// Returns an error when a compiled id duplicates a built-in or another
+/// Returns an error when a compiled id duplicates a const built-in or another
 /// compiled id.
 pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog, AgentError> {
     let mut ids = adapters()
         .into_iter()
         .map(|adapter| adapter.id().to_owned())
         .collect::<BTreeSet<_>>();
-    let mut composed: Vec<Box<dyn AgentAdapter>> = vec![
-        Box::new(Described {
-            description: &CLAUDE_CODE,
-        }),
-        Box::new(Described {
-            description: &CODEX,
-        }),
-        Box::new(Described {
-            description: &GEMINI,
-        }),
-        Box::new(Described {
-            description: &OPENCODE,
-        }),
-    ];
     for description in compiled {
         if !ids.insert(description.id().as_str().to_owned()) {
             return Err(AgentError::message(format!(
@@ -503,6 +431,30 @@ pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog
                 description.id().as_str()
             )));
         }
+    }
+
+    let mut composed: Vec<Box<dyn AgentAdapter>> = Vec::new();
+    for id in BUILTIN_ORDER {
+        if let Some(description) = compiled
+            .iter()
+            .find(|description| description.id().as_str() == id)
+        {
+            composed.push(Box::new(Compiled::new(description)));
+            continue;
+        }
+        let description = match id {
+            "claude-code" => &CLAUDE_CODE,
+            "codex" => continue,
+            "gemini-cli" => &GEMINI,
+            "opencode" => &OPENCODE,
+            _ => unreachable!("known built-in id"),
+        };
+        composed.push(Box::new(Described { description }));
+    }
+    for description in compiled
+        .iter()
+        .filter(|description| !BUILTIN_ORDER.contains(&description.id().as_str()))
+    {
         composed.push(Box::new(Compiled::new(description)));
     }
     Ok(Catalog { adapters: composed })
@@ -1411,14 +1363,6 @@ fn claude_settings(session: &Session) -> PathBuf {
     directory.join("settings.json")
 }
 
-fn codex_config(session: &Session) -> PathBuf {
-    let directory = session
-        .codex_home
-        .as_ref()
-        .map_or_else(|| session.home.join(".codex"), |path| path.clone());
-    directory.join("config.toml")
-}
-
 fn gemini_root(session: &Session) -> PathBuf {
     session
         .gemini_cli_home
@@ -1908,10 +1852,29 @@ mod tests {
                 .expect("host cases");
             let mut replayed = 0;
             for case in shared.iter().chain(host.iter()) {
-                replay_case(description, case);
+                replay_case(&Described { description }, case, TargetOs::current());
                 replayed += 1;
             }
             assert!(replayed > 0, "{id} has no host or shared cases");
+        }
+    }
+
+    #[test]
+    fn legacy_codex_replays_compiled_goldens_for_every_target_os() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/agents/codex/fixtures");
+        let (shared, per_os) = golden_layout("codex", &fixtures).expect("valid codex layout");
+        assert!(!shared.is_empty());
+        for (directory, cases) in &per_os {
+            let os = match *directory {
+                "linux" => TargetOs::Linux,
+                "macos" => TargetOs::Macos,
+                "windows" => TargetOs::Windows,
+                _ => unreachable!("validated target OS"),
+            };
+            for case in shared.iter().chain(cases.iter()) {
+                replay_case(crate::legacy::codex(), case, os);
+            }
         }
     }
 
@@ -2047,8 +2010,8 @@ mod tests {
         }
     }
 
-    fn replay_case(description: &'static super::Description, case_dir: &Path) {
-        let label = format!("{} / {}", description.id, case_dir.display());
+    fn replay_case(adapter: &dyn AgentAdapter, case_dir: &Path, os: TargetOs) {
+        let label = format!("{} / {os:?} / {}", adapter.id(), case_dir.display());
         let case = read_case(&case_dir.join("case.toml"));
         let home = scratch();
         let before_dir = case_dir.join("before");
@@ -2062,7 +2025,6 @@ mod tests {
             session = session.with_env(name, value.replace("{tmp}", &home.to_string_lossy()));
         }
         let target = GatewayTarget::new(case.base_url, case.token, case.routes);
-        let adapter = Described { description };
         let plan = adapter.plan(&session, &target).expect("const plan");
         verify_plan(&label, &home, &plan, &after);
         let applied = adapter.apply(&session, &target).expect("const apply");

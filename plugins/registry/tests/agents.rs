@@ -6,8 +6,9 @@ use hofund_plugin_api::{AgentRoute, FileKind, Slot, Visible};
 use hofund_plugin_registry::{agent, agents, fixture_agents};
 
 #[test]
-fn production_agent_list_is_currently_empty() {
-    assert!(agents().is_empty());
+fn production_agent_list_contains_codex() {
+    assert_eq!(agents().len(), 1);
+    assert_eq!(agent("codex").expect("codex").id().as_str(), "codex");
     assert!(agent("missing").is_none());
 }
 

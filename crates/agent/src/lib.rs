@@ -15,7 +15,7 @@
 //! the token file and it does not start the gateway. The daemon resolves the
 //! listen address and the bearer token and passes them in as a [`GatewayTarget`].
 //!
-//! The four adapters, and the documents they were checked against:
+//! The four catalog adapters, and the documents they were checked against:
 //!
 //! - Claude Code: `~/.claude/settings.json` (`CLAUDE_CONFIG_DIR` replaces that
 //!   directory). `env.ANTHROPIC_BASE_URL` is the gateway origin and
@@ -55,6 +55,9 @@ pub use hofund_plugin_api::{
 
 mod catalog;
 mod edit;
+#[cfg(feature = "legacy-codex-const")]
+#[doc(hidden)]
+pub mod legacy;
 mod store;
 
 pub use catalog::{Catalog, Compiled, adapters, catalog, find, resolve};
@@ -419,7 +422,7 @@ mod tests {
     use hofund_plugin_api::{AgentFile, FileKind};
 
     use super::Session;
-    use crate::{TargetOs, find, resolve};
+    use crate::{TargetOs, resolve};
 
     #[test]
     fn from_env_iter_ignores_empty_and_relative_path_overrides() {
@@ -474,7 +477,7 @@ mod tests {
         assert_eq!(sensitive.codex_home, None);
         assert_eq!(sensitive.env("PATH"), None);
         assert_eq!(sensitive.env("CODEX_HOME"), None);
-        assert!(!find("codex").expect("codex").detect(&sensitive));
+        assert!(!crate::legacy::codex().detect(&sensitive));
         let _ = fs::remove_dir_all(home);
     }
 
@@ -554,7 +557,7 @@ mod tests {
         assert_eq!(session.codex_home, Some(override_dir.to_path_buf()));
         assert_eq!(session.env("PATH"), Some(bin.as_os_str()));
         assert_eq!(session.env("CODEX_HOME"), Some(override_dir.as_os_str()));
-        assert!(find("codex").expect("codex").detect(session));
+        assert!(crate::legacy::codex().detect(session));
     }
 
     fn scratch(name: &str) -> PathBuf {

@@ -49,7 +49,7 @@ The spine, from [architecture.md](../architecture.md), is `ir <- codec <- provid
 
 The daemon match at `crates/daemon/src/lib.rs` lines 251-285 is the composition root, and it names `Vertex` and `Bedrock`. That is why a provider change and a kernel change collide.
 
-`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape for the engine: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. The four adapters are Rust constants in `crates/agent/src/catalog.rs` (`adapters` line 397). `Slot` (line 363) is `Origin`, `V1`, `Token`, `Literal`, `GeminiModel`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier`. `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
+`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape for the engine: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. At the original RFC pin, the four adapters were Rust constants in `crates/agent/src/catalog.rs`; F1 moved Codex to the compiled registry while the other three remain const-backed. `Slot` (line 363) is `Origin`, `V1`, `Token`, `Literal`, `GeminiModel`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier`. `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
 
 Streaming is already pull-based (`crates/provider/src/lib.rs` lines 5-7, `stream.rs` lines 3-4). That stays. What is missing is the host, the factory, and failure isolation.
 
@@ -913,13 +913,23 @@ D2 follows the review answers on D1. Shared protocol helpers stay in the SDK and
 
 ### PR D3 notes
 
-D3 adds the compiled agent-description path and its equivalence evidence. The four production adapters still use their Rust consts; F1-F4 migrate them only after this proof.
+D3 adds the compiled agent-description path and its equivalence evidence. At D3, the four production adapters still used their Rust consts; F1-F4 migrate them after this proof.
 
 - Delivery follows rule 3: the CLI and desktop call `hofund_agent::catalog(hofund_daemon::agent_descriptions())`. Until L, the daemon re-exports the registry's sorted `agents()` list without depending on the agent engine. L moves delivery behind the control plane.
 - The API adds `FileKind::Env`, `AgentFile` `create` and `env_replaces`, shared-id ordered candidates, `Slot::ModelIfUnset`, model and effort file builders, lowercase match needles, and documented tier and catalog-model semantics. Compiled path overrides and the named setters treat empty and relative environment values as unset, matching the reference. Path templates remain `~`-rooted, and lifting that restriction is still an open question.
 - `plugins/registry/build.rs` validates and compiles data-only `plugins/agents/<id>/agent.toml` files into static descriptions. These directories need no `plugin.toml` or crate and are not listed in `plugins.toml`. The non-default `test-fixtures` feature builds the separate fixture list; registry dev-dependencies enable it for tests.
 - `hofund-kit-agent` depends on `hofund-agent` and replays plan, apply, backup, refresh, and disconnect contracts without network access. Registry tests also dev-depend on the kit. Goldens live at `plugins/registry/tests/fixtures/agents/<id>/fixtures/<os>/<case>/` or `fixtures/all/<case>/`: shared cases run on all three OSes, OS cases run only on their own OS, and regeneration moves identical three-OS trees to `all/`; the same files pass through the compiled descriptions and test-only const descriptions.
 - F1-F4 map the existing private slots as follows: `GeminiModel` becomes `model_if_unset = { from = "model" }`, `ClaudeModel` becomes `model_if_unset = {}`, and `ClaudeTier` becomes `model_tier`, with `claude-fable-` as the needle only for Fable. `OpenCodeModels` becomes `catalog_models`, and OpenCode's JSONC/JSON choice becomes two candidates with JSONC `create = false` and JSON `create = true`.
+
+### PR F1 notes
+
+F1 migrates Codex to the compiled data-only path without changing its configuration bytes or lifecycle behavior.
+
+- `plugins/agents/codex/agent.toml` carries the former const's paths, ordered sets, model key, and rationale. The production Codex const and resolver are removed. The other three agents remain const-backed in this pull request.
+- The non-default `legacy-codex-const` feature exposes the frozen pre-F1 adapter only as an equivalence-test oracle. Agent and registry dev-dependencies enable it; normal production composition does not.
+- Goldens live at `plugins/agents/codex/fixtures/all/<case>/`. Fresh, existing-user, stale-hofund, multiple-route, environment override, and configured-model cases pass through both the shipped compiled description and the frozen oracle for Linux, macOS, and Windows. Registry integration tests also compare metadata and the complete edit lifecycle.
+- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. A compiled description fills its named slot; other compiled ids follow in input order, and collision checks are unchanged. `RESERVED_AGENT_IDS` now contains only const-backed ids.
+- No parity fixes or behavior changes are included.
 
 ### PR B2 notes
 
