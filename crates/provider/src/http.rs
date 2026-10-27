@@ -15,7 +15,7 @@ use crate::Completion;
 pub(crate) type Prepare = fn(&[u8]) -> Result<Vec<u8>, CodecError>;
 use crate::error::ProviderError;
 use crate::stream::SseEvents;
-pub(crate) use crate::stream::{map_transport, message_from};
+pub(crate) use crate::stream::{map_body, map_transport, message_from};
 
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
@@ -416,7 +416,9 @@ async fn send_json(
 /// Sends `builder`, retrying once only when connection establishment failed.
 ///
 /// A connect error proves that no request was sent. Errors after a write are
-/// never retried because the upstream may have processed a non-idempotent POST.
+/// never retried because the upstream may have processed a non-idempotent POST
+/// (`reference: internal/gateway/gateway.go:2828-2833`). Body reads happen only
+/// after this function returns, so an interrupted body is never replayed here.
 /// Hyper separately retries requests it cancelled on an idle socket before
 /// writing them.
 pub(crate) async fn send_builder(
@@ -524,7 +526,7 @@ impl Sent<'_> {
             );
             Ok(Completion::Stream(Box::pin(events)))
         } else {
-            let bytes = self.response.bytes().await.map_err(map_transport)?;
+            let bytes = self.response.bytes().await.map_err(map_body)?;
             let mut decoded = self
                 .codec
                 .decode_response(&bytes)
@@ -595,7 +597,7 @@ async fn send<'a>(
     let status = response.status();
     if !status.is_success() {
         let retry_after = retry_after(response.headers());
-        let bytes = response.bytes().await.unwrap_or_default();
+        let bytes = response.bytes().await.map_err(map_body)?;
         let error = ProviderError::status(status.as_u16(), message_from(&bytes));
         return Err(match retry_after {
             Some(after) => error.with_retry_after(after),
@@ -618,7 +620,7 @@ pub(crate) async fn raw_completion(
     if streaming {
         return raw_stream(response, codec).await;
     }
-    let bytes = response.bytes().await.map_err(map_transport)?;
+    let bytes = response.bytes().await.map_err(map_body)?;
     Ok(Completion::Raw(Box::pin(futures_util::stream::once(
         async move { Ok(bytes) },
     ))))
@@ -634,7 +636,7 @@ async fn raw_stream(
     loop {
         match incoming.next().await {
             None => break,
-            Some(Err(error)) => return Err(map_transport(error)),
+            Some(Err(error)) => return Err(map_body(error)),
             Some(Ok(chunk)) => {
                 let events = match decoder.push(&chunk) {
                     Ok(events) => events,
@@ -666,7 +668,7 @@ pub(crate) fn socket_backstop(idle: Duration) -> Duration {
 }
 
 fn map_chunk(chunk: Result<bytes::Bytes, reqwest::Error>) -> Result<bytes::Bytes, ProviderError> {
-    chunk.map_err(map_transport)
+    chunk.map_err(map_body)
 }
 
 /// Adapter identity used by the concrete providers.

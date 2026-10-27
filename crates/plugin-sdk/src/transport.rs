@@ -10,8 +10,9 @@
 //!
 //! [`Call::send_with_retry`] retries at most three times. [`PluginErrorKind::Connect`]
 //! (the request was not sent) is retried for every method. [`PluginErrorKind::Timeout`]
-//! and [`PluginErrorKind::Transport`] are retried only for an idempotent method,
-//! or when [`Call::idempotent`] is set. The wait between attempts is full-jitter
+//! [`PluginErrorKind::Transport`], and [`PluginErrorKind::Interrupted`] are
+//! retried only for an idempotent method, or when [`Call::idempotent`] is set.
+//! The wait between attempts is full-jitter
 //! exponential backoff, and dropping the future cancels it.
 
 use std::fmt;
@@ -106,8 +107,8 @@ impl Call {
     /// `POST` and `PATCH` retry only [`PluginErrorKind::Connect`] unless this
     /// is `true`. Set it when the upstream treats the call as idempotent, for
     /// example because the request carries an idempotency key. `GET`, `HEAD`,
-    /// `OPTIONS`, `PUT`, and `DELETE` already retry timeout and transport
-    /// failures. The default is `false`.
+    /// `OPTIONS`, `PUT`, and `DELETE` already retry timeout, transport, and
+    /// interrupted-body failures. The default is `false`.
     #[must_use]
     pub fn idempotent(mut self, idempotent: bool) -> Self {
         self.idempotent = idempotent;
@@ -212,11 +213,11 @@ impl Call {
     /// Sends the call up to `attempts` times, including the first try.
     ///
     /// The cap is three attempts. [`PluginErrorKind::Connect`] is retried for
-    /// every method, because the request was not sent. [`PluginErrorKind::Timeout`]
-    /// and [`PluginErrorKind::Transport`] are retried for `GET`, `HEAD`,
-    /// `OPTIONS`, `PUT`, and `DELETE`, and for a call marked
-    /// [`Call::idempotent`]. `POST` and `PATCH` are not retried on those two
-    /// kinds: the body may already have been processed.
+    /// every method, because the request was not sent. [`PluginErrorKind::Timeout`],
+    /// [`PluginErrorKind::Transport`], and [`PluginErrorKind::Interrupted`] are
+    /// retried for `GET`, `HEAD`, `OPTIONS`, `PUT`, and `DELETE`, and for a call
+    /// marked [`Call::idempotent`]. `POST` and `PATCH` are not retried on those
+    /// three kinds: the body may already have been processed.
     ///
     /// Between attempts the call waits a full-jitter exponential backoff,
     /// starting at 20ms and capped at 200ms. The wait is a normal sleep.
@@ -286,9 +287,12 @@ fn header_value(header: &Header) -> Result<http::HeaderValue, PluginError> {
 }
 
 fn retries(method: &str, idempotent: bool, kind: PluginErrorKind) -> bool {
+    // A status proves the upstream received the request. Only idempotent calls
+    // may repeat an interrupted body read on the same member.
+    // reference: internal/gateway/gateway.go:2828-2833
     match kind {
         PluginErrorKind::Connect => true,
-        PluginErrorKind::Timeout | PluginErrorKind::Transport => {
+        PluginErrorKind::Timeout | PluginErrorKind::Transport | PluginErrorKind::Interrupted => {
             idempotent || method_is_idempotent(method)
         }
         _ => false,
@@ -480,13 +484,16 @@ mod tests {
             assert!(retries(method, false, PluginErrorKind::Connect));
             assert!(retries(method, false, PluginErrorKind::Timeout));
             assert!(retries(method, false, PluginErrorKind::Transport));
+            assert!(retries(method, false, PluginErrorKind::Interrupted));
         }
         for method in ["POST", "PATCH"] {
             assert!(retries(method, false, PluginErrorKind::Connect));
             assert!(!retries(method, false, PluginErrorKind::Timeout));
             assert!(!retries(method, false, PluginErrorKind::Transport));
+            assert!(!retries(method, false, PluginErrorKind::Interrupted));
             assert!(retries(method, true, PluginErrorKind::Timeout));
             assert!(retries(method, true, PluginErrorKind::Transport));
+            assert!(retries(method, true, PluginErrorKind::Interrupted));
         }
         assert!(!retries("POST", true, PluginErrorKind::Status));
         assert!(!retries("GET", true, PluginErrorKind::Auth));

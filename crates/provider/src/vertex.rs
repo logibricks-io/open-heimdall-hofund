@@ -490,7 +490,7 @@ impl Provider for Vertex {
         let response = http::post_bearer(&self.upstream, &url, body, &token).await?;
         let status = response.status().as_u16();
         let retry_after = http::retry_after(response.headers());
-        let bytes = response.bytes().await.map_err(http::map_transport)?;
+        let bytes = response.bytes().await.map_err(http::map_body)?;
         generative::classify_count(status, retry_after, &bytes)
     }
 
@@ -532,6 +532,9 @@ impl Provider for Vertex {
                     crate::ProviderErrorKind::Connect => PluginError::connect(error.message),
                     crate::ProviderErrorKind::Timeout => PluginError::timeout(error.message),
                     crate::ProviderErrorKind::Transport => PluginError::transport(error.message),
+                    crate::ProviderErrorKind::Interrupted => {
+                        PluginError::interrupted(error.message)
+                    }
                     crate::ProviderErrorKind::Status => {
                         PluginError::status_error(error.status.unwrap_or(502), error.message)
                     }
@@ -1248,7 +1251,7 @@ async fn post_token(
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
-        let chunk = chunk.map_err(http::map_transport)?;
+        let chunk = chunk.map_err(http::map_body)?;
         if bytes.len().saturating_add(chunk.len()) > MAX_CREDENTIALS_BYTES as usize {
             return Err(ProviderError::decode(
                 "the token response is larger than 1 MiB",

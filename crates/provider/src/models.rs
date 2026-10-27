@@ -350,6 +350,7 @@ impl ModelClient {
             PluginErrorKind::Connect => PluginError::connect(message),
             PluginErrorKind::Timeout => PluginError::timeout(message),
             PluginErrorKind::Transport => PluginError::transport(message),
+            PluginErrorKind::Interrupted => PluginError::interrupted(message),
             PluginErrorKind::Status => {
                 PluginError::status_error(error.status().unwrap_or(502), message)
             }
@@ -681,9 +682,9 @@ pub(crate) async fn read_page(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| {
             if error.is_timeout() {
-                PluginError::timeout("upstream response exceeded its read deadline")
+                PluginError::interrupted("upstream response timed out while reading")
             } else {
-                PluginError::transport("could not read the upstream response")
+                PluginError::interrupted("could not read the upstream response")
             }
         })?;
         let remaining = cap
@@ -845,6 +846,7 @@ pub(crate) fn join_errors(errors: Vec<PluginError>, fallback: &str, suffix: &str
         PluginErrorKind::Connect => PluginError::connect(message),
         PluginErrorKind::Timeout => PluginError::timeout(message),
         PluginErrorKind::Transport => PluginError::transport(message),
+        PluginErrorKind::Interrupted => PluginError::interrupted(message),
         PluginErrorKind::Status => PluginError::status_error(last.status().unwrap_or(502), message),
         PluginErrorKind::Cancelled => PluginError::cancelled(message),
         _ => PluginError::decode(message),

@@ -1,5 +1,10 @@
 //! Upstream adapters against a local mock. No real network.
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use futures_util::StreamExt;
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
 use hofund_ir::{
@@ -98,6 +103,25 @@ where
         bytes.extend_from_slice(&item.expect("chunk"));
     }
     bytes
+}
+
+fn truncated_server(body: &'static [u8]) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&hits);
+    std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        count.fetch_add(1, Ordering::SeqCst);
+        let mut request = [0_u8; 8192];
+        let _ = socket.read(&mut request);
+        let headers = b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\nContent-Type: text/event-stream\r\n\r\n";
+        let _ = socket.write_all(headers);
+        let _ = socket.write_all(body);
+    });
+    (format!("http://{address}"), hits)
 }
 
 async fn text_of(completion: Completion) -> String {
@@ -703,6 +727,58 @@ async fn messages_stream_yields_text_deltas() {
         .await
         .expect("call");
     assert_eq!(text_of(completion).await, "hello");
+}
+
+#[tokio::test]
+async fn non_streaming_body_breaks_are_interrupted_and_not_retried() {
+    for inbound in ["openai-chat", "anthropic-messages"] {
+        let (base, hits) = truncated_server(br#"{"id":"cut"}"#);
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, Endpoint::new("primary", base))
+            .expect("provider");
+        let error = match provider.execute(user_request(false), inbound).await {
+            Ok(_) => panic!("expected an interrupted body"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Interrupted, "{inbound}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "{inbound}");
+    }
+}
+
+#[tokio::test]
+async fn streaming_body_breaks_are_interrupted_for_raw_and_decoded_streams() {
+    let body = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n";
+    for inbound in ["openai-chat", "anthropic-messages"] {
+        let (base, _) = truncated_server(body);
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, Endpoint::new("primary", base))
+            .expect("provider");
+        let completion = provider
+            .execute(user_request(true), inbound)
+            .await
+            .expect("headers");
+        match completion {
+            Completion::Raw(mut stream) => {
+                let error = loop {
+                    match stream.next().await {
+                        Some(Ok(_)) => {}
+                        Some(Err(error)) => break error,
+                        None => panic!("stream ended before the declared body length"),
+                    }
+                };
+                assert_eq!(error.kind, ProviderErrorKind::Interrupted, "{inbound}");
+            }
+            Completion::Stream(mut stream) => {
+                let error = loop {
+                    match stream.next().await {
+                        Some(Ok(_)) => {}
+                        Some(Err(error)) => break error,
+                        None => panic!("stream ended before the declared body length"),
+                    }
+                };
+                assert_eq!(error.kind, ProviderErrorKind::Interrupted, "{inbound}");
+            }
+            Completion::Unary(_) => panic!("expected a stream"),
+        }
+    }
 }
 
 #[tokio::test]

@@ -82,6 +82,7 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
         PluginErrorKind::Connect => ProviderError::connect(error.message()),
         PluginErrorKind::Timeout => ProviderError::timeout(error.message()),
         PluginErrorKind::Transport => ProviderError::transport(error.message()),
+        PluginErrorKind::Interrupted => ProviderError::interrupted(error.message()),
         PluginErrorKind::Status => {
             ProviderError::status(error.status().unwrap_or(502), error.message())
         }
