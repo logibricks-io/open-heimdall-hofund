@@ -130,6 +130,7 @@ Each list-only `RawTable` contains exactly:
 - `id`: `<provider id>#list:<wire>`. It cannot collide with the configured instance, never reaches the router, and is never logged as a route; host logs use the configured provider id.
 - `base_url`: the region-resolved preset row's base for that wire.
 - `protocol`: `chat` or `responses` only; Anthropic and generative factories take no protocol key.
+- `preset`: the catalog preset id the daemon passes to builtin factories. It is a reserved kernel key, so a user's `[providers.options] preset` is rejected.
 - `credential`: the credential for that wire.
 - `api_key`: the configured key after secret resolution. The same key also reaches the plugin through `runtime_host` (`crates/daemon/src/lib.rs` lines 335-341; `crates/plugin-host/src/lib.rs` lines 82-103).
 - `headers`: the configured headers.

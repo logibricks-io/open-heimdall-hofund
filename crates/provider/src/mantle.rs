@@ -49,11 +49,9 @@ impl LearnedRoutes {
     }
 }
 
-/// Whether this endpoint is Mantle by preset or by an address-added provider.
+/// Whether this endpoint is Mantle by preset or by host.
 pub(crate) fn is_mantle(endpoint: &Endpoint) -> bool {
-    endpoint.preset.as_deref() == Some("bedrock-mantle")
-        || (endpoint.preset.as_deref().is_none_or(str::is_empty)
-            && is_mantle_host(&endpoint.base_url))
+    endpoint.preset.as_deref() == Some("bedrock-mantle") || is_mantle_host(&endpoint.base_url)
 }
 
 /// Whether the endpoint is Bedrock's runtime or Mantle for Messages behavior.
@@ -132,9 +130,12 @@ pub(crate) fn wrong_route(status: Option<u16>, message: &str) -> bool {
     let Some(status) = status else {
         return false;
     };
-    if !(400..500).contains(&status) {
-        return false;
-    }
+    (400..500).contains(&status) && wrong_route_message(message)
+}
+
+/// Text that says this prefix does not serve the model, at any status.
+// reference: internal/gateway/mantle.go:54-72
+pub(crate) fn wrong_route_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("isn't supported on this route")
         || lower.contains("is not supported on this route")
@@ -249,14 +250,15 @@ mod tests {
     }
 
     #[test]
-    fn the_mantle_preset_enables_routing_on_a_relay() {
+    fn mantle_detection_uses_the_preset_or_host() {
         let relay = endpoint(Some("bedrock-mantle"), "https://relay.example/v1");
         assert!(is_mantle(&relay));
         assert!(is_mantle_root(&relay));
-        assert!(!is_mantle(&endpoint(
-            Some("openrouter"),
-            "https://bedrock-mantle.us-east-1.api.aws/v1"
-        )));
+        let mut other = endpoint(Some("openrouter"), V1);
+        assert!(is_mantle(&other));
+        assert!(is_mantle_root(&other));
+        normalize(&mut other, Wire::Chat);
+        assert_eq!(other.base_url, V1);
     }
 
     #[test]

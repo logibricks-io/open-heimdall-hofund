@@ -138,9 +138,23 @@ fn fit_bedrock_headers(headers: &mut Vec<(String, String)>) {
     *headers = fitted;
 }
 
-// reference: internal/gateway/gateway.go:4416-4420 and 5256-5259
+// reference: internal/gateway/betas.go:105-139, internal/gateway/gateway.go:4045,
+// internal/gateway/gateway.go:4416-4420 and 5256-5259
 fn fit_bedrock_request(request: &mut Request) {
     request.extensions.remove("metadata");
+    if let Some(serde_json::Value::Array(values)) = request.extensions.get("anthropic_beta") {
+        let fitted = fit_betas(values.iter().filter_map(serde_json::Value::as_str));
+        if fitted.is_empty() {
+            request.extensions.remove("anthropic_beta");
+        } else {
+            request.extensions.insert(
+                "anthropic_beta",
+                serde_json::Value::Array(
+                    fitted.into_iter().map(serde_json::Value::String).collect(),
+                ),
+            );
+        }
+    }
 }
 
 fn fit_betas<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<String> {

@@ -189,6 +189,43 @@ async fn chat_sends_an_azure_api_key_without_a_bearer_token() {
 }
 
 #[tokio::test]
+async fn bedrock_chat_always_sends_max_completion_tokens() {
+    for (preset, base_path) in [("bedrock", "/openai/v1"), ("bedrock-mantle", "/v1")] {
+        for inbound in ["openai-chat", "anthropic-messages"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(format!("{base_path}/chat/completions")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "chatcmpl-1",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop"
+                    }]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut endpoint = Endpoint::new("bedrock", format!("{}{base_path}", server.uri()));
+            endpoint.preset = Some(preset.to_owned());
+            let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+            let mut request = user_request(false);
+            request.params.max_tokens = Some(64);
+            provider.execute(request, inbound).await.expect("call");
+
+            let requests = server.received_requests().await.expect("requests");
+            let body: Value = serde_json::from_slice(&requests[0].body).expect("body");
+            assert_eq!(
+                body["max_completion_tokens"],
+                json!(64),
+                "{preset} {inbound}"
+            );
+            assert!(body.get("max_tokens").is_none(), "{preset} {inbound}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn chat_stream_yields_text_deltas() {
     let server = MockServer::start().await;
     let body =
@@ -383,6 +420,12 @@ async fn bedrock_messages_send_key_alone_fit_betas_and_drop_metadata() {
             .expect(1)
             .mount(&server)
             .await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages/count_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 17})))
+            .expect(1)
+            .mount(&server)
+            .await;
 
         let base = format!("{}/anthropic", server.uri());
         let mut endpoint = host.map_or_else(
@@ -419,32 +462,119 @@ async fn bedrock_messages_send_key_alone_fit_betas_and_drop_metadata() {
         request
             .extensions
             .insert("metadata", json!({"user_id": "{\"device_id\":\"local\"}"}));
+        request.extensions.insert(
+            "anthropic_beta",
+            json!([
+                "redact-thinking-2026-02-12",
+                "advanced-tool-use-2025-11-20",
+                "advanced-tool-use-2025-11-20"
+            ]),
+        );
         provider
-            .execute(request, "anthropic-messages")
+            .execute(request.clone(), "anthropic-messages")
             .await
             .expect("call");
+        let counted = provider
+            .count_input(request, "anthropic-messages")
+            .await
+            .expect("count");
+        assert!(matches!(counted, CountOutcome::Counted(17)));
 
         let requests = server.received_requests().await.expect("requests");
-        assert_eq!(requests.len(), 1);
-        let recorded = &requests[0];
-        assert_eq!(
-            recorded
-                .headers
-                .get("x-api-key")
-                .and_then(|value| value.to_str().ok()),
-            Some("secret")
-        );
-        assert!(recorded.headers.get("authorization").is_none());
-        assert_eq!(
-            recorded
-                .headers
-                .get("anthropic-beta")
-                .and_then(|value| value.to_str().ok()),
-            Some("tool-search-tool-2025-10-19,context-1m-2025-08-07")
-        );
-        let body: Value = serde_json::from_slice(&recorded.body).expect("body");
-        assert!(body.get("metadata").is_none());
+        assert_eq!(requests.len(), 2);
+        for recorded in &requests {
+            assert_eq!(
+                recorded
+                    .headers
+                    .get("x-api-key")
+                    .and_then(|value| value.to_str().ok()),
+                Some("secret")
+            );
+            assert!(recorded.headers.get("authorization").is_none());
+            assert_eq!(
+                recorded
+                    .headers
+                    .get("anthropic-beta")
+                    .and_then(|value| value.to_str().ok()),
+                Some("tool-search-tool-2025-10-19,context-1m-2025-08-07")
+            );
+            let body: Value = serde_json::from_slice(&recorded.body).expect("body");
+            assert!(body.get("metadata").is_none());
+            assert_eq!(
+                body["anthropic_beta"],
+                json!(["tool-search-tool-2025-10-19"])
+            );
+        }
     }
+}
+
+#[tokio::test]
+async fn bedrock_messages_remove_an_empty_body_beta_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut endpoint = Endpoint::new("bedrock", server.uri());
+    endpoint.preset = Some("bedrock".to_owned());
+    let provider = Anthropic::new(endpoint).expect("provider");
+    let mut request = user_request(false);
+    request.params.max_tokens = Some(16);
+    request.extensions.insert(
+        "anthropic_beta",
+        json!([
+            "redact-thinking-2026-02-12",
+            "prompt-caching-scope-2026-01-05"
+        ]),
+    );
+    provider
+        .execute(request, "anthropic-messages")
+        .await
+        .expect("call");
+    let requests = server.received_requests().await.expect("requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("body");
+    assert!(body.get("anthropic_beta").is_none());
+}
+
+#[tokio::test]
+async fn plain_anthropic_messages_keep_body_betas() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = Anthropic::new(Endpoint::new("plain", server.uri())).expect("provider");
+    let mut request = user_request(false);
+    request.params.max_tokens = Some(16);
+    let betas = json!([
+        "redact-thinking-2026-02-12",
+        "advanced-tool-use-2025-11-20",
+        "advanced-tool-use-2025-11-20"
+    ]);
+    request.extensions.insert("anthropic_beta", betas.clone());
+    provider
+        .execute(request, "anthropic-messages")
+        .await
+        .expect("call");
+    let requests = server.received_requests().await.expect("requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("body");
+    assert_eq!(body["anthropic_beta"], betas);
 }
 
 #[tokio::test]

@@ -84,11 +84,11 @@ impl OpenAiCompat {
         }
     }
 
-    fn url_for(&self, model: &str) -> String {
+    fn url_for(&self, model: &str, other: bool) -> String {
         let Some(mantle) = &self.mantle else {
             return http::request_url(&self.upstream).to_owned();
         };
-        let base = mantle::mantle_base(&mantle.base, model, mantle.routes.other(model));
+        let base = mantle::mantle_base(&mantle.base, model, other);
         format!(
             "{}/{}",
             base.trim_end_matches('/'),
@@ -122,7 +122,8 @@ impl Provider for OpenAiCompat {
             return http::execute(&self.upstream, codec, request, prepare, inbound_protocol).await;
         };
         let model = request.model.clone();
-        let url = self.url_for(&model);
+        let learned = mantle.routes.other(&model);
+        let url = self.url_for(&model, learned);
         match http::execute_at(
             &self.upstream,
             &url,
@@ -135,11 +136,11 @@ impl Provider for OpenAiCompat {
         {
             Err(error)
                 if !model.is_empty()
-                    && !mantle.routes.other(&model)
+                    && !learned
                     && mantle::wrong_route(error.status, &error.message) =>
             {
                 mantle.routes.learn_other(&model);
-                let url = self.url_for(&model);
+                let url = self.url_for(&model, true);
                 match http::execute_at(
                     &self.upstream,
                     &url,
@@ -152,13 +153,18 @@ impl Provider for OpenAiCompat {
                 {
                     Ok(completion) => Ok(completion),
                     Err(second)
-                        if mantle::wrong_route(second.status, &second.message)
-                            || second.status.is_none() =>
+                        if mantle::wrong_route_message(&second.message)
+                            || matches!(
+                                second.kind,
+                                crate::ProviderErrorKind::Connect
+                                    | crate::ProviderErrorKind::Timeout
+                                    | crate::ProviderErrorKind::Transport
+                            ) =>
                     {
                         mantle.routes.forget(&model);
                         Err(error)
                     }
-                    other => other,
+                    Err(second) => Err(second),
                 }
             }
             other => other,
@@ -216,15 +222,15 @@ mod tests {
         let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
         assert!(provider.mantle.is_some());
         assert_eq!(
-            provider.url_for("openai.gpt-5.5"),
+            provider.url_for("openai.gpt-5.5", false),
             "https://bedrock-mantle.us-east-1.api.aws/openai/v1/chat/completions"
         );
         assert_eq!(
-            provider.url_for("openai.gpt-oss-120b"),
+            provider.url_for("openai.gpt-oss-120b", false),
             "https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions"
         );
         assert_eq!(
-            provider.url_for("xai.grok-4.3"),
+            provider.url_for("xai.grok-4.3", false),
             "https://bedrock-mantle.us-east-1.api.aws/openai/v1/chat/completions"
         );
         let responses = OpenAiCompat::new(
@@ -233,7 +239,7 @@ mod tests {
         )
         .expect("responses");
         assert_eq!(
-            responses.url_for("xai.grok-4.3"),
+            responses.url_for("xai.grok-4.3", false),
             "https://bedrock-mantle.eu-west-1.api.aws/openai/v1/responses"
         );
 
@@ -244,7 +250,7 @@ mod tests {
         let runtime = OpenAiCompat::new(OpenAiProtocol::Chat, runtime).expect("runtime");
         assert!(runtime.mantle.is_none());
         assert_eq!(
-            runtime.url_for("openai.gpt-oss-120b"),
+            runtime.url_for("openai.gpt-oss-120b", false),
             "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions"
         );
     }
@@ -378,6 +384,281 @@ mod tests {
                 panic!("learned prefix was not refused");
             };
             assert!(error.message.contains("learned route"));
+        }
+        assert!(
+            provider
+                .mantle
+                .as_ref()
+                .expect("mantle")
+                .routes
+                .other("newmaker.model-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_calls_each_try_the_other_prefix_once() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400)
+                    .set_delay(std::time::Duration::from_millis(250))
+                    .set_body_json(serde_json::json!({
+                        "error": {"message": "model isn't supported on this route"}
+                    })),
+            )
+            .expect(4)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/openai/v1/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok()))
+            .expect(4)
+            .mount(&server)
+            .await;
+        let mut endpoint = Endpoint::new("mantle", format!("{}/v1", server.uri()));
+        endpoint.preset = Some("bedrock-mantle".to_owned());
+        let provider = std::sync::Arc::new(
+            OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider"),
+        );
+
+        let results = futures_util::future::join_all((0..4).map(|_| {
+            let provider = std::sync::Arc::clone(&provider);
+            async move {
+                provider
+                    .execute(say("newmaker.model-1"), "openai-chat")
+                    .await
+            }
+        }))
+        .await;
+        for result in results {
+            assert!(matches!(
+                result.expect("concurrent call"),
+                Completion::Raw(_)
+            ));
+        }
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 8);
+        for (path, expected) in [
+            ("/v1/chat/completions", 4),
+            ("/openai/v1/chat/completions", 4),
+        ] {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.url.path() == path)
+                    .count(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_decode_error_is_returned_and_the_route_stays_learned() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": {"message": "first prefix isn't supported on this route"}
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/openai/v1/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("not JSON"))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut endpoint = Endpoint::new("mantle", format!("{}/v1", server.uri()));
+        endpoint.preset = Some("bedrock-mantle".to_owned());
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+
+        for _ in 0..2 {
+            let Err(error) = provider
+                .execute(say("newmaker.model-1"), "anthropic-messages")
+                .await
+            else {
+                panic!("an invalid success response must not decode");
+            };
+            assert_eq!(error.kind, crate::ProviderErrorKind::Decode);
+            assert!(!error.message.contains("first prefix"));
+        }
+        assert!(
+            provider
+                .mantle
+                .as_ref()
+                .expect("mantle")
+                .routes
+                .other("newmaker.model-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_route_refusal_at_any_status_forgets_the_route() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": {"message": "first prefix isn't supported on this route"}
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/openai/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                    "error": {"message": "second prefix is not supported on this route"}
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut endpoint = Endpoint::new("mantle", format!("{}/v1", server.uri()));
+        endpoint.preset = Some("bedrock-mantle".to_owned());
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+
+        let Err(error) = provider
+            .execute(say("newmaker.model-1"), "openai-chat")
+            .await
+        else {
+            panic!("both prefixes refused");
+        };
+        assert_eq!(error.status, Some(400));
+        assert!(error.message.contains("first prefix"));
+        assert!(
+            !provider
+                .mantle
+                .as_ref()
+                .expect("mantle")
+                .routes
+                .other("newmaker.model-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_transport_error_forgets_the_route() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn complete_request(request: &[u8]) -> bool {
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                return false;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let length = headers
+                .split("\r\n")
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            request.len() >= header_end + 4 + length
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("connection");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let read = socket.read(&mut chunk).await.expect("read request");
+                    assert_ne!(read, 0, "request ended before its body");
+                    request.extend_from_slice(&chunk[..read]);
+                    if complete_request(&request) {
+                        break;
+                    }
+                }
+                if attempt == 0 {
+                    assert!(request.starts_with(b"POST /v1/chat/completions HTTP/1.1\r\n"));
+                    let body =
+                        br#"{"error":{"message":"first prefix isn't supported on this route"}}"#;
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .expect("response headers");
+                    socket.write_all(body).await.expect("response body");
+                } else {
+                    assert!(request.starts_with(b"POST /openai/v1/chat/completions HTTP/1.1\r\n"));
+                }
+            }
+        });
+        let mut endpoint = Endpoint::new("mantle", format!("http://{address}/v1"));
+        endpoint.preset = Some("bedrock-mantle".to_owned());
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+
+        let Err(error) = provider
+            .execute(say("newmaker.model-1"), "openai-chat")
+            .await
+        else {
+            panic!("a dropped connection must fail");
+        };
+        server.await.expect("server");
+        assert_eq!(error.status, Some(400));
+        assert!(error.message.contains("first prefix"));
+        assert!(
+            !provider
+                .mantle
+                .as_ref()
+                .expect("mantle")
+                .routes
+                .other("newmaker.model-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_second_error_is_returned_and_the_route_stays_learned() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": {"message": "first prefix isn't supported on this route"}
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/openai/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": {"message": "invalid model id"}
+                })),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut endpoint = Endpoint::new("mantle", format!("{}/v1", server.uri()));
+        endpoint.preset = Some("bedrock-mantle".to_owned());
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+
+        for _ in 0..2 {
+            let Err(error) = provider
+                .execute(say("newmaker.model-1"), "openai-chat")
+                .await
+            else {
+                panic!("the second refusal must be returned");
+            };
+            assert_eq!(error.status, Some(400));
+            assert_eq!(error.message, "invalid model id");
         }
         assert!(
             provider
