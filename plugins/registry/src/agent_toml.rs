@@ -1,7 +1,7 @@
 // Owned `agent.toml` input, validation, and static Rust rendering.
 // This file has no `crate::` imports so `build.rs` can `include!` it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 
@@ -159,6 +159,9 @@ fn validate(
     if agent_ids.contains(&agent.id) {
         return Err(error(source, "id", "collides with another agent id"));
     }
+    if super::RESERVED_AGENT_IDS.contains(&agent.id.as_str()) {
+        return Err(error(source, "id", "collides with a built-in agent id"));
+    }
     if agent.display_name.is_empty() {
         return Err(error(source, "display_name", "must not be empty"));
     }
@@ -177,6 +180,21 @@ fn validate(
             "must be `all` or an array of model ids",
         ));
     }
+    if let VisibleToml::Only(models) = &agent.visible {
+        let mut unique = BTreeSet::new();
+        for model in models {
+            if model.is_empty() {
+                return Err(error(source, "visible", "entries must not be empty"));
+            }
+            if !unique.insert(model) {
+                return Err(error(
+                    source,
+                    "visible",
+                    format!("contains duplicate entry `{model}`"),
+                ));
+            }
+        }
+    }
     for required in &agent.requires {
         if !inbound_ids.contains(required) {
             return Err(error(
@@ -188,6 +206,7 @@ fn validate(
     }
 
     let mut file_ids = BTreeSet::new();
+    let mut file_kinds = BTreeMap::new();
     for (index, file) in agent.files.iter().enumerate() {
         let field = format!("file[{index}]");
         if file.id.is_empty() {
@@ -199,6 +218,15 @@ fn validate(
                 source,
                 format!("{field}.kind"),
                 format!("unknown file kind `{}`", file.kind),
+            ));
+        }
+        if let Some(previous) = file_kinds.insert(file.id.as_str(), file.kind.as_str())
+            && previous != file.kind
+        {
+            return Err(error(
+                source,
+                format!("{field}.kind"),
+                "candidates with the same file id must have the same kind",
             ));
         }
         for (name, path) in [
@@ -298,6 +326,13 @@ fn validate_slot(slot: &SlotToml, source: &str, field: &str) -> Result<(), Strin
             if !matches!(name.as_str(), "origin" | "v1" | "token" | "catalog_models") =>
         {
             Err(error(source, format!("{field}.slot"), "unknown slot"))
+        }
+        SlotToml::ModelIfUnset(slot) if slot.model_if_unset.from.as_deref() == Some("") => {
+            Err(error(
+                source,
+                format!("{field}.slot.model_if_unset.from"),
+                "must not be empty",
+            ))
         }
         SlotToml::ModelTier(ModelTierSlot { model_tier }) => {
             if model_tier.tier.is_empty()
@@ -737,5 +772,45 @@ key = "effort"
         let only = base().replace("requires = [\"echo\"]", "visible = [\"one\", \"two\"]");
         let agent = validate(&only).expect("visible list");
         assert!(render(&agent).1.contains("Visible::Only"));
+    }
+
+    #[test]
+    fn validation_rejects_mixed_candidate_kinds() {
+        let candidate = "[[file]]\nid = \"config\"\nkind = \"toml\"\nlinux = \"~/.fixture/config.toml\"\nmacos = \"~/.fixture/config.toml\"\nwindows = \"~/.fixture/config.toml\"\n[model]";
+        reject(base().replace("[model]", candidate), "same file id");
+    }
+
+    #[test]
+    fn validation_rejects_empty_model_source() {
+        reject(
+            base().replace(
+                "slot = { literal = \"value\" }",
+                "slot = { model_if_unset = { from = \"\" } }",
+            ),
+            "model_if_unset.from",
+        );
+    }
+
+    #[test]
+    fn validation_rejects_empty_or_duplicate_visible_entries() {
+        for visible in ["visible = [\"one\", \"\"]", "visible = [\"one\", \"one\"]"] {
+            reject(base().replace("requires = [\"echo\"]", visible), "visible");
+        }
+    }
+
+    #[test]
+    fn validation_rejects_builtin_agent_ids() {
+        for id in super::super::RESERVED_AGENT_IDS {
+            let error = parse(
+                &base().replacen("fixture-agent", id, 1),
+                "fixture/agent.toml",
+                id,
+                &[],
+                &[],
+                &["echo".to_owned()],
+            )
+            .expect_err("built-in id");
+            assert!(error.contains("built-in agent id"), "{error}");
+        }
     }
 }

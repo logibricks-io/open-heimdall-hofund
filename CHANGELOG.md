@@ -28,8 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validated data-only `agent.toml` descriptions and delivers them through the
   daemon to the CLI and desktop.
 - `hofund-kit-agent` now runs per-OS golden conformance for planning, apply and
-  backup safety, token refresh, and disconnect drift. Registry fixtures replay
-  the same committed goldens through compiled and const descriptions.
+  backup safety, token refresh, and disconnect drift. Shared `all/` cases run
+  on every OS, OS-specific cases run only on their own OS, and regeneration
+  deduplicates identical three-OS trees. Status and configured models are
+  checked throughout the connection lifecycle (#108, #111). Registry fixtures
+  replay the same committed goldens through compiled and const descriptions.
+- Agent registration rejects ids reserved by the built-in catalog, mixed file
+  kinds under one file id, empty model-source keys, and empty or duplicate
+  visible-model entries. The reserved-id list is checked against the built-in
+  catalog by a daemon test (#111).
 - The plugin API's preflight hook lets `config check` validate external
   resources named by a resolved provider configuration without starting them.
 - The SDK's `IamAccessToken` retains an IAM access token and its optional
@@ -58,6 +65,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Coding-agent path overrides now treat empty and relative values as unset for
+  process environments, explicit environment pairs, and named setters. Const
+  and compiled adapters therefore use the same default paths.
+- Agent golden layouts reject unknown top-level entries, missing OS coverage,
+  incomplete per-OS case sets, and case directories without `case.toml`.
+  OS-specific cases can declare their exact targets with `only` (a non-empty,
+  duplicate-free subset that is not every OS; shared cases use `all/`), and golden
+  regeneration is enabled only by `UPDATE_GOLDEN=1`.
 - Agent model-match needles are required to be lowercase; tier matching itself
   remains ASCII case-insensitive. Compiled descriptions can explicitly identify
   model and effort files, unsupported file kinds are errors, and `Session`
@@ -113,6 +128,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Windows agent environment names now compare ASCII-case-insensitively for
+  `PATH`, path overrides, and compiled environment lookups.
+- Empty agent environment overrides now mean unset everywhere, including the
+  named `Session` setters and const adapters, so const and compiled plans use
+  the same default paths (#109). Relative overrides are also treated as unset;
+  see Changed.
+- Agent conformance compares the exact trimmed origin and the current and
+  refreshed tokens after disconnect, including a dedicated origin-only
+  dotenv golden file, so surviving gateway values cannot pass unnoticed (#110).
 - Gemini CLI connect writes `model.name`. A string `model` is moved there.
 - OpenCode `models` lists each gateway route, with `name` and an empty
   `variants` object. Modalities, limits, and reasoning levels are not

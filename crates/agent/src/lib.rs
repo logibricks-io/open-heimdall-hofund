@@ -43,7 +43,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Referenced so this crate's manifest dependency is compiled, not merely declared.
 use hofund_config as _;
@@ -98,6 +98,7 @@ pub struct Session {
     home: PathBuf,
     path: Option<OsString>,
     env: BTreeMap<OsString, OsString>,
+    env_case_insensitive: bool,
     claude_config_dir: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     gemini_cli_home: Option<PathBuf>,
@@ -127,6 +128,7 @@ impl Session {
             home: home.into(),
             path: None,
             env: BTreeMap::new(),
+            env_case_insensitive: cfg!(windows),
             claude_config_dir: None,
             codex_home: None,
             gemini_cli_home: None,
@@ -137,31 +139,89 @@ impl Session {
     /// Captures the process environment and reads the home directory and `PATH`.
     #[must_use]
     pub fn from_process_env() -> Self {
-        Self {
-            home: home_dir(),
-            path: std::env::var_os("PATH"),
-            env: std::env::vars_os().collect(),
-            claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
-            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
-            gemini_cli_home: std::env::var_os("GEMINI_CLI_HOME").map(PathBuf::from),
-            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from),
+        Self::from_env_iter(home_dir(), std::env::vars_os())
+    }
+
+    /// Builds a session from `home` and environment pairs without reading the
+    /// process environment. Empty and relative path overrides remain in the raw
+    /// environment map but are treated as unset by adapters.
+    #[must_use]
+    pub fn from_env_iter<I, K, V>(home: impl Into<PathBuf>, variables: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        let mut session = Self::new(home);
+        for (name, value) in variables {
+            session.set_env(name.as_ref(), value.as_ref());
         }
+        session
     }
 
     /// Returns an environment value captured in this session.
     #[must_use]
     pub fn env(&self, name: impl AsRef<OsStr>) -> Option<&OsStr> {
-        self.env.get(name.as_ref()).map(OsString::as_os_str)
+        let name = name.as_ref();
+        if self.env_case_insensitive {
+            self.env
+                .iter()
+                .find(|(candidate, _)| env_name_eq(candidate, name, true))
+                .map(|(_, value)| value.as_os_str())
+        } else {
+            self.env.get(name).map(OsString::as_os_str)
+        }
     }
 
-    /// Sets an environment value in this session.
+    /// Sets an environment value in this session. `with_env("PATH", ..)` sets
+    /// the path used for binary detection.
     #[must_use]
     pub fn with_env(mut self, name: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
-        self.env
-            .insert(name.as_ref().to_os_string(), value.as_ref().to_os_string());
+        self.set_env(name.as_ref(), value.as_ref());
         self
+    }
+
+    #[cfg(test)]
+    fn with_env_case_insensitive(mut self, enabled: bool) -> Self {
+        self.env_case_insensitive = enabled;
+        self
+    }
+
+    fn set_env(&mut self, name: &OsStr, value: &OsStr) {
+        if self.env_case_insensitive
+            && let Some(existing) = self
+                .env
+                .keys()
+                .find(|candidate| env_name_eq(candidate, name, true))
+                .cloned()
+        {
+            self.env.remove(&existing);
+        }
+        self.env.insert(name.to_os_string(), value.to_os_string());
+        let path = usable_override(value).then(|| PathBuf::from(value));
+        if env_name_eq(name, OsStr::new("PATH"), self.env_case_insensitive) {
+            self.path = Some(value.to_os_string());
+        } else if env_name_eq(
+            name,
+            OsStr::new("CLAUDE_CONFIG_DIR"),
+            self.env_case_insensitive,
+        ) {
+            self.claude_config_dir = path;
+        } else if env_name_eq(name, OsStr::new("CODEX_HOME"), self.env_case_insensitive) {
+            self.codex_home = path;
+        } else if env_name_eq(
+            name,
+            OsStr::new("GEMINI_CLI_HOME"),
+            self.env_case_insensitive,
+        ) {
+            self.gemini_cli_home = path;
+        } else if env_name_eq(
+            name,
+            OsStr::new("XDG_CONFIG_HOME"),
+            self.env_case_insensitive,
+        ) {
+            self.xdg_config_home = path;
+        }
     }
 
     /// Sets the `PATH` used to detect an installed binary.
@@ -171,60 +231,55 @@ impl Session {
         self
     }
 
-    /// Sets `CLAUDE_CONFIG_DIR`. A relative path is joined to the home directory.
+    /// Sets `CLAUDE_CONFIG_DIR`. Empty and relative paths are treated as unset.
     #[must_use]
     pub fn with_claude_config_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.claude_config_dir = Some(path.into());
-        if let Some(path) = &self.claude_config_dir {
-            self.env.insert(
-                OsString::from("CLAUDE_CONFIG_DIR"),
-                path.as_os_str().to_os_string(),
-            );
-        }
+        let path = path.into();
+        self.set_env(OsStr::new("CLAUDE_CONFIG_DIR"), path.as_os_str());
         self
     }
 
-    /// Sets `CODEX_HOME`. A relative path is joined to the home directory.
+    /// Sets `CODEX_HOME`. Empty and relative paths are treated as unset.
     #[must_use]
     pub fn with_codex_home(mut self, path: impl Into<PathBuf>) -> Self {
-        self.codex_home = Some(path.into());
-        if let Some(path) = &self.codex_home {
-            self.env.insert(
-                OsString::from("CODEX_HOME"),
-                path.as_os_str().to_os_string(),
-            );
-        }
+        let path = path.into();
+        self.set_env(OsStr::new("CODEX_HOME"), path.as_os_str());
         self
     }
 
-    /// Sets `GEMINI_CLI_HOME`. A relative path is joined to the home directory.
+    /// Sets `GEMINI_CLI_HOME`. Empty and relative paths are treated as unset.
     #[must_use]
     pub fn with_gemini_cli_home(mut self, path: impl Into<PathBuf>) -> Self {
-        self.gemini_cli_home = Some(path.into());
-        if let Some(path) = &self.gemini_cli_home {
-            self.env.insert(
-                OsString::from("GEMINI_CLI_HOME"),
-                path.as_os_str().to_os_string(),
-            );
-        }
+        let path = path.into();
+        self.set_env(OsStr::new("GEMINI_CLI_HOME"), path.as_os_str());
         self
     }
 
-    /// Sets `XDG_CONFIG_HOME`. A relative path is joined to the home directory.
+    /// Sets `XDG_CONFIG_HOME`. Empty and relative paths are treated as unset.
     ///
     /// OpenCode reads `$XDG_CONFIG_HOME/opencode` when this is set. Other
     /// agents ignore it.
     #[must_use]
     pub fn with_xdg_config_home(mut self, path: impl Into<PathBuf>) -> Self {
-        self.xdg_config_home = Some(path.into());
-        if let Some(path) = &self.xdg_config_home {
-            self.env.insert(
-                OsString::from("XDG_CONFIG_HOME"),
-                path.as_os_str().to_os_string(),
-            );
-        }
+        let path = path.into();
+        self.set_env(OsStr::new("XDG_CONFIG_HOME"), path.as_os_str());
         self
     }
+}
+
+fn env_name_eq(a: &OsStr, b: &OsStr, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        a.as_encoded_bytes()
+            .eq_ignore_ascii_case(b.as_encoded_bytes())
+    } else {
+        a == b
+    }
+}
+
+pub(crate) fn usable_override(value: &OsStr) -> bool {
+    !value.is_empty()
+        && (Path::new(value).is_absolute()
+            || (cfg!(windows) && matches!(value.as_encoded_bytes().first(), Some(b'\\' | b'/'))))
 }
 
 /// One managed file as it exists before an edit.
@@ -357,7 +412,34 @@ fn home_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use hofund_plugin_api::{AgentFile, FileKind};
+
     use super::Session;
+    use crate::{TargetOs, find, resolve};
+
+    #[test]
+    fn from_env_iter_ignores_empty_and_relative_path_overrides() {
+        let names = [
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+            "GEMINI_CLI_HOME",
+            "XDG_CONFIG_HOME",
+        ];
+        for value in ["", "relative"] {
+            let session = Session::from_env_iter("home", names.map(|name| (name, value)));
+            assert_eq!(session.claude_config_dir, None);
+            assert_eq!(session.codex_home, None);
+            assert_eq!(session.gemini_cli_home, None);
+            assert_eq!(session.xdg_config_home, None);
+            for name in names {
+                assert_eq!(session.env(name), Some(OsStr::new(value)));
+            }
+        }
+    }
 
     #[test]
     fn debug_shows_environment_names_without_values() {
@@ -368,5 +450,118 @@ mod tests {
         assert!(debug.contains("SECRET_NAME"), "{debug}");
         assert!(debug.contains("codex_home"), "{debug}");
         assert!(!debug.contains("do-not-print-this"), "{debug}");
+    }
+
+    #[test]
+    fn windows_environment_names_ignore_ascii_case() {
+        let home = scratch("names");
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).expect("binary directory");
+        let file_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+        fs::write(bin.join(file_name), "").expect("fake binary");
+        let override_dir = home.join("codex-override");
+        let session = Session::new(&home)
+            .with_env_case_insensitive(true)
+            .with_env("Path", bin.as_os_str())
+            .with_env("Codex_Home", override_dir.as_os_str());
+        assert_mixed_case_detection_and_override(&session, &bin, &override_dir);
+
+        let sensitive = Session::new(&home)
+            .with_env_case_insensitive(false)
+            .with_env("Path", bin.as_os_str())
+            .with_env("Codex_Home", override_dir.as_os_str());
+        assert_eq!(sensitive.path, None);
+        assert_eq!(sensitive.codex_home, None);
+        assert_eq!(sensitive.env("PATH"), None);
+        assert_eq!(sensitive.env("CODEX_HOME"), None);
+        assert!(!find("codex").expect("codex").detect(&sensitive));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn windows_environment_writes_replace_case_variants() {
+        let session = Session::new("home")
+            .with_env_case_insensitive(true)
+            .with_env("Path", "first")
+            .with_env("PATH", "second");
+        assert_eq!(session.env.len(), 1);
+        assert_eq!(session.env("path"), Some(OsStr::new("second")));
+        assert_eq!(session.path, Some(OsString::from("second")));
+        assert_eq!(session.env.keys().next(), Some(&OsString::from("PATH")));
+    }
+
+    #[test]
+    fn compiled_resolve_honors_windows_mixed_case_env_override() {
+        static FILE: AgentFile = AgentFile::from_static(
+            "config",
+            FileKind::Toml,
+            "~/.fixture/config.toml",
+            "~/.fixture/config.toml",
+            "~/.fixture/config.toml",
+            Some("FIXTURE_TOML_HOME"),
+        );
+
+        let home = scratch("resolve");
+        let override_dir = home.join("compiled-override");
+        let session = Session::new(&home)
+            .with_env_case_insensitive(true)
+            .with_env("Fixture_Toml_Home", override_dir.as_os_str());
+        assert_eq!(
+            session.env("FIXTURE_TOML_HOME"),
+            Some(override_dir.as_os_str())
+        );
+        assert_eq!(
+            resolve(&FILE, TargetOs::Linux, &session),
+            override_dir.join("config.toml")
+        );
+
+        let sensitive = Session::new(&home)
+            .with_env_case_insensitive(false)
+            .with_env("Fixture_Toml_Home", override_dir.as_os_str());
+        assert_eq!(sensitive.env("FIXTURE_TOML_HOME"), None);
+        assert_eq!(
+            resolve(&FILE, TargetOs::Linux, &sensitive),
+            home.join(".fixture").join("config.toml")
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn public_from_env_iter_uses_windows_environment_casing() {
+        let home = scratch("public-windows");
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).expect("binary directory");
+        fs::write(bin.join("codex.exe"), "").expect("fake binary");
+        let override_dir = home.join("codex-override");
+        let session = Session::from_env_iter(
+            &home,
+            [
+                (OsStr::new("Path"), bin.as_os_str()),
+                (OsStr::new("Codex_Home"), override_dir.as_os_str()),
+            ],
+        );
+        assert_mixed_case_detection_and_override(&session, &bin, &override_dir);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    fn assert_mixed_case_detection_and_override(
+        session: &Session,
+        bin: &Path,
+        override_dir: &Path,
+    ) {
+        assert_eq!(session.path, Some(bin.as_os_str().to_os_string()));
+        assert_eq!(session.codex_home, Some(override_dir.to_path_buf()));
+        assert_eq!(session.env("PATH"), Some(bin.as_os_str()));
+        assert_eq!(session.env("CODEX_HOME"), Some(override_dir.as_os_str()));
+        assert!(find("codex").expect("codex").detect(session));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("hofund-session-env-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("session test directory");
+        path
     }
 }

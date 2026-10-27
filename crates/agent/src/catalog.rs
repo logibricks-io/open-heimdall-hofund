@@ -11,7 +11,6 @@ use hofund_plugin_api::{
     Visible,
 };
 
-use crate::DisconnectOutcome;
 use crate::edit::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
 use crate::store::{
     backup_once, clear_markers, created_here, delete_verified, marker_present, read_optional,
@@ -21,6 +20,7 @@ use crate::{
     AgentAdapter, AgentError, ConfigFile, ConnectionStatus, FileChange, GatewayTarget, Plan,
     Session, TargetOs,
 };
+use crate::{DisconnectOutcome, usable_override};
 
 /// Claude Code user settings.
 ///
@@ -509,6 +509,9 @@ pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog
 }
 
 /// Resolves one compiled file location against a session.
+///
+/// Empty and relative environment overrides are treated as unset, so the
+/// default template is used.
 #[must_use]
 pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
     let template = match os {
@@ -519,7 +522,7 @@ pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
     let override_value = file.env_override().and_then(|name| {
         session
             .env(name)
-            .filter(|value| !value.is_empty())
+            .filter(|value| usable_override(value))
             .map(PathBuf::from)
     });
     let (root, remainder) = if let Some(value) = override_value {
@@ -532,7 +535,7 @@ pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
             .strip_prefix(prefix)
             .unwrap_or(template)
             .trim_start_matches('/');
-        (rooted(session, &value), remainder)
+        (value, remainder)
     } else {
         (
             session.home.clone(),
@@ -1375,7 +1378,7 @@ fn refused(id: &str, path: &Path, detail: &str) -> AgentError {
 fn preserve_dirs(session: &Session) -> Vec<PathBuf> {
     let mut dirs = vec![session.home.clone()];
     if let Some(path) = &session.xdg_config_home {
-        dirs.push(rooted(session, path));
+        dirs.push(path.clone());
     }
     dirs
 }
@@ -1400,19 +1403,11 @@ fn binary_on_path(session: &Session, name: &str) -> bool {
     false
 }
 
-fn rooted(session: &Session, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        session.home.join(path)
-    }
-}
-
 fn claude_settings(session: &Session) -> PathBuf {
-    let directory = session.claude_config_dir.as_ref().map_or_else(
-        || session.home.join(".claude"),
-        |path| rooted(session, path),
-    );
+    let directory = session
+        .claude_config_dir
+        .as_ref()
+        .map_or_else(|| session.home.join(".claude"), |path| path.clone());
     directory.join("settings.json")
 }
 
@@ -1420,7 +1415,7 @@ fn codex_config(session: &Session) -> PathBuf {
     let directory = session
         .codex_home
         .as_ref()
-        .map_or_else(|| session.home.join(".codex"), |path| rooted(session, path));
+        .map_or_else(|| session.home.join(".codex"), |path| path.clone());
     directory.join("config.toml")
 }
 
@@ -1428,7 +1423,7 @@ fn gemini_root(session: &Session) -> PathBuf {
     session
         .gemini_cli_home
         .as_ref()
-        .map_or_else(|| session.home.clone(), |path| rooted(session, path))
+        .map_or_else(|| session.home.clone(), |path| path.clone())
 }
 
 fn gemini_settings(session: &Session) -> PathBuf {
@@ -1441,7 +1436,7 @@ fn gemini_env(session: &Session) -> PathBuf {
 
 fn opencode_dir(session: &Session) -> PathBuf {
     match &session.xdg_config_home {
-        Some(path) => rooted(session, path).join("opencode"),
+        Some(path) => path.join("opencode"),
         None => session.home.join(".config").join("opencode"),
     }
 }
@@ -1525,6 +1520,12 @@ const FIXTURE_JSON_AGENT: Description = Description {
             resolve: fixture_json_env,
         },
         Location {
+            file: "origin",
+            kind: FileKind::Env,
+            create: true,
+            resolve: fixture_json_origin,
+        },
+        Location {
             file: "config",
             kind: FileKind::Json,
             create: false,
@@ -1595,6 +1596,11 @@ const FIXTURE_JSON_AGENT: Description = Description {
             slot: Slot::Literal("value"),
         },
         Set {
+            file: "origin",
+            key: "FIXTURE_BASE",
+            slot: Slot::Origin,
+        },
+        Set {
             file: "config",
             key: "models",
             slot: Slot::OpenCodeModels,
@@ -1610,23 +1616,62 @@ const FIXTURE_JSON_AGENT: Description = Description {
 fn fixture_toml_config(session: &Session) -> PathBuf {
     session
         .env("FIXTURE_TOML_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map_or_else(
-            || session.home.join(".fixture-toml"),
-            |path| rooted(session, &path),
-        )
+        .filter(|value| usable_override(value))
+        .map_or_else(|| fixture_toml_dir(session), PathBuf::from)
         .join("config.toml")
 }
 
 #[cfg(test)]
+fn fixture_toml_dir(session: &Session) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        session
+            .home
+            .join("Library")
+            .join("Preferences")
+            .join("fixture-toml")
+    } else if cfg!(target_os = "windows") {
+        session
+            .home
+            .join("AppData")
+            .join("Local")
+            .join("fixture-toml")
+    } else {
+        session.home.join(".config").join("fixture-toml")
+    }
+}
+
+#[cfg(test)]
 fn fixture_json_settings(session: &Session) -> PathBuf {
-    session.home.join(".fixture-json").join("settings.json")
+    fixture_json_dir(session).join("settings.json")
 }
 
 #[cfg(test)]
 fn fixture_json_env(session: &Session) -> PathBuf {
-    session.home.join(".fixture-json").join("fixture.env")
+    fixture_json_dir(session).join("fixture.env")
+}
+
+#[cfg(test)]
+fn fixture_json_origin(session: &Session) -> PathBuf {
+    fixture_json_dir(session).join("origin.env")
+}
+
+#[cfg(test)]
+fn fixture_json_dir(session: &Session) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        session
+            .home
+            .join("Library")
+            .join("Application Support")
+            .join("fixture-json")
+    } else if cfg!(target_os = "windows") {
+        session
+            .home
+            .join("AppData")
+            .join("Roaming")
+            .join("fixture-json")
+    } else {
+        session.home.join(".fixture-json")
+    }
 }
 
 #[cfg(test)]
@@ -1655,7 +1700,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{Described, FIXTURE_JSON_AGENT, FIXTURE_TOML_AGENT, FIXTURE_TOML_EFFORT};
-    use crate::{AgentAdapter, GatewayTarget, Plan, Session};
+    use crate::{AgentAdapter, GatewayTarget, Plan, Session, TargetOs};
 
     #[derive(Default)]
     struct GoldenCase {
@@ -1663,11 +1708,190 @@ mod tests {
         routes: Vec<String>,
         base_url: String,
         token: String,
+        configured_model: Option<String>,
+        only: Option<Vec<String>>,
     }
 
+    type GoldenLayout = (Vec<PathBuf>, [(&'static str, Vec<PathBuf>); 3]);
+
+    fn golden_layout(id: &str, fixtures: &Path) -> Result<GoldenLayout, String> {
+        let shared = golden_cases(&fixtures.join("all"))?;
+        let per_os = [
+            ("linux", golden_cases(&fixtures.join("linux"))?),
+            ("macos", golden_cases(&fixtures.join("macos"))?),
+            ("windows", golden_cases(&fixtures.join("windows"))?),
+        ];
+        validate_fixture_layout(id, fixtures, &shared, &per_os)?;
+        Ok((shared, per_os))
+    }
+
+    fn golden_cases(root: &Path) -> Result<Vec<PathBuf>, String> {
+        let mut cases = Vec::new();
+        match fs::read_dir(root) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = entry
+                        .map_err(|error| format!("read {}: {error}", root.display()))?
+                        .path();
+                    if !path.join("case.toml").is_file() {
+                        return Err(format!(
+                            "golden case directory {} must contain case.toml",
+                            path.display()
+                        ));
+                    }
+                    cases.push(path);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("read {}: {error}", root.display())),
+        }
+        cases.sort();
+        Ok(cases)
+    }
+
+    fn validate_fixture_layout(
+        id: &str,
+        fixtures: &Path,
+        shared: &[PathBuf],
+        per_os: &[(&str, Vec<PathBuf>); 3],
+    ) -> Result<(), String> {
+        match fs::read_dir(fixtures) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry =
+                        entry.map_err(|error| format!("read {}: {error}", fixtures.display()))?;
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if !["all", "linux", "macos", "windows"].contains(&name.as_str()) {
+                        return Err(format!(
+                            "unknown top-level fixture entry `{name}` at {}",
+                            entry.path().display()
+                        ));
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("read {}: {error}", fixtures.display())),
+        }
+        for (directory, cases) in per_os {
+            if shared.is_empty() && cases.is_empty() {
+                return Err(format!("{id}: {directory} has no golden cases"));
+            }
+        }
+        for case in shared {
+            if case_targets(case)?.is_some() {
+                return Err(format!(
+                    "shared case `{}` must not declare only",
+                    case.display()
+                ));
+            }
+            let name = case_name(case);
+            for (directory, cases) in per_os {
+                if cases.iter().any(|candidate| case_name(candidate) == name) {
+                    return Err(format!(
+                        "{id}: case `{name}` occurs in both all/ and {directory}/"
+                    ));
+                }
+            }
+        }
+
+        let mut by_name: BTreeMap<&str, Vec<(&str, &Path)>> = BTreeMap::new();
+        for (directory, cases) in per_os {
+            for case in cases {
+                by_name
+                    .entry(case_name(case))
+                    .or_default()
+                    .push((directory, case));
+            }
+        }
+        for (name, cases) in by_name {
+            let targets = case_targets(cases[0].1)?;
+            for (_, case) in cases.iter().skip(1) {
+                if case_targets(case)? != targets {
+                    return Err(format!("case `{name}` has inconsistent only declarations"));
+                }
+            }
+            let expected = targets.as_ref().map_or_else(
+                || {
+                    ["linux", "macos", "windows"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<std::collections::BTreeSet<_>>()
+                },
+                |targets| targets.clone(),
+            );
+            let actual = cases
+                .iter()
+                .map(|(directory, _)| (*directory).to_owned())
+                .collect::<std::collections::BTreeSet<_>>();
+            if actual != expected {
+                return Err(format!(
+                    "case `{name}` occurs in {actual:?}, but its layout requires {expected:?}"
+                ));
+            }
+            if targets.is_none() {
+                let first = tree(cases[0].1);
+                if cases.iter().skip(1).all(|(_, case)| tree(case) == first) {
+                    return Err(format!(
+                        "{id}: case `{name}` has byte-identical per-OS trees in {}; the trees must differ or the case must be shared via all/ for all three OS",
+                        fixtures.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn case_name(case: &Path) -> &str {
+        case.file_name()
+            .and_then(|name| name.to_str())
+            .expect("UTF-8 golden case name")
+    }
+
+    fn case_targets(case: &Path) -> Result<Option<std::collections::BTreeSet<String>>, String> {
+        let parsed = read_case(&case.join("case.toml"));
+        let Some(only) = parsed.only else {
+            return Ok(None);
+        };
+        if only.is_empty() {
+            return Err(format!(
+                "case `{}` only must list at least one OS",
+                case.display()
+            ));
+        }
+        let mut targets = std::collections::BTreeSet::new();
+        for directory in only {
+            if !["linux", "macos", "windows"].contains(&directory.as_str()) {
+                return Err(format!(
+                    "case `{}` declares unknown OS `{directory}` in only",
+                    case.display()
+                ));
+            }
+            if !targets.insert(directory.clone()) {
+                return Err(format!(
+                    "case `{}` declares duplicate OS `{directory}` in only",
+                    case.display()
+                ));
+            }
+        }
+        if targets.len() == 3 {
+            return Err(format!(
+                "case `{}` only lists every OS; use all/ instead",
+                case.display()
+            ));
+        }
+        Ok(Some(targets))
+    }
+
+    /// Shared cases run everywhere; OS-specific cases run where their const
+    /// resolver selects the same host-OS paths as the compiled description.
     #[test]
     fn const_fixture_descriptions_replay_compiled_goldens() {
         assert_eq!(FIXTURE_TOML_EFFORT.file, "config");
+        let host_directory = match TargetOs::current() {
+            TargetOs::Linux => "linux",
+            TargetOs::Macos => "macos",
+            TargetOs::Windows => "windows",
+        };
         for (id, description) in [
             ("fixture-toml-agent", &FIXTURE_TOML_AGENT),
             ("fixture-json-agent", &FIXTURE_JSON_AGENT),
@@ -1676,18 +1900,150 @@ mod tests {
                 .join("../../plugins/registry/tests/fixtures/agents")
                 .join(id)
                 .join("fixtures");
-            for os in ["linux", "macos", "windows"] {
-                let mut cases = fs::read_dir(fixtures.join(os))
-                    .expect("golden OS directory")
-                    .map(|entry| entry.expect("golden case").path())
-                    .filter(|path| path.join("case.toml").is_file())
-                    .collect::<Vec<_>>();
-                cases.sort();
-                assert!(!cases.is_empty(), "{id} has no {os} cases");
-                for case in cases {
-                    replay_case(description, &case);
-                }
+            let (shared, per_os) = golden_layout(id, &fixtures).expect("valid fixture layout");
+            let host = per_os
+                .iter()
+                .find(|(directory, _)| *directory == host_directory)
+                .map(|(_, cases)| cases)
+                .expect("host cases");
+            let mut replayed = 0;
+            for case in shared.iter().chain(host.iter()) {
+                replay_case(description, case);
+                replayed += 1;
             }
+            assert!(replayed > 0, "{id} has no host or shared cases");
+        }
+    }
+
+    fn write_layout_case(root: &Path, directory: &str, name: &str, only: Option<&[&str]>) {
+        let only = only.map_or_else(String::new, |directories| {
+            let directories = directories
+                .iter()
+                .map(|directory| format!("\"{directory}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("only = [{directories}]\n")
+        });
+        let case = root.join(directory).join(name);
+        fs::create_dir_all(case.join("after").join(directory)).expect("layout case");
+        fs::write(
+            case.join("case.toml"),
+            format!(
+                "routes = []\nbase_url = \"http://127.0.0.1:3425/\"\ntoken = \"old-token\"\n{only}"
+            ),
+        )
+        .expect("layout case.toml");
+        fs::write(
+            case.join("after").join(directory).join("fixture.env"),
+            "FIXTURE_TOKEN=old-token\n",
+        )
+        .expect("layout golden");
+    }
+
+    fn layout_error(root: &Path) -> String {
+        golden_layout("fixture-test", root)
+            .map(|_| ())
+            .expect_err("invalid fixture layout")
+    }
+
+    #[test]
+    fn const_fixture_layout_rejects_unknown_top_level_entry() {
+        let root = scratch();
+        for directory in ["linux", "macOS", "windows"] {
+            write_layout_case(&root, directory, "fresh", None);
+        }
+        let error = layout_error(&root);
+        assert!(error.contains("macOS"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn const_fixture_layout_requires_every_os() {
+        let root = scratch();
+        for directory in ["linux", "macos"] {
+            write_layout_case(&root, directory, "fresh", None);
+        }
+        let error = layout_error(&root);
+        assert!(error.contains("windows has no golden cases"), "{error}");
+        let _ = fs::remove_dir_all(&root);
+
+        let root = scratch();
+        for directory in ["linux", "windows"] {
+            write_layout_case(&root, directory, "fresh", None);
+        }
+        let error = layout_error(&root);
+        assert!(error.contains("macos has no golden cases"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn const_fixture_layout_requires_complete_per_os_cases() {
+        let root = scratch();
+        write_layout_case(&root, "all", "shared", None);
+        for directory in ["macos", "windows"] {
+            write_layout_case(&root, directory, "fresh", None);
+        }
+        let error = layout_error(&root);
+        assert!(error.contains("layout requires"), "{error}");
+        assert!(error.contains("linux"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn const_fixture_layout_requires_case_toml() {
+        let root = scratch();
+        fs::create_dir_all(root.join("all").join("broken")).expect("case directory");
+        let error = layout_error(&root);
+        assert!(error.contains("must contain case.toml"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn const_fixture_layout_enforces_only() {
+        let root = scratch();
+        write_layout_case(&root, "all", "shared", None);
+        for directory in ["linux", "windows"] {
+            write_layout_case(&root, directory, "selected", Some(&["linux", "windows"]));
+        }
+        golden_layout("fixture-test", &root).expect("only layout");
+
+        write_layout_case(&root, "windows", "selected", Some(&["linux"]));
+        let error = layout_error(&root);
+        assert!(error.contains("inconsistent only"), "{error}");
+
+        write_layout_case(&root, "all", "shared", Some(&["linux"]));
+        let error = layout_error(&root);
+        assert!(error.contains("must not declare only"), "{error}");
+        let _ = fs::remove_dir_all(&root);
+
+        for (only, expected) in [
+            (&[][..], "must list at least one OS"),
+            (&["linux", "linux"][..], "duplicate OS `linux`"),
+            (&["linux", "macos", "windows"][..], "use all/ instead"),
+        ] {
+            let root = scratch();
+            write_layout_case(&root, "all", "shared", None);
+            write_layout_case(&root, "linux", "selected", Some(only));
+            let error = layout_error(&root);
+            assert!(error.contains(expected), "{error}");
+            let _ = fs::remove_dir_all(root);
+        }
+
+        let root = scratch();
+        write_layout_case(&root, "all", "shared", None);
+        write_layout_case(&root, "linux", "selected", Some(&["plan9"]));
+        let error = layout_error(&root);
+        assert!(error.contains("unknown OS `plan9`"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn const_real_fixture_trees_pass_layout_validation() {
+        let agents = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/registry/tests/fixtures/agents");
+        for id in ["fixture-toml-agent", "fixture-json-agent"] {
+            golden_layout(id, &agents.join(id).join("fixtures"))
+                .unwrap_or_else(|error| panic!("{id}: {error}"));
         }
     }
 
@@ -1711,6 +2067,14 @@ mod tests {
         verify_plan(&label, &home, &plan, &after);
         let applied = adapter.apply(&session, &target).expect("const apply");
         verify_plan(&label, &home, &applied, &after);
+        assert_eq!(
+            adapter
+                .configured_model(&session)
+                .expect("const configured model")
+                .as_deref(),
+            case.configured_model.as_deref(),
+            "{label}: const configured model"
+        );
         let mut expected = before;
         expected.extend(after);
         assert_eq!(managed_tree(&home), expected, "{label}: const apply tree");
@@ -1758,6 +2122,11 @@ mod tests {
                 case.base_url = serde_json::from_str(raw).expect("case base URL");
             } else if key == "token" {
                 case.token = serde_json::from_str(raw).expect("case token");
+            } else if key == "configured_model" {
+                case.configured_model =
+                    Some(serde_json::from_str(raw).expect("case configured model"));
+            } else if key == "only" {
+                case.only = Some(serde_json::from_str(raw).expect("case only"));
             } else if in_env {
                 case.env.insert(
                     key.to_owned(),
