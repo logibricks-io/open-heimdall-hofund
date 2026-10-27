@@ -400,6 +400,59 @@ async fn messages_unary_sends_version_and_key() {
     assert!(requests[0].headers.get("authorization").is_none());
 }
 
+async fn bedrock_body_with_betas(betas: Value) -> Value {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut endpoint = Endpoint::new("bedrock", server.uri());
+    endpoint.preset = Some("bedrock".to_owned());
+    let provider = Anthropic::new(endpoint).expect("provider");
+    let mut request = user_request(false);
+    request.params.max_tokens = Some(16);
+    request.extensions.insert("anthropic_beta", betas);
+    provider
+        .execute(request, "anthropic-messages")
+        .await
+        .expect("call");
+    let requests = server.received_requests().await.expect("requests");
+    serde_json::from_slice(&requests[0].body).expect("body")
+}
+
+#[tokio::test]
+async fn bedrock_messages_split_comma_separated_body_betas() {
+    let body = bedrock_body_with_betas(json!([
+        "a, prompt-caching-scope-2026-01-05",
+        "advanced-tool-use-2025-11-20"
+    ]))
+    .await;
+    assert_eq!(
+        body["anthropic_beta"],
+        json!(["a", "tool-search-tool-2025-10-19"])
+    );
+}
+
+#[tokio::test]
+async fn bedrock_messages_stringify_non_string_body_betas() {
+    for (asked, expected) in [
+        (json!(["a", 1]), Some(json!(["a", 1]))),
+        (json!([1, "redact-thinking-2026-02-12"]), Some(json!(["1"]))),
+        (json!([null, "redact-thinking-2026-02-12"]), None),
+    ] {
+        let body = bedrock_body_with_betas(asked).await;
+        assert_eq!(body.get("anthropic_beta"), expected.as_ref());
+    }
+}
+
 #[tokio::test]
 async fn bedrock_messages_send_key_alone_fit_betas_and_drop_metadata() {
     for (host, preset) in [

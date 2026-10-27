@@ -127,7 +127,7 @@ fn fit_bedrock_headers(headers: &mut Vec<(String, String)>) {
     let mut fitted = Vec::with_capacity(headers.len());
     for (name, value) in std::mem::take(headers) {
         if name.eq_ignore_ascii_case("anthropic-beta") {
-            let betas = fit_betas(value.split(','));
+            let betas = fit_betas(std::iter::once(value.as_str()));
             if !betas.is_empty() {
                 fitted.push((name, betas.join(",")));
             }
@@ -143,7 +143,11 @@ fn fit_bedrock_headers(headers: &mut Vec<(String, String)>) {
 fn fit_bedrock_request(request: &mut Request) {
     request.extensions.remove("metadata");
     if let Some(serde_json::Value::Array(values)) = request.extensions.get("anthropic_beta") {
-        let fitted = fit_betas(values.iter().filter_map(serde_json::Value::as_str));
+        let asked: Vec<String> = values.iter().map(beta_text).collect();
+        let fitted = fit_betas(asked.iter().map(String::as_str));
+        if fitted == asked {
+            return;
+        }
         if fitted.is_empty() {
             request.extensions.remove("anthropic_beta");
         } else {
@@ -157,24 +161,34 @@ fn fit_bedrock_request(request: &mut Request) {
     }
 }
 
+fn beta_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => String::new(),
+        other => serde_json::to_string(other).expect("a JSON value must serialize"),
+    }
+}
+
 fn fit_betas<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut fitted = Vec::new();
     for value in values {
-        let value = value.trim();
-        let value = match value {
-            "advanced-tool-use-2025-11-20" => "tool-search-tool-2025-10-19",
-            other => other,
-        };
-        if value.is_empty()
-            || matches!(
-                value,
-                "prompt-caching-scope-2026-01-05" | "redact-thinking-2026-02-12"
-            )
-            || fitted.iter().any(|present| present == value)
-        {
-            continue;
+        for value in value.split(',') {
+            let value = value.trim();
+            let value = match value {
+                "advanced-tool-use-2025-11-20" => "tool-search-tool-2025-10-19",
+                other => other,
+            };
+            if value.is_empty()
+                || matches!(
+                    value,
+                    "prompt-caching-scope-2026-01-05" | "redact-thinking-2026-02-12"
+                )
+                || fitted.iter().any(|present| present == value)
+            {
+                continue;
+            }
+            fitted.push(value.to_owned());
         }
-        fitted.push(value.to_owned());
     }
     fitted
 }

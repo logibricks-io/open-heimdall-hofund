@@ -141,7 +141,8 @@ impl Provider for OpenAiCompat {
             {
                 mantle.routes.learn_other(&model);
                 let url = self.url_for(&model, true);
-                match http::execute_at(
+                // reference: internal/gateway/mantle.go:54-72
+                match http::send_at(
                     &self.upstream,
                     &url,
                     codec,
@@ -151,7 +152,7 @@ impl Provider for OpenAiCompat {
                 )
                 .await
                 {
-                    Ok(completion) => Ok(completion),
+                    Ok(sent) => sent.complete().await,
                     Err(second)
                         if mantle::wrong_route_message(&second.message)
                             || matches!(
@@ -541,27 +542,26 @@ mod tests {
         );
     }
 
+    fn complete_request(request: &[u8]) -> bool {
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let length = headers
+            .split("\r\n")
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        request.len() >= header_end + 4 + length
+    }
+
     #[tokio::test]
     async fn a_second_transport_error_forgets_the_route() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        fn complete_request(request: &[u8]) -> bool {
-            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
-            else {
-                return false;
-            };
-            let headers = String::from_utf8_lossy(&request[..header_end]);
-            let length = headers
-                .split("\r\n")
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-            request.len() >= header_end + 4 + length
-        }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -621,6 +621,93 @@ mod tests {
                 .routes
                 .other("newmaker.model-1")
         );
+    }
+
+    async fn assert_second_ok_with_broken_body_keeps_route(streaming: bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("connection");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let read = socket.read(&mut chunk).await.expect("read request");
+                    assert_ne!(read, 0, "request ended before its body");
+                    request.extend_from_slice(&chunk[..read]);
+                    if complete_request(&request) {
+                        break;
+                    }
+                }
+                if attempt == 0 {
+                    assert!(request.starts_with(b"POST /v1/chat/completions HTTP/1.1\r\n"));
+                    let body =
+                        br#"{"error":{"message":"first prefix isn't supported on this route"}}"#;
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .expect("response headers");
+                    socket.write_all(body).await.expect("response body");
+                } else {
+                    assert!(request.starts_with(b"POST /openai/v1/chat/completions HTTP/1.1\r\n"));
+                    let content_type = if streaming {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    };
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: 500\r\nconnection: close\r\n\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .expect("response headers");
+                    socket.write_all(b"1234567890").await.expect("partial body");
+                }
+            }
+        });
+        let mut endpoint = Endpoint::new("mantle", format!("http://{address}/v1"));
+        endpoint.preset = Some("bedrock-mantle".to_owned());
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+        let mut request = say("newmaker.model-1");
+        request.stream = streaming;
+
+        let Err(error) = provider.execute(request, "openai-chat").await else {
+            panic!("a truncated success body must fail");
+        };
+        server.await.expect("server");
+        assert_ne!(error.status, Some(400));
+        assert!(!error.message.contains("first prefix"));
+        assert!(
+            provider
+                .mantle
+                .as_ref()
+                .expect("mantle")
+                .routes
+                .other("newmaker.model-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_ok_with_a_truncated_body_keeps_the_route() {
+        assert_second_ok_with_broken_body_keeps_route(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_second_ok_stream_that_breaks_keeps_the_route() {
+        assert_second_ok_with_broken_body_keeps_route(true).await;
     }
 
     #[tokio::test]

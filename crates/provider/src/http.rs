@@ -501,6 +501,40 @@ pub(crate) async fn execute_at(
     .await
 }
 
+/// A successful upstream response waiting for its body to be completed.
+pub(crate) struct Sent<'a> {
+    response: reqwest::Response,
+    streaming: bool,
+    cross_protocol: bool,
+    codec: &'a dyn Codec,
+}
+
+impl Sent<'_> {
+    /// Reads or streams the successful response into a completion.
+    pub(crate) async fn complete(self) -> Result<Completion, ProviderError> {
+        if !self.cross_protocol {
+            return raw_completion(self.response, self.streaming, self.codec).await;
+        }
+        // Cross-protocol only. Extensions are stripped on the way back.
+        if self.streaming {
+            let events = SseEvents::new(
+                self.response.bytes_stream(),
+                self.codec.stream_decoder(),
+                self.cross_protocol,
+            );
+            Ok(Completion::Stream(Box::pin(events)))
+        } else {
+            let bytes = self.response.bytes().await.map_err(map_transport)?;
+            let mut decoded = self
+                .codec
+                .decode_response(&bytes)
+                .map_err(|error| ProviderError::decode(error.to_string()))?;
+            decoded.strip_extensions();
+            Ok(Completion::Unary(Box::new(decoded)))
+        }
+    }
+}
+
 async fn finish(
     upstream: &Upstream,
     url: &str,
@@ -510,6 +544,50 @@ async fn finish(
     inbound_protocol: &str,
     bearer: Option<&str>,
 ) -> Result<Completion, ProviderError> {
+    send(
+        upstream,
+        url,
+        codec,
+        request,
+        prepare,
+        inbound_protocol,
+        bearer,
+    )
+    .await?
+    .complete()
+    .await
+}
+
+/// Prepares and sends a request, returning only after its status is known.
+pub(crate) async fn send_at<'a>(
+    upstream: &Upstream,
+    url: &str,
+    codec: &'a dyn Codec,
+    request: Request,
+    prepare: Option<Prepare>,
+    inbound_protocol: &str,
+) -> Result<Sent<'a>, ProviderError> {
+    send(
+        upstream,
+        url,
+        codec,
+        request,
+        prepare,
+        inbound_protocol,
+        None,
+    )
+    .await
+}
+
+async fn send<'a>(
+    upstream: &Upstream,
+    url: &str,
+    codec: &'a dyn Codec,
+    request: Request,
+    prepare: Option<Prepare>,
+    inbound_protocol: &str,
+    bearer: Option<&str>,
+) -> Result<Sent<'a>, ProviderError> {
     let cross_protocol = codec.id() != inbound_protocol;
     let streaming = request.stream;
     let body = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
@@ -524,25 +602,12 @@ async fn finish(
             None => error,
         });
     }
-    if !cross_protocol {
-        return raw_completion(response, streaming, codec).await;
-    }
-    // Cross-protocol only. Extensions are stripped on the way back.
-    if streaming {
-        let events = SseEvents::new(
-            response.bytes_stream(),
-            codec.stream_decoder(),
-            cross_protocol,
-        );
-        Ok(Completion::Stream(Box::pin(events)))
-    } else {
-        let bytes = response.bytes().await.map_err(map_transport)?;
-        let mut decoded = codec
-            .decode_response(&bytes)
-            .map_err(|error| ProviderError::decode(error.to_string()))?;
-        decoded.strip_extensions();
-        Ok(Completion::Unary(Box::new(decoded)))
-    }
+    Ok(Sent {
+        response,
+        streaming,
+        cross_protocol,
+        codec,
+    })
 }
 
 pub(crate) async fn raw_completion(
