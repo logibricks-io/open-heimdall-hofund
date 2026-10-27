@@ -14,6 +14,8 @@ fn compiled_agent_ids_compose_in_cli_order_and_migrated_agents_are_compiled() {
     assert!(catalog.find("claude-code").is_some());
     assert!(hofund_agent::find("codex").is_none());
     assert!(catalog.find("codex").is_some());
+    assert!(hofund_agent::find("opencode").is_none());
+    assert!(catalog.find("opencode").is_some());
 }
 
 #[test]

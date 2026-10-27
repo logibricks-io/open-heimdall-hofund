@@ -1,0 +1,4 @@
+{
+  "model": "decoy-model",
+  "plugin": ["decoy"]
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "user-model",
+  "plugin": ["a"],
+  "provider": {
+    "other": {
+      "name": "Other",
+      "options": { "baseURL": "https://other.example/v1" }
+    }
+  },
+  "theme": "dark"
+}

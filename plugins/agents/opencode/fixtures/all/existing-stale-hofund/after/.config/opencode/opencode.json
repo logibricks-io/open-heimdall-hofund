@@ -1,0 +1,28 @@
+{
+  "model": "stale-model",
+  "provider": {
+    "hofund": {
+      "name": "hofund",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:3425/v1",
+        "apiKey": "old-token",
+        "extra": "keep"
+      },
+      "models": {
+        "route-a": {
+          "name": "route-a",
+          "variants": {}
+        },
+        "route-b": {
+          "name": "route-b",
+          "variants": {}
+        }
+      },
+      "extra": "keep"
+    },
+    "other": {
+      "name": "Other"
+    }
+  }
+}
