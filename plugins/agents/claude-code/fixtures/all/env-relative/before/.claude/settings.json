@@ -1,0 +1,6 @@
+{
+  "model": "relative-model",
+  "env": {
+    "KEEP": "yes"
+  }
+}

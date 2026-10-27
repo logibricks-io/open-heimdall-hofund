@@ -1,0 +1,12 @@
+{
+  "model": "user-model",
+  "permissions": {
+    "allow": ["Read"]
+  },
+  "env": {
+    "KEEP": "yes"
+  },
+  "ui": {
+    "theme": "dark"
+  }
+}

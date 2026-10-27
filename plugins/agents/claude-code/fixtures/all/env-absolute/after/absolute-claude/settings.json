@@ -1,0 +1,12 @@
+{
+  "model": "absolute-model",
+  "env": {
+    "KEEP": "yes",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3425",
+    "ANTHROPIC_AUTH_TOKEN": "old-token",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "absolute-model",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "absolute-model",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "absolute-model",
+    "ANTHROPIC_SMALL_FAST_MODEL": "absolute-model"
+  }
+}

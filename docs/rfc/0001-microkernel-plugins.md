@@ -49,7 +49,7 @@ The spine, from [architecture.md](../architecture.md), is `ir <- codec <- provid
 
 The daemon match at `crates/daemon/src/lib.rs` lines 251-285 is the composition root, and it names `Vertex` and `Bedrock`. That is why a provider change and a kernel change collide.
 
-`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape for the engine: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. At the original RFC pin, the four adapters were Rust constants in `crates/agent/src/catalog.rs`; F1 moved Codex to the compiled registry while the other three remain const-backed. `Slot` (line 363) is `Origin`, `V1`, `Token`, `Literal`, `GeminiModel`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier`. `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
+`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape for the engine: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. At the original RFC pin, the four adapters were Rust constants in `crates/agent/src/catalog.rs`; F1 and F2 moved Codex and Claude Code to the compiled registry while Gemini CLI and OpenCode remain const-backed. `Slot` (line 363) is `Origin`, `V1`, `Token`, `Literal`, `GeminiModel`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier`. `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
 
 Streaming is already pull-based (`crates/provider/src/lib.rs` lines 5-7, `stream.rs` lines 3-4). That stays. What is missing is the host, the factory, and failure isolation.
 
@@ -929,6 +929,16 @@ F1 migrates Codex to the compiled data-only path without changing its configurat
 - The non-default `legacy-codex-const` feature exposes the frozen pre-F1 adapter only as an equivalence-test oracle. Agent and registry dev-dependencies enable it; normal production composition does not.
 - Goldens live at `plugins/agents/codex/fixtures/all/<case>/`. Fresh, existing-user, stale-hofund, multiple-route, environment override, and configured-model cases pass through both the shipped compiled description and the frozen oracle for Linux, macOS, and Windows. Registry integration tests also compare metadata and the complete edit lifecycle.
 - `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. A compiled description fills its named slot; other compiled ids follow in input order, and collision checks are unchanged. `RESERVED_AGENT_IDS` now contains only const-backed ids.
+- No parity fixes or behavior changes are included.
+
+### PR F2 notes
+
+F2 migrates Claude Code to the compiled data-only path without changing its configuration bytes or lifecycle behavior.
+
+- `plugins/agents/claude-code/agent.toml` carries the former const's path, ordered origin, token, model, and tier sets, Fable needle, model key, and rationale. The production Claude Code const, described adapter, and resolver are removed; Gemini CLI and OpenCode remain const-backed.
+- F1's non-default `legacy-codex-const` feature is renamed `legacy-agent-consts` and now exposes the frozen Codex and Claude Code adapters only as equivalence-test oracles. Agent and registry dev-dependencies enable it; normal production composition does not.
+- Goldens live at `plugins/agents/claude-code/fixtures/all/<case>/`. Fresh, existing-user, stale-hofund, single-route, Fable, multiple-route, commented, environment override, and configured-model cases pass through both the shipped compiled description and the frozen oracle for Linux, macOS, and Windows. Registry integration tests also compare metadata, errors, and the complete edit lifecycle.
+- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. `RESERVED_AGENT_IDS` now contains `gemini-cli` and `opencode`; static `adapters()` and `find()` cover only those two const-backed agents.
 - No parity fixes or behavior changes are included.
 
 ### PR B2 notes

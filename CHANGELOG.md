@@ -66,10 +66,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Codex CLI is now a compiled data-only agent at
-  `plugins/agents/codex/agent.toml`; its production Rust const is removed. A
-  frozen const oracle remains behind the non-default `legacy-codex-const`
+  `plugins/agents/codex/agent.toml`; its production Rust const is removed.
+  Frozen const oracles remain behind the non-default `legacy-agent-consts`
   feature for equivalence tests. Catalog order is unchanged, and
   `RESERVED_AGENT_IDS` now lists only const-backed agent ids.
+- Claude Code is now a compiled data-only agent at
+  `plugins/agents/claude-code/agent.toml`; its production Rust const is removed
+  and its frozen oracle uses the renamed test-only `legacy-agent-consts`
+  feature. Catalog order remains `claude-code`, `codex`, `gemini-cli`,
+  `opencode`; `RESERVED_AGENT_IDS` now contains only `gemini-cli` and
+  `opencode`, and static `adapters()` and `find()` cover those two agents.
 - Coding-agent path overrides now treat empty and relative values as unset for
   process environments, explicit environment pairs, and named setters. Const
   and compiled adapters therefore use the same default paths.

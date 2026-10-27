@@ -127,7 +127,8 @@ on `agent` for the shared engine and `plugin-api` for descriptions. The upstream
 kit depends on `plugin-api` for the factory contract. The kits are not on the
 diagram. `plugin-relay` and `plugin-registry` dev-depend on `kit-upstream` for
 conformance tests; the registry also dev-depends on `kit-agent` and on `agent`
-for the frozen Codex equivalence oracle.
+for the frozen Codex and Claude Code equivalence oracles. Claude Code ships as
+`plugins/agents/claude-code/agent.toml`.
 
 | Package | May depend on |
 | --- | --- |

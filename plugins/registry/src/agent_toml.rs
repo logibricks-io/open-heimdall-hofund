@@ -827,4 +827,18 @@ key = "effort"
         .expect_err("shipped codex id");
         assert!(error.contains("collides with another agent id"), "{error}");
     }
+
+    #[test]
+    fn validation_rejects_shipped_claude_code_fixture_collision() {
+        let error = parse(
+            &base().replacen("fixture-agent", "claude-code", 1),
+            "fixtures/agents/claude-code/agent.toml",
+            "claude-code",
+            &[],
+            &["claude-code".to_owned()],
+            &["echo".to_owned()],
+        )
+        .expect_err("shipped claude-code id");
+        assert!(error.contains("collides with another agent id"), "{error}");
+    }
 }
