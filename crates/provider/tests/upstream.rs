@@ -461,6 +461,77 @@ async fn status_503_is_a_status_error() {
 }
 
 #[tokio::test]
+async fn execute_status_errors_carry_unbounded_retry_hints() {
+    let date = httpdate::fmt_http_date(
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000),
+    );
+    for (header, expected) in [
+        (Some("120"), Some(120)),
+        (Some(date.as_str()), None),
+        (Some("7200"), Some(7200)),
+        (None, None),
+    ] {
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(429).set_body_string("slow");
+        if let Some(header) = header {
+            response = response.insert_header("retry-after", header);
+        }
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider =
+            OpenAiCompat::new(OpenAiProtocol::Chat, Endpoint::new("primary", server.uri()))
+                .expect("provider");
+        let error = match provider.execute(user_request(false), "openai-chat").await {
+            Ok(_) => panic!("status"),
+            Err(error) => error,
+        };
+        if header == Some(date.as_str()) {
+            assert!(
+                error.retry_after() > Some(std::time::Duration::from_secs(7200)),
+                "header: {header:?}"
+            );
+        } else {
+            assert_eq!(
+                error.retry_after(),
+                expected.map(std::time::Duration::from_secs),
+                "header: {header:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn count_status_errors_carry_retry_hints() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "120")
+                .set_body_string("slow"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = Anthropic::new(Endpoint::new("primary", server.uri())).expect("provider");
+    let error = match provider
+        .count_input(user_request(false), "anthropic-messages")
+        .await
+    {
+        Ok(_) => panic!("status"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.retry_after(),
+        Some(std::time::Duration::from_secs(120))
+    );
+}
+
+#[tokio::test]
 async fn no_sampling_profile_omits_temperature_and_top_p() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

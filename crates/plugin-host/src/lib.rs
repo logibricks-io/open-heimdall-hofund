@@ -28,7 +28,7 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{
     AccountBackend, ClockBackend, DirBackend, HttpBackend, HttpRequest, HttpResponse, Job,
-    ObserveBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
+    ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use hofund_plugin_api::{
     AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, ProtocolId,
@@ -36,6 +36,7 @@ use hofund_plugin_api::{
 };
 
 pub use accounts::{PlaintextFileAccountStore, StoreError};
+pub use hofund_plugin_api::kernel::ObserveBackend;
 pub use pool::{HttpLimits, HttpProfile, PooledHttp};
 
 /// Builds a [`HostContext`] bound to `plugin`.
@@ -85,6 +86,30 @@ pub fn runtime_host(
     root: impl Into<PathBuf>,
     limits: HttpLimits,
 ) -> Result<HostContext, StoreError> {
+    runtime_host_with_observe(
+        plugin,
+        api_key,
+        root,
+        limits,
+        Arc::new(RecordingObserve::default()),
+    )
+}
+
+/// Builds a runtime context with a production observation backend.
+///
+/// The daemon binds the backend to the configured provider's member. Plugins
+/// only supply observations and cannot select which member receives them.
+///
+/// # Errors
+///
+/// Returns [`StoreError`] when the account file cannot be created.
+pub fn runtime_host_with_observe(
+    plugin: PluginId,
+    api_key: impl Into<String>,
+    root: impl Into<PathBuf>,
+    limits: HttpLimits,
+    observe: Arc<dyn ObserveBackend>,
+) -> Result<HostContext, StoreError> {
     let root = root.into();
     let accounts = PlaintextFileAccountStore::open(root.join("accounts.json"))?;
     Ok(host_context(
@@ -99,7 +124,7 @@ pub fn runtime_host(
         Arc::new(RecordingScheduler::default()),
         Arc::new(StdProcess::default()),
         Arc::new(RootDirs { root }),
-        Arc::new(RecordingObserve::default()),
+        observe,
     ))
 }
 

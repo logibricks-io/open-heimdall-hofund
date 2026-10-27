@@ -94,8 +94,9 @@ impl Provider for Generative {
         )?;
         let response = http::post_json(&self.upstream, &url, body).await?;
         let status = response.status().as_u16();
+        let retry_after = http::retry_after(response.headers());
         let bytes = response.bytes().await.map_err(http::map_transport)?;
-        classify_count(status, &bytes)
+        classify_count(status, retry_after, &bytes)
     }
 
     async fn execute(
@@ -248,7 +249,11 @@ fn join_url(base: &str, path: &str) -> Result<String, ProviderError> {
     Ok(url)
 }
 
-pub(crate) fn classify_count(status: u16, bytes: &[u8]) -> Result<CountOutcome, ProviderError> {
+pub(crate) fn classify_count(
+    status: u16,
+    retry_after: Option<std::time::Duration>,
+    bytes: &[u8],
+) -> Result<CountOutcome, ProviderError> {
     if status == 404
         || status == 405
         || status == 501
@@ -265,7 +270,11 @@ pub(crate) fn classify_count(status: u16, bytes: &[u8]) -> Result<CountOutcome, 
             .ok_or_else(|| ProviderError::decode("count response has no totalTokens"))?;
         return Ok(CountOutcome::Counted(tokens));
     }
-    Err(ProviderError::status(status, http::message_from(bytes)))
+    let error = ProviderError::status(status, http::message_from(bytes));
+    Err(match retry_after {
+        Some(after) => error.with_retry_after(after),
+        None => error,
+    })
 }
 
 fn endpoint_unsupported(bytes: &[u8]) -> bool {

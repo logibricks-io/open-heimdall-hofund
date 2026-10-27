@@ -7,6 +7,7 @@
 //! The daemon adapts each member into a service and wraps that service in the
 //! kernel layers.
 
+mod cooldown;
 mod member;
 mod snapshot;
 
@@ -19,6 +20,7 @@ use hofund_ir::{StreamEvent, estimate_input_tokens};
 use hofund_plugin_api::{BodyStream, CountOutcome, PluginErrorKind};
 use tracing::Instrument;
 
+pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::Member;
 pub use snapshot::Snapshot;
@@ -88,6 +90,7 @@ pub struct Router {
     routes: BTreeMap<String, Vec<Hop>>,
     providers: BTreeSet<String>,
     policy: FailoverPolicy,
+    cooldowns: Option<Arc<Cooldowns>>,
 }
 
 /// A counted input.
@@ -142,7 +145,21 @@ impl Router {
             routes,
             providers,
             policy,
+            cooldowns: None,
         }
+    }
+
+    /// Shares cooldown state with this router and later snapshots.
+    #[must_use]
+    pub fn with_cooldowns(mut self, cooldowns: Arc<Cooldowns>) -> Self {
+        self.cooldowns = Some(cooldowns);
+        self
+    }
+
+    /// Cooldown state used to order members, when configured.
+    #[must_use]
+    pub const fn cooldowns(&self) -> Option<&Arc<Cooldowns>> {
+        self.cooldowns.as_ref()
     }
 
     /// Member ids on the current routes, in first-seen order.
@@ -195,7 +212,10 @@ impl Router {
         inbound_protocol: &str,
     ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
-        let resolved = self.resolve(&asked)?;
+        let mut resolved = self.resolve(&asked)?;
+        if let Some(cooldowns) = &self.cooldowns {
+            resolved.hops = order_hops(resolved.hops, cooldowns);
+        }
         let policy = self.policy.clone();
         let mut last = None;
         for (index, hop) in resolved.hops.iter().enumerate() {
@@ -250,7 +270,10 @@ impl Router {
         request: &Request,
         inbound_protocol: &str,
     ) -> Result<InputCount, RouterError> {
-        let resolved = self.resolve(&request.model)?;
+        let mut resolved = self.resolve(&request.model)?;
+        if let Some(cooldowns) = &self.cooldowns {
+            resolved.hops = order_hops(resolved.hops, cooldowns);
+        }
         let policy = self.policy.clone();
         let mut last = None;
         let mut unsupported = false;
@@ -409,6 +432,37 @@ pub enum RouterError {
         /// Its error.
         error: PluginError,
     },
+}
+
+fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns) -> Vec<Hop> {
+    let mut ready = Vec::with_capacity(hops.len());
+    let mut cooling = Vec::new();
+    for hop in hops {
+        if let Some(state) = cooldowns.cooling(hop.member.id()) {
+            cooling.push((hop, state.until()));
+        } else {
+            ready.push(hop);
+        }
+    }
+    let mut probe = None;
+    for (index, (_, until)) in cooling.iter().enumerate() {
+        if probe.is_none_or(|(_, soonest): (usize, Instant)| *until < soonest) {
+            probe = Some((index, *until));
+        }
+    }
+    let probe = probe.map(|(index, _)| index);
+    for (index, (hop, until)) in cooling.into_iter().enumerate() {
+        if probe == Some(index) {
+            ready.push(hop);
+        } else {
+            tracing::debug!(
+                "member.id" = %hop.member.id(),
+                "cooldown.until" = ?until,
+                "member_cooldown_skip"
+            );
+        }
+    }
+    ready
 }
 
 fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {

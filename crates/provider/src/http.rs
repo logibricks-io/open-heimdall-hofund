@@ -17,6 +17,23 @@ use crate::error::ProviderError;
 use crate::stream::SseEvents;
 pub(crate) use crate::stream::{map_transport, message_from};
 
+pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after(value, std::time::SystemTime::now())
+}
+
+fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
+    value
+        .parse::<u64>()
+        .map(Duration::from_secs)
+        .ok()
+        .or_else(|| {
+            let at = httpdate::parse_http_date(value).ok()?;
+            at.duration_since(now).ok()
+        })
+        .filter(|after| !after.is_zero())
+}
+
 /// Where an API key is written.
 ///
 /// [`Credential::Default`] keeps the adapter's historical header: `Authorization:
@@ -495,8 +512,13 @@ async fn finish(
     let response = send_json(upstream, url, body, bearer).await?;
     let status = response.status();
     if !status.is_success() {
+        let retry_after = retry_after(response.headers());
         let bytes = response.bytes().await.unwrap_or_default();
-        return Err(ProviderError::status(status.as_u16(), message_from(&bytes)));
+        let error = ProviderError::status(status.as_u16(), message_from(&bytes));
+        return Err(match retry_after {
+            Some(after) => error.with_retry_after(after),
+            None => error,
+        });
     }
     if !cross_protocol {
         return raw_completion(response, streaming, codec).await;
@@ -613,7 +635,32 @@ mod tests {
 
     use tokio::io::AsyncReadExt;
 
-    use super::{note_dropped, send_builder};
+    use super::{note_dropped, parse_retry_after, send_builder};
+
+    #[test]
+    fn retry_after_parses_seconds_and_http_dates_at_a_fixed_time() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let date = httpdate::fmt_http_date(now + Duration::from_secs(120));
+        assert_eq!(
+            parse_retry_after("120", now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_retry_after(&date, now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_retry_after("7200", now),
+            Some(Duration::from_secs(7200))
+        );
+        assert_eq!(
+            parse_retry_after(&u64::MAX.to_string(), now),
+            Some(Duration::from_secs(u64::MAX))
+        );
+        assert_eq!(parse_retry_after("invalid", now), None);
+        assert_eq!(parse_retry_after("0", now), None);
+        assert_eq!(parse_retry_after(&httpdate::fmt_http_date(now), now), None);
+    }
 
     #[test]
     fn a_dropped_tool_is_noted_once() {

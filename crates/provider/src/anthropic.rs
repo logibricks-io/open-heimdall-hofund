@@ -70,8 +70,9 @@ impl Provider for Anthropic {
         let url = format!("{}/count_tokens", http::messages_url(&self.upstream));
         let response = http::post_json(&self.upstream, &url, body).await?;
         let status = response.status().as_u16();
+        let retry_after = http::retry_after(response.headers());
         let bytes = response.bytes().await.map_err(http::map_transport)?;
-        classify_count(status, &bytes)
+        classify_count(status, retry_after, &bytes)
     }
 
     async fn execute(
@@ -120,7 +121,11 @@ fn omit_max_tokens(body: Vec<u8>) -> Vec<u8> {
     serde_json::to_vec(&value).unwrap_or(body)
 }
 
-fn classify_count(status: u16, bytes: &[u8]) -> Result<CountOutcome, ProviderError> {
+fn classify_count(
+    status: u16,
+    retry_after: Option<std::time::Duration>,
+    bytes: &[u8],
+) -> Result<CountOutcome, ProviderError> {
     if status == 404
         || status == 405
         || status == 501
@@ -137,7 +142,11 @@ fn classify_count(status: u16, bytes: &[u8]) -> Result<CountOutcome, ProviderErr
             .ok_or_else(|| ProviderError::decode("count response has no input_tokens"))?;
         return Ok(CountOutcome::Counted(tokens));
     }
-    Err(ProviderError::status(status, http::message_from(bytes)))
+    let error = ProviderError::status(status, http::message_from(bytes));
+    Err(match retry_after {
+        Some(after) => error.with_retry_after(after),
+        None => error,
+    })
 }
 
 /// Whether a 400 says the count endpoint itself is missing.
