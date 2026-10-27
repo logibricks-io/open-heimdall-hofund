@@ -1,0 +1,3 @@
+# Several routes must not replace the user's model.
+model = "multiple-route-model"
+approval_policy = "on-request"

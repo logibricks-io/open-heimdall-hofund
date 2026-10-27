@@ -23,8 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when its rest expires, with newer panics extending the exclusion.
 - Compiled agent descriptions now support dotenv files, ordered file-location
   candidates, environment path overrides, conditional model writes, and model
-  catalogs. `hofund-agent` can compose the four built-in adapters with static
-  compiled descriptions through the same editing engine. The registry compiles
+  catalogs. `hofund-agent` can compose const built-ins with static compiled
+  descriptions through the same editing engine. The registry compiles
   validated data-only `agent.toml` descriptions and delivers them through the
   daemon to the CLI and desktop.
 - `hofund-kit-agent` now runs per-OS golden conformance for planning, apply and
@@ -65,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Codex CLI is now a compiled data-only agent at
+  `plugins/agents/codex/agent.toml`; its production Rust const is removed. A
+  frozen const oracle remains behind the non-default `legacy-codex-const`
+  feature for equivalence tests. Catalog order is unchanged, and
+  `RESERVED_AGENT_IDS` now lists only const-backed agent ids.
 - Coding-agent path overrides now treat empty and relative values as unset for
   process environments, explicit environment pairs, and named setters. Const
   and compiled adapters therefore use the same default paths.

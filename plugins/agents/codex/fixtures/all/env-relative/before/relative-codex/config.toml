@@ -1,0 +1,3 @@
+# This decoy must remain byte-identical.
+model = "decoy-model"
+experimental_bearer_token = "decoy-token"

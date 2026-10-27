@@ -1,0 +1,9 @@
+# Keep this comment and all unrelated settings.
+model = "user-model"
+temperature = 0.2
+unrelated = "keep"
+
+[model_providers.other]
+name = "Other provider"
+base_url = "https://other.example/v1"
+extra = true

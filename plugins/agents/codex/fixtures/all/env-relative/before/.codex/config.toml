@@ -1,0 +1,2 @@
+# The default path is used for a relative override.
+model = "relative-model"
