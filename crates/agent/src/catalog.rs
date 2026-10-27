@@ -427,6 +427,13 @@ impl Catalog {
 /// compiled id, or when a built-in has no compiled description or enabled
 /// legacy fallback.
 pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog, AgentError> {
+    compose(compiled, builtin_adapter)
+}
+
+fn compose(
+    compiled: &'static [&'static AgentDescription],
+    fallback: fn(&str) -> Option<Described>,
+) -> Result<Catalog, AgentError> {
     let mut ids = adapters()
         .into_iter()
         .map(|adapter| adapter.id().to_owned())
@@ -449,7 +456,7 @@ pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog
             composed.push(Box::new(Compiled::new(description)));
             continue;
         }
-        let Some(adapter) = builtin_adapter(id) else {
+        let Some(adapter) = fallback(id) else {
             return Err(AgentError::message(format!(
                 "built-in agent `{id}` has no compiled description"
             )));
@@ -1659,8 +1666,28 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{Described, FIXTURE_JSON_AGENT, FIXTURE_TOML_AGENT, FIXTURE_TOML_EFFORT};
+    use super::{
+        Described, FIXTURE_JSON_AGENT, FIXTURE_TOML_AGENT, FIXTURE_TOML_EFFORT, builtin_adapter,
+        compose,
+    };
     use crate::{AgentAdapter, GatewayTarget, Plan, Session, TargetOs};
+
+    #[test]
+    fn missing_compiled_codex_is_an_error_without_a_fallback() {
+        fn without_codex(id: &str) -> Option<Described> {
+            if id == "codex" {
+                None
+            } else {
+                builtin_adapter(id)
+            }
+        }
+
+        let error = compose(&[], without_codex).err().expect("missing codex");
+        assert_eq!(
+            error.to_string(),
+            "built-in agent `codex` has no compiled description"
+        );
+    }
 
     #[derive(Default)]
     struct GoldenCase {

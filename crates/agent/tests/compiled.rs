@@ -510,16 +510,6 @@ fn expected_absolute_paths(id: &str) -> Vec<PathBuf> {
     paths.iter().map(PathBuf::from).collect()
 }
 
-#[cfg(not(feature = "legacy-codex-const"))]
-#[test]
-fn catalog_without_compiled_codex_is_an_error() {
-    let error = catalog(&[]).err().expect("missing compiled codex");
-    assert_eq!(
-        error.to_string(),
-        "built-in agent `codex` has no compiled description"
-    );
-}
-
 #[cfg(feature = "legacy-codex-const")]
 #[test]
 fn catalog_without_compiled_codex_uses_the_legacy_fallback() {
