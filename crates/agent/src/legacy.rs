@@ -67,7 +67,7 @@ const CODEX: Description = Description {
     }),
 };
 
-const CODEX_ADAPTER: Described = Described {
+pub(crate) const CODEX_ADAPTER: Described = Described {
     description: &CODEX,
 };
 

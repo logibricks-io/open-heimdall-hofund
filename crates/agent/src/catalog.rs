@@ -424,7 +424,8 @@ impl Catalog {
 /// # Errors
 ///
 /// Returns an error when a compiled id duplicates a const built-in or another
-/// compiled id.
+/// compiled id, or when a built-in has no compiled description or enabled
+/// legacy fallback.
 pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog, AgentError> {
     let mut ids = adapters()
         .into_iter()
@@ -448,14 +449,12 @@ pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog
             composed.push(Box::new(Compiled::new(description)));
             continue;
         }
-        let description = match id {
-            "claude-code" => &CLAUDE_CODE,
-            "codex" => continue,
-            "gemini-cli" => &GEMINI,
-            "opencode" => &OPENCODE,
-            _ => unreachable!("known built-in id"),
+        let Some(adapter) = builtin_adapter(id) else {
+            return Err(AgentError::message(format!(
+                "built-in agent `{id}` has no compiled description"
+            )));
         };
-        composed.push(Box::new(Described { description }));
+        composed.push(Box::new(adapter));
     }
     for description in compiled
         .iter()
@@ -464,6 +463,17 @@ pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog
         composed.push(Box::new(Compiled::new(description)));
     }
     Ok(Catalog { adapters: composed })
+}
+
+fn builtin_adapter(id: &str) -> Option<Described> {
+    match id {
+        "claude-code" => Some(CLAUDE),
+        #[cfg(feature = "legacy-codex-const")]
+        "codex" => Some(crate::legacy::CODEX_ADAPTER),
+        "gemini-cli" => Some(GEMINI_ADAPTER),
+        "opencode" => Some(OPENCODE_ADAPTER),
+        _ => None,
+    }
 }
 
 /// Resolves one compiled file location against a session.
