@@ -68,7 +68,10 @@ impl ModelClient {
         let mut page = self
             .post_probe(&url, headers.clone(), bytes.clone(), stream)
             .await?;
-        if self.is_mantle() && crate::mantle::wrong_route(Some(page.status), &probe_error(&page)) {
+        if self.is_mantle()
+            && !model.is_empty()
+            && crate::mantle::wrong_route(Some(page.status), &probe_error(&page))
+        {
             let base = crate::mantle::mantle_base(&self.endpoint.base_url, model, true);
             url = format!("{}/{}", base.trim_end_matches('/'), path);
             page = self.post_probe(&url, headers, bytes, stream).await?;

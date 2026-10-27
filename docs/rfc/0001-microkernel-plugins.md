@@ -962,6 +962,7 @@ E1 is the first slice of row E. The threat model is [docs/plugins/providers.md](
 - After that validation, the daemon trims string options and resolves `env:`; resolution errors name the provider and key. It rejects a reserved kernel key inside `options`. `plan` still reads `project`, `location`, and `region` to build catalog URLs.
 - Built-in adapters take the pooled `reqwest` client from a kernel-only host-handle method, so `HttpLimits` apply. `HttpHandle::send` is unchanged. Moving the five protocol transports into the SDK and streaming through `HttpHandle::send` is targeted at the first row E PR that moves an adapter into its own plugin crate (E3, Vertex), which also removes the raw-client method.
 - `google-vertex` and `bedrock` are not compiled presets. `resolve` still owns their URLs. Per-preset `/models` and the connectivity probe are the next pull request.
+- Mantle parity is complete in `hofund-provider` (Option C). Moving Mantle into its own crate waits for Option B: SDK streaming transport, then the Vertex crate, then the Mantle crate.
 
 ### PR K notes
 

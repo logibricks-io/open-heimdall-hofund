@@ -377,6 +377,7 @@ fn endpoint_for(
     planned: &Planned,
 ) -> Result<Endpoint, DaemonError> {
     let mut endpoint = Endpoint::new(provider.id.clone(), planned.base_url.clone());
+    endpoint.preset = provider.preset.clone();
     endpoint.api_key = hofund_secrets::resolve(&provider.api_key).map_err(show)?;
     endpoint.credential = planned.credential;
     endpoint.headers = provider
@@ -496,6 +497,9 @@ fn raw_from_endpoint(
     let mut raw = RawTable::new();
     raw.insert("id", RawValue::String(provider.id.clone()));
     raw.insert("base_url", RawValue::String(endpoint.base_url.clone()));
+    if let Some(preset) = &provider.preset {
+        raw.insert("preset", RawValue::String(preset.clone()));
+    }
     raw.insert("api_key", RawValue::String(endpoint.api_key.clone()));
     raw.insert(
         "credential",
@@ -523,6 +527,7 @@ fn raw_from_endpoint(
 const RESERVED_OPTIONS: &[&str] = &[
     "id",
     "base_url",
+    "preset",
     "api_key",
     "credential",
     "quirks",
@@ -800,6 +805,25 @@ fn show<E: std::fmt::Display>(error: E) -> DaemonError {
 #[cfg(test)]
 mod tests {
     use super::check;
+
+    #[test]
+    fn the_raw_endpoint_table_carries_the_preset_id() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"mantle\"\npreset = \"bedrock-mantle\"\nprotocol = \"openai-chat\"\nbase_url = \"https://relay.example/v1\"\napi_key = \"test-key\"\n",
+        )
+        .expect("config");
+        let provider = &config.providers[0];
+        let planned = super::plan(provider).expect("plan");
+        let endpoint = super::endpoint_for(provider, &planned).expect("endpoint");
+        assert_eq!(endpoint.preset.as_deref(), Some("bedrock-mantle"));
+        let raw = super::raw_from_endpoint(provider, &planned, &endpoint).expect("raw");
+        assert_eq!(
+            raw.get("preset"),
+            Some(&hofund_plugin_api::RawValue::String(
+                "bedrock-mantle".to_owned()
+            ))
+        );
+    }
 
     #[test]
     fn a_preset_builds_and_an_unfinished_adapter_does_not() {

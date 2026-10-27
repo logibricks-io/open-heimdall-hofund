@@ -365,7 +365,10 @@ fn credential(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
         };
     }
     if wire == Wire::Messages {
-        if host.ends_with("anthropic.com") || is_bedrock(&host) {
+        if host.ends_with("anthropic.com")
+            || matches!(preset_id, "bedrock" | "bedrock-mantle")
+            || is_bedrock(&host)
+        {
             return Credential::XApiKey;
         }
         return Credential::MessagesBoth;
@@ -415,8 +418,7 @@ pub fn azure_base(raw: &str) -> Result<String, PresetError> {
 }
 
 fn is_bedrock(host: &str) -> bool {
-    (host.starts_with("bedrock-runtime.") && host.ends_with(".amazonaws.com"))
-        || (host.starts_with("bedrock-mantle.") && host.ends_with(".api.aws"))
+    crate::mantle::is_bedrock_host(host)
 }
 
 fn host_of(url: &str) -> String {

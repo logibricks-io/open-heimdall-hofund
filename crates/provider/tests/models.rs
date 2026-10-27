@@ -1264,7 +1264,7 @@ impl Match for NoPageToken {
 }
 
 #[tokio::test]
-async fn mantle_list_uses_v1_models_only() {
+async fn mantle_openai_base_lists_v1_models_only() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/models"))
@@ -1276,7 +1276,7 @@ async fn mantle_list_uses_v1_models_only() {
     let listed = openai(resolved_endpoint(
         &server,
         "bedrock-mantle.us-east-1.api.aws",
-        "/v1",
+        "/openai/v1",
     ))
     .list_models(&ListQuery::new())
     .await

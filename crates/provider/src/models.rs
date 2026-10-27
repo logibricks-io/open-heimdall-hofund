@@ -81,7 +81,7 @@ impl ModelClient {
         Ok(Self {
             endpoint: endpoint.clone(),
             client,
-            mantle: crate::mantle::is_mantle_root(&endpoint.base_url),
+            mantle: crate::mantle::is_mantle(endpoint),
         })
     }
 
@@ -175,7 +175,7 @@ impl ModelClient {
         supplied: Option<AuthChoice>,
         learned: &std::sync::Mutex<Option<AuthChoice>>,
     ) -> Result<Vec<u8>, PluginError> {
-        let initial = if azure {
+        let initial = if azure || (anthropic && self.is_bedrock()) {
             AuthChoice::XApiKey
         } else {
             supplied.unwrap_or(AuthChoice::Both)
@@ -333,10 +333,7 @@ impl ModelClient {
     }
 
     pub fn is_bedrock(&self) -> bool {
-        let host = url_host(&self.endpoint.base_url);
-        (host.starts_with("bedrock-runtime.") && host.ends_with(".amazonaws.com"))
-            || (host.starts_with("bedrock-mantle.") && host.ends_with(".amazonaws.com"))
-            || (host.starts_with("bedrock-mantle.") && host.ends_with(".api.aws"))
+        crate::mantle::is_bedrock(&self.endpoint)
     }
 
     pub fn is_mantle(&self) -> bool {
@@ -459,9 +456,7 @@ pub fn both_auth_applies(
     pinned_auth: bool,
 ) -> bool {
     let host = host.to_ascii_lowercase();
-    let bedrock = (host.starts_with("bedrock-runtime.") && host.ends_with(".amazonaws.com"))
-        || (host.starts_with("bedrock-mantle.") && host.ends_with(".amazonaws.com"))
-        || (host.starts_with("bedrock-mantle.") && host.ends_with(".api.aws"));
+    let bedrock = crate::mantle::is_bedrock_host(&host);
     api_key_present
         && base_present
         && credential != Credential::ApiKey
@@ -888,6 +883,35 @@ mod tests {
         assert!(super::both_auth_refused(401, body.as_bytes()));
         assert!(!super::both_auth_refused(403, body.as_bytes()));
         assert!(!super::both_auth_refused(401, b"x-api-key only"));
+    }
+
+    #[test]
+    fn only_api_aws_mantle_hosts_are_bedrock() {
+        let legacy = crate::http::Endpoint::new(
+            "legacy",
+            "https://bedrock-mantle.us-east-1.amazonaws.com/anthropic",
+        );
+        let client = super::ModelClient::new(&legacy).expect("client");
+        assert!(!client.is_bedrock());
+        assert!(super::both_auth_applies(
+            "bedrock-mantle.us-east-1.amazonaws.com",
+            true,
+            true,
+            crate::Credential::Default,
+            false,
+        ));
+        for host in [
+            "bedrock-mantle.us-east-1.api.aws",
+            "bedrock-runtime.us-east-1.amazonaws.com",
+        ] {
+            assert!(!super::both_auth_applies(
+                host,
+                true,
+                true,
+                crate::Credential::Default,
+                false,
+            ));
+        }
     }
 
     #[test]

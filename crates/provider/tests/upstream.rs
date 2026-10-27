@@ -189,6 +189,43 @@ async fn chat_sends_an_azure_api_key_without_a_bearer_token() {
 }
 
 #[tokio::test]
+async fn bedrock_chat_always_sends_max_completion_tokens() {
+    for (preset, base_path) in [("bedrock", "/openai/v1"), ("bedrock-mantle", "/v1")] {
+        for inbound in ["openai-chat", "anthropic-messages"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(format!("{base_path}/chat/completions")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "chatcmpl-1",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop"
+                    }]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut endpoint = Endpoint::new("bedrock", format!("{}{base_path}", server.uri()));
+            endpoint.preset = Some(preset.to_owned());
+            let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+            let mut request = user_request(false);
+            request.params.max_tokens = Some(64);
+            provider.execute(request, inbound).await.expect("call");
+
+            let requests = server.received_requests().await.expect("requests");
+            let body: Value = serde_json::from_slice(&requests[0].body).expect("body");
+            assert_eq!(
+                body["max_completion_tokens"],
+                json!(64),
+                "{preset} {inbound}"
+            );
+            assert!(body.get("max_tokens").is_none(), "{preset} {inbound}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn chat_stream_yields_text_deltas() {
     let server = MockServer::start().await;
     let body =
@@ -361,6 +398,236 @@ async fn messages_unary_sends_version_and_key() {
         "2023-06-01"
     );
     assert!(requests[0].headers.get("authorization").is_none());
+}
+
+async fn bedrock_body_with_betas(betas: Value) -> Value {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut endpoint = Endpoint::new("bedrock", server.uri());
+    endpoint.preset = Some("bedrock".to_owned());
+    let provider = Anthropic::new(endpoint).expect("provider");
+    let mut request = user_request(false);
+    request.params.max_tokens = Some(16);
+    request.extensions.insert("anthropic_beta", betas);
+    provider
+        .execute(request, "anthropic-messages")
+        .await
+        .expect("call");
+    let requests = server.received_requests().await.expect("requests");
+    serde_json::from_slice(&requests[0].body).expect("body")
+}
+
+#[tokio::test]
+async fn bedrock_messages_split_comma_separated_body_betas() {
+    let body = bedrock_body_with_betas(json!([
+        "a, prompt-caching-scope-2026-01-05",
+        "advanced-tool-use-2025-11-20"
+    ]))
+    .await;
+    assert_eq!(
+        body["anthropic_beta"],
+        json!(["a", "tool-search-tool-2025-10-19"])
+    );
+}
+
+#[tokio::test]
+async fn bedrock_messages_stringify_non_string_body_betas() {
+    for (asked, expected) in [
+        (json!(["a", 1]), Some(json!(["a", 1]))),
+        (json!([1, "redact-thinking-2026-02-12"]), Some(json!(["1"]))),
+        (json!([null, "redact-thinking-2026-02-12"]), None),
+    ] {
+        let body = bedrock_body_with_betas(asked).await;
+        assert_eq!(body.get("anthropic_beta"), expected.as_ref());
+    }
+}
+
+#[tokio::test]
+async fn bedrock_messages_send_key_alone_fit_betas_and_drop_metadata() {
+    for (host, preset) in [
+        (Some("bedrock-runtime.us-east-1.amazonaws.com"), None),
+        (None, Some("bedrock")),
+        (None, Some("bedrock-mantle")),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hello"}],
+                "stop_reason": "end_turn"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages/count_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 17})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = format!("{}/anthropic", server.uri());
+        let mut endpoint = host.map_or_else(
+            || Endpoint::new("bedrock", &base),
+            |host| {
+                let mut endpoint = Endpoint::new(
+                    "bedrock",
+                    format!("http://{host}:{}/anthropic", server.address().port()),
+                );
+                endpoint.client = Some(
+                    reqwest::Client::builder()
+                        .resolve(host, *server.address())
+                        .build()
+                        .expect("client"),
+                );
+                endpoint
+            },
+        );
+        endpoint.preset = preset.map(str::to_owned);
+        endpoint.api_key = "secret".to_owned();
+        endpoint.credential = Credential::MessagesBoth;
+        endpoint.headers = vec![(
+            "anthropic-beta".to_owned(),
+            concat!(
+                "advanced-tool-use-2025-11-20, prompt-caching-scope-2026-01-05,",
+                "redact-thinking-2026-02-12,context-1m-2025-08-07,",
+                "advanced-tool-use-2025-11-20"
+            )
+            .to_owned(),
+        )];
+        let provider = Anthropic::new(endpoint).expect("provider");
+        let mut request = user_request(false);
+        request.params.max_tokens = Some(16);
+        request
+            .extensions
+            .insert("metadata", json!({"user_id": "{\"device_id\":\"local\"}"}));
+        request.extensions.insert(
+            "anthropic_beta",
+            json!([
+                "redact-thinking-2026-02-12",
+                "advanced-tool-use-2025-11-20",
+                "advanced-tool-use-2025-11-20"
+            ]),
+        );
+        provider
+            .execute(request.clone(), "anthropic-messages")
+            .await
+            .expect("call");
+        let counted = provider
+            .count_input(request, "anthropic-messages")
+            .await
+            .expect("count");
+        assert!(matches!(counted, CountOutcome::Counted(17)));
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 2);
+        for recorded in &requests {
+            assert_eq!(
+                recorded
+                    .headers
+                    .get("x-api-key")
+                    .and_then(|value| value.to_str().ok()),
+                Some("secret")
+            );
+            assert!(recorded.headers.get("authorization").is_none());
+            assert_eq!(
+                recorded
+                    .headers
+                    .get("anthropic-beta")
+                    .and_then(|value| value.to_str().ok()),
+                Some("tool-search-tool-2025-10-19,context-1m-2025-08-07")
+            );
+            let body: Value = serde_json::from_slice(&recorded.body).expect("body");
+            assert!(body.get("metadata").is_none());
+            assert_eq!(
+                body["anthropic_beta"],
+                json!(["tool-search-tool-2025-10-19"])
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn bedrock_messages_remove_an_empty_body_beta_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut endpoint = Endpoint::new("bedrock", server.uri());
+    endpoint.preset = Some("bedrock".to_owned());
+    let provider = Anthropic::new(endpoint).expect("provider");
+    let mut request = user_request(false);
+    request.params.max_tokens = Some(16);
+    request.extensions.insert(
+        "anthropic_beta",
+        json!([
+            "redact-thinking-2026-02-12",
+            "prompt-caching-scope-2026-01-05"
+        ]),
+    );
+    provider
+        .execute(request, "anthropic-messages")
+        .await
+        .expect("call");
+    let requests = server.received_requests().await.expect("requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("body");
+    assert!(body.get("anthropic_beta").is_none());
+}
+
+#[tokio::test]
+async fn plain_anthropic_messages_keep_body_betas() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = Anthropic::new(Endpoint::new("plain", server.uri())).expect("provider");
+    let mut request = user_request(false);
+    request.params.max_tokens = Some(16);
+    let betas = json!([
+        "redact-thinking-2026-02-12",
+        "advanced-tool-use-2025-11-20",
+        "advanced-tool-use-2025-11-20"
+    ]);
+    request.extensions.insert("anthropic_beta", betas.clone());
+    provider
+        .execute(request, "anthropic-messages")
+        .await
+        .expect("call");
+    let requests = server.received_requests().await.expect("requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("body");
+    assert_eq!(body["anthropic_beta"], betas);
 }
 
 #[tokio::test]
