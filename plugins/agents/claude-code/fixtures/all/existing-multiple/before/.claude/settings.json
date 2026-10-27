@@ -1,0 +1,8 @@
+{
+  "env": {
+    "KEEP": "yes"
+  },
+  "ui": {
+    "theme": "dark"
+  }
+}

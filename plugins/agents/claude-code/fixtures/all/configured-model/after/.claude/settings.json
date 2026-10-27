@@ -1,0 +1,12 @@
+{
+  "model": "configured-user-model",
+  "env": {
+    "KEEP": "yes",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3425",
+    "ANTHROPIC_AUTH_TOKEN": "old-token",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "configured-user-model",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "configured-user-model",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "configured-user-model",
+    "ANTHROPIC_SMALL_FAST_MODEL": "configured-user-model"
+  }
+}

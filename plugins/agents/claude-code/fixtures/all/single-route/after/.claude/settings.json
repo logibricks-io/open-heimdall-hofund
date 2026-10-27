@@ -1,0 +1,12 @@
+{
+  "env": {
+    "KEEP": "yes",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3425",
+    "ANTHROPIC_AUTH_TOKEN": "old-token",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-sonnet-5"
+  },
+  "model": "claude-sonnet-5"
+}
