@@ -166,6 +166,28 @@ fn data_only_agent_trees_pass_but_empty_agent_directories_fail() {
 }
 
 #[test]
+fn data_only_builtin_provider_trees_pass() {
+    let root = std::env::temp_dir().join(format!(
+        "hofund-data-only-provider-rules-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let plugins = root.join("plugins");
+    fs::create_dir_all(plugins.join("providers/openai-compat")).expect("provider");
+    fs::write(
+        plugins.join("providers/openai-compat/presets.toml"),
+        "[[preset]]\nid = \"example\"\n",
+    )
+    .expect("presets");
+    assert!(plugin_tree_violations(&plugins).is_empty());
+    fs::create_dir_all(plugins.join("providers/other")).expect("other");
+    fs::write(plugins.join("providers/other/presets.toml"), "").expect("presets");
+    let violations = plugin_tree_violations(&plugins).join("\n");
+    assert!(violations.contains("not a builtin factory"), "{violations}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn plugin_rules_reject_a_bad_tree() {
     assert!(
         !denies_lint("// unreachable_pub\nfn value() {}\n", "unreachable_pub"),
@@ -1455,6 +1477,20 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                 violations.push(format!("{kind}/{id} uses a reserved plugin id"));
             }
             let manifest_path = path.join("Cargo.toml");
+            let plugin_manifest = path.join("plugin.toml").is_file();
+            if kind == "providers"
+                && !plugin_manifest
+                && !manifest_path.exists()
+                && path.join("presets.toml").is_file()
+            {
+                if matches!(id.as_str(), "anthropic" | "generative" | "openai-compat") {
+                    continue;
+                }
+                violations.push(format!(
+                    "providers/{id} is not a builtin factory data-only directory"
+                ));
+                continue;
+            }
             if kind == "agents" {
                 let agent = path.join("agent.toml").is_file();
                 let plugin_manifest = path.join("plugin.toml").is_file();

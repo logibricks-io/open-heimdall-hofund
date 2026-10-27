@@ -1,0 +1,88 @@
+[[preset]]
+id = "fixture-decide"
+name = "Fixture Decide"
+kind = "remote"
+decide = "https://decide.example.test"
+
+[[preset]]
+id = "fixture-equivalence"
+name = "Tencent Cloud"
+kind = "vendor"
+note = "Token Plan - pay as you go"
+chat = "https://api.lkeap.cloud.tencent.com/plan/v3"
+anthropic = "https://api.lkeap.cloud.tencent.com/plan/anthropic"
+website = "https://cloud.tencent.com/document/product/1823/130060"
+keys_url = "https://console.cloud.tencent.com/tokenhub/tokenplan"
+hosts = true
+
+[[preset.region]]
+id = "plan"
+name = "Plan - China"
+chat = "https://api.lkeap.cloud.tencent.com/plan/v3"
+anthropic = "https://api.lkeap.cloud.tencent.com/plan/anthropic"
+keys_url = "https://console.cloud.tencent.com/tokenhub/tokenplan"
+website = "https://cloud.tencent.com/document/product/1823/130060"
+models = ["tc-code-latest", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "kimi-k3", "kimi-k2.7-code", "deepseek-v4-pro-202606", "deepseek-v4-flash-202605", "minimax-m3", "minimax-m2.7", "hy4-preview", "hy3"]
+
+[[preset.region]]
+id = "cn"
+name = "Pay as you go - China"
+chat = "https://tokenhub.tencentmaas.com/v1"
+responses = "https://tokenhub.tencentmaas.com/v1"
+anthropic = "https://tokenhub.tencentmaas.com"
+keys_url = "https://console.cloud.tencent.com/tokenhub/apikey"
+website = "https://cloud.tencent.com/document/product/1823/130078"
+catalog = "tencent-tokenhub"
+
+[[preset.region]]
+id = "intl"
+name = "Pay as you go - Global"
+chat = "https://tokenhub-intl.tencentmaas.com/v1"
+responses = "https://tokenhub-intl.tencentmaas.com/v1"
+anthropic = "https://tokenhub-intl.tencentmaas.com"
+keys_url = "https://console.tencentcloud.com/tokenhub/apikey"
+website = "https://www.tencentcloud.com/document/product/1300/78939"
+catalog = "tencent-tokenhub"
+
+[[preset]]
+id = "fixture-fallback"
+name = "Fixture Fallback"
+kind = "vendor"
+chat = "https://fallback.example.test/v1"
+
+[[preset.region]]
+id = "only-responses"
+name = "Only Responses"
+responses = "https://region.example.test/v1"
+
+[[preset]]
+id = "fixture-multi"
+name = "Fixture Multi"
+kind = "vendor"
+chat = "https://first.example.test/v1"
+responses = "https://first.example.test/v1"
+only = "fixture-"
+models = ["fixture-one", "fixture-two"]
+
+[[preset.region]]
+id = "first"
+name = "First"
+chat = "https://first.example.test/v1"
+responses = "https://first.example.test/v1"
+
+[[preset.region]]
+id = "second"
+name = "Second"
+chat = "https://second.example.test/v1"
+models = ["fixture-region"]
+lists = true
+
+[[preset]]
+id = "fixture-no-url"
+name = "Fixture No URL"
+kind = "relay"
+
+[[alias]]
+id = "fixture-alias"
+preset = "fixture-multi"
+region = "second"

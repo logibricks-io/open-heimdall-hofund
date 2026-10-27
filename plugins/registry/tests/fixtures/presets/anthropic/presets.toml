@@ -1,0 +1,11 @@
+[[preset]]
+id = "fixture-anthropic-host"
+name = "Fixture Anthropic Host"
+kind = "vendor"
+anthropic = "https://api.anthropic.com"
+
+[[preset]]
+id = "fixture-messages"
+name = "Fixture Messages"
+kind = "vendor"
+anthropic = "https://messages.example.test"

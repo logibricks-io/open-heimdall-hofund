@@ -12,11 +12,12 @@
 
 use std::sync::Arc;
 
-use hofund_plugin_api::{DynUpstreamFactory, InboundSurface};
+use hofund_plugin_api::{DynUpstreamFactory, InboundSurface, ProtocolId};
 
 mod builtin;
 #[allow(dead_code)]
 mod check;
+mod select;
 
 include!("reserved_agent_ids.rs");
 
@@ -33,16 +34,31 @@ mod fixture_agent_descriptions {
     include!(concat!(env!("OUT_DIR"), "/fixture_agents.rs"));
 }
 
+#[cfg(feature = "test-fixtures")]
+mod fixture_preset_descriptions {
+    include!(concat!(env!("OUT_DIR"), "/fixture_presets.rs"));
+}
+
 #[cfg(test)]
 mod agent_toml;
+#[cfg(test)]
+#[allow(dead_code)]
+mod preset_toml;
 
 use check::path_matches;
 
 pub use agent_descriptions::{agent, agents};
+pub use check::builtin_factory_ids;
 #[cfg(feature = "test-fixtures")]
 pub use fixture_agent_descriptions::fixture_agents;
+#[cfg(feature = "test-fixtures")]
+pub use fixture_preset_descriptions::{fixture_aliases, fixture_presets};
 pub use generated::{
-    CompiledPreset, CompiledRoute, compiled_presets, compiled_routes, contributions,
+    CompiledAlias, CompiledPreset, CompiledRegion, CompiledRoute, compiled_aliases,
+    compiled_presets, compiled_routes, contributions,
+};
+pub use select::{
+    SelectError, Selection, model_plan_of, protocol_for, resolve_region, select, wire_for_protocol,
 };
 
 /// The factory for `id`.
@@ -54,10 +70,61 @@ pub fn factory(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
     upstream(id).or_else(|| builtin::factory(id))
 }
 
+/// The protocols served by all builtin factories, in catalog order.
+///
+/// The order is chat, responses, messages, generative, so a builtin-owned
+/// preset without wire URLs defaults to chat, as `resolve` does for
+/// endpoint-style catalog rows.
+#[must_use]
+pub fn builtin_protocols() -> Vec<ProtocolId> {
+    let served: Vec<ProtocolId> = builtin_factory_ids()
+        .iter()
+        .filter_map(|id| factory(id))
+        .flat_map(|factory| {
+            DynUpstreamFactory::spec(factory.as_ref())
+                .protocols()
+                .to_vec()
+        })
+        .collect();
+    [
+        ProtocolId::OPENAI_CHAT,
+        ProtocolId::OPENAI_RESPONSES,
+        ProtocolId::ANTHROPIC_MESSAGES,
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ]
+    .into_iter()
+    .filter(|protocol| served.contains(protocol))
+    .collect()
+}
+
 /// The preset record for `id`, when a linked plugin declares it.
 #[must_use]
 pub fn preset(id: &str) -> Option<&'static CompiledPreset> {
     compiled_presets().iter().find(|preset| preset.id == id)
+}
+
+/// Resolves a compiled preset id or alias and returns the alias's default region.
+#[must_use]
+pub fn find_preset(id: &str) -> Option<(&'static CompiledPreset, Option<&'static str>)> {
+    if let Some(preset) = preset(id) {
+        return Some((preset, None));
+    }
+    if let Some(alias) = compiled_aliases().iter().find(|alias| alias.id == id) {
+        return preset(alias.preset).map(|preset| (preset, alias.region));
+    }
+    #[cfg(feature = "test-fixtures")]
+    {
+        if let Some(preset) = fixture_presets().iter().find(|preset| preset.id == id) {
+            return Some((preset, None));
+        }
+        if let Some(alias) = fixture_aliases().iter().find(|alias| alias.id == id) {
+            return fixture_presets()
+                .iter()
+                .find(|preset| preset.id == alias.preset)
+                .map(|preset| (preset, alias.region));
+        }
+    }
+    None
 }
 
 /// Every inbound surface the linked plugins contribute.
