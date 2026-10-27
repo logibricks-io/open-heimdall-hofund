@@ -163,6 +163,497 @@ fn shipped_codex_matches_frozen_const_across_the_full_lifecycle() {
     }
 }
 
+#[test]
+fn shipped_codex_invalid_toml_preserves_the_file_without_a_backup() {
+    let description = hofund_plugin_registry::agent("codex").expect("shipped codex");
+    for os in [TargetOs::Linux, TargetOs::Macos, TargetOs::Windows] {
+        let context = format!("{os:?}");
+        let legacy_home = scratch();
+        let compiled_home = scratch();
+        let legacy_path = legacy_home.join(".codex/config.toml");
+        let compiled_path = compiled_home.join(".codex/config.toml");
+        write(&legacy_path, "model_provider = [\n");
+        write(&compiled_path, "model_provider = [\n");
+        let before = tree(&legacy_home);
+        assert_eq!(before, tree(&compiled_home), "{context}: initial tree");
+
+        let legacy_session = Session::new(&legacy_home);
+        let compiled_session = Session::new(&compiled_home);
+        let legacy_adapter = legacy::codex();
+        let compiled = Compiled::new(description).with_os(os);
+        let target = gateway_target("local-token");
+
+        let legacy_error = legacy_adapter
+            .plan(&legacy_session, &target)
+            .expect_err("legacy invalid plan");
+        let compiled_error = compiled
+            .plan(&compiled_session, &target)
+            .expect_err("compiled invalid plan");
+        assert_eq!(
+            normalized_error(&legacy_home, &legacy_error),
+            normalized_error(&compiled_home, &compiled_error),
+            "{context}: plan error"
+        );
+        assert_eq!(tree(&legacy_home), before, "{context}: legacy plan");
+        assert_eq!(
+            tree(&compiled_home),
+            before,
+            "{context}: compiled plan wrote or made a backup"
+        );
+
+        let legacy_error = legacy_adapter
+            .apply(&legacy_session, &target)
+            .expect_err("legacy invalid apply");
+        let compiled_error = compiled
+            .apply(&compiled_session, &target)
+            .expect_err("compiled invalid apply");
+        assert_eq!(
+            normalized_error(&legacy_home, &legacy_error),
+            normalized_error(&compiled_home, &compiled_error),
+            "{context}: apply error"
+        );
+        assert_eq!(tree(&legacy_home), before, "{context}: legacy apply");
+        assert_eq!(tree(&compiled_home), before, "{context}: compiled apply");
+        assert_eq!(
+            fs::read(&compiled_path).expect("compiled invalid bytes"),
+            b"model_provider = [\n",
+            "{context}: invalid bytes changed"
+        );
+        assert!(
+            !compiled_home.join(".codex/config.toml.hofund.bak").exists(),
+            "{context}: invalid apply made a backup"
+        );
+    }
+}
+
+#[test]
+fn shipped_codex_disconnect_refuses_a_broken_file_until_force() {
+    let description = hofund_plugin_registry::agent("codex").expect("shipped codex");
+    for os in [TargetOs::Linux, TargetOs::Macos, TargetOs::Windows] {
+        let context = format!("{os:?}");
+        let legacy_home = scratch();
+        let compiled_home = scratch();
+        let legacy_path = legacy_home.join(".codex/config.toml");
+        let compiled_path = compiled_home.join(".codex/config.toml");
+        write(&legacy_path, USER_CONFIG);
+        write(&compiled_path, USER_CONFIG);
+        let before = tree(&legacy_home);
+        let legacy_session = Session::new(&legacy_home);
+        let compiled_session = Session::new(&compiled_home);
+        let legacy_adapter = legacy::codex();
+        let compiled = Compiled::new(description).with_os(os);
+        let target = gateway_target("local-token");
+        legacy_adapter
+            .apply(&legacy_session, &target)
+            .expect("legacy apply");
+        compiled
+            .apply(&compiled_session, &target)
+            .expect("compiled apply");
+        assert_eq!(
+            tree(&legacy_home),
+            tree(&compiled_home),
+            "{context}: apply tree"
+        );
+
+        write(&legacy_path, "model_provider = [\n");
+        write(&compiled_path, "model_provider = [\n");
+        let broken = tree(&compiled_home);
+        let legacy_error = legacy_adapter
+            .disconnect(&legacy_session, false)
+            .expect_err("legacy broken disconnect");
+        let compiled_error = compiled
+            .disconnect(&compiled_session, false)
+            .expect_err("compiled broken disconnect");
+        assert_eq!(
+            normalized_error(&legacy_home, &legacy_error),
+            normalized_error(&compiled_home, &compiled_error),
+            "{context}: refusal"
+        );
+        let error = compiled_error.to_string();
+        assert!(error.contains("--force"), "{context}: {error}");
+        assert!(error.contains("codex"), "{context}: {error}");
+        assert_eq!(tree(&legacy_home), broken, "{context}: legacy refusal");
+        assert_eq!(
+            tree(&compiled_home),
+            broken,
+            "{context}: refusal changed files"
+        );
+        assert!(
+            compiled_home
+                .join(".codex/config.toml.hofund.bak")
+                .is_file(),
+            "{context}: refusal removed the backup"
+        );
+
+        let legacy_outcome = legacy_adapter
+            .disconnect(&legacy_session, true)
+            .expect("legacy forced disconnect");
+        let compiled_outcome = compiled
+            .disconnect(&compiled_session, true)
+            .expect("compiled forced disconnect");
+        assert_eq!(legacy_outcome, compiled_outcome, "{context}: forced");
+        assert!(compiled_outcome.changed(), "{context}: forced unchanged");
+        assert_eq!(tree(&legacy_home), before, "{context}: legacy restore");
+        assert_eq!(
+            tree(&compiled_home),
+            before,
+            "{context}: forced disconnect did not restore the original tree"
+        );
+        assert_eq!(
+            fs::read(&compiled_path).expect("compiled restored bytes"),
+            USER_CONFIG.as_bytes(),
+            "{context}: restored bytes"
+        );
+    }
+}
+
+#[test]
+fn shipped_codex_read_and_revert_cover_existing_and_missing_files() {
+    let description = hofund_plugin_registry::agent("codex").expect("shipped codex");
+    for os in [TargetOs::Linux, TargetOs::Macos, TargetOs::Windows] {
+        for (name, initial) in [("existing", Some(USER_CONFIG)), ("missing", None)] {
+            let context = format!("{os:?} / {name}");
+            let legacy_home = scratch();
+            let compiled_home = scratch();
+            let legacy_path = legacy_home.join(".codex/config.toml");
+            let compiled_path = compiled_home.join(".codex/config.toml");
+            if let Some(initial) = initial {
+                write(&legacy_path, initial);
+                write(&compiled_path, initial);
+            }
+            let before = tree(&legacy_home);
+            assert_eq!(before, tree(&compiled_home), "{context}: initial tree");
+            let legacy_session = Session::new(&legacy_home);
+            let compiled_session = Session::new(&compiled_home);
+            let legacy_adapter = legacy::codex();
+            let compiled = Compiled::new(description).with_os(os);
+            let target = gateway_target("local-token");
+            legacy_adapter
+                .apply(&legacy_session, &target)
+                .expect("legacy apply");
+            compiled
+                .apply(&compiled_session, &target)
+                .expect("compiled apply");
+
+            let legacy_read = legacy_adapter.read(&legacy_session).expect("legacy read");
+            let compiled_read = compiled.read(&compiled_session).expect("compiled read");
+            assert_eq!(compiled_read.len(), 1, "{context}: read file count");
+            assert_eq!(compiled_read[0].path, compiled_path, "{context}: read path");
+            let expected_bytes = fs::read(&compiled_path).expect("compiled applied bytes");
+            assert_eq!(
+                compiled_read[0].bytes.as_deref(),
+                Some(expected_bytes.as_slice()),
+                "{context}: read bytes"
+            );
+            let applied = String::from_utf8(expected_bytes).expect("applied TOML");
+            assert!(
+                applied.contains("model_provider = \"hofund\""),
+                "{context}: {applied}"
+            );
+            assert!(
+                applied.contains("base_url = \"http://127.0.0.1:3425/v1\""),
+                "{context}: {applied}"
+            );
+            assert!(
+                applied.contains("experimental_bearer_token = \"local-token\""),
+                "{context}: {applied}"
+            );
+            let normalize = |home: &Path, files: &[hofund_agent::ConfigFile]| {
+                files
+                    .iter()
+                    .map(|file| {
+                        (
+                            file.path
+                                .strip_prefix(home)
+                                .expect("relative")
+                                .to_path_buf(),
+                            file.bytes.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                normalize(&legacy_home, &legacy_read),
+                normalize(&compiled_home, &compiled_read),
+                "{context}: read equivalence"
+            );
+
+            legacy_adapter
+                .revert(&legacy_session)
+                .expect("legacy revert");
+            compiled.revert(&compiled_session).expect("compiled revert");
+            assert_eq!(tree(&legacy_home), before, "{context}: legacy revert");
+            assert_eq!(
+                tree(&compiled_home),
+                before,
+                "{context}: revert did not restore the initial tree"
+            );
+            if let Some(initial) = initial {
+                assert_eq!(
+                    fs::read(&compiled_path).expect("compiled reverted bytes"),
+                    initial.as_bytes(),
+                    "{context}: reverted bytes"
+                );
+            } else {
+                assert!(!compiled_path.exists(), "{context}: created file remains");
+            }
+        }
+    }
+}
+
+#[test]
+fn shipped_codex_detects_a_config_file_without_a_binary() {
+    let description = hofund_plugin_registry::agent("codex").expect("shipped codex");
+    for os in [TargetOs::Linux, TargetOs::Macos, TargetOs::Windows] {
+        let context = format!("{os:?}");
+        let legacy_home = scratch();
+        let compiled_home = scratch();
+        let legacy_session = Session::new(&legacy_home).with_path(legacy_home.join("empty-bin"));
+        let compiled_session =
+            Session::new(&compiled_home).with_path(compiled_home.join("empty-bin"));
+        let legacy_adapter = legacy::codex();
+        let compiled = Compiled::new(description).with_os(os);
+        assert!(!legacy_adapter.detect(&legacy_session), "{context}: legacy");
+        assert!(
+            !compiled.detect(&compiled_session),
+            "{context}: detected an absent binary and config"
+        );
+
+        write(&legacy_home.join(".codex/config.toml"), USER_CONFIG);
+        write(&compiled_home.join(".codex/config.toml"), USER_CONFIG);
+        assert!(legacy_adapter.detect(&legacy_session), "{context}: legacy");
+        assert!(
+            compiled.detect(&compiled_session),
+            "{context}: config alone was not detected"
+        );
+    }
+}
+
+#[test]
+fn shipped_codex_disconnect_keeps_a_directory_with_a_user_file() {
+    let description = hofund_plugin_registry::agent("codex").expect("shipped codex");
+    for os in [TargetOs::Linux, TargetOs::Macos, TargetOs::Windows] {
+        let context = format!("{os:?}");
+        let legacy_home = scratch();
+        let compiled_home = scratch();
+        let legacy_session = Session::new(&legacy_home);
+        let compiled_session = Session::new(&compiled_home);
+        let legacy_adapter = legacy::codex();
+        let compiled = Compiled::new(description).with_os(os);
+        let target = gateway_target("local-token");
+        legacy_adapter
+            .apply(&legacy_session, &target)
+            .expect("legacy apply");
+        compiled
+            .apply(&compiled_session, &target)
+            .expect("compiled apply");
+        write(&legacy_home.join(".codex/notes.txt"), "stay\n");
+        write(&compiled_home.join(".codex/notes.txt"), "stay\n");
+
+        let legacy_outcome = legacy_adapter
+            .disconnect(&legacy_session, false)
+            .expect("legacy disconnect");
+        let compiled_outcome = compiled
+            .disconnect(&compiled_session, false)
+            .expect("compiled disconnect");
+        assert_eq!(
+            normalized_outcome(&legacy_home, &legacy_outcome),
+            normalized_outcome(&compiled_home, &compiled_outcome),
+            "{context}: outcome"
+        );
+        assert!(compiled_outcome.changed(), "{context}: unchanged");
+        assert!(
+            compiled_outcome.warnings().is_empty(),
+            "{context}: warnings"
+        );
+        assert!(!compiled_home.join(".codex/config.toml").exists());
+        assert!(compiled_home.join(".codex").is_dir());
+        assert_eq!(
+            fs::read(compiled_home.join(".codex/notes.txt")).expect("user file"),
+            b"stay\n",
+            "{context}: user file"
+        );
+        assert_eq!(
+            tree(&legacy_home),
+            tree(&compiled_home),
+            "{context}: final tree"
+        );
+    }
+}
+
+#[test]
+fn shipped_codex_matches_legacy_for_non_utf8_bom_and_crlf_bytes() {
+    let description = hofund_plugin_registry::agent("codex").expect("shipped codex");
+    for os in [TargetOs::Linux, TargetOs::Macos, TargetOs::Windows] {
+        compare_non_utf8(description, os);
+        let bom = [b"\xef\xbb\xbf".as_slice(), USER_CONFIG.as_bytes()].concat();
+        compare_byte_round_trip(description, os, "UTF-8 BOM", &bom);
+        let crlf = USER_CONFIG.replace('\n', "\r\n");
+        compare_byte_round_trip(description, os, "CRLF", crlf.as_bytes());
+    }
+}
+
+fn compare_non_utf8(description: &'static AgentDescription, os: TargetOs) {
+    let context = format!("{os:?} / non-UTF-8");
+    let legacy_home = scratch();
+    let compiled_home = scratch();
+    let initial = b"model = \"user-model\"\n\xff";
+    write_bytes(&legacy_home.join(".codex/config.toml"), initial);
+    write_bytes(&compiled_home.join(".codex/config.toml"), initial);
+    let before = tree(&legacy_home);
+    let legacy_session = Session::new(&legacy_home);
+    let compiled_session = Session::new(&compiled_home);
+    let legacy_adapter = legacy::codex();
+    let compiled = Compiled::new(description).with_os(os);
+    let target = gateway_target("local-token");
+
+    let legacy_error = legacy_adapter
+        .plan(&legacy_session, &target)
+        .expect_err("legacy non-UTF-8 plan");
+    let compiled_error = compiled
+        .plan(&compiled_session, &target)
+        .expect_err("compiled non-UTF-8 plan");
+    assert_eq!(
+        normalized_error(&legacy_home, &legacy_error),
+        normalized_error(&compiled_home, &compiled_error),
+        "{context}: plan error"
+    );
+    assert!(compiled_error.to_string().contains("not UTF-8"));
+    assert_eq!(
+        tree(&legacy_home),
+        tree(&compiled_home),
+        "{context}: plan tree"
+    );
+    assert_eq!(tree(&compiled_home), before, "{context}: plan wrote");
+    let legacy_error = legacy_adapter
+        .apply(&legacy_session, &target)
+        .expect_err("legacy non-UTF-8 apply");
+    let compiled_error = compiled
+        .apply(&compiled_session, &target)
+        .expect_err("compiled non-UTF-8 apply");
+    assert_eq!(
+        normalized_error(&legacy_home, &legacy_error),
+        normalized_error(&compiled_home, &compiled_error),
+        "{context}: apply error"
+    );
+    assert!(compiled_error.to_string().contains("not UTF-8"));
+    assert_eq!(tree(&legacy_home), before, "{context}: legacy apply");
+    assert_eq!(tree(&compiled_home), before, "{context}: apply wrote");
+
+    let legacy_outcome = legacy_adapter
+        .disconnect(&legacy_session, false)
+        .expect("legacy non-UTF-8 disconnect");
+    let compiled_outcome = compiled
+        .disconnect(&compiled_session, false)
+        .expect("compiled non-UTF-8 disconnect");
+    assert_eq!(
+        normalized_outcome(&legacy_home, &legacy_outcome),
+        normalized_outcome(&compiled_home, &compiled_outcome),
+        "{context}: disconnect"
+    );
+    assert!(!compiled_outcome.changed(), "{context}: unexpected change");
+    assert!(compiled_outcome.warnings().is_empty());
+    assert_eq!(
+        tree(&legacy_home),
+        tree(&compiled_home),
+        "{context}: disconnect tree"
+    );
+    assert_eq!(tree(&compiled_home), before, "{context}: disconnect wrote");
+    assert!(!compiled_home.join(".codex/config.toml.hofund.bak").exists());
+}
+
+fn compare_byte_round_trip(
+    description: &'static AgentDescription,
+    os: TargetOs,
+    name: &str,
+    initial: &[u8],
+) {
+    let context = format!("{os:?} / {name}");
+    let legacy_home = scratch();
+    let compiled_home = scratch();
+    let legacy_path = legacy_home.join(".codex/config.toml");
+    let compiled_path = compiled_home.join(".codex/config.toml");
+    write_bytes(&legacy_path, initial);
+    write_bytes(&compiled_path, initial);
+    let before = tree(&legacy_home);
+    let legacy_session = Session::new(&legacy_home);
+    let compiled_session = Session::new(&compiled_home);
+    let legacy_adapter = legacy::codex();
+    let compiled = Compiled::new(description).with_os(os);
+    let target = gateway_target("local-token");
+
+    let legacy_plan = legacy_adapter
+        .plan(&legacy_session, &target)
+        .expect("legacy byte plan");
+    let compiled_plan = compiled
+        .plan(&compiled_session, &target)
+        .expect("compiled byte plan");
+    assert!(!compiled_plan.changes().is_empty(), "{context}: empty plan");
+    assert_plan(
+        &legacy_home,
+        &compiled_home,
+        &legacy_plan,
+        &compiled_plan,
+        &context,
+    );
+    assert_eq!(tree(&compiled_home), before, "{context}: plan wrote");
+    let legacy_applied = legacy_adapter
+        .apply(&legacy_session, &target)
+        .expect("legacy byte apply");
+    let compiled_applied = compiled
+        .apply(&compiled_session, &target)
+        .expect("compiled byte apply");
+    assert_plan(
+        &legacy_home,
+        &compiled_home,
+        &legacy_applied,
+        &compiled_applied,
+        &context,
+    );
+    assert_eq!(
+        tree(&legacy_home),
+        tree(&compiled_home),
+        "{context}: apply tree"
+    );
+    assert_eq!(
+        fs::read(compiled_home.join(".codex/config.toml.hofund.bak")).expect("backup"),
+        initial,
+        "{context}: backup bytes"
+    );
+
+    let legacy_outcome = legacy_adapter
+        .disconnect(&legacy_session, false)
+        .expect("legacy byte disconnect");
+    let compiled_outcome = compiled
+        .disconnect(&compiled_session, false)
+        .expect("compiled byte disconnect");
+    assert_eq!(
+        normalized_outcome(&legacy_home, &legacy_outcome),
+        normalized_outcome(&compiled_home, &compiled_outcome),
+        "{context}: disconnect"
+    );
+    assert!(compiled_outcome.changed(), "{context}: unchanged");
+    assert!(compiled_outcome.warnings().is_empty());
+    assert_eq!(tree(&legacy_home), before, "{context}: legacy restore");
+    assert_eq!(
+        tree(&compiled_home),
+        before,
+        "{context}: clean disconnect did not restore the original bytes"
+    );
+    assert_eq!(
+        fs::read(compiled_path).expect("restored bytes"),
+        initial,
+        "{context}: restored bytes"
+    );
+}
+
+fn write_bytes(path: &Path, contents: &[u8]) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("parent");
+    }
+    fs::write(path, contents).expect("write");
+}
+
 fn compare_scenario(description: &'static AgentDescription, os: TargetOs, scenario: &Scenario) {
     let context = format!("{os:?} / {}", scenario.name);
     let legacy_home = scratch();
@@ -417,7 +908,7 @@ fn assert_plan(
     compiled_plan: &Plan,
     context: &str,
 ) {
-    fn normalized(home: &Path, plan: &Plan) -> Vec<(PathBuf, Vec<u8>, Vec<u8>)> {
+    fn normalized(home: &Path, plan: &Plan) -> Vec<(PathBuf, Vec<u8>, Vec<u8>, String)> {
         plan.changes()
             .iter()
             .map(|change| {
@@ -429,6 +920,9 @@ fn assert_plan(
                         .to_path_buf(),
                     change.before().to_vec(),
                     change.after().to_vec(),
+                    change
+                        .diff()
+                        .replace(home.to_string_lossy().as_ref(), "<home>"),
                 )
             })
             .collect()
@@ -436,8 +930,14 @@ fn assert_plan(
     assert_eq!(
         normalized(legacy_home, legacy_plan),
         normalized(compiled_home, compiled_plan),
-        "{context}: plan paths and bytes"
+        "{context}: plan paths, bytes, and diff"
     );
+}
+
+fn normalized_error(home: &Path, error: &hofund_agent::AgentError) -> String {
+    error
+        .to_string()
+        .replace(home.to_string_lossy().as_ref(), "<home>")
 }
 
 fn normalized_status(home: &Path, status: &ConnectionStatus) -> (bool, bool, Vec<PathBuf>) {
