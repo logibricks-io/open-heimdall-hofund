@@ -970,11 +970,12 @@ PR K lands the member cooldown book and passive observation path. These are the 
 
 The implementation plan is [docs/plugins/control-plane.md](../plugins/control-plane.md). It keeps the accepted crate, client, process, and reload boundaries, with these clarifications and deviations:
 
-- The management API uses a separate loopback-only listener, not the model listener. The model gateway may bind a LAN address without exposing management routes.
-- Reload is triggered by a control call or SIGHUP, not by an initial file watcher. Validation and candidate construction finish before one ArcSwap publication.
-- SSE is the event transport. A bounded stream requests a fresh snapshot after lag; events are not durable across restarts.
-- Socket handoff and background-service installation are deferred to rows 16.3 and 16.4. This narrows the placement-table sentence that assigned them to L because listener transfer and service management are independent of the client boundary.
-- After L the CLI links `hofund-config`, `hofund-control-client`, and `hofund-secrets`, not `hofund-agent`. This narrows the dependency rule that allowed `hofund-agent` for offline commands: agent plans need registry descriptions that only `hofundd` links, so a dry-run plan goes through the control client. `hofund-secrets` serves local `token show`, which has no control route.
+- The management API uses a separate loopback-only listener, not the model listener. The model gateway may bind a LAN address without exposing local control routes. Later LAN-facing remote usage and quota features stay on the model listener with gateway-key authentication; the control listener is never widened for them.
+- Reload is triggered by a control call or the L6 debounced parent-directory watcher, with a 2 s stat-polling fallback. Validation and candidate construction finish before one ArcSwap publication. SIGHUP drains, flushes, and exits under foreground `hofund serve`; it is not a reload signal.
+- SSE is the event transport. Subscription precedes the snapshot, a separate bounded replay ring supports Last-Event-ID, request events are opt-in, and a lagged stream requests a fresh snapshot. Events are not durable across restarts.
+- Socket handoff and background-service installation are deferred to feature-parity rows 16.3 and 16.4 (`docs/feature-parity.md:329-330`). This narrows the placement-table sentence that assigned them to L because listener transfer and service management are independent of the client boundary.
+- After L the CLI's workspace dependencies are `hofund-config`, `hofund-control-client`, and `hofund-secrets`, plus the external `toml_edit`; it no longer depends on `hofund-agent` or `hofund-daemon`. Runtime commands use one-shot `hofundd <op> --config ...` when no daemon is running. There are two exceptions: `events tail` autostarts the daemon and retries, and `healthcheck` fails as the reference's container check does. This preserves offline agent operations, provider tests, usage, and full config validation without moving registry linkage out of `hofundd`. Only a missing `hofundd` permits a clearly labeled structural-only config-check fallback. `hofund-secrets` serves local `token show`, which has no control route.
+- L's reference citations use `dc1cfe0`; earlier rows remain pinned to `cbbf316`.
 - The CLI stays at `crates/cli` until row J. Desktop removal of the embedded daemon remains a follower of L.
 
 ### Parallel work plan
