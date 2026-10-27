@@ -129,6 +129,8 @@ diagram. `plugin-relay` and `plugin-registry` dev-depend on `kit-upstream` for
 conformance tests; the registry also dev-depends on `kit-agent` and on `agent`
 for the frozen Codex equivalence oracle.
 
+This table covers normal and build dependencies, including their target-specific forms. Dev-dependencies have a separate explicit allow-map in `xtask/tests/workspace_invariants.rs`; test-only edges below are labelled `(tests)`.
+
 | Package | May depend on |
 | --- | --- |
 | `hofund-ir` | — |
@@ -138,7 +140,7 @@ for the frozen Codex equivalence oracle.
 | `hofund-plugin-sdk` | `hofund-plugin-api`, `hofund-quirks` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` |
+| `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
 | `hofund-kit-upstream` | `hofund-plugin-api`, `hofund-plugin-host` |
