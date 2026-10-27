@@ -1,0 +1,12 @@
+{
+  "env": {
+    "KEEP": "yes",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3425",
+    "ANTHROPIC_AUTH_TOKEN": "old-token",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "fable-x",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "fable-x",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "fable-x",
+    "ANTHROPIC_SMALL_FAST_MODEL": "fable-x"
+  },
+  "model": "fable-x"
+}

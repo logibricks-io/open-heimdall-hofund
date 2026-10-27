@@ -1,0 +1,13 @@
+{
+  "model": "stale-model",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://stale.example",
+    "ANTHROPIC_AUTH_TOKEN": "stale-token",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "stale-opus",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "stale-sonnet",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "stale-haiku",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "stale-fable",
+    "ANTHROPIC_SMALL_FAST_MODEL": "stale-fast",
+    "KEEP": "yes"
+  }
+}

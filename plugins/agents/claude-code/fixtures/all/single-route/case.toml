@@ -1,0 +1,5 @@
+routes = ["claude-sonnet-5"]
+configured_model = "claude-sonnet-5"
+base_url = "http://127.0.0.1:3425/"
+token = "old-token"
+refreshed_token = "refreshed-token"

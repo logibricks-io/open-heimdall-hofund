@@ -1,0 +1,10 @@
+{
+  // Keep this user setting through a disconnect restore.
+  "model": "commented-model",
+  "env": {
+    "KEEP": "yes",
+  },
+  "permissions": {
+    "allow": ["Read"],
+  },
+}

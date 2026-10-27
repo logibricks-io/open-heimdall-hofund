@@ -6,9 +6,10 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(test, feature = "legacy-agent-consts"))]
+use hofund_plugin_api::TierId;
 use hofund_plugin_api::{
-    AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, Slot as ApiSlot, TierId,
-    Visible,
+    AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, Slot as ApiSlot, Visible,
 };
 
 use crate::edit::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
@@ -21,89 +22,6 @@ use crate::{
     Session, TargetOs,
 };
 use crate::{DisconnectOutcome, usable_override};
-
-/// Claude Code user settings.
-///
-/// The file is `~/.claude/settings.json`. On Windows that is
-/// `%USERPROFILE%\.claude\settings.json`. `CLAUDE_CONFIG_DIR` replaces the
-/// `.claude` directory. The file is strict JSON; comments are a syntax error
-/// in current Claude Code, and this adapter still accepts a loosened form so
-/// a commented file can be edited and later restored.
-///
-/// `env.ANTHROPIC_BASE_URL` is the gateway origin. The Claude SDK appends
-/// `/v1/messages`, so the value has no `/v1` suffix. `env.ANTHROPIC_AUTH_TOKEN`
-/// is sent as `Authorization: Bearer`. A string `model` already in the file
-/// stays. When the file has none and the gateway has one route, connect
-/// writes that route as `model`. Opus, Sonnet, Haiku, and
-/// `ANTHROPIC_SMALL_FAST_MODEL` then name that same model. Fable is written
-/// only when the model id contains `claude-fable-`; a non-Fable id in
-/// `ANTHROPIC_DEFAULT_FABLE_MODEL` makes Claude Code treat the main model as
-/// Fable. `CLAUDE_CODE_SUBAGENT_MODEL` stays unset so a subagent that names
-/// no model keeps the session model. `effortLevel` and
-/// `CLAUDE_CODE_EFFORT_LEVEL` stay unset because connect does not pick a
-/// level. Checked 2026-10-25: <https://code.claude.com/docs/en/model-config>,
-/// <https://code.claude.com/docs/en/env-vars>.
-///
-/// Sources: <https://code.claude.com/docs/en/settings>,
-/// <https://code.claude.com/docs/en/llm-gateway-connect>,
-/// <https://code.claude.com/docs/en/env-vars>.
-const CLAUDE_CODE: Description = Description {
-    id: "claude-code",
-    display_name: "Claude Code",
-    binary: "claude",
-    locations: &[Location {
-        file: "settings",
-        kind: FileKind::Json,
-        create: true,
-        resolve: claude_settings,
-    }],
-    sets: &[
-        Set {
-            file: "settings",
-            key: "env.ANTHROPIC_BASE_URL",
-            slot: Slot::Origin,
-        },
-        Set {
-            file: "settings",
-            key: "env.ANTHROPIC_AUTH_TOKEN",
-            slot: Slot::Token,
-        },
-        Set {
-            file: "settings",
-            key: "model",
-            slot: Slot::ClaudeModel,
-        },
-        Set {
-            file: "settings",
-            key: "env.ANTHROPIC_DEFAULT_OPUS_MODEL",
-            slot: Slot::ClaudeTier("opus"),
-        },
-        Set {
-            file: "settings",
-            key: "env.ANTHROPIC_DEFAULT_SONNET_MODEL",
-            slot: Slot::ClaudeTier("sonnet"),
-        },
-        Set {
-            file: "settings",
-            key: "env.ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            slot: Slot::ClaudeTier("haiku"),
-        },
-        Set {
-            file: "settings",
-            key: "env.ANTHROPIC_DEFAULT_FABLE_MODEL",
-            slot: Slot::ClaudeTier("fable"),
-        },
-        Set {
-            file: "settings",
-            key: "env.ANTHROPIC_SMALL_FAST_MODEL",
-            slot: Slot::ClaudeTier("fast"),
-        },
-    ],
-    model: Some(ModelKey {
-        file: "settings",
-        key: "model",
-    }),
-};
 
 /// Gemini CLI user settings and env file.
 ///
@@ -316,8 +234,10 @@ pub(crate) enum Slot {
     /// OpenCode `models` object built from [`GatewayTarget::models`].
     OpenCodeModels,
     /// Claude Code `model`, when the file has none and one route is configured.
+    #[cfg(any(test, feature = "legacy-agent-consts"))]
     ClaudeModel,
     /// Claude Code tier env value. `fable` is skipped unless the model id is Fable.
+    #[cfg(any(test, feature = "legacy-agent-consts"))]
     ClaudeTier(&'static str),
     /// Test-only API `ModelIfUnset` with an arbitrary source key. The fixture's
     /// `legacy_model` source is not representable by `GeminiModel`.
@@ -365,9 +285,6 @@ impl Compiled {
     }
 }
 
-const CLAUDE: Described = Described {
-    description: &CLAUDE_CODE,
-};
 const GEMINI_ADAPTER: Described = Described {
     description: &GEMINI,
 };
@@ -376,13 +293,13 @@ const OPENCODE_ADAPTER: Described = Described {
 };
 const BUILTIN_ORDER: [&str; 4] = ["claude-code", "codex", "gemini-cli", "opencode"];
 
-/// The const built-in adapters; codex is compiled and delivered separately.
+/// The const built-in adapters; codex and claude-code are compiled separately.
 #[must_use]
-pub fn adapters() -> [&'static dyn AgentAdapter; 3] {
-    [&CLAUDE, &GEMINI_ADAPTER, &OPENCODE_ADAPTER]
+pub fn adapters() -> [&'static dyn AgentAdapter; 2] {
+    [&GEMINI_ADAPTER, &OPENCODE_ADAPTER]
 }
 
-/// Finds a const built-in adapter by its stable id; codex is compiled.
+/// Finds a const built-in adapter; codex and claude-code are compiled.
 #[must_use]
 pub fn find(name: &str) -> Option<&'static dyn AgentAdapter> {
     adapters().into_iter().find(|adapter| adapter.id() == name)
@@ -411,7 +328,7 @@ impl Catalog {
 
 /// Composes const and compiled adapters in CLI order and rejects duplicate ids.
 ///
-/// Codex comes from the compiled list supplied by the daemon's
+/// Codex and claude-code come from the compiled list supplied by the daemon's
 /// `agent_descriptions()`. Other compiled ids follow the four built-in slots
 /// in input order.
 ///
@@ -443,8 +360,7 @@ pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog
             continue;
         }
         let description = match id {
-            "claude-code" => &CLAUDE_CODE,
-            "codex" => continue,
+            "claude-code" | "codex" => continue,
             "gemini-cli" => &GEMINI,
             "opencode" => &OPENCODE,
             _ => unreachable!("known built-in id"),
@@ -552,7 +468,9 @@ impl Engine {
                     Slot::Literal(value) => ApiSlot::Literal(value),
                     Slot::GeminiModel => ApiSlot::model_if_unset(Some("model")),
                     Slot::OpenCodeModels => ApiSlot::CatalogModels,
+                    #[cfg(any(test, feature = "legacy-agent-consts"))]
                     Slot::ClaudeModel => ApiSlot::model_if_unset(None),
+                    #[cfg(any(test, feature = "legacy-agent-consts"))]
                     Slot::ClaudeTier(tier) => ApiSlot::ModelTier {
                         tier: TierId::from_static(tier),
                         when_model_matches: (tier == "fable")
@@ -1355,14 +1273,6 @@ fn binary_on_path(session: &Session, name: &str) -> bool {
     false
 }
 
-fn claude_settings(session: &Session) -> PathBuf {
-    let directory = session
-        .claude_config_dir
-        .as_ref()
-        .map_or_else(|| session.home.join(".claude"), |path| path.clone());
-    directory.join("settings.json")
-}
-
 fn gemini_root(session: &Session) -> PathBuf {
     session
         .gemini_cli_home
@@ -1874,6 +1784,26 @@ mod tests {
             };
             for case in shared.iter().chain(cases.iter()) {
                 replay_case(crate::legacy::codex(), case, os);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_claude_code_replays_compiled_goldens_for_every_target_os() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/agents/claude-code/fixtures");
+        let (shared, per_os) =
+            golden_layout("claude-code", &fixtures).expect("valid claude-code layout");
+        assert!(!shared.is_empty());
+        for (directory, cases) in &per_os {
+            let os = match *directory {
+                "linux" => TargetOs::Linux,
+                "macos" => TargetOs::Macos,
+                "windows" => TargetOs::Windows,
+                _ => unreachable!("validated target OS"),
+            };
+            for case in shared.iter().chain(cases.iter()) {
+                replay_case(crate::legacy::claude_code(), case, os);
             }
         }
     }
