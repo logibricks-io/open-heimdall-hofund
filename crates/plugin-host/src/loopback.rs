@@ -959,12 +959,22 @@ mod tests {
     async fn deadline_times_out_and_a_second_wait_is_refused() {
         let registry = LoopbackRegistry::new();
         let session = session();
-        registry.bind(&key(), &session, &spec()).expect("bind");
+        let port = registry
+            .bind(&key(), &session, &spec())
+            .expect("bind")
+            .port();
         let error = registry
             .await_callback(&session, no_paste(), Duration::from_millis(50))
             .await
             .expect_err("deadline");
         assert_eq!(error.kind(), PluginErrorKind::Timeout);
+        let (status, _) = get(port, &format!("/callback?code=c&state={STATE}")).await;
+        assert_eq!(status, 409, "a timed-out sign-in is not claimed late");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            TcpStream::connect(("127.0.0.1", port)).await.is_err(),
+            "the port stays open after a timeout"
+        );
         let error = registry
             .await_callback(&session, no_paste(), WAIT)
             .await
