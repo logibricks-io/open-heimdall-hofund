@@ -474,7 +474,7 @@ fn check_features(listed: &[Listed]) -> Result<(), String> {
 
 fn emit(listed: &[Listed], builtins: &[FragmentToml]) -> String {
     let mut routes = String::new();
-    let mut calls = "        #[cfg(feature = \"test-fixtures\")]\n        (\"fixture-multi-listed\", crate::fixture_upstream::contribute()),\n".to_owned();
+    let mut calls = String::new();
     let mut presets = String::new();
     let mut aliases = String::new();
     for plugin in listed {

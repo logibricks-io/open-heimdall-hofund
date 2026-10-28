@@ -1709,6 +1709,7 @@ dependencies = [
 name = "hofund-kit-upstream"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "hofund-plugin-api",
  "hofund-plugin-host",
  "serde_json",

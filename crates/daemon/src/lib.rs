@@ -481,6 +481,11 @@ fn build_raw_plugin(
         hofund_plugin_host::runtime_host(plugin, api_key.to_owned(), root, limits)
     }
     .map_err(show)?;
+    // Kernel-owned factories (`openai-compat`, `anthropic`, `generative`,
+    // `google-vertex`, `bedrock`) are not linked plugins: they read the wire
+    // from the `protocol` raw key and keep the default `build_with`, so they
+    // still build through `validate_and_build`. Only a linked (listed) plugin
+    // receives the selected protocol in `BuildContext`.
     if hofund_plugin_registry::upstream(plugin_id).is_none() {
         return factory.validate_and_build(&raw, &host).map_err(show);
     }

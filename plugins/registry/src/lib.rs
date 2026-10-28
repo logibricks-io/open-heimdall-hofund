@@ -58,11 +58,25 @@ pub use fixture_agent_descriptions::fixture_agents;
 pub use fixture_preset_descriptions::{fixture_aliases, fixture_presets};
 pub use generated::{
     CompiledAlias, CompiledPreset, CompiledRegion, CompiledRoute, compiled_aliases,
-    compiled_presets, compiled_routes, contributions,
+    compiled_presets, compiled_routes,
 };
 pub use select::{
     SelectError, Selection, model_plan_of, protocol_for, resolve_region, select, wire_for_protocol,
 };
+
+/// Every linked plugin contribution, keyed by plugin id, in `plugins.toml` order.
+///
+/// With the `test-fixtures` feature, the test-only two-protocol listed
+/// fixture `fixture-multi-listed` is appended. The generated list never names
+/// a fixture.
+#[must_use]
+pub fn contributions() -> Vec<(&'static str, hofund_plugin_sdk::Contribution)> {
+    #[cfg_attr(not(feature = "test-fixtures"), allow(unused_mut))]
+    let mut linked = generated::contributions();
+    #[cfg(feature = "test-fixtures")]
+    linked.push(("fixture-multi-listed", fixture_upstream::contribute()));
+    linked
+}
 
 /// The factory for `id`.
 ///
