@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the legacy plaintext metadata file. Reads route by stored reference and
   load secrets per row, while kind-scoped v2 entries prevent cross-kind collisions.
   Fallback keys publish without overwrite, and Linux links libdbus statically.
+- Full typed control route and client surface, with ordered request defenses,
+  bounded bodies, error envelopes, no-store responses, and drain guards. The daemon
+  now serves secret-free provider summaries, cached models without upstream calls,
+  and route models over control TCP and Unix sockets.
+- Per-config control identities, single-instance locks, atomic token-free discovery,
+  secure runtime-directory fallback, and same-user Unix socket transport with ordered
+  client discovery. Windows keeps authenticated loopback TCP until named-pipe support lands.
 - Opt-in loopback TCP control health and status with strict Bearer, Host, Origin,
   and mutation defenses, live disk/runtime revisions, and a typed TCP control client.
   Model `/health` now identifies the service as hofund.
@@ -236,6 +243,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Control request bodies between 2 MiB and the protocol request limit now reach
+  their handler instead of getting the HTTP framework's plain-text 413 without
+  an error envelope or `Cache-Control: no-store`. The control pre-route check is
+  the only body size gate.
+- Over-long Unix control socket paths now warn and fall back to TCP instead of
+  preventing daemon startup. Socket tests use short paths on macOS, and the
+  Windows single-instance test no longer requires session debug output.
 - Wrong-method control responses now use the `method_not_allowed` error kind
   while retaining HTTP 405 (#206).
 - Decide-only presets with an explicit wire now report the same missing-endpoint
