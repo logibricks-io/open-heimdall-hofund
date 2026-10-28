@@ -63,9 +63,9 @@ slot = "catalog_models"
 # hofund agent connect opencode says how many routes were written. The v2 docs
 # describe providers plus package and settings; this adapter follows the current
 # providers page instead. Both pages document ~/.config and do not name an
-# override (checked 2026-10-25). When XDG_CONFIG_HOME is set this adapter uses
-# $XDG_CONFIG_HOME/opencode. Unset, the path stays ~/.config/opencode, including
-# on Windows.
+# override (checked 2026-10-25). When XDG_CONFIG_HOME is set to an absolute path
+# this adapter uses $XDG_CONFIG_HOME/opencode. Otherwise (unset, empty, or
+# relative) the path stays ~/.config/opencode, including on Windows.
 # Sources: https://opencode.ai/docs/providers/,
 # https://opencode.ai/docs/config/. The v2 shape is
 # https://opencode.ai/v2/docs/providers/.

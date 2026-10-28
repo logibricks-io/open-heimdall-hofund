@@ -169,6 +169,7 @@ fn provider_error(error: PluginError) -> ProviderError {
         PluginErrorKind::Connect => ProviderErrorKind::Connect,
         PluginErrorKind::Timeout => ProviderErrorKind::Timeout,
         PluginErrorKind::Transport => ProviderErrorKind::Transport,
+        PluginErrorKind::Interrupted => ProviderErrorKind::Interrupted,
         PluginErrorKind::Status => ProviderErrorKind::Status,
         PluginErrorKind::Decode => ProviderErrorKind::Decode,
         PluginErrorKind::Unsupported => ProviderErrorKind::Unsupported,

@@ -161,6 +161,45 @@ fn gemini_env_keeps_unrelated_lines_and_a_second_apply_is_a_no_op() {
 }
 
 #[test]
+fn gemini_cli_home_controls_both_files_and_unusable_values_use_home() {
+    let adapter = find("gemini-cli").expect("gemini");
+    let home = scratch();
+    let override_home = scratch();
+    let session = Session::new(&home).with_gemini_cli_home(&override_home);
+    let settings = override_home.join(".gemini").join("settings.json");
+    let env = override_home.join(".gemini").join(".env");
+    let plan = adapter.plan(&session, &target()).expect("plan");
+    let mut planned = plan
+        .changes()
+        .iter()
+        .map(|change| change.path().to_path_buf())
+        .collect::<Vec<_>>();
+    planned.sort();
+    let mut expected = vec![settings.clone(), env.clone()];
+    expected.sort();
+    assert_eq!(planned, expected);
+    adapter.apply(&session, &target()).expect("apply");
+    assert!(settings.is_file());
+    assert!(env.is_file());
+    assert!(!home.join(".gemini").exists());
+
+    for value in ["", "relative"] {
+        let home = scratch();
+        let root = home.join(".gemini");
+        let session = Session::new(&home).with_gemini_cli_home(value);
+        let plan = adapter.plan(&session, &target()).expect("default plan");
+        assert!(
+            plan.changes()
+                .iter()
+                .all(|change| change.path().starts_with(&root))
+        );
+        adapter.apply(&session, &target()).expect("default apply");
+        assert!(root.join("settings.json").is_file());
+        assert!(root.join(".env").is_file());
+    }
+}
+
+#[test]
 fn creating_a_missing_file_reverts_by_deleting_it() {
     let home = scratch();
     let session = Session::new(&home);

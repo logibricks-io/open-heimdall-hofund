@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Public `PluginErrorKind::Interrupted` and `ProviderErrorKind::Interrupted`
+  variants classify a 2xx reply whose body failed while being read.
 - Per-member cooldowns with generic, rate-limit, quota, credit, observation,
   and panic policies. Routing tries ready members first and retains only the
   soonest cooling member as a probe; shared state survives router republishes.
@@ -65,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Body breaks after a 2xx reply are now classified as `Interrupted` instead of
+  `Connect` on the provider path and `Transport` on the plugin-host path.
+  Plugin-host body breaks now fail over across members before a completion or
+  first stream event is returned; previously they did not fail over.
 - Codex CLI is now a compiled data-only agent at
   `plugins/agents/codex/agent.toml`; its production Rust const is removed.
   Frozen const oracles remain behind the non-default `legacy-agent-consts`
@@ -144,6 +150,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Non-2xx body-read failures now preserve the original `Status` and
+  `Retry-After`, including live model pages, Vertex token responses, and the
+  plugin host.
+- The plugin host now passes upstream response headers, including
+  `Retry-After`, through to plugins.
 - Mantle route learning no longer replays a refusal on the remembered prefix or
   forgets that prefix, and an empty model is never rerouted. Each request now
   captures its initial prefix and retries at the explicit other prefix, avoiding

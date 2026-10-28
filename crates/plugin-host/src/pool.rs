@@ -212,8 +212,8 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
 fn map_error(error: reqwest::Error) -> PluginError {
     // `is_connect` is DNS, TCP, or TLS setup, before the request is sent.
     // A connect timeout is that same pre-send failure when reqwest also
-    // reports it as connect. A reset after the send, or a body-read failure,
-    // is `Transport` and is not retried for a non-idempotent call.
+    // reports it as connect. A reset after the send and before a status is
+    // `Transport` and is not retried for a non-idempotent call.
     if error.is_connect() {
         PluginError::connect(error.to_string())
     } else if error.is_timeout() {
@@ -221,6 +221,14 @@ fn map_error(error: reqwest::Error) -> PluginError {
     } else {
         PluginError::transport(error.to_string())
     }
+}
+
+fn map_body(error: reqwest::Error) -> PluginError {
+    let mut message = error.to_string();
+    if error.is_timeout() && !message.contains("timed out") {
+        message.push_str(": timed out");
+    }
+    PluginError::interrupted(message)
 }
 
 #[cfg(test)]
@@ -264,9 +272,25 @@ impl HttpBackend for PooledHttp {
         let bytes = request.body().bytes().clone();
         let response = outbound.body(bytes).send().await.map_err(map_error)?;
         let status = response.status();
-        let collected = response.bytes().await.map_err(map_error)?;
+        // The body is collected here, so framing headers no longer describe it
+        // (a broken non-2xx body becomes empty). Other headers, such as
+        // Retry-After, reach the plugin unchanged.
+        let mut headers = response.headers().clone();
+        for name in [
+            reqwest::header::CONTENT_LENGTH,
+            reqwest::header::TRANSFER_ENCODING,
+            reqwest::header::CONNECTION,
+        ] {
+            headers.remove(name);
+        }
+        let collected = if status.is_success() {
+            response.bytes().await.map_err(map_body)?
+        } else {
+            response.bytes().await.unwrap_or_default()
+        };
         let mut output = HttpResponse::new(BodyStream::from_bytes(collected));
         *output.status_mut() = status;
+        *output.headers_mut() = headers;
         Ok(output)
     }
 
@@ -392,6 +416,7 @@ mod tests {
     enum Action {
         ResetAfterBody,
         ResetAfterHeaders,
+        Truncated,
         Respond(&'static [u8]),
         Hold,
     }
@@ -417,6 +442,12 @@ mod tests {
                     Action::ResetAfterHeaders => {
                         let _ = read_request(&mut stream, false);
                         reset(stream);
+                    }
+                    Action::Truncated => {
+                        let _ = read_request(&mut stream, false);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\n{",
+                        );
                     }
                     Action::Respond(body) => {
                         let _ = read_request(&mut stream, false);
@@ -529,6 +560,95 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn a_200_body_break_is_retried_only_for_idempotent_methods() {
+        let _guard = exclusive().await;
+        let limits = HttpLimits::new(Duration::from_secs(2), Duration::from_secs(2));
+        let (port, hits) = script(vec![
+            Action::Truncated,
+            Action::Truncated,
+            Action::Truncated,
+        ]);
+        let context = http(limits);
+        let error = Call::post(format!("http://127.0.0.1:{port}/v1"))
+            .bytes(b"hello")
+            .send_with_retry(context.http(), 3)
+            .await
+            .expect_err("truncated");
+        assert_eq!(error.kind(), PluginErrorKind::Interrupted);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        let (port, hits) = script(vec![
+            Action::Truncated,
+            Action::Truncated,
+            Action::Respond(b"ok"),
+        ]);
+        let context = http(limits);
+        let reply = Call::get(format!("http://127.0.0.1:{port}/v1"))
+            .send_with_retry(context.http(), 3)
+            .await
+            .expect("retried");
+        assert_eq!(reply.body(), b"ok");
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    fn raw(response: &'static [u8]) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = read_request(&mut stream, false);
+            let _ = stream.write_all(response);
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_429_preserves_status_and_retry_after_through_host_and_sdk() {
+        const COMPLETE: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 1\r\nretry-after: 120\r\nconnection: close\r\n\r\n{";
+        const TRUNCATED: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 4\r\nretry-after: 120\r\nconnection: close\r\n\r\n{";
+
+        let _guard = exclusive().await;
+        let port = raw(TRUNCATED);
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{port}/v1"))
+            .body(Body::from_bytes(b"hello".to_vec()))
+            .expect("request");
+        let response = PooledHttp::direct()
+            .send(request)
+            .await
+            .expect("status response");
+        assert_eq!(response.status().as_u16(), 429);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("120")
+        );
+        assert!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .is_none()
+        );
+
+        for response in [COMPLETE, TRUNCATED] {
+            let port = raw(response);
+            let context = http(HttpLimits::default());
+            let error = Call::post(format!("http://127.0.0.1:{port}/v1"))
+                .bytes(b"hello")
+                .send(context.http())
+                .await
+                .expect_err("rate limited");
+            assert_eq!(error.kind(), PluginErrorKind::Status);
+            assert_eq!(error.status(), Some(429));
+            assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_connect_refusal_is_retried() {
         let _guard = exclusive().await;
@@ -586,7 +706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stream_survives_past_one_read_budget_and_a_stall_times_out() {
+    async fn a_stream_survives_past_one_read_budget_and_a_stall_is_interrupted() {
         let _guard = exclusive().await;
         let limits = HttpLimits::new(Duration::from_secs(2), Duration::from_millis(400));
         let (port, _) = drip(6, Duration::from_millis(80));
@@ -604,7 +724,8 @@ mod tests {
             .send(context.http())
             .await
             .expect_err("stall");
-        assert_eq!(error.kind(), PluginErrorKind::Timeout);
+        assert_eq!(error.kind(), PluginErrorKind::Interrupted);
+        assert!(error.message().contains("timed out"), "{}", error.message());
         assert!(started.elapsed() < Duration::from_millis(1500));
     }
 

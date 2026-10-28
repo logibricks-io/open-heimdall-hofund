@@ -4,7 +4,7 @@
 //!
 //! | Event | Cooldown and ladder |
 //! | --- | --- |
-//! | Generic failure | Starts at 1 minute and doubles for each consecutive failure since the last success, capped at 10 minutes. Connection, timeout, transport, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses. |
+//! | Generic failure | Starts at 1 minute and doubles for each consecutive failure since the last success, capped at 10 minutes. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses. |
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. |
 //! | Exhausted quota | Uses the header retry hint capped at 1 hour, or 15 minutes without a positive hint. |
 //! | HTTP 402 | Uses 30 minutes, or the retry hint capped at 1 hour when that is longer. |
@@ -167,11 +167,14 @@ impl Cooldowns {
     }
 
     /// Records a failed call and returns its cooldown, if the error cools.
+    /// Interrupted bodies use the generic failure policy
+    /// (`reference: internal/gateway/fallback.go:1347-1355`).
     pub fn record_failure(&self, id: &MemberId, error: &PluginError) -> Option<Cooling> {
         let failure = match error.kind() {
             PluginErrorKind::Connect
             | PluginErrorKind::Timeout
             | PluginErrorKind::Transport
+            | PluginErrorKind::Interrupted
             | PluginErrorKind::Decode
             | PluginErrorKind::Io
             | PluginErrorKind::Auth => Failure::Generic(CooldownCause::Failure),
