@@ -183,6 +183,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Control response decoding now validates event boot ids and topic membership
+  and rejects oversized or invalid error-envelope fields instead of accepting
+  unbounded wire content (#184, #190).
 - OpenCode's configured `hofund/<route>` model no longer produces an unrouted
   model warning; other provider prefixes and bare model names still warn.
 - Non-2xx body-read failures now preserve the original `Status` and

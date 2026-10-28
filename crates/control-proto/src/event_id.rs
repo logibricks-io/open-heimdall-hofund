@@ -159,7 +159,7 @@ pub enum EventIdError {
     OutOfOrder,
 }
 
-fn validate_boot_id(boot_id: &str) -> Result<(), EventIdError> {
+pub(crate) fn validate_boot_id(boot_id: &str) -> Result<(), EventIdError> {
     if boot_id.is_empty()
         || boot_id.len() > MAX_BOOT_ID_LEN
         || !boot_id

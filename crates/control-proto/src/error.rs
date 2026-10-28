@@ -1,8 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{API_VERSION, FieldIssue, MAX_ERROR_MESSAGE_BYTES, MAX_REQUEST_ID_LEN};
+use crate::{API_VERSION, FieldIssue, MAX_ERROR_MESSAGE_BYTES, MAX_IDS, MAX_REQUEST_ID_LEN};
 
 /// An error response body.
+///
+/// Decoding rejects oversized text and invalid correlation ids rather than
+/// truncating or replacing them. Detail count reuses `MAX_IDS`, and every
+/// `FieldIssue` string reuses `MAX_ERROR_MESSAGE_BYTES`; no new limits are
+/// introduced for response validation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ErrorEnvelope {
@@ -18,6 +23,48 @@ impl Default for ErrorEnvelope {
             version: API_VERSION,
             error: ControlError::default(),
         }
+    }
+}
+
+impl ErrorEnvelope {
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        if self.error.message.len() > MAX_ERROR_MESSAGE_BYTES {
+            return Err(response_field_error(
+                "error.message",
+                "too_large",
+                "decoded error message exceeds the 4096-byte limit",
+            ));
+        }
+        if !valid_request_id(&self.error.request_id) {
+            return Err(response_field_error(
+                "error.request_id",
+                "invalid",
+                "decoded request id is empty, over-long, or not ASCII graphic",
+            ));
+        }
+        if self.error.details.len() > MAX_IDS {
+            return Err(response_field_error(
+                "error.details",
+                "too_many",
+                "decoded error details exceed the 4096-entry limit",
+            ));
+        }
+        for (index, issue) in self.error.details.iter().enumerate() {
+            for (name, text) in [
+                ("field", &issue.field),
+                ("reason", &issue.reason),
+                ("message", &issue.message),
+            ] {
+                if text.len() > MAX_ERROR_MESSAGE_BYTES {
+                    return Err(response_field_error(
+                        format!("error.details.{index}.{name}"),
+                        "too_large",
+                        "decoded error detail text exceeds the 4096-byte limit",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -83,7 +130,17 @@ impl Default for ControlError {
     }
 }
 
-fn valid_request_id(value: &str) -> bool {
+fn response_field_error(
+    field: impl Into<String>,
+    reason: &str,
+    message: &'static str,
+) -> ControlError {
+    let mut error = ControlError::new(ControlErrorKind::BadRequest, message, "validate");
+    error.details.push(FieldIssue::new(field, reason, message));
+    error
+}
+
+pub(crate) fn valid_request_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_REQUEST_ID_LEN
         && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
