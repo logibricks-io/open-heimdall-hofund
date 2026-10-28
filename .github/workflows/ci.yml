@@ -40,8 +40,10 @@ jobs:
           fetch-depth: 1
       - name: Install pinned Rust toolchain
         uses: ./.github/actions/rust-toolchain
+      # A cache restore once hung, so bound the step and let the job be retried.
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
       - name: Install desktop host libraries
         # The apt mirror sometimes stalls; fail fast so the job can be rerun.
         timeout-minutes: 10
@@ -76,6 +78,7 @@ jobs:
         uses: ./.github/actions/rust-toolchain
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
       - name: Install desktop host libraries
         # The apt mirror sometimes stalls; fail fast so the job can be rerun.
         timeout-minutes: 10
@@ -92,6 +95,38 @@ jobs:
             libxdo-dev
       - name: Test
         run: cargo test --workspace
+
+  test-each-package:
+    name: test-each-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/rust-toolchain
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
+      - name: Install desktop host libraries
+        # The apt mirror sometimes stalls; fail fast so the job can be rerun.
+        timeout-minutes: 10
+        if: runner.os == 'Linux'
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+            -o Dpkg::Options::="--force-confold" \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev
+      - name: Test each package with default features
+        run: bash .github/scripts/test-each-package.sh
 
   release-plan:
     name: release-plan
@@ -195,6 +230,7 @@ jobs:
         uses: ./.github/actions/rust-toolchain
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
       - name: Codec benches
         run: cargo bench -p hofund-codec --bench relay -- --sample-size 10 --warm-up-time 0.5 --measurement-time 1
 
@@ -212,6 +248,7 @@ jobs:
         uses: ./.github/actions/rust-toolchain
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
       - name: Install desktop host libraries
         # The apt mirror sometimes stalls; fail fast so the job can be rerun.
         timeout-minutes: 10
@@ -248,6 +285,7 @@ jobs:
         uses: ./.github/actions/rust-toolchain
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
       - name: Check each plugin without feature unification
         run: cargo run -p xtask -- check-plugins
 

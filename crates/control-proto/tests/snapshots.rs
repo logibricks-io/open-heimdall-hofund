@@ -517,6 +517,7 @@ fn every_event_payload_data_is_an_object_and_tolerates_unknown_fields() {
 
     for payload in known {
         let mut envelope = EventEnvelope::default();
+        envelope.boot_id = "boot-example".to_owned();
         envelope.topic = payload.topic().expect("known event topic");
         envelope.payload = payload.clone();
         let mut value = serde_json::to_value(envelope).expect("encode envelope");
