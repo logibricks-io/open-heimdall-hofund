@@ -266,6 +266,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Anthropic host checks match `anthropic.com` and its subdomains only, so a
+  lookalike host such as `evilanthropic.com` no longer gets official Anthropic
+  credential placement or model-list handling.
 - The test temp-path invariant also catches `env::temp_dir()`, imported or
   grouped `temp_dir` imports, and paths read from `TMPDIR`, `TEMP` or `TMP`.
 - Test fixtures now retain temporary-directory guards until test completion,
