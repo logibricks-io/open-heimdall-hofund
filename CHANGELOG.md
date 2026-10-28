@@ -124,6 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regional decision endpoints, now lives in
   `plugins/providers/openai-compat/presets.toml` with catalog-equivalent registry
   selection errors, credential derivation, and model planning.
+- The seventh batch moves OpenAI and OpenRouter into
+  `plugins/providers/openai-compat/presets.toml`, Google into
+  `plugins/providers/generative/presets.toml`, and Anthropic into
+  `plugins/providers/anthropic/presets.toml`, preserving registry selection,
+  credential derivation, and model planning.
 - `ProviderModels` is now non-exhaustive so future aggregation fields do not
   break downstream construction at compile time.
 - Plugin-host responses now strip every RFC 9110 hop-by-hop header, including

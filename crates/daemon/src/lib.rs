@@ -1318,6 +1318,37 @@ mod tests {
     }
 
     #[test]
+    fn moved_generative_and_messages_presets_plan_through_the_real_registry() {
+        for (preset, wire, base_url, credential, plugin) in [
+            (
+                "google",
+                hofund_provider::Wire::Generative,
+                "https://generativelanguage.googleapis.com/v1beta",
+                hofund_provider::Credential::GoogApiKey,
+                "generative",
+            ),
+            (
+                "anthropic",
+                hofund_provider::Wire::Messages,
+                "https://api.anthropic.com",
+                hofund_provider::Credential::XApiKey,
+                "anthropic",
+            ),
+        ] {
+            let config = hofund_config::load(&format!(
+                "[[providers]]\nid = \"{preset}\"\npreset = \"{preset}\"\napi_key = \"test-key\"\n"
+            ))
+            .expect("config");
+            let provider = &config.providers[0];
+            let planned = super::plan(provider).expect("real registry plan");
+            assert_eq!(planned.wire, wire);
+            assert_eq!(planned.base_url, base_url);
+            assert_eq!(planned.credential, credential);
+            assert_eq!(super::plugin_for(provider, wire, &registry()), plugin);
+        }
+    }
+
+    #[test]
     fn listed_plugins_select_each_declared_protocol_and_the_default_order() {
         let protocols = [
             hofund_plugin_api::ProtocolId::OPENAI_CHAT,

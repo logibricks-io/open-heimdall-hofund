@@ -1,0 +1,12 @@
+# Rows recorded from the reference preset list
+# (`internal/provider/presets.go`) at commit cbbf3163cb3c87ee0c327a56bc5689ddc5eda947.
+
+[[preset]]
+id = "anthropic"
+name = "Anthropic"
+kind = "vendor"
+catalog = "anthropic"
+anthropic = "https://api.anthropic.com"
+website = "https://console.anthropic.com"
+keys_url = "https://console.anthropic.com/settings/keys"
+header_hints = ["anthropic-workspace-id"]
