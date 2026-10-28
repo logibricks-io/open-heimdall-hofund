@@ -1,0 +1,14 @@
+{
+  "model": {
+    "name": "commented-model"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key",
+      "userKey": true
+    }
+  },
+  "ui": {
+    "theme": "dark"
+  }
+}

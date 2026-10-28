@@ -800,6 +800,13 @@ key = "effort"
 
     #[test]
     fn validation_rejects_builtin_agent_ids() {
+        // No const-backed agent remains, so the list is empty and the loop
+        // below is dead until #147 removes it. Fail loudly if an id returns.
+        assert!(
+            super::super::RESERVED_AGENT_IDS.is_empty(),
+            "RESERVED_AGENT_IDS is not empty; restore real coverage: {:?}",
+            super::super::RESERVED_AGENT_IDS
+        );
         for id in super::super::RESERVED_AGENT_IDS {
             let error = parse(
                 &base().replacen("fixture-agent", id, 1),
@@ -839,6 +846,20 @@ key = "effort"
             &["echo".to_owned()],
         )
         .expect_err("shipped claude-code id");
+        assert!(error.contains("collides with another agent id"), "{error}");
+    }
+
+    #[test]
+    fn validation_rejects_shipped_gemini_cli_fixture_collision() {
+        let error = parse(
+            &base().replacen("fixture-agent", "gemini-cli", 1),
+            "fixtures/agents/gemini-cli/agent.toml",
+            "gemini-cli",
+            &[],
+            &["gemini-cli".to_owned()],
+            &["echo".to_owned()],
+        )
+        .expect_err("shipped gemini-cli id");
         assert!(error.contains("collides with another agent id"), "{error}");
     }
 
