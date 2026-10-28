@@ -481,15 +481,21 @@ fn build_raw_plugin(
         hofund_plugin_host::runtime_host(plugin, api_key.to_owned(), root, limits)
     }
     .map_err(show)?;
-    // Builtin factories serve several protocols through the `protocol` raw key
-    // and do not override `build_with`, so they keep the original build path.
-    if hofund_plugin_registry::builtin_factory_ids().contains(&plugin_id) {
+    // Kernel-owned factories (`openai-compat`, `anthropic`, `generative`,
+    // `google-vertex`, `bedrock`) are not linked plugins: they read the wire
+    // from the `protocol` raw key or are single-wire catalog factories, and
+    // keep the default `build_with`, so they build through `validate_and_build`.
+    // Only a linked (listed) plugin receives the selected protocol in
+    // `BuildContext`, and a listed plugin without one is an error.
+    if hofund_plugin_registry::is_kernel_factory(plugin_id) {
         return factory.validate_and_build(&raw, &host).map_err(show);
     }
-    let Some(protocol) = protocol else {
-        // Catalog-only factories without a ProtocolId also keep their legacy build.
-        return factory.validate_and_build(&raw, &host).map_err(show);
-    };
+    let protocol = protocol.ok_or_else(|| {
+        DaemonError::new(format!(
+            "provider `{}` has no selected protocol for plugin `{plugin_id}`",
+            provider.id
+        ))
+    })?;
     factory
         .validate_and_build_with(&raw, &host, &BuildContext::new(protocol))
         .map_err(show)
@@ -1135,6 +1141,98 @@ mod tests {
         };
         let chunk = body.next_chunk().await.expect("chunk").expect("bytes");
         assert_eq!(&chunk[..], b"openai-responses");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_listed_plugin_without_a_selected_protocol_is_rejected() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"multi\"\npreset = \"fixture-listed-multi\"\nprotocol = \"openai-responses\"\napi_key = \"test-key\"\n",
+        )
+        .expect("config");
+        let provider = &config.providers[0];
+        let planned =
+            super::plan_with(provider, hofund_plugin_registry::find_fixture_preset).expect("plan");
+        let endpoint = super::endpoint_for(provider, &planned).expect("endpoint");
+        let raw = super::raw_for_with(
+            provider,
+            &planned,
+            &endpoint,
+            hofund_plugin_registry::find_fixture_preset,
+        )
+        .expect("raw");
+        let dir =
+            std::env::temp_dir().join(format!("hofund-listed-no-protocol-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let Err(error) = super::build_raw_plugin(
+            provider,
+            "fixture-multi-listed",
+            raw,
+            None,
+            &endpoint.api_key,
+            &dir.join("hofund.toml"),
+            hofund_plugin_host::HttpLimits::new(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            ),
+            true,
+            false,
+            None,
+        ) else {
+            panic!("listed plugin built without a selected protocol");
+        };
+        assert!(
+            error.to_string().contains(
+                "provider `multi` has no selected protocol for plugin `fixture-multi-listed`"
+            ),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kernel_catalog_factories_build_through_the_legacy_path_without_a_protocol() {
+        let dir =
+            std::env::temp_dir().join(format!("hofund-kernel-no-protocol-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        for (plugin_id, source) in [
+            (
+                "openai-compat",
+                "[[providers]]\nid = \"openai\"\npreset = \"openai\"\nprotocol = \"openai-responses\"\napi_key = \"test\"\n",
+            ),
+            (
+                "google-vertex",
+                "[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n[providers.options]\nproject = \"my-project\"\n",
+            ),
+            (
+                "bedrock",
+                "[[providers]]\nid = \"bedrock\"\nprotocol = \"bedrock-converse\"\nbase_url = \"https://bedrock-runtime.us-east-1.amazonaws.com\"\nregion = \"us-east-1\"\naccess_key_id = \"test-access\"\nsecret_access_key = \"test-secret\"\n",
+            ),
+        ] {
+            let config = hofund_config::load(source).expect("config");
+            let provider = &config.providers[0];
+            let planned = super::plan(provider).expect("plan");
+            let endpoint = super::endpoint_for(provider, &planned).expect("endpoint");
+            let raw = super::raw_for(provider, &planned, &endpoint).expect("raw");
+            super::build_raw_plugin(
+                provider,
+                plugin_id,
+                raw,
+                None,
+                &endpoint.api_key,
+                &dir.join("hofund.toml"),
+                hofund_plugin_host::HttpLimits::new(
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                ),
+                true,
+                false,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{plugin_id} legacy build failed: {error}"));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
