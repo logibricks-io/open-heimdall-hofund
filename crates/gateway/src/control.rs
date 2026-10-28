@@ -4,6 +4,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::path::Path;
@@ -13,17 +14,19 @@ use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::future::BoxFuture;
+use futures_util::stream::{BoxStream, StreamExt};
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError, ControlErrorKind,
-    ErrorEnvelope, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES, ModelListResponse,
-    PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
-    ProviderTestResponse, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
-    decode_request,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
+    HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse,
+    PicksSetRequest, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
+    ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UsageQuery, UsageResponse, decode_request,
 };
 #[cfg(unix)]
 use hyper_util::rt::TokioIo;
@@ -41,6 +44,85 @@ pub const DEFAULT_CONTROL_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr
 
 /// The only Host value accepted over local IPC.
 pub const LOCAL_IPC_HOST: &str = "hofund-control";
+
+/// Default interval between SSE heartbeat comments.
+pub const SSE_HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// Longest `Last-Event-ID` header value passed to the daemon; longer values are
+/// treated as malformed ids.
+pub const MAX_LAST_EVENT_ID_BYTES: usize = 1024;
+
+/// A parsed `GET /v1/hofund/events` request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EventsQuery {
+    /// Requested topics in canonical order, without duplicates.
+    pub topics: Vec<Topic>,
+    /// Raw `Last-Event-ID` header value. The daemon parses it so a malformed
+    /// id resynchronizes instead of failing the reconnect.
+    pub last_event_id: Option<String>,
+}
+
+impl EventsQuery {
+    /// Constructs a query; topics are put in canonical order without duplicates.
+    #[must_use]
+    pub fn new(topics: &[Topic], last_event_id: Option<String>) -> Self {
+        Self {
+            topics: Topic::CANONICAL
+                .into_iter()
+                .filter(|topic| topics.contains(topic))
+                .collect(),
+            last_event_id,
+        }
+    }
+}
+
+/// One server-sent event: composite id, event name, and serialized envelope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SseFrame {
+    /// Composite event id carrying every subscribed topic's cursor.
+    pub id: String,
+    /// Event name, the envelope payload tag.
+    pub event: String,
+    /// One serialized `EventEnvelope`.
+    pub data: Arc<str>,
+}
+
+impl SseFrame {
+    /// Constructs a frame.
+    #[must_use]
+    pub fn new(id: String, event: impl Into<String>, data: Arc<str>) -> Self {
+        Self {
+            id,
+            event: event.into(),
+            data,
+        }
+    }
+}
+
+/// An open event subscription. The stream ends after the daemon sends a
+/// closing event such as `token_rotated` or `shutdown_started`.
+pub struct EventSubscription {
+    /// Frames in delivery order.
+    pub frames: BoxStream<'static, SseFrame>,
+}
+
+impl EventSubscription {
+    /// Wraps a frame stream.
+    #[must_use]
+    pub fn new(frames: BoxStream<'static, SseFrame>) -> Self {
+        Self { frames }
+    }
+}
+
+impl fmt::Debug for EventSubscription {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EventSubscription")
+            .finish_non_exhaustive()
+    }
+}
 
 /// A boxed daemon operation exposed through the control protocol.
 pub type ControlFuture<'a, T> = BoxFuture<'a, Result<T, ControlFailure>>;
@@ -116,12 +198,30 @@ pub trait ControlState: Send + Sync {
     fn rotate_token(&self, request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse>;
     /// Starts graceful daemon shutdown.
     fn shutdown(&self, request: ShutdownRequest) -> ControlFuture<'_, ShutdownResponse>;
+    /// Reads the configuration document and its revisions.
+    fn config(&self) -> ControlFuture<'_, ConfigResponse>;
+    /// Validates a candidate configuration document without writing it.
+    fn validate_config(
+        &self,
+        request: ConfigValidateRequest,
+    ) -> ControlFuture<'_, ConfigValidationResponse>;
+    /// Writes and publishes a configuration document.
+    fn apply_config(&self, request: ConfigApplyRequest) -> ControlFuture<'_, ConfigResponse>;
+    /// Reloads the configuration file from disk.
+    fn reload_config(&self, request: ReloadRequest) -> ControlFuture<'_, ConfigResponse>;
+    /// Opens an event subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControlFailure`] when the daemon cannot serve events.
+    fn events(&self, query: EventsQuery) -> Result<EventSubscription, ControlFailure>;
 }
 
 /// A control server with its own router and token-file state.
 #[derive(Clone)]
 pub struct Control {
     inner: Arc<Inner>,
+    heartbeat: Duration,
 }
 
 struct Inner {
@@ -133,6 +233,7 @@ struct Inner {
 struct HttpState {
     control: Arc<Inner>,
     listen: Option<SocketAddr>,
+    heartbeat: Duration,
 }
 
 impl Control {
@@ -144,6 +245,7 @@ impl Control {
                 state,
                 tokens: Arc::new(TokenState::new(token, None)),
             }),
+            heartbeat: SSE_HEARTBEAT,
         }
     }
 
@@ -159,7 +261,16 @@ impl Control {
                 state,
                 tokens: Arc::new(TokenState::new(token, Some(token_file))),
             }),
+            heartbeat: SSE_HEARTBEAT,
         }
+    }
+
+    /// Sets the SSE heartbeat interval; tests use a short one.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_heartbeat(mut self, heartbeat: Duration) -> Self {
+        self.heartbeat = heartbeat;
+        self
     }
 
     /// Builds only the control router. `listen` supplies the exact Host value.
@@ -176,6 +287,7 @@ impl Control {
         let state = HttpState {
             control: Arc::clone(&self.inner),
             listen,
+            heartbeat: self.heartbeat,
         };
         axum::Router::new()
             .route("/v1/hofund/health", get(health).head(method_not_allowed))
@@ -212,6 +324,11 @@ impl Control {
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
             .route("/v1/hofund/token/rotate", post(rotate_token))
             .route("/v1/hofund/shutdown", post(shutdown))
+            .route("/v1/hofund/config", get(config).head(method_not_allowed))
+            .route("/v1/hofund/config/validate", post(validate_config))
+            .route("/v1/hofund/config/apply", post(apply_config))
+            .route("/v1/hofund/config/reload", post(reload_config))
+            .route("/v1/hofund/events", get(events).head(method_not_allowed))
             .fallback(not_found)
             .method_not_allowed_fallback(method_not_allowed)
             .with_state(state.clone())
@@ -654,6 +771,149 @@ async fn shutdown(State(state): State<HttpState>, body: Bytes) -> Response {
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.shutdown(request).await)
+}
+
+async fn config(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.config().await)
+}
+
+async fn validate_config(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<ConfigValidateRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.validate_config(request).await)
+}
+
+async fn apply_config(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<ConfigApplyRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.apply_config(request).await)
+}
+
+async fn reload_config(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<ReloadRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.reload_config(request).await)
+}
+
+async fn events(State(state): State<HttpState>, headers: HeaderMap, uri: Uri) -> Response {
+    let query = match events_query(uri.query(), &headers) {
+        Ok(query) => query,
+        Err(message) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ControlErrorKind::BadRequest,
+                message,
+            );
+        }
+    };
+    // `pre_route` already authenticated this exact header value.
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default()
+        .to_owned();
+    let subscription = match state.control.state.events(query) {
+        Ok(subscription) => subscription,
+        Err(failure) => return failure_response(failure),
+    };
+    let stream = heartbeat_stream(
+        subscription.frames,
+        Arc::clone(&state.control.tokens),
+        presented,
+        state.heartbeat,
+    );
+    let mut response = Sse::new(stream).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Interleaves daemon frames with heartbeat comments. Each heartbeat re-reads
+/// the token file and ends the stream when the presented token is no longer
+/// current, so a rotated-away client cannot keep reading.
+fn heartbeat_stream(
+    frames: BoxStream<'static, SseFrame>,
+    tokens: Arc<TokenState>,
+    presented: String,
+    heartbeat: Duration,
+) -> BoxStream<'static, Result<Event, std::convert::Infallible>> {
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + heartbeat, heartbeat);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    futures_util::stream::unfold(
+        (frames, ticker, tokens, presented),
+        |(mut frames, mut ticker, tokens, presented)| async move {
+            let event = tokio::select! {
+                biased;
+                frame = frames.next() => {
+                    let frame = frame?;
+                    Event::default().id(frame.id).event(frame.event).data(&*frame.data)
+                }
+                _ = ticker.tick() => {
+                    if !tokens_match(&tokens.current(), &presented) {
+                        return None;
+                    }
+                    Event::default().comment("")
+                }
+            };
+            Some((Ok(event), (frames, ticker, tokens, presented)))
+        },
+    )
+    .boxed()
+}
+
+fn events_query(query: Option<&str>, headers: &HeaderMap) -> Result<EventsQuery, &'static str> {
+    let mut topics = None;
+    for pair in query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+    {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match name {
+            "topics" if topics.is_none() => {
+                let mut parsed = Vec::new();
+                for label in value.split(',') {
+                    let topic = Topic::CANONICAL
+                        .into_iter()
+                        .find(|topic| topic.as_str() == label)
+                        .ok_or("unknown event topic")?;
+                    parsed.push(topic);
+                }
+                topics = Some(parsed);
+            }
+            "topics" => return Err("topics may appear only once"),
+            "last_event_id" | "lastEventId" => {
+                return Err("send the event cursor in the Last-Event-ID header, not the URL");
+            }
+            _ => return Err("unknown events query parameter"),
+        }
+    }
+    let mut ids = headers.get_all("last-event-id").iter();
+    let last_event_id = match (ids.next(), ids.next()) {
+        (None, _) => None,
+        (Some(_), Some(_)) => return Err("Last-Event-ID may appear only once"),
+        // Invalid bytes or an oversized value reach the daemon as a malformed
+        // id, which resynchronizes rather than failing the reconnect.
+        (Some(value), None) => Some(
+            value
+                .to_str()
+                .ok()
+                .filter(|value| value.len() <= MAX_LAST_EVENT_ID_BYTES)
+                .unwrap_or("malformed")
+                .to_owned(),
+        ),
+    };
+    let topics = topics.unwrap_or_else(|| vec![Topic::Control]);
+    Ok(EventsQuery::new(&topics, last_event_id))
 }
 
 async fn not_found() -> Response {

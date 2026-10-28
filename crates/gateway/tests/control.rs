@@ -14,7 +14,13 @@ use hofund_control_proto::{
     ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
     UsageQuery, UsageResponse, decode_error_envelope,
 };
-use hofund_gateway::control::{Control, ControlFuture, ControlState};
+use hofund_control_proto::{
+    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
+    ReloadRequest,
+};
+use hofund_gateway::control::{
+    Control, ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery,
+};
 use hofund_gateway::{Gateway, GatewayError};
 use hofund_router::{FailoverPolicy, Router, Snapshot};
 use hofund_usage::Ledger;
@@ -123,6 +129,34 @@ impl ControlState for State {
 
     fn shutdown(&self, _request: ShutdownRequest) -> ControlFuture<'_, ShutdownResponse> {
         unavailable()
+    }
+
+    fn config(&self) -> ControlFuture<'_, ConfigResponse> {
+        unavailable()
+    }
+
+    fn validate_config(
+        &self,
+        _request: ConfigValidateRequest,
+    ) -> ControlFuture<'_, ConfigValidationResponse> {
+        unavailable()
+    }
+
+    fn apply_config(&self, _request: ConfigApplyRequest) -> ControlFuture<'_, ConfigResponse> {
+        unavailable()
+    }
+
+    fn reload_config(&self, _request: ReloadRequest) -> ControlFuture<'_, ConfigResponse> {
+        unavailable()
+    }
+
+    fn events(&self, _query: EventsQuery) -> Result<EventSubscription, ControlFailure> {
+        Err(ControlError::new(
+            ControlErrorKind::Unavailable,
+            "not wired in this test",
+            "test",
+        )
+        .into())
     }
 }
 

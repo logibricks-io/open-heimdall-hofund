@@ -7,14 +7,17 @@ use std::path::PathBuf;
 
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError, ErrorEnvelope,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
     HealthResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
-    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, RouteModelListResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UsagePeriod, UsageQuery, UsageResponse, decode_error_envelope, decode_response,
+    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, ReloadRequest,
+    RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, Topic, UsagePeriod, UsageQuery, UsageResponse, decode_error_envelope,
+    decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
@@ -307,6 +310,86 @@ impl Client {
         .await
     }
 
+    /// Reads the on-disk and published configuration.
+    pub async fn config(&self) -> Result<ConfigResponse, ClientError> {
+        self.get("/v1/hofund/config").await
+    }
+
+    /// Validates candidate configuration text without writing it.
+    pub async fn validate_config(
+        &self,
+        request: ConfigValidateRequest,
+    ) -> Result<ConfigValidationResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/config/validate",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Writes and publishes configuration text against a base revision.
+    pub async fn apply_config(
+        &self,
+        request: ConfigApplyRequest,
+    ) -> Result<ConfigResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/config/apply",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Reloads the configuration file from disk against a base revision.
+    pub async fn reload_config(
+        &self,
+        request: ReloadRequest,
+    ) -> Result<ConfigResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/config/reload",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Opens the daemon event stream for `topics`, resuming after
+    /// `last_event_id` when given.
+    ///
+    /// An empty `topics` slice lets the daemon choose its default (control
+    /// only). The cursor travels in the `Last-Event-ID` header, never in the
+    /// query string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the connection fails or the daemon
+    /// rejects the subscription.
+    pub async fn events(
+        &self,
+        topics: &[Topic],
+        last_event_id: Option<&str>,
+    ) -> Result<EventStream, ClientError> {
+        let mut path = "/v1/hofund/events".to_owned();
+        if !topics.is_empty() {
+            let names: Vec<&str> = topics.iter().map(|topic| topic.as_str()).collect();
+            path.push_str("?topics=");
+            path.push_str(&names.join(","));
+        }
+        let response = self
+            .open(http::Method::GET, &path, None, last_event_id)
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(error_response(status, response.into_body()).await);
+        }
+        Ok(EventStream {
+            body: response.into_body(),
+            buffer: Vec::new(),
+            last_event_id: last_event_id.map(str::to_owned),
+        })
+    }
+
     async fn get<T: hofund_control_proto::Response>(&self, path: &str) -> Result<T, ClientError> {
         self.request(http::Method::GET, path, None).await
     }
@@ -317,12 +400,32 @@ impl Client {
         path: &str,
         body: Option<Vec<u8>>,
     ) -> Result<T, ClientError> {
+        let response = self.open(method, path, body, None).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(error_response(status, response.into_body()).await);
+        }
+        let body = Limited::new(response.into_body(), MAX_RESPONSE_BODY_BYTES)
+            .collect()
+            .await
+            .map_err(|error| transport("control response body failed", error))?
+            .to_bytes();
+        decode_response(hofund_control_proto::API_VERSION, &body).map_err(ClientError::Decode)
+    }
+
+    async fn open(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+        last_event_id: Option<&str>,
+    ) -> Result<http::Response<Incoming>, ClientError> {
         match &self.endpoint {
             Endpoint::Tcp(addr) => {
                 let stream = TcpStream::connect(addr)
                     .await
                     .map_err(|error| connect_error("control TCP connection failed", error))?;
-                self.request_over(stream, method, path, body, addr.to_string())
+                self.open_over(stream, method, path, body, last_event_id, addr.to_string())
                     .await
             }
             #[cfg(unix)]
@@ -331,22 +434,29 @@ impl Client {
                 let stream = tokio::net::UnixStream::connect(socket)
                     .await
                     .map_err(|error| connect_error("control Unix connection failed", error))?;
-                self.request_over(stream, method, path, body, LOCAL_IPC_HOST.to_owned())
-                    .await
+                self.open_over(
+                    stream,
+                    method,
+                    path,
+                    body,
+                    last_event_id,
+                    LOCAL_IPC_HOST.to_owned(),
+                )
+                .await
             }
         }
     }
 
-    async fn request_over<T, S>(
+    async fn open_over<S>(
         &self,
         stream: S,
         method: http::Method,
         path: &str,
         body: Option<Vec<u8>>,
+        last_event_id: Option<&str>,
         host: String,
-    ) -> Result<T, ClientError>
+    ) -> Result<http::Response<Incoming>, ClientError>
     where
-        T: hofund_control_proto::Response,
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
@@ -363,25 +473,125 @@ impl Client {
         if method != http::Method::GET {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
         }
+        if let Some(id) = last_event_id {
+            builder = builder.header("last-event-id", id);
+        }
         let request = builder
             .body(Full::new(std::io::Cursor::new(body.unwrap_or_default())))
             .map_err(|_| ClientError::Transport("cannot construct control request".to_owned()))?;
-        let response = sender
+        sender
             .send_request(request)
             .await
-            .map_err(|error| transport("control HTTP request failed", error))?;
-        let status = response.status();
-        let body = Limited::new(response.into_body(), MAX_RESPONSE_BODY_BYTES)
-            .collect()
-            .await
-            .map_err(|error| transport("control response body failed", error))?
-            .to_bytes();
-        if !status.is_success() {
-            let error = decode_error_envelope(hofund_control_proto::API_VERSION, &body)
-                .map_err(ClientError::Decode)?;
-            return Err(ClientError::Server { status, error });
+            .map_err(|error| transport("control HTTP request failed", error))
+    }
+}
+
+async fn error_response(status: http::StatusCode, body: Incoming) -> ClientError {
+    let body = match Limited::new(body, MAX_RESPONSE_BODY_BYTES).collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(error) => return transport("control response body failed", error),
+    };
+    match decode_error_envelope(hofund_control_proto::API_VERSION, &body) {
+        Ok(error) => ClientError::Server { status, error },
+        Err(error) => ClientError::Decode(error),
+    }
+}
+
+/// A live daemon event stream opened by [`Client::events`].
+///
+/// Pending bytes are bounded by the control response limit, so a peer that
+/// never terminates an event cannot grow the buffer without limit.
+pub struct EventStream {
+    body: Incoming,
+    buffer: Vec<u8>,
+    last_event_id: Option<String>,
+}
+
+impl fmt::Debug for EventStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EventStream")
+            .field("last_event_id", &self.last_event_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EventStream {
+    /// The id of the most recent event, for resuming with [`Client::events`].
+    #[must_use]
+    pub fn last_event_id(&self) -> Option<&str> {
+        self.last_event_id.as_deref()
+    }
+
+    /// Waits for the next event; `None` once the daemon ends the stream.
+    ///
+    /// Heartbeat comments are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for transport failures, an oversized event, or
+    /// an event body that does not decode.
+    pub async fn next(&mut self) -> Option<Result<EventEnvelope, ClientError>> {
+        loop {
+            if let Some(event) = self.take_event() {
+                return Some(event);
+            }
+            match self.body.frame().await {
+                None => return None,
+                Some(Err(error)) => {
+                    return Some(Err(transport("control event stream failed", error)));
+                }
+                Some(Ok(frame)) => {
+                    if let Ok(data) = frame.into_data() {
+                        if self.buffer.len() + data.len() > MAX_RESPONSE_BODY_BYTES {
+                            return Some(Err(ClientError::Transport(
+                                "control event exceeds the response size limit".to_owned(),
+                            )));
+                        }
+                        self.buffer.extend_from_slice(&data);
+                    }
+                }
+            }
         }
-        decode_response(hofund_control_proto::API_VERSION, &body).map_err(ClientError::Decode)
+    }
+
+    /// Removes and decodes complete SSE blocks until one carries data.
+    fn take_event(&mut self) -> Option<Result<EventEnvelope, ClientError>> {
+        loop {
+            let end = self.buffer.windows(2).position(|pair| pair == b"\n\n")?;
+            let block: Vec<u8> = self.buffer.drain(..end + 2).collect();
+            let Ok(block) = std::str::from_utf8(&block) else {
+                return Some(Err(ClientError::Transport(
+                    "control event is not UTF-8".to_owned(),
+                )));
+            };
+            let mut id = None;
+            let mut data = String::new();
+            for line in block.lines() {
+                let (field, value) = line.split_once(':').unwrap_or((line, ""));
+                let value = value.strip_prefix(' ').unwrap_or(value);
+                match field {
+                    "id" => id = Some(value.to_owned()),
+                    "data" => {
+                        if !data.is_empty() {
+                            data.push('\n');
+                        }
+                        data.push_str(value);
+                    }
+                    _ => {}
+                }
+            }
+            if data.is_empty() {
+                continue;
+            }
+            if let Some(id) = id {
+                self.last_event_id = Some(id);
+            }
+            return Some(
+                decode_response(hofund_control_proto::API_VERSION, data.as_bytes())
+                    .map_err(ClientError::Decode),
+            );
+        }
     }
 }
 
@@ -537,6 +747,7 @@ mod route_tests {
 
     /// One request as seen by the recording server.
     struct Recorded {
+        last_event_id: Option<String>,
         method: http::Method,
         path_and_query: String,
         content_types: Vec<String>,
@@ -573,9 +784,33 @@ mod route_tests {
             "/v1/hofund/usage" => serde_json::to_vec(&proto::UsageResponse::default()),
             "/v1/hofund/token/rotate" => serde_json::to_vec(&proto::TokenRotateResponse::default()),
             "/v1/hofund/shutdown" => serde_json::to_vec(&proto::ShutdownResponse::default()),
+            "/v1/hofund/config" | "/v1/hofund/config/apply" | "/v1/hofund/config/reload" => {
+                serde_json::to_vec(&proto::ConfigResponse::default())
+            }
+            "/v1/hofund/config/validate" => {
+                serde_json::to_vec(&proto::ConfigValidationResponse::default())
+            }
+            "/v1/hofund/events" => Ok(sse_body()),
             other => panic!("unexpected control path {other}"),
         };
         encoded.expect("response JSON")
+    }
+
+    fn sse_envelope(seq: u64) -> hofund_control_proto::EventEnvelope {
+        let mut envelope = hofund_control_proto::EventEnvelope::default();
+        envelope.boot_id = "boot1".to_owned();
+        envelope.seq = seq;
+        envelope
+    }
+
+    /// A heartbeat, two events split across odd field forms, then the end.
+    fn sse_body() -> Vec<u8> {
+        let first = serde_json::to_string(&sse_envelope(1)).expect("event JSON");
+        let second = serde_json::to_string(&sse_envelope(2)).expect("event JSON");
+        format!(
+            ": \n\nid: boot1:control=1\nevent: snapshot\ndata: {first}\n\n: \n\nid:boot1:control=2\nevent:snapshot\ndata:{second}\n\n"
+        )
+        .into_bytes()
     }
 
     async fn recording_server() -> (
@@ -600,6 +835,10 @@ mod route_tests {
                         service_fn(move |request: http::Request<hyper::body::Incoming>| {
                             let log = Arc::clone(&log);
                             async move {
+                                let last_event_id = request
+                                    .headers()
+                                    .get("last-event-id")
+                                    .map(|value| value.to_str().expect("event id").to_owned());
                                 let method = request.method().clone();
                                 let path = request.uri().path().to_owned();
                                 let path_and_query = request
@@ -621,6 +860,7 @@ mod route_tests {
                                     .to_bytes()
                                     .to_vec();
                                 log.lock().expect("recorded").push(Recorded {
+                                    last_event_id,
                                     method,
                                     path_and_query,
                                     content_types,
@@ -646,8 +886,9 @@ mod route_tests {
     async fn every_typed_method_sends_its_verb_path_headers_and_body() {
         use hofund_control_proto::{
             AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentPlanRequest,
-            PicksSetRequest, ProviderTestRequest, ShutdownRequest, TokenRotateRequest, UsagePeriod,
-            UsageQuery, decode_request,
+            ConfigApplyRequest, ConfigValidateRequest, PicksSetRequest, ProviderTestRequest,
+            ReloadRequest, ShutdownRequest, TokenRotateRequest, UsagePeriod, UsageQuery,
+            decode_request,
         };
 
         let (address, recorded, server) = recording_server().await;
@@ -660,6 +901,9 @@ mod route_tests {
         let disconnect_request = AgentDisconnectRequest::new(true, Some("plan-rev".to_owned()));
         let rotate_request = TokenRotateRequest::new();
         let shutdown_request = ShutdownRequest::new();
+        let validate_request = ConfigValidateRequest::new("listen = \"127.0.0.1:0\"\n");
+        let apply_request = ConfigApplyRequest::new("a".repeat(64), "listen = \"127.0.0.1:0\"\n");
+        let reload_request = ReloadRequest::new("b".repeat(64));
 
         client.health().await.expect("health");
         client.status().await.expect("status");
@@ -708,6 +952,19 @@ mod route_tests {
             .shutdown(shutdown_request.clone())
             .await
             .expect("shutdown");
+        client.config().await.expect("config");
+        client
+            .validate_config(validate_request.clone())
+            .await
+            .expect("validate config");
+        client
+            .apply_config(apply_request.clone())
+            .await
+            .expect("apply config");
+        client
+            .reload_config(reload_request.clone())
+            .await
+            .expect("reload config");
         server.abort();
 
         let recorded = std::mem::take(&mut *recorded.lock().expect("recorded"));
@@ -738,6 +995,10 @@ mod route_tests {
                 (http::Method::GET, "/v1/hofund/usage?period=week"),
                 (http::Method::POST, "/v1/hofund/token/rotate"),
                 (http::Method::POST, "/v1/hofund/shutdown"),
+                (http::Method::GET, "/v1/hofund/config"),
+                (http::Method::POST, "/v1/hofund/config/validate"),
+                (http::Method::POST, "/v1/hofund/config/apply"),
+                (http::Method::POST, "/v1/hofund/config/reload"),
             ]
         );
 
@@ -794,5 +1055,114 @@ mod route_tests {
             decode_request::<ShutdownRequest>(1, body(16)).expect("shutdown body"),
             shutdown_request
         );
+        assert_eq!(
+            decode_request::<ConfigValidateRequest>(1, body(18)).expect("validate body"),
+            validate_request
+        );
+        assert_eq!(
+            decode_request::<ConfigApplyRequest>(1, body(19)).expect("apply body"),
+            apply_request
+        );
+        assert_eq!(
+            decode_request::<ReloadRequest>(1, body(20)).expect("reload body"),
+            reload_request
+        );
+        assert!(
+            recorded
+                .iter()
+                .all(|request| request.last_event_id.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn events_send_topics_in_the_query_and_the_cursor_in_the_header() {
+        use hofund_control_proto::Topic;
+
+        let (address, recorded, server) = recording_server().await;
+        let client = super::Client::tcp(address, "test-token");
+
+        let mut stream = client.events(&[], None).await.expect("events");
+        assert_eq!(stream.last_event_id(), None);
+        assert_eq!(
+            stream.next().await.expect("first").expect("decoded"),
+            sse_envelope(1)
+        );
+        assert_eq!(stream.last_event_id(), Some("boot1:control=1"));
+        assert_eq!(
+            stream.next().await.expect("second").expect("decoded"),
+            sse_envelope(2)
+        );
+        assert_eq!(stream.last_event_id(), Some("boot1:control=2"));
+        assert!(
+            stream.next().await.is_none(),
+            "the stream ends with the body"
+        );
+
+        let mut resumed = client
+            .events(&[Topic::Control, Topic::Requests], Some("boot1:control=2"))
+            .await
+            .expect("resumed events");
+        assert_eq!(resumed.last_event_id(), Some("boot1:control=2"));
+        assert!(resumed.next().await.expect("event").is_ok());
+        server.abort();
+
+        let recorded = recorded.lock().expect("recorded");
+        assert_eq!(recorded[0].path_and_query, "/v1/hofund/events");
+        assert_eq!(recorded[0].last_event_id, None);
+        assert!(recorded[0].content_types.is_empty());
+        assert_eq!(
+            recorded[1].path_and_query,
+            "/v1/hofund/events?topics=control,requests"
+        );
+        assert_eq!(
+            recorded[1].last_event_id.as_deref(),
+            Some("boot1:control=2")
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_rejects_an_unterminated_event_over_the_limit() {
+        let mut stream = super::EventStream {
+            body: oversized_body().await,
+            buffer: Vec::new(),
+            last_event_id: None,
+        };
+        let error = stream.next().await.expect("item").expect_err("too large");
+        assert!(matches!(error, super::ClientError::Transport(_)), "{error}");
+    }
+
+    /// Serves an event body that never terminates its first event.
+    async fn oversized_body() -> hyper::body::Incoming {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("connection");
+            let service = service_fn(|_request: http::Request<hyper::body::Incoming>| async {
+                let body = vec![b'x'; hofund_control_proto::MAX_RESPONSE_BODY_BYTES + 1];
+                Ok::<_, Infallible>(http::Response::new(Full::new(std::io::Cursor::new(body))))
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+        let stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .expect("handshake");
+        tokio::spawn(connection);
+        let request = http::Request::builder()
+            .uri("/")
+            .header(http::header::HOST, "localhost")
+            .body(Full::new(std::io::Cursor::new(Vec::new())))
+            .expect("request");
+        sender
+            .send_request(request)
+            .await
+            .expect("response")
+            .into_body()
     }
 }

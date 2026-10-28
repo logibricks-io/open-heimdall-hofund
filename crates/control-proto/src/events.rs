@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     API_VERSION, AgentAction, ControlError, ControlErrorKind, EventCursor, FieldIssue,
-    validate_boot_id,
+    ListenSource, ShutdownState, validate_boot_id,
 };
 
 /// Independent event sequence spaces carried by one SSE stream.
@@ -191,6 +191,29 @@ impl EventPayload {
             _ => Some(Topic::Control),
         }
     }
+
+    /// Wire tag of this variant, as used for the SSE `event:` field.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Snapshot(_) => "snapshot",
+            Self::ConfigReloaded(_) => "config_reloaded",
+            Self::ConfigRejected(_) => "config_rejected",
+            Self::ListenerRelistenFailed(_) => "listener_relisten_failed",
+            Self::MemberCooled(_) => "member_cooled",
+            Self::MemberRecovered(_) => "member_recovered",
+            Self::SnapshotPublished(_) => "snapshot_published",
+            Self::RequestStarted(_) => "request_started",
+            Self::RequestFinished(_) => "request_finished",
+            Self::ModelsRefreshed(_) => "models_refreshed",
+            Self::AgentChanged(_) => "agent_changed",
+            Self::SignInProgress(_) => "sign_in_progress",
+            Self::TokenRotated(_) => "token_rotated",
+            Self::ShutdownStarted(_) => "shutdown_started",
+            Self::ResyncRequired(_) => "resync_required",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Minimal secret-free route member summary.
@@ -221,6 +244,18 @@ pub struct SnapshotEvent {
     pub members: Vec<MemberSummary>,
     /// Latest cursor for every requested topic.
     pub cursors: Vec<EventCursor>,
+    /// Effective model listener address, mirroring `StatusResponse`.
+    #[serde(default)]
+    pub effective_listen: String,
+    /// Source of the effective model listener address.
+    #[serde(default)]
+    pub listen_source: ListenSource,
+    /// Daemon shutdown state.
+    #[serde(default)]
+    pub shutdown: ShutdownState,
+    /// Number of requests in flight when the snapshot was taken.
+    #[serde(default)]
+    pub in_flight: u64,
 }
 
 /// Successful configuration publication payload.
