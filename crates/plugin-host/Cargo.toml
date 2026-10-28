@@ -13,12 +13,13 @@ rust-version.workspace = true
 [dependencies]
 hofund-plugin-api = { workspace = true, features = ["kernel", "kernel-internal"] }
 async-trait = "0.1.89"
+bytes = "1.12.0"
 futures-util = "0.3.32"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2.0.21"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-native-roots"] }
-tokio = { version = "1.52.2", features = ["rt", "time"] }
+tokio = { version = "1.52.2", features = ["rt", "sync", "time"] }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 getrandom = { version = "0.2.17", features = ["std"] }
 secrecy = "0.10.3"

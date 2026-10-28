@@ -1871,6 +1871,7 @@ name = "hofund-plugin-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chacha20poly1305",
  "futures-util",
  "getrandom 0.2.17",

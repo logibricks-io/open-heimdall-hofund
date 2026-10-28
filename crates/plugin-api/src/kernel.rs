@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
 use crate::body::{Body, BodyStream};
@@ -224,6 +225,58 @@ pub trait ProcessBackend: Send + Sync {
     /// Returns [`PluginError`] when `id` is not a child this backend spawned,
     /// or the kill fails.
     fn kill(&self, id: u32) -> Result<(), PluginError>;
+
+    /// Spawns `program` with piped standard input and output.
+    ///
+    /// The environment is cleared down to the host allowlist, then `env` is
+    /// applied. The returned child is killed and reaped when it is dropped.
+    /// The default refuses: a backend that cannot pipe stdio says so.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the process cannot be started, or with
+    /// kind `Unsupported` when this backend has no piped spawn.
+    async fn spawn_piped(
+        &self,
+        program: PathBuf,
+        args: Vec<std::ffi::OsString>,
+        env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        cwd: PathBuf,
+    ) -> Result<Box<dyn PipedChildBackend>, PluginError> {
+        let _ = (program, args, env, cwd);
+        Err(PluginError::unsupported(
+            "this process backend has no piped spawn",
+        ))
+    }
+}
+
+/// A child with piped standard input and output.
+///
+/// Dropping it kills and reaps the child.
+#[async_trait]
+#[doc(hidden)]
+pub trait PipedChildBackend: Send + Sync {
+    /// The process id.
+    fn id(&self) -> u32;
+
+    /// Writes `bytes` to standard input and flushes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when standard input is closed or the write fails.
+    async fn write_stdin(&self, bytes: Bytes) -> Result<(), PluginError>;
+
+    /// Closes standard input so the child reads end of file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when closing fails. Closing twice is not an error.
+    async fn close_stdin(&self) -> Result<(), PluginError>;
+
+    /// Standard output as one chunk per line, newline included.
+    ///
+    /// Returns `None` after the first call.
+    fn take_stdout(&self) -> Option<BodyStream>;
 }
 
 /// Per-plugin directories the kernel creates.

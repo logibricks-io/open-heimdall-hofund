@@ -1136,6 +1136,14 @@ Kernel globs, `plugins/registry`, the control crates, and `fuzz/` belong to whoe
 - A leading in-band error event fails the call before any event is yielded, and a non-2xx status keeps its `Retry-After`. Error messages are capped at 512 bytes.
 - `hofund-kit-upstream` re-exports `runtime_host` and `HttpLimits` so registry tests can run both transports on the pooled client against a mock.
 
+### PR H0f notes
+
+- `ProcessHandle::spawn_piped(&SpawnRequest) -> PipedChild` pipes standard input and output for a plugin that drives a local agent over stdio (Claude Code). Standard error is discarded.
+- `PipedChild` has `id()`, `write_stdin(Bytes)` (write and flush), `close_stdin()` (idempotent), and `stdout()`, which hands out the output once as one chunk per line with the newline kept. A second `stdout()` call is a `Config` error. A line longer than 1 MiB (newline excluded) ends the stream with an `Io` error.
+- The child sees only `PATH`, `HOME`, `USERPROFILE`, `LANG`, `LANGUAGE`, every `LC_*`, and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, either case) from the host, then the explicit pairs in the request. Windows also passes `SYSTEMROOT`, because the socket stack does not load without it.
+- Dropping a `PipedChild` kills the child, reaps it on a background thread, then releases stdin. It kills first because a cancelled write can still hold the stdin lock while blocked on a full pipe, so the caller never blocks on a stuck child.
+- `ProcessBackend::spawn_piped` has a default that returns `Unsupported`, so the recording backend and other test backends need no change.
+
 ## 7. Comparison with magpie at `cbbf316`
 
 Pins: hofund `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4`, magpie `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`.

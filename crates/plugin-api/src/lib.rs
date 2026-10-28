@@ -59,8 +59,8 @@ pub use error::{PluginError, PluginErrorKind};
 pub use hofund_ir::{ContentPart, Request, Response, Role, StreamEvent};
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, ClockHandle, DirHandle, HostContext, HttpHandle, Job,
-    JobId, JobSpec, ObserveHandle, ProcessHandle, SchedulerHandle, SecretsHandle, SpawnRequest,
-    Spawned, SurfaceHost,
+    JobId, JobSpec, ObserveHandle, PipedChild, ProcessHandle, SchedulerHandle, SecretsHandle,
+    SpawnRequest, Spawned, SurfaceHost,
 };
 pub use id::{
     AccountId, IdError, MemberId, MemberKey, PluginId, PluginKey, PluginKind, PresetId, ProtocolId,

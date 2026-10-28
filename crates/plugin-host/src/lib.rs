@@ -16,6 +16,7 @@
 
 mod account_secrets;
 mod accounts;
+mod piped;
 mod pool;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -28,7 +29,7 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{
     AccountBackend, ClockBackend, DirBackend, HttpBackend, HttpRequest, HttpResponse, Job,
-    ProcessBackend, SchedulerBackend, SecretsBackend,
+    PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use hofund_plugin_api::{
     AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,
@@ -440,7 +441,10 @@ impl ClockBackend for SystemClock {
 
 /// Spawns with [`Command::new`]. It never invokes a shell.
 ///
-/// Standard input, output, and error are [`Stdio::null`]. The child is kept
+/// Standard input, output, and error are [`Stdio::null`] for
+/// [`ProcessBackend::spawn`]. [`ProcessBackend::spawn_piped`] pipes stdin and
+/// stdout, clears the environment down to an allowlist, and kills the child
+/// when the returned handle is dropped. A spawned child is kept
 /// until [`ProcessBackend::wait`] or [`ProcessBackend::kill`]. `kill` signals
 /// the child and reaps it on a background thread, so the caller does not wait.
 /// Any child still held is killed and reaped when the last handle is dropped.
@@ -559,6 +563,18 @@ impl ProcessBackend for StdProcess {
         killed.map_err(|error| PluginError::io(error.to_string()))?;
         reaped.map_err(|error| PluginError::io(error.to_string()))?;
         Ok(())
+    }
+
+    async fn spawn_piped(
+        &self,
+        program: PathBuf,
+        args: Vec<OsString>,
+        env: Vec<(OsString, OsString)>,
+        cwd: PathBuf,
+    ) -> Result<Box<dyn PipedChildBackend>, PluginError> {
+        let request = SpawnRequest::new(program, args, env, cwd)?;
+        let child = accounts::run_blocking(move || piped::spawn(&request)).await?;
+        Ok(Box::new(child))
     }
 }
 
