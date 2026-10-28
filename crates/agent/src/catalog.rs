@@ -123,84 +123,6 @@ const GEMINI: Description = Description {
     }),
 };
 
-/// OpenCode global config.
-///
-/// The documented global path is `~/.config/opencode/opencode.json` or
-/// `opencode.jsonc`, including on Windows (the docs say `~/.config`, not
-/// `%APPDATA%`). When `opencode.jsonc` already exists it is the file that is
-/// edited. Otherwise `opencode.json` is edited or created. A JSONC comment
-/// does not survive apply; revert puts the original bytes back.
-///
-/// The provider entry is `provider.<id>` with `npm`
-/// `@ai-sdk/openai-compatible`, `options.baseURL`, `options.apiKey`, and
-/// `models`. `options.baseURL` includes `/v1` because that package appends
-/// `/chat/completions`. `models` has one entry per route: `name` is the
-/// route id and `variants` is `{}`. Modalities, context, output limits, and
-/// a reasoning flag are omitted; this build has no catalog values for them.
-/// An empty variants object keeps OpenCode from adding low, medium, and high
-/// on its own. A string `model` is compared with route names and is not
-/// rewritten. `hofund agent connect opencode` says how many routes were
-/// written. The
-/// v2 docs describe `providers` plus `package` and `settings`; this adapter
-/// follows the current providers page instead. Both pages document
-/// `~/.config` and do not name an override (checked 2026-10-25). When
-/// `XDG_CONFIG_HOME` is set this adapter uses `$XDG_CONFIG_HOME/opencode`.
-/// Unset, the path stays `~/.config/opencode`, including on Windows.
-///
-/// Sources: <https://opencode.ai/docs/providers/>,
-/// <https://opencode.ai/docs/config/>. The v2 shape is
-/// <https://opencode.ai/v2/docs/providers/>.
-const OPENCODE: Description = Description {
-    id: "opencode",
-    display_name: "OpenCode",
-    binary: "opencode",
-    locations: &[
-        Location {
-            file: "config",
-            kind: FileKind::Json,
-            create: false,
-            resolve: opencode_jsonc,
-        },
-        Location {
-            file: "config",
-            kind: FileKind::Json,
-            create: true,
-            resolve: opencode_json,
-        },
-    ],
-    sets: &[
-        Set {
-            file: "config",
-            key: "provider.hofund.name",
-            slot: Slot::Literal("hofund"),
-        },
-        Set {
-            file: "config",
-            key: "provider.hofund.npm",
-            slot: Slot::Literal("@ai-sdk/openai-compatible"),
-        },
-        Set {
-            file: "config",
-            key: "provider.hofund.options.baseURL",
-            slot: Slot::V1,
-        },
-        Set {
-            file: "config",
-            key: "provider.hofund.options.apiKey",
-            slot: Slot::Token,
-        },
-        Set {
-            file: "config",
-            key: "provider.hofund.models",
-            slot: Slot::OpenCodeModels,
-        },
-    ],
-    model: Some(ModelKey {
-        file: "config",
-        key: "model",
-    }),
-};
-
 pub(crate) struct Description {
     pub(crate) id: &'static str,
     pub(crate) display_name: &'static str,
@@ -232,12 +154,14 @@ pub(crate) struct Set {
 
 pub(crate) enum Slot {
     Origin,
+    #[cfg(any(test, feature = "legacy-agent-consts"))]
     V1,
     Token,
     Literal(&'static str),
     /// Gemini CLI `model.name`, when this connect has a model to write.
     GeminiModel,
     /// OpenCode `models` object built from [`GatewayTarget::models`].
+    #[cfg(any(test, feature = "legacy-agent-consts"))]
     OpenCodeModels,
     /// Claude Code `model`, when the file has none and one route is configured.
     #[cfg(any(test, feature = "legacy-agent-consts"))]
@@ -294,18 +218,15 @@ impl Compiled {
 const GEMINI_ADAPTER: Described = Described {
     description: &GEMINI,
 };
-const OPENCODE_ADAPTER: Described = Described {
-    description: &OPENCODE,
-};
 const BUILTIN_ORDER: [&str; 4] = ["claude-code", "codex", "gemini-cli", "opencode"];
 
-/// The const built-in adapters; codex and claude-code are compiled separately.
+/// The const built-in adapter; the other built-ins are compiled separately.
 #[must_use]
-pub fn adapters() -> [&'static dyn AgentAdapter; 2] {
-    [&GEMINI_ADAPTER, &OPENCODE_ADAPTER]
+pub fn adapters() -> [&'static dyn AgentAdapter; 1] {
+    [&GEMINI_ADAPTER]
 }
 
-/// Finds a const built-in adapter; codex and claude-code are compiled.
+/// Finds a const built-in adapter; the other built-ins are compiled.
 #[must_use]
 pub fn find(name: &str) -> Option<&'static dyn AgentAdapter> {
     adapters().into_iter().find(|adapter| adapter.id() == name)
@@ -334,8 +255,8 @@ impl Catalog {
 
 /// Composes const and compiled adapters in CLI order and rejects duplicate ids.
 ///
-/// Codex and claude-code come from the compiled list supplied by the daemon's
-/// `agent_descriptions()`. Other compiled ids follow the four built-in slots
+/// Codex, claude-code, and opencode come from the compiled list supplied by the
+/// daemon's `agent_descriptions()`. Other compiled ids follow the four built-in slots
 /// in input order.
 ///
 /// # Errors
@@ -396,7 +317,8 @@ fn builtin_adapter(id: &str) -> Option<Described> {
         #[cfg(feature = "legacy-agent-consts")]
         "codex" => Some(crate::legacy::CODEX_ADAPTER),
         "gemini-cli" => Some(GEMINI_ADAPTER),
-        "opencode" => Some(OPENCODE_ADAPTER),
+        #[cfg(feature = "legacy-agent-consts")]
+        "opencode" => Some(crate::legacy::OPENCODE_ADAPTER),
         _ => None,
     }
 }
@@ -488,10 +410,12 @@ impl Engine {
                 key: set.key,
                 slot: match set.slot {
                     Slot::Origin => ApiSlot::Origin,
+                    #[cfg(any(test, feature = "legacy-agent-consts"))]
                     Slot::V1 => ApiSlot::V1,
                     Slot::Token => ApiSlot::Token,
                     Slot::Literal(value) => ApiSlot::Literal(value),
                     Slot::GeminiModel => ApiSlot::model_if_unset(Some("model")),
+                    #[cfg(any(test, feature = "legacy-agent-consts"))]
                     Slot::OpenCodeModels => ApiSlot::CatalogModels,
                     #[cfg(any(test, feature = "legacy-agent-consts"))]
                     Slot::ClaudeModel => ApiSlot::model_if_unset(None),
@@ -1313,21 +1237,6 @@ fn gemini_env(session: &Session) -> PathBuf {
     gemini_root(session).join(".gemini").join(".env")
 }
 
-fn opencode_dir(session: &Session) -> PathBuf {
-    match &session.xdg_config_home {
-        Some(path) => path.join("opencode"),
-        None => session.home.join(".config").join("opencode"),
-    }
-}
-
-fn opencode_json(session: &Session) -> PathBuf {
-    opencode_dir(session).join("opencode.json")
-}
-
-fn opencode_jsonc(session: &Session) -> PathBuf {
-    opencode_dir(session).join("opencode.jsonc")
-}
-
 #[cfg(test)]
 const FIXTURE_TOML_AGENT: Description = Description {
     id: "fixture-toml-agent",
@@ -1615,6 +1524,22 @@ mod tests {
             error.to_string(),
             "built-in agent `claude-code` has no compiled description"
         );
+
+        fn without_opencode(id: &str) -> Option<Described> {
+            if id == "opencode" {
+                None
+            } else {
+                builtin_adapter(id)
+            }
+        }
+
+        let error = compose(&[], without_opencode)
+            .err()
+            .expect("missing opencode");
+        assert_eq!(
+            error.to_string(),
+            "built-in agent `opencode` has no compiled description"
+        );
     }
 
     #[derive(Default)]
@@ -1865,6 +1790,25 @@ mod tests {
             };
             for case in shared.iter().chain(cases.iter()) {
                 replay_case(crate::legacy::claude_code(), case, os);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_opencode_replays_compiled_goldens_for_every_target_os() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/agents/opencode/fixtures");
+        let (shared, per_os) = golden_layout("opencode", &fixtures).expect("valid opencode layout");
+        assert!(!shared.is_empty());
+        for (directory, cases) in &per_os {
+            let os = match *directory {
+                "linux" => TargetOs::Linux,
+                "macos" => TargetOs::Macos,
+                "windows" => TargetOs::Windows,
+                _ => unreachable!("validated target OS"),
+            };
+            for case in shared.iter().chain(cases.iter()) {
+                replay_case(crate::legacy::opencode(), case, os);
             }
         }
     }

@@ -1,0 +1,19 @@
+{
+  "model": "stale-model",
+  "provider": {
+    "hofund": {
+      "name": "stale",
+      "npm": "stale-package",
+      "options": {
+        "baseURL": "https://stale.example/v1",
+        "apiKey": "stale-token",
+        "extra": "keep"
+      },
+      "models": {
+        "stale-route": { "name": "stale-route", "variants": { "high": {} } }
+      },
+      "extra": "keep"
+    },
+    "other": { "name": "Other" }
+  }
+}
