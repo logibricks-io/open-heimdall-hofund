@@ -1,0 +1,6 @@
+[[preset]]
+id = "fixture-listed-multi"
+name = "Fixture Listed Multi"
+kind = "vendor"
+chat = "https://listed-chat.example.test/v1"
+responses = "https://listed-responses.example.test/v1"

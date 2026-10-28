@@ -488,7 +488,7 @@ impl HostContext {
     ///
     /// `plugin` is stored in the handles. Account, secret, directory, and
     /// observation calls use it. A plugin cannot pass a different id.
-    #[cfg(feature = "kernel")]
+    #[cfg(any(feature = "kernel", test))]
     #[doc(hidden)]
     #[must_use]
     #[allow(clippy::too_many_arguments)]

@@ -254,6 +254,17 @@ pub trait UpstreamFactory: Send + Sync + 'static {
         cfg: &Self::Config,
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
+    fn build_with(
+        &self,
+        cfg: &Self::Config,
+        host: &HostContext,
+        ctx: &BuildContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+        if Some(ctx.protocol()) == self.spec().protocols().first().copied() {
+            return self.build(cfg, host);
+        }
+        Err(BuildError::new("protocol requires a build_with override"))
+    }
 }
 
 pub trait DynUpstreamFactory: Send + Sync + 'static {
@@ -266,8 +277,18 @@ pub trait DynUpstreamFactory: Send + Sync + 'static {
         raw: &RawTable,
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
+    fn validate_and_build_with(
+        &self,
+        raw: &RawTable,
+        host: &HostContext,
+        ctx: &BuildContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
 }
+```
 
+`BuildContext` is a non-exhaustive typed struct whose `protocol()` accessor returns the selected `ProtocolId`. Its public constructor also lets plugins and kits construct build tests. The default `build_with` supports only the spec's first protocol, so a multi-protocol plugin must opt in rather than silently using the wrong wire; `validate_and_build` retains that first-protocol behavior. The erased entry point rejects a protocol absent from `spec().protocols()` before calling the plugin. A typed context is preferable to a reserved raw-table key: it does not weaken config typing, mix kernel data with values validated twice, or require every listed schema to accept a new key.
+
+```rust
 #[async_trait]
 pub trait UpstreamProvider: Send + Sync + 'static {
     async fn execute(

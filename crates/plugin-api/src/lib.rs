@@ -74,8 +74,8 @@ pub use records::{
 pub use secrecy::SecretString;
 pub use subscription::{DynSubscriptionFactory, Subscription, SubscriptionFactory};
 pub use upstream::{
-    CredentialStyle, DynUpstreamFactory, HeaderName, ListKind, UpstreamFactory, UpstreamProvider,
-    UpstreamSpec,
+    BuildContext, CredentialStyle, DynUpstreamFactory, HeaderName, ListKind, UpstreamFactory,
+    UpstreamProvider, UpstreamSpec,
 };
 
 #[cfg(test)]

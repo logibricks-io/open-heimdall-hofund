@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Plugin API `BuildContext` and protocol-aware upstream build methods let listed
+  provider plugins receive the selected protocol. The daemon now accepts any
+  protocol a listed plugin declares instead of restricting it to the first.
 - Provider preset fragments now carry the full catalog schema, regions, and
   aliases, with builtin data-only directories, catalog-equivalent wire and
   credential selection, and build-time validation for row-E data migrations.

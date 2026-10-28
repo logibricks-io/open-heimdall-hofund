@@ -36,10 +36,12 @@ A builtin-owned row lives in the directory for its default wire's factory. The d
 Endpoint selection mirrors `resolve` and `Endpoints::of` in `crates/provider/src/presets.rs:177-262,450-466`:
 
 - A non-empty region wire replaces the preset wire; an empty one falls back to the preset. A region wire may exist even when the preset has no URL for that wire.
-- With an explicit `protocol`, the selected wire must have an effective URL whenever the preset has any wire URLs. A builtin-owned row may use any protocol served by the builtin factories. Until plugin-api carries the selected protocol, another row is limited to its owning plugin's first declared protocol and rejects any other explicit protocol.
+- With an explicit `protocol`, the selected wire must have an effective URL whenever the preset has any wire URLs. A builtin-owned row may use any protocol served by the builtin factories. Another row may use any protocol its owning plugin declares; an explicit protocol outside that list is rejected with the declared alternatives.
 - Without an explicit protocol, the first served URL wins in `generative`, `chat`, `responses`, `anthropic` order. Builtin-owned rows are served per wire by `openai-compat`, `anthropic`, and `generative`, with the plugin chosen from the selected wire exactly as for a catalog row.
 - A non-empty provider `base_url` always overrides the selected fragment URL.
 - With no wire URLs, a builtin-owned explicit protocol requires that wire's endpoint. Without an explicit protocol, a builtin-owned row requires `endpoint` and `base_url` and defaults to chat; without `endpoint`, it reports `has no endpoint`. Other plugins require `base_url`. A decide-only row reports that it only classifies a route.
+
+The reference provider exposes per-protocol URLs through `Base(proto)` and lists them in preference order through `Speaks` (`reference: internal/provider/provider.go:1442-1478`). Its gateway chooses the upstream protocol before translating the request and then obtains that protocol's base (`reference: internal/gateway/gateway.go:3882-3902,4085`). Hofund keeps the same separation: registry selection chooses the protocol and base, then the daemon passes the selected `ProtocolId` to the listed factory when it builds the provider.
 
 An unknown region error lists valid ids in declared order, unlike the catalog's shorter error in `crates/provider/src/presets.rs:483-489`. Naming a region on a regionless preset is a separate error. Runtime registry tests check builtin-owned wires against the combined builtin protocol set and other wires against their owning factory, and require every fragment id to differ from the remaining catalog ids; these checks need factory data that the build script cannot use. The production-fragment checks are not gated on `test-fixtures`, so they run in default CI, and they are a required gate for every batch.
 
@@ -100,7 +102,9 @@ The daemon probe selector uses route mappings and listed endpoint metadata. `Nam
 4. The daemon builds a `RawTable`: `id`, `base_url`, the resolved `api_key`, `credential`, `quirks`, `headers`, `protocol` (`chat` or `responses` only), and `preset` (the catalog preset id for builtin factories). It then copies `options` without resolving their strings. A reserved key, including a user-supplied `preset`, is `provider `{id}` option `{key}` is reserved`.
 5. `factory.validate` checks the unresolved table against the kernel keys plus that plugin's schema. Anything else is `provider `{id}` has unknown option `{key}``. A non-string on a string field is `provider `{id}` option `{key}` must be a string`.
 6. Only after validation, each option string is trimmed and `env:`-resolved. Resolution errors name the provider id and option key. `config check` then calls `factory.preflight` on the resolved table; startup skips this step.
-7. The factory validates the resolved table again, and `factory.build` attaches the pooled client and constructs the adapter.
+7. The factory validates the resolved table again. Daemon-owned factories use `validate_and_build` and `build` as before. For a listed factory, the daemon calls `validate_and_build_with` with a `BuildContext` containing the selected `ProtocolId`, and the factory's `build_with` constructs the adapter.
+
+`UpstreamFactory::build_with` has a default: it delegates to `build` for the spec's first protocol and rejects any other protocol. A multi-protocol listed plugin therefore opts in explicitly, while existing single-protocol plugins need no code or schema change. The legacy `validate_and_build` entry point still builds the first protocol. The typed, non-exhaustive context keeps kernel data separate from user configuration; a reserved raw-table key would be stringly typed and every listed schema, including relay's unknown-key rejection, would have to accept it.
 
 | Factory | Option keys, all strings, all optional |
 | --- | --- |

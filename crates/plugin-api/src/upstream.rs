@@ -172,6 +172,30 @@ impl UpstreamSpec {
     }
 }
 
+/// Kernel-selected values for one upstream build.
+///
+/// These values are separate from [`RawTable`] so plugin configuration schemas
+/// do not need to accept kernel-owned keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BuildContext {
+    protocol: ProtocolId,
+}
+
+impl BuildContext {
+    /// A build context for `protocol`.
+    #[must_use]
+    pub const fn new(protocol: ProtocolId) -> Self {
+        Self { protocol }
+    }
+
+    /// The protocol selected for this provider.
+    #[must_use]
+    pub const fn protocol(&self) -> ProtocolId {
+        self.protocol
+    }
+}
+
 /// Builds an [`UpstreamProvider`] from validated config.
 ///
 /// The associated type is what the plugin validates. The registry stores
@@ -221,6 +245,32 @@ pub trait UpstreamFactory: Send + Sync + 'static {
         cfg: &Self::Config,
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
+
+    /// Builds the provider for the protocol selected in `ctx`.
+    ///
+    /// The default delegates to [`UpstreamFactory::build`] for the spec's first
+    /// protocol. A multi-protocol plugin overrides this method to support its
+    /// other declared protocols.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError`] when the provider cannot be constructed, or when
+    /// the default implementation receives a protocol other than the first.
+    fn build_with(
+        &self,
+        cfg: &Self::Config,
+        host: &HostContext,
+        ctx: &BuildContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+        if Some(ctx.protocol()) == self.spec().protocols().first().copied() {
+            return self.build(cfg, host);
+        }
+        Err(BuildError::new(format!(
+            "plugin `{}` cannot build protocol `{}` without overriding `build_with`",
+            self.spec().plugin(),
+            ctx.protocol()
+        )))
+    }
 }
 
 /// The factory the registry stores.
@@ -251,7 +301,7 @@ pub trait DynUpstreamFactory: Send + Sync + 'static {
     /// Returns [`ConfigError`] when validation or the environment check fails.
     fn preflight(&self, raw: &RawTable) -> Result<(), ConfigError>;
 
-    /// Validates `raw` and builds the provider.
+    /// Validates `raw` and builds the provider for the spec's first protocol.
     ///
     /// # Errors
     ///
@@ -261,6 +311,19 @@ pub trait DynUpstreamFactory: Send + Sync + 'static {
         &self,
         raw: &RawTable,
         host: &HostContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
+
+    /// Validates `raw` and builds the provider for the protocol in `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError`] when validation or construction fails, or when
+    /// `ctx` names a protocol the factory does not declare.
+    fn validate_and_build_with(
+        &self,
+        raw: &RawTable,
+        host: &HostContext,
+        ctx: &BuildContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
 }
 
@@ -292,6 +355,23 @@ where
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
         let cfg = UpstreamFactory::validate(self, raw)?;
         self.build(&cfg, host)
+    }
+
+    fn validate_and_build_with(
+        &self,
+        raw: &RawTable,
+        host: &HostContext,
+        ctx: &BuildContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+        if !self.spec().protocols().contains(&ctx.protocol()) {
+            return Err(BuildError::new(format!(
+                "plugin `{}` does not declare protocol `{}`",
+                self.spec().plugin(),
+                ctx.protocol()
+            )));
+        }
+        let cfg = UpstreamFactory::validate(self, raw)?;
+        self.build_with(&cfg, host, ctx)
     }
 }
 
@@ -391,7 +471,26 @@ pub trait UpstreamProvider: Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use super::{HeaderName, ListKind};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    use async_trait::async_trait;
+
+    use crate::kernel::{
+        AccountBackend, ClockBackend, DirBackend, HttpBackend, Job, ObserveBackend, ProcessBackend,
+        SchedulerBackend, SecretsBackend,
+    };
+    use crate::{
+        Account, AccountId, Body, BodyStream, BuildError, Completion, ConfigError, CredentialStyle,
+        HostContext, PluginError, PluginId, ProtocolId, QuotaObservation, RawTable, Request,
+        Schema, SecretString, ValidConfig,
+    };
+
+    use super::{
+        BuildContext, DynUpstreamFactory, HeaderName, ListKind, UpstreamFactory, UpstreamProvider,
+        UpstreamSpec,
+    };
 
     #[test]
     fn list_kind_rank_has_the_explicit_capability_order() {
@@ -421,5 +520,212 @@ mod tests {
     #[should_panic(expected = "lowercase")]
     fn header_names_reject_uppercase() {
         let _ = HeaderName::new("X-Api-Key");
+    }
+
+    #[test]
+    fn default_build_with_only_builds_the_first_protocol() {
+        let factory = MultiFactory;
+        let host = test_host();
+        let first = BuildContext::new(ProtocolId::OPENAI_CHAT);
+        factory
+            .build_with(&TestConfig, &host, &first)
+            .expect("first protocol");
+        let second = BuildContext::new(ProtocolId::OPENAI_RESPONSES);
+        let Err(error) = factory.build_with(&TestConfig, &host, &second) else {
+            panic!("second protocol built without an override");
+        };
+        assert_eq!(
+            error.message(),
+            "plugin `multi` cannot build protocol `openai-responses` without overriding `build_with`"
+        );
+    }
+
+    #[test]
+    fn dyn_build_rejects_an_undeclared_protocol() {
+        let host = test_host();
+        let ctx = BuildContext::new(ProtocolId::ANTHROPIC_MESSAGES);
+        let Err(error) = DynUpstreamFactory::validate_and_build_with(
+            &MultiFactory,
+            &RawTable::new(),
+            &host,
+            &ctx,
+        ) else {
+            panic!("undeclared protocol was accepted");
+        };
+        assert_eq!(
+            error.message(),
+            "plugin `multi` does not declare protocol `anthropic-messages`"
+        );
+    }
+
+    struct MultiFactory;
+    struct TestConfig;
+
+    impl ValidConfig for TestConfig {}
+
+    static MULTI_SPEC: UpstreamSpec = UpstreamSpec::from_static(
+        PluginId::from_static("multi"),
+        &[ProtocolId::OPENAI_CHAT, ProtocolId::OPENAI_RESPONSES],
+        CredentialStyle::Bearer,
+        ListKind::Unsupported,
+    );
+
+    impl UpstreamFactory for MultiFactory {
+        type Config = TestConfig;
+
+        fn spec(&self) -> &'static UpstreamSpec {
+            &MULTI_SPEC
+        }
+
+        fn config_schema(&self) -> Schema {
+            Schema::object(Vec::new(), &[]).expect("empty schema")
+        }
+
+        fn validate(&self, _raw: &RawTable) -> Result<Self::Config, ConfigError> {
+            Ok(TestConfig)
+        }
+
+        fn build(
+            &self,
+            _cfg: &Self::Config,
+            _host: &HostContext,
+        ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+            Ok(Arc::new(StubProvider))
+        }
+    }
+
+    struct StubProvider;
+
+    #[async_trait]
+    impl UpstreamProvider for StubProvider {
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound: ProtocolId,
+        ) -> Result<Completion, PluginError> {
+            unreachable!("the build test does not execute the provider")
+        }
+    }
+
+    struct TestBackend;
+
+    fn test_host() -> HostContext {
+        let backend = Arc::new(TestBackend);
+        HostContext::from_backends(
+            PluginId::from_static("multi"),
+            backend.clone(),
+            backend.clone(),
+            backend.clone(),
+            backend.clone(),
+            backend.clone(),
+            backend.clone(),
+            backend.clone(),
+            backend,
+        )
+    }
+
+    #[async_trait]
+    impl HttpBackend for TestBackend {
+        async fn send(
+            &self,
+            _request: http::Request<Body>,
+        ) -> Result<http::Response<BodyStream>, PluginError> {
+            unreachable!()
+        }
+    }
+
+    #[async_trait]
+    impl SecretsBackend for TestBackend {
+        async fn get(
+            &self,
+            _plugin: &PluginId,
+            _id: &str,
+        ) -> Result<Option<SecretString>, PluginError> {
+            unreachable!()
+        }
+    }
+
+    #[async_trait]
+    impl AccountBackend for TestBackend {
+        async fn list(&self, _plugin: &PluginId) -> Result<Vec<Account>, PluginError> {
+            unreachable!()
+        }
+
+        async fn upsert(
+            &self,
+            _account: Account,
+            _secret: SecretString,
+        ) -> Result<(), PluginError> {
+            unreachable!()
+        }
+
+        async fn remove(&self, _plugin: &PluginId, _id: &AccountId) -> Result<(), PluginError> {
+            unreachable!()
+        }
+
+        async fn secret(
+            &self,
+            _plugin: &PluginId,
+            _id: &AccountId,
+        ) -> Result<Option<SecretString>, PluginError> {
+            unreachable!()
+        }
+    }
+
+    impl ClockBackend for TestBackend {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH
+        }
+
+        fn monotonic(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+
+    impl SchedulerBackend for TestBackend {
+        fn register(&self, _name: &str, _every_ms: u64, _job: Job) -> Result<u64, PluginError> {
+            unreachable!()
+        }
+
+        fn cancel(&self, _id: u64) {}
+
+        fn shutdown(&self) {}
+    }
+
+    #[async_trait]
+    impl ProcessBackend for TestBackend {
+        async fn spawn(
+            &self,
+            _program: PathBuf,
+            _args: Vec<std::ffi::OsString>,
+            _env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+            _cwd: PathBuf,
+        ) -> Result<u32, PluginError> {
+            unreachable!()
+        }
+
+        async fn wait(&self, _id: u32) -> Result<i32, PluginError> {
+            unreachable!()
+        }
+
+        fn kill(&self, _id: u32) -> Result<(), PluginError> {
+            unreachable!()
+        }
+    }
+
+    impl DirBackend for TestBackend {
+        fn cache_dir(&self, _plugin: &PluginId) -> Result<PathBuf, PluginError> {
+            unreachable!()
+        }
+
+        fn state_dir(&self, _plugin: &PluginId) -> Result<PathBuf, PluginError> {
+            unreachable!()
+        }
+    }
+
+    impl ObserveBackend for TestBackend {
+        fn observe(&self, _observation: QuotaObservation) -> Result<(), PluginError> {
+            unreachable!()
+        }
     }
 }

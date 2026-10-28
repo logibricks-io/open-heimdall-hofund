@@ -39,6 +39,9 @@ mod fixture_preset_descriptions {
     include!(concat!(env!("OUT_DIR"), "/fixture_presets.rs"));
 }
 
+#[cfg(feature = "test-fixtures")]
+mod fixture_upstream;
+
 #[cfg(test)]
 mod agent_toml;
 #[cfg(test)]
