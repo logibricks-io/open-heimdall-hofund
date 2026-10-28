@@ -338,6 +338,16 @@ keys_url = "https://ollama.com/settings/keys"
 hosts = true
 
 [[preset]]
+id = "openai"
+name = "OpenAI"
+kind = "vendor"
+catalog = "openai"
+chat = "https://api.openai.com/v1"
+responses = "https://api.openai.com/v1"
+website = "https://platform.openai.com"
+keys_url = "https://platform.openai.com/api-keys"
+
+[[preset]]
 id = "opencode-go"
 name = "OpenCode Go"
 kind = "relay"
@@ -362,6 +372,18 @@ website = "https://opencode.ai/docs/zen"
 keys_url = "https://opencode.ai/auth"
 no_key = true
 key_hint = "optional: free models need no key"
+
+[[preset]]
+id = "openrouter"
+name = "OpenRouter"
+kind = "relay"
+catalog = "openrouter"
+chat = "https://openrouter.ai/api/v1"
+anthropic = "https://openrouter.ai/api"
+decide = "https://openrouter.ai/api/v1"
+website = "https://openrouter.ai"
+keys_url = "https://openrouter.ai/keys"
+header_hints = ["HTTP-Referer", "X-OpenRouter-Title"]
 
 [[preset]]
 id = "pipellm"
