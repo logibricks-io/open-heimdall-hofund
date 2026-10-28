@@ -502,9 +502,13 @@ fn uses_process_temp_dir(source: &str) -> bool {
         }
     }
     // Paths built from the temp-dir environment variables.
-    [concat!("TM", "PDIR"), concat!("TE", "MP"), concat!("T", "MP")]
-        .into_iter()
-        .any(|name| compact.contains(&format!("\"{name}\"")))
+    [
+        concat!("TM", "PDIR"),
+        concat!("TE", "MP"),
+        concat!("T", "MP"),
+    ]
+    .into_iter()
+    .any(|name| compact.contains(&format!("\"{name}\"")))
 }
 
 fn platform_win_exempt(member: &str) -> bool {
