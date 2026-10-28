@@ -126,8 +126,10 @@ impl LoopbackRegistry {
     /// driver reads from the terminal. A pasted line must pass
     /// [`parse_pasted_callback`]; a line that does not is skipped, and the
     /// driver can check one itself first to tell the user. `paste` ending
-    /// does not end the wait. The listener stays bound until
-    /// [`LoopbackRegistry::release`].
+    /// does not end the wait. Once the sign-in finishes, times out or is
+    /// cancelled, the listener answers late requests with 409 for a short
+    /// linger and then closes; [`LoopbackRegistry::release`] closes it at once
+    /// and must still be called on every exit path.
     ///
     /// # Errors
     ///
