@@ -259,6 +259,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent conformance compares the exact trimmed origin and the current and
   refreshed tokens after disconnect, including a dedicated origin-only
   dotenv golden file, so surviving gateway values cannot pass unnoticed (#110).
+- Agent golden conformance compares directories as well as file contents, so
+  extra and missing empty directories no longer pass unnoticed (#148).
+- Non-forced Gemini CLI disconnect restores an original string `model` after
+  unrelated user edits without demoting an original object `model` on connect or
+  disconnect. Invalid `model` and non-string `model.name` shapes produce
+  actionable errors that name the key to repair (#176).
 - Gemini CLI connect writes `model.name`. A string `model` is moved there.
 - OpenCode `models` lists each gateway route, with `name` and an empty
   `variants` object. Modalities, limits, and reasoning levels are not

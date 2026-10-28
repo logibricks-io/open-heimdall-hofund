@@ -768,7 +768,7 @@ fn shipped_gemini_cli_discriminates_model_sources_and_route_counts() {
 }
 
 #[test]
-fn shipped_gemini_cli_second_apply_string_model_disconnect_requires_force() {
+fn shipped_gemini_cli_second_apply_string_model_disconnect_restores_the_string_model() {
     let initial = "{\n  \"model\": \"user-model\"\n}\n";
     for os in OPERATING_SYSTEMS {
         let home = scratch();
@@ -784,15 +784,56 @@ fn shipped_gemini_cli_second_apply_string_model_disconnect_requires_force() {
                 .expect("second apply")
                 .is_empty()
         );
-        let connected = tree(&home);
+        let disconnected = adapter
+            .disconnect(&session, false)
+            .expect("string-model disconnect");
+        assert!(disconnected.changed());
+        assert_eq!(tree(&home), before);
+        let second = adapter
+            .disconnect(&session, false)
+            .expect("second string-model disconnect");
+        assert!(!second.changed());
+        assert_eq!(tree(&home), before);
+    }
+}
+
+#[test]
+fn shipped_gemini_cli_string_model_disconnect_rejects_extra_model_keys_without_writing() {
+    let initial = "{\n  \"model\": \"user-model\"\n}\n";
+    for os in OPERATING_SYSTEMS {
+        let home = scratch();
+        let settings_path = home.join(".gemini/settings.json");
+        write(&settings_path, initial);
+        write(&home.join(".gemini/.env"), GEMINI_ENV);
+        let session = Session::new(&home);
+        let adapter = adapter("gemini-cli", os);
+        adapter.apply(&session, &target()).expect("apply");
+
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).expect("settings")).expect("JSON");
+        settings["model"]
+            .as_object_mut()
+            .expect("model object")
+            .insert("temperature".to_owned(), serde_json::json!(0.2));
+        let edited = serde_json::to_vec_pretty(&settings).expect("edited JSON");
+        fs::write(&settings_path, &edited).expect("edit settings");
+        let before_disconnect = fs::read(&settings_path).expect("edited settings");
+
         let error = adapter
             .disconnect(&session, false)
-            .expect_err("string-model drift")
+            .expect_err("extra model key")
             .to_string();
+        assert!(
+            error.contains(
+                "`model` must contain only a string `name` to restore the original string; move other keys out of `model` before disconnect"
+            ),
+            "{error}"
+        );
         assert!(error.contains("--force"), "{error}");
-        assert_eq!(tree(&home), connected);
-        assert!(adapter.disconnect(&session, true).expect("force").changed());
-        assert_eq!(tree(&home), before);
+        assert_eq!(
+            fs::read(&settings_path).expect("settings after refusal"),
+            before_disconnect
+        );
     }
 }
 
