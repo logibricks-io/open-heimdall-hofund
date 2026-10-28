@@ -226,10 +226,6 @@ impl Table {
         Ok(())
     }
 
-    pub(crate) fn member_ids(&self) -> Vec<hofund_plugin_api::MemberId> {
-        self.snapshot.load().member_ids()
-    }
-
     pub(crate) fn publish(&self) {
         let hops = self.hops.lock().expect("membership");
         let routes = hops

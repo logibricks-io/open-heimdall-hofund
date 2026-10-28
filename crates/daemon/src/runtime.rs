@@ -80,7 +80,9 @@ impl Runtime {
         let table = self.table.get().expect("initial snapshot").clone();
         table.replace(&built, routes, policy)?;
 
-        let members = table.member_ids().into_iter().collect::<HashSet<_>>();
+        // Published routes omit failed members; every configured candidate
+        // member must retain its rest regardless of that transient flag.
+        let members = fingerprints.keys().cloned().collect::<HashSet<_>>();
         self.cooldowns.retain_members(&members);
         let mut previous = self.fingerprints.lock().expect("provider fingerprints");
         for (id, fingerprint) in &fingerprints {
@@ -114,8 +116,8 @@ mod tests {
     use hofund_plugin_api::PluginError;
 
     use super::Runtime;
+    use crate::RegistryAdapter;
     use crate::membership::member_id;
-    use crate::{RegistryAdapter, provider_fingerprint};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -153,6 +155,13 @@ mod tests {
         );
         runtime.initial_snapshot(config, None).expect("snapshot");
         runtime
+    }
+
+    fn fingerprint(config: &Config, index: usize) -> String {
+        let provider = &config.providers[index];
+        let planned = crate::plan(provider).expect("plan");
+        let endpoint = crate::endpoint_for(provider, &planned).expect("endpoint");
+        crate::provider_fingerprint(provider, &endpoint).expect("fingerprint")
     }
 
     fn cool(runtime: &Runtime, id: &str) {
@@ -210,22 +219,73 @@ mod tests {
         assert!(runtime.cooldowns.cooling(&member_id("member")).is_some());
     }
 
+    fn aws_config() -> Config {
+        let providers = ["first", "second"]
+            .iter()
+            .map(|id| {
+                format!(
+                    "[[providers]]\nid = \"{id}\"\nprotocol = \"bedrock-converse\"\nbase_url = \"https://bedrock-runtime.us-east-1.amazonaws.com\"\n[providers.options]\nregion = \"us-east-1\"\naccess_key_id = \"access-{id}\"\nsecret_access_key = \"secret-{id}\"\nsession_token = \"session-{id}\"\n"
+                )
+            })
+            .collect::<String>();
+        hofund_config::load(&format!(
+            "{providers}[[routes]]\nmodel = \"demo\"\nupstreams = [\"first\", \"second\"]\n"
+        ))
+        .expect("AWS config")
+    }
+
+    fn assert_secret_free(digest: &str, secrets: &[&str]) {
+        for secret in secrets {
+            let hexadecimal = secret
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            for encoded in [(*secret).to_owned(), base64(secret.as_bytes()), hexadecimal] {
+                assert!(!digest.contains(&encoded));
+            }
+        }
+    }
+
     #[test]
     fn provider_fingerprint_is_secret_free_and_changes_for_key_and_base_url() {
-        let key = "secret-key-value";
-        let original = provider_fingerprint(key, "http://127.0.0.1:9");
-        assert_eq!(original, provider_fingerprint(key, "http://127.0.0.1:9"));
-        assert_ne!(
-            original,
-            provider_fingerprint("another-key", "http://127.0.0.1:9")
-        );
-        assert_ne!(original, provider_fingerprint(key, "http://127.0.0.1:10"));
-        let hexadecimal = key
-            .bytes()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        for encoded in [key.to_owned(), base64(key.as_bytes()), hexadecimal] {
-            assert!(!original.contains(&encoded));
+        let original = config(&["member"]);
+        let digest = fingerprint(&original, 0);
+        assert_eq!(digest, fingerprint(&original, 0));
+        let mut changed = original.clone();
+        changed.providers[0].api_key = "another-key".to_owned();
+        assert_ne!(digest, fingerprint(&changed, 0));
+        let mut changed = original.clone();
+        changed.providers[0].base_url = "http://127.0.0.1:10".to_owned();
+        assert_ne!(digest, fingerprint(&changed, 0));
+        let mut changed = original;
+        changed.providers[0]
+            .headers
+            .insert("authorization".to_owned(), "header-secret".to_owned());
+        assert_ne!(digest, fingerprint(&changed, 0));
+        assert_secret_free(&digest, &["first-key"]);
+    }
+
+    #[test]
+    fn provider_fingerprint_covers_sigv4_secrets_and_clears_only_changed_member() {
+        for option in ["secret_access_key", "session_token"] {
+            let original = aws_config();
+            let digest = fingerprint(&original, 0);
+            assert_secret_free(&digest, &["access-first", "secret-first", "session-first"]);
+            let mut changed = original.clone();
+            changed.providers[0].options.insert(
+                option.to_owned(),
+                hofund_config::Value::String("rotated-secret".to_owned()),
+            );
+            let changed_digest = fingerprint(&changed, 0);
+            assert_ne!(digest, changed_digest);
+            assert_secret_free(&changed_digest, &["rotated-secret"]);
+
+            let runtime = runtime(&original);
+            cool(&runtime, "first");
+            cool(&runtime, "second");
+            runtime.publish_candidate(&changed).expect("changed");
+            assert_eq!(runtime.cooldowns.cooling(&member_id("first")), None);
+            assert!(runtime.cooldowns.cooling(&member_id("second")).is_some());
         }
     }
 
@@ -244,6 +304,20 @@ mod tests {
         runtime.publish_candidate(&changed).expect("changed");
         assert_eq!(runtime.cooldowns.cooling(&member_id("first")), None);
         assert!(runtime.cooldowns.cooling(&member_id("second")).is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn maintenance_task_recovers_expired_rest_without_reads() {
+        let config = config(&["member"]);
+        let runtime = runtime(&config);
+        cool(&runtime, "member");
+        let task = runtime.spawn_maintenance();
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        let recoveries = runtime.cooldowns.drain_recoveries();
+        assert_eq!(recoveries.len(), 1);
+        assert_eq!(recoveries[0].0, member_id("member"));
+        task.abort();
     }
 
     fn base64(bytes: &[u8]) -> String {

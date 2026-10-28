@@ -77,39 +77,46 @@ mod tests {
     #[test]
     fn production_registry_calls_stay_in_this_module() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for entry in std::fs::read_dir(root).expect("daemon sources") {
-            let path = entry.expect("source entry").path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("rs")
-                || path.file_name().and_then(|name| name.to_str()) == Some("registry.rs")
-            {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).expect("source text");
-            let mut test_item = false;
-            let mut test_depth = 0_u32;
-            let mut test_braces = false;
-            for line in source.lines() {
-                let trimmed = line.trim();
-                if test_item {
-                    let opens = line.matches('{').count() as u32;
-                    let closes = line.matches('}').count() as u32;
-                    test_braces |= opens > 0;
-                    test_depth = test_depth.saturating_add(opens).saturating_sub(closes);
-                    if test_braces && test_depth == 0 {
-                        test_item = false;
-                        test_braces = false;
+        let mut directories = vec![root];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).expect("daemon sources") {
+                let path = entry.expect("source entry").path();
+                if path.is_dir() {
+                    directories.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|extension| extension.to_str()) != Some("rs")
+                    || path.file_name().and_then(|name| name.to_str()) == Some("registry.rs")
+                {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("source text");
+                let mut test_item = false;
+                let mut test_depth = 0_u32;
+                let mut test_braces = false;
+                for line in source.lines() {
+                    let trimmed = line.trim();
+                    if test_item {
+                        let opens = line.matches('{').count() as u32;
+                        let closes = line.matches('}').count() as u32;
+                        test_braces |= opens > 0;
+                        test_depth = test_depth.saturating_add(opens).saturating_sub(closes);
+                        if test_braces && test_depth == 0 {
+                            test_item = false;
+                            test_braces = false;
+                        }
+                        continue;
                     }
-                    continue;
+                    if trimmed == "#[cfg(test)]" {
+                        test_item = true;
+                        continue;
+                    }
+                    assert!(
+                        !line.contains("hofund_plugin_registry"),
+                        "direct registry call in {}: {line}",
+                        path.display()
+                    );
                 }
-                if trimmed == "#[cfg(test)]" {
-                    test_item = true;
-                    continue;
-                }
-                assert!(
-                    !line.contains("hofund_plugin_registry"),
-                    "direct registry call in {}: {line}",
-                    path.display()
-                );
             }
         }
     }

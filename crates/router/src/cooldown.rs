@@ -217,6 +217,7 @@ impl Cooldowns {
         let failure = failure?;
         let revision = next_revision(&mut book);
         let Some(state) = self.entry_for_insert(&mut book, id, now, revision) else {
+            // A full book of active rests can consume a revision without inserting.
             let mut state = State::new(now, 0);
             return Some(self.apply_failure(&mut state, failure, now, error));
         };
@@ -376,6 +377,8 @@ impl Cooldowns {
     }
 
     /// Removes states for members absent from a successfully built candidate.
+    ///
+    /// Removed members drop active rests without a recovery event.
     pub fn retain_members(&self, members: &HashSet<MemberId>) {
         let now = (self.clock)();
         let mut book = self.lock();
@@ -384,6 +387,8 @@ impl Cooldowns {
     }
 
     /// Removes one member after its provider identity changes.
+    ///
+    /// The changed identity drops an active rest without a recovery event.
     pub fn remove(&self, id: &MemberId) {
         let now = (self.clock)();
         let mut book = self.lock();

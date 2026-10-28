@@ -407,26 +407,69 @@ fn providers(
                 timeout,
                 plugin_id,
                 preset_id: provider.preset.clone().unwrap_or_default(),
-                fingerprint: provider_fingerprint(&endpoint.api_key, &planned.base_url),
+                fingerprint: provider_fingerprint(provider, &endpoint)?,
             },
         );
     }
     Ok(built)
 }
 
-fn provider_fingerprint(credential: &str, base_url: &str) -> String {
+fn provider_fingerprint(
+    provider: &hofund_config::Provider,
+    endpoint: &Endpoint,
+) -> Result<String, DaemonError> {
     use sha2::{Digest, Sha256};
 
-    let mut hash = Sha256::new();
-    hash.update(b"hofund-provider-fingerprint-v1\0");
-    for field in [credential, base_url] {
-        hash.update((field.len() as u64).to_be_bytes());
-        hash.update(field.as_bytes());
+    fn field(hash: &mut Sha256, label: &str, value: &str) {
+        hash.update((label.len() as u64).to_be_bytes());
+        hash.update(label.as_bytes());
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
     }
-    hash.finalize()
+
+    let mut hash = Sha256::new();
+    hash.update(b"hofund-provider-fingerprint-v2\0");
+    field(&mut hash, "api_key", &endpoint.api_key);
+    for name in ["access_key_id", "secret_access_key", "session_token"] {
+        let value = match provider.options.get(name) {
+            None => String::new(),
+            Some(Value::String(value)) => {
+                hofund_secrets::resolve(value.trim()).map_err(|error| {
+                    DaemonError::new(format!(
+                        "provider `{}` option `{name}`: {error}",
+                        provider.id
+                    ))
+                })?
+            }
+            Some(_) => {
+                return Err(DaemonError::new(format!(
+                    "provider `{}` option `{name}` must be a string",
+                    provider.id
+                )));
+            }
+        };
+        field(&mut hash, name, &value);
+    }
+    for (name, value) in &endpoint.headers {
+        let name = name.to_ascii_lowercase();
+        if matches!(
+            name.as_str(),
+            "authorization"
+                | "proxy-authorization"
+                | "api-key"
+                | "x-api-key"
+                | "x-goog-api-key"
+                | "x-amz-security-token"
+        ) {
+            field(&mut hash, &format!("header:{name}"), value);
+        }
+    }
+    field(&mut hash, "base_url", &endpoint.base_url);
+    Ok(hash
+        .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .collect())
 }
 
 fn endpoint_for(

@@ -504,3 +504,31 @@ fn candidate_retention_prunes_only_absent_members() {
     assert!(book.cooling(&kept).is_some());
     assert_eq!(book.revision(&removed), 0);
 }
+
+#[test]
+fn observation_only_rest_is_pruned_as_soon_as_it_expires() {
+    let (book, clock) = with_policy(CooldownPolicy::default());
+    let id = member("observed");
+    book.observe(&id, None, Some(0));
+    assert_ne!(book.revision(&id), 0);
+    advance(&clock, 15 * MINUTE);
+    assert_eq!(book.revision(&id), 0);
+    assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Observed)]);
+}
+
+#[test]
+fn rate_ladder_resets_after_forget_despite_later_generic_history() {
+    let (book, clock) = with_policy(CooldownPolicy::default());
+    let id = member("member");
+    book.record_failure(&id, &PluginError::connect("down"));
+    advance(&clock, 1);
+    book.record_failure(&id, &PluginError::status_error(429, "slow"));
+    advance(&clock, 1);
+    book.record_failure(&id, &PluginError::connect("down"));
+    advance(&clock, 1_859);
+    let next = book
+        .record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate rest");
+    assert_eq!(next.failures(), 1);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+}
