@@ -31,18 +31,17 @@ use hofund_plugin_api::kernel::{
     ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use hofund_plugin_api::{
-    AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, ProtocolId,
-    QuotaObservation, SecretString, SpawnRequest, SurfaceHost,
+    AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,
+    PluginKind, ProtocolId, QuotaObservation, SecretString, SpawnRequest, SurfaceHost,
 };
 
 pub use accounts::{PlaintextFileAccountStore, StoreError};
 pub use hofund_plugin_api::kernel::ObserveBackend;
 pub use pool::{HttpLimits, HttpProfile, PooledHttp};
 
-/// Builds a [`HostContext`] bound to `plugin`.
+/// Builds a provider-scoped [`HostContext`] bound to `plugin`.
 ///
-/// This is the constructor. [`HostContext::from_backends`] exists so this
-/// crate can fill the private handles. Plugins do not call either one.
+/// This compatibility constructor preserves the original provider-only API.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn host_context(
@@ -56,8 +55,45 @@ pub fn host_context(
     dirs: Arc<dyn DirBackend>,
     observe: Arc<dyn ObserveBackend>,
 ) -> HostContext {
-    HostContext::from_backends(
-        plugin, http, secrets, accounts, clock, scheduler, process, dirs, observe,
+    host_context_for(
+        PluginKind::Provider,
+        plugin,
+        http,
+        secrets,
+        accounts,
+        clock,
+        scheduler,
+        process,
+        dirs,
+        observe,
+    )
+}
+
+/// Builds a [`HostContext`] for one plugin kind and id.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn host_context_for(
+    kind: PluginKind,
+    plugin: PluginId,
+    http: Arc<dyn HttpBackend>,
+    secrets: Arc<dyn SecretsBackend>,
+    accounts: Arc<dyn AccountBackend>,
+    clock: Arc<dyn ClockBackend>,
+    scheduler: Arc<dyn SchedulerBackend>,
+    process: Arc<dyn ProcessBackend>,
+    dirs: Arc<dyn DirBackend>,
+    observe: Arc<dyn ObserveBackend>,
+) -> HostContext {
+    HostContext::from_backends_for(
+        PluginKey::new(kind, plugin),
+        http,
+        secrets,
+        accounts,
+        clock,
+        scheduler,
+        process,
+        dirs,
+        observe,
     )
 }
 
@@ -71,11 +107,7 @@ pub fn surface_host(
     SurfaceHost::from_parts(members, protocols, AuthResult::new(accepted))
 }
 
-/// A [`HostContext`] for one configured provider.
-///
-/// The HTTP handle is the pooled direct client with `limits`. `api_key` is
-/// the secret `api_key` for this plugin. Accounts live at `root/accounts.json`.
-/// The scheduler records jobs and does not run them.
+/// A provider-scoped [`HostContext`] for one configured provider.
 ///
 /// # Errors
 ///
@@ -86,7 +118,27 @@ pub fn runtime_host(
     root: impl Into<PathBuf>,
     limits: HttpLimits,
 ) -> Result<HostContext, StoreError> {
-    runtime_host_with_observe(
+    runtime_host_for(PluginKind::Provider, plugin, api_key, root, limits)
+}
+
+/// A [`HostContext`] for one plugin kind and id.
+///
+/// The HTTP handle is the pooled direct client with `limits`. `api_key` is
+/// the secret `api_key` for this plugin. Accounts live at `root/accounts.json`.
+/// The scheduler records jobs and does not run them.
+///
+/// # Errors
+///
+/// Returns [`StoreError`] when the account file cannot be created.
+pub fn runtime_host_for(
+    kind: PluginKind,
+    plugin: PluginId,
+    api_key: impl Into<String>,
+    root: impl Into<PathBuf>,
+    limits: HttpLimits,
+) -> Result<HostContext, StoreError> {
+    runtime_host_with_observe_for(
+        kind,
         plugin,
         api_key,
         root,
@@ -95,10 +147,7 @@ pub fn runtime_host(
     )
 }
 
-/// Builds a runtime context with a production observation backend.
-///
-/// The daemon binds the backend to the configured provider's member. Plugins
-/// only supply observations and cannot select which member receives them.
+/// Builds a provider-scoped runtime context with an observation backend.
 ///
 /// # Errors
 ///
@@ -110,10 +159,31 @@ pub fn runtime_host_with_observe(
     limits: HttpLimits,
     observe: Arc<dyn ObserveBackend>,
 ) -> Result<HostContext, StoreError> {
+    runtime_host_with_observe_for(PluginKind::Provider, plugin, api_key, root, limits, observe)
+}
+
+/// Builds a kind-scoped runtime context with an observation backend.
+///
+/// The daemon binds the backend to the configured provider's member. Plugins
+/// only supply observations and cannot select which member receives them.
+///
+/// # Errors
+///
+/// Returns [`StoreError`] when the account file cannot be created.
+pub fn runtime_host_with_observe_for(
+    kind: PluginKind,
+    plugin: PluginId,
+    api_key: impl Into<String>,
+    root: impl Into<PathBuf>,
+    limits: HttpLimits,
+    observe: Arc<dyn ObserveBackend>,
+) -> Result<HostContext, StoreError> {
     let root = root.into();
     let accounts = PlaintextFileAccountStore::open(root.join("accounts.json"))?;
-    Ok(host_context(
-        plugin.clone(),
+    let plugin = PluginKey::new(kind, plugin);
+    Ok(host_context_for(
+        kind,
+        plugin.id().clone(),
         Arc::new(PooledHttp::with_limits(HttpProfile::direct(), limits)),
         Arc::new(KeySecrets {
             plugin,
@@ -130,14 +200,14 @@ pub fn runtime_host_with_observe(
 
 /// One `api_key` secret. [`Debug`] is not implemented.
 struct KeySecrets {
-    plugin: PluginId,
+    plugin: PluginKey,
     api_key: String,
 }
 
 #[async_trait]
 impl SecretsBackend for KeySecrets {
-    async fn get(&self, plugin: &PluginId, id: &str) -> Result<Option<SecretString>, PluginError> {
-        if plugin.as_str() == self.plugin.as_str() && id == "api_key" && !self.api_key.is_empty() {
+    async fn get(&self, plugin: &PluginKey, id: &str) -> Result<Option<SecretString>, PluginError> {
+        if plugin == &self.plugin && id == "api_key" && !self.api_key.is_empty() {
             Ok(Some(SecretString::from(self.api_key.clone())))
         } else {
             Ok(None)
@@ -182,13 +252,23 @@ pub struct TestHost {
 }
 
 impl TestHost {
-    /// Recording backends rooted at `root`, bound to `plugin`.
+    /// Provider-scoped recording backends rooted at `root`.
     ///
     /// # Panics
     ///
     /// Panics when the account file cannot be created.
     #[must_use]
     pub fn open(plugin: PluginId, root: impl Into<PathBuf>) -> Self {
+        Self::open_for(PluginKind::Provider, plugin, root)
+    }
+
+    /// Recording backends rooted at `root`, bound to a kind and plugin id.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the account file cannot be created.
+    #[must_use]
+    pub fn open_for(kind: PluginKind, plugin: PluginId, root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let http = Arc::new(RecordingHttp::default());
         let secrets = Arc::new(RecordingSecrets::default());
@@ -197,7 +277,8 @@ impl TestHost {
         let observe = Arc::new(RecordingObserve::default());
         let accounts = PlaintextFileAccountStore::open(root.join("accounts.json"))
             .expect("test host account file");
-        let context = host_context(
+        let context = host_context_for(
+            kind,
             plugin,
             Arc::clone(&http) as Arc<dyn HttpBackend>,
             Arc::clone(&secrets) as Arc<dyn SecretsBackend>,
@@ -268,6 +349,16 @@ impl TestHost {
 #[must_use]
 pub fn test_host(plugin: PluginId, root: impl Into<PathBuf>) -> HostContext {
     TestHost::open(plugin, root).context().clone()
+}
+
+/// A kind-scoped [`HostContext`] whose backends do not touch the network.
+///
+/// # Panics
+///
+/// Panics when the account file cannot be created.
+#[must_use]
+pub fn test_host_for(kind: PluginKind, plugin: PluginId, root: impl Into<PathBuf>) -> HostContext {
+    TestHost::open_for(kind, plugin, root).context().clone()
 }
 
 /// A clock that returns one instant. Tests use this. Production passes [`SystemClock`].
@@ -561,31 +652,44 @@ impl HttpBackend for RecordingHttp {
     }
 }
 
-/// Secrets a test inserts, keyed by plugin. [`Debug`] is not implemented:
+/// Secrets a test inserts, keyed by plugin kind and id. [`Debug`] is not implemented:
 /// the map holds secret text.
 #[derive(Default)]
 pub struct RecordingSecrets {
-    values: Mutex<BTreeMap<(String, String), String>>,
+    values: Mutex<BTreeMap<(PluginKind, String, String), String>>,
 }
 
 impl RecordingSecrets {
-    /// Stores `secret` for `plugin` at `id`, replacing a previous value.
+    /// Stores a provider secret for `plugin` at `id`, replacing a previous value.
     pub fn insert(&self, plugin: &PluginId, id: impl Into<String>, secret: impl Into<String>) {
-        self.values
-            .lock()
-            .expect("secrets lock")
-            .insert((plugin.as_str().to_owned(), id.into()), secret.into());
+        self.insert_for(
+            &PluginKey::new(PluginKind::Provider, plugin.clone()),
+            id,
+            secret,
+        );
+    }
+
+    /// Stores `secret` for a kind-qualified `plugin` at `id`.
+    pub fn insert_for(&self, plugin: &PluginKey, id: impl Into<String>, secret: impl Into<String>) {
+        self.values.lock().expect("secrets lock").insert(
+            (plugin.kind(), plugin.id().as_str().to_owned(), id.into()),
+            secret.into(),
+        );
     }
 }
 
 #[async_trait]
 impl SecretsBackend for RecordingSecrets {
-    async fn get(&self, plugin: &PluginId, id: &str) -> Result<Option<SecretString>, PluginError> {
+    async fn get(&self, plugin: &PluginKey, id: &str) -> Result<Option<SecretString>, PluginError> {
         Ok(self
             .values
             .lock()
             .expect("secrets lock")
-            .get(&(plugin.as_str().to_owned(), id.to_owned()))
+            .get(&(
+                plugin.kind(),
+                plugin.id().as_str().to_owned(),
+                id.to_owned(),
+            ))
             .cloned()
             .map(SecretString::from))
     }
@@ -708,12 +812,24 @@ struct RootDirs {
 }
 
 impl DirBackend for RootDirs {
-    fn cache_dir(&self, plugin: &PluginId) -> Result<PathBuf, PluginError> {
-        mkdir(&self.root.join("cache").join(plugin.as_str()))
+    fn cache_dir(&self, plugin: &PluginKey) -> Result<PathBuf, PluginError> {
+        mkdir(
+            &self
+                .root
+                .join("cache")
+                .join(plugin.kind().as_str())
+                .join(plugin.id().as_str()),
+        )
     }
 
-    fn state_dir(&self, plugin: &PluginId) -> Result<PathBuf, PluginError> {
-        mkdir(&self.root.join("state").join(plugin.as_str()))
+    fn state_dir(&self, plugin: &PluginKey) -> Result<PathBuf, PluginError> {
+        mkdir(
+            &self
+                .root
+                .join("state")
+                .join(plugin.kind().as_str())
+                .join(plugin.id().as_str()),
+        )
     }
 }
 
@@ -751,15 +867,21 @@ mod tests {
     use hofund_plugin_api::kernel::{
         self, AccountBackend, ClockBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
     };
-    use hofund_plugin_api::{Account, AccountId, JobSpec, PluginId, SecretString, SpawnRequest};
+    use hofund_plugin_api::{
+        Account, AccountId, JobSpec, PluginId, PluginKey, PluginKind, SecretString, SpawnRequest,
+    };
 
     use super::{
         FixedClock, PlaintextFileAccountStore, RecordingScheduler, StdProcess, SystemClock,
-        host_context, surface_host, test_host,
+        host_context, host_context_for, surface_host, test_host,
     };
 
     fn plugin() -> PluginId {
         PluginId::from_static("example-agent")
+    }
+
+    fn key() -> PluginKey {
+        PluginKey::new(PluginKind::Provider, plugin())
     }
 
     fn root() -> std::path::PathBuf {
@@ -791,7 +913,7 @@ mod tests {
     async fn file_store_is_private_plaintext_and_does_not_debug_the_secret() {
         let path = root().join("accounts.json");
         let store = PlaintextFileAccountStore::open(&path).expect("open");
-        let account = Account::from_stored(plugin(), AccountId::from_static("work"), "Work")
+        let account = Account::from_stored_scoped(key(), AccountId::from_static("work"), "Work")
             .expect("account");
         store
             .upsert(account, SecretString::from("secret-a"))
@@ -806,21 +928,21 @@ mod tests {
             "the file is plaintext until the keychain store"
         );
         let first = store
-            .secret(&plugin(), &AccountId::from_static("work"))
+            .secret(&key(), &AccountId::from_static("work"))
             .await
             .expect("secret")
             .expect("present");
         assert_eq!(kernel::expose_secret(&first), "secret-a");
         store
             .upsert(
-                Account::from_stored(plugin(), AccountId::from_static("work"), "Work")
+                Account::from_stored_scoped(key(), AccountId::from_static("work"), "Work")
                     .expect("account"),
                 SecretString::from("secret-b"),
             )
             .await
             .expect("replace");
         let second = store
-            .secret(&plugin(), &AccountId::from_static("work"))
+            .secret(&key(), &AccountId::from_static("work"))
             .await
             .expect("secret")
             .expect("present");
@@ -1021,6 +1143,120 @@ mod tests {
         let clock =
             FixedClock::new(SystemTime::UNIX_EPOCH).with_monotonic(Duration::from_millis(5));
         assert_eq!(clock.monotonic(), Duration::from_millis(5));
+    }
+
+    #[tokio::test]
+    async fn equal_ids_in_different_kinds_have_isolated_host_storage() {
+        let root = root();
+        let secrets = std::sync::Arc::new(super::RecordingSecrets::default());
+        let accounts = std::sync::Arc::new(
+            PlaintextFileAccountStore::open(root.join("accounts.json")).expect("store"),
+        );
+        let build = |kind: PluginKind| {
+            host_context_for(
+                kind,
+                PluginId::from_static("shared"),
+                std::sync::Arc::new(super::RecordingHttp::default()),
+                std::sync::Arc::clone(&secrets) as std::sync::Arc<dyn SecretsBackend>,
+                std::sync::Arc::clone(&accounts) as std::sync::Arc<dyn AccountBackend>,
+                std::sync::Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+                std::sync::Arc::new(super::RecordingScheduler::default()),
+                std::sync::Arc::new(super::RecordingProcess::default()),
+                std::sync::Arc::new(super::RootDirs { root: root.clone() }),
+                std::sync::Arc::new(super::RecordingObserve::default()),
+            )
+        };
+        let provider = build(PluginKind::Provider);
+        let subscription = build(PluginKind::Subscription);
+        secrets.insert_for(provider.key(), "token", "provider-secret");
+        secrets.insert_for(subscription.key(), "token", "subscription-secret");
+        for (host, expected) in [
+            (&provider, "provider-secret"),
+            (&subscription, "subscription-secret"),
+        ] {
+            let secret = host
+                .secrets()
+                .get("token")
+                .await
+                .expect("get")
+                .expect("present");
+            assert_eq!(kernel::expose_secret(&secret), expected);
+            host.accounts()
+                .upsert(
+                    host.accounts()
+                        .account(AccountId::from_static("work"), "Work")
+                        .expect("account"),
+                    SecretString::from(expected),
+                )
+                .await
+                .expect("upsert");
+        }
+        assert_eq!(provider.accounts().list().await.expect("list").len(), 1);
+        assert_eq!(subscription.accounts().list().await.expect("list").len(), 1);
+        let provider_account = provider
+            .accounts()
+            .secret(&AccountId::from_static("work"))
+            .await
+            .expect("secret")
+            .expect("present");
+        let subscription_account = subscription
+            .accounts()
+            .secret(&AccountId::from_static("work"))
+            .await
+            .expect("secret")
+            .expect("present");
+        assert_eq!(kernel::expose_secret(&provider_account), "provider-secret");
+        assert_eq!(
+            kernel::expose_secret(&subscription_account),
+            "subscription-secret"
+        );
+        assert_eq!(
+            provider.dirs().cache_dir().expect("cache"),
+            root.join("cache/provider/shared")
+        );
+        assert_eq!(
+            subscription.dirs().cache_dir().expect("cache"),
+            root.join("cache/subscription/shared")
+        );
+        assert_ne!(
+            provider.dirs().state_dir().expect("state"),
+            subscription.dirs().state_dir().expect("state")
+        );
+    }
+
+    #[tokio::test]
+    async fn account_rows_without_a_kind_remain_subscription_rows() {
+        let path = root().join("accounts.json");
+        std::fs::write(
+            &path,
+            r#"[{"plugin":"shared","account":"work","label":"Work","secret":"stored"}]"#,
+        )
+        .expect("legacy rows");
+        let store = PlaintextFileAccountStore::open(&path).expect("open");
+        let subscription =
+            PluginKey::new(PluginKind::Subscription, PluginId::from_static("shared"));
+        assert_eq!(store.list(&subscription).await.expect("list").len(), 1);
+        let provider = PluginKey::new(PluginKind::Provider, PluginId::from_static("shared"));
+        assert!(store.list(&provider).await.expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_api_keys_are_isolated_by_plugin_kind() {
+        let secrets = super::KeySecrets {
+            plugin: key(),
+            api_key: "value".to_owned(),
+        };
+        for kind in [PluginKind::Subscription, PluginKind::Agent] {
+            let foreign = PluginKey::new(kind, plugin());
+            assert!(
+                secrets
+                    .get(&foreign, "api_key")
+                    .await
+                    .expect("get")
+                    .is_none(),
+                "{kind} must not read the provider secret"
+            );
+        }
     }
 
     #[tokio::test]

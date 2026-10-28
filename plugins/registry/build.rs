@@ -45,24 +45,46 @@ fn run() -> Result<(), String> {
     let listed = parse_list(&workspace, &text)?;
     let discovered = discover(&workspace)?;
     let builtins = load_data_fragments(&workspace, "plugins/providers", true)?;
-    let listed_ids: Vec<&str> = listed.iter().map(|plugin| plugin.id.as_str()).collect();
-    if let Some(id) = duplicate_id(&listed_ids) {
-        return Err(format!("duplicate plugin id {id}"));
+    let kind_ids: Vec<(&str, &str)> = listed
+        .iter()
+        .map(|plugin| (plugin.kind.as_str(), plugin.id.as_str()))
+        .collect();
+    if let Some((kind, id)) = duplicate_kind_id(&kind_ids) {
+        return Err(format!("duplicate plugin id {id} in kind {kind}"));
     }
-    if !strictly_sorted(&listed_ids) {
-        return Err("plugins.toml is not sorted by id".to_owned());
+    let listed_ids: Vec<(&str, &str)> = listed
+        .iter()
+        .map(|plugin| (plugin.id.as_str(), plugin.kind.as_str()))
+        .collect();
+    if !strictly_sorted_plugin_ids(&listed_ids) {
+        return Err("plugins.toml is not sorted by id and kind".to_owned());
+    }
+    let packages: Vec<&str> = listed
+        .iter()
+        .map(|plugin| plugin.package.as_str())
+        .collect();
+    if let Some(package) = duplicate_id(&packages) {
+        return Err(format!("duplicate plugin package {package}"));
+    }
+    let features: Vec<&str> = listed
+        .iter()
+        .map(|plugin| plugin.feature.as_str())
+        .collect();
+    if let Some(feature) = duplicate_id(&features) {
+        return Err(format!("duplicate plugin feature {feature}"));
     }
     for plugin in &listed {
-        if reserved(&plugin.id) {
-            return Err(format!("{} is a reserved plugin id", plugin.id));
-        }
-        if plugin.feature != plugin.id {
+        let expected_feature = expected_feature(&kind_ids, &plugin.kind, &plugin.id);
+        if plugin.feature != expected_feature {
             return Err(format!(
-                "{} feature {} does not match the id",
+                "{} feature is {}, expected {expected_feature}",
                 plugin.id, plugin.feature
             ));
         }
-        if builtin_factory_ids().contains(&plugin.id.as_str()) {
+        if reserved(&plugin.id) {
+            return Err(format!("{} is a reserved plugin id", plugin.id));
+        }
+        if plugin.kind == "provider" && builtin_factory_ids().contains(&plugin.id.as_str()) {
             return Err(format!("{} is a builtin factory id", plugin.id));
         }
         let expected = expected_path(&plugin.kind, &plugin.id)?;
@@ -76,13 +98,19 @@ fn run() -> Result<(), String> {
         println!("cargo:rerun-if-changed=../../{}/plugin.toml", plugin.path);
         println!("cargo:rerun-if-changed=../../{}/Cargo.toml", plugin.path);
         check_package(&dir, &plugin.package)?;
-        if !discovered.iter().any(|id| id == &plugin.id) {
-            return Err(format!("{} is not on disk", plugin.id));
+        if !discovered
+            .iter()
+            .any(|(kind, id)| kind == &plugin.kind && id == &plugin.id)
+        {
+            return Err(format!("{}/{} is not on disk", plugin.kind, plugin.id));
         }
     }
-    for id in &discovered {
-        if !listed.iter().any(|plugin| plugin.id == *id) {
-            return Err(format!("{id} is missing from plugins.toml"));
+    for (kind, id) in &discovered {
+        if !listed
+            .iter()
+            .any(|plugin| &plugin.kind == kind && &plugin.id == id)
+        {
+            return Err(format!("{kind}/{id} is missing from plugins.toml"));
         }
     }
     let mut routes = Vec::new();
@@ -99,13 +127,22 @@ fn run() -> Result<(), String> {
         .collect();
     preset_toml::validate_all(&fragments)?;
     check_features(&listed)?;
-    let plugin_ids: Vec<String> = listed.iter().map(|plugin| plugin.id.clone()).collect();
+    let agent_plugin_ids: Vec<String> = agent_collision_ids(&kind_ids)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     let inbound_ids: Vec<String> = listed
         .iter()
         .filter(|plugin| plugin.kind == "inbound")
         .map(|plugin| plugin.id.clone())
         .collect();
-    let agents = load_agents(&workspace, "plugins/agents", &plugin_ids, &[], &inbound_ids)?;
+    let agents = load_agents(
+        &workspace,
+        "plugins/agents",
+        &agent_plugin_ids,
+        &[],
+        &inbound_ids,
+    )?;
     let out = PathBuf::from(std::env::var("OUT_DIR").map_err(|error| error.to_string())?);
     fs::write(out.join("registry.rs"), emit(&listed, &builtins))
         .map_err(|error| error.to_string())?;
@@ -116,7 +153,7 @@ fn run() -> Result<(), String> {
         let fixtures = load_agents(
             &workspace,
             "plugins/registry/tests/fixtures/agents",
-            &plugin_ids,
+            &agent_plugin_ids,
             &agent_ids,
             &inbound_ids,
         )?;
@@ -313,7 +350,7 @@ fn check_package(dir: &Path, package: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn discover(workspace: &Path) -> Result<Vec<String>, String> {
+fn discover(workspace: &Path) -> Result<Vec<(String, String)>, String> {
     // The plugins directory itself, so a new unlisted plugin directory reruns
     // the on-disk bijection check. A new plugin is created inside a kind
     // directory, and that directory's mtime is what Cargo sees.
@@ -352,7 +389,7 @@ fn discover(workspace: &Path) -> Result<Vec<String>, String> {
             );
             let text = fs::read_to_string(&manifest).map_err(|error| error.to_string())?;
             let value: toml::Value = toml::from_str(&text).map_err(|error| error.to_string())?;
-            ids.push(field(&value, "id")?);
+            ids.push((field(&value, "kind")?, field(&value, "id")?));
         }
     }
     Ok(ids)
@@ -476,8 +513,15 @@ fn emit(listed: &[Listed], builtins: &[FragmentToml]) -> String {
     let mut aliases = String::new();
     for plugin in listed {
         let rust_name = plugin.package.replace('-', "_");
+        let kind = match plugin.kind.as_str() {
+            "provider" => "Provider",
+            "subscription" => "Subscription",
+            "agent" => "Agent",
+            "inbound" => "Inbound",
+            _ => unreachable!("plugin kind was validated"),
+        };
         calls.push_str(&format!(
-            "        #[cfg(feature = \"{}\")]\n        (\"{}\", {rust_name}::contribute()),\n",
+            "        #[cfg(feature = \"{}\")]\n        (hofund_plugin_api::PluginKind::{kind}, \"{}\", {rust_name}::contribute()),\n",
             plugin.feature, plugin.id
         ));
         for route in &plugin.routes {
@@ -656,9 +700,9 @@ pub fn compiled_aliases() -> &'static [CompiledAlias] {{
 {aliases}    ]
 }}
 
-/// Contributions for the features enabled on this build.
+/// Kind, id, and contribution for the features enabled on this build.
 #[must_use]
-pub fn contributions() -> Vec<(&'static str, hofund_plugin_sdk::Contribution)> {{
+pub fn contributions() -> Vec<(hofund_plugin_api::PluginKind, &'static str, hofund_plugin_sdk::Contribution)> {{
     vec![
 {calls}    ]
 }}

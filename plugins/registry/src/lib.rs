@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use hofund_plugin_api::{DynUpstreamFactory, InboundSurface, ProtocolId};
+use hofund_plugin_api::{DynUpstreamFactory, InboundSurface, PluginKind, ProtocolId};
 
 mod builtin;
 #[allow(dead_code)]
@@ -62,17 +62,21 @@ pub use select::{
     SelectError, Selection, model_plan_of, protocol_for, resolve_region, select, wire_for_protocol,
 };
 
-/// Every linked plugin contribution, keyed by plugin id, in `plugins.toml` order.
+/// Every linked plugin contribution, keyed by plugin kind and id, in `plugins.toml` order.
 ///
 /// With the `test-fixtures` feature, the test-only two-protocol listed
 /// fixture `fixture-multi-listed` is appended. The generated list never names
 /// a fixture.
 #[must_use]
-pub fn contributions() -> Vec<(&'static str, hofund_plugin_sdk::Contribution)> {
+pub fn contributions() -> Vec<(PluginKind, &'static str, hofund_plugin_sdk::Contribution)> {
     #[cfg_attr(not(feature = "test-fixtures"), allow(unused_mut))]
     let mut linked = generated::contributions();
     #[cfg(feature = "test-fixtures")]
-    linked.push(("fixture-multi-listed", fixture_upstream::contribute()));
+    linked.push((
+        PluginKind::Provider,
+        "fixture-multi-listed",
+        fixture_upstream::contribute(),
+    ));
     linked
 }
 
@@ -156,41 +160,55 @@ pub fn find_fixture_preset(id: &str) -> Option<(&'static CompiledPreset, Option<
 }
 
 /// Every inbound surface the linked plugins contribute.
+///
+/// Surfaces on contributions of any other [`PluginKind`] are ignored.
 #[must_use]
 pub fn surfaces() -> Vec<Arc<dyn InboundSurface>> {
     let mut found = Vec::new();
-    for (_, contribution) in contributions() {
-        found.extend(contribution.surfaces().iter().cloned());
+    for (kind, _, contribution) in contributions() {
+        if kind == PluginKind::Inbound {
+            found.extend(contribution.surfaces().iter().cloned());
+        }
     }
     found
 }
 
-/// The upstream factory for `id`, when that plugin is linked and contributes one.
-#[must_use]
-pub fn upstream(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
-    contributions()
-        .into_iter()
-        .find_map(|(name, contribution)| {
-            if name == id {
-                contribution.upstreams().first().cloned()
-            } else {
-                None
-            }
-        })
+fn upstream_in(
+    contributions: &[(PluginKind, &'static str, hofund_plugin_sdk::Contribution)],
+    id: &str,
+) -> Option<Arc<dyn DynUpstreamFactory>> {
+    contributions.iter().find_map(|(kind, name, contribution)| {
+        if *kind == PluginKind::Provider && *name == id {
+            contribution.upstreams().first().cloned()
+        } else {
+            None
+        }
+    })
 }
 
-/// The inbound surface for `id`, when that plugin is linked and contributes one.
+/// The upstream factory for `id`, when that provider plugin is linked and contributes one.
+#[must_use]
+pub fn upstream(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
+    upstream_in(&contributions(), id)
+}
+
+fn surface_in(
+    contributions: &[(PluginKind, &'static str, hofund_plugin_sdk::Contribution)],
+    id: &str,
+) -> Option<Arc<dyn InboundSurface>> {
+    contributions.iter().find_map(|(kind, name, contribution)| {
+        if *kind == PluginKind::Inbound && *name == id {
+            contribution.surfaces().first().cloned()
+        } else {
+            None
+        }
+    })
+}
+
+/// The inbound surface for `id`, when that inbound plugin is linked and contributes one.
 #[must_use]
 pub fn surface(id: &str) -> Option<Arc<dyn InboundSurface>> {
-    contributions()
-        .into_iter()
-        .find_map(|(name, contribution)| {
-            if name == id {
-                contribution.surfaces().first().cloned()
-            } else {
-                None
-            }
-        })
+    surface_in(&contributions(), id)
 }
 
 /// The plugin id of the longest matching route.
@@ -214,9 +232,38 @@ pub fn match_route(method: &str, path: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use hofund_plugin_api::{CredentialStyle, ListKind, ProtocolId};
+    use hofund_plugin_api::{CredentialStyle, ListKind, PluginKind, ProtocolId};
 
-    use super::{match_route, surface, upstream};
+    use super::{match_route, surface, surface_in, upstream, upstream_in};
+
+    #[test]
+    fn same_id_lookups_ignore_contributions_of_another_kind() {
+        let provider = [(
+            PluginKind::Provider,
+            "shared",
+            hofund_plugin_relay::contribute(),
+        )];
+        let non_provider = [(
+            PluginKind::Inbound,
+            "shared",
+            hofund_plugin_relay::contribute(),
+        )];
+        assert!(upstream_in(&provider, "shared").is_some());
+        assert!(upstream_in(&non_provider, "shared").is_none());
+
+        let non_inbound = [(
+            PluginKind::Provider,
+            "shared",
+            hofund_plugin_echo::contribute(),
+        )];
+        let inbound = [(
+            PluginKind::Inbound,
+            "shared",
+            hofund_plugin_echo::contribute(),
+        )];
+        assert!(surface_in(&non_inbound, "shared").is_none());
+        assert!(surface_in(&inbound, "shared").is_some());
+    }
 
     #[test]
     fn echo_matches_get_only() {
@@ -294,7 +341,7 @@ mod tests {
             assert!(super::builtin::factory(id).is_none(), "{id}");
             assert!(!super::is_kernel_factory(id), "{id}");
         }
-        for (id, _) in super::contributions() {
+        for (_, id, _) in super::contributions() {
             assert!(!super::is_kernel_factory(id), "{id}");
         }
     }
