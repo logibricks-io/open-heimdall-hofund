@@ -1,10 +1,11 @@
 use serde::de::DeserializeOwned;
+use serde_json::error::Category;
 
 use crate::{
     API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
     AgentListResponse, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
-    ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope, HealthResponse,
+    ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, HealthResponse,
     MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
     ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
@@ -40,34 +41,27 @@ pub trait Response: DeserializeOwned + sealed::Sealed {
 /// Decodes and validates a bounded request body.
 ///
 /// Checks occur in this order: body byte limit, path version, strict JSON
-/// shape, body version, then semantic validation. JSON errors name the serde
-/// failure but never include the source body.
+/// shape, body version, then semantic validation. JSON errors contain only a
+/// category, line and column, and a field name for unknown, missing, or
+/// duplicate fields when it is a short ASCII identifier. Body values are never
+/// included in the message or details.
 pub fn decode_request<T: Request>(path_version: u32, body: &[u8]) -> Result<T, ControlError> {
     check_length(body, MAX_REQUEST_BODY_BYTES)?;
     check_path_version(path_version)?;
-    let request = serde_json::from_slice::<T>(body).map_err(|error| {
-        ControlError::new(
-            ControlErrorKind::BadRequest,
-            format!("malformed request JSON: {error}"),
-            "decode",
-        )
-    })?;
+    let request =
+        serde_json::from_slice::<T>(body).map_err(|error| malformed_json("request", error))?;
     check_body_version(request.version())?;
     request.validate()?;
     Ok(request)
 }
 
 /// Decodes a bounded response or event body, accepting additive unknown fields.
+/// Decode errors use the same value-free representation as request errors.
 pub fn decode_response<T: Response>(path_version: u32, body: &[u8]) -> Result<T, ControlError> {
     check_length(body, MAX_RESPONSE_BODY_BYTES)?;
     check_path_version(path_version)?;
-    let response = serde_json::from_slice::<T>(body).map_err(|error| {
-        ControlError::new(
-            ControlErrorKind::BadRequest,
-            format!("malformed response JSON: {error}"),
-            "decode",
-        )
-    })?;
+    let response =
+        serde_json::from_slice::<T>(body).map_err(|error| malformed_json("response", error))?;
     check_body_version(response.version())?;
     response.validate()?;
     Ok(response)
@@ -79,6 +73,71 @@ pub fn decode_error_envelope(
     body: &[u8],
 ) -> Result<ErrorEnvelope, ControlError> {
     decode_response(path_version, body)
+}
+
+fn malformed_json(surface: &str, error: serde_json::Error) -> ControlError {
+    let raw_message = error.to_string();
+    let (category, reason, field) = match error.classify() {
+        Category::Syntax => ("syntax", "syntax", None),
+        Category::Eof => ("eof", "eof", None),
+        Category::Io => ("io", "data", None),
+        Category::Data => {
+            let (reason, field) = data_error_shape(&raw_message);
+            ("data", reason, field)
+        }
+    };
+    let mut message = format!("malformed {surface} JSON: {category} error");
+    if let Some(field) = &field {
+        message.push_str(&format!(" ({reason} `{field}`)"));
+    }
+    message.push_str(&format!(
+        " at line {} column {}",
+        error.line(),
+        error.column()
+    ));
+    let mut control = ControlError::new(ControlErrorKind::BadRequest, &message, "decode");
+    control.details.push(FieldIssue::new(
+        field.as_deref().unwrap_or("body"),
+        reason,
+        &message,
+    ));
+    control
+}
+
+fn data_error_shape(message: &str) -> (&'static str, Option<String>) {
+    for (prefix, reason) in [
+        ("unknown field `", "unknown_field"),
+        ("missing field `", "missing_field"),
+        ("duplicate field `", "duplicate_field"),
+    ] {
+        if let Some(rest) = message.strip_prefix(prefix) {
+            let field = rest
+                .split('`')
+                .next()
+                .filter(|field| valid_error_field(field))
+                .map(str::to_owned);
+            return (reason, field);
+        }
+    }
+    for (prefix, reason) in [
+        ("invalid type:", "invalid_type"),
+        ("invalid value:", "invalid_value"),
+        ("unknown variant `", "unknown_variant"),
+        ("invalid length", "invalid_length"),
+    ] {
+        if message.starts_with(prefix) {
+            return (reason, None);
+        }
+    }
+    ("data", None)
+}
+
+fn valid_error_field(field: &str) -> bool {
+    !field.is_empty()
+        && field.len() <= 64
+        && field
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn check_length(body: &[u8], limit: usize) -> Result<(), ControlError> {
@@ -152,12 +211,12 @@ macro_rules! response {
 
 request!(ConfigValidateRequest, validate);
 request!(ConfigApplyRequest, validate);
-request!(ReloadRequest);
+request!(ReloadRequest, validate);
 request!(ProviderTestRequest, validate);
 request!(PicksSetRequest, validate);
 request!(AgentPlanRequest, validate);
-request!(AgentConnectRequest);
-request!(AgentDisconnectRequest);
+request!(AgentConnectRequest, validate);
+request!(AgentDisconnectRequest, validate);
 request!(TokenRotateRequest);
 request!(ShutdownRequest);
 

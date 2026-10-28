@@ -393,6 +393,9 @@ fn unsafe_manifest_violation(member: &str, manifest: &str) -> bool {
     !platform_win_exempt(member) && manifest_opts_out_of_safe_code(manifest)
 }
 
+// The manifest check is the real guard: workspace `forbid` already rejects a
+// source-level allowance. This scan is conservative belt-and-braces and may
+// report false positives, such as `deny` or attribute text in comments.
 fn source_opts_out_of_safe_code(source: &str) -> bool {
     let source = compact(source);
     ["allow", "expect", "warn", "deny"]

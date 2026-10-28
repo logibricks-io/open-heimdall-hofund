@@ -2,7 +2,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{API_VERSION, ControlError, ControlErrorKind, FieldIssue, MAX_CONFIG_TEXT_BYTES};
+use crate::{
+    API_VERSION, ControlError, ControlErrorKind, FieldIssue, MAX_CONFIG_TEXT_BYTES,
+    validate_revision,
+};
 
 /// Whole-document configuration validation input.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +68,7 @@ impl ConfigApplyRequest {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        validate_revision("expected_revision", &self.expected_revision)?;
         validate_config_text(&self.text)
     }
 }
@@ -99,6 +103,10 @@ impl ReloadRequest {
             version: API_VERSION,
             expected_revision: expected_revision.into(),
         }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        validate_revision("expected_revision", &self.expected_revision)
     }
 }
 

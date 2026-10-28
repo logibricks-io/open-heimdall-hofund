@@ -443,7 +443,7 @@ pub struct SignInProgressEvent {
 /// Token rotation notification without token material.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct TokenRotatedEvent;
+pub struct TokenRotatedEvent {}
 
 /// Shutdown start payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

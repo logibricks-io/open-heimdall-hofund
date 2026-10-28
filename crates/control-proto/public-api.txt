@@ -224,10 +224,10 @@ ModelsRefreshedEvent.list_kind
 ModelsRefreshedEvent.model_count
 ModelsRefreshedEvent.ok
 ModelsRefreshedEvent.provider
-PickEdit #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+PickEdit #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 PickEdit::Add
 PickEdit::Remove
-PicksForm #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+PicksForm #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 PicksForm::Edit
 PicksForm::Replace
 PicksForm::Reset

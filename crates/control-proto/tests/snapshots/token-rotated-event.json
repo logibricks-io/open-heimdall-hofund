@@ -6,6 +6,6 @@
   "time_ms": 1700000004000,
   "payload": {
     "event": "token_rotated",
-    "data": null
+    "data": {}
   }
 }

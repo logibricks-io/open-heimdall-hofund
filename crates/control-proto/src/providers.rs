@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{API_VERSION, ControlError, ControlErrorKind, FieldIssue, MAX_ID_BYTES, MAX_IDS};
+use crate::{
+    API_VERSION, ControlError, ControlErrorKind, FieldIssue, MAX_ID_BYTES, MAX_IDS,
+    validate_revision,
+};
 
 /// Optional model selection for a configured provider connectivity test.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,7 +185,7 @@ impl PicksSetRequest {
                 Ok(PicksForm::Replace(ids.clone()))
             }
             (None, Some(edit)) => {
-                validate_ids("edit", edit)?;
+                validate_id_count("edit", edit.len())?;
                 if edit.is_empty() {
                     return Err(picks_error(
                         ControlErrorKind::Unprocessable,
@@ -204,16 +207,29 @@ impl PicksSetRequest {
                 }
                 let mut changes = Vec::with_capacity(edit.len());
                 for token in edit {
-                    let Some((operation, id)) = token.split_at_checked(1) else {
-                        return Err(mixed_form());
+                    let Some(operation) = token.as_bytes().first().copied() else {
+                        return Err(edit_token_error(
+                            "invalid",
+                            "an edit token must not be empty",
+                        ));
                     };
-                    if id.is_empty() || id.len() > MAX_ID_BYTES {
+                    if !matches!(operation, b'+' | b'-') {
                         return Err(mixed_form());
                     }
-                    match operation {
-                        "+" => changes.push(PickEdit::Add(id.to_owned())),
-                        "-" => changes.push(PickEdit::Remove(id.to_owned())),
-                        _ => return Err(mixed_form()),
+                    let id = &token[1..];
+                    if id.is_empty() {
+                        return Err(edit_token_error("invalid", "an edit id must not be empty"));
+                    }
+                    if id.len() > MAX_ID_BYTES {
+                        return Err(edit_token_error(
+                            "too_large",
+                            "an edit id exceeds the 256-byte limit",
+                        ));
+                    }
+                    if operation == b'+' {
+                        changes.push(PickEdit::Add(id.to_owned()));
+                    } else {
+                        changes.push(PickEdit::Remove(id.to_owned()));
                     }
                 }
                 Ok(PicksForm::Edit(changes))
@@ -222,13 +238,14 @@ impl PicksSetRequest {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        validate_revision("expected_picks_revision", &self.expected_picks_revision)?;
         self.form().map(|_| ())
     }
 }
 
 /// Validated picks operation. Applying it to host state is deliberately not
 /// part of the protocol crate.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PicksForm {
     /// Replace the complete pick list.
@@ -240,7 +257,7 @@ pub enum PicksForm {
 }
 
 /// One validated delta edit.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PickEdit {
     /// Add a model id.
@@ -278,12 +295,11 @@ impl Default for PicksResponse {
 }
 
 fn mixed_form() -> ControlError {
-    picks_error(
-        ControlErrorKind::Unprocessable,
-        "edit",
-        "mixed_forms",
-        "edit tokens must all be +id or -id changes",
-    )
+    edit_token_error("mixed_forms", "edit tokens must all be +id or -id changes")
+}
+
+fn edit_token_error(reason: &str, message: &str) -> ControlError {
+    picks_error(ControlErrorKind::Unprocessable, "edit", reason, message)
 }
 
 fn picks_error(kind: ControlErrorKind, field: &str, reason: &str, message: &str) -> ControlError {
@@ -292,8 +308,8 @@ fn picks_error(kind: ControlErrorKind, field: &str, reason: &str, message: &str)
     error
 }
 
-fn validate_ids(field: &str, ids: &[String]) -> Result<(), ControlError> {
-    if ids.len() > MAX_IDS {
+fn validate_id_count(field: &str, count: usize) -> Result<(), ControlError> {
+    if count > MAX_IDS {
         return Err(picks_error(
             ControlErrorKind::Unprocessable,
             field,
@@ -301,6 +317,11 @@ fn validate_ids(field: &str, ids: &[String]) -> Result<(), ControlError> {
             "the id list exceeds the 4096-entry limit",
         ));
     }
+    Ok(())
+}
+
+fn validate_ids(field: &str, ids: &[String]) -> Result<(), ControlError> {
+    validate_id_count(field, ids.len())?;
     if ids.iter().any(|id| id.is_empty()) {
         return Err(picks_error(
             ControlErrorKind::Unprocessable,

@@ -87,7 +87,7 @@ The design PR changes only the inspiration allowlist. The implementation pull re
 
 Every management path starts `/v1/hofund`. JSON request and response bodies carry `"version": 1`; query-only and empty requests use the path version. `hofund-control-proto` exports `API_VERSION: u32 = 1`. A mismatched version is an explicit protocol error, not a best-effort decode.
 
-Public DTOs use serde and `#[non_exhaustive]`. Requests reject unknown fields so a typo cannot change meaning. Responses permit unknown fields so an older client can read a newer compatible server. Optional response fields are additive. Enum consumers match a wildcard; response enums that serde must decode include an `Unknown` fallback.
+Public DTOs use serde and `#[non_exhaustive]`. Requests reject unknown fields so a typo cannot change meaning. Responses permit unknown fields so an older client can read a newer compatible server. Optional response fields are additive. Enum consumers match a wildcard; response enums that serde must decode include an `Unknown` fallback. The control wire uses snake_case field and enum names; `/v1/hofund/*` is a new client API that replaces the reference GUI's `/api/*` handler (camelCase) and is intentionally not wire-compatible with it.
 
 ```rust
 pub const API_VERSION: u32 = 1;

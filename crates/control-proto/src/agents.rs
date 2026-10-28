@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{API_VERSION, ControlError, ControlErrorKind, FieldIssue};
+use crate::{API_VERSION, ControlError, ControlErrorKind, FieldIssue, validate_revision};
 
 /// Agent lifecycle action.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +76,13 @@ impl AgentConnectRequest {
             expected_plan_revision,
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        if let Some(revision) = &self.expected_plan_revision {
+            validate_revision("expected_plan_revision", revision)?;
+        }
+        Ok(())
+    }
 }
 
 /// Agent disconnect request guarded by an optional plan revision.
@@ -100,6 +107,13 @@ impl AgentDisconnectRequest {
             force,
             expected_plan_revision,
         }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        if let Some(revision) = &self.expected_plan_revision {
+            validate_revision("expected_plan_revision", revision)?;
+        }
+        Ok(())
     }
 }
 

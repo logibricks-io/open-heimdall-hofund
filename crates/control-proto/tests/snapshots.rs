@@ -491,6 +491,47 @@ fn response_and_event_snapshots_accept_unknown_fields() {
 }
 
 #[test]
+fn every_event_payload_data_is_an_object_and_tolerates_unknown_fields() {
+    // This external-crate test cannot exhaustively match the non-exhaustive
+    // enum, so keep this list beside the manual decoder's tag list.
+    let known = vec![
+        EventPayload::Snapshot(SnapshotEvent::default()),
+        EventPayload::ConfigReloaded(ConfigReloadedEvent::default()),
+        EventPayload::ConfigRejected(ConfigRejectedEvent::default()),
+        EventPayload::ListenerRelistenFailed(ListenerRelistenFailedEvent::default()),
+        EventPayload::MemberCooled(MemberCooledEvent::default()),
+        EventPayload::MemberRecovered(MemberRecoveredEvent::default()),
+        EventPayload::SnapshotPublished(SnapshotPublishedEvent::default()),
+        EventPayload::RequestStarted(RequestStartedEvent::default()),
+        EventPayload::RequestFinished(RequestFinishedEvent::default()),
+        EventPayload::ModelsRefreshed(ModelsRefreshedEvent::default()),
+        EventPayload::AgentChanged(AgentChangedEvent::default()),
+        EventPayload::SignInProgress(SignInProgressEvent::default()),
+        EventPayload::TokenRotated(TokenRotatedEvent::default()),
+        EventPayload::ShutdownStarted(ShutdownStartedEvent::default()),
+        EventPayload::ResyncRequired(ResyncRequiredEvent::default()),
+    ];
+    let decoder = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/events.rs"))
+        .expect("read event decoder");
+    assert_eq!(known.len(), decoder.matches("decode!(").count());
+
+    for payload in known {
+        let mut envelope = EventEnvelope::default();
+        envelope.topic = payload.topic().expect("known event topic");
+        envelope.payload = payload.clone();
+        let mut value = serde_json::to_value(envelope).expect("encode envelope");
+        let data = value["payload"]["data"]
+            .as_object_mut()
+            .expect("event data must be an object");
+        data.insert("future".to_owned(), Value::from(1));
+        let body = serde_json::to_vec(&value).expect("encode modified envelope");
+        let decoded = decode_response::<EventEnvelope>(API_VERSION, &body)
+            .expect("event with additive data field");
+        assert_eq!(decoded.payload, payload);
+    }
+}
+
+#[test]
 fn unknown_response_enum_strings_use_fallbacks() {
     assert_eq!(
         serde_json::from_str::<ControlErrorKind>("\"future\"").expect("error kind"),
@@ -606,6 +647,72 @@ fn decode_checks_limits_versions_and_shapes_in_order() {
 }
 
 #[test]
+fn decode_errors_never_echo_request_values() {
+    const SECRET: &str = "sk-live-0123456789abcdefSECRET";
+    let number = "987654321";
+    let mut errors = Vec::new();
+    for body in [
+        format!(r#"{{"version":1,"action":"connect","force":"{SECRET}"}}"#),
+        format!(r#"{{"version":1,"action":"connect","force":{number}}}"#),
+        format!(r#"{{"version":1,"action":"{SECRET}","force":false}}"#),
+    ] {
+        errors.push(
+            decode_request::<AgentPlanRequest>(API_VERSION, body.as_bytes())
+                .expect_err("malformed agent request"),
+        );
+    }
+    for body in [
+        format!(r#"{{"version":1,"text":"","{SECRET}":true}}"#),
+        format!(r#"{{"version":1,"text":"{SECRET}"#),
+        format!(r#"{{"version":1,"text":"{SECRET}",}}"#),
+    ] {
+        errors.push(
+            decode_request::<ConfigValidateRequest>(API_VERSION, body.as_bytes())
+                .expect_err("malformed config request"),
+        );
+    }
+    for body in [
+        format!(r#"{{"version":1,"draining":"{SECRET}"}}"#),
+        format!(r#"{{"version":1,"draining":{number}}}"#),
+    ] {
+        errors.push(
+            decode_response::<ShutdownResponse>(API_VERSION, body.as_bytes())
+                .expect_err("wrong response type"),
+        );
+    }
+    for body in [
+        format!(r#"{{"version":1,"text":"{SECRET}"#),
+        format!(r#"{{"version":1,"text":"{SECRET}",}}"#),
+    ] {
+        errors.push(
+            decode_response::<ConfigResponse>(API_VERSION, body.as_bytes())
+                .expect_err("malformed response"),
+        );
+    }
+    for error in errors {
+        assert!(!error.message.contains(SECRET), "{}", error.message);
+        assert!(!error.message.contains(number), "{}", error.message);
+        assert!(!format!("{error:?}").contains(SECRET), "{error:?}");
+        assert!(!format!("{error:?}").contains(number), "{error:?}");
+        for issue in error.details {
+            assert!(!issue.field.contains(SECRET));
+            assert!(!issue.reason.contains(SECRET));
+            assert!(!issue.message.contains(SECRET));
+            assert!(!issue.field.contains(number));
+            assert!(!issue.reason.contains(number));
+            assert!(!issue.message.contains(number));
+        }
+    }
+
+    let error =
+        decode_request::<TokenRotateRequest>(API_VERSION, br#"{"version":1,"colour":true}"#)
+            .expect_err("unknown field");
+    assert!(error.message.contains("unknown_field `colour`"));
+    assert_eq!(error.details[0].field, "colour");
+    assert_eq!(error.details[0].reason, "unknown_field");
+}
+
+#[test]
 fn picks_forms_are_typed_and_validated() {
     let replace = PicksSetRequest::replace("r", vec!["a".to_owned()]);
     assert_eq!(
@@ -640,7 +747,7 @@ fn picks_forms_are_typed_and_validated() {
             ControlErrorKind::Unprocessable
         );
     }
-    for token in ["a", "+", "all,+a", "none,+a"] {
+    for token in ["a", "all,+a", "none,+a"] {
         let error = PicksSetRequest::edit("r", vec![token.to_owned()])
             .form()
             .expect_err("mixed form");
@@ -717,7 +824,7 @@ fn event_payload_topics_are_stable() {
 fn reject_unknown<T: Request + std::fmt::Debug>(body: &str) {
     let error = decode_request::<T>(API_VERSION, body.as_bytes()).expect_err("unknown field");
     assert_eq!(error.kind, ControlErrorKind::BadRequest);
-    assert!(error.message.contains("unknown field"), "{}", error.message);
+    assert!(error.message.contains("unknown_field"), "{}", error.message);
 }
 
 fn event_snapshot(name: &str, payload: EventPayload) {
@@ -897,5 +1004,104 @@ fn limits_match_the_plan_and_bound_config_text_at_the_edge() {
     let error = decode_request::<ConfigApplyRequest>(API_VERSION, &over).expect_err("over limit");
     assert_eq!(error.kind, ControlErrorKind::BadRequest);
     assert_eq!(error.details[0].field, "text");
+    assert_eq!(error.details[0].reason, "too_large");
+}
+
+#[test]
+fn revision_fields_are_bounded_by_max_id_bytes() {
+    let at = "r".repeat(MAX_ID_BYTES);
+    let over = "r".repeat(MAX_ID_BYTES + 1);
+    assert_revision_limit::<ConfigApplyRequest>(
+        "expected_revision",
+        serde_json::to_vec(&ConfigApplyRequest::new(at.clone(), "")).expect("encode apply"),
+        serde_json::to_vec(&ConfigApplyRequest::new(over.clone(), "")).expect("encode apply"),
+    );
+    assert_revision_limit::<ReloadRequest>(
+        "expected_revision",
+        serde_json::to_vec(&ReloadRequest::new(at.clone())).expect("encode reload"),
+        serde_json::to_vec(&ReloadRequest::new(over.clone())).expect("encode reload"),
+    );
+    assert_revision_limit::<PicksSetRequest>(
+        "expected_picks_revision",
+        serde_json::to_vec(&PicksSetRequest::replace(at.clone(), vec!["a".to_owned()]))
+            .expect("encode picks"),
+        serde_json::to_vec(&PicksSetRequest::replace(
+            over.clone(),
+            vec!["a".to_owned()],
+        ))
+        .expect("encode picks"),
+    );
+    assert_revision_limit::<AgentConnectRequest>(
+        "expected_plan_revision",
+        serde_json::to_vec(&AgentConnectRequest::new(Some(at.clone()))).expect("encode connect"),
+        serde_json::to_vec(&AgentConnectRequest::new(Some(over.clone()))).expect("encode connect"),
+    );
+    assert_revision_limit::<AgentDisconnectRequest>(
+        "expected_plan_revision",
+        serde_json::to_vec(&AgentDisconnectRequest::new(false, Some(at.clone())))
+            .expect("encode disconnect"),
+        serde_json::to_vec(&AgentDisconnectRequest::new(false, Some(over)))
+            .expect("encode disconnect"),
+    );
+}
+
+#[test]
+fn id_lists_enforce_the_max_ids_count() {
+    let ids = (0..MAX_IDS)
+        .map(|index| format!("m{index}"))
+        .collect::<Vec<_>>();
+    let body = serde_json::to_vec(&PicksSetRequest::replace("r", ids.clone())).expect("encode ids");
+    decode_request::<PicksSetRequest>(API_VERSION, &body).expect("ids at limit");
+    let mut over_ids = ids;
+    over_ids.push("overflow".to_owned());
+    let body = serde_json::to_vec(&PicksSetRequest::replace("r", over_ids)).expect("encode ids");
+    let error = decode_request::<PicksSetRequest>(API_VERSION, &body).expect_err("too many ids");
+    assert_eq!(error.details[0].field, "ids");
+    assert_eq!(error.details[0].reason, "too_many");
+
+    let edits = (0..MAX_IDS)
+        .map(|index| format!("+m{index}"))
+        .collect::<Vec<_>>();
+    let body = serde_json::to_vec(&PicksSetRequest::edit("r", edits.clone())).expect("encode edit");
+    decode_request::<PicksSetRequest>(API_VERSION, &body).expect("edit at limit");
+    let mut over_edits = edits;
+    over_edits.push("+overflow".to_owned());
+    let body = serde_json::to_vec(&PicksSetRequest::edit("r", over_edits)).expect("encode edit");
+    let error = decode_request::<PicksSetRequest>(API_VERSION, &body).expect_err("too many edits");
+    assert_eq!(error.details[0].field, "edit");
+    assert_eq!(error.details[0].reason, "too_many");
+}
+
+#[test]
+fn edit_token_failures_report_specific_reasons() {
+    let at_limit = format!("+{}", "m".repeat(MAX_ID_BYTES));
+    PicksSetRequest::edit("r", vec![at_limit])
+        .form()
+        .expect("256-byte edit id");
+    let over_limit = format!("+{}", "m".repeat(MAX_ID_BYTES + 1));
+    for (token, reason) in [
+        (String::new(), "invalid"),
+        ("+".to_owned(), "invalid"),
+        (over_limit, "too_large"),
+        ("plain".to_owned(), "mixed_forms"),
+        ("é".to_owned(), "mixed_forms"),
+    ] {
+        let error = PicksSetRequest::edit("r", vec![token])
+            .form()
+            .expect_err("invalid edit token");
+        assert_eq!(error.details[0].field, "edit");
+        assert_eq!(error.details[0].reason, reason);
+    }
+}
+
+fn assert_revision_limit<T: Request + std::fmt::Debug>(
+    field: &str,
+    at_body: Vec<u8>,
+    over_body: Vec<u8>,
+) {
+    decode_request::<T>(API_VERSION, &at_body).expect("revision at limit");
+    let error = decode_request::<T>(API_VERSION, &over_body).expect_err("revision over limit");
+    assert_eq!(error.kind, ControlErrorKind::Unprocessable);
+    assert_eq!(error.details[0].field, field);
     assert_eq!(error.details[0].reason, "too_large");
 }
