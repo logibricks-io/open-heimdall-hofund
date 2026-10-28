@@ -20,7 +20,7 @@ use hofund_plugin_host::HttpLimits;
 pub use hofund_gateway::Running;
 use hofund_provider::{Credential, Endpoint, Provider, Wire, resolve};
 use hofund_quirks::named;
-use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
+use hofund_router::{Cooldowns, FailoverPolicy, Snapshot};
 use hofund_secrets::TokenFile;
 use hofund_usage::Ledger;
 
@@ -30,8 +30,11 @@ pub mod control_map;
 mod membership;
 mod models;
 mod models_state;
+mod registry;
+mod runtime;
 
 pub use models::{ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming};
+pub use registry::{CompiledPreset, DaemonRegistry, RegistryAdapter};
 
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
@@ -74,7 +77,8 @@ impl std::error::Error for DaemonError {}
 pub fn check(path: &Path) -> Result<(), DaemonError> {
     let config = load_path(path).map_err(show)?;
     warn(&config);
-    let _ = providers(&config, path, None, Mode::Check, None, None)?;
+    let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
+    let _ = providers(&config, path, None, Mode::Check, None, None, &registry)?;
     Ok(())
 }
 
@@ -143,7 +147,7 @@ pub fn configured_listen(path: &Path) -> Option<String> {
 /// Static agent descriptions compiled into the plugin registry.
 #[must_use]
 pub fn agent_descriptions() -> &'static [&'static AgentDescription] {
-    hofund_plugin_registry::agents()
+    RegistryAdapter.agents()
 }
 
 /// Model names declared in `path`'s routes.
@@ -176,7 +180,21 @@ pub fn usage_report(path: &Path) -> Result<String, DaemonError> {
 /// Returns [`DaemonError`] when startup fails. A later accept error stays on
 /// the server task.
 pub async fn start(path: &Path) -> Result<Running, DaemonError> {
-    start_inner(path, None, None).await
+    start_inner(path, None, None, Arc::new(RegistryAdapter)).await
+}
+
+/// Starts a daemon with an injected registry.
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] when startup fails.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub async fn start_with_registry(
+    path: &Path,
+    registry: Arc<dyn DaemonRegistry>,
+) -> Result<Running, DaemonError> {
+    start_inner(path, Some(0), None, registry).await
 }
 
 /// Starts the daemon without retaining idle upstream sockets.
@@ -190,7 +208,7 @@ pub async fn start(path: &Path) -> Result<Running, DaemonError> {
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub async fn start_for_test(path: &Path) -> Result<Running, DaemonError> {
-    start_inner(path, Some(0), None).await
+    start_inner(path, Some(0), None, Arc::new(RegistryAdapter)).await
 }
 
 /// Starts a test daemon with short refresh-loop timings.
@@ -200,29 +218,27 @@ pub async fn start_for_test_with_refresh(
     path: &Path,
     timing: RefreshTiming,
 ) -> Result<Running, DaemonError> {
-    start_inner(path, Some(0), Some(timing)).await
+    start_inner(path, Some(0), Some(timing), Arc::new(RegistryAdapter)).await
 }
 
 async fn start_inner(
     path: &Path,
     max_idle_per_host: Option<usize>,
     refresh_timing: Option<RefreshTiming>,
+    registry: Arc<dyn DaemonRegistry>,
 ) -> Result<Running, DaemonError> {
     let config = load_path(path).map_err(show)?;
     warn(&config);
     let token_path = beside(path, &config.token_file);
     let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
     let usage = Arc::new(Ledger::open(&beside(path, &config.usage_file)).map_err(show)?);
+    let runtime = runtime::Runtime::new(Arc::clone(&registry), path, max_idle_per_host);
     let mut models_host = ModelsHost::new(config.connect_timeout, config.read_timeout)
-        .with_state_root(beside(path, ".hofund"));
-    let gateway = Gateway::with_token_file(
-        router(&config, path, max_idle_per_host, Some(&mut models_host))?,
-        token,
-        token_path,
-        inbound_codecs(),
-        usage,
-    )
-    .with_surfaces(hofund_plugin_registry::surfaces());
+        .with_state_root(beside(path, ".hofund"))
+        .with_registry(Arc::clone(&registry));
+    let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
+    let gateway = Gateway::with_token_file(snapshot, token, token_path, inbound_codecs(), usage)
+        .with_surfaces(registry.surfaces());
     let running = gateway
         .bind(config.listen)
         .await
@@ -233,7 +249,8 @@ async fn start_inner(
         path.to_path_buf(),
         refresh_timing.unwrap_or_default(),
     );
-    Ok(running.with_task(refresh))
+    let maintenance = runtime.spawn_maintenance();
+    Ok(running.with_task(refresh).with_task(maintenance))
 }
 
 /// Serves until the process receives a shutdown signal.
@@ -267,16 +284,20 @@ fn token_file(path: &Path) -> Result<TokenFile, DaemonError> {
     Ok(TokenFile::new(beside(path, &config.token_file)))
 }
 
+type RouterParts = (
+    Snapshot,
+    Arc<membership::Table>,
+    HashMap<hofund_plugin_api::MemberId, String>,
+);
+
 fn router(
     config: &Config,
     path: &Path,
     max_idle_per_host: Option<usize>,
     models_host: Option<&mut ModelsHost>,
-) -> Result<Snapshot, DaemonError> {
-    let cooldowns = Arc::new(Cooldowns::with_clock(
-        CooldownPolicy::default(),
-        Arc::new(|| tokio::time::Instant::now().into_std()),
-    ));
+    cooldowns: Arc<Cooldowns>,
+    registry: &Arc<dyn DaemonRegistry>,
+) -> Result<RouterParts, DaemonError> {
     let built = providers(
         config,
         path,
@@ -284,7 +305,23 @@ fn router(
         Mode::Serve,
         models_host,
         Some(Arc::clone(&cooldowns)),
+        registry,
     )?;
+    let fingerprints = built
+        .iter()
+        .map(|(id, provider)| (membership::member_id(id), provider.fingerprint.clone()))
+        .collect();
+    let (routes, policy) = route_plan(config);
+    let (snapshot, table) = membership::open_with_table(&built, routes, policy, cooldowns)?;
+    Ok((snapshot, table, fingerprints))
+}
+
+fn route_plan(
+    config: &Config,
+) -> (
+    BTreeMap<String, Vec<membership::PlannedHop>>,
+    FailoverPolicy,
+) {
     let caps: BTreeMap<&str, u64> = config
         .providers
         .iter()
@@ -312,7 +349,7 @@ fn router(
         connect_errors: config.failover.connect_errors,
         statuses: config.failover.statuses.clone(),
     };
-    membership::open(&built, routes, policy, cooldowns)
+    (routes, policy)
 }
 
 #[derive(Clone, Copy)]
@@ -328,6 +365,7 @@ fn providers(
     mode: Mode,
     mut models_host: Option<&mut ModelsHost>,
     cooldowns: Option<Arc<Cooldowns>>,
+    registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<BTreeMap<String, membership::BuiltProvider>, DaemonError> {
     let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
     if let Some(max_idle_per_host) = max_idle_per_host {
@@ -337,12 +375,12 @@ fn providers(
     for provider in &config.providers {
         let planned = match models_host.as_deref() {
             Some(host) => host.planned(provider)?,
-            None => plan(provider)?,
+            None => plan_using(provider, |id| registry.find_preset(id), registry)?,
         };
         let endpoint = endpoint_for(provider, &planned)?;
         let timeout = endpoint.timeout;
         let protocol = protocol_of(planned.wire);
-        let plugin_id = plugin_for(provider, planned.wire);
+        let plugin_id = plugin_for(provider, planned.wire, registry);
         let adapter = build_plugin(
             provider,
             &planned,
@@ -351,6 +389,7 @@ fn providers(
             limits,
             mode,
             cooldowns.clone(),
+            registry,
         )?;
         if let Some(host) = models_host.as_deref_mut() {
             host.register_instance(
@@ -368,10 +407,26 @@ fn providers(
                 timeout,
                 plugin_id,
                 preset_id: provider.preset.clone().unwrap_or_default(),
+                fingerprint: provider_fingerprint(&endpoint.api_key, &planned.base_url),
             },
         );
     }
     Ok(built)
+}
+
+fn provider_fingerprint(credential: &str, base_url: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hash = Sha256::new();
+    hash.update(b"hofund-provider-fingerprint-v1\0");
+    for field in [credential, base_url] {
+        hash.update((field.len() as u64).to_be_bytes());
+        hash.update(field.as_bytes());
+    }
+    hash.finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn endpoint_for(
@@ -398,22 +453,34 @@ fn endpoint_for(
     Ok(endpoint)
 }
 
-type PresetLookup = fn(
-    &str,
-) -> Option<(
-    &'static hofund_plugin_registry::CompiledPreset,
-    Option<&'static str>,
-)>;
-
-fn plugin_for(provider: &hofund_config::Provider, wire: Wire) -> String {
-    plugin_for_with(provider, wire, hofund_plugin_registry::find_preset)
+fn plugin_for(
+    provider: &hofund_config::Provider,
+    wire: Wire,
+    registry: &Arc<dyn DaemonRegistry>,
+) -> String {
+    plugin_for_using(provider, wire, |id| registry.find_preset(id), registry)
 }
 
-fn plugin_for_with(provider: &hofund_config::Provider, wire: Wire, lookup: PresetLookup) -> String {
+#[cfg(test)]
+fn plugin_for_with(
+    provider: &hofund_config::Provider,
+    wire: Wire,
+    lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
+) -> String {
+    let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
+    plugin_for_using(provider, wire, lookup, &registry)
+}
+
+fn plugin_for_using(
+    provider: &hofund_config::Provider,
+    wire: Wire,
+    lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
+    registry: &Arc<dyn DaemonRegistry>,
+) -> String {
     if let Some(preset) = &provider.preset
         && let Some((compiled, _)) = lookup(preset)
     {
-        if hofund_plugin_registry::builtin_factory_ids().contains(&compiled.plugin) {
+        if registry.builtin_factory_ids().contains(&compiled.plugin) {
             return implementation_id(wire).to_owned();
         }
         return compiled.plugin.to_owned();
@@ -421,6 +488,7 @@ fn plugin_for_with(provider: &hofund_config::Provider, wire: Wire, lookup: Prese
     implementation_id(wire).to_owned()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_plugin(
     provider: &hofund_config::Provider,
     planned: &Planned,
@@ -429,9 +497,10 @@ fn build_plugin(
     limits: HttpLimits,
     mode: Mode,
     cooldowns: Option<Arc<Cooldowns>>,
+    registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<adapt::ProviderAdapter, DaemonError> {
-    let plugin_id = plugin_for(provider, planned.wire);
-    let raw = raw_for(provider, planned, endpoint)?;
+    let plugin_id = plugin_for(provider, planned.wire, registry);
+    let raw = raw_for(provider, planned, endpoint, registry)?;
     let upstream = build_raw_plugin(
         provider,
         &plugin_id,
@@ -443,6 +512,7 @@ fn build_plugin(
         true,
         matches!(mode, Mode::Check),
         cooldowns,
+        registry,
     )?;
     Ok(adapt::ProviderAdapter::new(provider.id.clone(), upstream))
 }
@@ -459,8 +529,10 @@ fn build_raw_plugin(
     resolve_own_options: bool,
     preflight: bool,
     cooldowns: Option<Arc<Cooldowns>>,
+    registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<Arc<dyn UpstreamProvider>, DaemonError> {
-    let factory = hofund_plugin_registry::factory(plugin_id)
+    let factory = registry
+        .factory(plugin_id)
         .ok_or_else(|| DaemonError::new(format!("no factory for plugin `{plugin_id}`")))?;
     factory.validate(&raw).map_err(show)?;
     if resolve_own_options {
@@ -489,7 +561,7 @@ fn build_raw_plugin(
     // keep the default `build_with`, so they build through `validate_and_build`.
     // Only a linked (listed) plugin receives the selected protocol in
     // `BuildContext`, and a listed plugin without one is an error.
-    if hofund_plugin_registry::is_kernel_factory(plugin_id) {
+    if registry.is_kernel_factory(plugin_id) {
         return factory.validate_and_build(&raw, &host).map_err(show);
     }
     let protocol = protocol.ok_or_else(|| {
@@ -512,24 +584,38 @@ fn raw_for(
     provider: &hofund_config::Provider,
     planned: &Planned,
     endpoint: &Endpoint,
+    registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<RawTable, DaemonError> {
-    raw_for_with(
+    raw_for_using(
         provider,
         planned,
         endpoint,
-        hofund_plugin_registry::find_preset,
+        |id| registry.find_preset(id),
+        registry,
     )
 }
 
+#[cfg(test)]
 fn raw_for_with(
     provider: &hofund_config::Provider,
     planned: &Planned,
     endpoint: &Endpoint,
-    lookup: PresetLookup,
+    lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
+) -> Result<RawTable, DaemonError> {
+    let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
+    raw_for_using(provider, planned, endpoint, lookup, &registry)
+}
+
+fn raw_for_using(
+    provider: &hofund_config::Provider,
+    planned: &Planned,
+    endpoint: &Endpoint,
+    lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
+    registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<RawTable, DaemonError> {
     if let Some(preset) = &provider.preset
         && let Some((compiled, _)) = lookup(preset)
-        && !hofund_plugin_registry::builtin_factory_ids().contains(&compiled.plugin)
+        && !registry.builtin_factory_ids().contains(&compiled.plugin)
     {
         return raw_from_preset(compiled, provider, &planned.base_url);
     }
@@ -537,7 +623,7 @@ fn raw_for_with(
 }
 
 fn raw_from_preset(
-    preset: &hofund_plugin_registry::CompiledPreset,
+    preset: &registry::CompiledPreset,
     provider: &hofund_config::Provider,
     base_url: &str,
 ) -> Result<RawTable, DaemonError> {
@@ -698,19 +784,20 @@ struct Planned {
 }
 
 fn compiled_credential(
-    compiled: &'static hofund_plugin_registry::CompiledPreset,
+    compiled: &'static registry::CompiledPreset,
     region: Option<&str>,
     wire: Wire,
+    registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<Credential, DaemonError> {
-    if !hofund_plugin_registry::builtin_factory_ids().contains(&compiled.plugin) {
+    if !registry.builtin_factory_ids().contains(&compiled.plugin) {
         return Ok(Credential::Default);
     }
-    let protocol = hofund_plugin_registry::protocol_for(wire)
+    let protocol = registry::protocol_for(wire)
         .ok_or_else(|| DaemonError::new(format!("preset `{}` cannot use {wire:?}", compiled.id)))?;
-    let selection = hofund_plugin_registry::select(
+    let selection = registry::select(
         compiled,
         region,
-        &hofund_plugin_registry::builtin_protocols(),
+        &registry.builtin_protocols(),
         Some(protocol),
         "",
     )
@@ -731,13 +818,25 @@ fn served_for(plugin: &str, protocols: &[ProtocolId]) -> Result<Vec<ProtocolId>,
     Ok(protocols.to_vec())
 }
 
+#[cfg(test)]
 fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
-    plan_with(provider, hofund_plugin_registry::find_preset)
+    let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
+    plan_using(provider, hofund_plugin_registry::find_preset, &registry)
 }
 
+#[cfg(test)]
 fn plan_with(
     provider: &hofund_config::Provider,
-    lookup: PresetLookup,
+    lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
+) -> Result<Planned, DaemonError> {
+    let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
+    plan_using(provider, lookup, &registry)
+}
+
+fn plan_using(
+    provider: &hofund_config::Provider,
+    lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
+    registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<Planned, DaemonError> {
     let selected = match provider.protocol.as_deref() {
         Some(protocol) => Some(selected_protocol(&provider.id, protocol)?),
@@ -747,11 +846,11 @@ fn plan_with(
         && let Some((compiled, alias_region)) = lookup(preset)
     {
         let region = option_present(provider, "region")?.or(alias_region);
-        let builtin = hofund_plugin_registry::builtin_factory_ids().contains(&compiled.plugin);
+        let builtin = registry.builtin_factory_ids().contains(&compiled.plugin);
         let served = if builtin {
-            hofund_plugin_registry::builtin_protocols()
+            registry.builtin_protocols()
         } else {
-            let factory = hofund_plugin_registry::factory(compiled.plugin).ok_or_else(|| {
+            let factory = registry.factory(compiled.plugin).ok_or_else(|| {
                 DaemonError::new(format!(
                     "preset plugin `{}` has no factory",
                     compiled.plugin
@@ -762,7 +861,7 @@ fn plan_with(
                 DynUpstreamFactory::spec(factory.as_ref()).protocols(),
             )?
         };
-        let selection = hofund_plugin_registry::select(
+        let selection = registry::select(
             compiled,
             region,
             &served,
@@ -795,7 +894,7 @@ fn plan_with(
         })
         .map_err(show)?;
         return Ok(Planned {
-            protocol: hofund_plugin_registry::protocol_for(resolved.wire),
+            protocol: registry::protocol_for(resolved.wire),
             base_url: resolved.base_url,
             wire: resolved.wire,
             credential: resolved.credential,
@@ -842,8 +941,8 @@ fn option_present<'a>(
 
 fn selected_protocol(provider_id: &str, protocol: &str) -> Result<(ProtocolId, Wire), DaemonError> {
     let id = ProtocolId::try_from(protocol).map_err(|_| unknown_protocol(provider_id, protocol))?;
-    let wire = hofund_plugin_registry::wire_for_protocol(id)
-        .ok_or_else(|| unknown_protocol(provider_id, protocol))?;
+    let wire =
+        registry::wire_for_protocol(id).ok_or_else(|| unknown_protocol(provider_id, protocol))?;
     Ok((id, wire))
 }
 
@@ -903,6 +1002,10 @@ fn show<E: std::fmt::Display>(error: E) -> DaemonError {
 #[cfg(test)]
 mod tests {
     use super::check;
+
+    fn registry() -> std::sync::Arc<dyn super::DaemonRegistry> {
+        std::sync::Arc::new(super::RegistryAdapter)
+    }
 
     #[test]
     fn the_raw_endpoint_table_carries_the_preset_id() {
@@ -1129,6 +1232,7 @@ mod tests {
             true,
             false,
             None,
+            &registry(),
         )
         .expect("build");
         let completion = upstream
@@ -1181,6 +1285,7 @@ mod tests {
             true,
             false,
             None,
+            &registry(),
         ) else {
             panic!("listed plugin built without a selected protocol");
         };
@@ -1217,7 +1322,8 @@ mod tests {
             let provider = &config.providers[0];
             let planned = super::plan(provider).expect("plan");
             let endpoint = super::endpoint_for(provider, &planned).expect("endpoint");
-            let raw = super::raw_for(provider, &planned, &endpoint).expect("raw");
+            let registry = registry();
+            let raw = super::raw_for(provider, &planned, &endpoint, &registry).expect("raw");
             super::build_raw_plugin(
                 provider,
                 plugin_id,
@@ -1232,6 +1338,7 @@ mod tests {
                 true,
                 false,
                 None,
+                &registry,
             )
             .unwrap_or_else(|error| panic!("{plugin_id} legacy build failed: {error}"));
         }

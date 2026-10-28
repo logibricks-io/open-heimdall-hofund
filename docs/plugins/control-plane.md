@@ -339,6 +339,8 @@ Issue #120 is resolved in H, not L. It concerns whether `QuotaObservation::retry
 
 Tests for #117 cover cooldown survival across reload and panic publication, removed-member pruning, expired-entry pruning, success against a missing id without insertion, the 10,000-entry bound, revision-guard behavior, and one recovery event per rest.
 
+**Status (L2):** `DaemonRegistry` and daemon runtime state now keep one cooldown book across startup, candidate, panic, and recovery publication. Successful publication prunes removed members and changed provider fingerprints; the book now has book-wide revisions, idle expiry, bounded eviction, periodic maintenance, and one recovery event per rest. The `rate_forget` retention and credential-sensitive identity follow the reference behavior (`reference: internal/gateway/routing.go:170-185`, `reference: internal/gateway/routing.go:1360-1375`, `reference: internal/provider/keys.go:68-85`).
+
 ## `hofund serve` exec and release
 
 On Unix, `hofund serve` discovers `hofundd` beside `std::env::current_exe()` first, then searches `PATH` using the platform executable suffix. It invokes the selected path directly with `--config <path>`, inherits the environment, and uses `CommandExt::exec`. There is no shell and no parent process left to forward signals: the daemon receives them and its exit status is the command's status. `HOFUND_CONFIG` and provider `env:` values pass through unchanged; an explicit `--config` is passed exactly once.

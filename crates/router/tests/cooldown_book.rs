@@ -312,3 +312,195 @@ fn overflowing_policy_durations_still_cool_far_into_the_future() {
     assert!(generic.until().duration_since(now) > Duration::from_secs(365 * DAY));
     assert!(book.cooling(&id).is_some());
 }
+
+fn member(name: &str) -> MemberId {
+    MemberId::from_preset(
+        PresetId::try_from(name).expect("preset id"),
+        MemberKey::from_static("default"),
+    )
+}
+
+fn with_policy(policy: CooldownPolicy) -> (Cooldowns, Arc<Mutex<Instant>>) {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
+    (
+        Cooldowns::with_clock(policy, Arc::new(move || *clock.lock().expect("clock"))),
+        now,
+    )
+}
+
+#[allow(clippy::field_reassign_with_default)]
+fn custom_policy(max_entries: usize, rate_forget: Duration) -> CooldownPolicy {
+    let mut policy = CooldownPolicy::default();
+    policy.max_entries = max_entries;
+    policy.rate_forget = rate_forget;
+    policy
+}
+
+#[test]
+fn success_does_not_insert_missing_entry() {
+    let (book, _) = with_policy(CooldownPolicy::default());
+    let id = member("missing");
+    assert_eq!(book.revision(&id), 0);
+    book.record_success(&id);
+    assert_eq!(book.revision(&id), 0);
+    book.record_success_if_unchanged(&id, 0);
+    assert_eq!(book.revision(&id), 0);
+    assert!(book.entries().is_empty());
+}
+
+#[test]
+fn success_clears_and_removes_entry_without_history() {
+    let (book, _) = with_policy(CooldownPolicy::default());
+    for conditional in [false, true] {
+        let id = member(if conditional { "conditional" } else { "direct" });
+        book.observe(&id, None, Some(0));
+        let revision = book.revision(&id);
+        if conditional {
+            book.record_success_if_unchanged(&id, revision);
+        } else {
+            book.record_success(&id);
+        }
+        assert_eq!(book.cooling(&id), None);
+        assert_eq!(book.revision(&id), 0);
+    }
+}
+
+#[test]
+fn stale_success_after_missing_capture_does_not_clear_concurrent_failure() {
+    let (book, _) = with_policy(CooldownPolicy::default());
+    let id = member("member");
+    assert_eq!(book.revision(&id), 0);
+    book.record_failure(&id, &PluginError::connect("down"));
+    book.record_success_if_unchanged(&id, 0);
+    assert!(book.cooling(&id).is_some());
+}
+
+#[test]
+fn revisions_are_book_wide_monotonic_and_never_zero() {
+    let (book, _) = with_policy(CooldownPolicy::default());
+    let first = member("first");
+    let second = member("second");
+    assert_eq!(book.revision(&first), 0);
+    book.record_failure(&first, &PluginError::connect("down"));
+    let one = book.revision(&first);
+    book.record_failure(&second, &PluginError::connect("down"));
+    let two = book.revision(&second);
+    assert!(one >= 1);
+    assert!(two > one);
+    book.record_success(&first);
+    assert_eq!(book.revision(&first), 0);
+    book.record_failure(&first, &PluginError::connect("down"));
+    assert!(book.revision(&first) > two);
+}
+
+#[test]
+fn expired_idle_entry_is_pruned_on_read() {
+    let policy = custom_policy(10_000, Duration::from_secs(10));
+    let (book, clock) = with_policy(policy);
+    let id = member("member");
+    book.record_failure(&id, &PluginError::connect("down"));
+    advance(&clock, 61);
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.revision(&id), 1);
+    advance(&clock, 10);
+    assert_eq!(book.revision(&id), 0);
+}
+
+#[test]
+fn rate_limit_entry_kept_for_rate_forget_then_pruned() {
+    let policy = custom_policy(10_000, Duration::from_secs(30));
+    let (book, clock) = with_policy(policy);
+    let id = member("member");
+    book.record_failure(&id, &PluginError::status_error(429, "slow"));
+    advance(&clock, 60);
+    assert_eq!(book.cooling(&id), None);
+    assert_ne!(book.revision(&id), 0);
+    advance(&clock, 29);
+    assert_ne!(book.revision(&id), 0);
+    advance(&clock, 1);
+    assert_eq!(book.revision(&id), 0);
+}
+
+#[test]
+fn maintenance_never_expires_active_rest() {
+    let policy = custom_policy(10_000, Duration::ZERO);
+    let (book, _) = with_policy(policy);
+    let id = member("member");
+    book.record_failure(&id, &PluginError::connect("down"));
+    book.maintain();
+    assert!(book.cooling(&id).is_some());
+    assert_ne!(book.revision(&id), 0);
+}
+
+#[test]
+fn bounded_book_evicts_expired_then_lru_idle_never_active() {
+    let mut policy = custom_policy(2, Duration::from_secs(30));
+    let (book, clock) = with_policy(policy.clone());
+    let expired = member("expired");
+    let active = member("active");
+    let incoming = member("incoming");
+    book.record_failure(&expired, &PluginError::connect("down"));
+    advance(&clock, 1);
+    book.record_failure(&active, &PluginError::connect("down"));
+    advance(&clock, 59);
+    book.record_failure(&incoming, &PluginError::connect("down"));
+    assert_eq!(book.revision(&expired), 0);
+    assert!(book.cooling(&active).is_some());
+    assert!(book.cooling(&incoming).is_some());
+
+    let (book, clock) = with_policy(policy.clone());
+    book.record_failure(&expired, &PluginError::connect("down"));
+    advance(&clock, 61);
+    assert_eq!(book.cooling(&expired), None);
+    book.record_failure(&active, &PluginError::connect("down"));
+    book.record_failure(&incoming, &PluginError::connect("down"));
+    assert_eq!(book.revision(&expired), 0);
+    assert!(book.cooling(&active).is_some());
+    assert!(book.cooling(&incoming).is_some());
+
+    policy.max_entries = 1;
+    let (book, _) = with_policy(policy);
+    book.record_failure(&active, &PluginError::connect("down"));
+    book.record_failure(&incoming, &PluginError::connect("down"));
+    assert!(book.cooling(&active).is_some());
+    assert_eq!(book.cooling(&incoming), None);
+    assert_eq!(book.revision(&incoming), 0);
+}
+
+#[test]
+fn recovery_fires_once_per_rest() {
+    let (book, clock) = with_policy(CooldownPolicy::default());
+    let expired = member("expired");
+    let cleared = member("cleared");
+    book.record_failure(&expired, &PluginError::connect("down"));
+    advance(&clock, 60);
+    assert_eq!(book.cooling(&expired), None);
+    assert_eq!(book.cooling(&expired), None);
+    assert_eq!(
+        book.drain_recoveries(),
+        vec![(expired.clone(), CooldownCause::Failure)]
+    );
+    assert!(book.drain_recoveries().is_empty());
+
+    book.record_failure(&cleared, &PluginError::status_error(429, "slow"));
+    book.record_success(&cleared);
+    book.record_success(&cleared);
+    assert_eq!(
+        book.drain_recoveries(),
+        vec![(cleared, CooldownCause::RateLimit)]
+    );
+    assert!(book.drain_recoveries().is_empty());
+}
+
+#[test]
+fn candidate_retention_prunes_only_absent_members() {
+    let (book, _) = with_policy(CooldownPolicy::default());
+    let kept = member("kept");
+    let removed = member("removed");
+    book.record_failure(&kept, &PluginError::connect("down"));
+    book.record_failure(&removed, &PluginError::connect("down"));
+    book.retain_members(&std::collections::HashSet::from([kept.clone()]));
+    assert!(book.cooling(&kept).is_some());
+    assert_eq!(book.revision(&removed), 0);
+}
