@@ -60,8 +60,8 @@ pub use hofund_ir::{ContentPart, Request, Response, Role, StreamEvent};
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, BindBlocked, ClockHandle, DirHandle, HostContext,
     HttpHandle, Job, JobId, JobSpec, LOOPBACK_CANCEL_PATH, LoopbackBinding, LoopbackHandle,
-    LoopbackSpec, ObserveHandle, ProcessHandle, RedirectHost, SchedulerHandle, SecretsHandle,
-    SpawnRequest, Spawned, SurfaceHost,
+    LoopbackSpec, ObserveHandle, PipedChild, ProcessHandle, RedirectHost, SchedulerHandle,
+    SecretsHandle, SpawnRequest, Spawned, SurfaceHost,
 };
 pub use id::{
     AccountId, IdError, MemberId, MemberKey, PluginId, PluginKey, PluginKind, PresetId, ProtocolId,

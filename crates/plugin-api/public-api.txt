@@ -361,6 +361,12 @@ ObserveHandle #[non_exhaustive] derives(Clone)
 ObserveHandle::fn observation (& self) -> QuotaObservation
 ObserveHandle::fn observe (& self , observation : QuotaObservation) -> Result < () , PluginError >
 PROBE_CAP
+PipedChild
+PipedChild #[non_exhaustive]
+PipedChild::async fn close_stdin (& self) -> Result < () , PluginError >
+PipedChild::async fn write_stdin (& self , bytes : Bytes) -> Result < () , PluginError >
+PipedChild::fn id (& self) -> u32
+PipedChild::fn stdout (& self) -> Result < BodyStream , PluginError >
 Plan
 Plan #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 Plan::fn changes (& self) -> & [FileChange]
@@ -443,6 +449,7 @@ ProbeReport::fn snippet (& self) -> & str
 ProcessHandle
 ProcessHandle #[non_exhaustive] derives(Clone)
 ProcessHandle::async fn spawn (& self , request : & SpawnRequest) -> Result < Spawned , PluginError >
+ProcessHandle::async fn spawn_piped (& self , request : & SpawnRequest) -> Result < PipedChild , PluginError >
 ProcessHandle::async fn wait (& self , spawned : Spawned) -> Result < i32 , PluginError >
 ProcessHandle::fn kill (& self , spawned : Spawned) -> Result < () , PluginError >
 ProtocolId
@@ -694,8 +701,14 @@ kernel::LoopbackBackend::fn bind (& self , plugin : & PluginKey , session : & st
 kernel::LoopbackBackend::fn release (& self , session : & str)
 kernel::ObserveBackend
 kernel::ObserveBackend::fn observe (& self , observation : QuotaObservation) -> Result < () , PluginError >
+kernel::PipedChildBackend
+kernel::PipedChildBackend::async fn close_stdin (& self) -> Result < () , PluginError >
+kernel::PipedChildBackend::async fn write_stdin (& self , bytes : Bytes) -> Result < () , PluginError >
+kernel::PipedChildBackend::fn id (& self) -> u32
+kernel::PipedChildBackend::fn take_stdout (& self) -> Option < BodyStream >
 kernel::ProcessBackend
 kernel::ProcessBackend::async fn spawn (& self , program : PathBuf , args : Vec < std :: ffi :: OsString > , env : Vec < (std :: ffi :: OsString , std :: ffi :: OsString) > , cwd : PathBuf ,) -> Result < u32 , PluginError >
+kernel::ProcessBackend::async fn spawn_piped (& self , program : PathBuf , args : Vec < std :: ffi :: OsString > , env : Vec < (std :: ffi :: OsString , std :: ffi :: OsString) > , cwd : PathBuf ,) -> Result < Box < dyn PipedChildBackend > , PluginError >
 kernel::ProcessBackend::async fn wait (& self , id : u32) -> Result < i32 , PluginError >
 kernel::ProcessBackend::fn kill (& self , id : u32) -> Result < () , PluginError >
 kernel::SchedulerBackend

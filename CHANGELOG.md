@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is not a Bedrock Mantle root, so a streamed reply reaches the client as the
   upstream sends it. A reset after the request was written is not replayed and
   does not fail over.
+- Piped child processes for plugins: `ProcessHandle::spawn_piped` returns a
+  child with line-framed stdout (1 MiB line cap), stdin writes and close, an
+  environment cleared to a path, home, locale, and proxy allowlist, and kill
+  and reap on drop.
 - Loopback sign-in callbacks: plugins bind a kernel-owned listener on
   `127.0.0.1` through `HostContext::loopback()`, on a fixed or ephemeral port.
   The first request with the expected `state` and a `code` completes the
