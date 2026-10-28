@@ -31,6 +31,7 @@ struct Region {
     chat: &'static str,
     responses: &'static str,
     anthropic: &'static str,
+    decide: &'static str,
     catalog: &'static str,
     website: &'static str,
     keys_url: &'static str,
@@ -47,6 +48,7 @@ const NO_REGION: Region = Region {
     chat: "",
     responses: "",
     anthropic: "",
+    decide: "",
     catalog: "",
     website: "",
     keys_url: "",
@@ -611,6 +613,76 @@ const ROWS: &[Row] = &[
         anthropic: "https://open.bigmodel.cn/api/anthropic",
         website: "https://open.bigmodel.cn",
         keys_url: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys",
+    },
+    // reference: internal/provider/presets.go:542
+    // name and note kept ASCII as in the old catalog
+    Row {
+        id: "typesafe",
+        name: "TypeSafe Jev",
+        kind: "vendor",
+        catalog: "",
+        note: "routes groups - picks model and effort",
+        chat: "",
+        responses: "",
+        anthropic: "",
+        website: "https://typesafe.ai",
+        keys_url: "https://console.typesafe.ai/keys",
+    },
+    // reference: internal/provider/presets.go:547
+    // name and note kept ASCII as in the old catalog
+    Row {
+        id: "vercel-jev",
+        name: "Jev - Vercel AI Gateway",
+        kind: "relay",
+        catalog: "",
+        note: "routes groups - picks model and effort",
+        chat: "",
+        responses: "",
+        anthropic: "",
+        website: "https://vercel.com/ai-gateway/models/jev",
+        keys_url: "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys",
+    },
+    // reference: internal/provider/presets.go:553
+    // name and note kept ASCII as in the old catalog
+    Row {
+        id: "cloudflare-jev",
+        name: "Cloudflare Workers AI - Jev, Clef",
+        kind: "relay",
+        catalog: "",
+        note: "routes groups - picks model and effort",
+        chat: "",
+        responses: "",
+        anthropic: "",
+        website: "https://developers.cloudflare.com/ai/models/typesafe/jev/",
+        keys_url: "https://dash.cloudflare.com/profile/api-tokens",
+    },
+    // reference: internal/provider/presets.go:560
+    // note and region names kept ASCII as in the old catalog
+    Row {
+        id: "bailian-decision",
+        name: "Bailian Decision Model",
+        kind: "vendor",
+        catalog: "",
+        note: "routes groups - picks model and effort",
+        chat: "",
+        responses: "",
+        anthropic: "",
+        website: "https://help.aliyun.com/zh/model-studio/decision-model-preview",
+        keys_url: "https://bailian.console.aliyun.com/?tab=model#/api-key",
+    },
+    // reference: internal/provider/presets.go:573
+    // note kept ASCII as in the old catalog
+    Row {
+        id: "qwen-decision",
+        name: "Qwen Decision Model",
+        kind: "vendor",
+        catalog: "",
+        note: "routes groups - picks model and effort",
+        chat: "",
+        responses: "",
+        anthropic: "",
+        website: "https://www.qianwenai.com/models/decision-model-preview",
+        keys_url: "https://platform.qianwenai.com/home/api-keys",
     },
 ];
 
@@ -1257,6 +1329,66 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
             ..NO_DETAILS
         },
     ),
+    (
+        "typesafe",
+        Details {
+            decide: "https://api.typesafe.ai/v1",
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "vercel-jev",
+        Details {
+            decide: "https://ai-gateway.vercel.sh/typesafe",
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "cloudflare-jev",
+        Details {
+            decide: "https://api.cloudflare.com/client/v4",
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "bailian-decision",
+        Details {
+            regions: &[
+                Region {
+                    id: "cn-beijing",
+                    name: "Workspace - Beijing",
+                    decide: "https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                    ..NO_REGION
+                },
+                Region {
+                    id: "ap-southeast-1",
+                    name: "Workspace - Singapore",
+                    decide: "https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+                    keys_url: "https://modelstudio.console.alibabacloud.com/?tab=playground#/api-key",
+                    ..NO_REGION
+                },
+                Region {
+                    id: "token-plan",
+                    name: "Token Plan - Beijing",
+                    decide: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                    keys_url: "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal",
+                    ..NO_REGION
+                },
+            ],
+            region_label: "Plan",
+            short: "Bailian Decision",
+            decide: "https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "qwen-decision",
+        Details {
+            short: "Qwen Decision",
+            decide: "https://maas.qianwenaiapi.com/compatible-mode/v1",
+            ..NO_DETAILS
+        },
+    ),
 ];
 
 fn details(row: &Row) -> &'static Details {
@@ -1301,6 +1433,32 @@ fn endpoint(row: &Row, region: Option<&Region>, wire: Wire) -> &'static str {
         Wire::Responses => row.responses,
         Wire::Messages => row.anthropic,
         Wire::Generative | Wire::Vertex | Wire::Converse => "",
+    }
+}
+
+fn decide_only(row: &Row) -> bool {
+    row.chat.is_empty()
+        && row.responses.is_empty()
+        && row.anthropic.is_empty()
+        && !details(row).decide.is_empty()
+        && details(row).regions.iter().all(|region| {
+            region.chat.is_empty() && region.responses.is_empty() && region.anthropic.is_empty()
+        })
+}
+
+fn decide_endpoint(row: &Row, region: Option<&Region>) -> &'static str {
+    region
+        .map(|region| region.decide)
+        .filter(|decide| !decide.is_empty())
+        .unwrap_or(details(row).decide)
+}
+
+fn wire_name(wire: Wire) -> &'static str {
+    match wire {
+        Wire::Chat => "chat",
+        Wire::Responses => "responses",
+        Wire::Messages => "messages",
+        Wire::Generative | Wire::Vertex | Wire::Converse => panic!("not a batch wire"),
     }
 }
 
@@ -1412,6 +1570,7 @@ fn batch_rows_match_the_reference_literal() {
             assert_eq!(actual.chat, expected.chat);
             assert_eq!(actual.responses, expected.responses);
             assert_eq!(actual.anthropic, expected.anthropic);
+            assert_eq!(actual.decide, expected.decide);
             assert_eq!(actual.catalog, expected.catalog);
             assert_eq!(actual.website, expected.website);
             assert_eq!(actual.keys_url, expected.keys_url);
@@ -1439,6 +1598,40 @@ fn batch_rows_resolve_like_the_old_catalog() {
         let (preset, _) = find_preset(row.id).expect("compiled batch row");
         for region in regions(row) {
             let region_id = region.map(|region| region.id);
+            if decide_only(row) {
+                for (protocol, wire) in [
+                    (None, Wire::Chat),
+                    (Some(ProtocolId::OPENAI_CHAT), Wire::Chat),
+                    (Some(ProtocolId::OPENAI_RESPONSES), Wire::Responses),
+                    (Some(ProtocolId::ANTHROPIC_MESSAGES), Wire::Messages),
+                ] {
+                    for base_url in ["", OVERRIDE] {
+                        let error = select(preset, region_id, &protocols, protocol, base_url)
+                            .expect_err("decide-only old catalog resolution");
+                        let expected = if protocol.is_none() {
+                            format!(
+                                "preset `{}` only classifies a route. It has no chat, responses, or messages endpoint.",
+                                row.id
+                            )
+                        } else {
+                            format!("preset `{}` has no {} endpoint", row.id, wire_name(wire))
+                        };
+                        assert_eq!(error.to_string(), expected, "{} {region_id:?}", row.id);
+                        let credential_base = if base_url.is_empty() {
+                            decide_endpoint(row, region)
+                        } else {
+                            OVERRIDE
+                        };
+                        assert_eq!(
+                            credential_for(row.id, wire, credential_base),
+                            expected_credential(wire),
+                            "{} {wire:?} {base_url:?}",
+                            row.id
+                        );
+                    }
+                }
+                continue;
+            }
             let cases = std::iter::once((None, Wire::Chat))
                 .chain(served(row, region).map(|(protocol, wire)| (Some(protocol), wire)));
             for (protocol, wire) in cases {
@@ -1591,4 +1784,24 @@ fn batch_rows_model_plan_like_the_old_catalog() {
             );
         }
     }
+}
+
+#[test]
+fn moved_decide_only_row_reports_explicit_wire_error() {
+    let (preset, _) = find_preset("typesafe").expect("moved decide-only preset");
+    let error = select(
+        preset,
+        None,
+        &builtin_protocols(),
+        Some(ProtocolId::OPENAI_CHAT),
+        OVERRIDE,
+    )
+    .expect_err("explicit wire on a real decide-only row");
+    assert_eq!(error.to_string(), "preset `typesafe` has no chat endpoint");
+}
+
+#[test]
+fn moved_decide_only_row_preserves_decide_url() {
+    let (preset, _) = find_preset("typesafe").expect("moved decide-only preset");
+    assert_eq!(preset.decide, "https://api.typesafe.ai/v1");
 }
