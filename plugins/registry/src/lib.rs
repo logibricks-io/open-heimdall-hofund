@@ -19,8 +19,6 @@ mod builtin;
 mod check;
 mod select;
 
-include!("reserved_agent_ids.rs");
-
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/registry.rs"));
 }

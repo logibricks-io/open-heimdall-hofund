@@ -49,7 +49,7 @@ The spine, from [architecture.md](../architecture.md), is `ir <- codec <- provid
 
 The daemon match at `crates/daemon/src/lib.rs` lines 251-285 is the composition root, and it names `Vertex` and `Bedrock`. That is why a provider change and a kernel change collide.
 
-`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape for the engine: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. At the original RFC pin, the four adapters were Rust constants in `crates/agent/src/catalog.rs`; F1-F4 moved Codex, Claude Code, Gemini CLI, and OpenCode to the compiled registry; no const-backed agent remains. `Slot` (line 363) is `Origin`, `V1`, `Token`, `Literal`, `GeminiModel`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier` (at the original pin; after F3 and F4, the whole const `Slot` enum is compiled only for tests and the legacy oracles behind `legacy-agent-consts`). `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
+`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape for the engine: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. At the original RFC pin, the four adapters were Rust constants in `crates/agent/src/catalog.rs`; F1-F4 moved Codex, Claude Code, Gemini CLI, and OpenCode to the compiled registry. The old const engine and migration-only oracle feature have since been removed, and compiled descriptions use the plugin API slots directly. `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
 
 Streaming is already pull-based (`crates/provider/src/lib.rs` lines 5-7, `stream.rs` lines 3-4). That stays. What is missing is the host, the factory, and failure isolation.
 
@@ -489,9 +489,9 @@ The engine stays in `hofund-agent`, which depends on `hofund-plugin-api`. The AP
 
 On this pin the four consts already write more than a URL and a token:
 
-- Gemini CLI writes `model.name` (at the original pin: `catalog.rs` lines 176-178 and 246, `Slot::GeminiModel` at line 369). A string `model` is moved there. The sets now live in `plugins/agents/gemini-cli/agent.toml`, the frozen const lives in `crates/agent/src/legacy.rs`, and `Slot::GeminiModel` is test-only. [agents.md](../coverage/agents.md) line 18 records the same fact.
-- OpenCode writes one `models` entry per route, with `name` and `variants` set to `{}` (at the original pin: `catalog.rs` lines 267-270, `Slot::OpenCodeModels` at line 370). Modalities, limits, and reasoning are omitted because this build has no catalog values. The catalog-model set now lives in `plugins/agents/opencode/agent.toml`, and the frozen const lives in `crates/agent/src/legacy.rs`; `OpenCodeModels` is test-only after F4.
-- Claude Code writes `env.ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, and `ANTHROPIC_DEFAULT_FABLE_MODEL` only for a Fable id (at the original pin: `catalog.rs` lines 31-37 and 72-94, `Slot::ClaudeTier` at line 375). The tier sets now live in `plugins/agents/claude-code/agent.toml`, and the frozen const lives in `crates/agent/src/legacy.rs`. `CLAUDE_CODE_SUBAGENT_MODEL`, `effortLevel`, and `CLAUDE_CODE_EFFORT_LEVEL` stay unset.
+- Gemini CLI writes `model.name` (at the original pin: `catalog.rs` lines 176-178 and 246, `Slot::GeminiModel` at line 369). A string `model` is moved there. The sets now live in `plugins/agents/gemini-cli/agent.toml`, and the old private slot has been removed. [agents.md](../coverage/agents.md) line 18 records the same fact.
+- OpenCode writes one `models` entry per route, with `name` and `variants` set to `{}` (at the original pin: `catalog.rs` lines 267-270, `Slot::OpenCodeModels` at line 370). Modalities, limits, and reasoning are omitted because this build has no catalog values. The catalog-model set now lives in `plugins/agents/opencode/agent.toml`, and the old private slot has been removed.
+- Claude Code writes `env.ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, and `ANTHROPIC_DEFAULT_FABLE_MODEL` only for a Fable id (at the original pin: `catalog.rs` lines 31-37 and 72-94, Claude's tier slot at line 375). The tier sets now live in `plugins/agents/claude-code/agent.toml`, and the old private slot has been removed. `CLAUDE_CODE_SUBAGENT_MODEL`, `effortLevel`, and `CLAUDE_CODE_EFFORT_LEVEL` stay unset.
 
 A crate exists only when a slot cannot express the write. Known cases from the coverage inventory:
 
@@ -828,7 +828,7 @@ The entry points are `hofund_kit_upstream::conformance(factory, fixture)`, `hofu
 | --- | --- | --- | --- |
 | Upstream | `kits/upstream` | `execute` against wiremock, auth header placement, error class (`Connect`, `Timeout`, `Status`, `Decode`), `list_models` pagination when `ListKind::Live`, `probe` sends one minimal request and records a status, `quota` either returns windows or `PluginErrorKind::Unsupported`. Also: drop mid-stream closes the upstream connection, a kernel deadline fires, a mid-stream error becomes a protocol error event, `Debug` of any secret-bearing value does not contain the key, cancel-safety, and N parallel `execute` calls on one instance. | `crates/provider/tests/upstream.rs` (header: "Upstream adapters against a local mock. No real network.") and `crates/provider/tests/azure_deployments.rs`. |
 | Subscription | `kits/subscription` | Recorded HTTP fixtures for `start_sign_in`, `complete_sign_in`, `refresh`, and `quota`. The account store sees an atomic update. No browser, no loopback to a vendor, no live OAuth in CI. | No hofund test exists yet. The fixture format is request and response files checked into the plugin directory. |
-| Agent | `kits/agent` | Temp `Session` (the pattern in `crates/agent/tests/rewrite.rs`), golden bytes before and after `plan` for each OS, `apply` backup, `disconnect` drift (user-edited keys kept, untouched keys restored), `refresh_token` without a new backup. | `crates/agent/tests/rewrite.rs`. |
+| Agent | `kits/agent` | Temp `Session`, golden bytes before and after `plan` for each OS, `apply` backup, `disconnect` drift (user-edited keys kept, untouched keys restored), `refresh_token` without a new backup. | `plugins/registry/tests/agent_conformance.rs` and `plugins/registry/tests/agent_regressions.rs`. |
 
 A plugin pull request runs `cargo test -p <crate>` for a code plugin, or the registry's fragment test for a data-only plugin, plus `cargo test -p xtask --test workspace_invariants`. The fragment test checks the compiled static ids, required keys, and duplicate detection. It does not re-parse TOML at runtime.
 
@@ -943,17 +943,17 @@ D3 adds the compiled agent-description path and its equivalence evidence. At D3,
 - Delivery follows rule 3: the CLI and desktop call `hofund_agent::catalog(hofund_daemon::agent_descriptions())`. Until L, the daemon re-exports the registry's sorted `agents()` list without depending on the agent engine. L moves delivery behind the control plane.
 - The API adds `FileKind::Env`, `AgentFile` `create` and `env_replaces`, shared-id ordered candidates, `Slot::ModelIfUnset`, model and effort file builders, lowercase match needles, and documented tier and catalog-model semantics. Compiled path overrides and the named setters treat empty and relative environment values as unset, matching the reference. Path templates remain `~`-rooted, and lifting that restriction is still an open question.
 - `plugins/registry/build.rs` validates and compiles data-only `plugins/agents/<id>/agent.toml` files into static descriptions. These directories need no `plugin.toml` or crate and are not listed in `plugins.toml`. The non-default `test-fixtures` feature builds the separate fixture list; registry dev-dependencies enable it for tests.
-- `hofund-kit-agent` depends on `hofund-agent` and replays plan, apply, backup, refresh, and disconnect contracts without network access. Registry tests also dev-depend on the kit. Goldens live at `plugins/registry/tests/fixtures/agents/<id>/fixtures/<os>/<case>/` or `fixtures/all/<case>/`: shared cases run on all three OSes, OS cases run only on their own OS, and regeneration moves identical three-OS trees to `all/`; the same files pass through the compiled descriptions and test-only const descriptions.
-- F1-F4 map the existing private slots as follows: `GeminiModel` becomes `model_if_unset = { from = "model" }`, `ClaudeModel` becomes `model_if_unset = {}`, and `ClaudeTier` becomes `model_tier`, with `claude-fable-` as the needle only for Fable. `OpenCodeModels` becomes `catalog_models`, and OpenCode's JSONC/JSON choice becomes two candidates with JSONC `create = false` and JSON `create = true`.
+- `hofund-kit-agent` depends on `hofund-agent` and replays plan, apply, backup, refresh, and disconnect contracts without network access. Registry tests also dev-depend on the kit. Goldens live at `plugins/registry/tests/fixtures/agents/<id>/fixtures/<os>/<case>/` or `fixtures/all/<case>/`: shared cases run on all three OSes, OS cases run only on their own OS, and regeneration moves identical three-OS trees to `all/`. Compiled descriptions replay these goldens, and shipped-plugin regression tests cover the remaining edge cases.
+- F1-F4 map the existing private slots as follows: `GeminiModel` becomes `model_if_unset = { from = "model" }`, Claude's model slot becomes `model_if_unset = {}`, and Claude's tier slot becomes `model_tier`, with `claude-fable-` as the needle only for Fable. `OpenCodeModels` becomes `catalog_models`, and OpenCode's JSONC/JSON choice becomes two candidates with JSONC `create = false` and JSON `create = true`.
 
 ### PR F1 notes
 
 F1 migrates Codex to the compiled data-only path without changing its configuration bytes or lifecycle behavior.
 
 - `plugins/agents/codex/agent.toml` carries the former const's paths, ordered sets, model key, and rationale. The production Codex const and resolver are removed. The other three agents remain const-backed in this pull request.
-- The non-default `legacy-codex-const` feature exposes the frozen pre-F1 adapter only as an equivalence-test oracle. Agent and registry dev-dependencies enable it; normal production composition does not.
+- The temporary pre-F1 oracle feature was enabled only by agent and registry dev-dependencies, never by normal production composition. It was removed after F4.
 - Goldens live at `plugins/agents/codex/fixtures/all/<case>/`. Fresh, existing-user, stale-hofund, multiple-route, environment override, and configured-model cases pass through both the shipped compiled description and the frozen oracle for Linux, macOS, and Windows. Registry integration tests also compare metadata and the complete edit lifecycle.
-- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. A compiled description fills its named slot; other compiled ids follow in input order, and collision checks are unchanged. `RESERVED_AGENT_IDS` now contains only const-backed ids.
+- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. A compiled description fills its named slot; other compiled ids follow in input order, and collision checks are unchanged. The temporary reserved-id list was removed after all agents migrated.
 - No parity fixes or behavior changes are included.
 
 ### PR F2 notes
@@ -961,9 +961,9 @@ F1 migrates Codex to the compiled data-only path without changing its configurat
 F2 migrates Claude Code to the compiled data-only path without changing its configuration bytes or lifecycle behavior.
 
 - `plugins/agents/claude-code/agent.toml` carries the former const's path, ordered origin, token, model, and tier sets, Fable needle, model key, and rationale. The production Claude Code const, described adapter, and resolver are removed; Gemini CLI and OpenCode remain const-backed.
-- F1's non-default `legacy-codex-const` feature is renamed `legacy-agent-consts` and now exposes the frozen Codex and Claude Code adapters only as equivalence-test oracles. Agent and registry dev-dependencies enable it; normal production composition does not.
+- F1's temporary oracle feature was renamed and extended to the frozen Codex and Claude Code adapters. It remained dev-only and was removed after F4.
 - Goldens live at `plugins/agents/claude-code/fixtures/all/<case>/`. Fresh, existing-user, stale-hofund, single-route, Fable, multiple-route, commented, environment override, and configured-model cases pass through both the shipped compiled description and the frozen oracle for Linux, macOS, and Windows. Registry integration tests also compare metadata, errors, and the complete edit lifecycle.
-- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. `RESERVED_AGENT_IDS` now contains `gemini-cli` and `opencode`; static `adapters()` and `find()` cover only those two const-backed agents.
+- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. The temporary reserved-id list and static lookup functions were removed after all agents migrated.
 - No parity fixes or behavior changes are included.
 
 ### PR F3 notes
@@ -971,19 +971,19 @@ F2 migrates Claude Code to the compiled data-only path without changing its conf
 F3 migrates Gemini CLI to the compiled data-only path without changing its configuration bytes or lifecycle behavior.
 
 - `plugins/agents/gemini-cli/agent.toml` carries the former const's paths, ordered sets, model key, and rationale. An absolute `GEMINI_CLI_HOME` remains the parent of `.gemini`; empty and relative values remain unset. The production Gemini CLI const, described adapter, and resolvers are removed.
-- The non-default `legacy-agent-consts` feature now exposes the frozen Codex, Claude Code, Gemini CLI, and OpenCode adapters only as equivalence-test oracles. The const `Slot` enum, including `GeminiModel` and `Origin`, is compiled only for tests and that feature.
+- The temporary dev-only oracle feature exposed all four frozen adapters after F3 and F4. The old const `Slot` enum and that feature have since been removed.
 - Goldens live at `plugins/agents/gemini-cli/fixtures/all/<case>/`. Fresh, one-file and two-file user content, stale-hofund, string-model, existing-model, route-count, commented, configured-model, and environment override cases pass through both the shipped compiled description and the frozen oracle for Linux, macOS, and Windows. Registry integration tests also compare metadata, errors, directory trees, and the complete edit lifecycle.
-- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. `RESERVED_AGENT_IDS` is empty; static `adapters()` is empty and `find()` always returns `None`. Removing the legacy consts entirely is #147.
-- F4 (OpenCode) merged first, so F3 leaves zero const-backed agents. The const engine types (`Description`, `Location`, `Set`, `Slot`, `Described`) are compiled only for tests and `legacy-agent-consts`; the legacy fallback in `builtin_adapter` is feature-gated, and a missing compiled built-in is still a hard `AgentError` (#131).
+- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. The reserved-id list and static lookup functions were removed in the #147 and #180 cleanup.
+- F4 (OpenCode) merged first, so F3 leaves zero const-backed agents. The const engine types and fallback have since been removed, and a missing compiled built-in remains a hard `AgentError` (#131).
 
 ### PR F4 notes
 
 F4 migrates OpenCode to the compiled data-only path without changing its configuration bytes or lifecycle behavior.
 
 - `plugins/agents/opencode/agent.toml` carries the former const's ordered JSONC and JSON candidates, XDG override, provider sets, catalog-model slot, model key, and rationale. The production OpenCode const, described adapter, and path resolvers are removed.
-- The non-default `legacy-agent-consts` feature also exposes the frozen OpenCode adapter as an equivalence-test oracle. `Slot::V1`, which only OpenCode used in production, is now test/legacy-only alongside `OpenCodeModels`; both join the other migrated private slots behind test-only compilation.
+- The temporary dev-only oracle feature also exposed the frozen OpenCode adapter. All migrated private slots and the feature have since been removed.
 - Goldens live at `plugins/agents/opencode/fixtures/all/<case>/`. Fresh, JSON, JSONC, both-files, stale-hofund, route-count, configured-model, and XDG cases pass through both the shipped compiled description and the frozen oracle for Linux, macOS, and Windows. Registry integration tests compare metadata, errors, bytes, directory trees, and the complete edit lifecycle.
-- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. After F4 alone, `RESERVED_AGENT_IDS` contained only `gemini-cli`; F3 then emptied it.
+- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. The temporary reserved-id list has been removed.
 - No parity fixes or behavior changes are included.
 
 ### PR B2 notes
