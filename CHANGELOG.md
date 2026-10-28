@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-config control identities, single-instance locks, atomic token-free discovery,
+  secure runtime-directory fallback, and same-user Unix socket transport with ordered
+  client discovery. Windows keeps authenticated loopback TCP until named-pipe support lands.
 - Opt-in loopback TCP control health and status with strict Bearer, Host, Origin,
   and mutation defenses, live disk/runtime revisions, and a typed TCP control client.
   Model `/health` now identifies the service as hofund.
@@ -222,6 +225,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Over-long Unix control socket paths now warn and fall back to TCP instead of
+  preventing daemon startup. Socket tests use short paths on macOS, and the
+  Windows single-instance test no longer requires session debug output.
 - Wrong-method control responses now use the `method_not_allowed` error kind
   while retaining HTTP 405 (#206).
 - Decide-only presets with an explicit wire now report the same missing-endpoint

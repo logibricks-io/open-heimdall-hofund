@@ -1,6 +1,6 @@
 [package]
 name = "hofund-control-client"
-description = "Typed TCP client for the hofund control protocol."
+description = "Typed TCP and local IPC client for the hofund control protocol."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -16,7 +16,9 @@ http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10.9"
 tokio = { version = "1.54.1", features = ["net", "rt"] }
 
 [dev-dependencies]
