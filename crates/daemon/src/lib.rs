@@ -42,7 +42,9 @@ mod models_state;
 mod registry;
 mod runtime;
 
-pub use models::{ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming};
+pub use models::{
+    Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
+};
 pub use registry::{CompiledPreset, DaemonRegistry, RegistryAdapter};
 
 /// A configuration, credential, or startup failure.
@@ -316,18 +318,25 @@ async fn start_inner(
         .with_state_root(beside(path, ".hofund"))
         .with_registry(Arc::clone(&registry));
     let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
+    let cooldowns = snapshot
+        .load()
+        .cooldowns()
+        .cloned()
+        .expect("daemon router has shared cooldowns");
     let gateway = Gateway::with_token_file(
         snapshot,
         token.clone(),
         token_path.clone(),
         inbound_codecs(),
-        usage,
+        Arc::clone(&usage),
     )
     .with_surfaces(registry.surfaces());
     let mut running = gateway
         .bind(config.listen)
         .await
         .map_err(|error| DaemonError::new(error.to_string()))?;
+    let models_host = Arc::new(models_host);
+    let config = Arc::new(config);
     if let Some(session) = control_session.as_mut() {
         let state = Arc::new(control::DaemonControl::new(
             path,
@@ -335,6 +344,12 @@ async fn start_inner(
             running.local_addr,
             started_at_ms,
             runtime_revision,
+            Arc::clone(&models_host),
+            Arc::clone(&config),
+            Arc::clone(&registry),
+            cooldowns,
+            Arc::clone(&usage),
+            token_path.clone(),
         ));
         let control = hofund_gateway::control::Control::with_token_file(state, token, token_path);
         let mut tcp_listen = options.control_listen;
@@ -393,9 +408,8 @@ async fn start_inner(
     if let Some(session) = control_session {
         running = running.with_resource(session);
     }
-    let models_host = Arc::new(models_host);
     let refresh = models_host.spawn_refresh(
-        config,
+        config.as_ref().clone(),
         path.to_path_buf(),
         refresh_timing.unwrap_or_default(),
     );
@@ -1315,6 +1329,37 @@ mod tests {
             panic!("production plan resolved a fixture preset");
         };
         assert_eq!(error.to_string(), "unknown preset `fixture-equivalence`");
+    }
+
+    #[test]
+    fn moved_generative_and_messages_presets_plan_through_the_real_registry() {
+        for (preset, wire, base_url, credential, plugin) in [
+            (
+                "google",
+                hofund_provider::Wire::Generative,
+                "https://generativelanguage.googleapis.com/v1beta",
+                hofund_provider::Credential::GoogApiKey,
+                "generative",
+            ),
+            (
+                "anthropic",
+                hofund_provider::Wire::Messages,
+                "https://api.anthropic.com",
+                hofund_provider::Credential::XApiKey,
+                "anthropic",
+            ),
+        ] {
+            let config = hofund_config::load(&format!(
+                "[[providers]]\nid = \"{preset}\"\npreset = \"{preset}\"\napi_key = \"test-key\"\n"
+            ))
+            .expect("config");
+            let provider = &config.providers[0];
+            let planned = super::plan(provider).expect("real registry plan");
+            assert_eq!(planned.wire, wire);
+            assert_eq!(planned.base_url, base_url);
+            assert_eq!(planned.credential, credential);
+            assert_eq!(super::plugin_for(provider, wire, &registry()), plugin);
+        }
     }
 
     #[test]

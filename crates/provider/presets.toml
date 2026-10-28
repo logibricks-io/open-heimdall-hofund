@@ -8,37 +8,6 @@ version = 1
 source_commit = "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
 
 [[preset]]
-id = "anthropic"
-name = "Anthropic"
-kind = "vendor"
-catalog = "anthropic"
-anthropic = "https://api.anthropic.com"
-website = "https://console.anthropic.com"
-keys_url = "https://console.anthropic.com/settings/keys"
-header_hints = ["anthropic-workspace-id"]
-
-[[preset]]
-id = "openai"
-name = "OpenAI"
-kind = "vendor"
-catalog = "openai"
-chat = "https://api.openai.com/v1"
-responses = "https://api.openai.com/v1"
-website = "https://platform.openai.com"
-keys_url = "https://platform.openai.com/api-keys"
-
-[[preset]]
-id = "google"
-name = "Google Gemini"
-kind = "vendor"
-catalog = "google"
-note = "Gemini Developer API"
-generative = "https://generativelanguage.googleapis.com/v1beta"
-chat = "https://generativelanguage.googleapis.com/v1beta/openai"
-website = "https://aistudio.google.com"
-keys_url = "https://aistudio.google.com/apikey"
-
-[[preset]]
 id = "google-vertex"
 name = "Google Vertex AI"
 short = "Vertex AI"
@@ -275,18 +244,6 @@ keys_url = "https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/Cogniti
 hosts = true
 endpoint = "https://<resource>.openai.azure.com"
 endpoint_hint = "Your resource's endpoint, from Keys and Endpoint in the Azure portal. Once added, the gateway asks the resource for its deployments with this key, over its v1 API; the deployments' names are the model ids."
-
-[[preset]]
-id = "openrouter"
-name = "OpenRouter"
-kind = "relay"
-catalog = "openrouter"
-chat = "https://openrouter.ai/api/v1"
-anthropic = "https://openrouter.ai/api"
-decide = "https://openrouter.ai/api/v1"
-website = "https://openrouter.ai"
-keys_url = "https://openrouter.ai/keys"
-header_hints = ["HTTP-Referer", "X-OpenRouter-Title"]
 
 [[preset]]
 id = "ollama"
