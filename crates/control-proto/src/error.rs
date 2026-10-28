@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{API_VERSION, FieldIssue, MAX_ERROR_MESSAGE_BYTES, MAX_IDS, MAX_REQUEST_ID_LEN};
 
+const INVALID_REQUEST_ID: &str = "invalid-request-id";
+
 /// An error response body.
 ///
 /// Decoding rejects oversized text and invalid correlation ids rather than
@@ -32,7 +34,7 @@ impl ErrorEnvelope {
             return Err(response_field_error(
                 "error.message",
                 "too_large",
-                "decoded error message exceeds the 4096-byte limit",
+                format!("decoded error message exceeds the {MAX_ERROR_MESSAGE_BYTES}-byte limit"),
             ));
         }
         if !valid_request_id(&self.error.request_id) {
@@ -46,7 +48,7 @@ impl ErrorEnvelope {
             return Err(response_field_error(
                 "error.details",
                 "too_many",
-                "decoded error details exceed the 4096-entry limit",
+                format!("decoded error details exceed the {MAX_IDS}-entry limit"),
             ));
         }
         for (index, issue) in self.error.details.iter().enumerate() {
@@ -59,7 +61,9 @@ impl ErrorEnvelope {
                     return Err(response_field_error(
                         format!("error.details.{index}.{name}"),
                         "too_large",
-                        "decoded error detail text exceeds the 4096-byte limit",
+                        format!(
+                            "decoded error detail text exceeds the {MAX_ERROR_MESSAGE_BYTES}-byte limit"
+                        ),
                     ));
                 }
             }
@@ -106,7 +110,7 @@ impl ControlError {
         let request_id = if valid_request_id(&request_id) {
             request_id
         } else {
-            "invalid-request-id".to_owned()
+            INVALID_REQUEST_ID.to_owned()
         };
         Self {
             kind,
@@ -123,7 +127,7 @@ impl Default for ControlError {
         Self {
             kind: ControlErrorKind::Internal,
             message: String::new(),
-            request_id: String::new(),
+            request_id: INVALID_REQUEST_ID.to_owned(),
             retry_after_ms: None,
             details: Vec::new(),
         }
@@ -133,9 +137,10 @@ impl Default for ControlError {
 fn response_field_error(
     field: impl Into<String>,
     reason: &str,
-    message: &'static str,
+    message: impl Into<String>,
 ) -> ControlError {
-    let mut error = ControlError::new(ControlErrorKind::BadRequest, message, "validate");
+    let message = message.into();
+    let mut error = ControlError::new(ControlErrorKind::BadRequest, message.as_str(), "validate");
     error.details.push(FieldIssue::new(field, reason, message));
     error
 }
