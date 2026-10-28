@@ -211,6 +211,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Model-list redaction masks only whole secret tokens of at least eight characters,
   strips URL userinfo, and removes every URL query value through one shared helper.
+  This applies to every URL in an error message, including pagination URLs and
+  URLs quoted in transport errors.
 - Token URLs containing userinfo are rejected.
 
 ### Deprecated

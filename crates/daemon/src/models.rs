@@ -2074,7 +2074,6 @@ impl From<PageError> for ListFailure {
 #[derive(Clone)]
 struct Redactor {
     secrets: Vec<String>,
-    models_url: Option<String>,
 }
 
 impl Redactor {
@@ -2094,10 +2093,7 @@ impl Redactor {
                     .filter(|value| !value.is_empty()),
             );
         }
-        Self {
-            secrets,
-            models_url: models_url.map(str::to_owned),
-        }
+        Self { secrets }
     }
 
     fn clean(&self, error: PluginError) -> DaemonError {
@@ -2109,15 +2105,39 @@ impl Redactor {
     }
 
     fn text(&self, text: &str) -> String {
-        let mut clean = text.to_owned();
-        if let Some(url) = &self.models_url {
-            clean = clean.replace(url, &safe_url(url));
-        }
+        let mut clean = safe_urls_in(text);
         for secret in &self.secrets {
             clean = redact_token(&clean, secret);
         }
         clean
     }
+}
+
+/// Rewrites every `http://` or `https://` URL embedded in `text` with
+/// [`safe_url`], so userinfo and query values of any length (including
+/// pagination URLs that differ from the configured models URL, and URLs quoted
+/// inside transport errors) are never printed verbatim.
+fn safe_urls_in(text: &str) -> String {
+    let mut clean = String::with_capacity(text.len());
+    let mut remaining = text;
+    loop {
+        let start = match (remaining.find("http://"), remaining.find("https://")) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => break,
+        };
+        clean.push_str(&remaining[..start]);
+        let rest = &remaining[start..];
+        let end = rest
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, ')' | '"' | '\'' | '<' | '>' | '`')
+            })
+            .unwrap_or(rest.len());
+        clean.push_str(&safe_url(&rest[..end]));
+        remaining = &rest[end..];
+    }
+    clean.push_str(remaining);
+    clean
 }
 
 fn url_host(url: &str) -> Option<String> {
@@ -2185,6 +2205,23 @@ mod tests {
         let url = "https://user:pass@example.test/models?key=tiny#fragment";
         let redactor = redaction_fixture(Some(url));
         assert_eq!(redactor.text(url), "https://example.test/models?<redacted>");
+    }
+
+    #[test]
+    fn redactor_strips_short_query_values_from_any_url_in_the_text() {
+        let redactor = redaction_fixture(Some("https://example.test/models?key=tiny"));
+        let message = "error sending request for url (https://example.test/models?key=tiny&after_id=x&limit=1000): operation timed out";
+        let clean = redactor.text(message);
+        assert!(!clean.contains("tiny"), "{clean}");
+        assert_eq!(
+            clean,
+            "error sending request for url (https://example.test/models?<redacted>): operation timed out"
+        );
+        let other = redactor.text("see 'http://u:p@other.test/x?a=1' and \"https://a.test/b\"");
+        assert_eq!(
+            other,
+            "see 'http://other.test/x?<redacted>' and \"https://a.test/b\""
+        );
     }
 
     #[test]
