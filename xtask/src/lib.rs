@@ -6,3 +6,4 @@
 //! source scan is a second layer for paths, `include!`, and `#[path]`.
 
 pub mod boundary;
+pub mod registry;

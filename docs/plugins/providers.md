@@ -2,6 +2,56 @@
 
 This note is the contract for row E of RFC 0001 before the factories change. The plugin boundary in [boundary.md](boundary.md) still applies. This page is only about provider options, the SDK helpers those factories share, and the limits of this first slice.
 
+## Preset fragments
+
+A preset fragment is the data-only form of a catalog row. Its `[[preset]]` keys intentionally match `crates/provider/presets.toml`, but each batch must re-sort presets and aliases by id within each destination file because the catalog is not sorted. The preset shape follows `reference: internal/provider/presets.go:23-66`; regions follow `reference: internal/provider/presets.go:68-100`.
+
+A preset requires `id`, `name`, and `kind`. `kind` is `vendor`, `relay`, `local`, or `remote` (`reference: internal/provider/presets.go:13-19`). The optional keys are:
+
+- `short`, `note`, `catalog`, `website`, `keys_url`, `site_host`, and `key_hint`;
+- `no_key`, `no_list`, and `hosts` (booleans), `only`, `models`, and `header_hints`;
+- `endpoint`, `endpoint_hint`, `endpoint_needed`, `region_label`, and `decide`;
+- the flat wire keys `chat`, `responses`, `anthropic`, and `generative`;
+- `config`, a table whose values must be strings;
+- `[[preset.region]]` rows.
+
+`generative` is a hofund extension; it is not a field in the reference preset. The other wire names stay flat, as in the reference. The earlier design note's separate `protocols` list and `[preset.urls]` table are not used: non-empty URL keys already declare the available wires, and a separate list would duplicate them and force every moved row to be rewritten.
+
+A region requires `id`. Its optional keys are `name`, `chat`, `responses`, `anthropic`, `decide`, `lists`, `keys_url`, `website`, `site_host`, `catalog`, `models`, `embeddings`, `drawers`, and `videos`. A present region `models` array replaces the preset array, including when it is empty. There is no region `generative` override, matching `Endpoints::of` in `crates/provider/src/presets.rs:450-466`.
+
+A fragment may also contain top-level `[[alias]]` rows with `id`, `preset`, and optional `region`, the same shape as `crates/provider/presets.toml:10-27`. An alias supplies a default region; an explicit user region wins.
+
+Fragments have three locations:
+
+1. Inline `[[preset]]` and `[[alias]]` rows in a provider plugin's `plugin.toml`.
+2. Files relative to that plugin directory named by `presets = ["presets.toml"]` in `plugin.toml`, following RFC 0001 section 2.1.
+3. `plugins/providers/<builtin-factory-id>/presets.toml` with no `Cargo.toml` or `plugin.toml`. The directory name must be `openai-compat`, `anthropic`, or `generative`. These fragments compile unconditionally because their factories are always linked.
+
+A missing named file or a data-only directory for another id fails the build. Every `presets = [...]` entry must match `[a-z0-9-]+\.toml`. Each named file is a Cargo rebuild input. Plugin directories that already follow another rule, such as the code-only `fixture` package, are unchanged.
+
+Validation runs at build time. Preset and alias ids are kebab-case and unique across all real fragments, including aliases; test fixtures use a separate namespace. Presets and aliases are each sorted by id within one file. Regions retain declared order, and region ids are non-empty and unique within their preset and are never sorted. When regions exist, the preset-level wire set and URLs must exactly mirror the first region, so the first region is the default by construction (`reference: internal/provider/presets.go:68-69`). Names are non-empty. Every wire, `decide`, `endpoint`, `website`, and `keys_url` URL, at preset or region level where applicable, is empty or starts with `http://` or `https://` and contains no whitespace. An alias targets a preset in the same build and, when present, one of its regions. Unknown keys are errors through `deny_unknown_fields`, an intentional improvement over the reference Go literal because a typo in a moved row cannot silently compile. Config values remain strings, but emitted Rust uses debug-string escaping rather than restricting quotes, slashes, or newlines.
+
+A builtin-owned row lives in the directory for its default wire's factory. The default is the first non-empty preset-level URL in `generative`, `chat`, `responses`, `anthropic` order. Because the preset level mirrors the first region, this is also the first region's default. Generative belongs in `generative`, Chat or Responses in `openai-compat`, and Messages in `anthropic`. A row with no wire URL also belongs in `openai-compat`, but must declare `endpoint` unless it is decide-only. A placement error names the file, preset, and expected directory.
+
+Endpoint selection mirrors `resolve` and `Endpoints::of` in `crates/provider/src/presets.rs:177-262,450-466`:
+
+- A non-empty region wire replaces the preset wire; an empty one falls back to the preset. A region wire may exist even when the preset has no URL for that wire.
+- With an explicit `protocol`, the selected wire must have an effective URL whenever the preset has any wire URLs. A builtin-owned row may use any protocol served by the builtin factories. Until plugin-api carries the selected protocol, another row is limited to its owning plugin's first declared protocol and rejects any other explicit protocol.
+- Without an explicit protocol, the first served URL wins in `generative`, `chat`, `responses`, `anthropic` order. Builtin-owned rows are served per wire by `openai-compat`, `anthropic`, and `generative`, with the plugin chosen from the selected wire exactly as for a catalog row.
+- A non-empty provider `base_url` always overrides the selected fragment URL.
+- With no wire URLs, a builtin-owned explicit protocol requires that wire's endpoint. Without an explicit protocol, a builtin-owned row requires `endpoint` and `base_url` and defaults to chat; without `endpoint`, it reports `has no endpoint`. Other plugins require `base_url`. A decide-only row reports that it only classifies a route.
+
+An unknown region error lists valid ids in declared order, unlike the catalog's shorter error in `crates/provider/src/presets.rs:483-489`. Naming a region on a regionless preset is a separate error. Runtime registry tests check builtin-owned wires against the combined builtin protocol set and other wires against their owning factory, and require every fragment id to differ from the remaining catalog ids; these checks need factory data that the build script cannot use. The production-fragment checks are not gated on `test-fixtures`, so they run in default CI, and they are a required gate for every batch.
+
+For a builtin-owned row, credential placement comes from `hofund_provider::credential_for` with the final base URL (the region-resolved URL, or a provider `base_url` override when one is set), the same derivation used for catalog rows. The model-list path, which has no override, uses the region-resolved URL in `crates/provider/src/presets.rs:340-365`. Other plugins keep the default credential. A builtin-owned row with no wire URLs defaults to chat, as `resolve` does for endpoint-style catalog rows. A listed plugin's schema must accept `base_url`, because the daemon injects the selected preset URL into its raw table.
+
+### Decisions
+
+- Single-wire fill: hofund keeps one protocol per provider, and Mantle fill stays keyed by preset id or host, as a documented divergence from the reference's multi-protocol provider fill.
+- Flat wire keys: kept to match the reference `PresetDef` and `Region` fields and the existing catalog keys.
+- No credential key: the credential is derived from the preset id and final host, avoiding a second source of truth.
+- Placement: a builtin-owned row lives with its default-wire factory.
+
 ## Threat model
 
 Plugins are in-repo Rust linked into `hofundd`. A reviewer reads the diff. Nothing here is a sandbox, and nothing here accepts an out-of-tree plugin.

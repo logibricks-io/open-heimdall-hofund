@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Provider preset fragments now carry the full catalog schema, regions, and
+  aliases, with builtin data-only directories, catalog-equivalent wire and
+  credential selection, and build-time validation for row-E data migrations.
 - Docs: control plane (row L) plan.
 - Public `PluginErrorKind::Interrupted` and `ProviderErrorKind::Interrupted`
   variants classify a 2xx reply whose body failed while being read.
@@ -114,6 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[providers.options]` is forwarded to the plugin factory. Each factory has
   an option schema. An unknown key or a wrong type is a check error that
   names the provider and the key and does not include the value.
+- Relay with no `base_url` now fails at plan time with
+  `preset \`relay\` needs base_url`.
 - Vertex and Bedrock are built through `registry.factory`, like the other
   wires. The daemon no longer constructs those adapters itself.
 - Built-in adapters use the pooled host client, so `connect_timeout_ms` and
