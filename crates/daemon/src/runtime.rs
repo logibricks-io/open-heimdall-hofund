@@ -260,7 +260,7 @@ mod tests {
         let mut changed = original;
         changed.providers[0]
             .headers
-            .insert("authorization".to_owned(), "header-secret".to_owned());
+            .insert("x-auth-token".to_owned(), "header-secret".to_owned());
         assert_ne!(digest, fingerprint(&changed, 0));
         assert_secret_free(&digest, &["first-key"]);
     }

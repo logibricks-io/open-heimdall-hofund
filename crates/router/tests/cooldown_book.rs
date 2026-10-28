@@ -532,3 +532,25 @@ fn rate_ladder_resets_after_forget_despite_later_generic_history() {
     assert_eq!(next.failures(), 1);
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
 }
+
+#[test]
+fn rate_ladder_resets_during_active_non_rate_rest_after_forget() {
+    let (book, clock) = with_policy(CooldownPolicy::default());
+    let id = member("member");
+    book.record_failure(&id, &PluginError::status_error(429, "slow"));
+    advance(&clock, MINUTE);
+    let second = book
+        .record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("second rate failure");
+    assert_eq!(second.failures(), 2);
+    book.record_failure(
+        &id,
+        &PluginError::quota("empty").with_retry_after(Duration::from_secs(HOUR)),
+    );
+    advance(&clock, 32 * MINUTE);
+    book.maintain();
+    let next = book
+        .record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate failure during quota rest");
+    assert_eq!(next.failures(), 1);
+}

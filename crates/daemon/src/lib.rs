@@ -452,17 +452,7 @@ fn provider_fingerprint(
     }
     for (name, value) in &endpoint.headers {
         let name = name.to_ascii_lowercase();
-        if matches!(
-            name.as_str(),
-            "authorization"
-                | "proxy-authorization"
-                | "api-key"
-                | "x-api-key"
-                | "x-goog-api-key"
-                | "x-amz-security-token"
-        ) {
-            field(&mut hash, &format!("header:{name}"), value);
-        }
+        field(&mut hash, &format!("header:{name}"), value);
     }
     field(&mut hash, "base_url", &endpoint.base_url);
     Ok(hash
