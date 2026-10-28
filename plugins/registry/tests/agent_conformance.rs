@@ -9,7 +9,8 @@ fn shipped_agents_match_their_golden_cases() {
             .join("../agents")
             .join(description.id().as_str())
             .join("fixtures");
-        hofund_kit_agent::conformance(description, &fixtures);
+        let scratch = tempfile::tempdir().expect("temp dir");
+        hofund_kit_agent::conformance(description, &fixtures, scratch.path());
     }
 }
 
@@ -21,6 +22,7 @@ fn compiled_agents_match_their_golden_cases() {
             .join("tests/fixtures/agents")
             .join(description.id().as_str())
             .join("fixtures");
-        hofund_kit_agent::conformance(description, &fixtures);
+        let scratch = tempfile::tempdir().expect("temp dir");
+        hofund_kit_agent::conformance(description, &fixtures, scratch.path());
     }
 }

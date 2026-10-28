@@ -123,7 +123,11 @@ pub fn runtime_host_with_observe(
         Arc::new(SystemClock),
         Arc::new(RecordingScheduler::default()),
         Arc::new(StdProcess::default()),
-        Arc::new(RootDirs { root }),
+        Arc::new(RootDirs {
+            root,
+            #[cfg(test)]
+            _guard: None,
+        }),
         observe,
     ))
 }
@@ -148,16 +152,9 @@ impl SecretsBackend for KeySecrets {
 /// A context whose HTTP handle is `http`. Tests use this to drive the pooled client.
 #[cfg(test)]
 pub(crate) fn context_for_http(http: Arc<dyn HttpBackend>) -> HostContext {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "hofund-pool-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&root).expect("root");
+    let dirs = RootDirs::test();
     let accounts =
-        PlaintextFileAccountStore::open(root.join("accounts.json")).expect("test accounts");
+        PlaintextFileAccountStore::open(dirs.root.join("accounts.json")).expect("test accounts");
     host_context(
         PluginId::from_static("relay"),
         http,
@@ -166,7 +163,7 @@ pub(crate) fn context_for_http(http: Arc<dyn HttpBackend>) -> HostContext {
         Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
         Arc::new(RecordingScheduler::default()),
         Arc::new(RecordingProcess::default()),
-        Arc::new(RootDirs { root }),
+        Arc::new(dirs),
         Arc::new(RecordingObserve::default()),
     )
 }
@@ -205,7 +202,11 @@ impl TestHost {
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
             Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
             Arc::clone(&process) as Arc<dyn ProcessBackend>,
-            Arc::new(RootDirs { root }),
+            Arc::new(RootDirs {
+                root,
+                #[cfg(test)]
+                _guard: None,
+            }),
             Arc::clone(&observe) as Arc<dyn ObserveBackend>,
         );
         Self {
@@ -705,6 +706,20 @@ impl ProcessBackend for RecordingProcess {
 
 struct RootDirs {
     root: PathBuf,
+    #[cfg(test)]
+    _guard: Option<tempfile::TempDir>,
+}
+
+#[cfg(test)]
+impl RootDirs {
+    fn test() -> Self {
+        let guard = tempfile::tempdir().expect("test root");
+        let root = guard.path().to_path_buf();
+        Self {
+            root,
+            _guard: Some(guard),
+        }
+    }
 }
 
 impl DirBackend for RootDirs {
@@ -762,25 +777,23 @@ mod tests {
         PluginId::from_static("example-agent")
     }
 
-    fn root() -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        // A wall-clock stamp is not unique across parallel tests. Windows
-        // often returns the same `SystemTime` for the whole batch, so two
-        // tests shared `accounts.json` and the second rename of `accounts.tmp`
-        // failed with ERROR_FILE_NOT_FOUND.
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "hofund-host-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).expect("root");
-        path
+    struct Scratch(tempfile::TempDir);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    fn root() -> Scratch {
+        Scratch(tempfile::tempdir().expect("root"))
     }
 
     #[test]
     fn test_roots_do_not_share_a_directory() {
-        assert_ne!(root(), root());
+        assert_ne!(&*root(), &*root());
     }
 
     fn idle_job() -> hofund_plugin_api::Job {
@@ -835,7 +848,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_handle_rejects_another_plugins_account() {
-        let host = test_host(plugin(), root());
+        let root = root();
+        let host = test_host(plugin(), root.to_path_buf());
         let foreign = Account::from_stored(
             PluginId::from_static("other-plugin"),
             AccountId::from_static("work"),
@@ -949,7 +963,7 @@ mod tests {
                 std::sync::Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
                 std::sync::Arc::clone(&scheduler) as std::sync::Arc<dyn SchedulerBackend>,
                 std::sync::Arc::new(super::RecordingProcess::default()),
-                std::sync::Arc::new(super::RootDirs { root: root() }),
+                std::sync::Arc::new(super::RootDirs::test()),
                 std::sync::Arc::new(super::RecordingObserve::default()),
             )
         };
@@ -980,7 +994,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_host_seeds_and_records() {
-        let host = super::TestHost::open(plugin(), root());
+        let root = root();
+        let host = super::TestHost::open(plugin(), root.to_path_buf());
         host.secrets()
             .insert(host.context().plugin(), "token", "value");
         let secret = host
@@ -1040,7 +1055,7 @@ mod tests {
                 std::sync::Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
                 std::sync::Arc::new(super::RecordingScheduler::default()),
                 std::sync::Arc::new(super::RecordingProcess::default()),
-                std::sync::Arc::new(super::RootDirs { root: root() }),
+                std::sync::Arc::new(super::RootDirs::test()),
                 std::sync::Arc::new(super::RecordingObserve::default()),
             )
         };

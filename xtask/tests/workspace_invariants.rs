@@ -385,6 +385,46 @@ fn unsafe_code_scanner_flags_opt_outs_and_exempts_platform_win() {
     }
 }
 
+/// Workspace-relative Rust sources that may still access the process temp dir.
+/// Test fixtures should use RAII guards instead; keep this list empty.
+const TEMP_DIR_ALLOWLIST: &[&str] = &[];
+
+#[test]
+fn test_fixtures_do_not_build_process_temp_paths() {
+    let root = workspace_root();
+    let mut violations = Vec::new();
+    for member in MEMBERS {
+        for path in rust_files(&root.join(member)) {
+            let relative = relative(&root, &path);
+            if !TEMP_DIR_ALLOWLIST.contains(&relative.as_str())
+                && uses_process_temp_dir(&read_to_string(&path))
+            {
+                violations.push(relative);
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "test fixtures must use tempfile guards instead of process temp paths:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn process_temp_dir_scanner_has_positive_and_negative_cases() {
+    assert!(uses_process_temp_dir(concat!(
+        "let root = std::env::",
+        "temp_dir().join(\"fixture\");"
+    )));
+    assert!(!uses_process_temp_dir(
+        "let root = tempfile::tempdir().expect(\"temp dir\");"
+    ));
+}
+
+fn uses_process_temp_dir(source: &str) -> bool {
+    source.contains(concat!("std::env::", "temp_dir"))
+}
+
 fn platform_win_exempt(member: &str) -> bool {
     member == "crates/platform-win"
 }

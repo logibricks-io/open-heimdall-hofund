@@ -1,7 +1,5 @@
 //! Daemon control-state reporting over the opt-in TCP listener.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use hofund_control_proto::{
     API_VERSION, ListenSource, ShutdownState, StatusResponse, decode_response,
 };
@@ -9,15 +7,8 @@ use hofund_daemon::{StartOptions, start_with_options};
 
 #[tokio::test]
 async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "hofund-daemon-control-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch directory");
-    let path = dir.join("hofund.toml");
+    let dir = tempfile::tempdir().expect("scratch directory");
+    let path = dir.path().join("hofund.toml");
     std::fs::write(&path, "listen = \"127.0.0.1:0\"\n").expect("config");
     let running = start_with_options(
         &path,
@@ -28,7 +19,7 @@ async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() 
     .await
     .expect("start");
     let control = running.control_local_addr().expect("control listener");
-    let token = std::fs::read_to_string(dir.join("hofund.token")).expect("token");
+    let token = std::fs::read_to_string(dir.path().join("hofund.token")).expect("token");
     let client = reqwest::Client::new();
     let url = format!("http://{control}/v1/hofund/status");
 
@@ -81,5 +72,4 @@ async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() 
     assert!(changed.not_applied.is_empty());
 
     running.shutdown().await;
-    let _ = std::fs::remove_dir_all(dir);
 }

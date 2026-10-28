@@ -419,7 +419,7 @@ fn home_dir() -> PathBuf {
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use hofund_plugin_api::{AgentFile, FileKind};
 
@@ -465,13 +465,13 @@ mod tests {
         let file_name = if cfg!(windows) { "codex.exe" } else { "codex" };
         fs::write(bin.join(file_name), "").expect("fake binary");
         let override_dir = home.join("codex-override");
-        let session = Session::new(&home)
+        let session = Session::new(&*home)
             .with_env_case_insensitive(true)
             .with_env("Path", bin.as_os_str())
             .with_env("Codex_Home", override_dir.as_os_str());
         assert_mixed_case_environment_override(&session, &bin, &override_dir);
 
-        let sensitive = Session::new(&home)
+        let sensitive = Session::new(&*home)
             .with_env_case_insensitive(false)
             .with_env("Path", bin.as_os_str())
             .with_env("Codex_Home", override_dir.as_os_str());
@@ -507,7 +507,7 @@ mod tests {
 
         let home = scratch("resolve");
         let override_dir = home.join("compiled-override");
-        let session = Session::new(&home)
+        let session = Session::new(&*home)
             .with_env_case_insensitive(true)
             .with_env("Fixture_Toml_Home", override_dir.as_os_str());
         assert_eq!(
@@ -519,7 +519,7 @@ mod tests {
             override_dir.join("config.toml")
         );
 
-        let sensitive = Session::new(&home)
+        let sensitive = Session::new(&*home)
             .with_env_case_insensitive(false)
             .with_env("Fixture_Toml_Home", override_dir.as_os_str());
         assert_eq!(sensitive.env("FIXTURE_TOML_HOME"), None);
@@ -556,11 +556,23 @@ mod tests {
         assert_eq!(session.env("CODEX_HOME"), Some(override_dir.as_os_str()));
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("hofund-session-env-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("session test directory");
-        path
+    struct Scratch(tempfile::TempDir);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn scratch(_name: &str) -> Scratch {
+        Scratch(tempfile::tempdir().expect("session test directory"))
     }
 }

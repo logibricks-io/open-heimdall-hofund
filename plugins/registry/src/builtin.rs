@@ -661,11 +661,8 @@ mod tests {
 
     #[test]
     fn vertex_preflight_error_has_only_the_credentials_path() {
-        let missing = std::env::temp_dir().join(format!(
-            "hofund-registry-missing-credentials-{}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&missing);
+        let directory = tempfile::tempdir().expect("temp dir");
+        let missing = directory.path().join("missing-credentials.json");
         let mut vertex = raw("vertex");
         vertex.insert("project", RawValue::String("example-project".to_owned()));
         vertex.insert(

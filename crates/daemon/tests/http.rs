@@ -1,15 +1,12 @@
 //! Each inbound protocol against each upstream kind, plus auth and failover.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 use std::time::Duration;
 
 use hofund_daemon::{check, start_for_test};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Upstream {
     protocol: &'static str,
@@ -79,11 +76,24 @@ const INBOUNDS: &[Inbound] = &[
     },
 ];
 
-fn scratch() -> PathBuf {
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("hofund-http-{}-{id}", std::process::id()));
-    fs::create_dir_all(&path).expect("dir");
-    path
+struct Scratch(tempfile::TempDir);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+fn scratch() -> Scratch {
+    Scratch(tempfile::tempdir().expect("temp dir"))
 }
 
 fn config_text(base_url: &str, upstream: &Upstream, failover_statuses: &str) -> String {

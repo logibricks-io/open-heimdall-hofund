@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
@@ -46,28 +45,21 @@ fn app() -> axum::Router {
     control().into_router(LISTEN)
 }
 
-fn scratch(label: &str) -> std::path::PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "hofund-control-{label}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).expect("scratch directory");
-    path
+fn scratch(_label: &str) -> tempfile::TempDir {
+    tempfile::tempdir().expect("scratch directory")
 }
 
-fn model_app(token: &str) -> axum::Router {
+fn model_app(token: &str) -> (axum::Router, tempfile::TempDir) {
     let dir = scratch("model");
-    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
-    Gateway::new(
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let app = Gateway::new(
         Snapshot::new(Router::new(BTreeMap::new(), FailoverPolicy::default())),
         token.to_owned(),
         HashMap::new(),
         usage,
     )
-    .into_router()
+    .into_router();
+    (app, dir)
 }
 
 async fn call(
@@ -98,13 +90,25 @@ async fn call(
     (status, headers, body)
 }
 
+async fn call_temp(
+    (app, _dir): (axum::Router, tempfile::TempDir),
+    method: Method,
+    uri: &str,
+    host: Option<&str>,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    call(app, method, uri, host, headers, body).await
+}
+
 fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
 
 #[tokio::test]
 async fn model_health_reports_hofund_identity() {
-    let (status, _, body) = call(model_app(TOKEN), Method::GET, "/health", None, &[], "").await;
+    let (status, _, body) =
+        call_temp(model_app(TOKEN), Method::GET, "/health", None, &[], "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, br#"{"status":"ok","service":"hofund"}"#);
 }
@@ -119,7 +123,7 @@ async fn control_health_and_model_health_are_open() {
     assert_eq!(health.api_version, API_VERSION);
     assert!(!headers.contains_key("access-control-allow-origin"));
 
-    let (status, _, _) = call(model_app(TOKEN), Method::GET, "/health", None, &[], "").await;
+    let (status, _, _) = call_temp(model_app(TOKEN), Method::GET, "/health", None, &[], "").await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -361,7 +365,7 @@ async fn control_bind_rejects_non_loopback_addresses() {
 #[tokio::test]
 async fn token_rotation_takes_effect_on_next_control_request() {
     let dir = scratch("rotation");
-    let token_path = dir.join("control.token");
+    let token_path = dir.path().join("control.token");
     std::fs::write(&token_path, "first\n").expect("initial token");
     let app = Control::with_token_file(Arc::new(State), "first".to_owned(), token_path.clone())
         .into_router(LISTEN);
@@ -440,7 +444,7 @@ async fn control_token_never_in_debug_or_errors() {
 #[tokio::test]
 async fn control_routes_are_not_on_model_listener() {
     let authorization = bearer(TOKEN);
-    let (status, _, body) = call(
+    let (status, _, body) = call_temp(
         model_app(TOKEN),
         Method::GET,
         "/v1/hofund/status",

@@ -1902,15 +1902,13 @@ mod tests {
 
     #[test]
     fn ensure_config_file_writes_once() {
-        let dir = std::env::temp_dir().join(format!("hofund-config-{}", std::process::id()));
-        let path = dir.join("hofund.toml");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("hofund.toml");
         assert!(super::ensure_config_file(&path).expect("create"));
         assert!(path.is_file());
         std::fs::write(&path, "listen = \"127.0.0.1:9\"\n").expect("overwrite");
         assert!(!super::ensure_config_file(&path).expect("keep"));
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("127.0.0.1:9"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

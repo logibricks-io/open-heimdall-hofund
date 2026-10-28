@@ -14,10 +14,26 @@ fn load_config(source: &str) -> hofund_config::Config {
     hofund_config::load(source).expect("config")
 }
 
-fn config_path(test: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join(format!("hofund-probes-{test}-{}", std::process::id()))
-        .join("hofund.toml")
+struct ConfigPath {
+    _guard: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for ConfigPath {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+fn make_config_path(_test: &str) -> ConfigPath {
+    let guard = tempfile::tempdir().expect("temp dir");
+    let path = guard.path().join("hofund.toml");
+    ConfigPath {
+        _guard: guard,
+        path,
+    }
 }
 
 fn make_host() -> ModelsHost {
@@ -98,8 +114,9 @@ async fn selector_prefers_exposed_then_plain_pool_order_over_endpoint_knowledge(
         server.uri()
     ));
     let host = make_host();
+    let new_config_path = make_config_path("selection");
     let exposed = host
-        .probe(&config, &config_path("selection"), "chat", None)
+        .probe(&config, &new_config_path, "chat", None)
         .await
         .expect("exposed model");
     assert_eq!(exposed.model, "alias");
@@ -108,12 +125,12 @@ async fn selector_prefers_exposed_then_plain_pool_order_over_endpoint_knowledge(
         server.uri()
     ));
     let endpoint = host
-        .probe(&config, &config_path("selection"), "chat", None)
+        .probe(&config, &new_config_path, "chat", None)
         .await
         .expect("exposed model again");
     assert_eq!(endpoint.model, "alias");
     let listed = host
-        .probe(&without_routes, &config_path("selection"), "chat", None)
+        .probe(&without_routes, &new_config_path, "chat", None)
         .await
         .expect("first eligible pool row");
     assert_eq!(listed.model, "gemini-2.5-flash-image");
@@ -153,8 +170,9 @@ async fn selector_treats_unrecognized_endpoints_as_no_endpoint_metadata() {
         "[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\n",
         server.uri()
     ));
+    let new_config_path = make_config_path("unknown-endpoint");
     let result = make_host()
-        .probe(&config, &config_path("unknown-endpoint"), "chat", None)
+        .probe(&config, &new_config_path, "chat", None)
         .await
         .expect("unrecognized endpoints use the no-endpoints rule");
     assert_eq!(result.model, "unknown-endpoint");
@@ -184,8 +202,9 @@ async fn messages_selector_accepts_anthropic_endpoint_without_a_claude_id() {
         "[[providers]]\nid = \"messages\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{}\"\napi_key = \"test-key\"\n",
         server.uri()
     ));
+    let new_config_path = make_config_path("messages-endpoint");
     let result = make_host()
-        .probe(&config, &config_path("messages-endpoint"), "messages", None)
+        .probe(&config, &new_config_path, "messages", None)
         .await
         .expect("Anthropic endpoint");
     assert_eq!(result.model, "vendor/text");
@@ -214,8 +233,9 @@ async fn gemini_flash_image_suffix_is_not_an_images_api_id() {
         "[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\n",
         server.uri()
     ));
+    let new_config_path = make_config_path("gemini-image");
     let result = make_host()
-        .probe(&config, &config_path("gemini-image"), "chat", None)
+        .probe(&config, &new_config_path, "chat", None)
         .await
         .expect("chat image suffix");
     assert_eq!(result.model, "gemini-2.5-flash-image");
@@ -243,8 +263,9 @@ async fn second_pass_accepts_an_image_only_list() {
         "[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\n",
         server.uri()
     ));
+    let new_config_path = make_config_path("second-pass");
     let result = make_host()
-        .probe(&config, &config_path("second-pass"), "chat", None)
+        .probe(&config, &new_config_path, "chat", None)
         .await
         .expect("second pass");
     assert_eq!(result.model, "gpt-image-1");
@@ -271,13 +292,9 @@ async fn named_wrong_protocol_and_decide_only_selection_send_nothing() {
         server.uri()
     ));
     let host = make_host();
+    let new_config_path = make_config_path("no-send");
     let error = host
-        .probe(
-            &config,
-            &config_path("no-send"),
-            "chat",
-            Some("response-only"),
-        )
+        .probe(&config, &new_config_path, "chat", Some("response-only"))
         .await
         .expect_err("wrong protocol");
     assert!(
@@ -305,7 +322,7 @@ async fn named_wrong_protocol_and_decide_only_selection_send_nothing() {
         decide.uri()
     ));
     let error = host
-        .probe(&config, &config_path("no-send"), "chat", None)
+        .probe(&config, &new_config_path, "chat", None)
         .await
         .expect_err("decide only");
     assert_eq!(
@@ -365,15 +382,16 @@ async fn learned_anthropic_auth_is_reused_and_not_shared_with_chat() {
         server.uri()
     ));
     let host = make_host();
-    host.list_models(&config, &config_path("learned"), "messages")
+    let new_config_path = make_config_path("learned");
+    host.list_models(&config, &new_config_path, "messages")
         .await
         .expect("learn auth");
     let probed = host
-        .probe(&config, &config_path("learned"), "messages", None)
+        .probe(&config, &new_config_path, "messages", None)
         .await
         .expect("Anthropic probe");
     assert_eq!(probed.model, "vendor/claude-sonnet");
-    host.probe(&config, &config_path("learned"), "chat", None)
+    host.probe(&config, &new_config_path, "chat", None)
         .await
         .expect("chat stays bearer");
     server.verify().await;
@@ -408,8 +426,9 @@ async fn batch_probe_runs_at_most_four_concurrently_and_preserves_order() {
     let config = load_config(&format!(
         "[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-key\"\n"
     ));
+    let new_config_path = make_config_path("batch");
     let results = make_host()
-        .probe_many(&config, &config_path("batch"), "chat", names.to_vec())
+        .probe_many(&config, &new_config_path, "chat", names.to_vec())
         .await
         .expect("batch selection");
     let completed = results

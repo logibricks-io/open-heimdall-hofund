@@ -442,13 +442,29 @@ fn clippy_plugin(package: &str, dir: &std::path::Path) -> Result<(), String> {
 mod tests {
     use super::{load_plugin_packages, resolved_kernel_feature, workspace_root};
 
+    struct Scratch(tempfile::TempDir);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    fn scratch() -> Scratch {
+        Scratch(tempfile::tempdir().expect("temp dir"))
+    }
+
     #[test]
     fn data_only_agents_pass_but_empty_agent_directories_fail() {
-        let root = std::env::temp_dir().join(format!(
-            "hofund-data-only-agent-packages-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch();
         let plugins = root.join("plugins");
         std::fs::create_dir_all(plugins.join("agents/example")).expect("agent");
         std::fs::write(
@@ -470,11 +486,7 @@ mod tests {
 
     #[test]
     fn data_only_builtin_provider_directories_pass() {
-        let root = std::env::temp_dir().join(format!(
-            "hofund-data-only-provider-packages-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch();
         let plugins = root.join("plugins");
         let ids = xtask::registry::builtin_factory_ids(&workspace_root()).expect("builtin ids");
         assert!(ids.len() >= 3, "{ids:?}");
@@ -500,9 +512,7 @@ mod tests {
 
     #[test]
     fn plugin_packages_fail_closed() {
-        let root =
-            std::env::temp_dir().join(format!("hofund-plugin-packages-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch();
         let plugin = root.join("plugins/providers/example");
         std::fs::create_dir_all(&plugin).expect("dir");
         std::fs::write(

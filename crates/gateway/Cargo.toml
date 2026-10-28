@@ -39,5 +39,6 @@ hofund-plugin-api = { workspace = true }
 hofund-router = { workspace = true }
 hofund-usage = { workspace = true }
 serde_json = "1.0.154"
+tempfile = { workspace = true }
 tokio = { version = "1.54.1", features = ["io-util", "macros", "rt-multi-thread"] }
 tower = "0.5.3"

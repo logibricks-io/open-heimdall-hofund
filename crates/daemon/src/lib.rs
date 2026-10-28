@@ -1309,6 +1309,26 @@ mod tests {
         );
     }
 
+    struct Scratch(tempfile::TempDir);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    fn scratch() -> Scratch {
+        Scratch(tempfile::tempdir().expect("temp dir"))
+    }
+
     #[tokio::test]
     async fn a_listed_preset_build_receives_the_selected_protocol() {
         let config = hofund_config::load(
@@ -1326,9 +1346,7 @@ mod tests {
             hofund_plugin_registry::find_fixture_preset,
         )
         .expect("raw");
-        let dir = std::env::temp_dir().join(format!("hofund-listed-build-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         let upstream = super::build_raw_plugin(
             provider,
             "fixture-multi-listed",
@@ -1378,10 +1396,7 @@ mod tests {
             hofund_plugin_registry::find_fixture_preset,
         )
         .expect("raw");
-        let dir =
-            std::env::temp_dir().join(format!("hofund-listed-no-protocol-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         let Err(error) = super::build_raw_plugin(
             provider,
             "fixture-multi-listed",
@@ -1411,10 +1426,7 @@ mod tests {
 
     #[test]
     fn kernel_catalog_factories_build_through_the_legacy_path_without_a_protocol() {
-        let dir =
-            std::env::temp_dir().join(format!("hofund-kernel-no-protocol-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         for (plugin_id, source) in [
             (
                 "openai-compat",
@@ -1458,9 +1470,7 @@ mod tests {
 
     #[test]
     fn a_preset_builds_and_an_unfinished_adapter_does_not() {
-        let dir = std::env::temp_dir().join(format!("hofund-preset-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         let path = dir.join("hofund.toml");
         std::fs::write(
             &path,
@@ -1520,9 +1530,7 @@ mod tests {
 
     #[test]
     fn a_registry_preset_builds_through_the_factory() {
-        let dir = std::env::temp_dir().join(format!("hofund-relay-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         let path = dir.join("hofund.toml");
         std::fs::write(
             &path,
@@ -1548,9 +1556,7 @@ mod tests {
 
     #[test]
     fn an_unknown_protocol_names_the_provider_and_the_codec_ids() {
-        let dir = std::env::temp_dir().join(format!("hofund-protocol-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         let path = dir.join("hofund.toml");
         std::fs::write(
             &path,
@@ -1568,9 +1574,7 @@ mod tests {
 
     #[test]
     fn a_non_string_option_names_the_provider_and_the_key() {
-        let dir = std::env::temp_dir().join(format!("hofund-option-type-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         let path = dir.join("hofund.toml");
         std::fs::write(
             &path,
@@ -1613,9 +1617,7 @@ mod tests {
 
     #[test]
     fn aws_key_specs_are_trimmed_before_lookup() {
-        let dir = std::env::temp_dir().join(format!("hofund-aws-trim-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         let path = dir.join("hofund.toml");
         let base = "protocol = \"bedrock-converse\"\nbase_url = \"https://bedrock-runtime.us-east-1.amazonaws.com\"\nregion = \"us-east-1\"\n";
         std::fs::write(
@@ -1670,9 +1672,7 @@ mod tests {
     fn the_v0_1_0_example_checks_with_warnings_only() {
         let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../config/fixtures/v0.1.0-hofund.toml");
-        let dir = std::env::temp_dir().join(format!("hofund-v010-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         let path = dir.join("hofund.toml");
         std::fs::copy(&source, &path).expect("copy fixture");
         check(&path).expect("v0.1.0");
@@ -1681,9 +1681,7 @@ mod tests {
 
     #[tokio::test]
     async fn echo_is_mounted_behind_auth() {
-        let dir = std::env::temp_dir().join(format!("hofund-echo-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = scratch();
         let path = dir.join("hofund.toml");
         std::fs::write(&path, "listen = \"127.0.0.1:0\"\n").expect("write");
         let running = super::start(&path).await.expect("start");

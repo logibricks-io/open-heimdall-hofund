@@ -1373,13 +1373,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_host_observation_cools_only_its_bound_member() {
         let book = cooldowns();
-        let root = std::env::temp_dir().join(format!("hofund-observe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("root");
+        let root = tempfile::tempdir().expect("root");
         let host = hofund_plugin_host::runtime_host_with_observe(
             hofund_plugin_api::PluginId::from_static("observed"),
             "",
-            &root,
+            root.path(),
             hofund_plugin_host::HttpLimits::default(),
             super::observe_backend("observed", Arc::clone(&book)),
         )

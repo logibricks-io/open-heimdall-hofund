@@ -1,23 +1,31 @@
 //! Resolved Vertex option validation through `hofund config check`'s daemon path.
 
+use hofund_daemon::check;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use hofund_daemon::check;
-
-static NEXT: AtomicU64 = AtomicU64::new(0);
 const CHILD_CONFIG: &str = "HOFUND_VERTEX_TEST_CHILD_CONFIG";
 const CHILD_OUTPUT: &str = "HOFUND_VERTEX_TEST_CHILD_OUTPUT";
 const ENV_URL: &str = "HOFUND_VERTEX_TEST_URL";
 
-fn scratch() -> PathBuf {
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("hofund-vertex-check-{}-{id}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("dir");
-    dir
+struct Scratch(tempfile::TempDir);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+fn scratch() -> Scratch {
+    Scratch(tempfile::tempdir().expect("temp dir"))
 }
 
 fn config(dir: &Path, option: &str) -> PathBuf {

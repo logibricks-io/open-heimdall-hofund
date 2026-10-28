@@ -174,18 +174,17 @@ fn member_id(id: &'static str) -> MemberId {
     )
 }
 
-fn gateway(members: Vec<Arc<dyn Member>>, token: &str) -> axum::Router {
+fn gateway(members: Vec<Arc<dyn Member>>, token: &str) -> (axum::Router, tempfile::TempDir) {
     gateway_with(members, token, false)
 }
 
-fn gateway_with(members: Vec<Arc<dyn Member>>, token: &str, generative: bool) -> axum::Router {
-    let dir = std::env::temp_dir().join(format!(
-        "hofund-edge-{}-{}-{generative}",
-        std::process::id(),
-        members.len()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
+fn gateway_with(
+    members: Vec<Arc<dyn Member>>,
+    token: &str,
+    generative: bool,
+) -> (axum::Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
     routes.insert("demo".to_owned(), members);
     let mut codecs = HashMap::new();
@@ -197,13 +196,14 @@ fn gateway_with(members: Vec<Arc<dyn Member>>, token: &str, generative: bool) ->
         );
         codecs.insert(GENERATIVE_STREAM.to_owned(), Arc::new(GenerativeLanguage));
     }
-    Gateway::new(
+    let app = Gateway::new(
         Snapshot::new(Router::new(routes, FailoverPolicy::default())),
         token.to_owned(),
         codecs,
         usage,
     )
-    .into_router()
+    .into_router();
+    (app, dir)
 }
 
 fn fake(id: &'static str, hits: &Arc<AtomicUsize>, fail: Option<u16>) -> Arc<dyn Member> {
@@ -235,7 +235,7 @@ async fn call(app: axum::Router, token: Option<&str>, body: &'static str) -> (St
 #[tokio::test]
 async fn bearer_is_required_and_a_route_answers() {
     let hits = Arc::new(AtomicUsize::new(0));
-    let app = gateway(vec![fake("primary", &hits, None)], "secret");
+    let (app, _dir) = gateway(vec![fake("primary", &hits, None)], "secret");
     let (status, _) = call(app.clone(), None, r#"{"model":"demo"}"#).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, body) = call(app.clone(), Some("nope"), r#"{"model":"demo"}"#).await;
@@ -268,7 +268,7 @@ async fn bearer_is_required_and_a_route_answers() {
 #[tokio::test]
 async fn a_stream_is_pulled_and_a_client_error_does_not_fail_over() {
     let second = Arc::new(AtomicUsize::new(0));
-    let app = gateway(
+    let (app, _dir) = gateway(
         vec![
             Arc::new(Fake {
                 route_id: "primary",
@@ -288,7 +288,7 @@ async fn a_stream_is_pulled_and_a_client_error_does_not_fail_over() {
     assert_eq!(second.load(Ordering::SeqCst), 0);
 
     let backup = Arc::new(AtomicUsize::new(0));
-    let app = gateway(
+    let (app, _dir) = gateway(
         vec![
             fake("primary", &Arc::new(AtomicUsize::new(0)), Some(400)),
             fake("backup", &backup, None),
@@ -300,7 +300,7 @@ async fn a_stream_is_pulled_and_a_client_error_does_not_fail_over() {
     assert_eq!(backup.load(Ordering::SeqCst), 0);
 
     let backup = Arc::new(AtomicUsize::new(0));
-    let app = gateway(
+    let (app, _dir) = gateway(
         vec![
             fake("primary", &Arc::new(AtomicUsize::new(0)), Some(503)),
             fake("backup", &backup, None),
@@ -316,7 +316,7 @@ async fn a_stream_is_pulled_and_a_client_error_does_not_fail_over() {
 #[tokio::test]
 async fn a_header_secret_or_query_secret_is_accepted() {
     let hits = Arc::new(AtomicUsize::new(0));
-    let app = gateway(vec![fake("primary", &hits, None)], "secret");
+    let (app, _dir) = gateway(vec![fake("primary", &hits, None)], "secret");
     let (status, _) = call_with(
         app.clone(),
         "x-goog-api-key",
@@ -366,7 +366,7 @@ async fn a_header_secret_or_query_secret_is_accepted() {
 #[tokio::test]
 async fn generative_routes_inject_the_model_and_list_models() {
     let hits = Arc::new(AtomicUsize::new(0));
-    let app = gateway_with(vec![fake("primary", &hits, None)], "secret", true);
+    let (app, _dir) = gateway_with(vec![fake("primary", &hits, None)], "secret", true);
     let (status, body) = call_with(
         app.clone(),
         "x-goog-api-key",
@@ -411,7 +411,7 @@ async fn generative_routes_inject_the_model_and_list_models() {
 
 #[tokio::test]
 async fn health_is_open_and_names_no_secret() {
-    let app = gateway(
+    let (app, _dir) = gateway(
         vec![fake("primary", &Arc::new(AtomicUsize::new(0)), None)],
         "secret",
     );
@@ -435,11 +435,10 @@ async fn health_is_open_and_names_no_secret() {
 
 #[tokio::test]
 async fn a_replaced_token_file_is_read_on_the_next_request() {
-    let dir = std::env::temp_dir().join(format!("hofund-edge-token-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let token_path = dir.join("token");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let token_path = dir.path().join("token");
     std::fs::write(&token_path, "first\n").expect("token");
-    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
     routes.insert(
         "demo".to_owned(),
@@ -470,10 +469,8 @@ async fn a_replaced_token_file_is_read_on_the_next_request() {
 
 #[tokio::test]
 async fn a_rejected_body_records_the_model_it_named() {
-    let dir = std::env::temp_dir().join(format!("hofund-edge-usage-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("dir");
-    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
     routes.insert(
         "gpt-demo".to_owned(),
@@ -534,7 +531,7 @@ impl Member for ThenFail {
 
 #[tokio::test]
 async fn a_stream_error_after_an_event_is_an_error_frame() {
-    let app = gateway(
+    let (app, _dir) = gateway(
         vec![Arc::new(ThenFail {
             member_id: member_id("primary"),
         })],
@@ -614,16 +611,9 @@ impl Member for RawReply {
 fn raw_app(
     parts: Vec<Vec<u8>>,
     then_error: bool,
-) -> (axum::Router, Arc<Ledger>, std::path::PathBuf) {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "hofund-edge-raw-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::SeqCst)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("dir");
-    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
+) -> (axum::Router, Arc<Ledger>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
     routes.insert(
         "demo".to_owned(),
