@@ -321,6 +321,24 @@ async fn cross_site_origin_and_form_mutation_fail() {
 }
 
 #[tokio::test]
+async fn head_on_known_control_routes_is_method_not_allowed() {
+    let authorization = bearer(TOKEN);
+    for path in ["/v1/hofund/health", "/v1/hofund/status"] {
+        let (status, _, body) = call(
+            app(),
+            Method::HEAD,
+            path,
+            Some(HOST),
+            &[("authorization", &authorization)],
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{path}");
+        assert!(body.is_empty(), "{path}");
+    }
+}
+
+#[tokio::test]
 async fn control_bind_rejects_non_loopback_addresses() {
     for address in ["0.0.0.0:0", "[::]:0", "192.168.1.20:0"] {
         let Err(error) = control().bind(address.parse().expect("address")).await else {

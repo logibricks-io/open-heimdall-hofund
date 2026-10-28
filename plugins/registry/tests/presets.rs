@@ -265,6 +265,23 @@ fn decide_only_preset_is_not_callable() {
 
 #[cfg(feature = "test-fixtures")]
 #[test]
+fn listed_decide_only_preset_is_not_callable_with_an_explicit_wire() {
+    let error = select(
+        fixture("fixture-listed-decide"),
+        None,
+        OPENAI,
+        Some(ProtocolId::OPENAI_CHAT),
+        "https://override.example.test/v1",
+    )
+    .expect_err("decide only");
+    assert_eq!(
+        error.to_string(),
+        "preset `fixture-listed-decide` has no chat endpoint"
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
 fn alias_region_is_default_and_user_region_wins() {
     let alias = fixture_aliases()[0];
     let preset = fixture(alias.preset);
