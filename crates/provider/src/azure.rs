@@ -1,6 +1,6 @@
 //! Azure OpenAI deployment names and base-model fallback.
 
-use hofund_plugin_api::{ListKind, ModelList, ModelSpec, PluginError, PluginErrorKind};
+use hofund_plugin_api::{ListKind, ModelList, ModelSpec, PluginError, PluginErrorKind, safe_url};
 use hofund_plugin_sdk::{PageError, PageErrorKind, after_id};
 use serde_json::Value;
 
@@ -105,7 +105,7 @@ async fn azure_list_inner(endpoint: &Endpoint) -> Result<AzureList, PluginError>
                 if specs.is_empty() {
                     errors.push(PluginError::decode(format!(
                         "{}: no models listed",
-                        client.safe_url(&url)
+                        safe_url(&url)
                     )));
                     continue;
                 }

@@ -148,6 +148,8 @@ One error type. `PluginError` is a `thiserror` struct, `#[non_exhaustive]`, with
 
 These types are specified in this document and implemented in PR B: `ListQuery`, `ProbeQuery`, `QuotaQuery`, `ModelList`, `ProbeReport`, `SignInCtx`, `SignInProof`, `SignInFlow`, `SignInChallenge`, `SubscriptionSpec`, `Account`, `QuotaWindow`, `QuotaObservation`, `Plan`, `GatewayTarget`, `DisconnectOutcome`, `ConnectionStatus`, `Schema`, `RawTable`, `ValidConfig`, `ConfigError`, `BuildError`, `WriteCtx`, `ImportCtx`, `ImportedProvider`, `ModelSpec`, `RouteSpec`, `SurfaceHost`, `Body`, and `BodyStream`. `Plan` moves out of `crates/agent/src/lib.rs` line 174. `GatewayTarget` moves out of line 67, and its token field is a `SecretString`. `AccountPool` is not a plugin type. The account store on `HostContext` replaces it. PR B implements `From<ConfigError> for BuildError`, because `validate` returns `ConfigError` and `validate_and_build` returns `BuildError`.
 
+`ModelList::source_url` records the URL that answered a list request for host-side response deduplication. `with_source_url` strips userinfo and fragments and replaces the query with `<redacted>` before storing it, keeping the record's derived `Debug` output free of URL credentials and query values.
+
 ### Lifecycle, isolation, and reload
 
 Order for every plugin instance: `validate`, then `build`, then `health` (default `Ok(())`), then later `shutdown(&self, deadline)` (default no-op). `health` and `shutdown` live on the instance, because that is what owns background work. `shutdown` is called for token refresh loops, list refresh, and loopback listeners. The deadline is the kernel's drain budget.
