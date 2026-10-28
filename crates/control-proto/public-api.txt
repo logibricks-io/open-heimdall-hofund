@@ -1,0 +1,415 @@
+*
+AgentAction #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+AgentAction::Connect
+AgentAction::Disconnect
+AgentAction::Unknown #[serde(other)]
+AgentChangeResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AgentChangeResponse.action
+AgentChangeResponse.agent
+AgentChangeResponse.changed_paths
+AgentChangeResponse.version
+AgentChangeResponse.warnings
+AgentChangedEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AgentChangedEvent.action
+AgentChangedEvent.agent
+AgentChangedEvent.changed_paths
+AgentChangedEvent.warnings
+AgentConnectRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AgentConnectRequest.expected_plan_revision
+AgentConnectRequest.version
+AgentConnectRequest::fn new (expected_plan_revision : Option < String >) -> Self
+AgentDisconnectRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AgentDisconnectRequest.expected_plan_revision
+AgentDisconnectRequest.force
+AgentDisconnectRequest.version
+AgentDisconnectRequest::fn new (force : bool , expected_plan_revision : Option < String >) -> Self
+AgentListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AgentListResponse.agents
+AgentListResponse.version
+AgentPlanRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AgentPlanRequest.action
+AgentPlanRequest.force
+AgentPlanRequest.version
+AgentPlanRequest::fn new (action : AgentAction , force : bool) -> Self
+AgentPlanResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AgentPlanResponse.action
+AgentPlanResponse.agent
+AgentPlanResponse.changes
+AgentPlanResponse.plan_revision
+AgentPlanResponse.version
+AgentRefreshResult #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+AgentRefreshResult.id
+AgentRefreshResult.message
+AgentRefreshResult.ok
+AgentState #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+AgentState::Connected
+AgentState::Disconnected
+AgentState::Drifted
+AgentState::Unknown #[serde(other)]
+AgentStatusEntry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+AgentStatusEntry.id
+AgentStatusEntry.model
+AgentStatusEntry.paths
+AgentStatusEntry.state
+AgentStatusResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AgentStatusResponse.agents
+AgentStatusResponse.version
+AgentSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+AgentSummary.display_name
+AgentSummary.id
+AgentSummary.installed
+ConfigApplyRequest #[non_exhaustive] derives(Clone, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ConfigApplyRequest.expected_revision
+ConfigApplyRequest.text
+ConfigApplyRequest.version
+ConfigApplyRequest::fn new (expected_revision : impl Into < String > , text : impl Into < String >) -> Self
+ConfigRejectedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ConfigRejectedEvent.issues
+ConfigRejectedEvent.revision
+ConfigReloadedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ConfigReloadedEvent.changed_members
+ConfigReloadedEvent.disk_revision
+ConfigReloadedEvent.generation
+ConfigReloadedEvent.not_applied
+ConfigReloadedEvent.pending_restart
+ConfigReloadedEvent.runtime_revision
+ConfigResponse #[non_exhaustive] derives(Clone, PartialEq, Eq, Serialize, Deserialize)
+ConfigResponse.disk_revision
+ConfigResponse.generation
+ConfigResponse.not_applied
+ConfigResponse.pending_restart
+ConfigResponse.runtime_revision
+ConfigResponse.text
+ConfigResponse.version
+ConfigValidateRequest #[non_exhaustive] derives(Clone, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ConfigValidateRequest.text
+ConfigValidateRequest.version
+ConfigValidateRequest::fn new (text : impl Into < String >) -> Self
+ConfigValidationResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ConfigValidationResponse.issues
+ConfigValidationResponse.pending_restart
+ConfigValidationResponse.valid
+ConfigValidationResponse.version
+ControlError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ControlError.details
+ControlError.kind
+ControlError.message
+ControlError.request_id
+ControlError.retry_after_ms
+ControlError::fn new (kind : ControlErrorKind , message : impl Into < String > , request_id : impl Into < String > ,) -> Self
+ControlErrorKind #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+ControlErrorKind::BadRequest
+ControlErrorKind::Conflict
+ControlErrorKind::Forbidden
+ControlErrorKind::Internal
+ControlErrorKind::InvalidConfig
+ControlErrorKind::NotFound
+ControlErrorKind::Timeout
+ControlErrorKind::Unauthorized
+ControlErrorKind::Unavailable
+ControlErrorKind::Unknown #[serde(other)]
+ControlErrorKind::Unprocessable
+ControlErrorKind::UnsupportedVersion
+ControlErrorKind::Upstream
+ControlErrorKind::const fn http_status (self) -> u16
+CooldownReason #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+CooldownReason::Credit
+CooldownReason::Failure
+CooldownReason::Observed
+CooldownReason::Panic
+CooldownReason::Quota
+CooldownReason::RateLimit
+CooldownReason::Unknown #[serde(other)]
+CooldownReason::const fn as_str (self) -> & 'static str
+EmptyRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+EmptyRequest::const fn new () -> Self
+ErrorEnvelope #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ErrorEnvelope.error
+ErrorEnvelope.version
+EventCursor #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+EventCursor.seq
+EventCursor.topic
+EventCursor::const fn new (topic : Topic , seq : u64) -> Self
+EventEnvelope #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+EventEnvelope.boot_id
+EventEnvelope.payload
+EventEnvelope.seq
+EventEnvelope.time_ms
+EventEnvelope.topic
+EventEnvelope.version
+EventId derives(Clone, Debug, PartialEq, Eq)
+EventId::fn boot_id (& self) -> & str
+EventId::fn cursors (& self) -> & [EventCursor]
+EventId::fn new (boot_id : impl Into < String > , cursors : Vec < EventCursor > ,) -> Result < Self , EventIdError >
+EventId::fn parse (value : & str) -> Result < Self , EventIdError >
+EventIdError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Error)
+EventIdError::BadBootId
+EventIdError::BadCursor
+EventIdError::BadSequence
+EventIdError::Duplicate
+EventIdError::Empty
+EventIdError::MissingColon
+EventIdError::OutOfOrder
+EventIdError::UnknownTopic
+EventPayload #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize) # [serde (tag = "event" , content = "data" , rename_all = "snake_case")]
+EventPayload::AgentChanged
+EventPayload::ConfigRejected
+EventPayload::ConfigReloaded
+EventPayload::ListenerRelistenFailed
+EventPayload::MemberCooled
+EventPayload::MemberRecovered
+EventPayload::ModelsRefreshed
+EventPayload::RequestFinished
+EventPayload::RequestStarted
+EventPayload::ResyncRequired
+EventPayload::ShutdownStarted
+EventPayload::SignInProgress
+EventPayload::Snapshot
+EventPayload::SnapshotPublished
+EventPayload::TokenRotated
+EventPayload::Unknown #[serde(other)]
+EventPayload::const fn topic (& self) -> Option < Topic >
+FieldIssue #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+FieldIssue.field
+FieldIssue.message
+FieldIssue.reason
+FieldIssue::fn new (field : impl Into < String > , reason : impl Into < String > , message : impl Into < String > ,) -> Self
+HealthResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+HealthResponse.api_version
+HealthResponse.daemon_version
+HealthResponse.version
+ListenSource #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+ListenSource::Config
+ListenSource::Environment
+ListenSource::Unknown #[serde(other)]
+ListenerRelistenFailedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ListenerRelistenFailedEvent.disk_revision
+ListenerRelistenFailedEvent.generation
+ListenerRelistenFailedEvent.issue
+ListenerRelistenFailedEvent.running
+ListenerRelistenFailedEvent.runtime_revision
+MemberCooledEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+MemberCooledEvent.cause
+MemberCooledEvent.failures
+MemberCooledEvent.member_id
+MemberCooledEvent.remaining_ms
+MemberCooledEvent.retry_after_ms
+MemberRecoveredEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+MemberRecoveredEvent.member_id
+MemberRecoveredEvent.ready
+MemberSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+MemberSummary.id
+MemberSummary.ready
+ModelEntry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ModelEntry.context
+ModelEntry.display_name
+ModelEntry.id
+ModelEntry.max_output
+ModelListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ModelListResponse.added
+ModelListResponse.delisted
+ModelListResponse.fetched_at_ms
+ModelListResponse.models
+ModelListResponse.provider
+ModelListResponse.removed
+ModelListResponse.version
+ModelListenerStatus #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ModelListenerStatus.configured
+ModelListenerStatus.effective
+ModelListenerStatus.effective_source
+ModelListenerStatus.running
+ModelsRefreshedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ModelsRefreshedEvent.error
+ModelsRefreshedEvent.list_kind
+ModelsRefreshedEvent.model_count
+ModelsRefreshedEvent.ok
+ModelsRefreshedEvent.provider
+PickEdit #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+PickEdit::Add
+PickEdit::Remove
+PicksForm #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+PicksForm::Edit
+PicksForm::Replace
+PicksForm::Reset
+PicksResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+PicksResponse.delisted
+PicksResponse.picked_from
+PicksResponse.picks
+PicksResponse.picks_revision
+PicksResponse.version
+PicksSetRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+PicksSetRequest.edit
+PicksSetRequest.expected_picks_revision
+PicksSetRequest.ids
+PicksSetRequest.version
+PicksSetRequest::fn edit (expected_picks_revision : impl Into < String > , changes : Vec < String >) -> Self
+PicksSetRequest::fn form (& self) -> Result < PicksForm , ControlError >
+PicksSetRequest::fn replace (expected_picks_revision : impl Into < String > , ids : Vec < String >) -> Self
+PlannedChange #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+PlannedChange.diff
+PlannedChange.path
+ProviderListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ProviderListResponse.providers
+ProviderListResponse.version
+ProviderSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ProviderSummary.id
+ProviderSummary.kind
+ProviderSummary.model_count
+ProviderSummary.protocol
+ProviderSummary.ready
+ProviderTestRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProviderTestRequest.models
+ProviderTestRequest.version
+ProviderTestRequest::fn new (models : Option < Vec < String > >) -> Self
+ProviderTestResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ProviderTestResponse.provider
+ProviderTestResponse.results
+ProviderTestResponse.version
+ProviderTestResult #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ProviderTestResult.error
+ProviderTestResult.latency_ms
+ProviderTestResult.model
+ProviderTestResult.ok
+ProviderTestResult.status
+ReloadRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ReloadRequest.expected_revision
+ReloadRequest.version
+ReloadRequest::fn new (expected_revision : impl Into < String >) -> Self
+Request
+Request::fn validate (& self) -> Result < () , ControlError >
+Request::fn version (& self) -> u32
+RequestFinishedEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+RequestFinishedEvent.duration_ms
+RequestFinishedEvent.input_tokens
+RequestFinishedEvent.member
+RequestFinishedEvent.output_tokens
+RequestFinishedEvent.request_id
+RequestFinishedEvent.status_class
+RequestStartedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+RequestStartedEvent.inbound_protocol
+RequestStartedEvent.request_id
+RequestStartedEvent.route
+RequestStartedEvent.started_at_ms
+Response
+Response::fn validate (& self) -> Result < () , ControlError >
+Response::fn version (& self) -> u32
+Resume #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+Resume::After
+Resume::Fresh
+Resume::Resync
+ResyncReason #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+ResyncReason::Lagged
+ResyncReason::MalformedId
+ResyncReason::MissingTopic
+ResyncReason::Unknown #[serde(other)]
+ResyncReason::UnknownBoot
+ResyncReason::Unreplayable
+ResyncRequiredEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ResyncRequiredEvent.cursors
+ResyncRequiredEvent.reason
+ResyncRequiredEvent.topic
+RouteModel #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+RouteModel.id
+RouteModelListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+RouteModelListResponse.models
+RouteModelListResponse.version
+ShutdownRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ShutdownRequest.version
+ShutdownRequest::fn new () -> Self
+ShutdownResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ShutdownResponse.draining
+ShutdownResponse.version
+ShutdownStartedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ShutdownStartedEvent.draining
+ShutdownState #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+ShutdownState::Draining
+ShutdownState::Running
+ShutdownState::Unknown #[serde(other)]
+SignInProgressEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SignInProgressEvent.provider
+SignInProgressEvent.state
+SnapshotEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SnapshotEvent.cursors
+SnapshotEvent.disk_revision
+SnapshotEvent.generation
+SnapshotEvent.members
+SnapshotEvent.not_applied
+SnapshotEvent.pending_restart
+SnapshotEvent.runtime_revision
+SnapshotPublishedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SnapshotPublishedEvent.generation
+SnapshotPublishedEvent.members
+SnapshotPublishedEvent.routes
+StatusClass #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+StatusClass::ClientError
+StatusClass::Informational
+StatusClass::Redirection
+StatusClass::ServerError
+StatusClass::Success
+StatusClass::Unknown #[serde(other)]
+StatusResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+StatusResponse.disk_revision
+StatusResponse.generation
+StatusResponse.in_flight
+StatusResponse.model_listener
+StatusResponse.not_applied
+StatusResponse.pending_restart
+StatusResponse.pid
+StatusResponse.runtime_revision
+StatusResponse.shutdown
+StatusResponse.started_at_ms
+StatusResponse.version
+TokenRotateRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+TokenRotateRequest.version
+TokenRotateRequest::fn new () -> Self
+TokenRotateResponse #[non_exhaustive] derives(Clone, PartialEq, Eq, Serialize, Deserialize)
+TokenRotateResponse.agents
+TokenRotateResponse.token
+TokenRotateResponse.version
+TokenRotatedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+Topic #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+Topic::CANONICAL
+Topic::Control
+Topic::Requests
+Topic::Unknown #[serde(other)]
+Topic::const fn as_str (self) -> & 'static str
+UsagePeriod #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+UsagePeriod::All
+UsagePeriod::Day
+UsagePeriod::Month
+UsagePeriod::Unknown #[serde(other)]
+UsagePeriod::Week
+UsageQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+UsageQuery.period
+UsageQuery::fn new (period : UsagePeriod) -> Self
+UsageQuery::fn validate (& self) -> Result < () , ControlError >
+UsageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+UsageResponse.period
+UsageResponse.rows
+UsageResponse.totals
+UsageResponse.version
+UsageRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+UsageRow.created_at_ms
+UsageRow.duration_ms
+UsageRow.input_tokens
+UsageRow.model
+UsageRow.output_tokens
+UsageRow.provider
+UsageRow.status
+UsageTotals #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+UsageTotals.input_tokens
+UsageTotals.output_tokens
+UsageTotals.requests
+const API_VERSION
+const MAX_BOOT_ID_LEN
+const MAX_CONFIG_TEXT_BYTES
+const MAX_ERROR_MESSAGE_BYTES
+const MAX_IDS
+const MAX_ID_BYTES
+const MAX_REQUEST_BODY_BYTES
+const MAX_REQUEST_ID_LEN
+const MAX_RESPONSE_BODY_BYTES
+fn decode_error_envelope (path_version : u32 , body : & [u8] ,) -> Result < ErrorEnvelope , ControlError >
+fn decode_request < T : Request > (path_version : u32 , body : & [u8]) -> Result < T , ControlError >
+fn decode_response < T : Response > (path_version : u32 , body : & [u8]) -> Result < T , ControlError >
+fn resume_plan (last_event_id : Option < & str > , boot_id : & str , requested : & [Topic] ,) -> Vec < (Topic , Resume) >

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "control",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "listener_relisten_failed",
+    "data": {
+      "issue": {
+        "field": "listen",
+        "reason": "bind_failed",
+        "message": "example bind failure"
+      },
+      "running": "127.0.0.1:3425",
+      "disk_revision": "disk-revision-3",
+      "runtime_revision": "runtime-revision-3",
+      "generation": 5
+    }
+  }
+}

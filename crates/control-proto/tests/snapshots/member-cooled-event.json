@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "control",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "member_cooled",
+    "data": {
+      "member_id": "member-1",
+      "cause": "rate_limit",
+      "retry_after_ms": 1000,
+      "remaining_ms": 900,
+      "failures": 2
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "provider": "primary",
+  "models": [
+    {
+      "id": "model-a",
+      "display_name": "Example Model A",
+      "context": 8192,
+      "max_output": 1024
+    }
+  ],
+  "fetched_at_ms": 1700000001000,
+  "added": [
+    "model-b"
+  ],
+  "removed": [
+    "model-c"
+  ],
+  "delisted": [
+    "model-c"
+  ]
+}

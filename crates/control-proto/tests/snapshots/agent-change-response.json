@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "agent": "example-agent",
+  "action": "disconnect",
+  "changed_paths": [
+    "/home/example/.agent/config.json"
+  ],
+  "warnings": [
+    "example warning"
+  ]
+}

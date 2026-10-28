@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "expected_picks_revision": "picks-revision-1",
+  "ids": null,
+  "edit": [
+    "+model-c",
+    "-model-a"
+  ]
+}

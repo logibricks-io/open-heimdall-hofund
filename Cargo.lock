@@ -1612,6 +1612,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-control-proto"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 3.0.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "hofund-daemon"
 version = "0.1.0"
 dependencies = [
@@ -1621,6 +1632,7 @@ dependencies = [
  "hofund-agent",
  "hofund-codec",
  "hofund-config",
+ "hofund-control-proto",
  "hofund-daemon",
  "hofund-gateway",
  "hofund-plugin-api",

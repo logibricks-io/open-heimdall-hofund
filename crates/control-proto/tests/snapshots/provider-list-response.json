@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "primary",
+      "kind": "built-in",
+      "protocol": "example-protocol",
+      "ready": true,
+      "model_count": 2
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "error": {
+    "kind": "conflict",
+    "message": "configuration changed on disk",
+    "request_id": "request-1",
+    "retry_after_ms": 25,
+    "details": [
+      {
+        "field": "expected_revision",
+        "reason": "stale",
+        "message": "reload and retry"
+      }
+    ]
+  }
+}

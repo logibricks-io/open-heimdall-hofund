@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "example-agent",
+      "display_name": "Example Agent",
+      "installed": true
+    }
+  ]
+}

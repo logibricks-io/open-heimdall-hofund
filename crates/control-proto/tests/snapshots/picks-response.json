@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "picks": [
+    "model-a"
+  ],
+  "picked_from": [
+    "model-a",
+    "model-c"
+  ],
+  "delisted": [
+    "model-c"
+  ],
+  "picks_revision": "picks-revision-2"
+}
