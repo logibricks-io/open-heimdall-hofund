@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "disk_revision": "disk-revision-2",
+  "runtime_revision": "runtime-revision-1",
+  "generation": 4,
+  "text": "listen = \"127.0.0.1:3425\"\n",
+  "pending_restart": [
+    "usage_file"
+  ],
+  "not_applied": [
+    {
+      "field": "listen",
+      "reason": "env_override",
+      "message": "HOFUND_ADDR overrides the configured listener"
+    }
+  ]
+}

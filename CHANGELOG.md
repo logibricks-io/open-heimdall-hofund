@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hofund-control-proto` 0.1.0 with versioned DTOs, events, composite SSE ids,
+  bounded decoding, and committed JSON and public-API snapshots.
+- A workspace invariant that permits an unsafe-code opt-out only in the future
+  isolated Windows platform crate.
+- Stable daemon mappings from internal provider failures and cooldown causes
+  to control wire values.
 - Provider preset fragments now carry the full catalog schema, regions, and
   aliases, with builtin data-only directories, catalog-equivalent wire and
   credential selection, and build-time validation for row-E data migrations.

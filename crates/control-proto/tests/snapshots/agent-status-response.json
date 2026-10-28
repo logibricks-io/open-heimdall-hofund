@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "example-agent",
+      "state": "drifted",
+      "model": "default",
+      "paths": [
+        "/home/example/.agent/config.json"
+      ]
+    }
+  ]
+}

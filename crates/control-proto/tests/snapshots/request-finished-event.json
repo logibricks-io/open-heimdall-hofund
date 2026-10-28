@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "requests",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "request_finished",
+    "data": {
+      "request_id": "request-1",
+      "member": "member-1",
+      "status_class": "success",
+      "duration_ms": 20,
+      "input_tokens": 10,
+      "output_tokens": 5
+    }
+  }
+}

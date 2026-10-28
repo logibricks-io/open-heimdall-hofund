@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "control",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "snapshot",
+    "data": {
+      "disk_revision": "disk-revision-2",
+      "runtime_revision": "runtime-revision-1",
+      "generation": 4,
+      "pending_restart": [
+        "token_file"
+      ],
+      "not_applied": [
+        {
+          "field": "listen",
+          "reason": "env_override",
+          "message": "HOFUND_ADDR overrides the configured listener"
+        }
+      ],
+      "members": [
+        {
+          "id": "member-1",
+          "ready": true
+        }
+      ],
+      "cursors": [
+        {
+          "topic": "control",
+          "seq": 12
+        },
+        {
+          "topic": "requests",
+          "seq": 40
+        }
+      ]
+    }
+  }
+}

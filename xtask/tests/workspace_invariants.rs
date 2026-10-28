@@ -19,6 +19,7 @@ const MEMBERS: &[&str] = &[
     "crates/cli",
     "crates/codec",
     "crates/config",
+    "crates/control-proto",
     "crates/daemon",
     "crates/gateway",
     "crates/ir",
@@ -48,10 +49,12 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-cli" => &["hofund-agent", "hofund-daemon"],
         "hofund-codec" => &["hofund-ir"],
         "hofund-config" => &[],
+        "hofund-control-proto" => &[],
         "hofund-desktop" => &["hofund-agent", "hofund-daemon"],
         "hofund-daemon" => &[
             "hofund-codec",
             "hofund-config",
+            "hofund-control-proto",
             "hofund-gateway",
             "hofund-plugin-api",
             "hofund-plugin-host",
@@ -112,6 +115,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-cli" => &[],
         "hofund-codec" => &[],
         "hofund-config" => &[],
+        "hofund-control-proto" => &[],
         "hofund-desktop" => &[],
         "hofund-daemon" => &["hofund-agent", "hofund-daemon", "hofund-plugin-registry"],
         "hofund-gateway" => &[
@@ -283,6 +287,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-cli",
         "hofund-codec",
         "hofund-config",
+        "hofund-control-proto",
         "hofund-daemon",
         "hofund-desktop",
         "hofund-gateway",
@@ -306,6 +311,145 @@ fn dependency_graph_matches_architecture() {
     ] {
         assert!(seen.contains(package), "missing package {package}");
     }
+}
+
+#[test]
+fn only_platform_win_may_allow_unsafe_code() {
+    let root = workspace_root();
+    let manifest = read_to_string(&root.join("Cargo.toml"));
+    assert!(
+        compact(&manifest).contains("unsafe_code=\"forbid\""),
+        "the workspace must forbid unsafe code"
+    );
+    let mut violations = Vec::new();
+    for member in MEMBERS {
+        if platform_win_exempt(member) {
+            continue;
+        }
+        let member_root = root.join(member);
+        let package_manifest = read_to_string(&member_root.join("Cargo.toml"));
+        if manifest_opts_out_of_safe_code(&package_manifest) {
+            violations.push(format!("{member}/Cargo.toml"));
+        }
+        for path in rust_files(&member_root) {
+            let text = read_to_string(&path);
+            if source_opts_out_of_safe_code(&text) {
+                violations.push(relative(&root, &path));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "only crates/platform-win may relax the unsafe-code forbid rule:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn unsafe_code_scanner_flags_opt_outs_and_exempts_platform_win() {
+    for source in [
+        concat!("#![allow", "(unsafe_code)]"),
+        concat!("#[allow", "(unsafe_code)]"),
+        concat!("#![cfg_attr(windows, allow", "(unsafe_code))]"),
+        concat!("#[expect", "(unsafe_code)]"),
+        concat!("#[warn", "(unsafe_code)]"),
+        concat!("#[deny", "(unsafe_code)]"),
+        concat!("#![allow", "(unused, unsafe_code)]"),
+        concat!("#[allow", "(clippy::pedantic,unsafe_code,dead_code)]"),
+        concat!("#[expect", "(rust::unsafe_code, reason = \"ffi\")]"),
+        concat!(
+            "#![cfg_attr(all(windows, feature = \"x\"), allow",
+            "(dead_code, unsafe_code))]"
+        ),
+    ] {
+        assert!(source_opts_out_of_safe_code(source), "{source}");
+        assert!(!unsafe_source_violation("crates/platform-win", source));
+        assert!(unsafe_source_violation("crates/control-proto", source));
+    }
+    let manifest = "[lints.rust]\nunsafe_code = \"allow\"\n";
+    assert!(manifest_opts_out_of_safe_code(manifest));
+    assert!(!unsafe_manifest_violation("crates/platform-win", manifest));
+    assert!(!source_opts_out_of_safe_code(
+        "fn safe() { let unsafe_code = 1; }"
+    ));
+    for source in [
+        "#![allow(unused, unsafe_code_like)]",
+        "#[disallow(unsafe_code)]",
+        "#[allow(unused)] fn f(unsafe_code: u8) {}",
+    ] {
+        assert!(!source_opts_out_of_safe_code(source), "{source}");
+    }
+}
+
+fn platform_win_exempt(member: &str) -> bool {
+    member == "crates/platform-win"
+}
+
+fn unsafe_source_violation(member: &str, source: &str) -> bool {
+    !platform_win_exempt(member) && source_opts_out_of_safe_code(source)
+}
+
+fn unsafe_manifest_violation(member: &str, manifest: &str) -> bool {
+    !platform_win_exempt(member) && manifest_opts_out_of_safe_code(manifest)
+}
+
+// The manifest check is the real guard: workspace `forbid` already rejects a
+// source-level allowance. This scan is conservative belt-and-braces and may
+// report false positives, such as `deny` or attribute text in comments.
+fn source_opts_out_of_safe_code(source: &str) -> bool {
+    let source = compact(source);
+    ["allow", "expect", "warn", "deny"]
+        .into_iter()
+        .any(|level| {
+            lint_lists(&source, level)
+                .into_iter()
+                .any(names_unsafe_code)
+        })
+}
+
+/// Returns the contents of every `level(...)` group whose level name is not
+/// part of a longer identifier, up to the matching paren.
+fn lint_lists<'a>(source: &'a str, level: &str) -> Vec<&'a str> {
+    let pattern = format!("{level}(");
+    let mut lists = Vec::new();
+    for (start, _) in source.match_indices(&pattern) {
+        let before = source[..start].chars().next_back();
+        if before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_') {
+            continue;
+        }
+        let body = &source[start + pattern.len()..];
+        let mut depth = 0_usize;
+        let mut end = body.len();
+        for (index, ch) in body.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    end = index;
+                    break;
+                }
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        lists.push(&body[..end]);
+    }
+    lists
+}
+
+fn names_unsafe_code(list: &str) -> bool {
+    list.split(',')
+        .any(|lint| lint == "unsafe_code" || lint.ends_with("::unsafe_code"))
+}
+
+fn manifest_opts_out_of_safe_code(manifest: &str) -> bool {
+    let manifest = compact(manifest);
+    !manifest.contains("[lints]workspace=true")
+        || manifest.contains("[lints.rust]")
+        || manifest.contains("unsafe_code")
+}
+
+fn compact(text: &str) -> String {
+    text.split_whitespace().collect()
 }
 
 #[test]

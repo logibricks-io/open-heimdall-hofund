@@ -1016,6 +1016,20 @@ The implementation plan is [docs/plugins/control-plane.md](../plugins/control-pl
 - L's reference citations use `dc1cfe0`; earlier rows remain pinned to `cbbf316`.
 - The CLI stays at `crates/cli` until row J. Desktop removal of the embedded daemon remains a follower of L.
 
+### PR L1 notes
+
+L1 adds `hofund-control-proto` 0.1.0 with versioned DTOs, all route request and response types, event envelopes and payload variants, bounded decoding, composite SSE ids, resume planning, JSON snapshots, and a source-walked public-API snapshot. It has no HTTP, Tokio, daemon, router, provider, or plugin-api dependency.
+
+- R1: `ControlErrorKind` adds `BadRequest`, `UnsupportedVersion`, and `Unprocessable` before `Unknown`. `http_status()` supplies the default status, including 400 for the first two and 422 for semantic validation and configuration validation. There is no rate-limit kind; an upstream 429 stays `Upstream` with status 429 selected by the daemon mapping.
+- R2: `FieldIssue` carries a field, a stable snake_case reason, and a sanitized message. The same type serves validation details and `not_applied`.
+- R3: configuration text and rotated tokens have manually redacted `Debug` implementations. Configuration debug output shows only its byte count; token debug output is always `<redacted>`. Snapshot values are explicitly fake.
+- R4: every response and event struct implements `Default`, with `version = API_VERSION`; body request constructors set the current version. Integration snapshots construct values only through that public API. `ConfigResponse` also enforces the decoded text limit on response decode.
+- R5: `EmptyRequest` is a unit-like no-body marker. It is not a JSON request-body type and is never decoded by `decode_request`; `UsageQuery` is likewise query-only and uses the path version.
+- Boot ids are tightened to nonempty ASCII graphic bytes (`0x21..=0x7e`) except colon, comma, and equals, up to 64 bytes. This rejects control bytes that SSE ids cannot carry as well as whitespace. Composite-id construction and parsing share the same canonical cursor rules. Ring-retention decisions remain with the L6 server.
+- Stable provider-error and cooldown mappings live in the daemon's hidden public `control_map` module because that crate owns both internal and wire types. Upstream 429 is the only status-preserving special case. Retry durations round up to whole milliseconds and saturate at `u64::MAX`. The gateway receives its proto edge in L3, not L1.
+- The Windows spike found no maintained, license-compatible safe crate covering both protected current-user pipe creation and connected-client SID lookup. Interprocess 2.4.7 lacks both safe security operations and uses `0BSD OR Apache-2.0`, whose 0BSD option is outside the current license allow list; windows-permissions and windows-acl are stale and incomplete; sddl is GPL-3.0; Tokio and windows-sys require unsafe FFI. Windows stays on authenticated loopback TCP. L4 will isolate `hofund-platform-win`, resolve SIDs through process tokens, create exactly `D:P(A;;GA;;;<current-user-SID>)` with Tokio's raw security-attributes hook, verify the client through `GetNamedPipeClientProcessId` and its process token, and require Windows CI DACL and wrong-SID tests. The detailed evidence and links are in the external L1 spike report.
+- L3 owns HTTP routing, TCP authentication, and the gateway/client edges. L4 owns Unix and Windows transports and the isolated platform implementation. L5 owns stateful route operations and mapping call sites. L6 owns reload, watcher, listener, event buses, replay rings, retention checks, and SSE production.
+
 ### Parallel work plan
 
 B is alone. After B, B2 and C can proceed together. D starts after C, because both edit `providers` and C lands the snapshot those calls publish. K waits for C and must merge before H. L waits for D. H does not wait for L: until L, subscription commands stay on the in-process CLI path. H does wait for encrypted account storage. `PlaintextFileAccountStore` is not the store those plugins persist to.

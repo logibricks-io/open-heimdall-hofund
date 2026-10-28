@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "token": "example-token-not-real",
+  "agents": [
+    {
+      "id": "example-agent",
+      "ok": true,
+      "message": null
+    }
+  ]
+}

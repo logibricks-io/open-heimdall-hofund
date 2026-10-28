@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "provider": "primary",
+  "results": [
+    {
+      "model": "model-a",
+      "ok": false,
+      "status": 429,
+      "latency_ms": 12,
+      "error": {
+        "kind": "upstream",
+        "message": "upstream rejected the example request",
+        "request_id": "request-1",
+        "retry_after_ms": null,
+        "details": []
+      }
+    }
+  ]
+}

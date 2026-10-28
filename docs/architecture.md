@@ -42,6 +42,8 @@ flowchart BT
   provider["provider<br/>upstream adapters"]
   router["router<br/>routing and failover"]
   config["config<br/>settings"]
+  controlProto["control-proto<br/>wire DTOs and events"]
+  daemon --> controlProto
   secrets["secrets<br/>credentials"]
   usage["usage<br/>consumption records"]
   agent["agent<br/>config adapters"]
@@ -152,10 +154,11 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-router` | `hofund-ir`, `hofund-plugin-api` |
 | `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-usage` |
 | `hofund-config` | — |
+| `hofund-control-proto` | — |
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
-| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent` (tests) |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent` (tests) |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
@@ -169,6 +172,9 @@ Declare internal dependencies in `[workspace.dependencies]` with an explicit
 dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 
 `xtask` is a development crate. No runtime crate may depend on it.
+The `control-client` and gateway `control-proto` edges arrive in L3; the
+`hofundd` composition-root edges arrive in L7, as ordered by
+[the control-plane plan](plugins/control-plane.md).
 
 ### Rules that the table is there to protect
 
@@ -212,6 +218,7 @@ dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 | `gateway` | axum HTTP server and middleware pipeline. |
 | `agent` | Coding-agent config adapters. A declarative description per agent; plan an edit, then apply it. The daemon passes the gateway URL and token in. |
 | `config` | Typed configuration for listeners, routes, accounts, and agents. |
+| `control-proto` | Versioned serde DTOs, events, error envelope, and wire version. No HTTP, Tokio, daemon, router, provider, or plugin-api dependency. |
 | `secrets` | Credential storage and resolution. |
 | `usage` | Request and token usage records. |
 | `daemon` | Process composition root. Wires config, secrets, and the gateway. |

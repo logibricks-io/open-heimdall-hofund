@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "pid": 7,
+  "started_at_ms": 1700000000000,
+  "model_listener": {
+    "configured": "127.0.0.1:3425",
+    "effective": "127.0.0.1:4425",
+    "running": "127.0.0.1:3425",
+    "effective_source": "environment"
+  },
+  "generation": 4,
+  "disk_revision": "disk-revision-2",
+  "runtime_revision": "runtime-revision-1",
+  "pending_restart": [
+    "token_file"
+  ],
+  "not_applied": [
+    {
+      "field": "listen",
+      "reason": "env_override",
+      "message": "HOFUND_ADDR overrides the configured listener"
+    }
+  ],
+  "in_flight": 3,
+  "shutdown": "draining"
+}

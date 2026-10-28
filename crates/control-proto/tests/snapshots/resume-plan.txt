@@ -1,0 +1,7 @@
+no-header -> control=fresh,requests=fresh
+valid-two-topic -> control=after(12),requests=after(40)
+unknown-boot -> control=resync(unknown_boot),requests=resync(unknown_boot)
+missing-topic -> control=after(12),requests=resync(missing_topic)
+malformed -> control=resync(malformed_id),requests=resync(malformed_id)
+duplicate -> control=resync(malformed_id),requests=resync(malformed_id)
+unrequested-topic-ignored -> requests=after(40)

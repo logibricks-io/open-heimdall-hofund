@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "valid": false,
+  "issues": [
+    {
+      "field": "providers.0.base_url",
+      "reason": "invalid",
+      "message": "base URL must be absolute"
+    }
+  ],
+  "pending_restart": [
+    "control.listen"
+  ]
+}
