@@ -18,6 +18,18 @@ use syn::visit::Visit;
 
 use super::{MEMBERS, read_to_string, relative, rust_files, workspace_root};
 
+fn scratch() -> PathBuf {
+    thread_local! {
+        static GUARDS: std::cell::RefCell<Vec<tempfile::TempDir>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    GUARDS.with(|guards| {
+        let guard = tempfile::tempdir().expect("temp dir");
+        let path = guard.path().to_path_buf();
+        guards.borrow_mut().push(guard);
+        path
+    })
+}
+
 #[test]
 fn plugin_seam_matches_the_contract() {
     let root = workspace_root();
@@ -142,7 +154,7 @@ fn plugin_seam_matches_the_contract() {
 
 #[test]
 fn data_only_agent_trees_pass_but_empty_agent_directories_fail() {
-    let root = std::env::temp_dir().join(format!(
+    let root = scratch().join(format!(
         "hofund-data-only-agent-rules-{}",
         std::process::id()
     ));
@@ -167,7 +179,7 @@ fn data_only_agent_trees_pass_but_empty_agent_directories_fail() {
 
 #[test]
 fn data_only_builtin_provider_trees_pass() {
-    let root = std::env::temp_dir().join(format!(
+    let root = scratch().join(format!(
         "hofund-data-only-provider-rules-{}",
         std::process::id()
     ));
@@ -413,7 +425,7 @@ extra = ["hofund-plugin-api/kernel"]
         "a renamed dependency's kernel feature must count"
     );
 
-    let root = std::env::temp_dir().join(format!("hofund-plugin-rules-{}", std::process::id()));
+    let root = scratch().join(format!("hofund-plugin-rules-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let plugin = root.join("plugins/providers/openai-compat");
     fs::create_dir_all(plugin.join("src")).expect("dir");
@@ -505,7 +517,7 @@ fn plugin_rules_reject_each_bypass() {
         "attribute argument: {attribute:?}"
     );
 
-    let root = std::env::temp_dir().join(format!("hofund-plugin-include-{}", std::process::id()));
+    let root = scratch().join(format!("hofund-plugin-include-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("dir");
     fs::write(
@@ -620,7 +632,7 @@ fast = ["dep:api/kernel"]
         "dep:api/kernel must count"
     );
 
-    let tree = std::env::temp_dir().join(format!("hofund-plugin-bypass-{}", std::process::id()));
+    let tree = scratch().join(format!("hofund-plugin-bypass-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tree);
     let renamed = tree.join("plugins/providers/renamed");
     fs::create_dir_all(renamed.join("src")).expect("dir");
@@ -670,7 +682,7 @@ fast = ["dep:api/kernel"]
             .any(|hit| hit.contains("std::os::windows::process"))
     );
 
-    let bypass = std::env::temp_dir().join(format!("hofund-plugin-round2-{}", std::process::id()));
+    let bypass = scratch().join(format!("hofund-plugin-round2-{}", std::process::id()));
     let _ = fs::remove_dir_all(&bypass);
     let outside = bypass.join("plugins/providers/outside");
     fs::create_dir_all(outside.join("src")).expect("dir");
@@ -776,7 +788,7 @@ fast = ["dep:api/kernel"]
         let hits = runtime_hits(source).join("\n");
         assert!(hits.contains(needle), "{needle} missing in:\n{hits}");
     }
-    let fake = std::env::temp_dir().join(format!("hofund-plugin-round3-{}", std::process::id()));
+    let fake = scratch().join(format!("hofund-plugin-round3-{}", std::process::id()));
     let _ = fs::remove_dir_all(&fake);
     let pkg = fake.join("plugins/providers/fakeapi");
     fs::create_dir_all(pkg.join("src")).expect("dir");
@@ -793,8 +805,7 @@ fast = ["dep:api/kernel"]
     );
     let _ = fs::remove_dir_all(&fake);
 
-    let scripted =
-        std::env::temp_dir().join(format!("hofund-plugin-buildrs-{}", std::process::id()));
+    let scripted = scratch().join(format!("hofund-plugin-buildrs-{}", std::process::id()));
     let _ = fs::remove_dir_all(&scripted);
     let pkg = scripted.join("plugins/providers/scripted");
     fs::create_dir_all(pkg.join("src")).expect("dir");
@@ -814,7 +825,7 @@ fast = ["dep:api/kernel"]
     assert!(found.contains("build.rs emits rustc-cfg"), "{found}");
     let _ = fs::remove_dir_all(&scripted);
 
-    let renamed = std::env::temp_dir().join(format!("hofund-plugin-a25-{}", std::process::id()));
+    let renamed = scratch().join(format!("hofund-plugin-a25-{}", std::process::id()));
     let _ = fs::remove_dir_all(&renamed);
     let pkg = renamed.join("plugins/providers/renamed");
     fs::create_dir_all(pkg.join("src")).expect("dir");
@@ -834,7 +845,7 @@ fast = ["dep:api/kernel"]
     assert!(found.contains("build.rs emits rustc-cfg"), "{found}");
     let _ = fs::remove_dir_all(&renamed);
 
-    let paths = std::env::temp_dir().join(format!("hofund-plugin-a34-{}", std::process::id()));
+    let paths = scratch().join(format!("hofund-plugin-a34-{}", std::process::id()));
     let _ = fs::remove_dir_all(&paths);
     let txt = paths.join("plugins/providers/pathtxt");
     fs::create_dir_all(txt.join("src")).expect("dir");
@@ -871,7 +882,7 @@ fast = ["dep:api/kernel"]
     assert!(found.contains("bin target sets path"), "{found}");
     let _ = fs::remove_dir_all(&paths);
 
-    let includes = std::env::temp_dir().join(format!("hofund-plugin-a38-{}", std::process::id()));
+    let includes = scratch().join(format!("hofund-plugin-a38-{}", std::process::id()));
     let _ = fs::remove_dir_all(&includes);
     let manifest = "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nhofund-plugin-api = { workspace = true }\n[lints]\nworkspace = true\n";
     let probes = [
@@ -884,7 +895,7 @@ fast = ["dep:api/kernel"]
             "absinc",
             format!(
                 "std::include!(\"{}\");\nfn clean() {{}}\n",
-                std::env::temp_dir()
+                scratch()
                     .join("hofund-a38c-evil.rs")
                     .to_string_lossy()
                     .replace('\\', "/")

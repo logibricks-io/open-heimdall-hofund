@@ -1101,7 +1101,6 @@ impl AccountSecretBackend for MemoryAccountSecrets {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -1110,29 +1109,16 @@ mod tests {
     const ACCOUNT: &str = "work";
     const KIND: &str = "subscription";
 
-    pub(super) struct TestDir(pub(super) PathBuf);
+    pub(super) struct TestDir(pub(super) tempfile::TempDir);
 
     impl TestDir {
         pub(super) fn join(&self, name: &str) -> PathBuf {
-            self.0.join(name)
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).ok();
+            self.0.path().join(name)
         }
     }
 
     pub(super) fn scratch() -> TestDir {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "hofund-encrypted-accounts-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).expect("scratch");
-        TestDir(path)
+        TestDir(tempfile::tempdir().expect("scratch"))
     }
 
     pub(super) fn secret() -> SecretString {
@@ -1370,7 +1356,7 @@ mod tests {
         load_or_create_key(&secrets_path, &key_path).expect("second key");
         let second = fs::read(&key_path).expect("second bytes");
         assert!(first == second, "second publish replaced the key");
-        assert!(!root.0.read_dir().expect("directory").any(|entry| {
+        assert!(!root.0.path().read_dir().expect("directory").any(|entry| {
             entry
                 .expect("entry")
                 .file_name()
@@ -1394,7 +1380,7 @@ mod tests {
         );
         let on_disk = fs::read(&key_path).expect("key bytes");
         assert!(on_disk == winner, "racing publish replaced the key file");
-        assert!(!root.0.read_dir().expect("directory").any(|entry| {
+        assert!(!root.0.path().read_dir().expect("directory").any(|entry| {
             entry
                 .expect("entry")
                 .file_name()

@@ -930,7 +930,6 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn missing_compiled_builtin_is_an_error() {
@@ -1288,12 +1287,23 @@ mod tests {
         }
     }
 
-    fn scratch() -> PathBuf {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("hofund-golden-layout-{}-{id}", std::process::id()));
-        fs::create_dir_all(&path).expect("golden layout temp dir");
-        path
+    struct Scratch(tempfile::TempDir);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn scratch() -> Scratch {
+        Scratch(tempfile::tempdir().expect("golden layout temp dir"))
     }
 }

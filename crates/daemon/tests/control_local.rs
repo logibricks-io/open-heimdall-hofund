@@ -2,27 +2,23 @@
 
 //! Per-config local control lifecycle tests.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 
 use hofund_daemon::{ControlRuntime, StartOptions, start_with_options};
 
-fn scratch(label: &str) -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = PathBuf::from("/tmp").join(format!(
-        "hofund-daemon-{label}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).expect("scratch directory");
-    let socket = path.join("control.sock");
+fn scratch(label: &str) -> tempfile::TempDir {
+    // A short `/tmp` root keeps Unix socket paths under the macOS limit.
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("hofund-daemon-{label}-"))
+        .tempdir_in("/tmp")
+        .expect("scratch directory");
+    let socket = dir.path().join("control.sock");
     assert!(
         socket.as_os_str().as_encoded_bytes().len() < 100,
         "socket path must be shorter than 100 bytes: {}",
         socket.display()
     );
-    path
+    dir
 }
 
 fn options(dir: &Path) -> StartOptions {
@@ -50,10 +46,11 @@ fn socket_id(socket: &Path) -> &str {
 #[tokio::test]
 async fn concurrent_start_single_instance_lock() {
     use std::os::unix::fs::MetadataExt;
-    let dir = scratch("single-instance");
+    let dir_guard = scratch("single-instance");
+    let dir = dir_guard.path();
     let config = dir.join("hofund.toml");
     std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
-    let running = start_with_options(&config, options(&dir))
+    let running = start_with_options(&config, options(dir))
         .await
         .expect("first daemon");
     let socket = running
@@ -72,7 +69,7 @@ async fn concurrent_start_single_instance_lock() {
     let token = std::fs::read_to_string(dir.join("hofund.token")).expect("token");
     assert!(!String::from_utf8_lossy(&discovery_bytes).contains(token.trim()));
 
-    let Err(error) = start_with_options(&config, options(&dir)).await else {
+    let Err(error) = start_with_options(&config, options(dir)).await else {
         panic!("second daemon acquired the single-instance lock");
     };
     assert_eq!(
@@ -86,20 +83,20 @@ async fn concurrent_start_single_instance_lock() {
     running.shutdown().await;
     assert!(!discovery.exists());
     assert!(!socket.exists());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn two_configs_in_one_directory_run_independent_daemons() {
-    let dir = scratch("independent");
+    let dir_guard = scratch("independent");
+    let dir = dir_guard.path();
     let first = dir.join("first.toml");
     let second = dir.join("second.toml");
     std::fs::write(&first, "listen = \"127.0.0.1:0\"\n").expect("first config");
     std::fs::write(&second, "listen = \"127.0.0.1:0\"\n").expect("second config");
-    let first_running = start_with_options(&first, options(&dir))
+    let first_running = start_with_options(&first, options(dir))
         .await
         .expect("first daemon");
-    let second_running = start_with_options(&second, options(&dir))
+    let second_running = start_with_options(&second, options(dir))
         .await
         .expect("second daemon");
     let first_socket = first_running.control_socket_path().expect("first socket");
@@ -111,13 +108,13 @@ async fn two_configs_in_one_directory_run_independent_daemons() {
     first_running.shutdown().await;
     assert!(second_socket.exists());
     second_running.shutdown().await;
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn read_only_config_dir_falls_back_to_runtime_dir() {
     use std::os::unix::fs::PermissionsExt;
-    let root = scratch("read-only");
+    let root_guard = scratch("read-only");
+    let root = root_guard.path();
     let dir = root.join("config");
     std::fs::create_dir(&dir).expect("config directory");
     let config = dir.join("hofund.toml");
@@ -133,7 +130,7 @@ async fn read_only_config_dir_falls_back_to_runtime_dir() {
     std::fs::write(dir.join(".hofund"), "not a directory").expect("blocked state path");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
         .expect("read-only directory");
-    let running = start_with_options(&config, options(&root))
+    let running = start_with_options(&config, options(root))
         .await
         .expect("daemon with runtime fallback");
     let socket = running.control_socket_path().expect("Unix socket");
@@ -153,15 +150,15 @@ async fn read_only_config_dir_falls_back_to_runtime_dir() {
     running.shutdown().await;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
         .expect("restore directory permissions");
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
 async fn restart_refuses_non_socket_control_path() {
-    let dir = scratch("non-socket");
+    let dir_guard = scratch("non-socket");
+    let dir = dir_guard.path();
     let config = dir.join("hofund.toml");
     std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
-    let running = start_with_options(&config, options(&dir))
+    let running = start_with_options(&config, options(dir))
         .await
         .expect("first daemon");
     let socket = running
@@ -170,7 +167,7 @@ async fn restart_refuses_non_socket_control_path() {
         .to_path_buf();
     running.shutdown().await;
     std::fs::write(&socket, "do not remove").expect("regular file");
-    let Err(error) = start_with_options(&config, options(&dir)).await else {
+    let Err(error) = start_with_options(&config, options(dir)).await else {
         panic!("non-socket control path was replaced");
     };
     assert!(error.to_string().contains("non-socket"), "{error}");
@@ -178,12 +175,12 @@ async fn restart_refuses_non_socket_control_path() {
         std::fs::read_to_string(&socket).expect("file"),
         "do not remove"
     );
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn unix_socket_unavailable_uses_configured_tcp() {
-    let dir = scratch("tcp-fallback");
+    let dir_guard = scratch("tcp-fallback");
+    let dir = dir_guard.path();
     let config = dir.join("hofund.toml");
     std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
     let running = start_with_options(
@@ -213,13 +210,13 @@ async fn unix_socket_unavailable_uses_configured_tcp() {
     assert_eq!(value["socket_path"], serde_json::Value::Null);
     assert!(value["tcp_endpoints"][0].as_str().is_some());
     running.shutdown().await;
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn overlong_unix_socket_path_uses_configured_tcp() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = scratch("long-socket-path");
+    let dir_guard = scratch("long-socket-path");
+    let dir = dir_guard.path();
     let config = dir.join("hofund.toml");
     std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
     let runtime = dir.join("r".repeat(120));
@@ -230,7 +227,7 @@ async fn overlong_unix_socket_path_uses_configured_tcp() {
         &config,
         StartOptions {
             control_listen: Some("127.0.0.1:0".parse().expect("control TCP")),
-            control_runtime: Some(ControlRuntime::new(Some(runtime), dir.clone())),
+            control_runtime: Some(ControlRuntime::new(Some(runtime), dir.to_path_buf())),
             ..StartOptions::default()
         },
     )
@@ -253,5 +250,4 @@ async fn overlong_unix_socket_path_uses_configured_tcp() {
     assert_eq!(value["socket_path"], serde_json::Value::Null);
     assert!(value["tcp_endpoints"][0].as_str().is_some());
     running.shutdown().await;
-    let _ = std::fs::remove_dir_all(dir);
 }

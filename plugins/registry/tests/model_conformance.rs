@@ -19,54 +19,63 @@ fn openai(base_url: &str, protocol: &str) -> RawTable {
 
 #[tokio::test]
 async fn openai_chat_factory_passes_list_and_probe_conformance() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     let factory = hofund_plugin_registry::factory("openai-compat").expect("factory");
     check_list_and_probe(
         factory.as_ref(),
         |base| openai(base, "chat"),
         ProtocolId::OPENAI_CHAT,
         "conformance-key",
+        scratch.path(),
     )
     .await;
 }
 
 #[tokio::test]
 async fn openai_responses_factory_passes_list_and_probe_conformance() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     let factory = hofund_plugin_registry::factory("openai-compat").expect("factory");
     check_list_and_probe(
         factory.as_ref(),
         |base| openai(base, "responses"),
         ProtocolId::OPENAI_RESPONSES,
         "conformance-key",
+        scratch.path(),
     )
     .await;
 }
 
 #[tokio::test]
 async fn anthropic_factory_passes_list_and_probe_conformance() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     let factory = hofund_plugin_registry::factory("anthropic").expect("factory");
     check_list_and_probe(
         factory.as_ref(),
         raw,
         ProtocolId::ANTHROPIC_MESSAGES,
         "conformance-key",
+        scratch.path(),
     )
     .await;
 }
 
 #[tokio::test]
 async fn generative_factory_passes_list_and_probe_conformance() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     let factory = hofund_plugin_registry::factory("generative").expect("factory");
     check_list_and_probe(
         factory.as_ref(),
         raw,
         ProtocolId::GENERATIVE_LANGUAGE,
         "conformance-key",
+        scratch.path(),
     )
     .await;
 }
 
 #[tokio::test]
 async fn vertex_factory_passes_static_catalog_conformance() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     let factory = hofund_plugin_registry::factory("google-vertex").expect("factory");
     check_list_and_probe(
         factory.as_ref(),
@@ -79,12 +88,14 @@ async fn vertex_factory_passes_static_catalog_conformance() {
         },
         ProtocolId::GENERATIVE_LANGUAGE,
         "",
+        scratch.path(),
     )
     .await;
 }
 
 #[tokio::test]
 async fn bedrock_factory_passes_static_catalog_conformance() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     let factory = hofund_plugin_registry::factory("bedrock").expect("factory");
     check_list_and_probe(
         factory.as_ref(),
@@ -99,6 +110,7 @@ async fn bedrock_factory_passes_static_catalog_conformance() {
         },
         ProtocolId::BEDROCK_CONVERSE,
         "",
+        scratch.path(),
     )
     .await;
 }

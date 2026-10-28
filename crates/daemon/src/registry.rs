@@ -133,33 +133,25 @@ mod tests {
 
     #[test]
     fn rust_sources_recurses_and_skips_registry() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "hofund-registry-sources-{}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(root.join("nested/deeper")).expect("directories");
+        let root = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(root.path().join("nested/deeper")).expect("directories");
         for path in [
-            root.join("a.rs"),
-            root.join("nested/b.rs"),
-            root.join("nested/deeper/c.rs"),
-            root.join("nested/registry.rs"),
-            root.join("notes.txt"),
+            root.path().join("a.rs"),
+            root.path().join("nested/b.rs"),
+            root.path().join("nested/deeper/c.rs"),
+            root.path().join("nested/registry.rs"),
+            root.path().join("notes.txt"),
         ] {
             std::fs::write(path, "").expect("fixture");
         }
 
         assert_eq!(
-            rust_sources(&root),
+            rust_sources(root.path()),
             [
-                root.join("a.rs"),
-                root.join("nested/b.rs"),
-                root.join("nested/deeper/c.rs"),
+                root.path().join("a.rs"),
+                root.path().join("nested/b.rs"),
+                root.path().join("nested/deeper/c.rs"),
             ]
         );
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 }

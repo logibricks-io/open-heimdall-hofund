@@ -1652,6 +1652,7 @@ dependencies = [
  "hofund-config",
  "hofund-plugin-api",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "toml_edit 0.25.17+spec-1.1.0",
 ]
@@ -1686,6 +1687,7 @@ version = "0.1.0"
 dependencies = [
  "regex",
  "serde",
+ "tempfile",
  "thiserror 2.0.21",
  "toml_edit 0.25.17+spec-1.1.0",
 ]
@@ -1702,6 +1704,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
 ]
 
@@ -1743,6 +1746,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tower",
  "tracing",
@@ -1759,6 +1763,7 @@ dependencies = [
  "serde",
  "tauri",
  "tauri-build",
+ "tempfile",
  "tokio",
 ]
 
@@ -1781,6 +1786,7 @@ dependencies = [
  "hyper-util",
  "metrics",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tower",
@@ -1804,6 +1810,7 @@ dependencies = [
  "hofund-plugin-host",
  "serde",
  "serde_json",
+ "tempfile",
  "toml 0.8.2",
 ]
 
@@ -1822,6 +1829,7 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-host",
  "serde_json",
+ "tempfile",
  "tokio",
  "wiremock",
 ]
@@ -1874,6 +1882,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -1898,6 +1907,7 @@ dependencies = [
  "hofund-quirks",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.8.2",
  "wiremock",
@@ -1910,6 +1920,7 @@ dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
+ "tempfile",
 ]
 
 [[package]]
@@ -1949,6 +1960,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "toml_edit 0.25.17+spec-1.1.0",
@@ -1984,6 +1996,7 @@ name = "hofund-secrets"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -1993,6 +2006,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "rusqlite",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -5844,6 +5858,7 @@ dependencies = [
  "proc-macro2",
  "serde_json",
  "syn 3.0.9",
+ "tempfile",
  "toml 0.8.2",
 ]
 

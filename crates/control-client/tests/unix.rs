@@ -4,7 +4,6 @@
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use hofund_control_client::{Client, ClientError, DiscoveryOptions};
 use http_body_util::Full;
@@ -19,35 +18,30 @@ const HEALTH_MISMATCH: &[u8] = br#"{"version":1,"api_version":2,"daemon_version"
 const STATUS: &[u8] = br#"{"version":1,"pid":7,"started_at_ms":123,"model_listener":{"configured":"127.0.0.1:3425","effective":"127.0.0.1:3425","running":"127.0.0.1:3425","effective_source":"config"},"generation":1,"disk_revision":"disk","runtime_revision":"runtime","pending_restart":[],"not_applied":[],"in_flight":0,"shutdown":"running"}"#;
 const UNAUTHORIZED: &[u8] = br#"{"version":1,"error":{"kind":"unauthorized","message":"unauthorized","request_id":"test","retry_after_ms":null,"details":[]}}"#;
 
-struct Scratch(PathBuf);
+struct Scratch(tempfile::TempDir);
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = PathBuf::from("/tmp").join(format!(
-            "hofund-client-{label}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("scratch directory");
-        let socket = path.join("control.sock");
+        // A short `/tmp` root keeps Unix socket paths under the macOS limit.
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("hofund-client-{label}-"))
+            .tempdir_in("/tmp")
+            .expect("scratch directory");
+        let socket = dir.path().join("control.sock");
         assert!(
             socket.as_os_str().as_encoded_bytes().len() < 100,
             "socket path must be shorter than 100 bytes: {}",
             socket.display()
         );
-        Self(path)
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        self.0.path()
     }
 
     fn join(&self, path: &str) -> PathBuf {
-        self.0.join(path)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        self.path().join(path)
     }
 }
 
@@ -112,7 +106,14 @@ fn spawn_server_with_health(
 
 fn config_id(path: &Path) -> String {
     let resolved = std::fs::canonicalize(path).expect("canonical config");
-    let digest = Sha256::digest(resolved.to_str().expect("UTF-8 path").as_bytes());
+    let text = resolved.to_str().expect("UTF-8 path");
+    // Discovery lowercases the canonical path on macOS; random scratch names
+    // contain uppercase letters, so mirror that normalization here.
+    #[cfg(target_os = "macos")]
+    let text = text.to_lowercase();
+    #[cfg(not(target_os = "macos"))]
+    let text = text.to_owned();
+    let digest = Sha256::digest(text.as_bytes());
     digest[..8]
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -229,7 +230,7 @@ async fn discovery_falls_back_from_missing_socket_to_runtime_discovery() {
     let client = Client::discover(
         &config,
         TOKEN,
-        DiscoveryOptions::isolated(Some(xdg), dir.0.clone()),
+        DiscoveryOptions::isolated(Some(xdg), dir.path().to_path_buf()),
     )
     .await
     .expect("discovered client");
@@ -244,7 +245,7 @@ async fn discovery_wrong_token_does_not_fall_back_to_tcp() {
     let socket = dir.join("live.sock");
     let server = spawn_server(&socket, 2);
     write_socket_discovery(&dir, &id, &socket);
-    let mut options = DiscoveryOptions::isolated(None, dir.0.clone());
+    let mut options = DiscoveryOptions::isolated(None, dir.path().to_path_buf());
     options.control_listen = Some("127.0.0.1:9".parse().expect("TCP address"));
     let error = Client::discover(&config, "wrong-token", options)
         .await
@@ -271,7 +272,7 @@ async fn discovery_health_version_mismatch_does_not_fall_back_to_tcp() {
     let socket = dir.join("live.sock");
     let server = spawn_server_with_health(&socket, 1, HEALTH_MISMATCH);
     write_socket_discovery(&dir, &id, &socket);
-    let mut options = DiscoveryOptions::isolated(None, dir.0.clone());
+    let mut options = DiscoveryOptions::isolated(None, dir.path().to_path_buf());
     options.control_listen = Some("127.0.0.1:9".parse().expect("TCP address"));
     let error = Client::discover(&config, TOKEN, options)
         .await
@@ -297,7 +298,7 @@ async fn discovery_wrong_version_does_not_fall_back_to_tcp() {
         .expect("discovery JSON"),
     )
     .expect("discovery");
-    let mut options = DiscoveryOptions::isolated(None, dir.0.clone());
+    let mut options = DiscoveryOptions::isolated(None, dir.path().to_path_buf());
     options.control_listen = Some("127.0.0.1:9".parse().expect("TCP address"));
     let error = Client::discover(&config, TOKEN, options)
         .await
@@ -309,7 +310,7 @@ async fn discovery_wrong_version_does_not_fall_back_to_tcp() {
 async fn discovery_overlong_socket_path_falls_back_to_tcp() {
     let dir = Scratch::new("long-socket");
     let (config, id) = write_config(&dir);
-    let socket = dir.0.join("s".repeat(120));
+    let socket = dir.path().join("s".repeat(120));
     std::fs::write(
         dir.join(".hofund").join(format!("control-{id}.json")),
         serde_json::to_vec(&serde_json::json!({
@@ -323,7 +324,7 @@ async fn discovery_overlong_socket_path_falls_back_to_tcp() {
         .expect("discovery JSON"),
     )
     .expect("discovery");
-    let options = DiscoveryOptions::isolated(None, dir.0.clone());
+    let options = DiscoveryOptions::isolated(None, dir.path().to_path_buf());
     let error = Client::discover(&config, TOKEN, options)
         .await
         .expect_err("unavailable TCP fallback");

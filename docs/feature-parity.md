@@ -254,7 +254,7 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 | 9.7 | Read usage from agents' own session files | `internal/sessions/calls_*.go` | auxiliary | Missing | none | Later phase. |
 | 9.8 | Apps report their own usage (`POST /v1/magpie/usage/requests`) | `internal/gateway/usage_ingest.go`; `ref.md:2096` | auxiliary | Missing | none | Idempotent on a request id, as magpie does. |
 | 9.9 | Output speed and time to first token | `internal/gateway/ttft.go`; `docs/subsystems/gui-shell.md` ("Streamed output speed") | core | Partial | `crates/usage/src/lib.rs` (`latency_ms` only) | Record time to first byte and tokens per second. |
-| 9.10 | Usage heatmap and summary API (`/v1/magpie/usage`) | `internal/usage/heatmap.go`; `internal/gateway/usage_api.go` | auxiliary | Missing | none | Serve from SQLite queries. |
+| 9.10 | Usage heatmap and summary API (`/v1/magpie/usage`) | `internal/usage/heatmap.go`; `internal/gateway/usage_api.go` | auxiliary | Partial | `crates/usage/src/lib.rs` (`Window`, `window_start`, `Ledger::summary`); `crates/daemon/src/control.rs` (`usage`) | The control `GET /usage` route serves today, week, month, or all-time rows and SQL totals from local midnight, capped at the newest 10,000 rows with `rows_truncated`. No heatmap yet. |
 | 9.11 | Settings advice from real usage (compaction, cache TTL) | `internal/tune` | auxiliary | Missing | none | Low priority. |
 | 9.12 | Gateway key limits per day, week and month (`/v1/magpie/limit`) | `internal/budget`; `internal/gwbudget`; `ref.md:1440` | core | Missing | none | Enforce in SQLite transactions, so limits hold across restarts. |
 

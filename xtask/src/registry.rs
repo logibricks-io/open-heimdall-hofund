@@ -265,12 +265,24 @@ mod tests {
         );
     }
 
-    fn root_with(source: &str, name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "hofund-xtask-registry-{name}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+    struct Scratch(tempfile::TempDir);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    fn root_with(source: &str, _name: &str) -> Scratch {
+        let root = Scratch(tempfile::tempdir().expect("temp dir"));
         std::fs::create_dir_all(root.join("plugins/registry/src")).expect("dirs");
         std::fs::write(root.join("plugins/registry/src/check.rs"), source).expect("source");
         root

@@ -101,8 +101,12 @@ pub struct UsageResponse {
     pub period: UsagePeriod,
     /// Usage rows.
     pub rows: Vec<UsageRow>,
-    /// Aggregate totals.
+    /// Aggregate totals over every row in the period, not only `rows`.
     pub totals: UsageTotals,
+    /// Whether the server dropped older rows from `rows` to stay within its
+    /// row cap. Absent from older peers, which never truncate.
+    #[serde(default)]
+    pub rows_truncated: bool,
 }
 
 impl Default for UsageResponse {
@@ -112,6 +116,7 @@ impl Default for UsageResponse {
             period: UsagePeriod::All,
             rows: Vec::new(),
             totals: UsageTotals::default(),
+            rows_truncated: false,
         }
     }
 }

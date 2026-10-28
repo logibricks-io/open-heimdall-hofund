@@ -53,10 +53,9 @@ impl Member for Counter {
     }
 }
 
-fn app(tokens: Option<u64>) -> axum::Router {
-    let dir = std::env::temp_dir().join(format!("hofund-count-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
+fn app(tokens: Option<u64>) -> (axum::Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
     routes.insert(
         "demo".to_owned(),
@@ -74,16 +73,21 @@ fn app(tokens: Option<u64>) -> axum::Router {
         Arc::new(AnthropicMessages) as Arc<dyn Codec>,
     );
     codecs.insert(GENERATIVE_UNARY.to_owned(), Arc::new(GenerativeLanguage));
-    Gateway::new(
+    let app = Gateway::new(
         Snapshot::new(Router::new(routes, FailoverPolicy::default())),
         "secret".to_owned(),
         codecs,
         usage,
     )
-    .into_router()
+    .into_router();
+    (app, dir)
 }
 
-async fn post(app: axum::Router, uri: &str, body: &str) -> (StatusCode, String) {
+async fn post(
+    (app, _dir): (axum::Router, tempfile::TempDir),
+    uri: &str,
+    body: &str,
+) -> (StatusCode, String) {
     let response = app
         .oneshot(
             Request::builder()

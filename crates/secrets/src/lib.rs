@@ -171,16 +171,11 @@ fn write_atomic(path: &Path, token: &str) -> Result<(), SecretError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{TokenFile, resolve};
 
-    fn scratch() -> std::path::PathBuf {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("hofund-secret-{}-{id}", std::process::id()));
-        fs::create_dir_all(&path).expect("dir");
-        path
+    fn scratch() -> tempfile::TempDir {
+        tempfile::tempdir().expect("temp dir")
     }
 
     #[test]
@@ -195,13 +190,13 @@ mod tests {
     #[test]
     fn rotate_replaces_the_file_atomically() {
         let dir = scratch();
-        let file = TokenFile::new(dir.join("hofund.token"));
+        let file = TokenFile::new(dir.path().join("hofund.token"));
         let first = file.load_or_create().expect("create");
         assert!(first.starts_with("hofund_"));
         let second = file.rotate().expect("rotate");
         assert_ne!(first, second);
         assert_eq!(file.read().expect("read"), second);
-        assert!(!dir.join("hofund.token.tmp").exists());
+        assert!(!dir.path().join("hofund.token.tmp").exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -212,6 +207,5 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
-        fs::remove_dir_all(dir).ok();
     }
 }

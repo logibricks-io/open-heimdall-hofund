@@ -132,10 +132,8 @@ async fn daemon_runs_on_a_fake_registry() {
         .expect(1)
         .mount(&server)
         .await;
-    let dir = std::env::temp_dir().join(format!("hofund-fake-registry-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("directory");
-    let config = dir.join("hofund.toml");
+    let dir = tempfile::tempdir().expect("directory");
+    let config = dir.path().join("hofund.toml");
     std::fs::write(
         &config,
         format!(
@@ -149,7 +147,7 @@ async fn daemon_runs_on_a_fake_registry() {
         consultations: Arc::clone(&consultations),
     });
     let running = start_with_registry(&config, registry).await.expect("start");
-    let token = std::fs::read_to_string(dir.join("hofund.token")).expect("token");
+    let token = std::fs::read_to_string(dir.path().join("hofund.token")).expect("token");
     let response = reqwest::Client::new()
         .post(format!("http://{}/v1/chat/completions", running.local_addr))
         .bearer_auth(token.trim())
@@ -161,5 +159,4 @@ async fn daemon_runs_on_a_fake_registry() {
     assert!(response.text().await.expect("body").contains("ok"));
     assert!(consultations.load(Ordering::SeqCst) > 0);
     running.shutdown().await;
-    let _ = std::fs::remove_dir_all(dir);
 }

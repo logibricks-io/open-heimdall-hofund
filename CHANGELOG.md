@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the legacy plaintext metadata file. Reads route by stored reference and
   load secrets per row, while kind-scoped v2 entries prevent cross-kind collisions.
   Fallback keys publish without overwrite, and Linux links libdbus statically.
+- Control usage summaries for today, week, month, or all time from local midnight,
+  with SQL totals over the whole period and the newest 10,000 rows
+  (`rows_truncated` marks a cap). `POST /shutdown` now drains in-flight model
+  requests, closes idle control connections, removes the socket, and releases
+  the daemon lock; later mutations return 503.
 - Full typed control route and client surface, with ordered request defenses,
   bounded bodies, error envelopes, no-store responses, and drain guards. The daemon
   now serves secret-free provider summaries, cached models without upstream calls,
@@ -251,6 +256,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Test fixtures now retain temporary-directory guards until test completion,
+  including panic paths, and a workspace invariant rejects hand-built process
+  temp paths. Existing host model-state directories are tightened to `0700` on
+  Unix, and unreadable or unmovable state files are preserved instead of being
+  overwritten (#212, #101, #102).
 - Quota refusals are now recognized from the response body with the reference's
   rule order: a 402 naming a used-up limit, a 429 naming its reset time or a
   planned allowance, a 5xx quota code, or another 4xx naming a used-up limit.

@@ -1,7 +1,6 @@
 //! Agent connect, disconnect, and token rotation over the control plane.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use hofund_agent::Session;
@@ -20,25 +19,17 @@ const CONFIG: &str = "listen = \"127.0.0.1:0\"\n\
 [[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"provider-key\"\n\
 [[routes]]\nmodel = \"m\"\nupstreams = [\"chat\"]\n";
 
-struct Scratch(PathBuf);
+struct Scratch(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "hofund-daemon-agents-{label}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&path);
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("hofund-daemon-agents-{label}-"))
+            .tempdir()
+            .expect("scratch dir");
+        let path = dir.path().to_path_buf();
         std::fs::create_dir_all(path.join("home")).expect("scratch home");
-        Self(path)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        Self(path, dir)
     }
 }
 
@@ -554,5 +545,29 @@ async fn concurrent_rotate_and_connect_serialize_on_gate() {
         assert_eq!(status, StatusCode::OK);
     }
     assert_eq!(*daemon.generation.borrow(), 6);
+    daemon.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn token_rotate_scrubs_pre_rotation_status_errors() {
+    let daemon = Daemon::start("status-error").await;
+    let old = daemon.token();
+    // A malformed TOML file whose parse error quotes the line holding the token.
+    let codex = daemon.scratch.0.join("home/.codex/config.toml");
+    std::fs::create_dir_all(codex.parent().expect("codex parent")).expect("codex dir");
+    std::fs::write(&codex, format!("token = \"{old}\" trailing\n")).expect("codex config");
+    let (status, body) = daemon.rotate(&old).await;
+    assert_eq!(status, StatusCode::OK);
+    let rotated: TokenRotateResponse = decode_response(API_VERSION, &body).expect("rotate");
+    let failure = rotated
+        .agents
+        .iter()
+        .find(|agent| agent.id == "codex")
+        .expect("codex result");
+    assert!(!failure.ok);
+    let message = failure.message.clone().unwrap_or_default();
+    assert!(message.contains("[redacted]"), "{message}");
+    assert!(!message.contains(&old), "{message}");
+    assert!(!String::from_utf8_lossy(&body).contains(&old));
     daemon.running.shutdown().await;
 }

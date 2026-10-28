@@ -1,7 +1,8 @@
 //! Cargo and source boundary for plugin packages.
 //!
 //! Plugins may depend only on `hofund-plugin-api` and `hofund-plugin-sdk`
-//! (plus their own test kit), and those two crates must be `workspace = true`.
+//! (plus their own test kit and `tempfile` in dev-dependencies), and those two
+//! crates must be `workspace = true`.
 //! Clippy, configured by `xtask/plugin-boundary/clippy.toml`, sees a macro
 //! fragment such as `std::$m::Command` after expansion. This module does not
 //! try to match `$` splices in source text. The threat model is
@@ -128,7 +129,7 @@ pub fn dependency_error(
     if ALLOWED_DEPS.contains(&name) {
         return None;
     }
-    if dev && own_kit == Some(name) {
+    if dev && (own_kit == Some(name) || name == "tempfile") {
         return None;
     }
     Some(format!("depends on {name}"))
@@ -1711,6 +1712,17 @@ fn contains_manifest(dir: &Path) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    fn scratch() -> std::path::PathBuf {
+        thread_local! {
+            static GUARDS: std::cell::RefCell<Vec<tempfile::TempDir>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        GUARDS.with(|guards| {
+            let guard = tempfile::tempdir().expect("temp dir");
+            let path = guard.path().to_path_buf();
+            guards.borrow_mut().push(guard);
+            path
+        })
+    }
     use super::{dependency_error, manifest_dependency_errors, source_violations};
 
     #[test]
@@ -1759,12 +1771,16 @@ cc = "1"
             ),
             None
         );
+        assert_eq!(dependency_error("tempfile", &[], true, None), None);
+        assert_eq!(
+            dependency_error("tempfile", &[], false, None).as_deref(),
+            Some("depends on tempfile")
+        );
     }
 
     #[test]
     fn path_attributes_and_computed_includes_are_rejected() {
-        let root =
-            std::env::temp_dir().join(format!("hofund-plugin-boundary-{}", std::process::id()));
+        let root = scratch().join(format!("hofund-plugin-boundary-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let src = root.join("src");
         std::fs::create_dir_all(src.join("hidden")).expect("src");
@@ -1788,7 +1804,7 @@ cc = "1"
 
     #[test]
     fn a_macro_fragment_is_denied_after_expansion() {
-        let root = std::env::temp_dir().join(format!("hofund-plugin-macro-{}", std::process::id()));
+        let root = scratch().join(format!("hofund-plugin-macro-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).expect("src");
         std::fs::write(
@@ -1982,10 +1998,8 @@ cc = "1"
             .parent()
             .expect("workspace")
             .to_path_buf();
-        let release =
-            std::env::temp_dir().join(format!("hofund-plugin-release-{}", std::process::id()));
-        let feature =
-            std::env::temp_dir().join(format!("hofund-plugin-feature-{}", std::process::id()));
+        let release = scratch().join(format!("hofund-plugin-release-{}", std::process::id()));
+        let feature = scratch().join(format!("hofund-plugin-feature-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&release);
         let _ = std::fs::remove_dir_all(&feature);
         write_fixture(
@@ -2020,8 +2034,7 @@ cc = "1"
             .parent()
             .expect("workspace")
             .to_path_buf();
-        let root =
-            std::env::temp_dir().join(format!("hofund-plugin-default-feat-{}", std::process::id()));
+        let root = scratch().join(format!("hofund-plugin-default-feat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         write_fixture(
             &root,
@@ -2045,8 +2058,7 @@ cc = "1"
 
     #[test]
     fn a_build_script_cannot_set_cfg() {
-        let root =
-            std::env::temp_dir().join(format!("hofund-plugin-buildrs-{}", std::process::id()));
+        let root = scratch().join(format!("hofund-plugin-buildrs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).expect("src");
         std::fs::write(
@@ -2073,9 +2085,8 @@ cc = "1"
 
     #[test]
     fn a_renamed_build_script_is_rejected() {
-        let root = std::env::temp_dir().join(format!("hofund-plugin-a25-{}", std::process::id()));
-        let off =
-            std::env::temp_dir().join(format!("hofund-plugin-a25-off-{}", std::process::id()));
+        let root = scratch().join(format!("hofund-plugin-a25-{}", std::process::id()));
+        let off = scratch().join(format!("hofund-plugin-a25-off-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&off);
         std::fs::create_dir_all(root.join("src")).expect("src");
@@ -2116,7 +2127,7 @@ cc = "1"
 
     #[test]
     fn a_non_rs_path_module_is_scanned() {
-        let root = std::env::temp_dir().join(format!("hofund-plugin-a34-{}", std::process::id()));
+        let root = scratch().join(format!("hofund-plugin-a34-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).expect("src");
         std::fs::write(
@@ -2149,11 +2160,9 @@ cc = "1"
 
     #[test]
     fn explicit_target_paths_are_rejected() {
-        let lib = std::env::temp_dir().join(format!("hofund-plugin-a35-{}", std::process::id()));
-        let bin =
-            std::env::temp_dir().join(format!("hofund-plugin-a35-bin-{}", std::process::id()));
-        let clean =
-            std::env::temp_dir().join(format!("hofund-plugin-a35-ok-{}", std::process::id()));
+        let lib = scratch().join(format!("hofund-plugin-a35-{}", std::process::id()));
+        let bin = scratch().join(format!("hofund-plugin-a35-bin-{}", std::process::id()));
+        let clean = scratch().join(format!("hofund-plugin-a35-ok-{}", std::process::id()));
         for dir in [&lib, &bin, &clean] {
             let _ = std::fs::remove_dir_all(dir);
             std::fs::create_dir_all(dir.join("src")).expect("src");
@@ -2209,8 +2218,7 @@ cc = "1"
 
     #[test]
     fn dep_info_rejects_files_outside_the_package() {
-        let root =
-            std::env::temp_dir().join(format!("hofund-plugin-depinfo-{}", std::process::id()));
+        let root = scratch().join(format!("hofund-plugin-depinfo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let package = root.join("plugins/providers/probe");
         std::fs::create_dir_all(package.join("src")).expect("src");
@@ -2231,8 +2239,7 @@ cc = "1"
             "[workspace]\nresolver = \"2\"\nmembers = [\"plugins/providers/probe\"]\n",
         )
         .expect("workspace");
-        let outside =
-            std::env::temp_dir().join(format!("hofund-not-allowed-{}.rs", std::process::id()));
+        let outside = scratch().join(format!("hofund-not-allowed-{}.rs", std::process::id()));
         std::fs::write(&outside, "#[cfg(not(clippy))]\nfn sneak() {}\n").expect("outside");
         let bad = package.join("src/bad.txt");
         std::fs::write(&bad, "\"unterminated").expect("bad");
@@ -2372,8 +2379,7 @@ plugins/providers/fixture/src/lib.rs:\n\
     #[cfg(unix)]
     #[test]
     fn symlinks_are_rejected_without_rewriting_the_path() {
-        let root =
-            std::env::temp_dir().join(format!("hofund-plugin-symlink-{}", std::process::id()));
+        let root = scratch().join(format!("hofund-plugin-symlink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let real = root.join("real");
         std::fs::create_dir_all(real.join("src")).expect("real");
