@@ -200,12 +200,18 @@ async fn agent_list_reports_catalog_and_detection() {
 #[tokio::test]
 async fn agent_status_reflects_connected_files() {
     let daemon = Daemon::start("status").await;
-    assert_eq!(state_of(&daemon.status().await, "claude-code"), AgentState::Disconnected);
+    assert_eq!(
+        state_of(&daemon.status().await, "claude-code"),
+        AgentState::Disconnected
+    );
     let (status, body) = daemon.connect("claude-code", None).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let change: AgentChangeResponse = decode_response(API_VERSION, &body).expect("connect");
     assert_eq!(change.action, AgentAction::Connect);
-    assert_eq!(change.changed_paths, [daemon.settings().display().to_string()]);
+    assert_eq!(
+        change.changed_paths,
+        [daemon.settings().display().to_string()]
+    );
     let after = daemon.status().await;
     assert_eq!(state_of(&after, "claude-code"), AgentState::Connected);
     assert_eq!(state_of(&after, "codex"), AgentState::Disconnected);
@@ -223,15 +229,23 @@ async fn agent_status_reflects_connected_files() {
 async fn agent_plan_redacts_token_in_diff() {
     let daemon = Daemon::start("plan").await;
     daemon.write_settings("{\"theme\": \"dark\"}\n");
-    let plan = daemon.plan("claude-code", AgentAction::Connect, false).await;
+    let plan = daemon
+        .plan("claude-code", AgentAction::Connect, false)
+        .await;
     assert_eq!(plan.agent, "claude-code");
     assert_eq!(plan.plan_revision.len(), 64);
     assert_eq!(plan.changes.len(), 1);
     let diff = &plan.changes[0].diff;
     assert!(diff.contains("[redacted]"), "{diff}");
     assert!(!diff.contains(&daemon.token()));
-    assert_eq!(daemon.read_settings(), "{\"theme\": \"dark\"}\n", "plan writes nothing");
-    let disconnect = daemon.plan("claude-code", AgentAction::Disconnect, true).await;
+    assert_eq!(
+        daemon.read_settings(),
+        "{\"theme\": \"dark\"}\n",
+        "plan writes nothing"
+    );
+    let disconnect = daemon
+        .plan("claude-code", AgentAction::Disconnect, true)
+        .await;
     assert_eq!(disconnect.changes.len(), 1);
     assert!(disconnect.changes[0].diff.is_empty());
     assert_ne!(disconnect.plan_revision, plan.plan_revision);
@@ -242,7 +256,9 @@ async fn agent_plan_redacts_token_in_diff() {
 async fn agent_plan_revision_prevents_stale_connect() {
     let daemon = Daemon::start("stale").await;
     daemon.write_settings("{}\n");
-    let plan = daemon.plan("claude-code", AgentAction::Connect, false).await;
+    let plan = daemon
+        .plan("claude-code", AgentAction::Connect, false)
+        .await;
     daemon.write_settings("{\"theme\": \"light\"}\n");
     let (status, body) = daemon
         .connect("claude-code", Some(plan.plan_revision.clone()))
@@ -252,10 +268,17 @@ async fn agent_plan_revision_prevents_stale_connect() {
     assert_eq!(kind, ControlErrorKind::Conflict);
     assert_eq!(codes, ["stale_plan"]);
     assert_eq!(daemon.read_settings(), "{\"theme\": \"light\"}\n");
-    let fresh = daemon.plan("claude-code", AgentAction::Connect, false).await;
-    let (status, _) = daemon.connect("claude-code", Some(fresh.plan_revision)).await;
+    let fresh = daemon
+        .plan("claude-code", AgentAction::Connect, false)
+        .await;
+    let (status, _) = daemon
+        .connect("claude-code", Some(fresh.plan_revision))
+        .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(state_of(&daemon.status().await, "claude-code"), AgentState::Connected);
+    assert_eq!(
+        state_of(&daemon.status().await, "claude-code"),
+        AgentState::Connected
+    );
     daemon.running.shutdown().await;
 }
 
@@ -267,7 +290,9 @@ async fn agent_disconnect_restores_preconnect_bytes() {
     let (status, _) = daemon.connect("claude-code", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_ne!(daemon.read_settings(), original);
-    let plan = daemon.plan("claude-code", AgentAction::Disconnect, false).await;
+    let plan = daemon
+        .plan("claude-code", AgentAction::Disconnect, false)
+        .await;
     let (status, body) = daemon
         .post(
             "agents/claude-code/disconnect",
@@ -278,7 +303,10 @@ async fn agent_disconnect_restores_preconnect_bytes() {
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let change: AgentChangeResponse = decode_response(API_VERSION, &body).expect("disconnect");
     assert_eq!(change.action, AgentAction::Disconnect);
-    assert_eq!(change.changed_paths, [daemon.settings().display().to_string()]);
+    assert_eq!(
+        change.changed_paths,
+        [daemon.settings().display().to_string()]
+    );
     assert_eq!(daemon.read_settings(), original);
     let (status, body) = daemon
         .post(
@@ -337,9 +365,16 @@ async fn token_rotate_updates_connected_agents_and_old_token_fails() {
     let settings = daemon.read_settings();
     assert!(settings.contains(&rotated.token));
     assert!(!settings.contains(&old));
-    assert_eq!(state_of(&daemon.status().await, "claude-code"), AgentState::Connected);
+    assert_eq!(
+        state_of(&daemon.status().await, "claude-code"),
+        AgentState::Connected
+    );
     let (status, _) = daemon.get("status", &old).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "old token on the control route");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "old token on the control route"
+    );
     let model = daemon
         .client
         .get(format!("http://{}/v1/models", daemon.running.local_addr))
@@ -347,7 +382,11 @@ async fn token_rotate_updates_connected_agents_and_old_token_fails() {
         .send()
         .await
         .expect("model route");
-    assert_eq!(model.status(), StatusCode::UNAUTHORIZED, "old token on the model route");
+    assert_eq!(
+        model.status(),
+        StatusCode::UNAUTHORIZED,
+        "old token on the model route"
+    );
     let (status, _) = daemon.get("status", &rotated.token).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(*daemon.generation.borrow(), 1);
@@ -462,7 +501,10 @@ async fn token_never_in_logs_or_errors() {
         let text = String::from_utf8_lossy(body);
         assert!(!text.contains(&old), "{text}");
     }
-    assert!(!message.contains(&old) && !message.contains(&rotated.token), "{message}");
+    assert!(
+        !message.contains(&old) && !message.contains(&rotated.token),
+        "{message}"
+    );
     assert!(!format!("{rotated:?}").contains(&rotated.token));
     let log = captured().lock().expect("log").clone();
     assert!(log.contains("claude-code"), "the refresh failure is logged");
@@ -498,7 +540,10 @@ async fn concurrent_rotate_and_connect_serialize_on_gate() {
             daemon.read_settings().contains(&daemon.token()),
             "round {round}: the agent holds the current token"
         );
-        assert_eq!(state_of(&daemon.status().await, "claude-code"), AgentState::Connected);
+        assert_eq!(
+            state_of(&daemon.status().await, "claude-code"),
+            AgentState::Connected
+        );
         let (status, _) = daemon
             .post(
                 "agents/claude-code/disconnect",
