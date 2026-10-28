@@ -418,14 +418,14 @@ impl AccountStore {
 
     /// Takes the lease file lock for one account, polling until `wait` runs out.
     ///
-    /// The returned file holds the lock. Dropping it releases the lock.
+    /// The returned guard holds the lock. Dropping it releases the lock.
     fn acquire_lease(
         &self,
         kind: &str,
         plugin: &str,
         account: &str,
         wait: Duration,
-    ) -> Result<File, StoreError> {
+    ) -> Result<LeaseLock, StoreError> {
         let lease_path = self.lease_path(kind, plugin, account);
         let mut options = OpenOptions::new();
         options.create(true).write(true).truncate(false);
@@ -441,7 +441,7 @@ impl AccountStore {
         let started = Instant::now();
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(file),
+                Ok(()) => return Ok(LeaseLock(file)),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     let waited = started.elapsed();
                     if waited >= wait {
@@ -590,10 +590,23 @@ fn lock_component(value: &str) -> String {
         .collect()
 }
 
+/// A held lease file lock.
+///
+/// Drop unlocks explicitly instead of relying on close: a child process
+/// spawned while the lock is held shares the open file until it execs, and
+/// close alone would leave the lock held for that window.
+struct LeaseLock(File);
+
+impl Drop for LeaseLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 /// A held lease. The lock file stays locked until commit or drop.
 struct StoreLease {
     store: AccountStore,
-    file: File,
+    file: LeaseLock,
     account: Account,
     secret: SecretString,
 }

@@ -183,7 +183,9 @@ pub trait SchedulerBackend: Send + Sync {
     /// when it cannot run work, for example outside a runtime.
     fn run_once(&self, name: &str, work: BoxFuture<'static, ()>) -> Result<u64, PluginError> {
         let _ = (name, work);
-        Err(PluginError::unsupported("this scheduler has no one-shot jobs"))
+        Err(PluginError::unsupported(
+            "this scheduler has no one-shot jobs",
+        ))
     }
 }
 

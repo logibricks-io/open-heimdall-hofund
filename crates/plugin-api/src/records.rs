@@ -1763,8 +1763,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        Account, AuthChoice, BinaryName, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
-        QuotaObservation, QuotaWindow, SignInChallenge, StaticUrl,
+        Account, AccountStatus, AuthChoice, BinaryName, ListQuery, MatchNeedle, ModelList,
+        ModelSpec, ProbeQuery, QuotaObservation, QuotaWindow, SignInChallenge, SignInCtx,
+        SignInProof, StaticUrl,
     };
     use crate::ListKind;
     use crate::id::{AccountId, PluginId, ProtocolId};
@@ -1898,5 +1899,59 @@ mod tests {
         assert!(SignInChallenge::device_code("", "https://example.com").is_err());
         let _url = StaticUrl::new("https://auth.example.com/device");
         let _binary = BinaryName::new("example-agent");
+    }
+
+    #[test]
+    fn quota_windows_block_by_default_and_cover_every_model() {
+        let window = QuotaWindow::new("weekly", 1, Some(10), None).expect("window");
+        assert!(window.blocking());
+        assert_eq!(window.scope_model(), None);
+        let window = window.with_blocking(false).with_scope_model("model-a");
+        assert!(!window.blocking());
+        assert_eq!(window.scope_model(), Some("model-a"));
+    }
+
+    #[test]
+    fn account_status_defaults_to_ready() {
+        assert_eq!(AccountStatus::default(), AccountStatus::Ready);
+        let needs = AccountStatus::NeedsSignIn {
+            reason: "token revoked".to_owned(),
+        };
+        assert_ne!(needs, AccountStatus::Ready);
+    }
+
+    #[test]
+    fn sign_in_session_must_be_32_lowercase_hex_digits() {
+        let plugin = PluginId::from_static("example-agent");
+        assert_eq!(SignInCtx::new(plugin.clone()).session(), "");
+        let good = "0123456789abcdef0123456789abcdef";
+        let ctx = SignInCtx::new(plugin.clone())
+            .with_session(good)
+            .expect("valid");
+        assert_eq!(ctx.session(), good);
+        for bad in [
+            "",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789ABCDEF0123456789abcdef",
+            "0123456789abcdeg0123456789abcdef",
+        ] {
+            assert!(
+                SignInCtx::new(plugin.clone()).with_session(bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn sign_in_options_need_a_name() {
+        let plugin = PluginId::from_static("example-agent");
+        let ctx = SignInCtx::new(plugin.clone())
+            .with_option("host", "example.test")
+            .expect("option");
+        assert_eq!(ctx.option("host"), Some("example.test"));
+        assert_eq!(ctx.option("label"), None);
+        assert!(SignInCtx::new(plugin).with_option("", "x").is_err());
+        assert_eq!(format!("{:?}", SignInProof::Await), "Await");
     }
 }

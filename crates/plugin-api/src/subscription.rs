@@ -10,7 +10,8 @@ use crate::error::PluginError;
 use crate::host::HostContext;
 use crate::id::{AccountId, PluginId};
 use crate::records::{
-    AccountStatus, ModelList, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof, SubscriptionSpec,
+    AccountStatus, ModelList, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof,
+    SubscriptionSpec,
 };
 use crate::upstream::UpstreamProvider;
 

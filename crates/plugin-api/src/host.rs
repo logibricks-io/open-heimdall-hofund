@@ -16,8 +16,8 @@ use crate::error::PluginError;
 use crate::id::PluginKind;
 use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
 use crate::kernel::{
-    AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, HttpBackend, ObserveBackend, ProcessBackend,
-    SchedulerBackend, SecretsBackend,
+    AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, HttpBackend, ObserveBackend,
+    ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use crate::records::{Account, QuotaObservation};
 use futures_util::future::BoxFuture;
@@ -194,7 +194,11 @@ impl AccountLease {
     ///
     /// Returns [`PluginError`] when `label` is empty or the write fails. The
     /// lease is released either way.
-    pub async fn commit(self, label: Option<String>, secret: SecretString) -> Result<(), PluginError> {
+    pub async fn commit(
+        self,
+        label: Option<String>,
+        secret: SecretString,
+    ) -> Result<(), PluginError> {
         if label.as_deref().is_some_and(str::is_empty) {
             return Err(PluginError::config("account label is empty"));
         }
@@ -332,11 +336,7 @@ impl SchedulerHandle {
     ///
     /// Returns [`PluginError`] when `name` is empty or the scheduler cannot
     /// run the work.
-    pub fn run_once(
-        &self,
-        name: &str,
-        work: BoxFuture<'static, ()>,
-    ) -> Result<JobId, PluginError> {
+    pub fn run_once(&self, name: &str, work: BoxFuture<'static, ()>) -> Result<JobId, PluginError> {
         if name.is_empty() {
             return Err(PluginError::config("job name is empty"));
         }
