@@ -156,6 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OpenCode's configured `hofund/<route>` model no longer produces an unrouted
+  model warning; other provider prefixes and bare model names still warn.
 - Non-2xx body-read failures now preserve the original `Status` and
   `Retry-After`, including live model pages, Vertex token responses, and the
   plugin host.
