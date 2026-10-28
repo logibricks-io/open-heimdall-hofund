@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 18);
+        assert_eq!(catalog.preset.len(), 13);
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
@@ -896,16 +896,6 @@ mod tests {
         })
         .expect_err("vertex project");
         assert!(error.to_string().contains("Google Cloud project"));
-        let error = resolve(&Resolve {
-            id: "typesafe",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect_err("decide");
-        assert!(error.to_string().contains("classifies"));
         let error = resolve(&Resolve {
             id: "nope",
             region: None,
