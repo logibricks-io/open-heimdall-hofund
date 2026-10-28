@@ -275,7 +275,7 @@ async fn handle(
         }
         return error_response(
             StatusCode::METHOD_NOT_ALLOWED,
-            ControlErrorKind::NotFound,
+            ControlErrorKind::MethodNotAllowed,
             "method not allowed",
         );
     }
@@ -298,7 +298,7 @@ async fn handle(
         }
         _ if path == "/v1/hofund/health" || path == "/v1/hofund/status" => error_response(
             StatusCode::METHOD_NOT_ALLOWED,
-            ControlErrorKind::NotFound,
+            ControlErrorKind::MethodNotAllowed,
             "method not allowed",
         ),
         _ => error_response(

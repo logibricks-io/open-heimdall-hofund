@@ -156,6 +156,20 @@ fn default_error_envelope_round_trips() {
 }
 
 #[test]
+fn method_not_allowed_error_round_trips_with_its_wire_spelling() {
+    let mut envelope = ErrorEnvelope::default();
+    envelope.error = ControlError::new(
+        ControlErrorKind::MethodNotAllowed,
+        "method not allowed",
+        "request-1",
+    );
+    let body = serde_json::to_vec(&envelope).expect("encode error envelope");
+    assert!(String::from_utf8_lossy(&body).contains("method_not_allowed"));
+    let decoded = decode_error_envelope(API_VERSION, &body).expect("decode error envelope");
+    assert_eq!(decoded, envelope);
+}
+
+#[test]
 fn error_message_validation_uses_configured_limit() {
     let mut envelope = valid_error_envelope();
     envelope.error.message = "x".repeat(MAX_ERROR_MESSAGE_BYTES + 1);

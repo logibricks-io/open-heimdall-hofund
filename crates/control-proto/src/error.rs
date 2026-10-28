@@ -167,6 +167,8 @@ pub enum ControlErrorKind {
     Forbidden,
     /// The requested id does not exist.
     NotFound,
+    /// The request method is not allowed on this route.
+    MethodNotAllowed,
     /// A revision or optimistic-concurrency check failed.
     Conflict,
     /// The JSON body or request shape is malformed.
@@ -200,6 +202,7 @@ impl ControlErrorKind {
             Self::Unauthorized => 401,
             Self::Forbidden => 403,
             Self::NotFound => 404,
+            Self::MethodNotAllowed => 405,
             Self::Conflict => 409,
             Self::BadRequest | Self::UnsupportedVersion => 400,
             Self::InvalidConfig | Self::Unprocessable => 422,

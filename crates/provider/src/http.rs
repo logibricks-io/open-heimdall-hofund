@@ -7,6 +7,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
 use hofund_ir::Request;
+use hofund_plugin_sdk::transport::parse_retry_after;
 use hofund_quirks::Profile;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -20,18 +21,6 @@ pub(crate) use crate::stream::{map_body, map_transport, message_from};
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
     parse_retry_after(value, std::time::SystemTime::now())
-}
-
-fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
-    value
-        .parse::<u64>()
-        .map(Duration::from_secs)
-        .ok()
-        .or_else(|| {
-            let at = httpdate::parse_http_date(value).ok()?;
-            at.duration_since(now).ok()
-        })
-        .filter(|after| !after.is_zero())
 }
 
 /// Where an API key is written.

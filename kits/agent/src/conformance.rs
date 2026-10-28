@@ -453,6 +453,9 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
     let drifted = managed_tree(&home);
     let gateway_values = gateway_values(&case);
     for (path, bytes) in &drifted {
+        if is_directory(path) {
+            continue;
+        }
         if description.files().iter().all(|file| {
             resolve(file, os, &session).strip_prefix(&home).ok() != Some(path.as_path())
         }) {
@@ -558,7 +561,11 @@ fn verify_plan(
     }
     assert_eq!(
         planned,
-        after.keys().cloned().collect(),
+        after
+            .keys()
+            .filter(|path| !is_directory(path))
+            .cloned()
+            .collect(),
         "{label}: after tree does not match plan paths"
     );
 }
@@ -714,21 +721,28 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    let mut files = BTreeMap::new();
-    collect_files(root, root, &mut files);
-    files
+    let mut entries = BTreeMap::new();
+    collect_entries(root, root, &mut entries);
+    entries
 }
 
-fn collect_files(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
-    let Ok(entries) = fs::read_dir(directory) else {
+fn collect_entries(root: &Path, directory: &Path, entries: &mut BTreeMap<PathBuf, Vec<u8>>) {
+    let Ok(children) = fs::read_dir(directory) else {
         return;
     };
-    for entry in entries {
-        let path = entry.expect("tree entry").path();
+    for child in children {
+        let path = child.expect("tree entry").path();
         if path.is_dir() {
-            collect_files(root, &path, files);
+            let mut relative = path
+                .strip_prefix(root)
+                .expect("tree relative")
+                .as_os_str()
+                .to_os_string();
+            relative.push("/");
+            entries.insert(PathBuf::from(relative), Vec::new());
+            collect_entries(root, &path, entries);
         } else if path.is_file() {
-            files.insert(
+            entries.insert(
                 path.strip_prefix(root)
                     .expect("tree relative")
                     .to_path_buf(),
@@ -740,8 +754,17 @@ fn collect_files(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Ve
 
 fn copy_tree(source: &Path, destination: &Path) {
     for (relative, bytes) in tree(source) {
-        write(&destination.join(relative), &bytes);
+        let path = destination.join(&relative);
+        if is_directory(&relative) {
+            fs::create_dir_all(path).expect("copy directory");
+        } else {
+            write(&path, &bytes);
+        }
     }
+}
+
+fn is_directory(path: &Path) -> bool {
+    path.as_os_str().to_string_lossy().ends_with('/')
 }
 
 fn write(path: &Path, bytes: &[u8]) {
@@ -1002,5 +1025,20 @@ refreshed_token = "refreshed-token"
             surviving_gateway_values("user_added=keep\n", &values).is_empty(),
             "origin-free file was flagged"
         );
+    }
+
+    #[test]
+    fn tree_comparison_detects_extra_and_missing_empty_directories() {
+        let expected_root = scratch();
+        let actual_root = scratch();
+        fs::create_dir_all(actual_root.join("empty")).expect("empty directory");
+        let expected = super::tree(&expected_root);
+        let actual = super::tree(&actual_root);
+
+        assert_ne!(actual, expected, "extra empty directory passed");
+        assert_ne!(expected, actual, "missing empty directory passed");
+
+        let _ = fs::remove_dir_all(expected_root);
+        let _ = fs::remove_dir_all(actual_root);
     }
 }

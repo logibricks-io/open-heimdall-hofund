@@ -213,6 +213,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wrong-method control responses now use the `method_not_allowed` error kind
+  while retaining HTTP 405 (#206).
+- Decide-only presets with an explicit wire now report the same missing-endpoint
+  message through catalog and registry selection (#170).
+- Provider and SDK transports share one Retry-After parser. Model-list error
+  joining preserves homogeneous Auth, Quota, Io, Config, Unsupported, and
+  Internal kinds instead of collapsing them to Decode (#119).
 - Default control error envelopes now round-trip with a valid request-id
   placeholder, validation messages use their limit constants, CI workflow
   parsing covers both cache-step forms and missing per-package test jobs, and
@@ -255,6 +262,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent conformance compares the exact trimmed origin and the current and
   refreshed tokens after disconnect, including a dedicated origin-only
   dotenv golden file, so surviving gateway values cannot pass unnoticed (#110).
+- Agent golden conformance compares directories as well as file contents, so
+  extra and missing empty directories no longer pass unnoticed (#148).
+- Non-forced Gemini CLI disconnect restores an original string `model` after
+  unrelated user edits without demoting an original object `model` on connect or
+  disconnect. Invalid `model` and non-string `model.name` shapes produce
+  actionable errors that name the key to repair (#176).
 - Gemini CLI connect writes `model.name`. A string `model` is moved there.
 - OpenCode `models` lists each gateway route, with `name` and an empty
   `variants` object. Modalities, limits, and reasoning levels are not

@@ -303,7 +303,7 @@ async fn cross_site_origin_and_form_mutation_fail() {
         assert_eq!(envelope.error.kind, ControlErrorKind::BadRequest);
     }
 
-    let (status, _, _) = call(
+    let (status, _, body) = call(
         app(),
         Method::POST,
         "/v1/hofund/status",
@@ -316,6 +316,26 @@ async fn cross_site_origin_and_form_mutation_fail() {
     )
     .await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let envelope = decode_error_envelope(API_VERSION, &body).expect("error envelope");
+    assert_eq!(envelope.error.kind, ControlErrorKind::MethodNotAllowed);
+}
+
+#[tokio::test]
+async fn head_on_known_control_routes_is_method_not_allowed() {
+    let authorization = bearer(TOKEN);
+    for path in ["/v1/hofund/health", "/v1/hofund/status"] {
+        let (status, _, body) = call(
+            app(),
+            Method::HEAD,
+            path,
+            Some(HOST),
+            &[("authorization", &authorization)],
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{path}");
+        assert!(body.is_empty(), "{path}");
+    }
 }
 
 #[tokio::test]
