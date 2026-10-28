@@ -5,11 +5,13 @@
 //! names do not belong in this crate. Generative Language paths are matched
 //! in `endpoints`.
 
+pub mod control;
 mod endpoints;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 
 use std::collections::HashMap;
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -46,13 +48,47 @@ pub struct Gateway {
 
 struct Inner {
     snapshot: Snapshot,
-    /// Last token read from [`Self::token_file`], or the token passed to
-    /// [`Gateway::new`] when that file cannot be read.
-    token: Mutex<String>,
-    token_file: Option<PathBuf>,
+    tokens: TokenState,
     codecs: HashMap<String, Arc<dyn Codec>>,
     usage: Arc<Ledger>,
     surfaces: Vec<Arc<dyn InboundSurface>>,
+}
+
+struct TokenState {
+    /// Last token read from the file, or the initial token when it cannot be read.
+    token: Mutex<String>,
+    token_file: Option<PathBuf>,
+}
+
+impl TokenState {
+    fn new(token: String, token_file: Option<PathBuf>) -> Self {
+        Self {
+            token: Mutex::new(token),
+            token_file,
+        }
+    }
+
+    fn current(&self) -> String {
+        let mut known = self
+            .token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(path) = &self.token_file
+            && let Ok(text) = std::fs::read_to_string(path)
+        {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                *known = trimmed.to_owned();
+            }
+        }
+        known.clone()
+    }
+}
+
+impl fmt::Debug for TokenState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("TokenState").finish_non_exhaustive()
+    }
 }
 
 /// A bound server.
@@ -62,6 +98,8 @@ pub struct Running {
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     attached: Vec<tokio::task::JoinHandle<()>>,
+    linked: Vec<Running>,
+    control_addr: Option<SocketAddr>,
 }
 
 /// The listener could not be bound.
@@ -74,6 +112,12 @@ pub enum GatewayError {
         listen: SocketAddr,
         /// The operating-system error.
         source: std::io::Error,
+    },
+    /// A control listener was requested on a non-loopback address.
+    #[error("control listener must use a numeric loopback address, got {listen}")]
+    NonLoopback {
+        /// The address that was rejected.
+        listen: SocketAddr,
     },
 }
 
@@ -118,8 +162,7 @@ impl Gateway {
         Self {
             inner: Arc::new(Inner {
                 snapshot,
-                token: Mutex::new(token),
-                token_file,
+                tokens: TokenState::new(token, token_file),
                 codecs,
                 usage,
                 surfaces: Vec::new(),
@@ -194,16 +237,26 @@ impl Gateway {
                 })
                 .await
         });
-        Ok(Running {
-            local_addr,
-            shutdown: Some(shutdown),
-            task: Some(task),
-            attached: Vec::new(),
-        })
+        Ok(Running::new(local_addr, shutdown, task))
     }
 }
 
 impl Running {
+    fn new(
+        local_addr: SocketAddr,
+        shutdown: oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<std::io::Result<()>>,
+    ) -> Self {
+        Self {
+            local_addr,
+            shutdown: Some(shutdown),
+            task: Some(task),
+            attached: Vec::new(),
+            linked: Vec::new(),
+            control_addr: None,
+        }
+    }
+
     /// Attaches a background task aborted by both shutdown and drop.
     #[doc(hidden)]
     #[must_use]
@@ -212,10 +265,28 @@ impl Running {
         self
     }
 
+    /// Links a control listener to this server's lifetime.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_control(mut self, control: Running) -> Self {
+        self.control_addr = Some(control.local_addr);
+        self.linked.push(control);
+        self
+    }
+
+    /// Returns the bound control address when a control listener is linked.
+    #[must_use]
+    pub fn control_local_addr(&self) -> Option<SocketAddr> {
+        self.control_addr
+    }
+
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
     pub async fn shutdown(mut self) {
         for task in self.attached.drain(..) {
             task.abort();
+        }
+        for linked in self.linked.drain(..) {
+            Box::pin(linked.shutdown()).await;
         }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -348,7 +419,10 @@ fn surface_error(error: PluginError) -> Response {
 }
 
 async fn health() -> Response {
-    json_response(StatusCode::OK, br#"{"status":"ok"}"#.to_vec())
+    json_response(
+        StatusCode::OK,
+        br#"{"status":"ok","service":"hofund"}"#.to_vec(),
+    )
 }
 
 async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
@@ -539,19 +613,7 @@ fn reject(
 }
 
 fn current_token(app: &Inner) -> String {
-    let mut known = app
-        .token
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(path) = &app.token_file
-        && let Ok(text) = std::fs::read_to_string(path)
-    {
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            *known = trimmed.to_owned();
-        }
-    }
-    known.clone()
+    app.tokens.current()
 }
 
 /// Accepts the bearer token, `x-api-key`, `x-goog-api-key`, or a `key` query value.

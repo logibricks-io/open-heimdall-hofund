@@ -42,8 +42,11 @@ flowchart BT
   provider["provider<br/>upstream adapters"]
   router["router<br/>routing and failover"]
   config["config<br/>settings"]
+  controlClient["control-client<br/>typed control transports"]
   controlProto["control-proto<br/>wire DTOs and events"]
+  controlClient --> controlProto
   daemon --> controlProto
+  gateway --> controlProto
   secrets["secrets<br/>credentials"]
   usage["usage<br/>consumption records"]
   agent["agent<br/>config adapters"]
@@ -152,8 +155,9 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-kit-agent` | `hofund-agent`, `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-quirks` |
 | `hofund-router` | `hofund-ir`, `hofund-plugin-api` |
-| `hofund-gateway` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-usage` |
+| `hofund-gateway` | `hofund-codec`, `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-usage` |
 | `hofund-config` | — |
+| `hofund-control-client` | `hofund-control-proto` |
 | `hofund-control-proto` | — |
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
@@ -172,7 +176,7 @@ Declare internal dependencies in `[workspace.dependencies]` with an explicit
 dependency with no version is a wildcard, and `cargo deny` rejects wildcards.
 
 `xtask` is a development crate. No runtime crate may depend on it.
-The `control-client` and gateway `control-proto` edges arrive in L3; the
+The `control-client` and gateway `control-proto` edges landed in L3; the
 `hofundd` composition-root edges arrive in L7, as ordered by
 [the control-plane plan](plugins/control-plane.md).
 
@@ -190,7 +194,8 @@ The `control-client` and gateway `control-proto` edges arrive in L3; the
 - Protocol names (Anthropic Messages, OpenAI Chat Completions, OpenAI Responses,
   and the Generative Language API) belong in `codec`. Naming a protocol there
   is not permission to mention that vendor from `gateway` or `router`.
-- The HTTP stack is axum. Only `gateway` may depend on axum or hyper. The
+- Only `gateway` may depend on axum. `gateway` and `control-client` may depend
+  on hyper, http, http-body-util, and hyper-util for their HTTP edges. The
   daemon may depend on `tower` for the kernel deadline and panic layer. The
   router must not depend on `tower`.
 - `usage` stays a leaf. `gateway` records one row per request. `usage` does
@@ -218,6 +223,7 @@ The `control-client` and gateway `control-proto` edges arrive in L3; the
 | `gateway` | axum HTTP server and middleware pipeline. |
 | `agent` | Coding-agent config adapters. A declarative description per agent; plan an edit, then apply it. The daemon passes the gateway URL and token in. |
 | `config` | Typed configuration for listeners, routes, accounts, and agents. |
+| `control-client` | Typed control calls over TCP and, in later pull requests, local IPC. Re-exports the proto for UI callers. |
 | `control-proto` | Versioned serde DTOs, events, error envelope, and wire version. No HTTP, Tokio, daemon, router, provider, or plugin-api dependency. |
 | `secrets` | Credential storage and resolution. |
 | `usage` | Request and token usage records. |
