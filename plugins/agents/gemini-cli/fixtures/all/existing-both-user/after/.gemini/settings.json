@@ -1,0 +1,13 @@
+{
+  "model": {
+    "name": "user-model",
+    "temperature": 0.2
+  },
+  "theme": "dark",
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key",
+      "userKey": true
+    }
+  }
+}

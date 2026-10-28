@@ -1,0 +1,13 @@
+{
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    }
+  },
+  "model": {
+    "name": "stale-model"
+  },
+  "ui": {
+    "theme": "dark"
+  }
+}

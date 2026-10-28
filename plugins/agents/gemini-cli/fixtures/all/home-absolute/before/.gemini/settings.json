@@ -1,0 +1,4 @@
+{
+  "model": "default-home-decoy",
+  "security": { "auth": { "selectedType": "oauth-personal" } }
+}

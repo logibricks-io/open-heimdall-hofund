@@ -463,7 +463,7 @@ fn warn_unrouted_model(
         return Ok(());
     };
     let routes = route_models(config).map_err(|error| error.to_string())?;
-    if routes.iter().all(|route| route != &model) {
+    if !model_has_route(adapter.id(), &model, &routes) {
         eprintln!(
             "warning: {} model `{model}` has no route in {}",
             adapter.id(),
@@ -471,6 +471,15 @@ fn warn_unrouted_model(
         );
     }
     Ok(())
+}
+
+fn model_has_route(adapter_id: &str, model: &str, routes: &[String]) -> bool {
+    if adapter_id == "opencode" {
+        return model
+            .strip_prefix("hofund/")
+            .is_some_and(|model| routes.iter().any(|route| route == model));
+    }
+    routes.iter().any(|route| route == model)
 }
 
 fn disconnect(adapter: &dyn hofund_agent::AgentAdapter, force: bool) -> Result<(), String> {
@@ -508,7 +517,8 @@ fn agent_status(config: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, HelpTopic, connect_models_note, opencode_models_note, parse, redact_diff,
+        Command, HelpTopic, connect_models_note, model_has_route, opencode_models_note, parse,
+        redact_diff,
     };
 
     fn words(values: &[&str]) -> Vec<String> {
@@ -529,6 +539,16 @@ mod tests {
         for adapter_id in ["codex", "claude-code", "gemini-cli"] {
             assert_eq!(connect_models_note(adapter_id, 2), None);
         }
+    }
+
+    #[test]
+    fn opencode_route_matching_strips_only_its_own_provider_prefix() {
+        let routes = vec!["route-a".to_owned()];
+        assert!(model_has_route("opencode", "hofund/route-a", &routes));
+        assert!(!model_has_route("opencode", "other/route-a", &routes));
+        // OpenCode spells selections as provider/model, so a bare model warns.
+        assert!(!model_has_route("opencode", "route-a", &routes));
+        assert!(!model_has_route("codex", "hofund/route-a", &routes));
     }
 
     #[test]
