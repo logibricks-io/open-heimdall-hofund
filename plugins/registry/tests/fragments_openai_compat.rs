@@ -1,4 +1,4 @@
-//! Parity checks for the first data-only OpenAI-compatible preset batch.
+//! Parity checks for the data-only OpenAI-compatible preset batches.
 
 use hofund_plugin_api::ProtocolId;
 use hofund_plugin_registry::{builtin_protocols, find_preset, model_plan_of, select};
@@ -149,6 +149,136 @@ const ROWS: &[Row] = &[
         anthropic: "",
         website: "https://api.together.ai",
         keys_url: "https://api.together.ai/settings/api-keys",
+    },
+    // reference: internal/provider/presets.go:147
+    Row {
+        id: "xai",
+        name: "xAI",
+        kind: "vendor",
+        catalog: "xai",
+        note: "",
+        chat: "https://api.x.ai/v1",
+        responses: "https://api.x.ai/v1",
+        anthropic: "https://api.x.ai",
+        website: "https://console.x.ai",
+        keys_url: "https://console.x.ai",
+    },
+    // reference: internal/provider/presets.go:150
+    Row {
+        id: "moonshot",
+        name: "Kimi",
+        kind: "vendor",
+        catalog: "moonshotai",
+        note: "",
+        chat: "https://api.moonshot.ai/v1",
+        responses: "",
+        anthropic: "https://api.moonshot.ai/anthropic",
+        website: "https://platform.moonshot.ai",
+        keys_url: "https://platform.moonshot.ai/console/api-keys",
+    },
+    // reference: internal/provider/presets.go:153
+    Row {
+        id: "moonshot-cn",
+        name: "Kimi (China)",
+        kind: "vendor",
+        catalog: "moonshotai",
+        note: "",
+        chat: "https://api.moonshot.cn/v1",
+        responses: "",
+        anthropic: "https://api.moonshot.cn/anthropic",
+        website: "https://platform.moonshot.cn",
+        keys_url: "https://platform.moonshot.cn/console/api-keys",
+    },
+    // reference: internal/provider/presets.go:158
+    Row {
+        id: "kimi-code",
+        name: "Kimi Code",
+        kind: "vendor",
+        catalog: "kimi-code-plan-global",
+        note: "Membership",
+        chat: "https://api.kimi.ai/coding/v1",
+        responses: "",
+        anthropic: "https://api.kimi.ai/coding",
+        website: "https://www.kimi.com/code",
+        keys_url: "https://www.kimi.com/code/console",
+    },
+    // reference: internal/provider/presets.go:162
+    Row {
+        id: "kimi-code-cn",
+        name: "Kimi Code (China)",
+        kind: "vendor",
+        catalog: "kimi-code-plan-cn",
+        note: "Membership",
+        chat: "https://api.kimi.com/coding/v1",
+        responses: "",
+        anthropic: "https://api.kimi.com/coding",
+        website: "https://www.kimi.com/code",
+        keys_url: "https://www.kimi.com/code/console",
+    },
+    // reference: internal/provider/presets.go:184
+    Row {
+        id: "minimax",
+        name: "MiniMax",
+        kind: "vendor",
+        catalog: "minimax",
+        note: "",
+        chat: "https://api.minimax.io/v1",
+        responses: "",
+        anthropic: "https://api.minimax.io/anthropic",
+        website: "https://platform.minimax.io",
+        keys_url: "https://platform.minimax.io/user-center/basic-information/interface-key",
+    },
+    // reference: internal/provider/presets.go:187
+    Row {
+        id: "minimax-cn",
+        name: "MiniMax (China)",
+        kind: "vendor",
+        catalog: "minimax",
+        note: "",
+        chat: "https://api.minimaxi.com/v1",
+        responses: "",
+        anthropic: "https://api.minimaxi.com/anthropic",
+        website: "https://platform.minimaxi.com",
+        keys_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+    },
+    // reference: internal/provider/presets.go:333
+    Row {
+        id: "qwen",
+        name: "Qwen",
+        kind: "vendor",
+        catalog: "alibaba",
+        note: "DashScope - intl",
+        chat: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        responses: "",
+        anthropic: "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+        website: "https://modelstudio.console.alibabacloud.com",
+        keys_url: "https://modelstudio.console.alibabacloud.com/?tab=playground#/api-key",
+    },
+    // reference: internal/provider/presets.go:337
+    Row {
+        id: "qwen-cn",
+        name: "Qwen (China)",
+        kind: "vendor",
+        catalog: "alibaba",
+        note: "DashScope - China",
+        chat: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        responses: "",
+        anthropic: "https://dashscope.aliyuncs.com/apps/anthropic",
+        website: "https://bailian.console.aliyun.com",
+        keys_url: "https://bailian.console.aliyun.com/?tab=model#/api-key",
+    },
+    // reference: internal/provider/presets.go:364
+    Row {
+        id: "mistral",
+        name: "Mistral",
+        kind: "vendor",
+        catalog: "mistral",
+        note: "",
+        chat: "https://api.mistral.ai/v1",
+        responses: "",
+        anthropic: "",
+        website: "https://console.mistral.ai",
+        keys_url: "https://console.mistral.ai/api-keys",
     },
 ];
 
