@@ -91,6 +91,22 @@ impl ProviderError {
         }
     }
 
+    /// An HTTP status and response body from the upstream.
+    #[must_use]
+    pub(crate) fn response(status: u16, body: &[u8]) -> Self {
+        let message = crate::stream::message_from(body);
+        if hofund_plugin_sdk::transport::is_quota_error(status, body) {
+            Self {
+                kind: ProviderErrorKind::Quota,
+                message,
+                status: Some(status),
+                retry_after: None,
+            }
+        } else {
+            Self::status(status, message)
+        }
+    }
+
     /// A body this protocol could not decode.
     #[must_use]
     pub fn decode(message: impl Into<String>) -> Self {

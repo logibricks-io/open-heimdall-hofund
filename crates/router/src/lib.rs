@@ -64,14 +64,13 @@ impl FailoverPolicy {
             PluginErrorKind::Connect | PluginErrorKind::Timeout | PluginErrorKind::Interrupted => {
                 self.connect_errors
             }
-            PluginErrorKind::Status => error
+            PluginErrorKind::Status | PluginErrorKind::Quota => error
                 .status()
                 .is_some_and(|code| self.statuses.contains(&code)),
             PluginErrorKind::Transport
             | PluginErrorKind::Decode
             | PluginErrorKind::Unsupported
             | PluginErrorKind::Auth
-            | PluginErrorKind::Quota
             | PluginErrorKind::Config
             | PluginErrorKind::Cancelled
             | PluginErrorKind::Io

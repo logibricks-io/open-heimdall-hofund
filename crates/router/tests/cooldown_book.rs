@@ -189,8 +189,62 @@ fn a_new_failure_never_shortens_a_longer_cooldown() {
         .record_failure(&id, &PluginError::connect("down"))
         .expect("generic");
     assert_eq!(generic.until(), expected.until());
-    assert_eq!(generic.cause(), CooldownCause::Failure);
+    assert_eq!(generic.cause(), CooldownCause::Quota);
+    assert_eq!(generic.failures(), expected.failures());
+    assert_eq!(book.cooling(&id), Some(expected));
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
+}
+
+#[test]
+fn a_later_deadline_brings_its_own_cause_and_failures() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &PluginError::connect("down"))
+        .expect("generic");
+    let quota = PluginError::quota("empty").with_retry_after(Duration::from_secs(HOUR));
+    let applied = book.record_failure(&id, &quota).expect("quota");
+    assert_eq!(applied.cause(), CooldownCause::Quota);
+    assert_eq!(
+        book.cooling(&id).map(|cooling| cooling.cause()),
+        Some(CooldownCause::Quota)
+    );
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
+}
+
+#[test]
+fn rate_ladder_restarts_after_an_intervening_non_rate_rest() {
+    let (book, id, clock) = fixture();
+    let first = book
+        .record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate");
+    assert_eq!(first.failures(), 1);
+    advance(&clock, MINUTE + 1);
+    let generic = book
+        .record_failure(&id, &PluginError::connect("down"))
+        .expect("generic");
+    assert_eq!(generic.cause(), CooldownCause::Failure);
+    advance(&clock, MINUTE + 1);
+    let next = book
+        .record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate");
+    assert_eq!(next.cause(), CooldownCause::RateLimit);
+    assert_eq!(next.failures(), 1);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+}
+
+#[test]
+fn rate_ladder_continues_when_the_previous_rest_was_a_rate_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate");
+    advance(&clock, MINUTE + 1);
+    let next = book
+        .record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate");
+    assert_eq!(next.failures(), 2);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(2 * MINUTE)
+    );
 }
 
 fn assert_observed(
@@ -719,8 +773,14 @@ fn rate_ladder_resets_during_active_non_rate_rest_after_forget() {
     );
     advance(&clock, 32 * MINUTE);
     book.maintain();
-    let next = book
+    let kept = book
         .record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("rate failure during quota rest");
+    assert_eq!(kept.cause(), CooldownCause::Quota);
+    advance(&clock, 29 * MINUTE);
+    let next = book
+        .record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate failure after quota rest");
+    assert_eq!(next.cause(), CooldownCause::RateLimit);
     assert_eq!(next.failures(), 1);
 }

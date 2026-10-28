@@ -547,7 +547,10 @@ impl Provider for Vertex {
                         PluginError::unsupported(error.message)
                     }
                     crate::ProviderErrorKind::Auth => PluginError::auth(error.message),
-                    crate::ProviderErrorKind::Quota => PluginError::quota(error.message),
+                    crate::ProviderErrorKind::Quota => match error.status {
+                        Some(status) => PluginError::quota_status(status, error.message),
+                        None => PluginError::quota(error.message),
+                    },
                     crate::ProviderErrorKind::Config => PluginError::config(error.message),
                     crate::ProviderErrorKind::Cancelled => PluginError::cancelled(error.message),
                     crate::ProviderErrorKind::Io => PluginError::io(error.message),

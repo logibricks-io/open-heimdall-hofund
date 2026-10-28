@@ -229,6 +229,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Quota refusals are now recognized from the response body with the reference's
+  rule order: a 402 naming a used-up limit, a 429 naming its reset time or a
+  planned allowance, a 5xx quota code, or another 4xx naming a used-up limit.
+  Per-minute and short-wait rate limits, `insufficient_quota`, and credit
+  refusals stay out. Quota errors keep their HTTP status for failover.
+- `Retry-After` keeps fractional seconds, and `*ratelimit*reset*` headers in
+  RFC 3339, Go duration, or Unix-time form are read when it is absent; the
+  longest wins and the router still caps the wait.
+- The rate-limit ladder now continues only when the previous rest was a rate
+  rest, and a kept longer rest keeps its own cause and failure count.
 - Over-long Unix control socket paths now warn and fall back to TCP instead of
   preventing daemon startup. Socket tests use short paths on macOS, and the
   Windows single-instance test no longer requires session debug output.

@@ -149,6 +149,8 @@ struct State {
     failures: u32,
     rate_failures: u32,
     rate_until: Option<Instant>,
+    /// Cause of the most recent rest kept; it outlives the rest's expiry.
+    last_cause: Option<CooldownCause>,
     idle_since: Option<Instant>,
     touched: Instant,
     revision: u64,
@@ -161,6 +163,7 @@ impl State {
             failures: 0,
             rate_failures: 0,
             rate_until: None,
+            last_cause: None,
             idle_since: None,
             touched: now,
             revision,
@@ -488,10 +491,15 @@ impl Cooldowns {
         now: Instant,
         retry_after: Option<Duration>,
     ) -> Cooling {
-        let resting = state.active(now);
-        let within_forget = state
-            .rate_until
-            .is_some_and(|until| now.saturating_duration_since(until) < self.policy.rate_forget);
+        // The ladder continues only when the last rest kept was a rate rest;
+        // an intervening rest for another cause restarts it (reference:
+        // internal/gateway/routing.go rateRest).
+        let previous_rate = state.last_cause == Some(CooldownCause::RateLimit);
+        let resting = previous_rate && state.active(now);
+        let within_forget = previous_rate
+            && state.rate_until.is_some_and(|until| {
+                now.saturating_duration_since(until) < self.policy.rate_forget
+            });
         state.rate_failures = if resting && state.rate_failures > 0 {
             state.rate_failures
         } else if within_forget {
@@ -671,13 +679,16 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
     }
 }
 
+/// Keeps whichever rest ends later, with its own cause and failure count
+/// (reference: internal/gateway/routing.go restSlow keeps the longer note).
+/// A candidate ending at the same instant replaces the current rest.
 fn apply(state: &mut State, candidate: Cooling) -> Cooling {
-    let until = match state.cooling {
-        Some(current) => current.until.max(candidate.until),
-        None => candidate.until,
+    let applied = match state.cooling {
+        Some(current) if current.until > candidate.until => current,
+        _ => candidate,
     };
-    let applied = Cooling { until, ..candidate };
     state.cooling = Some(applied);
+    state.last_cause = Some(applied.cause);
     applied
 }
 

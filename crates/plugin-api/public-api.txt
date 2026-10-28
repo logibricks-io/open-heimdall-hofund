@@ -343,6 +343,7 @@ PluginError::fn interrupted (message : impl Into < String >) -> Self
 PluginError::fn io (message : impl Into < String >) -> Self
 PluginError::fn message (& self) -> & str
 PluginError::fn quota (message : impl Into < String >) -> Self
+PluginError::fn quota_status (status : u16 , message : impl Into < String >) -> Self
 PluginError::fn status_error (status : u16 , message : impl Into < String >) -> Self
 PluginError::fn timeout (message : impl Into < String >) -> Self
 PluginError::fn transport (message : impl Into < String >) -> Self
