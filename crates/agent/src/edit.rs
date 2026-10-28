@@ -906,4 +906,41 @@ experimental_bearer_token = \"local-token\"
         assert!(error.contains("`model.name` must be a string"), "{error}");
         assert!(error.contains("restore `model.name`"), "{error}");
     }
+
+    #[test]
+    fn json_string_model_restore_rejects_extra_model_keys() {
+        let original = r#"{"model": "user-model"}"#;
+        let current = r#"{"model": {"name": "user-model", "temperature": 0.2}}"#;
+        let original_model = get(FileKind::Json, original, "model.name")
+            .expect("original model")
+            .expect("string model");
+        let restore = [Assignment {
+            key: "model.name",
+            value: original_model,
+            raw_json: true,
+        }];
+        let error = render(FileKind::Json, Some(current), &restore)
+            .expect_err("extra model key")
+            .to_string();
+        assert_eq!(
+            error,
+            "`model` must contain only a string `name` to restore the original string; move other keys out of `model` before disconnect"
+        );
+    }
+
+    #[test]
+    fn json_raw_model_name_object_is_not_a_string_model_restore() {
+        let original = r#"{"model": {"name": "old-model"}}"#;
+        let restore = [Assignment {
+            key: "model.name",
+            value: r#"{"name":"x","extra":1}"#.to_owned(),
+            raw_json: true,
+        }];
+        let rendered = render(FileKind::Json, Some(original), &restore).expect("render");
+        let rendered: serde_json::Value = serde_json::from_slice(&rendered).expect("rendered JSON");
+        assert_eq!(
+            rendered["model"],
+            serde_json::json!({"name": {"name": "x", "extra": 1}})
+        );
+    }
 }
