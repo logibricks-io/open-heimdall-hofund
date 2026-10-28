@@ -84,13 +84,24 @@ pub(crate) fn is_empty_document(kind: FileKind, bytes: &[u8]) -> Result<bool, Ag
 
 fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
     let mut root = json_root(original)?;
-    if assignments
-        .iter()
-        .any(|assignment| assignment.key == "model.name")
-    {
-        promote_string_model(&mut root);
+    let string_model = assignments.iter().find_map(string_model_restore);
+    let writes_model_name = assignments.iter().any(|assignment| {
+        assignment.key == "model.name" && string_model_restore(assignment).is_none()
+    });
+    let promotes_string_model = writes_model_name
+        || assignments
+            .iter()
+            .any(|assignment| assignment.key == "security.auth.selectedType");
+    if promotes_string_model {
+        promote_string_model(&mut root, !writes_model_name);
+    }
+    if let Some(name) = string_model {
+        restore_string_model(&mut root, name)?;
     }
     for assignment in assignments {
+        if string_model_restore(assignment).is_some() {
+            continue;
+        }
         set_json(
             &mut root,
             &split_key(assignment.key),
@@ -171,13 +182,48 @@ fn remove_json(original: &str, keys: &[&str]) -> Result<String, AgentError> {
     pretty_json(&root)
 }
 
-fn promote_string_model(root: &mut Value) {
+fn promote_string_model(root: &mut Value, preserve_name: bool) {
     let Some(object) = root.as_object_mut() else {
         return;
     };
     if object.get("model").is_some_and(Value::is_string) {
-        object.remove("model");
+        let name = object.remove("model").expect("string model");
+        if preserve_name {
+            object.insert("model".to_owned(), serde_json::json!({ "name": name }));
+        }
     }
+}
+
+fn string_model_restore(assignment: &Assignment) -> Option<String> {
+    if assignment.key != "model.name" || !assignment.raw_json {
+        return None;
+    }
+    let Value::Object(model) = serde_json::from_str(&assignment.value).ok()? else {
+        return None;
+    };
+    if model.len() != 1 {
+        return None;
+    }
+    match model.get("name") {
+        Some(Value::String(name)) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+fn restore_string_model(root: &mut Value, name: String) -> Result<(), AgentError> {
+    let restorable = root
+        .get("model")
+        .and_then(Value::as_object)
+        .is_some_and(|model| model.len() == 1 && model.get("name").is_some_and(Value::is_string));
+    if !restorable {
+        return Err(AgentError::message(
+            "`model` must contain only a string `name` to restore the original string; move other keys out of `model` before disconnect",
+        ));
+    }
+    root.as_object_mut()
+        .expect("JSON root")
+        .insert("model".to_owned(), Value::String(name));
+    Ok(())
 }
 
 fn pretty_json(root: &Value) -> Result<String, AgentError> {
@@ -236,6 +282,9 @@ pub(crate) fn json_string(value: &Value, key: &str) -> Result<Option<String>, Ag
 }
 
 fn json_get(value: &Value, key: &str) -> Result<Option<String>, AgentError> {
+    if key == "model.name" {
+        return json_model_name(value);
+    }
     let mut cursor = value;
     for part in split_key(key) {
         let Some(object) = cursor.as_object() else {
@@ -250,6 +299,35 @@ fn json_get(value: &Value, key: &str) -> Result<Option<String>, AgentError> {
         Value::String(text) => Ok(Some(text.clone())),
         Value::Null => Ok(None),
         _ => Ok(Some(cursor.to_string())),
+    }
+}
+
+fn json_model_name(value: &Value) -> Result<Option<String>, AgentError> {
+    let Some(root) = value.as_object() else {
+        return Err(AgentError::message(
+            "cannot read `model.name` unless the JSON root is an object; restore an object before disconnect",
+        ));
+    };
+    let Some(model) = root.get("model") else {
+        return Ok(None);
+    };
+    let model = match model {
+        Value::String(model) => {
+            return Ok(Some(serde_json::json!({ "name": model }).to_string()));
+        }
+        Value::Object(model) => model,
+        _ => {
+            return Err(AgentError::message(
+                "`model` must be a string or an object containing `name`; restore `model` to one of those shapes before disconnect",
+            ));
+        }
+    };
+    match model.get("name") {
+        Some(Value::String(name)) => Ok(Some(name.clone())),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(AgentError::message(
+            "`model.name` must be a string or null; restore `model.name` to a string before disconnect",
+        )),
     }
 }
 
@@ -709,5 +787,160 @@ experimental_bearer_token = \"local-token\"
         assert!(!text.contains("hofund"));
         assert!(!text.contains("local-token"));
         assert!(!is_empty_document(FileKind::Toml, text.as_bytes()).expect("empty"));
+    }
+
+    #[test]
+    fn json_restores_a_string_model_after_a_user_edit() {
+        let original = r#"{
+  "model": "user-model",
+  "ui": { "theme": "dark" }
+}
+"#;
+        let connect = [
+            Assignment {
+                key: "security.auth.selectedType",
+                value: "gemini-api-key".to_owned(),
+                raw_json: false,
+            },
+            Assignment {
+                key: "model.name",
+                value: "user-model".to_owned(),
+                raw_json: false,
+            },
+        ];
+        let connected = render(FileKind::Json, Some(original), &connect).expect("connect");
+        let connected = String::from_utf8(connected).expect("connected UTF-8");
+        let mut edited: serde_json::Value =
+            serde_json::from_str(&connected).expect("connected JSON");
+        assert_eq!(edited["model"]["name"], "user-model");
+        edited
+            .as_object_mut()
+            .expect("JSON root")
+            .insert("user_added".to_owned(), serde_json::Value::from("keep"));
+        let edited = serde_json::to_string(&edited).expect("edited JSON");
+
+        let original_model = get(FileKind::Json, original, "model.name")
+            .expect("original model")
+            .expect("string model");
+        let restore = [Assignment {
+            key: "model.name",
+            value: original_model,
+            raw_json: true,
+        }];
+        let restored = render(FileKind::Json, Some(&edited), &restore).expect("restore");
+        let restored = String::from_utf8(restored).expect("restored UTF-8");
+        let disconnected = remove_keys(FileKind::Json, &restored, &["security.auth.selectedType"])
+            .expect("disconnect");
+        let disconnected: serde_json::Value =
+            serde_json::from_slice(&disconnected).expect("disconnected JSON");
+        assert_eq!(disconnected["model"], "user-model");
+        assert_eq!(disconnected["user_added"], "keep");
+        assert_eq!(disconnected["ui"]["theme"], "dark");
+        assert!(disconnected.get("security").is_none());
+    }
+
+    #[test]
+    fn json_singleton_object_model_keeps_its_shape_through_restore() {
+        let original = r#"{
+  "model": { "name": "user-model" },
+  "ui": { "theme": "dark" }
+}
+"#;
+        let connect = [Assignment {
+            key: "model.name",
+            value: "hofund-model".to_owned(),
+            raw_json: false,
+        }];
+        let connected = render(FileKind::Json, Some(original), &connect).expect("connect");
+        let connected = String::from_utf8(connected).expect("connected UTF-8");
+        let connected_json: serde_json::Value =
+            serde_json::from_str(&connected).expect("connected JSON");
+        assert_eq!(connected_json["model"]["name"], "hofund-model");
+        assert!(connected_json["model"].is_object());
+        let second = render(FileKind::Json, Some(&connected), &connect).expect("second apply");
+        assert_eq!(second, connected.as_bytes());
+
+        let mut edited = connected_json;
+        edited
+            .as_object_mut()
+            .expect("JSON root")
+            .insert("user_added".to_owned(), serde_json::Value::from("keep"));
+        let edited = serde_json::to_string(&edited).expect("edited JSON");
+        let original_model = get(FileKind::Json, original, "model.name")
+            .expect("original model")
+            .expect("object model name");
+        assert_eq!(original_model, "user-model");
+        let restore = [Assignment {
+            key: "model.name",
+            value: original_model,
+            raw_json: false,
+        }];
+        let restored = render(FileKind::Json, Some(&edited), &restore).expect("restore");
+        let restored: serde_json::Value = serde_json::from_slice(&restored).expect("restored JSON");
+        assert_eq!(
+            restored["model"],
+            serde_json::json!({ "name": "user-model" })
+        );
+        assert_eq!(restored["user_added"], "keep");
+        assert_eq!(restored["ui"]["theme"], "dark");
+    }
+
+    #[test]
+    fn json_model_shape_error_names_the_key_and_repair() {
+        let error = get(FileKind::Json, r#"{"model": 42}"#, "model.name")
+            .expect_err("invalid model shape")
+            .to_string();
+        assert!(
+            error.contains("`model` must be a string or an object"),
+            "{error}"
+        );
+        assert!(error.contains("restore `model`"), "{error}");
+        assert!(!error.contains("`name` is not an object"), "{error}");
+    }
+
+    #[test]
+    fn json_model_name_rejects_a_non_string_name() {
+        let error = get(FileKind::Json, r#"{"model": {"name": 42}}"#, "model.name")
+            .expect_err("invalid model name")
+            .to_string();
+        assert!(error.contains("`model.name` must be a string"), "{error}");
+        assert!(error.contains("restore `model.name`"), "{error}");
+    }
+
+    #[test]
+    fn json_string_model_restore_rejects_extra_model_keys() {
+        let original = r#"{"model": "user-model"}"#;
+        let current = r#"{"model": {"name": "user-model", "temperature": 0.2}}"#;
+        let original_model = get(FileKind::Json, original, "model.name")
+            .expect("original model")
+            .expect("string model");
+        let restore = [Assignment {
+            key: "model.name",
+            value: original_model,
+            raw_json: true,
+        }];
+        let error = render(FileKind::Json, Some(current), &restore)
+            .expect_err("extra model key")
+            .to_string();
+        assert_eq!(
+            error,
+            "`model` must contain only a string `name` to restore the original string; move other keys out of `model` before disconnect"
+        );
+    }
+
+    #[test]
+    fn json_raw_model_name_object_is_not_a_string_model_restore() {
+        let original = r#"{"model": {"name": "old-model"}}"#;
+        let restore = [Assignment {
+            key: "model.name",
+            value: r#"{"name":"x","extra":1}"#.to_owned(),
+            raw_json: true,
+        }];
+        let rendered = render(FileKind::Json, Some(original), &restore).expect("render");
+        let rendered: serde_json::Value = serde_json::from_slice(&rendered).expect("rendered JSON");
+        assert_eq!(
+            rendered["model"],
+            serde_json::json!({"name": {"name": "x", "extra": 1}})
+        );
     }
 }
