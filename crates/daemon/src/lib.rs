@@ -481,20 +481,15 @@ fn build_raw_plugin(
         hofund_plugin_host::runtime_host(plugin, api_key.to_owned(), root, limits)
     }
     .map_err(show)?;
-    // Kernel-owned factories (`openai-compat`, `anthropic`, `generative`,
-    // `google-vertex`, `bedrock`) are not linked plugins: they read the wire
-    // from the `protocol` raw key and keep the default `build_with`, so they
-    // still build through `validate_and_build`. Only a linked (listed) plugin
-    // receives the selected protocol in `BuildContext`.
-    if hofund_plugin_registry::upstream(plugin_id).is_none() {
+    // Builtin factories serve several protocols through the `protocol` raw key
+    // and do not override `build_with`, so they keep the original build path.
+    if hofund_plugin_registry::builtin_factory_ids().contains(&plugin_id) {
         return factory.validate_and_build(&raw, &host).map_err(show);
     }
-    let protocol = protocol.ok_or_else(|| {
-        DaemonError::new(format!(
-            "provider `{}` has no selected protocol for plugin `{plugin_id}`",
-            provider.id
-        ))
-    })?;
+    let Some(protocol) = protocol else {
+        // Catalog-only factories without a ProtocolId also keep their legacy build.
+        return factory.validate_and_build(&raw, &host).map_err(show);
+    };
     factory
         .validate_and_build_with(&raw, &host, &BuildContext::new(protocol))
         .map_err(show)
