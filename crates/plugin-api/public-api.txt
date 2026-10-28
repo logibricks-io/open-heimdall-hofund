@@ -422,13 +422,19 @@ ProtocolId::const fn as_str (self) -> & 'static str
 ProtocolId::const fn from_static (value : & 'static str) -> Self
 QuotaObservation
 QuotaObservation #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+QuotaObservation::const fn limit (& self) -> Option < u64 >
 QuotaObservation::const fn remaining (& self) -> Option < u64 >
 QuotaObservation::const fn retry_after (& self) -> Option < Duration >
+QuotaObservation::const fn spending_credits (& self) -> bool
+QuotaObservation::const fn window_reset (& self) -> Option < Duration >
+QuotaObservation::const fn with_limit (mut self , limit : u64) -> Self
+QuotaObservation::const fn with_remaining (mut self , remaining : u64) -> Self
+QuotaObservation::const fn with_retry_after (mut self , after : Duration) -> Self
+QuotaObservation::const fn with_spending_credits (mut self , spending : bool) -> Self
+QuotaObservation::const fn with_window_reset (mut self , after : Duration) -> Self
 QuotaObservation::fn from_stored (plugin : PluginId) -> Self
 QuotaObservation::fn plugin (& self) -> & PluginId
 QuotaObservation::fn window (& self) -> Option < & str >
-QuotaObservation::fn with_remaining (mut self , remaining : u64) -> Self
-QuotaObservation::fn with_retry_after (mut self , after : Duration) -> Self
 QuotaQuery
 QuotaQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 QuotaQuery::fn account (& self) -> Option < & AccountId >

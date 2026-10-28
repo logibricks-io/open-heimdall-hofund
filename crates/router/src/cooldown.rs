@@ -8,7 +8,7 @@
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. |
 //! | Exhausted quota | Uses the header retry hint capped at 1 hour, or 15 minutes without a positive hint. |
 //! | HTTP 402 | Uses 30 minutes, or the retry hint capped at 1 hour when that is longer. |
-//! | Passive observation | An exhausted window uses its stated reset capped at 8 days, or 15 minutes without a positive reset. Any other observation records nothing. Observations do not advance either failure ladder. |
+//! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use hofund_plugin_api::{MemberId, PluginError, PluginErrorKind};
+use hofund_plugin_api::{MemberId, PluginError, PluginErrorKind, QuotaObservation};
 
 const RECOVERY_CAPACITY: usize = 1_024;
 
@@ -310,22 +310,16 @@ impl Cooldowns {
 
     /// Applies an exhausted quota window observed on a successful call.
     ///
-    /// Other observations record nothing and do not advance the state revision.
-    pub fn observe(
-        &self,
-        id: &MemberId,
-        retry_after: Option<Duration>,
-        remaining: Option<u64>,
-    ) -> Option<Cooling> {
+    /// Zero remaining uses reset, retry, then default cooldowns. Positive
+    /// remaining at or above 98% used rests only for a known positive window
+    /// reset (reference: internal/provider/routing.go:365-375). Accounts
+    /// spending credits and all other observations record nothing and do not
+    /// advance the state revision.
+    pub fn observe(&self, id: &MemberId, observation: &QuotaObservation) -> Option<Cooling> {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        if remaining != Some(0) {
-            return None;
-        }
-        let duration = positive_hint(retry_after).map_or(self.policy.quota_default, |after| {
-            after.min(self.policy.quota_max)
-        });
+        let duration = observation_rest(&self.policy, observation)?;
         let revision = next_revision(&mut book);
         let Some(state) = self.entry_for_insert(&mut book, id, now, revision) else {
             return Some(cooling(now, duration, CooldownCause::Observed, 0));
@@ -630,6 +624,33 @@ fn ladder(base: Duration, cap: Duration, failures: u32) -> Duration {
 
 fn positive_hint(duration: Option<Duration>) -> Option<Duration> {
     duration.filter(|duration| !duration.is_zero())
+}
+
+fn observation_rest(policy: &CooldownPolicy, observation: &QuotaObservation) -> Option<Duration> {
+    if observation.spending_credits() {
+        return None;
+    }
+    let remaining = observation.remaining()?;
+    if remaining == 0 {
+        return Some(
+            if let Some(after) = positive_hint(observation.window_reset()) {
+                after.min(policy.quota_max)
+            } else if let Some(after) = positive_hint(observation.retry_after()) {
+                after.min(policy.retry_after_max)
+            } else {
+                policy.quota_default
+            },
+        );
+    }
+    let limit = observation.limit()?;
+    if limit == 0 || remaining > limit {
+        return None;
+    }
+    let used = u128::from(limit) - u128::from(remaining);
+    if used * 100 < u128::from(limit) * 98 {
+        return None;
+    }
+    positive_hint(observation.window_reset()).map(|after| after.min(policy.quota_max))
 }
 
 /// Keeps an overflowing rest active at a far deadline rather than failing open.

@@ -94,6 +94,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subscription to share an id without changing existing config or CLI commands.
   Registry contributions and host secrets, accounts, cache directories, and state
   directories are keyed by kind and id; legacy account rows remain subscriptions.
+- Passive quota observations now distinguish one-hour retry hints from
+  eight-day window resets, rest at 98% used only when the window reset is
+  known, and exempt accounts spending credits. `Cooldowns::observe` now takes
+  `&QuotaObservation` instead of separate positional fields.
 - `agent.toml` rejects `create` on single-location files, where the field had
   no observable effect; multi-location candidate selection is unchanged (#177).
 - Removed the frozen agent const engine, migration-only oracle feature, static
@@ -113,6 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata and decision endpoints, now lives in
   `plugins/providers/openai-compat/presets.toml` with catalog-equivalent registry
   selection and model planning.
+- The fifth batch of four vendor preset rows and their four aliases, including
+  regional endpoints and model metadata, now lives in
+  `plugins/providers/openai-compat/presets.toml` with catalog-equivalent registry
+  selection, credential derivation, and model planning.
 - `ProviderModels` is now non-exhaustive so future aggregation fields do not
   break downstream construction at compile time.
 - Plugin-host responses now strip every RFC 9110 hop-by-hop header, including
@@ -263,6 +271,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent conformance compares the exact trimmed origin and the current and
   refreshed tokens after disconnect, including a dedicated origin-only
   dotenv golden file, so surviving gateway values cannot pass unnoticed (#110).
+- Agent golden conformance compares directories as well as file contents, so
+  extra and missing empty directories no longer pass unnoticed (#148).
+- Non-forced Gemini CLI disconnect restores an original string `model` after
+  unrelated user edits without demoting an original object `model` on connect or
+  disconnect. Invalid `model` and non-string `model.name` shapes produce
+  actionable errors that name the key to repair (#176).
 - Gemini CLI connect writes `model.name`. A string `model` is moved there.
 - OpenCode `models` lists each gateway route, with `name` and an empty
   `variants` object. Modalities, limits, and reasoning levels are not
