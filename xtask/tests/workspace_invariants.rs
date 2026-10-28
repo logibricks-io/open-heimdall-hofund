@@ -239,6 +239,10 @@ fn dependency_graph_matches_architecture() {
         }
     }
 
+    assert!(
+        workspace_legacy_codex_feature_is_allowed(&manifest),
+        "workspace dependencies must not enable legacy-agent-consts"
+    );
     let mut seen = BTreeSet::new();
     for member in MEMBERS {
         let package_manifest = read_to_string(&root.join(member).join("Cargo.toml"));
@@ -247,7 +251,7 @@ fn dependency_graph_matches_architecture() {
             inherits_workspace_edition(&package_manifest),
             "{name} must inherit edition 2024 from the workspace"
         );
-        let deps = workspace_deps(&package_manifest, DependencySection::Normal);
+        let deps = workspace_deps(&package_manifest, DependencySection::Normal, &manifest);
         let Some(expected) = expected_deps(&name) else {
             panic!("no allowed dependency list for package {name}");
         };
@@ -257,7 +261,7 @@ fn dependency_graph_matches_architecture() {
             deps, expected_set,
             "package {name} normal/build dependencies drifted; update docs/architecture.md and this test together"
         );
-        let dev_deps = workspace_deps(&package_manifest, DependencySection::Dev);
+        let dev_deps = workspace_deps(&package_manifest, DependencySection::Dev, &manifest);
         let Some(expected_dev) = expected_dev_deps(&name) else {
             panic!("no allowed dev dependency list for package {name}");
         };
@@ -268,7 +272,7 @@ fn dependency_graph_matches_architecture() {
             "package {name} dev dependencies drifted; review the dev allow-map"
         );
         assert!(
-            legacy_codex_feature_is_allowed(&name, &package_manifest),
+            legacy_codex_feature_is_allowed(&name, &package_manifest, &manifest),
             "package {name} enables legacy-agent-consts outside dev-dependencies"
         );
         assert!(seen.insert(name), "duplicate package name");
@@ -541,105 +545,172 @@ fn package_name(manifest: &str) -> String {
 enum DependencySection {
     Normal,
     Dev,
-    Other,
 }
 
-fn workspace_deps(manifest: &str, wanted: DependencySection) -> BTreeSet<String> {
+fn workspace_deps(
+    manifest: &str,
+    wanted: DependencySection,
+    workspace_manifest: &str,
+) -> BTreeSet<String> {
+    let manifest = parse_manifest(manifest);
+    let workspace_manifest = parse_manifest(workspace_manifest);
     let mut deps = BTreeSet::new();
-    let mut section = DependencySection::Other;
-    for line in manifest.lines() {
-        let trimmed = strip_comment(line).trim();
-        if trimmed.starts_with('[') {
-            section = DependencySection::Other;
-            if let Some((table_section, name)) = dependency_table(trimmed) {
-                section = table_section;
-                if table_section == wanted && is_workspace_crate(name) {
-                    deps.insert(name.to_string());
-                }
-            } else if let Some(header_section) = dependency_section(trimmed) {
-                section = header_section;
-            }
-            continue;
+    visit_dependencies(&manifest, wanted, |key, dependency| {
+        let package = resolved_dependency_package_name(key, dependency, &workspace_manifest);
+        let is_local = dependency
+            .get("workspace")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false)
+            || dependency.get("path").is_some();
+        if is_workspace_crate(package) && is_local {
+            deps.insert(package.to_string());
         }
-        if section != wanted || trimmed.is_empty() {
-            continue;
-        }
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        if is_workspace_crate(key) && (value.contains("workspace") || value.contains("path")) {
-            deps.insert(key.to_string());
-        }
-    }
+    });
     deps
 }
 
-fn dependency_table(header: &str) -> Option<(DependencySection, &str)> {
-    let inner = header.strip_prefix('[')?.strip_suffix(']')?.trim();
-    for (prefix, section) in [
-        ("dependencies.", DependencySection::Normal),
-        ("build-dependencies.", DependencySection::Normal),
-        ("dev-dependencies.", DependencySection::Dev),
-    ] {
-        if let Some(name) = inner.strip_prefix(prefix) {
-            return Some((section, name.trim_matches(&['\'', '"'][..])));
-        }
-    }
-    None
+fn parse_manifest(manifest: &str) -> toml::Value {
+    toml::from_str(manifest).expect("manifest must be valid TOML")
 }
 
-fn dependency_section(header: &str) -> Option<DependencySection> {
-    let inner = header.strip_prefix('[')?.strip_suffix(']')?.trim();
-    match inner {
-        "dependencies" | "build-dependencies" => Some(DependencySection::Normal),
-        "dev-dependencies" => Some(DependencySection::Dev),
-        _ if inner.starts_with("target.") && inner.ends_with(".dependencies") => {
-            Some(DependencySection::Normal)
-        }
-        _ if inner.starts_with("target.") && inner.ends_with(".build-dependencies") => {
-            Some(DependencySection::Normal)
-        }
-        _ if inner.starts_with("target.") && inner.ends_with(".dev-dependencies") => {
-            Some(DependencySection::Dev)
-        }
-        _ => None,
+fn visit_dependencies<F>(manifest: &toml::Value, wanted: DependencySection, mut visit: F)
+where
+    F: FnMut(&str, &toml::Value),
+{
+    let sections: &[&str] = match wanted {
+        DependencySection::Normal => &["dependencies", "build-dependencies"],
+        DependencySection::Dev => &["dev-dependencies"],
+    };
+    for section in sections {
+        visit_dependency_section(manifest, section, &mut visit);
     }
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values() {
+            for section in sections {
+                visit_dependency_section(target, section, &mut visit);
+            }
+        }
+    }
+}
+
+fn visit_dependency_section<F>(manifest: &toml::Value, section: &str, visit: &mut F)
+where
+    F: FnMut(&str, &toml::Value),
+{
+    if let Some(dependencies) = manifest.get(section).and_then(toml::Value::as_table) {
+        for (key, dependency) in dependencies {
+            visit(key, dependency);
+        }
+    }
+}
+
+fn dependency_package_name<'a>(key: &'a str, dependency: &'a toml::Value) -> &'a str {
+    dependency
+        .get("package")
+        .and_then(toml::Value::as_str)
+        .unwrap_or(key)
+}
+
+fn resolved_dependency_package_name<'a>(
+    key: &'a str,
+    dependency: &'a toml::Value,
+    workspace_manifest: &'a toml::Value,
+) -> &'a str {
+    if dependency
+        .get("workspace")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
+        && let Some(inherited) = workspace_dependency(workspace_manifest, key)
+    {
+        return dependency_package_name(key, inherited);
+    }
+    dependency_package_name(key, dependency)
 }
 
 fn is_workspace_crate(name: &str) -> bool {
     name.starts_with("hofund-") || name == "xtask"
 }
 
-fn legacy_codex_feature_is_allowed(package: &str, manifest: &str) -> bool {
+fn legacy_codex_feature_is_allowed(
+    package: &str,
+    manifest: &str,
+    workspace_manifest: &str,
+) -> bool {
     if package == "hofund-agent" {
         return true;
     }
-    let mut section = DependencySection::Other;
-    let mut agent_table = false;
-    for line in manifest.lines() {
-        let trimmed = strip_comment(line).trim();
-        if trimmed.starts_with('[') {
-            agent_table = dependency_table(trimmed).is_some_and(|(table_section, name)| {
-                table_section == DependencySection::Normal && name == "hofund-agent"
-            });
-            section = dependency_table(trimmed).map_or_else(
-                || dependency_section(trimmed).unwrap_or(DependencySection::Other),
-                |(table_section, _)| table_section,
-            );
-            continue;
+    let manifest = parse_manifest(manifest);
+    let workspace_manifest = parse_manifest(workspace_manifest);
+    let mut agent_aliases = BTreeSet::new();
+    let mut allowed = true;
+    visit_dependencies(&manifest, DependencySection::Normal, |key, dependency| {
+        if resolved_dependency_package_name(key, dependency, &workspace_manifest) != "hofund-agent"
+        {
+            return;
         }
-        if section != DependencySection::Normal {
-            continue;
+        agent_aliases.insert(key.to_string());
+        if dependency_enables_legacy_codex(dependency) {
+            allowed = false;
         }
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        if (agent_table || key.trim() == "hofund-agent") && value.contains("legacy-agent-consts") {
-            return false;
+        if dependency
+            .get("workspace")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false)
+            && workspace_dependency(&workspace_manifest, key)
+                .is_some_and(dependency_enables_legacy_codex)
+        {
+            allowed = false;
+        }
+    });
+    if !allowed {
+        return false;
+    }
+
+    let Some(features) = manifest.get("features").and_then(toml::Value::as_table) else {
+        return true;
+    };
+    for declarations in features.values().filter_map(toml::Value::as_array) {
+        for declaration in declarations.iter().filter_map(toml::Value::as_str) {
+            let Some((dependency, feature)) = declaration.split_once('/') else {
+                continue;
+            };
+            let dependency = dependency.strip_suffix('?').unwrap_or(dependency);
+            if feature == "legacy-agent-consts" && agent_aliases.contains(dependency) {
+                return false;
+            }
         }
     }
     true
+}
+
+fn dependency_enables_legacy_codex(dependency: &toml::Value) -> bool {
+    dependency
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("legacy-agent-consts"))
+        })
+}
+
+fn workspace_dependency<'a>(manifest: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
+    manifest.get("workspace")?.get("dependencies")?.get(key)
+}
+
+fn workspace_legacy_codex_feature_is_allowed(manifest: &str) -> bool {
+    let manifest = parse_manifest(manifest);
+    let Some(dependencies) = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table)
+    else {
+        return true;
+    };
+    dependencies.iter().all(|(key, dependency)| {
+        dependency_package_name(key, dependency) != "hofund-agent"
+            || !dependency_enables_legacy_codex(dependency)
+    })
 }
 
 #[test]
@@ -650,7 +721,8 @@ hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
 "#;
     assert!(!legacy_codex_feature_is_allowed(
         "hofund-plugin-registry",
-        manifest
+        manifest,
+        ""
     ));
 }
 
@@ -662,7 +734,8 @@ hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
 "#;
     assert!(legacy_codex_feature_is_allowed(
         "hofund-plugin-registry",
-        manifest
+        manifest,
+        ""
     ));
 }
 
@@ -673,10 +746,208 @@ fn dependency_table_form_is_detected() {
 workspace = true
 features = ["legacy-agent-consts"]
 "#;
-    assert!(workspace_deps(manifest, DependencySection::Normal).contains("hofund-agent"));
+    assert!(workspace_deps(manifest, DependencySection::Normal, "").contains("hofund-agent"));
     assert!(!legacy_codex_feature_is_allowed(
         "hofund-plugin-registry",
-        manifest
+        manifest,
+        ""
+    ));
+}
+
+#[test]
+fn multiline_inline_features_are_detected() {
+    let manifest = r#"
+[dependencies]
+hofund-agent = { workspace = true, features = [
+    "legacy-agent-consts",
+] }
+"#;
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        ""
+    ));
+}
+
+#[test]
+fn multiline_table_features_are_detected() {
+    let manifest = r#"
+[dependencies.hofund-agent]
+workspace = true
+features = [
+    "legacy-agent-consts",
+]
+"#;
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        ""
+    ));
+}
+
+#[test]
+fn target_dependency_table_is_detected() {
+    let manifest = r#"
+[target.'cfg(unix)'.dependencies.hofund-agent]
+workspace = true
+features = ["legacy-agent-consts"]
+"#;
+    assert!(workspace_deps(manifest, DependencySection::Normal, "").contains("hofund-agent"));
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        ""
+    ));
+}
+
+#[test]
+fn renamed_dependency_is_detected() {
+    let manifest = r#"
+[dependencies]
+agent = { package = "hofund-agent", workspace = true, features = ["legacy-agent-consts"] }
+"#;
+    assert!(workspace_deps(manifest, DependencySection::Normal, "").contains("hofund-agent"));
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        ""
+    ));
+}
+
+#[test]
+fn workspace_renamed_dependency_is_detected() {
+    let workspace_manifest = r#"
+[workspace.dependencies]
+agent = { package = "hofund-agent", path = "crates/agent" }
+"#;
+    let manifest = r#"
+[dependencies]
+agent = { workspace = true }
+"#;
+    assert!(
+        workspace_deps(manifest, DependencySection::Normal, workspace_manifest)
+            .contains("hofund-agent")
+    );
+    assert!(legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        workspace_manifest
+    ));
+}
+
+#[test]
+fn workspace_renamed_feature_forwarding_is_detected() {
+    let workspace_manifest = r#"
+[workspace.dependencies]
+agent = { package = "hofund-agent", path = "crates/agent" }
+"#;
+    let manifest = r#"
+[dependencies]
+agent = { workspace = true }
+[features]
+default = ["agent/legacy-agent-consts"]
+"#;
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        workspace_manifest
+    ));
+}
+
+#[test]
+fn workspace_renamed_member_features_are_detected() {
+    let workspace_manifest = r#"
+[workspace.dependencies]
+agent = { package = "hofund-agent", path = "crates/agent" }
+"#;
+    let manifest = r#"
+[dependencies]
+agent = { workspace = true, features = ["legacy-agent-consts"] }
+"#;
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        workspace_manifest
+    ));
+}
+
+#[test]
+fn dotted_dependency_keys_are_detected() {
+    let manifest = r#"
+[dependencies]
+hofund-agent.workspace = true
+hofund-agent.features = ["legacy-agent-consts"]
+"#;
+    assert!(workspace_deps(manifest, DependencySection::Normal, "").contains("hofund-agent"));
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        ""
+    ));
+}
+
+#[test]
+fn feature_forwarding_is_detected() {
+    let manifest = r#"
+[dependencies]
+hofund-agent = { workspace = true }
+[features]
+default = ["hofund-agent/legacy-agent-consts"]
+"#;
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        ""
+    ));
+}
+
+#[test]
+fn optional_feature_forwarding_is_detected() {
+    let manifest = r#"
+[dependencies]
+hofund-agent = { workspace = true, optional = true }
+[features]
+default = ["hofund-agent?/legacy-agent-consts"]
+"#;
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        ""
+    ));
+}
+
+#[test]
+fn renamed_feature_forwarding_is_detected() {
+    let manifest = r#"
+[dependencies]
+agent = { package = "hofund-agent", workspace = true }
+[features]
+default = ["agent/legacy-agent-consts"]
+"#;
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        ""
+    ));
+}
+
+#[test]
+fn inherited_workspace_features_are_detected() {
+    let workspace_manifest = r#"
+[workspace.dependencies]
+hofund-agent = { path = "crates/agent", features = ["legacy-agent-consts"] }
+"#;
+    let manifest = r#"
+[dependencies]
+hofund-agent.workspace = true
+"#;
+    assert!(!workspace_legacy_codex_feature_is_allowed(
+        workspace_manifest
+    ));
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest,
+        workspace_manifest
     ));
 }
 
@@ -692,7 +963,7 @@ hofund-config = { workspace = true }
 [target.'cfg(unix)'.dev-dependencies]
 hofund-router = { workspace = true }
 "#;
-    let normal = workspace_deps(manifest, DependencySection::Normal);
+    let normal = workspace_deps(manifest, DependencySection::Normal, "");
     assert_eq!(
         normal,
         ["hofund-codec", "hofund-config", "hofund-ir"]
@@ -701,7 +972,7 @@ hofund-router = { workspace = true }
             .collect()
     );
     assert_eq!(
-        workspace_deps(manifest, DependencySection::Dev),
+        workspace_deps(manifest, DependencySection::Dev, ""),
         ["hofund-router".to_string()].into_iter().collect()
     );
 }

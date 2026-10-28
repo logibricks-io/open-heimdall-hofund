@@ -270,24 +270,45 @@ impl HttpBackend for PooledHttp {
             outbound = outbound.header(name.as_str(), header);
         }
         let bytes = request.body().bytes().clone();
-        let response = outbound.body(bytes).send().await.map_err(map_error)?;
+        let mut response = outbound.body(bytes).send().await.map_err(map_error)?;
         let status = response.status();
-        // The body is collected here, so framing headers no longer describe it
-        // (a broken non-2xx body becomes empty). Other headers, such as
-        // Retry-After, reach the plugin unchanged.
         let mut headers = response.headers().clone();
+        let nominated = headers
+            .get_all(reqwest::header::CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .filter_map(|name| reqwest::header::HeaderName::from_bytes(name.trim().as_bytes()).ok())
+            .collect::<Vec<_>>();
         for name in [
             reqwest::header::CONTENT_LENGTH,
             reqwest::header::TRANSFER_ENCODING,
             reqwest::header::CONNECTION,
+            reqwest::header::HeaderName::from_static("keep-alive"),
+            reqwest::header::PROXY_AUTHENTICATE,
+            reqwest::header::PROXY_AUTHORIZATION,
+            reqwest::header::TE,
+            reqwest::header::TRAILER,
+            reqwest::header::UPGRADE,
+            reqwest::header::HeaderName::from_static("proxy-connection"),
         ] {
             headers.remove(name);
         }
-        let collected = if status.is_success() {
-            response.bytes().await.map_err(map_body)?
-        } else {
-            response.bytes().await.unwrap_or_default()
-        };
+        for name in nominated {
+            headers.remove(name);
+        }
+        // Set-Cookie stays because plugins are the HTTP clients and the host
+        // keeps no cookie jar on their behalf.
+        let success = status.is_success();
+        let mut collected = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => collected.extend_from_slice(&chunk),
+                Ok(None) => break,
+                Err(_) if !success => break,
+                Err(error) => return Err(map_body(error)),
+            }
+        }
         let mut output = HttpResponse::new(BodyStream::from_bytes(collected));
         *output.status_mut() = status;
         *output.headers_mut() = headers;
@@ -607,7 +628,7 @@ mod tests {
     #[tokio::test]
     async fn a_429_preserves_status_and_retry_after_through_host_and_sdk() {
         const COMPLETE: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 1\r\nretry-after: 120\r\nconnection: close\r\n\r\n{";
-        const TRUNCATED: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 4\r\nretry-after: 120\r\nconnection: close\r\n\r\n{";
+        const TRUNCATED: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 4\r\nretry-after: 120\r\nconnection: x-foo\r\nkeep-alive: timeout=5\r\nproxy-connection: keep-alive\r\nproxy-authenticate: Basic\r\nproxy-authorization: Basic secret\r\nte: trailers\r\ntrailer: x-checksum\r\nupgrade: h2c\r\nx-foo: strip\r\nx-ordinary: survive\r\nset-cookie: session=plugin\r\n\r\n{";
 
         let _guard = exclusive().await;
         let port = raw(TRUNCATED);
@@ -628,12 +649,42 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("120")
         );
-        assert!(
+        for name in [
+            "connection",
+            "content-length",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "proxy-connection",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "x-foo",
+        ] {
+            assert!(!response.headers().contains_key(name), "{name}");
+        }
+        assert_eq!(
             response
                 .headers()
-                .get(reqwest::header::CONTENT_LENGTH)
-                .is_none()
+                .get("x-ordinary")
+                .and_then(|value| value.to_str().ok()),
+            Some("survive")
         );
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::SET_COOKIE)
+                .and_then(|value| value.to_str().ok()),
+            Some("session=plugin")
+        );
+        let body = response
+            .into_body()
+            .next_chunk()
+            .await
+            .expect("chunk")
+            .expect("partial body");
+        assert_eq!(&body[..], b"{");
 
         for response in [COMPLETE, TRUNCATED] {
             let port = raw(response);

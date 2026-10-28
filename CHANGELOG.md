@@ -71,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ProviderModels` is now non-exhaustive so future aggregation fields do not
+  break downstream construction at compile time.
+- Plugin-host responses now strip every RFC 9110 hop-by-hop header, including
+  headers named by `Connection`, while preserving `Set-Cookie` for plugins.
+  Truncated non-2xx responses retain the partial body bytes read so far.
 - Body breaks after a 2xx reply are now classified as `Interrupted` instead of
   `Connect` on the provider path and `Transport` on the plugin-host path.
   Plugin-host body breaks now fail over across members before a completion or
@@ -164,6 +169,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OpenCode's configured `hofund/<route>` model no longer produces an unrouted
+  model warning; other provider prefixes and bare model names still warn.
 - Non-2xx body-read failures now preserve the original `Status` and
   `Retry-After`, including live model pages, Vertex token responses, and the
   plugin host.
