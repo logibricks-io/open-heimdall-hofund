@@ -351,7 +351,7 @@ These fields move into `options`: `project`, `location`, `credentials`, `imperso
 
 A URL-only preset is a fragment, not a crate. The shape already in `presets.toml` (the `anthropic` and `openai` tables at lines 29-47) moves with the implementation that serves it. `plugins/registry/build.rs` compiles every fragment into static preset data. Startup does not parse TOML. Validation fails the build, not the process. A builtin factory without a plugin crate uses the data-only location `plugins/providers/<builtin-factory-id>/presets.toml`, with no `Cargo.toml` or `plugin.toml`.
 
-Builtin-owned rows are served per wire by `openai-compat`, `anthropic`, and `generative`; the selected wire chooses the factory as it does for a catalog row. Each row lives in its default wire's factory directory: the first non-empty preset URL in `generative`, `chat`, `responses`, `anthropic` order determines that wire, or the first region's URLs when the preset level has none. Generative uses `generative`, Chat and Responses use `openai-compat`, Messages uses `anthropic`, and a row without wire URLs uses `openai-compat`.
+Builtin-owned rows are served per wire by `openai-compat`, `anthropic`, and `generative`; the selected wire chooses the factory as it does for a catalog row. Each row lives in its default wire's factory directory: the first non-empty preset URL in `generative`, `chat`, `responses`, `anthropic` order determines that wire. Generative uses `generative`, Chat and Responses use `openai-compat`, Messages uses `anthropic`, and a row without wire URLs uses `openai-compat`.
 
 ```toml
 # plugins/providers/openai-compat/presets.toml

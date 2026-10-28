@@ -157,6 +157,7 @@ pub enum ControlErrorKind {
     Unauthorized,
     Forbidden,
     NotFound,
+    MethodNotAllowed,
     Conflict,
     InvalidConfig,
     Unavailable,

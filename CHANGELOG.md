@@ -210,6 +210,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wrong-method control responses now use the `method_not_allowed` error kind
+  while retaining HTTP 405 (#206).
+- Decide-only presets with an explicit wire now report the same missing-endpoint
+  message through catalog and registry selection (#170).
+- Provider and SDK transports share one Retry-After parser. Model-list error
+  joining preserves homogeneous Auth, Quota, Io, Config, Unsupported, and
+  Internal kinds instead of collapsing them to Decode (#119).
 - Default control error envelopes now round-trip with a valid request-id
   placeholder, validation messages use their limit constants, CI workflow
   parsing covers both cache-step forms and missing per-package test jobs, and
