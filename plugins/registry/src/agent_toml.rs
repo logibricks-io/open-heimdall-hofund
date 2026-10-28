@@ -800,6 +800,13 @@ key = "effort"
 
     #[test]
     fn validation_rejects_builtin_agent_ids() {
+        // No const-backed agent remains, so the list is empty and the loop
+        // below is dead until #147 removes it. Fail loudly if an id returns.
+        assert!(
+            super::super::RESERVED_AGENT_IDS.is_empty(),
+            "RESERVED_AGENT_IDS is not empty; restore real coverage: {:?}",
+            super::super::RESERVED_AGENT_IDS
+        );
         for id in super::super::RESERVED_AGENT_IDS {
             let error = parse(
                 &base().replacen("fixture-agent", id, 1),

@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The one Gemini CLI case whose drift disconnect the shared kit cannot check.
 ///
@@ -92,9 +93,11 @@ fn copy_dir(source: &Path, destination: &Path) {
 }
 
 fn scratch(label: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
-        "hofund-agent-conformance-{label}-{}",
-        std::process::id()
+        "hofund-agent-conformance-{label}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = fs::remove_dir_all(&path);
     path

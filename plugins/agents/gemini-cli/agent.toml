@@ -21,8 +21,8 @@ env_replaces = "~"
 create = true
 
 # .gemini/.env is loaded by the CLI and is not excluded. Empty and relative
-# GEMINI_CLI_HOME values are treated as unset, a documented divergence from
-# the reference behavior.
+# GEMINI_CLI_HOME values are treated as unset, matching the reference's
+# path-variable rule (internal/appdir/env.go:101-107).
 [[file]]
 id = "env"
 kind = "env"

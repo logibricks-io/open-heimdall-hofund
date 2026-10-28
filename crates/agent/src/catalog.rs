@@ -131,7 +131,7 @@ pub fn find(name: &str) -> Option<&'static dyn AgentAdapter> {
     adapters().into_iter().find(|adapter| adapter.id() == name)
 }
 
-/// Const and compiled adapters in catalog order.
+/// Compiled adapters in catalog order.
 pub struct Catalog {
     adapters: Vec<Box<dyn AgentAdapter>>,
 }
@@ -152,7 +152,7 @@ impl Catalog {
     }
 }
 
-/// Composes const and compiled adapters in CLI order and rejects duplicate ids.
+/// Composes compiled adapters in CLI order and rejects duplicate ids.
 ///
 /// Every built-in (claude-code, codex, gemini-cli, opencode) comes from the
 /// compiled list supplied by the daemon's `agent_descriptions()`. Other
@@ -160,9 +160,8 @@ impl Catalog {
 ///
 /// # Errors
 ///
-/// Returns an error when a compiled id duplicates a const built-in or another
-/// compiled id, or when a built-in has no compiled description or enabled
-/// legacy fallback.
+/// Returns an error when two compiled descriptions share an id, or when a
+/// built-in has no compiled description (or enabled legacy fallback).
 pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog, AgentError> {
     compose(compiled, builtin_adapter)
 }
@@ -1966,23 +1965,6 @@ mod tests {
         let session = session_for(&home);
         let target = GatewayTarget::new(&case.base_url, &case.token, case.routes.clone());
         let plan = adapter.plan(&session, &target).expect("const plan");
-        let after =
-            if std::env::var_os("UPDATE_GOLDEN").as_deref() == Some(std::ffi::OsStr::new("1")) {
-                let after_dir = case_dir.join("after");
-                if after_dir.exists() {
-                    fs::remove_dir_all(&after_dir).expect("remove old Gemini golden");
-                }
-                for change in plan.changes() {
-                    let relative = change.path().strip_prefix(&home).expect("golden relative");
-                    let path = after_dir.join(relative);
-                    fs::create_dir_all(path.parent().expect("golden parent"))
-                        .expect("create golden parent");
-                    fs::write(path, change.after()).expect("write Gemini golden");
-                }
-                tree(&after_dir)
-            } else {
-                after
-            };
         verify_plan(&label, &home, &plan, &after);
         let applied = adapter.apply(&session, &target).expect("const apply");
         verify_plan(&label, &home, &applied, &after);

@@ -84,8 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plugins/agents/claude-code/agent.toml`; its production Rust const is removed
   and its frozen oracle uses the renamed test-only `legacy-agent-consts`
   feature. Catalog order remains `claude-code`, `codex`, `gemini-cli`,
-  `opencode`; `RESERVED_AGENT_IDS` now contains only `gemini-cli` and
-  `opencode`, and static `adapters()` and `find()` cover those two agents.
+  `opencode`.
 - Gemini CLI is now a compiled data-only agent at
   `plugins/agents/gemini-cli/agent.toml`; its production Rust const is removed
   and its frozen oracle remains behind `legacy-agent-consts`. Catalog order is
