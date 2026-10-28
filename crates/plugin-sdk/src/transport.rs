@@ -4,9 +4,10 @@
 //! client. [`Call::send`] uses [`HttpHandle::send`](hofund_plugin_api::HttpHandle::send).
 //! A status of 400 or higher becomes [`PluginErrorKind::Status`].
 //!
-//! `HttpHandle::send` streams a 2xx body, but [`Call`] still reads the whole
-//! body. The Chat, Responses, Messages, Generative, and Converse transports move
-//! into the SDK later, starting with Chat and Responses.
+//! `HttpHandle::send` streams a 2xx body. [`Call::send`] reads the whole body,
+//! and [`Call::open`] returns a 2xx body unread. The Chat and Responses
+//! transport is [`crate::wire`]. Messages, Generative, and Converse move into
+//! the SDK later.
 //!
 //! [`Call::send_with_retry`] retries at most three times. [`PluginErrorKind::Connect`]
 //! (the request was not sent) is retried for every method. [`PluginErrorKind::Timeout`]
@@ -250,6 +251,65 @@ impl Call {
         }
     }
 
+    /// Sends the call up to `attempts` times and returns a 2xx response unread.
+    ///
+    /// Retries follow [`Call::send_with_retry`]. A status of 400 or higher is
+    /// read in full and returned as the same error [`Call::send`] returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last [`PluginError`] when every attempt fails, the first
+    /// error that this call must not retry, or the status error.
+    pub async fn open(self, http: &HttpHandle, attempts: u8) -> Result<HttpResponse, PluginError> {
+        let response = self.open_raw(http, attempts).await?;
+        if response.status().as_u16() < 400 {
+            return Ok(response);
+        }
+        let (status, retry_after, body) = read_body(response).await?;
+        Err(status_failure(status, retry_after, &body))
+    }
+
+    /// Like [`Call::open`], but every status comes back unread.
+    pub(crate) async fn open_raw(
+        self,
+        http: &HttpHandle,
+        attempts: u8,
+    ) -> Result<HttpResponse, PluginError> {
+        let attempts = attempts.clamp(1, MAX_ATTEMPTS);
+        let mut attempt = 1_u8;
+        loop {
+            match http.send(self.clone().request()?).await {
+                Ok(response) => return Ok(response),
+                Err(error)
+                    if attempt < attempts
+                        && retries(self.method, self.idempotent, error.kind()) =>
+                {
+                    let failed = u32::from(attempt);
+                    attempt += 1;
+                    tokio::time::sleep(backoff(failed)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Sets a header, replacing every header of the same name. Case is ignored.
+    pub(crate) fn replace_header(
+        mut self,
+        name: &str,
+        value: impl Into<String>,
+        sensitive: bool,
+    ) -> Self {
+        self.headers
+            .retain(|header| !header.name.eq_ignore_ascii_case(name));
+        self.headers.push(Header {
+            name: name.to_owned(),
+            value: value.into(),
+            sensitive,
+        });
+        self
+    }
+
     fn request(self) -> Result<HttpRequest, PluginError> {
         let mut builder = http::Request::builder().method(self.method).uri(&self.uri);
         for header in &self.headers {
@@ -328,24 +388,28 @@ fn classify(
     body: Vec<u8>,
 ) -> Result<Reply, PluginError> {
     if status >= 400 {
-        let snippet = String::from_utf8_lossy(&body);
-        let snippet = snippet.chars().take(STATUS_SNIPPET).collect::<String>();
-        let message = if snippet.is_empty() {
-            format!("upstream returned status {status}")
-        } else {
-            snippet
-        };
-        let error = if is_quota_error(status, &body) {
-            PluginError::quota_status(status, message)
-        } else {
-            PluginError::status_error(status, message)
-        };
-        return Err(match retry_after {
-            Some(after) => error.with_retry_after(after),
-            None => error,
-        });
+        return Err(status_failure(status, retry_after, &body));
     }
     Ok(Reply { status, body })
+}
+
+fn status_failure(status: u16, retry_after: Option<Duration>, body: &[u8]) -> PluginError {
+    let snippet = String::from_utf8_lossy(body);
+    let snippet = snippet.chars().take(STATUS_SNIPPET).collect::<String>();
+    let message = if snippet.is_empty() {
+        format!("upstream returned status {status}")
+    } else {
+        snippet
+    };
+    let error = if is_quota_error(status, body) {
+        PluginError::quota_status(status, message)
+    } else {
+        PluginError::status_error(status, message)
+    };
+    match retry_after {
+        Some(after) => error.with_retry_after(after),
+        None => error,
+    }
 }
 
 /// Whether an upstream status and response body report exhausted quota.
@@ -575,7 +639,7 @@ fn without_urls(text: &str) -> String {
     output
 }
 
-async fn read_body(
+pub(crate) async fn read_body(
     mut response: HttpResponse,
 ) -> Result<(u16, Option<Duration>, Vec<u8>), PluginError> {
     let status = response.status().as_u16();

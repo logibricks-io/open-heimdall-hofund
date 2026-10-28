@@ -95,7 +95,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-quirks",
         ],
         "hofund-plugin-relay" => &["hofund-plugin-api", "hofund-plugin-sdk"],
-        "hofund-plugin-sdk" => &["hofund-plugin-api", "hofund-quirks"],
+        "hofund-plugin-sdk" => &["hofund-codec", "hofund-plugin-api", "hofund-quirks"],
         "hofund-provider" => &[
             "hofund-codec",
             "hofund-ir",

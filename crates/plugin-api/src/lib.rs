@@ -56,7 +56,7 @@ pub use body::{Body, BodyStream};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
 pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfig};
 pub use error::{PluginError, PluginErrorKind};
-pub use hofund_ir::{Request, Response, StreamEvent};
+pub use hofund_ir::{ContentPart, Request, Response, Role, StreamEvent};
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, ClockHandle, DirHandle, HostContext, HttpHandle, Job,
     JobId, JobSpec, ObserveHandle, ProcessHandle, SchedulerHandle, SecretsHandle, SpawnRequest,

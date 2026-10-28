@@ -1128,6 +1128,14 @@ Kernel globs, `plugins/registry`, the control crates, and `fuzz/` belong to whoe
 - `SchedulerHandle::run_once` runs one named background job. It keeps running when the caller drops its future, and it is cancelled by `cancel` or host shutdown.
 - `QuotaWindow` gains `blocking` (default `true`) and `scope_model`. `SignInCtx` gains a session (32 lowercase hex digits, set by the host) and named options. `SignInProof::Await` reports a sign-in that completes later. `Subscription` gains `cancel_sign_in` and `account_status`, with defaults of no-op and `Ready`.
 
+### PR E8a notes
+
+- New SDK module `hofund_plugin_sdk::wire` and the edge `plugin-sdk -> codec`. `wire::execute` encodes a Chat or Responses request, sends it on `HttpHandle`, and returns raw bytes for the same protocol or decoded events across protocols. Cross-protocol calls drop request extensions, as the adapter does.
+- The builtin `openai-compat` factory uses `wire::execute` unless the base is a Bedrock Mantle root (`OpenAiCompat::direct_base`). Model lists and probes stay on the adapter transport.
+- Only a connection-establishment failure is retried, once. A reset after the write is `Transport` and is not replayed. The adapter labels the same failure `Connect`, which the router fails over; that label is a follow-up in `hofund-provider`.
+- A leading in-band error event fails the call before any event is yielded, and a non-2xx status keeps its `Retry-After`. Error messages are capped at 512 bytes.
+- `hofund-kit-upstream` re-exports `runtime_host` and `HttpLimits` so registry tests can run both transports on the pooled client against a mock.
+
 ## 7. Comparison with magpie at `cbbf316`
 
 Pins: hofund `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4`, magpie `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`.

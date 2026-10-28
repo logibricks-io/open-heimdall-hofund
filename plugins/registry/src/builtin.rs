@@ -10,11 +10,12 @@ use futures_util::StreamExt;
 
 use hofund_plugin_api::{
     BuildError, Completion as PluginCompletion, ConfigError, CountOutcome as PluginCount,
-    CredentialStyle, DynUpstreamFactory, HostContext, ListKind, PluginError, PluginId, ProtocolId,
-    RawTable, RawValue, Request, Schema, UpstreamFactory, UpstreamProvider, UpstreamSpec,
-    ValidConfig,
+    CredentialStyle, DynUpstreamFactory, HeaderName, HostContext, HttpHandle, ListKind,
+    PluginError, PluginId, ProtocolId, RawTable, RawValue, Request, Schema, SecretString,
+    UpstreamFactory, UpstreamProvider, UpstreamSpec, ValidConfig,
 };
 use hofund_plugin_sdk::async_trait;
+use hofund_plugin_sdk::wire::{self, Target};
 use hofund_provider::{
     Anthropic, Bedrock, Completion as ProviderCompletion, CountOutcome as ProviderCount,
     Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, ProviderError,
@@ -122,12 +123,133 @@ impl UpstreamFactory for OpenAiFactory {
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
         let protocol = cfg.protocol.unwrap_or(OpenAiProtocol::Chat);
-        let mut endpoint = cfg.endpoint.clone();
-        attach_client(&mut endpoint, host);
-        let adapter = OpenAiCompat::new(protocol, endpoint).map_err(build_error)?;
-        Ok(Arc::new(Bridged {
-            inner: Arc::new(adapter),
-        }))
+        openai_compat(protocol, cfg.endpoint.clone(), host)
+    }
+}
+
+/// Builds the `openai-compat` provider.
+///
+/// `execute` goes through the SDK transport on the host client unless the base
+/// is a Mantle root. Counting, listing, probing, and Mantle stay on the adapter.
+///
+/// # Errors
+///
+/// Returns [`BuildError`] when the adapter rejects the endpoint.
+#[doc(hidden)]
+pub fn openai_compat(
+    protocol: OpenAiProtocol,
+    mut endpoint: Endpoint,
+    host: &HostContext,
+) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+    attach_client(&mut endpoint, host);
+    let style = credential_style(endpoint.credential);
+    let headers = endpoint.headers.clone();
+    let quirks = endpoint.quirks;
+    let secret =
+        (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
+    let adapter = Arc::new(OpenAiCompat::new(protocol, endpoint).map_err(build_error)?);
+    let bridged = Bridged {
+        inner: adapter.clone(),
+    };
+    let Some(base) = adapter.direct_base() else {
+        return Ok(Arc::new(bridged));
+    };
+    let wire = match protocol {
+        OpenAiProtocol::Chat => ProtocolId::OPENAI_CHAT,
+        OpenAiProtocol::Responses => ProtocolId::OPENAI_RESPONSES,
+    };
+    Ok(Arc::new(Direct {
+        http: host.http().clone(),
+        target: Target::new(wire, base)
+            .credential(style)
+            .headers(headers)
+            .quirks(quirks),
+        secret,
+        bridged,
+    }))
+}
+
+/// The `openai-compat` provider with every call on the adapter's own transport.
+///
+/// Parity tests compare it with [`openai_compat`].
+///
+/// # Errors
+///
+/// Returns [`BuildError`] when the adapter rejects the endpoint.
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub fn openai_compat_adapter(
+    protocol: OpenAiProtocol,
+    mut endpoint: Endpoint,
+    host: &HostContext,
+) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+    attach_client(&mut endpoint, host);
+    let adapter = OpenAiCompat::new(protocol, endpoint).map_err(build_error)?;
+    Ok(Arc::new(Bridged {
+        inner: Arc::new(adapter),
+    }))
+}
+
+/// The SDK header for a provider credential on Chat or Responses.
+///
+/// `Default` is the adapter's bearer token. Every other value names the same
+/// header the adapter writes.
+fn credential_style(credential: Credential) -> CredentialStyle {
+    match credential {
+        Credential::Default | Credential::Bearer => CredentialStyle::Bearer,
+        Credential::ApiKey => CredentialStyle::ApiKey,
+        Credential::XApiKey => CredentialStyle::XApiKey,
+        Credential::MessagesBoth => CredentialStyle::MessagesBoth,
+        Credential::GoogApiKey => CredentialStyle::NamedHeader(HeaderName::new("x-goog-api-key")),
+    }
+}
+
+/// A Chat or Responses provider whose `execute` goes through the SDK transport
+/// on the host client. Counting, listing, and probing stay on the adapter.
+struct Direct {
+    http: HttpHandle,
+    target: Target,
+    secret: Option<SecretString>,
+    bridged: Bridged,
+}
+
+#[async_trait]
+impl UpstreamProvider for Direct {
+    async fn execute(
+        &self,
+        request: Request,
+        inbound: ProtocolId,
+    ) -> Result<PluginCompletion, PluginError> {
+        wire::execute(
+            &self.http,
+            &self.target,
+            self.secret.as_ref(),
+            request,
+            inbound,
+        )
+        .await
+    }
+
+    async fn count_input(
+        &self,
+        request: Request,
+        inbound: ProtocolId,
+    ) -> Result<PluginCount, PluginError> {
+        self.bridged.count_input(request, inbound).await
+    }
+
+    async fn list_models(
+        &self,
+        query: &hofund_plugin_api::ListQuery,
+    ) -> Result<hofund_plugin_api::ModelList, PluginError> {
+        self.bridged.list_models(query).await
+    }
+
+    async fn probe(
+        &self,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, PluginError> {
+        self.bridged.probe(query).await
     }
 }
 

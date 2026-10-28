@@ -1054,4 +1054,29 @@ mod tests {
             "dropping the body must close the upstream connection"
         );
     }
+
+    #[tokio::test]
+    async fn call_replies_are_unchanged_for_chunked_bodies() {
+        const OK: &[u8] = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nhello\r\n1\r\n \r\n5\r\nworld\r\n0\r\n\r\n";
+        const BUSY: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n2\r\nbu\r\n2\r\nsy\r\n0\r\n\r\n";
+
+        let _guard = exclusive().await;
+        let context = http(HttpLimits::default());
+        let port = raw(OK);
+        let reply = Call::get(format!("http://127.0.0.1:{port}/v1"))
+            .send(context.http())
+            .await
+            .expect("chunked reply");
+        assert_eq!(reply.status(), 200);
+        assert_eq!(reply.body(), b"hello world");
+
+        let port = raw(BUSY);
+        let error = Call::get(format!("http://127.0.0.1:{port}/v1"))
+            .send(context.http())
+            .await
+            .expect_err("chunked error");
+        assert_eq!(error.kind(), PluginErrorKind::Status);
+        assert_eq!(error.status(), Some(503));
+        assert_eq!(error.message(), "busy");
+    }
 }
