@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Piped child processes for plugins: `ProcessHandle::spawn_piped` returns a
+  child with line-framed stdout (1 MiB line cap), stdin writes and close, an
+  environment cleared to a path, home, locale, and proxy allowlist, and kill
+  and reap on drop.
 - Account refresh leases: a per-account cross-process lock that reads the stored
   secret past the cache and commits a refreshed one, with bounded waits for
   refreshes and upserts. Plugins also gain one-shot background jobs, blocking

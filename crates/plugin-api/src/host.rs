@@ -17,9 +17,10 @@ use crate::id::PluginKind;
 use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
 use crate::kernel::{
     AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, HttpBackend, ObserveBackend,
-    ProcessBackend, SchedulerBackend, SecretsBackend,
+    PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use crate::records::{Account, QuotaObservation};
+use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
 pub use crate::kernel::Job;
@@ -457,6 +458,62 @@ impl Spawned {
     }
 }
 
+/// A child process with piped standard input and output.
+///
+/// Dropping it kills and reaps the child.
+#[non_exhaustive]
+pub struct PipedChild {
+    inner: Box<dyn PipedChildBackend>,
+}
+
+impl std::fmt::Debug for PipedChild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PipedChild")
+            .field("id", &self.inner.id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PipedChild {
+    /// The process id.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.inner.id()
+    }
+
+    /// Writes `bytes` to standard input and flushes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when standard input is closed or the write fails.
+    pub async fn write_stdin(&self, bytes: Bytes) -> Result<(), PluginError> {
+        self.inner.write_stdin(bytes).await
+    }
+
+    /// Closes standard input so the child reads end of file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when closing fails. Closing twice is not an error.
+    pub async fn close_stdin(&self) -> Result<(), PluginError> {
+        self.inner.close_stdin().await
+    }
+
+    /// Standard output, one chunk per line with the newline kept.
+    ///
+    /// A line longer than 1 MiB ends the stream with an `Io` error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when standard output was already taken.
+    pub fn stdout(&self) -> Result<BodyStream, PluginError> {
+        self.inner
+            .take_stdout()
+            .ok_or_else(|| PluginError::config("standard output was already taken"))
+    }
+}
+
 /// Process spawn. The SDK resolves the binary. This handle does not invoke a shell.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -481,6 +538,30 @@ impl ProcessHandle {
             )
             .await?;
         Ok(Spawned::new(id))
+    }
+
+    /// Spawns `request` with piped standard input and output.
+    ///
+    /// The child sees only an allowlist of the host environment (`PATH`,
+    /// `HOME` or `USERPROFILE`, locale, and proxy variables), then the pairs
+    /// in `request`. Standard error is discarded. Output lines are capped at
+    /// 1 MiB. Dropping the [`PipedChild`] kills and reaps the child.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the process cannot be started, or with
+    /// kind `Unsupported` when the host has no piped spawn.
+    pub async fn spawn_piped(&self, request: &SpawnRequest) -> Result<PipedChild, PluginError> {
+        let inner = self
+            .inner
+            .spawn_piped(
+                request.program.clone(),
+                request.args.clone(),
+                request.env.clone(),
+                request.cwd.clone(),
+            )
+            .await?;
+        Ok(PipedChild { inner })
     }
 
     /// Waits for `spawned` and reaps it.
@@ -794,7 +875,113 @@ impl SurfaceHost {
 mod tests {
     use std::path::PathBuf;
 
-    use super::SpawnRequest;
+    use std::ffi::OsString;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+
+    use super::{PipedChild, ProcessHandle, SpawnRequest};
+    use crate::body::BodyStream;
+    use crate::error::{PluginError, PluginErrorKind};
+    use crate::kernel::{PipedChildBackend, ProcessBackend};
+
+    struct NoPipes;
+
+    #[async_trait]
+    impl ProcessBackend for NoPipes {
+        async fn spawn(
+            &self,
+            _program: PathBuf,
+            _args: Vec<OsString>,
+            _env: Vec<(OsString, OsString)>,
+            _cwd: PathBuf,
+        ) -> Result<u32, PluginError> {
+            Ok(1)
+        }
+
+        async fn wait(&self, _id: u32) -> Result<i32, PluginError> {
+            Ok(0)
+        }
+
+        fn kill(&self, _id: u32) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakePipe {
+        written: Arc<Mutex<Vec<u8>>>,
+        closed: Arc<Mutex<bool>>,
+        stdout: Mutex<Option<BodyStream>>,
+    }
+
+    #[async_trait]
+    impl PipedChildBackend for FakePipe {
+        fn id(&self) -> u32 {
+            42
+        }
+
+        async fn write_stdin(&self, bytes: Bytes) -> Result<(), PluginError> {
+            self.written
+                .lock()
+                .expect("written")
+                .extend_from_slice(&bytes);
+            Ok(())
+        }
+
+        async fn close_stdin(&self) -> Result<(), PluginError> {
+            *self.closed.lock().expect("closed") = true;
+            Ok(())
+        }
+
+        fn take_stdout(&self) -> Option<BodyStream> {
+            self.stdout.lock().expect("stdout").take()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_backend_has_no_piped_spawn() {
+        let handle = ProcessHandle {
+            inner: Arc::new(NoPipes),
+        };
+        let program = if cfg!(windows) {
+            r"C:\Tools\agent.exe"
+        } else {
+            "/usr/bin/agent"
+        };
+        let cwd = if cfg!(windows) { r"C:\Tools" } else { "/tmp" };
+        let request = SpawnRequest::new(program, Vec::new(), Vec::new(), cwd).expect("request");
+        let error = handle.spawn_piped(&request).await.expect_err("unsupported");
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn piped_child_delegates_and_hands_out_stdout_once() {
+        let pipe = FakePipe {
+            stdout: Mutex::new(Some(BodyStream::from_bytes("line\n"))),
+            ..FakePipe::default()
+        };
+        let written = Arc::clone(&pipe.written);
+        let closed = Arc::clone(&pipe.closed);
+        let child = PipedChild {
+            inner: Box::new(pipe),
+        };
+        assert_eq!(child.id(), 42);
+        assert_eq!(format!("{child:?}"), "PipedChild { id: 42, .. }");
+        child
+            .write_stdin(Bytes::from_static(b"hello"))
+            .await
+            .expect("write");
+        assert_eq!(*written.lock().expect("written"), b"hello");
+        child.close_stdin().await.expect("close");
+        assert!(*closed.lock().expect("closed"));
+        let mut stdout = child.stdout().expect("first stdout");
+        let chunk = stdout.next_chunk().await.expect("a chunk").expect("ok");
+        assert_eq!(&chunk[..], b"line\n");
+        let error = child.stdout().expect_err("second stdout");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+    }
 
     #[test]
     fn spawn_rejects_a_relative_program() {

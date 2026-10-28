@@ -1128,6 +1128,14 @@ Kernel globs, `plugins/registry`, the control crates, and `fuzz/` belong to whoe
 - `SchedulerHandle::run_once` runs one named background job. It keeps running when the caller drops its future, and it is cancelled by `cancel` or host shutdown.
 - `QuotaWindow` gains `blocking` (default `true`) and `scope_model`. `SignInCtx` gains a session (32 lowercase hex digits, set by the host) and named options. `SignInProof::Await` reports a sign-in that completes later. `Subscription` gains `cancel_sign_in` and `account_status`, with defaults of no-op and `Ready`.
 
+### PR H0f notes
+
+- `ProcessHandle::spawn_piped(&SpawnRequest) -> PipedChild` pipes standard input and output for a plugin that drives a local agent over stdio (Claude Code). Standard error is discarded.
+- `PipedChild` has `id()`, `write_stdin(Bytes)` (write and flush), `close_stdin()` (idempotent), and `stdout()`, which hands out the output once as one chunk per line with the newline kept. A second `stdout()` call is a `Config` error. A line longer than 1 MiB (newline excluded) ends the stream with an `Io` error.
+- The child sees only `PATH`, `HOME`, `USERPROFILE`, `LANG`, `LANGUAGE`, every `LC_*`, and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, either case) from the host, then the explicit pairs in the request. Windows also passes `SYSTEMROOT`, because the socket stack does not load without it.
+- Dropping a `PipedChild` closes stdin, kills the child, and reaps it on a background thread, so the caller never blocks on a stuck child.
+- `ProcessBackend::spawn_piped` has a default that returns `Unsupported`, so the recording backend and other test backends need no change.
+
 ## 7. Comparison with magpie at `cbbf316`
 
 Pins: hofund `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4`, magpie `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`.
