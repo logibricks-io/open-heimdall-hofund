@@ -6,6 +6,7 @@ members = [
     "crates/cli",
     "crates/codec",
     "crates/config",
+    "crates/control-client",
     "crates/control-proto",
     "crates/daemon",
     "crates/gateway",
@@ -45,6 +46,7 @@ rust-version = "1.99.1"
 hofund-agent = { version = "0.1.0", path = "crates/agent" }
 hofund-codec = { version = "0.1.0", path = "crates/codec" }
 hofund-config = { version = "0.1.0", path = "crates/config" }
+hofund-control-client = { version = "0.1.0", path = "crates/control-client" }
 hofund-control-proto = { version = "0.1.0", path = "crates/control-proto" }
 hofund-daemon = { version = "0.1.0", path = "crates/daemon" }
 hofund-gateway = { version = "0.1.0", path = "crates/gateway" }

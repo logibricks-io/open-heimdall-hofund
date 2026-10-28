@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in loopback TCP control health and status with strict Bearer, Host, Origin,
+  and mutation defenses, live disk/runtime revisions, and a typed TCP control client.
+  Model `/health` now identifies the service as hofund.
 - `DaemonRegistry` injection and shared daemon runtime state. Cooldown books now
   survive candidate publication, prune removed members and changed provider
   fingerprints, expire idle history, bound eviction, and record one recovery per rest.
