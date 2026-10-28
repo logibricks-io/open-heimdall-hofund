@@ -27,6 +27,7 @@ use hofund_usage::Ledger;
 
 mod adapt;
 mod control;
+mod control_local;
 #[cfg_attr(
     not(test),
     expect(
@@ -179,11 +180,18 @@ pub fn usage_report(path: &Path) -> Result<String, DaemonError> {
     ledger.table().map_err(show)
 }
 
+pub use control_local::ControlRuntime;
+
 /// Optional listeners for a daemon start.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct StartOptions {
     /// Numeric loopback address for the opt-in control listener.
     pub control_listen: Option<SocketAddr>,
+    /// Enables local control even without a configured TCP address.
+    pub control_enabled: bool,
+    /// Isolated runtime roots, primarily for tests. `None` reads the environment.
+    #[doc(hidden)]
+    pub control_runtime: Option<ControlRuntime>,
 }
 
 /// Binds the address in the config and serves until shutdown.
@@ -206,15 +214,16 @@ pub async fn start(path: &Path) -> Result<Running, DaemonError> {
     .await
 }
 
-/// Starts a daemon with optional control TCP enabled.
+/// Starts a daemon with opt-in local control listeners.
 ///
-/// The control address is supplied programmatically; no configuration field is
-/// introduced. The returned [`Running::control_local_addr`] reports its bound
-/// address.
+/// A configured control address enables TCP and, on Unix, the per-config
+/// socket. `control_enabled` without an address prefers the socket and uses
+/// default loopback TCP only when local IPC is unavailable. No configuration
+/// field is introduced.
 ///
 /// # Errors
 ///
-/// Returns [`DaemonError`] when startup or a listener bind fails.
+/// Returns [`DaemonError`] when startup, locking, or a listener bind fails.
 pub async fn start_with_options(
     path: &Path,
     options: StartOptions,
@@ -286,6 +295,18 @@ async fn start_inner(
         .map_err(|error| show(ConfigError::Read(error.to_string())))?;
     let config = hofund_config::load(&config_text).map_err(show)?;
     let runtime_revision = control::revision(config_text.as_bytes());
+    let control_runtime = options
+        .control_runtime
+        .unwrap_or_else(ControlRuntime::from_env);
+    let mut control_session = if options.control_enabled || options.control_listen.is_some() {
+        let identity = control_local::ConfigIdentity::resolve(path).map_err(DaemonError::new)?;
+        Some(
+            control_local::ControlSession::acquire(identity, &control_runtime)
+                .map_err(DaemonError::new)?,
+        )
+    } else {
+        None
+    };
     warn(&config);
     let token_path = beside(path, &config.token_file);
     let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
@@ -307,7 +328,7 @@ async fn start_inner(
         .bind(config.listen)
         .await
         .map_err(|error| DaemonError::new(error.to_string()))?;
-    if let Some(control_listen) = options.control_listen {
+    if let Some(session) = control_session.as_mut() {
         let state = Arc::new(control::DaemonControl::new(
             path,
             config.listen,
@@ -315,11 +336,62 @@ async fn start_inner(
             started_at_ms,
             runtime_revision,
         ));
-        let control = hofund_gateway::control::Control::with_token_file(state, token, token_path)
-            .bind(control_listen)
-            .await
-            .map_err(|error| DaemonError::new(error.to_string()))?;
-        running = running.with_control(control);
+        let control = hofund_gateway::control::Control::with_token_file(state, token, token_path);
+        let mut tcp_listen = options.control_listen;
+        #[cfg(unix)]
+        let mut socket_path = None;
+        #[cfg(not(unix))]
+        let socket_path = None;
+        #[cfg(unix)]
+        {
+            if let Ok(candidate) = session.socket_path(&control_runtime) {
+                session
+                    .prepare_socket(&candidate)
+                    .map_err(DaemonError::new)?;
+                match control.clone().bind_unix(&candidate).await {
+                    Ok(unix) => {
+                        running = running.with_unix_control(unix, candidate.clone());
+                        socket_path = Some(candidate);
+                    }
+                    Err(
+                        error @ (hofund_gateway::GatewayError::SocketPathTooLong { .. }
+                        | hofund_gateway::GatewayError::BindUnix { .. }),
+                    ) => {
+                        tracing::warn!(
+                            path = %candidate.display(),
+                            %error,
+                            "Unix control socket unavailable; falling back to TCP"
+                        );
+                        if tcp_listen.is_none() {
+                            tcp_listen = Some(hofund_gateway::control::DEFAULT_CONTROL_ADDR);
+                        }
+                    }
+                    Err(error) => return Err(DaemonError::new(error.to_string())),
+                }
+            } else if tcp_listen.is_none() {
+                tcp_listen = Some(hofund_gateway::control::DEFAULT_CONTROL_ADDR);
+            }
+        }
+        #[cfg(not(unix))]
+        if tcp_listen.is_none() {
+            tcp_listen = Some(hofund_gateway::control::DEFAULT_CONTROL_ADDR);
+        }
+        if let Some(listen) = tcp_listen {
+            let tcp = control
+                .bind(listen)
+                .await
+                .map_err(|error| DaemonError::new(error.to_string()))?;
+            running = running.with_control(tcp);
+        }
+        session
+            .publish(
+                running.control_local_addr().into_iter().collect(),
+                socket_path,
+            )
+            .map_err(DaemonError::new)?;
+    }
+    if let Some(session) = control_session {
+        running = running.with_resource(session);
     }
     let models_host = Arc::new(models_host);
     let refresh = models_host.spawn_refresh(
