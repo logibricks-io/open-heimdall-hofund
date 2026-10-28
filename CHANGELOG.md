@@ -252,6 +252,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   temp paths. Existing host model-state directories are tightened to `0700` on
   Unix, and unreadable or unmovable state files are preserved instead of being
   overwritten (#212, #101, #102).
+- Vertex token mint failures are shared with concurrent waiters and negatively
+  cached for five seconds. Mantle learned-route maps are bounded to 256 entries
+  per provider instance with oldest-entry eviction. Invalid local plugin header
+  values now report `Config` instead of `Auth` (#65, #137, #118).
 - SigV4 form and STS tests now use the literal AWS suite inputs. Release and
   desktop-bundle apt installs now have bounded steps, retries, and HTTP timeouts.
 - Control request bodies between 2 MiB and the protocol request limit now reach
