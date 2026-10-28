@@ -155,10 +155,13 @@ async fn client_refuses_regular_file_socket_before_request() {
     let dir = Scratch::new("regular-file");
     let socket = dir.join("control.sock");
     std::fs::write(&socket, "not a socket").expect("regular file");
-    let error = Client::unix(&socket, TOKEN)
-        .health()
-        .await
-        .expect_err("regular file");
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Client::unix(&socket, TOKEN).health(),
+    )
+    .await
+    .expect("client must refuse before waiting on the server")
+    .expect_err("regular file");
     assert!(matches!(error, ClientError::Discovery(_)), "{error}");
     assert_eq!(
         std::fs::read_to_string(socket).expect("file"),
@@ -173,10 +176,13 @@ async fn client_refuses_symlinked_socket_without_sending_request() {
     let listener = UnixListener::bind(&socket).expect("Unix listener");
     let link = dir.join("linked.sock");
     std::os::unix::fs::symlink(&socket, &link).expect("socket symlink");
-    let error = Client::unix(&link, TOKEN)
-        .health()
-        .await
-        .expect_err("socket symlink");
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Client::unix(&link, TOKEN).health(),
+    )
+    .await
+    .expect("client must refuse before waiting on the server")
+    .expect_err("socket symlink");
     assert!(matches!(error, ClientError::Discovery(_)), "{error}");
     let accept =
         tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept()).await;
