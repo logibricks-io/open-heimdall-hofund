@@ -1237,6 +1237,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_api_keys_are_isolated_by_plugin_kind() {
+        let secrets = super::KeySecrets {
+            plugin: key(),
+            api_key: "value".to_owned(),
+        };
+        for kind in [PluginKind::Subscription, PluginKind::Agent] {
+            let foreign = PluginKey::new(kind, plugin());
+            assert!(
+                secrets
+                    .get(&foreign, "api_key")
+                    .await
+                    .expect("get")
+                    .is_none(),
+                "{kind} must not read the provider secret"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_plugin_cannot_read_another_plugins_secret() {
         let secrets = std::sync::Arc::new(super::RecordingSecrets::default());
         let plugin_a = plugin();

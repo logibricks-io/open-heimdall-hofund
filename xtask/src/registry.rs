@@ -60,12 +60,13 @@ pub fn builtin_factory_ids(workspace_root: &Path) -> Result<Vec<String>, String>
     Ok(ids)
 }
 
-/// Checks per-kind plugin ids and globally unique Cargo package and feature names.
+/// Checks per-kind plugin ids, deterministic Cargo features, and unique build identifiers.
 ///
 /// # Errors
 ///
 /// Returns a descriptive error for malformed rows, duplicate ids within one
-/// kind, reserved ids, duplicate build identifiers, or unsorted rows.
+/// kind, reserved ids, invalid feature names, duplicate build identifiers, or
+/// unsorted rows.
 pub fn check_plugin_list(text: &str) -> Result<(), String> {
     let value: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
     let plugins = value
@@ -107,6 +108,34 @@ pub fn check_plugin_list(text: &str) -> Result<(), String> {
     if ordered.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err("plugins.toml is not sorted by id and kind".to_owned());
     }
+    for plugin in plugins {
+        let id = plugin
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .expect("id was checked");
+        let kind = plugin
+            .get("kind")
+            .and_then(toml::Value::as_str)
+            .expect("kind was checked");
+        let feature = plugin
+            .get("feature")
+            .and_then(toml::Value::as_str)
+            .expect("feature was checked");
+        let shared = plugins.iter().any(|other| {
+            other.get("id").and_then(toml::Value::as_str) == Some(id)
+                && other.get("kind").and_then(toml::Value::as_str) != Some(kind)
+        });
+        let expected = if shared {
+            format!("{kind}-{id}")
+        } else {
+            id.to_owned()
+        };
+        if feature != expected {
+            return Err(format!(
+                "{kind}/{id} feature is {feature}, expected {expected}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -138,6 +167,57 @@ mod tests {
         ]
         .concat();
         check_plugin_list(&text).expect("cross-kind ids");
+    }
+
+    #[test]
+    fn plugin_list_accepts_deterministic_feature_names() {
+        check_plugin_list(&row("unique", "provider", "package", "unique"))
+            .expect("unique ids use the bare feature");
+        let shared = [
+            row("shared", "agent", "agent-package", "agent-shared"),
+            row("shared", "provider", "provider-package", "provider-shared"),
+        ]
+        .concat();
+        check_plugin_list(&shared).expect("shared ids use kind-qualified features");
+    }
+
+    #[test]
+    fn plugin_list_rejects_arbitrary_feature_names() {
+        for text in [
+            row("unique", "provider", "package", "arbitrary"),
+            [
+                row("shared", "agent", "agent-package", "arbitrary"),
+                row("shared", "provider", "provider-package", "provider-shared"),
+            ]
+            .concat(),
+        ] {
+            let error = check_plugin_list(&text).expect_err("arbitrary feature");
+            assert!(error.contains("expected"), "{error}");
+        }
+    }
+
+    #[test]
+    fn plugin_list_rejects_rows_out_of_id_or_kind_order() {
+        let by_id = [
+            row("z-last", "provider", "first-package", "z-last"),
+            row("a-first", "agent", "second-package", "a-first"),
+        ]
+        .concat();
+        assert!(
+            check_plugin_list(&by_id)
+                .expect_err("id order")
+                .contains("not sorted by id and kind")
+        );
+        let by_kind = [
+            row("shared", "provider", "first-package", "provider-shared"),
+            row("shared", "agent", "second-package", "agent-shared"),
+        ]
+        .concat();
+        assert!(
+            check_plugin_list(&by_kind)
+                .expect_err("kind order")
+                .contains("not sorted by id and kind")
+        );
     }
 
     #[test]
