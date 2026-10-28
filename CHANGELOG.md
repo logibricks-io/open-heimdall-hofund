@@ -9,11 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- The pooled plugin HTTP client streams a success body as the upstream sends
-  it instead of buffering the whole response (row H0g). A read failure after
-  the headers is one `Interrupted` chunk that ends the stream; error bodies
-  are still buffered. `Call::send` in the SDK still reads the full body, so its
-  retry rules do not change.
 - Control picks, model refresh, and provider test routes. Picks edits check a
   revision equal to the state file hash under the state lock, roll back on a
   failed save, and follow the reference edit forms. Refresh has a 30 s timeout
@@ -121,6 +116,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The pooled plugin HTTP client streams a success body as the upstream sends
+  it instead of buffering the whole response (row H0g). A read failure after
+  the headers is one `Interrupted` chunk that ends the stream; error bodies
+  are still buffered. `Call::send` in the SDK still reads the full body, so its
+  retry rules do not change.
 - Plugin ids are now unique per kind rather than globally, allowing an agent and
   subscription to share an id without changing existing config or CLI commands.
   Registry contributions and host secrets, accounts, cache directories, and state

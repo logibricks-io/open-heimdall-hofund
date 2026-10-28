@@ -1009,7 +1009,7 @@ E1 is the first slice of row E. The threat model is [docs/plugins/providers.md](
 - `hofund-plugin-sdk` now has SigV4 (moved from `hofund-provider`), OAuth token parsing and form bodies, a JSON page cursor, and `Call::json`. PKCE, loopback, and device flow stay in H. OAuth token caching, refresh, and single-flight become an SDK helper in row H (subscription plugins); Vertex keeps its own cache until then. A paging loop with a page limit and repeated-cursor guard is deferred to PR E2 (model listing).
 - Every wire, including Vertex and Bedrock, is built with `registry.factory`. The adapters still live in `hofund-provider`. The factories validate option schemas before any option `env:` reference is resolved. Unknown keys and wrong types name the provider and the key and do not include the value.
 - After that validation, the daemon trims string options and resolves `env:`; resolution errors name the provider and key. It rejects a reserved kernel key inside `options`. `plan` still reads `project`, `location`, and `region` to build catalog URLs.
-- Built-in adapters take the pooled `reqwest` client from a kernel-only host-handle method, so `HttpLimits` apply. `HttpHandle::send` is unchanged. Moving the five protocol transports into the SDK and streaming through `HttpHandle::send` is targeted at the first row E PR that moves an adapter into its own plugin crate (E3, Vertex), which also removes the raw-client method.
+- Built-in adapters take the pooled `reqwest` client from a kernel-only host-handle method, so `HttpLimits` apply. `HttpHandle::send` was unchanged here; PR H0g-a later made it stream 2xx bodies. Moving the five protocol transports into the SDK and streaming through `HttpHandle::send` is targeted at the first row E PR that moves an adapter into its own plugin crate (E3, Vertex), which also removes the raw-client method.
 - `google-vertex` and `bedrock` are not compiled presets. `resolve` still owns their URLs. Per-preset `/models` and the connectivity probe are the next pull request.
 - Mantle parity is complete in `hofund-provider` (Option C). Moving Mantle into its own crate waits for Option B: SDK streaming transport, then the Vertex crate, then the Mantle crate.
 
@@ -1111,6 +1111,14 @@ The only shared file in a batch is `plugins/registry/Cargo.toml` (features and d
 Kernel globs, `plugins/registry`, the control crates, and `fuzz/` belong to whoever the owner assigns to the kernel. Each plugin batch's pull request adds the lines for the directories it introduces. A plugin agent does not need write access to another plugin's directory.
 
 `docs/magpie-comparison.md` gains the adopt-or-redesign rows for this seam in pull request B. This pull request does not edit that table. The comparison is recorded when the seam lands.
+
+### PR H0g-a notes
+
+- `HttpHandle::send` on the pooled host streams a 2xx body as the upstream sends it. A read failure after the headers is one `Interrupted` chunk, and then the stream ends. An empty 2xx body yields no chunks, where it used to yield one empty chunk.
+- A non-2xx body is still buffered. A read break while buffering keeps the bytes that arrived, so a status error keeps its body and `Retry-After`.
+- Dropping the body drops the upstream response and closes its connection.
+- SDK `Call::send` still reads the whole body through `read_body`, so its replies and retry rules do not change.
+- H owns row H0g (ruling Q2). The SDK protocol transports, the removal of the raw-client method and the kit conformance test over the plugin transport are deferred to H0g-b. The Chat and Responses transport lands as the SDK `wire` module in PR E8a.
 
 ## 7. Comparison with magpie at `cbbf316`
 
