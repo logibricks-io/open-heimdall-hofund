@@ -201,96 +201,6 @@ website = "https://cloud.tencent.com/document/product/1823/130659"
 models = ["auto", "hy4-preview", "glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "minimax-m3", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "deepseek-v4-pro-202606", "deepseek-v4-flash-202605", "mimo-v2.6-pro", "mimo-v2.6-flash"]
 
 [[preset]]
-id = "huaweicloud"
-name = "Huawei Cloud MaaS"
-short = "Huawei Cloud"
-kind = "vendor"
-note = "Token Plan, southwest China (Guiyang)"
-chat = "https://api.modelarts-maas.com/plan/v2"
-anthropic = "https://api.modelarts-maas.com/plan/anthropic"
-website = "https://support.huaweicloud.com/Token-plan-maas/tokenplan-maas-0001.html"
-keys_url = "https://console.huaweicloud.com/modelarts/?#/model-studio/authmanage"
-models = ["glm-5.3", "glm-5.1", "kimi-k2.6", "deepseek-v4.1-flash", "deepseek-v4-flash"]
-region_label = "Plan"
-
-[[preset.region]]
-id = "plan"
-name = "Token Plan"
-chat = "https://api.modelarts-maas.com/plan/v2"
-anthropic = "https://api.modelarts-maas.com/plan/anthropic"
-
-[[preset.region]]
-id = "api"
-name = "Pay as you go"
-chat = "https://api.modelarts-maas.com/openai/v1"
-anthropic = "https://api.modelarts-maas.com/anthropic"
-
-[[preset]]
-id = "volcengine"
-name = "Volcengine Ark"
-kind = "vendor"
-note = "Coding plan, agent plan, and pay as you go"
-chat = "https://ark.cn-beijing.volces.com/api/coding/v3"
-responses = "https://ark.cn-beijing.volces.com/api/coding/v3"
-anthropic = "https://ark.cn-beijing.volces.com/api/coding"
-website = "https://www.volcengine.com/docs/82379/1925114"
-keys_url = "https://ark.volcengine.com/region:cn-beijing/apikey"
-no_list = true
-region_label = "Plan"
-
-[[preset.region]]
-id = "coding"
-name = "Coding Plan"
-chat = "https://ark.cn-beijing.volces.com/api/coding/v3"
-responses = "https://ark.cn-beijing.volces.com/api/coding/v3"
-anthropic = "https://ark.cn-beijing.volces.com/api/coding"
-models = ["ark-code-latest", "doubao-seed-evolving", "doubao-seed-2.1-pro", "doubao-seed-2.1-lite", "doubao-seed-2.1-turbo", "doubao-seed-2.0-mini", "minimax-m3", "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.7-code", "kimi-k2.8-preview", "kimi-k3"]
-embeddings = ["doubao-embedding-vision"]
-
-[[preset.region]]
-id = "agent"
-name = "Agent Plan"
-chat = "https://ark.cn-beijing.volces.com/api/plan/v3"
-responses = "https://ark.cn-beijing.volces.com/api/plan/v3"
-anthropic = "https://ark.cn-beijing.volces.com/api/plan"
-models = ["ark-code-latest", "doubao-seed-evolving", "doubao-seed-2.1-pro", "doubao-seed-2.1-lite", "doubao-seed-2.1-turbo", "doubao-seed-2.0-mini", "minimax-m3", "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.7-code", "kimi-k2.8-preview", "kimi-k3"]
-embeddings = ["doubao-embedding-vision"]
-drawers = ["doubao-seedream-5-0-pro"]
-videos = ["doubao-seedance-2.0", "doubao-seedance-2.0-fast", "doubao-seedance-2.0-mini", "doubao-seedance-2.5"]
-
-[[preset.region]]
-id = "api"
-name = "Pay as you go"
-chat = "https://ark.cn-beijing.volces.com/api/v3"
-responses = "https://ark.cn-beijing.volces.com/api/v3"
-lists = true
-
-[[preset]]
-id = "qwen-token-plan"
-name = "Qwen Token Plan"
-short = "Qwen Plan"
-kind = "vendor"
-note = "Qwen AI platform - subscription"
-chat = "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
-anthropic = "https://token-plan.maas.qianwenaiapi.com/apps/anthropic"
-website = "https://platform.qianwenai.com/docs/token-plan/overview"
-keys_url = "https://platform.qianwenai.com/home/analytics/token-plan/individual"
-models = ["auto", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "glm-5.3", "glm-5.2"]
-
-[[preset]]
-id = "bailian-token-plan"
-name = "Bailian Token Plan"
-short = "Bailian Plan"
-kind = "vendor"
-note = "Alibaba Cloud Bailian - subscription"
-chat = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-anthropic = "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic"
-decide = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-website = "https://help.aliyun.com/zh/model-studio/token-plan-overview"
-keys_url = "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal"
-models = ["auto", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "glm-5.3", "glm-5.2"]
-
-[[preset]]
 id = "bedrock"
 name = "Amazon Bedrock"
 kind = "vendor"
@@ -518,19 +428,6 @@ endpoint = "https://<resource>.openai.azure.com"
 endpoint_hint = "Your resource's endpoint, from Keys and Endpoint in the Azure portal. Once added, the gateway asks the resource for its deployments with this key, over its v1 API; the deployments' names are the model ids."
 
 [[preset]]
-id = "ollama-cloud"
-name = "Ollama Cloud"
-kind = "vendor"
-catalog = "ollama-cloud"
-note = "cloud models, with an API key"
-chat = "https://ollama.com/v1"
-anthropic = "https://ollama.com"
-decide = "https://ollama.com/v1"
-website = "https://docs.ollama.com/cloud"
-keys_url = "https://ollama.com/settings/keys"
-hosts = true
-
-[[preset]]
 id = "openrouter"
 name = "OpenRouter"
 kind = "relay"
@@ -541,31 +438,6 @@ decide = "https://openrouter.ai/api/v1"
 website = "https://openrouter.ai"
 keys_url = "https://openrouter.ai/keys"
 header_hints = ["HTTP-Referer", "X-OpenRouter-Title"]
-
-[[preset]]
-id = "clinepass"
-name = "ClinePass"
-kind = "relay"
-note = "open coding models, $9.99/month"
-chat = "https://api.cline.bot/api/v1"
-website = "https://docs.cline.bot/getting-started/clinepass"
-keys_url = "https://app.cline.bot"
-only = "cline-pass/"
-models = ["cline-pass/glm-5.3", "cline-pass/glm-5.3-flash", "cline-pass/kimi-k3", "cline-pass/deepseek-v4-pro", "cline-pass/deepseek-v4.1-flash", "cline-pass/mimo-v2.5", "cline-pass/mimo-v2.5-pro", "cline-pass/minimax-m3", "cline-pass/muse-spark-1.3-contributor", "cline-pass/qwen3.8-max", "cline-pass/qwen3.7-max", "cline-pass/qwen3.7-plus"]
-
-[[preset]]
-id = "opencode-zen"
-name = "OpenCode Zen"
-kind = "relay"
-catalog = "opencode"
-chat = "https://opencode.ai/zen/v1"
-responses = "https://opencode.ai/zen/v1"
-anthropic = "https://opencode.ai/zen"
-decide = "https://opencode.ai/zen/v1"
-website = "https://opencode.ai/docs/zen"
-keys_url = "https://opencode.ai/auth"
-no_key = true
-key_hint = "optional: free models need no key"
 
 [[preset]]
 id = "typesafe"

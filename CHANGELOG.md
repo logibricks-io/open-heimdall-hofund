@@ -98,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The third batch of nine vendor and relay preset rows, including their regions
   and credential metadata, now lives in `plugins/providers/openai-compat/presets.toml`
   with catalog-equivalent registry behavior.
+- The fourth batch of seven vendor and relay preset rows, including their model
+  metadata and decision endpoints, now lives in
+  `plugins/providers/openai-compat/presets.toml` with catalog-equivalent registry
+  selection and model planning.
 - `ProviderModels` is now non-exhaustive so future aggregation fields do not
   break downstream construction at compile time.
 - Plugin-host responses now strip every RFC 9110 hop-by-hop header, including
