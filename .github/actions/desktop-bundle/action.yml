@@ -45,8 +45,9 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        sudo DEBIAN_FRONTEND=noninteractive apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
           -o Dpkg::Options::="--force-confold" \
           libwebkit2gtk-4.1-dev \
           libayatana-appindicator3-dev \

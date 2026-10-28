@@ -12,7 +12,7 @@ use hofund_config::Config;
 use hofund_plugin_api::{
     AuthChoice, CredentialStyle, DynUpstreamFactory, HostContext, ListKind, ListQuery, ModelSpec,
     PluginError, ProbeQuery, ProbeReport, ProtocolId, RawTable, RawValue, SecretString,
-    UpstreamProvider,
+    UpstreamProvider, redact_token, safe_url,
 };
 use hofund_plugin_host::HttpLimits;
 use hofund_plugin_sdk::{Call, PageError, PageErrorKind, after_id};
@@ -2098,8 +2098,6 @@ impl From<PageError> for ListFailure {
 #[derive(Clone)]
 struct Redactor {
     secrets: Vec<String>,
-    query: Option<String>,
-    models_url: Option<String>,
 }
 
 impl Redactor {
@@ -2119,13 +2117,7 @@ impl Redactor {
                     .filter(|value| !value.is_empty()),
             );
         }
-        Self {
-            secrets,
-            query: models_url
-                .and_then(|url| url.split_once('?'))
-                .map(|(_, query)| query.to_owned()),
-            models_url: models_url.map(str::to_owned),
-        }
+        Self { secrets }
     }
 
     fn clean(&self, error: PluginError) -> DaemonError {
@@ -2137,28 +2129,39 @@ impl Redactor {
     }
 
     fn text(&self, text: &str) -> String {
-        let mut clean = text.to_owned();
-        if let Some(url) = &self.models_url {
-            clean = clean.replace(url, &safe_url(url));
-        }
-        if let Some(query) = &self.query
-            && !query.is_empty()
-        {
-            clean = clean.replace(query, "<redacted>");
-        }
+        let mut clean = safe_urls_in(text);
         for secret in &self.secrets {
-            clean = clean.replace(secret, "[redacted]");
+            clean = redact_token(&clean, secret);
         }
         clean
     }
 }
 
-fn safe_url(url: &str) -> String {
-    let without_fragment = url.split('#').next().unwrap_or(url);
-    without_fragment.split_once('?').map_or_else(
-        || without_fragment.to_owned(),
-        |(base, _)| format!("{base}?<redacted>"),
-    )
+/// Rewrites every `http://` or `https://` URL embedded in `text` with
+/// [`safe_url`], so userinfo and query values of any length (including
+/// pagination URLs that differ from the configured models URL, and URLs quoted
+/// inside transport errors) are never printed verbatim.
+fn safe_urls_in(text: &str) -> String {
+    let mut clean = String::with_capacity(text.len());
+    let mut remaining = text;
+    loop {
+        let start = match (remaining.find("http://"), remaining.find("https://")) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => break,
+        };
+        clean.push_str(&remaining[..start]);
+        let rest = &remaining[start..];
+        let end = rest
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, ')' | '"' | '\'' | '<' | '>' | '`')
+            })
+            .unwrap_or(rest.len());
+        clean.push_str(&safe_url(&rest[..end]));
+        remaining = &rest[end..];
+    }
+    clean.push_str(remaining);
+    clean
 }
 
 fn url_host(url: &str) -> Option<String> {
@@ -2200,6 +2203,50 @@ mod tests {
     use hofund_provider::{Credential, ModelPlan, Wire};
 
     use super::{Merged, bounded_kind, list_only_raw};
+
+    fn redaction_fixture(models_url: Option<&str>) -> super::Redactor {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"fixture\"\nprotocol = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\nheaders = { x-short = \"tiny\" }\n",
+        )
+        .expect("config");
+        let mut endpoint = hofund_provider::Endpoint::new("fixture", "https://example.test/v1");
+        endpoint.api_key = "secret-token".to_owned();
+        super::Redactor::new(&config.providers[0], &endpoint, models_url)
+    }
+
+    #[test]
+    fn redactor_masks_only_whole_tokens_of_at_least_eight_characters() {
+        let redactor = redaction_fixture(None);
+        assert_eq!(
+            redactor.text("secret-token prefixsecret-token secret-tokensuffix"),
+            "[redacted] prefixsecret-token secret-tokensuffix"
+        );
+        assert_eq!(redactor.text("tiny tinyish"), "tiny tinyish");
+    }
+
+    #[test]
+    fn redactor_strips_userinfo_and_short_query_values() {
+        let url = "https://user:pass@example.test/models?key=tiny#fragment";
+        let redactor = redaction_fixture(Some(url));
+        assert_eq!(redactor.text(url), "https://example.test/models?<redacted>");
+    }
+
+    #[test]
+    fn redactor_strips_short_query_values_from_any_url_in_the_text() {
+        let redactor = redaction_fixture(Some("https://example.test/models?key=tiny"));
+        let message = "error sending request for url (https://example.test/models?key=tiny&after_id=x&limit=1000): operation timed out";
+        let clean = redactor.text(message);
+        assert!(!clean.contains("tiny"), "{clean}");
+        assert_eq!(
+            clean,
+            "error sending request for url (https://example.test/models?<redacted>): operation timed out"
+        );
+        let other = redactor.text("see 'http://u:p@other.test/x?a=1' and \"https://a.test/b\"");
+        assert_eq!(
+            other,
+            "see 'http://other.test/x?<redacted>' and \"https://a.test/b\""
+        );
+    }
 
     #[test]
     fn compiled_models_credential_uses_the_region_resolved_host() {

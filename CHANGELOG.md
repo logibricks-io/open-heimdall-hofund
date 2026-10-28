@@ -213,6 +213,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Model-list redaction masks only whole secret tokens of at least eight characters,
+  strips URL userinfo, and removes every URL query value through one shared helper.
+  This applies to every URL in an error message, including pagination URLs and
+  URLs quoted in transport errors.
 - Token URLs containing userinfo are rejected.
 
 ### Deprecated
@@ -248,6 +252,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longest wins and the router still caps the wait.
 - The rate-limit ladder now continues only when the previous rest was a rate
   rest, and a kept longer rest keeps its own cause and failure count.
+- SigV4 form and STS tests now use the literal AWS suite inputs. Release and
+  desktop-bundle apt installs now have bounded steps, retries, and HTTP timeouts.
 - Control request bodies between 2 MiB and the protocol request limit now reach
   their handler instead of getting the HTTP framework's plain-text 413 without
   an error envelope or `Cache-Control: no-store`. The control pre-route check is
