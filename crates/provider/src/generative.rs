@@ -274,7 +274,7 @@ pub(crate) fn classify_count(
             .ok_or_else(|| ProviderError::decode("count response has no totalTokens"))?;
         return Ok(CountOutcome::Counted(tokens));
     }
-    let error = ProviderError::status(status, http::message_from(bytes));
+    let error = ProviderError::response(status, bytes);
     Err(match retry_after {
         Some(after) => error.with_retry_after(after),
         None => error,

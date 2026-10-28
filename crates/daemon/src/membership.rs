@@ -692,7 +692,10 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
         ProviderErrorKind::Decode => PluginError::decode(error.message),
         ProviderErrorKind::Unsupported => PluginError::unsupported(error.message),
         ProviderErrorKind::Auth => PluginError::auth(error.message),
-        ProviderErrorKind::Quota => PluginError::quota(error.message),
+        ProviderErrorKind::Quota => match error.status {
+            Some(status) => PluginError::quota_status(status, error.message),
+            None => PluginError::quota(error.message),
+        },
         ProviderErrorKind::Config => PluginError::config(error.message),
         ProviderErrorKind::Cancelled => PluginError::cancelled(error.message),
         ProviderErrorKind::Io => PluginError::io(error.message),
