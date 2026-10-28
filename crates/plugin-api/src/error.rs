@@ -17,20 +17,24 @@ pub enum PluginErrorKind {
     /// A retry may repeat this kind for every HTTP method. A reset after the
     /// request was sent is [`Transport`](Self::Transport), not `Connect`.
     Connect,
-    /// The socket stalled past the host's connect or read deadline.
+    /// The socket stalled past the host's connect or pre-header read deadline.
     ///
     /// A retry may repeat this kind only when the call is idempotent: `GET`,
     /// `HEAD`, `OPTIONS`, `PUT`, `DELETE`, or a call the caller marked
     /// idempotent. `POST` and `PATCH` are not retried on a timeout unless
-    /// that mark is set.
+    /// that mark is set. A body-read timeout after a 2xx status is
+    /// [`Interrupted`](Self::Interrupted).
     Timeout,
-    /// The request was sent, then the connection failed or the body could not be read.
+    /// The request was sent, then the connection failed before a status arrived.
     ///
-    /// This is the kind for a reset after the upstream received the body, and
-    /// for a failure while reading the response. A retry may repeat it only
-    /// when the call is idempotent, under the same rule as [`Timeout`](Self::Timeout).
-    /// It is never retried for a non-idempotent `POST` or `PATCH`.
+    /// A retry may repeat it only when the call is idempotent, under the same
+    /// rule as [`Timeout`](Self::Timeout). It is never retried for a
+    /// non-idempotent `POST` or `PATCH`. A body failure after a 2xx status is
+    /// [`Interrupted`](Self::Interrupted).
     Transport,
+    /// The upstream answered with a 2xx status, then its body failed or stalled before it was complete.
+    /// The request was received, so it is never resent to the same member unless the call is idempotent.
+    Interrupted,
     /// The upstream returned an HTTP status.
     Status,
     /// The body was not a response this protocol understands.
@@ -91,10 +95,16 @@ impl PluginError {
         Self::new(PluginErrorKind::Timeout, message)
     }
 
-    /// The request was sent, then the socket failed or the body could not be read.
+    /// The request was sent, then the socket failed before a status arrived.
     #[must_use]
     pub fn transport(message: impl Into<String>) -> Self {
         Self::new(PluginErrorKind::Transport, message)
+    }
+
+    /// The response body failed or stalled after the upstream answered.
+    #[must_use]
+    pub fn interrupted(message: impl Into<String>) -> Self {
+        Self::new(PluginErrorKind::Interrupted, message)
     }
 
     /// An HTTP status from the upstream.
@@ -209,6 +219,7 @@ impl fmt::Display for PluginErrorKind {
             Self::Connect => "connect",
             Self::Timeout => "timeout",
             Self::Transport => "transport",
+            Self::Interrupted => "interrupted",
             Self::Status => "status",
             Self::Decode => "decode",
             Self::Unsupported => "unsupported",
@@ -252,6 +263,9 @@ mod tests {
             PluginErrorKind::Transport
         );
         assert_eq!(PluginErrorKind::Transport.to_string(), "transport");
+        let interrupted = PluginError::interrupted("cut off");
+        assert_eq!(interrupted.kind(), PluginErrorKind::Interrupted);
+        assert_eq!(PluginErrorKind::Interrupted.to_string(), "interrupted");
     }
 
     #[test]

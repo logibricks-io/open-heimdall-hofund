@@ -25,12 +25,16 @@ pub struct ProviderError {
 /// Classification of [`ProviderError`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderErrorKind {
-    /// The connection could not be established, or the body failed in transit.
+    /// The connection could not be established before the request was sent.
     Connect,
-    /// The upstream did not answer within the configured time.
+    /// The upstream did not answer with a status within the configured time.
+    /// A body-read timeout after a 2xx status is [`Interrupted`](Self::Interrupted).
     Timeout,
-    /// The request was sent, but its response failed in transit.
+    /// The request was sent, but its response failed before a status arrived.
     Transport,
+    /// The upstream answered with a 2xx status, then its body failed or stalled before it was complete.
+    /// The request was received, so it is never resent to the same member unless the call is idempotent.
+    Interrupted,
     /// The upstream returned an HTTP status.
     Status,
     /// The body was not a response this adapter's protocol understands.
@@ -64,10 +68,16 @@ impl ProviderError {
         Self::new(ProviderErrorKind::Timeout, message)
     }
 
-    /// A transport failure after the request was sent.
+    /// A transport failure after the request was sent and before a status arrived.
     #[must_use]
     pub fn transport(message: impl Into<String>) -> Self {
         Self::new(ProviderErrorKind::Transport, message)
+    }
+
+    /// The response body failed or stalled after the upstream answered.
+    #[must_use]
+    pub fn interrupted(message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Interrupted, message)
     }
 
     /// An HTTP status from the upstream.

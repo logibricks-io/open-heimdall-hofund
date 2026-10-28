@@ -61,6 +61,7 @@ fn every_generic_failure_kind_and_status_cools() {
     for error in [
         PluginError::timeout("late"),
         PluginError::transport("reset"),
+        PluginError::interrupted("cut off"),
         PluginError::decode("bad"),
         PluginError::io("io"),
         PluginError::auth("denied"),

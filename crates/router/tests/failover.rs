@@ -105,6 +105,15 @@ async fn dispatch(router: &Router, model: &str) -> Result<hofund_router::Routed,
     router.dispatch(&request, "inbound").await
 }
 
+#[test]
+fn interrupted_errors_follow_the_connect_failover_setting() {
+    let mut policy = FailoverPolicy::default();
+    let error = PluginError::interrupted("cut off");
+    assert!(policy.allows(&error));
+    policy.connect_errors = false;
+    assert!(!policy.allows(&error));
+}
+
 #[tokio::test]
 async fn ordered_failover_skips_status_and_connect_failures() {
     let first_hits = Arc::new(AtomicUsize::new(0));

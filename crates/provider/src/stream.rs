@@ -94,7 +94,7 @@ impl Stream for SseEvents {
                 }
                 Poll::Ready(Some(Err(error))) => {
                     this.finished = true;
-                    return Poll::Ready(Some(Err(map_transport(error))));
+                    return Poll::Ready(Some(Err(map_body(error))));
                 }
                 Poll::Ready(Some(Ok(chunk))) => match this.decoder.push(&chunk) {
                     Ok(events) => this.pending.extend(events.into_iter().map(Ok)),
@@ -149,6 +149,14 @@ pub(crate) fn map_transport(error: ReqwestError) -> ProviderError {
             error.to_string(),
         )
     }
+}
+
+pub(crate) fn map_body(error: ReqwestError) -> ProviderError {
+    let mut message = error.to_string();
+    if error.is_timeout() && !message.contains("timed out") {
+        message.push_str(": timed out");
+    }
+    ProviderError::interrupted(message)
 }
 
 pub(crate) fn message_from(bytes: &[u8]) -> String {

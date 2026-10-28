@@ -328,6 +328,7 @@ PluginError::fn config (message : impl Into < String >) -> Self
 PluginError::fn connect (message : impl Into < String >) -> Self
 PluginError::fn decode (message : impl Into < String >) -> Self
 PluginError::fn internal (message : impl Into < String >) -> Self
+PluginError::fn interrupted (message : impl Into < String >) -> Self
 PluginError::fn io (message : impl Into < String >) -> Self
 PluginError::fn message (& self) -> & str
 PluginError::fn quota (message : impl Into < String >) -> Self
@@ -345,6 +346,7 @@ PluginErrorKind::Config
 PluginErrorKind::Connect
 PluginErrorKind::Decode
 PluginErrorKind::Internal
+PluginErrorKind::Interrupted
 PluginErrorKind::Io
 PluginErrorKind::Quota
 PluginErrorKind::Status

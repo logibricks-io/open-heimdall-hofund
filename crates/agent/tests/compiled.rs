@@ -510,13 +510,16 @@ fn expected_absolute_paths(id: &str) -> Vec<PathBuf> {
     paths.iter().map(PathBuf::from).collect()
 }
 
+#[cfg(feature = "legacy-agent-consts")]
+#[test]
+fn catalog_without_compiled_codex_uses_the_legacy_fallback() {
+    let catalog = catalog(&[]).expect("legacy codex fallback");
+    assert_eq!(catalog.adapters().len(), 4);
+    assert!(catalog.find("codex").is_some());
+}
+
 #[test]
 fn catalog_checks_collisions_and_keeps_builtins_first() {
-    let empty = catalog(&[]).expect("empty compiled catalog");
-    assert_eq!(empty.adapters().len(), 2);
-    assert!(empty.find("claude-code").is_none());
-    assert!(empty.find("codex").is_none());
-
     let with_extra = catalog(MIGRATED_AND_EXTRA_LIST).expect("extra catalog");
     let ids = with_extra
         .adapters()

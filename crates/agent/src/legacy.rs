@@ -90,7 +90,7 @@ const CLAUDE_CODE: Description = Description {
     }),
 };
 
-const CLAUDE: Described = Described {
+pub(crate) const CLAUDE: Described = Described {
     description: &CLAUDE_CODE,
 };
 
@@ -170,7 +170,7 @@ const CODEX: Description = Description {
     }),
 };
 
-const CODEX_ADAPTER: Described = Described {
+pub(crate) const CODEX_ADAPTER: Described = Described {
     description: &CODEX,
 };
 

@@ -18,11 +18,13 @@ fn compiled_agent_ids_compose_in_cli_order_and_migrated_agents_are_compiled() {
 
 #[test]
 fn reserved_agent_ids_match_the_builtin_catalog() {
-    let builtins = hofund_agent::catalog(&[]).expect("built-in catalog");
+    let builtins =
+        hofund_agent::catalog(hofund_daemon::agent_descriptions()).expect("built-in catalog");
     let ids = builtins
         .adapters()
         .into_iter()
         .map(|adapter| adapter.id())
+        .filter(|id| !matches!(*id, "claude-code" | "codex"))
         .collect::<Vec<_>>();
     assert_eq!(hofund_plugin_registry::RESERVED_AGENT_IDS, ids);
 }
