@@ -1180,7 +1180,10 @@ mod tests {
                 std::sync::Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
                 std::sync::Arc::new(super::RecordingScheduler::default()),
                 std::sync::Arc::new(super::RecordingProcess::default()),
-                std::sync::Arc::new(super::RootDirs { root: root.clone() }),
+                std::sync::Arc::new(super::RootDirs {
+                    root: root.to_path_buf(),
+                    _guard: None,
+                }),
                 std::sync::Arc::new(super::RecordingObserve::default()),
             )
         };

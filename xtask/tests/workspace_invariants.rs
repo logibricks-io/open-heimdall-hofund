@@ -385,8 +385,9 @@ fn unsafe_code_scanner_flags_opt_outs_and_exempts_platform_win() {
     }
 }
 
-/// Workspace-relative Rust sources that may still access the process temp dir.
-/// Test fixtures should use RAII guards instead; keep this list empty.
+/// Workspace-relative Rust sources whose test code may still access the process temp dir.
+/// Test fixtures should use RAII guards instead; keep this list empty. Runtime code (before the
+/// first `#[cfg(test)]` module of a `src` file) may use the temp dir as product behaviour.
 const TEMP_DIR_ALLOWLIST: &[&str] = &[];
 
 #[test]
@@ -397,7 +398,7 @@ fn test_fixtures_do_not_build_process_temp_paths() {
         for path in rust_files(&root.join(member)) {
             let relative = relative(&root, &path);
             if !TEMP_DIR_ALLOWLIST.contains(&relative.as_str())
-                && uses_process_temp_dir(&read_to_string(&path))
+                && uses_process_temp_dir(test_code(&relative, &read_to_string(&path)))
             {
                 violations.push(relative);
             }
@@ -419,6 +420,47 @@ fn process_temp_dir_scanner_has_positive_and_negative_cases() {
     assert!(!uses_process_temp_dir(
         "let root = tempfile::tempdir().expect(\"temp dir\");"
     ));
+    let runtime = concat!(
+        "fn runtime() -> PathBuf { std::env::",
+        "temp_dir() }\n#[cfg(test)]\nmod tests {}\n"
+    );
+    assert!(!uses_process_temp_dir(test_code(
+        "crates/a/src/lib.rs",
+        runtime
+    )));
+    assert!(uses_process_temp_dir(test_code(
+        "crates/a/tests/it.rs",
+        runtime
+    )));
+    assert!(uses_process_temp_dir(test_code(
+        "crates/a/src/tests.rs",
+        runtime
+    )));
+    let in_tests = concat!(
+        "fn runtime() {}\n#[cfg(all(test, unix))]\nmod tests { fn f() { std::env::",
+        "temp_dir(); } }\n"
+    );
+    assert!(uses_process_temp_dir(test_code(
+        "crates/a/src/lib.rs",
+        in_tests
+    )));
+}
+
+/// The part of `source` that is test code: the whole file for integration tests, benches,
+/// examples and `tests.rs` modules, otherwise everything from the first `cfg(test)` attribute on.
+fn test_code<'a>(relative: &str, source: &'a str) -> &'a str {
+    let whole_file = ["/tests/", "/benches/", "/examples/"]
+        .iter()
+        .any(|segment| relative.contains(segment))
+        || relative.ends_with("/tests.rs");
+    if whole_file {
+        return source;
+    }
+    ["#[cfg(test)]", "#[cfg(all(test"]
+        .iter()
+        .filter_map(|marker| source.find(marker))
+        .min()
+        .map_or("", |start| &source[start..])
 }
 
 fn uses_process_temp_dir(source: &str) -> bool {

@@ -526,7 +526,9 @@ async fn unix_socket_round_trip_with_permissions_and_safe_peer_cred() {
 async fn unix_listener_rejects_wrong_peer_uid_before_http() {
     use std::os::unix::fs::MetadataExt;
     let dir = UnixScratch::new("unix-peer-uid");
-    let uid = std::fs::metadata(dir.path()).expect("directory metadata").uid();
+    let uid = std::fs::metadata(dir.path())
+        .expect("directory metadata")
+        .uid();
     let socket = dir.path().join("control.sock");
     let running = control()
         .bind_unix_with_expected_uid(&socket, uid.wrapping_add(1))

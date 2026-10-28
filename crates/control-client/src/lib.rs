@@ -252,34 +252,23 @@ fn transport(context: &str, error: impl fmt::Display) -> ClientError {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    struct Scratch(PathBuf);
+    struct Scratch(tempfile::TempDir);
 
     impl Scratch {
         fn new() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = PathBuf::from("/tmp").join(format!(
-                "hofund-client-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("scratch directory");
-            let socket = path.join("control.sock");
+            // A short `/tmp` root keeps Unix socket paths under the macOS limit.
+            let dir = tempfile::Builder::new()
+                .prefix("hofund-client-")
+                .tempdir_in("/tmp")
+                .expect("scratch directory");
+            let socket = dir.path().join("control.sock");
             assert!(
                 socket.as_os_str().as_encoded_bytes().len() < 100,
                 "socket path must be shorter than 100 bytes: {}",
                 socket.display()
             );
-            Self(path)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            Self(dir)
         }
     }
 
@@ -287,7 +276,7 @@ mod tests {
     fn unix_socket_verifier_rejects_wrong_owner_uid() {
         use std::os::unix::fs::MetadataExt;
         let dir = Scratch::new();
-        let socket = dir.0.join("control.sock");
+        let socket = dir.0.path().join("control.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("Unix listener");
         let owner_uid = std::fs::metadata(&socket).expect("socket metadata").uid();
         super::verify_unix_socket_for(&socket, owner_uid).expect("current owner");

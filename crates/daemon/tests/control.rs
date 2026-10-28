@@ -98,8 +98,8 @@ async fn windows_token_uses_profile_acl_until_pipe() {
     )
     .await
     .expect("TCP fallback");
-    let token_path = profile.join("hofund.token");
-    assert!(token_path.starts_with(&profile));
+    let token_path = profile.path().join("hofund.token");
+    assert!(token_path.starts_with(profile.path()));
     let token = std::fs::read_to_string(token_path).expect("profile token");
     let response = reqwest::get(format!(
         "http://{}/v1/hofund/health",
@@ -110,5 +110,4 @@ async fn windows_token_uses_profile_acl_until_pipe() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert!(!token.trim().is_empty());
     running.shutdown().await;
-    let _ = std::fs::remove_dir_all(profile);
 }
