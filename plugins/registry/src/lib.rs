@@ -290,7 +290,11 @@ mod tests {
         let record = super::preset("relay").expect("relay preset");
         assert_eq!(record.plugin, "relay");
         assert!(record.config.is_empty());
-        assert!(super::preset("openai").is_none());
+        assert!(super::preset("ollama").is_none());
+        assert_eq!(
+            super::preset("openai").map(|preset| preset.plugin),
+            Some("openai-compat")
+        );
         assert_eq!(
             super::factory("openai-compat")
                 .expect("builtin")

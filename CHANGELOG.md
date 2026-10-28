@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Full typed control route and client surface, with ordered request defenses,
+  bounded bodies, error envelopes, no-store responses, and drain guards. The daemon
+  now serves secret-free provider summaries, cached models without upstream calls,
+  and route models over control TCP and Unix sockets.
 - Per-config control identities, single-instance locks, atomic token-free discovery,
   secure runtime-directory fallback, and same-user Unix socket transport with ordered
   client discovery. Windows keeps authenticated loopback TCP until named-pipe support lands.
@@ -128,6 +132,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regional decision endpoints, now lives in
   `plugins/providers/openai-compat/presets.toml` with catalog-equivalent registry
   selection errors, credential derivation, and model planning.
+- The seventh batch moves OpenAI and OpenRouter into
+  `plugins/providers/openai-compat/presets.toml`, Google into
+  `plugins/providers/generative/presets.toml`, and Anthropic into
+  `plugins/providers/anthropic/presets.toml`, preserving registry selection,
+  credential derivation, and model planning.
 - `ProviderModels` is now non-exhaustive so future aggregation fields do not
   break downstream construction at compile time.
 - Plugin-host responses now strip every RFC 9110 hop-by-hop header, including
@@ -239,6 +248,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longest wins and the router still caps the wait.
 - The rate-limit ladder now continues only when the previous rest was a rate
   rest, and a kept longer rest keeps its own cause and failure count.
+- Control request bodies between 2 MiB and the protocol request limit now reach
+  their handler instead of getting the HTTP framework's plain-text 413 without
+  an error envelope or `Cache-Control: no-store`. The control pre-route check is
+  the only body size gate.
 - Over-long Unix control socket paths now warn and fall back to TCP instead of
   preventing daemon startup. Socket tests use short paths on macOS, and the
   Windows single-instance test no longer requires session debug output.
