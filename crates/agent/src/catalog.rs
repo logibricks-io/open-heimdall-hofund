@@ -1,13 +1,11 @@
-//! Compiled catalog composition and the const engine kept for the legacy oracles.
+//! Compiled catalog composition and the shared editing engine.
 //!
 //! Paths and keys were checked against each tool's own docs on 2026-10-24.
-//! The citations sit on each description below.
+//! The citations sit on each shipped description.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-#[cfg(any(test, feature = "legacy-agent-consts"))]
-use hofund_plugin_api::TierId;
 use hofund_plugin_api::{
     AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, Slot as ApiSlot, Visible,
 };
@@ -23,68 +21,10 @@ use crate::{
 };
 use crate::{DisconnectOutcome, usable_override};
 
-#[cfg(any(test, feature = "legacy-agent-consts"))]
-pub(crate) struct Description {
-    pub(crate) id: &'static str,
-    pub(crate) display_name: &'static str,
-    pub(crate) binary: &'static str,
-    pub(crate) locations: &'static [Location],
-    pub(crate) sets: &'static [Set],
-    /// File id and key holding the tool's selected model, when it has one.
-    pub(crate) model: Option<ModelKey>,
-}
-
 #[derive(Clone, Copy)]
-pub(crate) struct ModelKey {
-    pub(crate) file: &'static str,
-    pub(crate) key: &'static str,
-}
-
-#[cfg(any(test, feature = "legacy-agent-consts"))]
-pub(crate) struct Location {
-    pub(crate) file: &'static str,
-    pub(crate) kind: FileKind,
-    pub(crate) create: bool,
-    pub(crate) resolve: fn(&Session) -> PathBuf,
-}
-
-#[cfg(any(test, feature = "legacy-agent-consts"))]
-pub(crate) struct Set {
-    pub(crate) file: &'static str,
-    pub(crate) key: &'static str,
-    pub(crate) slot: Slot,
-}
-
-#[cfg(any(test, feature = "legacy-agent-consts"))]
-pub(crate) enum Slot {
-    Origin,
-    V1,
-    Token,
-    Literal(&'static str),
-    /// Gemini CLI `model.name`, when this connect has a model to write.
-    GeminiModel,
-    /// OpenCode `models` object built from [`GatewayTarget::models`].
-    OpenCodeModels,
-    /// Claude Code `model`, when the file has none and one route is configured.
-    ClaudeModel,
-    /// Claude Code tier env value. `fable` is skipped unless the model id is Fable.
-    ClaudeTier(&'static str),
-    /// Test-only API `ModelIfUnset` with an arbitrary source key. The fixture's
-    /// `legacy_model` source is not representable by `GeminiModel`.
-    #[cfg(test)]
-    ModelIfUnset(Option<&'static str>),
-    /// Test-only API `ModelTier` with an arbitrary needle. The fixture's
-    /// `fixture-fable-` needle is not representable by `ClaudeTier`.
-    #[cfg(test)]
-    ModelTier {
-        tier: &'static str,
-        when_model_matches: Option<&'static str>,
-    },
-}
-
-#[cfg(any(test, feature = "legacy-agent-consts"))]
-pub(crate) struct Described {
-    pub(crate) description: &'static Description,
+struct ModelKey {
+    file: &'static str,
+    key: &'static str,
 }
 
 /// An adapter backed by a compiled static agent description.
@@ -118,19 +58,6 @@ impl Compiled {
 
 const BUILTIN_ORDER: [&str; 4] = ["claude-code", "codex", "gemini-cli", "opencode"];
 
-/// Const built-in adapters. Every built-in is now compiled, so this is empty.
-#[must_use]
-pub fn adapters() -> [&'static dyn AgentAdapter; 0] {
-    []
-}
-
-/// Finds a const built-in adapter. Every built-in is now compiled, so this
-/// always returns `None`; use [`Catalog::find`].
-#[must_use]
-pub fn find(name: &str) -> Option<&'static dyn AgentAdapter> {
-    adapters().into_iter().find(|adapter| adapter.id() == name)
-}
-
 /// Compiled adapters in catalog order.
 pub struct Catalog {
     adapters: Vec<Box<dyn AgentAdapter>>,
@@ -161,7 +88,7 @@ impl Catalog {
 /// # Errors
 ///
 /// Returns an error when two compiled descriptions share an id, or when a
-/// built-in has no compiled description (or enabled legacy fallback).
+/// built-in has no compiled description.
 pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog, AgentError> {
     compose(compiled, builtin_adapter)
 }
@@ -205,22 +132,8 @@ fn compose(
     Ok(Catalog { adapters: composed })
 }
 
-fn builtin_adapter(id: &str) -> Option<Box<dyn AgentAdapter>> {
-    #[cfg(feature = "legacy-agent-consts")]
-    let adapter = match id {
-        "claude-code" => Some(crate::legacy::CLAUDE),
-        "codex" => Some(crate::legacy::CODEX_ADAPTER),
-        "gemini-cli" => Some(crate::legacy::GEMINI_ADAPTER),
-        "opencode" => Some(crate::legacy::OPENCODE_ADAPTER),
-        _ => None,
-    }
-    .map(|adapter| Box::new(adapter) as Box<dyn AgentAdapter>);
-    #[cfg(not(feature = "legacy-agent-consts"))]
-    let adapter = {
-        let _ = id;
-        None
-    };
-    adapter
+fn builtin_adapter(_id: &str) -> Option<Box<dyn AgentAdapter>> {
+    None
 }
 
 /// Resolves one compiled file location against a session.
@@ -291,67 +204,6 @@ struct Engine {
 }
 
 impl Engine {
-    #[cfg(any(test, feature = "legacy-agent-consts"))]
-    fn described(description: &'static Description, session: &Session) -> Self {
-        let locations = description
-            .locations
-            .iter()
-            .map(|location| EngineLocation {
-                file: location.file,
-                path: (location.resolve)(session),
-                kind: location.kind,
-                create: location.create,
-            })
-            .collect();
-        let sets = description
-            .sets
-            .iter()
-            .map(|set| EngineSet {
-                file: set.file,
-                key: set.key,
-                slot: match set.slot {
-                    Slot::Origin => ApiSlot::Origin,
-                    #[cfg(any(test, feature = "legacy-agent-consts"))]
-                    Slot::V1 => ApiSlot::V1,
-                    Slot::Token => ApiSlot::Token,
-                    Slot::Literal(value) => ApiSlot::Literal(value),
-                    Slot::GeminiModel => ApiSlot::model_if_unset(Some("model")),
-                    #[cfg(any(test, feature = "legacy-agent-consts"))]
-                    Slot::OpenCodeModels => ApiSlot::CatalogModels,
-                    #[cfg(any(test, feature = "legacy-agent-consts"))]
-                    Slot::ClaudeModel => ApiSlot::model_if_unset(None),
-                    #[cfg(any(test, feature = "legacy-agent-consts"))]
-                    Slot::ClaudeTier(tier) => ApiSlot::ModelTier {
-                        tier: TierId::from_static(tier),
-                        when_model_matches: (tier == "fable")
-                            .then(|| hofund_plugin_api::MatchNeedle::new("claude-fable-")),
-                    },
-                    #[cfg(test)]
-                    Slot::ModelIfUnset(from) => ApiSlot::model_if_unset(from),
-                    #[cfg(test)]
-                    Slot::ModelTier {
-                        tier,
-                        when_model_matches,
-                    } => ApiSlot::ModelTier {
-                        tier: TierId::from_static(tier),
-                        when_model_matches: when_model_matches
-                            .map(hofund_plugin_api::MatchNeedle::new),
-                    },
-                },
-            })
-            .collect();
-        Self {
-            id: description.id,
-            display_name: description.display_name,
-            binary: description.binary,
-            locations,
-            sets,
-            model: description.model,
-            visible: Visible::All,
-            route: AgentRoute::Gateway,
-        }
-    }
-
     fn compiled(
         description: &'static AgentDescription,
         os: TargetOs,
@@ -766,61 +618,6 @@ struct Chosen<'a> {
     sets: Vec<&'a EngineSet>,
 }
 
-#[cfg(any(test, feature = "legacy-agent-consts"))]
-impl AgentAdapter for Described {
-    fn id(&self) -> &str {
-        self.description.id
-    }
-
-    fn display_name(&self) -> &str {
-        self.description.display_name
-    }
-
-    fn detect(&self, session: &Session) -> bool {
-        Engine::described(self.description, session).detect(session)
-    }
-
-    fn read(&self, session: &Session) -> Result<Vec<ConfigFile>, AgentError> {
-        Engine::described(self.description, session).read()
-    }
-
-    fn plan(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, AgentError> {
-        Engine::described(self.description, session).plan(target)
-    }
-
-    fn apply(&self, session: &Session, target: &GatewayTarget) -> Result<Plan, AgentError> {
-        Engine::described(self.description, session).apply(target)
-    }
-
-    fn revert(&self, session: &Session) -> Result<(), AgentError> {
-        Engine::described(self.description, session).revert()
-    }
-
-    fn disconnect(&self, session: &Session, force: bool) -> Result<DisconnectOutcome, AgentError> {
-        Engine::described(self.description, session).disconnect(session, force)
-    }
-
-    fn refresh_token(
-        &self,
-        session: &Session,
-        target: &GatewayTarget,
-    ) -> Result<Vec<PathBuf>, AgentError> {
-        Engine::described(self.description, session).refresh_token(target)
-    }
-
-    fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError> {
-        Engine::described(self.description, session).configured_model()
-    }
-
-    fn status(
-        &self,
-        session: &Session,
-        target: &GatewayTarget,
-    ) -> Result<ConnectionStatus, AgentError> {
-        Engine::described(self.description, session).status(session, target)
-    }
-}
-
 impl AgentAdapter for Compiled {
     fn id(&self) -> &str {
         self.description.id().as_str()
@@ -1125,333 +922,23 @@ fn binary_on_path(session: &Session, name: &str) -> bool {
 }
 
 #[cfg(test)]
-const FIXTURE_TOML_AGENT: Description = Description {
-    id: "fixture-toml-agent",
-    display_name: "Fixture TOML Agent",
-    binary: "fixture-toml",
-    locations: &[Location {
-        file: "config",
-        kind: FileKind::Toml,
-        create: true,
-        resolve: fixture_toml_config,
-    }],
-    sets: &[
-        Set {
-            file: "config",
-            key: "model_provider",
-            slot: Slot::Literal("hofund"),
-        },
-        Set {
-            file: "config",
-            key: "model_providers.hofund.name",
-            slot: Slot::Literal("hofund"),
-        },
-        Set {
-            file: "config",
-            key: "model_providers.hofund.base_url",
-            slot: Slot::V1,
-        },
-        Set {
-            file: "config",
-            key: "model_providers.hofund.wire_api",
-            slot: Slot::Literal("responses"),
-        },
-        Set {
-            file: "config",
-            key: "model_providers.hofund.experimental_bearer_token",
-            slot: Slot::Token,
-        },
-    ],
-    model: Some(ModelKey {
-        file: "config",
-        key: "model",
-    }),
-};
-
-/// The private engine does not read effort keys. This retains the fixture's
-/// effort file and key beside its equivalent `Description`.
-#[cfg(test)]
-const FIXTURE_TOML_EFFORT: ModelKey = ModelKey {
-    file: "config",
-    key: "model_reasoning_effort",
-};
-
-#[cfg(test)]
-const FIXTURE_JSON_AGENT: Description = Description {
-    id: "fixture-json-agent",
-    display_name: "Fixture JSON Agent",
-    binary: "fixture-json",
-    locations: &[
-        Location {
-            file: "settings",
-            kind: FileKind::Json,
-            create: true,
-            resolve: fixture_json_settings,
-        },
-        Location {
-            file: "env",
-            kind: FileKind::Env,
-            create: true,
-            resolve: fixture_json_env,
-        },
-        Location {
-            file: "origin",
-            kind: FileKind::Env,
-            create: true,
-            resolve: fixture_json_origin,
-        },
-        Location {
-            file: "config",
-            kind: FileKind::Json,
-            create: false,
-            resolve: fixture_json_config_jsonc,
-        },
-        Location {
-            file: "config",
-            kind: FileKind::Json,
-            create: true,
-            resolve: fixture_json_config_json,
-        },
-    ],
-    sets: &[
-        Set {
-            file: "settings",
-            key: "origin",
-            slot: Slot::Origin,
-        },
-        Set {
-            file: "settings",
-            key: "token",
-            slot: Slot::Token,
-        },
-        Set {
-            file: "settings",
-            key: "literal",
-            slot: Slot::Literal("value"),
-        },
-        Set {
-            file: "settings",
-            key: "model.name",
-            slot: Slot::ClaudeModel,
-        },
-        Set {
-            file: "settings",
-            key: "selected.model",
-            slot: Slot::ModelIfUnset(Some("legacy_model")),
-        },
-        Set {
-            file: "settings",
-            key: "tiers.opus",
-            slot: Slot::ModelTier {
-                tier: "opus",
-                when_model_matches: None,
-            },
-        },
-        Set {
-            file: "settings",
-            key: "tiers.fable",
-            slot: Slot::ModelTier {
-                tier: "fable",
-                when_model_matches: Some("fixture-fable-"),
-            },
-        },
-        Set {
-            file: "env",
-            key: "FIXTURE_TOKEN",
-            slot: Slot::Token,
-        },
-        Set {
-            file: "env",
-            key: "FIXTURE_ORIGIN",
-            slot: Slot::Origin,
-        },
-        Set {
-            file: "env",
-            key: "FIXTURE_LITERAL",
-            slot: Slot::Literal("value"),
-        },
-        Set {
-            file: "origin",
-            key: "FIXTURE_BASE",
-            slot: Slot::Origin,
-        },
-        Set {
-            file: "config",
-            key: "models",
-            slot: Slot::OpenCodeModels,
-        },
-    ],
-    model: Some(ModelKey {
-        file: "settings",
-        key: "model.name",
-    }),
-};
-
-#[cfg(test)]
-fn fixture_toml_config(session: &Session) -> PathBuf {
-    session
-        .env("FIXTURE_TOML_HOME")
-        .filter(|value| usable_override(value))
-        .map_or_else(|| fixture_toml_dir(session), PathBuf::from)
-        .join("config.toml")
-}
-
-#[cfg(test)]
-fn fixture_toml_dir(session: &Session) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        session
-            .home
-            .join("Library")
-            .join("Preferences")
-            .join("fixture-toml")
-    } else if cfg!(target_os = "windows") {
-        session
-            .home
-            .join("AppData")
-            .join("Local")
-            .join("fixture-toml")
-    } else {
-        session.home.join(".config").join("fixture-toml")
-    }
-}
-
-#[cfg(test)]
-fn fixture_json_settings(session: &Session) -> PathBuf {
-    fixture_json_dir(session).join("settings.json")
-}
-
-#[cfg(test)]
-fn fixture_json_env(session: &Session) -> PathBuf {
-    fixture_json_dir(session).join("fixture.env")
-}
-
-#[cfg(test)]
-fn fixture_json_origin(session: &Session) -> PathBuf {
-    fixture_json_dir(session).join("origin.env")
-}
-
-#[cfg(test)]
-fn fixture_json_dir(session: &Session) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        session
-            .home
-            .join("Library")
-            .join("Application Support")
-            .join("fixture-json")
-    } else if cfg!(target_os = "windows") {
-        session
-            .home
-            .join("AppData")
-            .join("Roaming")
-            .join("fixture-json")
-    } else {
-        session.home.join(".fixture-json")
-    }
-}
-
-#[cfg(test)]
-fn fixture_json_config_jsonc(session: &Session) -> PathBuf {
-    session
-        .home
-        .join(".config")
-        .join("fixture-json")
-        .join("config.jsonc")
-}
-
-#[cfg(test)]
-fn fixture_json_config_json(session: &Session) -> PathBuf {
-    session
-        .home
-        .join(".config")
-        .join("fixture-json")
-        .join("config.json")
-}
-
-#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{
-        Described, FIXTURE_JSON_AGENT, FIXTURE_TOML_AGENT, FIXTURE_TOML_EFFORT, builtin_adapter,
-        compose,
-    };
-    use crate::{AgentAdapter, GatewayTarget, Plan, Session, TargetOs};
-
     #[test]
-    fn missing_compiled_codex_is_an_error_without_a_fallback() {
-        fn without_codex(id: &str) -> Option<Box<dyn AgentAdapter>> {
-            if id == "codex" {
-                None
-            } else {
-                builtin_adapter(id)
-            }
-        }
-
-        let error = compose(&[], without_codex).err().expect("missing codex");
-        assert_eq!(
-            error.to_string(),
-            "built-in agent `codex` has no compiled description"
-        );
-
-        fn without_claude(id: &str) -> Option<Box<dyn AgentAdapter>> {
-            if id == "claude-code" {
-                None
-            } else {
-                builtin_adapter(id)
-            }
-        }
-
-        let error = compose(&[], without_claude)
-            .err()
-            .expect("missing claude-code");
+    fn missing_compiled_builtin_is_an_error() {
+        let error = super::catalog(&[]).err().expect("missing built-in");
         assert_eq!(
             error.to_string(),
             "built-in agent `claude-code` has no compiled description"
-        );
-
-        fn without_opencode(id: &str) -> Option<Box<dyn AgentAdapter>> {
-            if id == "opencode" {
-                None
-            } else {
-                builtin_adapter(id)
-            }
-        }
-
-        let error = compose(&[], without_opencode)
-            .err()
-            .expect("missing opencode");
-        assert_eq!(
-            error.to_string(),
-            "built-in agent `opencode` has no compiled description"
-        );
-
-        fn without_gemini_cli(id: &str) -> Option<Box<dyn AgentAdapter>> {
-            if id == "gemini-cli" {
-                None
-            } else {
-                builtin_adapter(id)
-            }
-        }
-
-        let error = compose(&[], without_gemini_cli)
-            .err()
-            .expect("missing gemini-cli");
-        assert_eq!(
-            error.to_string(),
-            "built-in agent `gemini-cli` has no compiled description"
         );
     }
 
     #[derive(Default)]
     struct GoldenCase {
-        env: BTreeMap<String, String>,
-        routes: Vec<String>,
-        base_url: String,
-        token: String,
-        configured_model: Option<String>,
         only: Option<Vec<String>>,
     }
 
@@ -1625,117 +1112,6 @@ mod tests {
         Ok(Some(targets))
     }
 
-    /// Shared cases run everywhere; OS-specific cases run where their const
-    /// resolver selects the same host-OS paths as the compiled description.
-    #[test]
-    fn const_fixture_descriptions_replay_compiled_goldens() {
-        assert_eq!(FIXTURE_TOML_EFFORT.file, "config");
-        let host_directory = match TargetOs::current() {
-            TargetOs::Linux => "linux",
-            TargetOs::Macos => "macos",
-            TargetOs::Windows => "windows",
-        };
-        for (id, description) in [
-            ("fixture-toml-agent", &FIXTURE_TOML_AGENT),
-            ("fixture-json-agent", &FIXTURE_JSON_AGENT),
-        ] {
-            let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../plugins/registry/tests/fixtures/agents")
-                .join(id)
-                .join("fixtures");
-            let (shared, per_os) = golden_layout(id, &fixtures).expect("valid fixture layout");
-            let host = per_os
-                .iter()
-                .find(|(directory, _)| *directory == host_directory)
-                .map(|(_, cases)| cases)
-                .expect("host cases");
-            let mut replayed = 0;
-            for case in shared.iter().chain(host.iter()) {
-                replay_case(&Described { description }, case, TargetOs::current());
-                replayed += 1;
-            }
-            assert!(replayed > 0, "{id} has no host or shared cases");
-        }
-    }
-
-    #[test]
-    fn legacy_codex_replays_compiled_goldens_for_every_target_os() {
-        let fixtures =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/agents/codex/fixtures");
-        let (shared, per_os) = golden_layout("codex", &fixtures).expect("valid codex layout");
-        assert!(!shared.is_empty());
-        for (directory, cases) in &per_os {
-            let os = match *directory {
-                "linux" => TargetOs::Linux,
-                "macos" => TargetOs::Macos,
-                "windows" => TargetOs::Windows,
-                _ => unreachable!("validated target OS"),
-            };
-            for case in shared.iter().chain(cases.iter()) {
-                replay_case(crate::legacy::codex(), case, os);
-            }
-        }
-    }
-
-    #[test]
-    fn legacy_claude_code_replays_compiled_goldens_for_every_target_os() {
-        let fixtures =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/agents/claude-code/fixtures");
-        let (shared, per_os) =
-            golden_layout("claude-code", &fixtures).expect("valid claude-code layout");
-        assert!(!shared.is_empty());
-        for (directory, cases) in &per_os {
-            let os = match *directory {
-                "linux" => TargetOs::Linux,
-                "macos" => TargetOs::Macos,
-                "windows" => TargetOs::Windows,
-                _ => unreachable!("validated target OS"),
-            };
-            for case in shared.iter().chain(cases.iter()) {
-                replay_case(crate::legacy::claude_code(), case, os);
-            }
-        }
-    }
-
-    #[test]
-    fn legacy_opencode_replays_compiled_goldens_for_every_target_os() {
-        let fixtures =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/agents/opencode/fixtures");
-        let (shared, per_os) = golden_layout("opencode", &fixtures).expect("valid opencode layout");
-        assert!(!shared.is_empty());
-        for (directory, cases) in &per_os {
-            let os = match *directory {
-                "linux" => TargetOs::Linux,
-                "macos" => TargetOs::Macos,
-                "windows" => TargetOs::Windows,
-                _ => unreachable!("validated target OS"),
-            };
-            for case in shared.iter().chain(cases.iter()) {
-                replay_case(crate::legacy::opencode(), case, os);
-            }
-        }
-    }
-
-    #[test]
-    fn legacy_gemini_cli_replays_compiled_goldens_for_every_target_os() {
-        let fixtures =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/agents/gemini-cli/fixtures");
-        let (shared, per_os) =
-            golden_layout("gemini-cli", &fixtures).expect("valid gemini-cli layout");
-        assert!(!shared.is_empty());
-        for (directory, cases) in &per_os {
-            let os = match *directory {
-                "linux" => TargetOs::Linux,
-                "macos" => TargetOs::Macos,
-                "windows" => TargetOs::Windows,
-                _ => unreachable!("validated target OS"),
-            };
-            for case in shared.iter().chain(cases.iter()) {
-                replay_gemini_case(crate::legacy::gemini_cli(), case, os);
-            }
-        }
-    }
-
     fn write_layout_case(root: &Path, directory: &str, name: &str, only: Option<&[&str]>) {
         let only = only.map_or_else(String::new, |directories| {
             let directories = directories
@@ -1768,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn const_fixture_layout_rejects_unknown_top_level_entry() {
+    fn fixture_layout_rejects_unknown_top_level_entry() {
         let root = scratch();
         for directory in ["linux", "macOS", "windows"] {
             write_layout_case(&root, directory, "fresh", None);
@@ -1779,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn const_fixture_layout_requires_every_os() {
+    fn fixture_layout_requires_every_os() {
         let root = scratch();
         for directory in ["linux", "macos"] {
             write_layout_case(&root, directory, "fresh", None);
@@ -1798,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn const_fixture_layout_requires_complete_per_os_cases() {
+    fn fixture_layout_requires_complete_per_os_cases() {
         let root = scratch();
         write_layout_case(&root, "all", "shared", None);
         for directory in ["macos", "windows"] {
@@ -1811,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn const_fixture_layout_requires_case_toml() {
+    fn fixture_layout_requires_case_toml() {
         let root = scratch();
         fs::create_dir_all(root.join("all").join("broken")).expect("case directory");
         let error = layout_error(&root);
@@ -1820,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn const_fixture_layout_enforces_only() {
+    fn fixture_layout_enforces_only() {
         let root = scratch();
         write_layout_case(&root, "all", "shared", None);
         for directory in ["linux", "windows"] {
@@ -1859,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn const_real_fixture_trees_pass_layout_validation() {
+    fn real_fixture_trees_pass_layout_validation() {
         let agents = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../plugins/registry/tests/fixtures/agents");
         for id in ["fixture-toml-agent", "fixture-json-agent"] {
@@ -1868,205 +1244,19 @@ mod tests {
         }
     }
 
-    fn replay_case(adapter: &dyn AgentAdapter, case_dir: &Path, os: TargetOs) {
-        let label = format!("{} / {os:?} / {}", adapter.id(), case_dir.display());
-        let case = read_case(&case_dir.join("case.toml"));
-        let home = scratch();
-        let before_dir = case_dir.join("before");
-        if before_dir.is_dir() {
-            copy_tree(&before_dir, &home);
-        }
-        let before = tree(&home);
-        let after = tree(&case_dir.join("after"));
-        let mut session = Session::new(&home);
-        for (name, value) in case.env {
-            session = session.with_env(name, value.replace("{tmp}", &home.to_string_lossy()));
-        }
-        let target = GatewayTarget::new(case.base_url, case.token, case.routes);
-        let plan = adapter.plan(&session, &target).expect("const plan");
-        verify_plan(&label, &home, &plan, &after);
-        let applied = adapter.apply(&session, &target).expect("const apply");
-        verify_plan(&label, &home, &applied, &after);
-        assert_eq!(
-            adapter
-                .configured_model(&session)
-                .expect("const configured model")
-                .as_deref(),
-            case.configured_model.as_deref(),
-            "{label}: const configured model"
-        );
-        let mut expected = before;
-        expected.extend(after);
-        assert_eq!(managed_tree(&home), expected, "{label}: const apply tree");
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    fn replay_gemini_case(adapter: &dyn AgentAdapter, case_dir: &Path, os: TargetOs) {
-        fn directories(root: &Path) -> std::collections::BTreeSet<PathBuf> {
-            fn collect(
-                root: &Path,
-                directory: &Path,
-                directories: &mut std::collections::BTreeSet<PathBuf>,
-            ) {
-                let Ok(entries) = fs::read_dir(directory) else {
-                    return;
-                };
-                for entry in entries {
-                    let path = entry.expect("directory entry").path();
-                    if path.is_dir() {
-                        directories.insert(
-                            path.strip_prefix(root)
-                                .expect("relative directory")
-                                .to_path_buf(),
-                        );
-                        collect(root, &path, directories);
-                    }
-                }
-            }
-
-            let mut directories = std::collections::BTreeSet::new();
-            collect(root, root, &mut directories);
-            directories
-        }
-
-        fn implied_directories<'a>(
-            paths: impl IntoIterator<Item = &'a PathBuf>,
-        ) -> std::collections::BTreeSet<PathBuf> {
-            let mut directories = std::collections::BTreeSet::new();
-            for path in paths {
-                let mut parent = path.parent();
-                while let Some(directory) = parent
-                    && !directory.as_os_str().is_empty()
-                {
-                    directories.insert(directory.to_path_buf());
-                    parent = directory.parent();
-                }
-            }
-            directories
-        }
-
-        let label = format!("{} / {os:?} / {}", adapter.id(), case_dir.display());
-        let case = read_case(&case_dir.join("case.toml"));
-        let home = scratch();
-        let before_dir = case_dir.join("before");
-        if before_dir.is_dir() {
-            copy_tree(&before_dir, &home);
-        }
-        let before = tree(&home);
-        let before_directories = directories(&home);
-        let after = tree(&case_dir.join("after"));
-        let session_for = |home: &Path| {
-            let mut session = Session::new(home);
-            for (name, value) in &case.env {
-                session = session.with_env(name, value.replace("{tmp}", &home.to_string_lossy()));
-            }
-            session
-        };
-        let session = session_for(&home);
-        let target = GatewayTarget::new(&case.base_url, &case.token, case.routes.clone());
-        let plan = adapter.plan(&session, &target).expect("const plan");
-        verify_plan(&label, &home, &plan, &after);
-        let applied = adapter.apply(&session, &target).expect("const apply");
-        verify_plan(&label, &home, &applied, &after);
-        assert_eq!(
-            adapter
-                .configured_model(&session)
-                .expect("const configured model")
-                .as_deref(),
-            case.configured_model.as_deref(),
-            "{label}: const configured model"
-        );
-        let mut expected = before.clone();
-        expected.extend(after.clone());
-        assert_eq!(managed_tree(&home), expected, "{label}: const apply tree");
-        assert_eq!(
-            directories(&home),
-            implied_directories(before.keys().chain(after.keys())),
-            "{label}: apply directories"
-        );
-
-        let forced_home = scratch();
-        copy_tree(&home, &forced_home);
-        let forced = adapter
-            .disconnect(&session_for(&forced_home), true)
-            .expect("const forced disconnect");
-        assert!(forced.changed(), "{label}: forced disconnect unchanged");
-        assert_eq!(tree(&forced_home), before, "{label}: forced bytes");
-        assert_eq!(
-            directories(&forced_home),
-            before_directories,
-            "{label}: forced directories"
-        );
-        let _ = fs::remove_dir_all(&home);
-        let _ = fs::remove_dir_all(&forced_home);
-    }
-
-    fn verify_plan(label: &str, home: &Path, plan: &Plan, after: &BTreeMap<PathBuf, Vec<u8>>) {
-        let mut planned = Vec::new();
-        for change in plan.changes() {
-            let relative = change.path().strip_prefix(home).expect("plan relative");
-            planned.push(relative.to_path_buf());
-            assert_eq!(
-                change.after(),
-                after.get(relative).map_or(&[][..], Vec::as_slice),
-                "{label}: plan after bytes for {relative:?}"
-            );
-        }
-        planned.sort();
-        let mut golden = after.keys().cloned().collect::<Vec<_>>();
-        golden.sort();
-        assert_eq!(planned, golden, "{label}: plan paths");
-    }
-
     fn read_case(path: &Path) -> GoldenCase {
         let text = fs::read_to_string(path).expect("case.toml");
         let mut case = GoldenCase::default();
-        let mut in_env = false;
         for line in text.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if line == "[env]" {
-                in_env = true;
-                continue;
-            }
             let Some((key, raw)) = line.split_once('=') else {
                 continue;
             };
-            let key = key.trim();
-            let raw = raw.trim();
-            if key == "routes" {
-                case.routes = serde_json::from_str(raw).expect("case routes");
-            } else if key == "base_url" {
-                case.base_url = serde_json::from_str(raw).expect("case base URL");
-            } else if key == "token" {
-                case.token = serde_json::from_str(raw).expect("case token");
-            } else if key == "configured_model" {
-                case.configured_model =
-                    Some(serde_json::from_str(raw).expect("case configured model"));
-            } else if key == "only" {
-                case.only = Some(serde_json::from_str(raw).expect("case only"));
-            } else if in_env {
-                case.env.insert(
-                    key.to_owned(),
-                    serde_json::from_str(raw).expect("case env value"),
-                );
+            if key.trim() == "only" {
+                case.only = Some(serde_json::from_str(raw.trim()).expect("case only"));
             }
         }
         case
-    }
-
-    fn managed_tree(home: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-        tree(home)
-            .into_iter()
-            .filter(|(path, _)| {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                ![".hofund.bak", ".hofund.absent", ".hofund.wrote"]
-                    .iter()
-                    .any(|suffix| name.ends_with(suffix))
-            })
-            .collect()
     }
 
     fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -2094,22 +1284,12 @@ mod tests {
         }
     }
 
-    fn copy_tree(source: &Path, destination: &Path) {
-        for (relative, bytes) in tree(source) {
-            let path = destination.join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("before parent");
-            }
-            fs::write(path, bytes).expect("before file");
-        }
-    }
-
     fn scratch() -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let path =
-            std::env::temp_dir().join(format!("hofund-const-golden-{}-{id}", std::process::id()));
-        fs::create_dir_all(&path).expect("const golden temp dir");
+            std::env::temp_dir().join(format!("hofund-golden-layout-{}-{id}", std::process::id()));
+        fs::create_dir_all(&path).expect("golden layout temp dir");
         path
     }
 }
