@@ -192,6 +192,7 @@ const INSPIRATION_ALLOWLIST: &[&str] = &[
     "docs/coverage/subscriptions.md",
     "docs/feature-parity.md",
     "docs/magpie-comparison.md",
+    "docs/plugins/control-plane.md",
     "docs/plugins/models.md",
     "docs/rfc/0001-microkernel-plugins.md",
     "docs/roadmap.md",
