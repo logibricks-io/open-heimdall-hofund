@@ -82,6 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Removed the frozen agent const engine, migration-only oracle feature, static
+  legacy catalog lookups, reserved agent id list, and legacy-only test seams.
+  Shipped behavior remains covered by unchanged goldens and shipped-plugin
+  regression tests (#147, #180, #130, #167).
 - The first ten relay preset rows now live in
   `plugins/providers/openai-compat/presets.toml`. Registry selection, credential
   derivation, and model planning preserve their catalog behavior.

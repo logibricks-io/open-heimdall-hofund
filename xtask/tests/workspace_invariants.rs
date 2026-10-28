@@ -111,7 +111,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
 /// Direct dev workspace dependencies each package may declare.
 fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
-        "hofund-agent" => &["hofund-agent"],
+        "hofund-agent" => &[],
         "hofund-cli" => &[],
         "hofund-codec" => &[],
         "hofund-config" => &[],
@@ -244,8 +244,8 @@ fn dependency_graph_matches_architecture() {
     }
 
     assert!(
-        workspace_legacy_codex_feature_is_allowed(&manifest),
-        "workspace dependencies must not enable legacy-agent-consts"
+        legacy_agent_consts_feature_is_absent(&manifest),
+        "workspace manifest declares or enables legacy-agent-consts"
     );
     let mut seen = BTreeSet::new();
     for member in MEMBERS {
@@ -276,8 +276,8 @@ fn dependency_graph_matches_architecture() {
             "package {name} dev dependencies drifted; review the dev allow-map"
         );
         assert!(
-            legacy_codex_feature_is_allowed(&name, &package_manifest, &manifest),
-            "package {name} enables legacy-agent-consts outside dev-dependencies"
+            legacy_agent_consts_feature_is_absent(&package_manifest),
+            "package {name} declares or enables legacy-agent-consts"
         );
         assert!(seen.insert(name), "duplicate package name");
     }
@@ -771,328 +771,43 @@ fn resolved_dependency_package_name<'a>(
     dependency_package_name(key, dependency)
 }
 
-fn is_workspace_crate(name: &str) -> bool {
-    name.starts_with("hofund-") || name == "xtask"
-}
-
-fn legacy_codex_feature_is_allowed(
-    package: &str,
-    manifest: &str,
-    workspace_manifest: &str,
-) -> bool {
-    if package == "hofund-agent" {
-        return true;
-    }
-    let manifest = parse_manifest(manifest);
-    let workspace_manifest = parse_manifest(workspace_manifest);
-    let mut agent_aliases = BTreeSet::new();
-    let mut allowed = true;
-    visit_dependencies(&manifest, DependencySection::Normal, |key, dependency| {
-        if resolved_dependency_package_name(key, dependency, &workspace_manifest) != "hofund-agent"
-        {
-            return;
-        }
-        agent_aliases.insert(key.to_string());
-        if dependency_enables_legacy_codex(dependency) {
-            allowed = false;
-        }
-        if dependency
-            .get("workspace")
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(false)
-            && workspace_dependency(&workspace_manifest, key)
-                .is_some_and(dependency_enables_legacy_codex)
-        {
-            allowed = false;
-        }
-    });
-    if !allowed {
-        return false;
-    }
-
-    let Some(features) = manifest.get("features").and_then(toml::Value::as_table) else {
-        return true;
-    };
-    for declarations in features.values().filter_map(toml::Value::as_array) {
-        for declaration in declarations.iter().filter_map(toml::Value::as_str) {
-            let Some((dependency, feature)) = declaration.split_once('/') else {
-                continue;
-            };
-            let dependency = dependency.strip_suffix('?').unwrap_or(dependency);
-            if feature == "legacy-agent-consts" && agent_aliases.contains(dependency) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-fn dependency_enables_legacy_codex(dependency: &toml::Value) -> bool {
-    dependency
-        .get("features")
-        .and_then(toml::Value::as_array)
-        .is_some_and(|features| {
-            features
-                .iter()
-                .any(|feature| feature.as_str() == Some("legacy-agent-consts"))
-        })
-}
-
 fn workspace_dependency<'a>(manifest: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
     manifest.get("workspace")?.get("dependencies")?.get(key)
 }
 
-fn workspace_legacy_codex_feature_is_allowed(manifest: &str) -> bool {
-    let manifest = parse_manifest(manifest);
-    let Some(dependencies) = manifest
-        .get("workspace")
-        .and_then(|workspace| workspace.get("dependencies"))
-        .and_then(toml::Value::as_table)
-    else {
-        return true;
-    };
-    dependencies.iter().all(|(key, dependency)| {
-        dependency_package_name(key, dependency) != "hofund-agent"
-            || !dependency_enables_legacy_codex(dependency)
-    })
+fn is_workspace_crate(name: &str) -> bool {
+    name.starts_with("hofund-") || name == "xtask"
+}
+
+fn legacy_agent_consts_feature_is_absent(manifest: &str) -> bool {
+    fn mentions_feature(value: &toml::Value) -> bool {
+        match value {
+            toml::Value::String(text) => {
+                text == "legacy-agent-consts" || text.ends_with("/legacy-agent-consts")
+            }
+            toml::Value::Array(values) => values.iter().any(mentions_feature),
+            toml::Value::Table(table) => {
+                table.keys().any(|key| key == "legacy-agent-consts")
+                    || table.values().any(mentions_feature)
+            }
+            _ => false,
+        }
+    }
+
+    !mentions_feature(&parse_manifest(manifest))
 }
 
 #[test]
-fn legacy_codex_feature_is_rejected_in_normal_dependencies() {
+fn legacy_agent_consts_feature_is_rejected() {
     let manifest = r#"
+[features]
+legacy-agent-consts = []
+default = ["agent/legacy-agent-consts"]
+
 [dependencies]
 hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
 "#;
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn legacy_codex_feature_is_allowed_in_dev_dependencies() {
-    let manifest = r#"
-[dev-dependencies]
-hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
-"#;
-    assert!(legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn dependency_table_form_is_detected() {
-    let manifest = r#"
-[dependencies.hofund-agent]
-workspace = true
-features = ["legacy-agent-consts"]
-"#;
-    assert!(workspace_deps(manifest, DependencySection::Normal, "").contains("hofund-agent"));
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn multiline_inline_features_are_detected() {
-    let manifest = r#"
-[dependencies]
-hofund-agent = { workspace = true, features = [
-    "legacy-agent-consts",
-] }
-"#;
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn multiline_table_features_are_detected() {
-    let manifest = r#"
-[dependencies.hofund-agent]
-workspace = true
-features = [
-    "legacy-agent-consts",
-]
-"#;
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn target_dependency_table_is_detected() {
-    let manifest = r#"
-[target.'cfg(unix)'.dependencies.hofund-agent]
-workspace = true
-features = ["legacy-agent-consts"]
-"#;
-    assert!(workspace_deps(manifest, DependencySection::Normal, "").contains("hofund-agent"));
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn renamed_dependency_is_detected() {
-    let manifest = r#"
-[dependencies]
-agent = { package = "hofund-agent", workspace = true, features = ["legacy-agent-consts"] }
-"#;
-    assert!(workspace_deps(manifest, DependencySection::Normal, "").contains("hofund-agent"));
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn workspace_renamed_dependency_is_detected() {
-    let workspace_manifest = r#"
-[workspace.dependencies]
-agent = { package = "hofund-agent", path = "crates/agent" }
-"#;
-    let manifest = r#"
-[dependencies]
-agent = { workspace = true }
-"#;
-    assert!(
-        workspace_deps(manifest, DependencySection::Normal, workspace_manifest)
-            .contains("hofund-agent")
-    );
-    assert!(legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        workspace_manifest
-    ));
-}
-
-#[test]
-fn workspace_renamed_feature_forwarding_is_detected() {
-    let workspace_manifest = r#"
-[workspace.dependencies]
-agent = { package = "hofund-agent", path = "crates/agent" }
-"#;
-    let manifest = r#"
-[dependencies]
-agent = { workspace = true }
-[features]
-default = ["agent/legacy-agent-consts"]
-"#;
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        workspace_manifest
-    ));
-}
-
-#[test]
-fn workspace_renamed_member_features_are_detected() {
-    let workspace_manifest = r#"
-[workspace.dependencies]
-agent = { package = "hofund-agent", path = "crates/agent" }
-"#;
-    let manifest = r#"
-[dependencies]
-agent = { workspace = true, features = ["legacy-agent-consts"] }
-"#;
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        workspace_manifest
-    ));
-}
-
-#[test]
-fn dotted_dependency_keys_are_detected() {
-    let manifest = r#"
-[dependencies]
-hofund-agent.workspace = true
-hofund-agent.features = ["legacy-agent-consts"]
-"#;
-    assert!(workspace_deps(manifest, DependencySection::Normal, "").contains("hofund-agent"));
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn feature_forwarding_is_detected() {
-    let manifest = r#"
-[dependencies]
-hofund-agent = { workspace = true }
-[features]
-default = ["hofund-agent/legacy-agent-consts"]
-"#;
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn optional_feature_forwarding_is_detected() {
-    let manifest = r#"
-[dependencies]
-hofund-agent = { workspace = true, optional = true }
-[features]
-default = ["hofund-agent?/legacy-agent-consts"]
-"#;
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn renamed_feature_forwarding_is_detected() {
-    let manifest = r#"
-[dependencies]
-agent = { package = "hofund-agent", workspace = true }
-[features]
-default = ["agent/legacy-agent-consts"]
-"#;
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        ""
-    ));
-}
-
-#[test]
-fn inherited_workspace_features_are_detected() {
-    let workspace_manifest = r#"
-[workspace.dependencies]
-hofund-agent = { path = "crates/agent", features = ["legacy-agent-consts"] }
-"#;
-    let manifest = r#"
-[dependencies]
-hofund-agent.workspace = true
-"#;
-    assert!(!workspace_legacy_codex_feature_is_allowed(
-        workspace_manifest
-    ));
-    assert!(!legacy_codex_feature_is_allowed(
-        "hofund-plugin-registry",
-        manifest,
-        workspace_manifest
-    ));
+    assert!(!legacy_agent_consts_feature_is_absent(manifest));
 }
 
 #[test]

@@ -1,6 +1,5 @@
-//! Equivalence tests for compiled descriptions and const-backed adapters.
+//! Tests for compiled descriptions and the shared editing engine.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -220,16 +219,6 @@ static OPENCODE: AgentDescription = AgentDescription::from_static(
 
 static DESCRIPTIONS: &[&AgentDescription] = &[&CLAUDE, &CODEX, &GEMINI, &OPENCODE];
 
-fn const_adapter(id: &str) -> &'static dyn AgentAdapter {
-    match id {
-        "claude-code" => hofund_agent::legacy::claude_code(),
-        "codex" => hofund_agent::legacy::codex(),
-        "gemini-cli" => hofund_agent::legacy::gemini_cli(),
-        "opencode" => hofund_agent::legacy::opencode(),
-        _ => panic!("no const adapter for {id}"),
-    }
-}
-
 static PATH_FILE: AgentFile = AgentFile::from_static(
     "config",
     FileKind::Json,
@@ -373,11 +362,10 @@ enum OverrideValue {
 }
 
 #[test]
-fn environment_overrides_match_for_const_and_compiled_adapters() {
+fn environment_overrides_select_compiled_adapter_paths() {
     let target = target_with(&["route-a"]);
     for description in DESCRIPTIONS {
         let id = description.id().as_str();
-        let const_adapter = const_adapter(id);
         let compiled = Compiled::new(description);
         for source in [
             OverrideSource::NamedSetter,
@@ -390,65 +378,32 @@ fn environment_overrides_match_for_const_and_compiled_adapters() {
                 OverrideValue::Relative,
             ] {
                 let context = format!("{id} / {source:?} / {value_kind:?}");
-                let const_default_home = scratch();
-                let compiled_default_home = scratch();
-                let const_override_home = scratch();
-                let compiled_override_home = scratch();
-                let const_default = Session::new(&const_default_home);
-                let compiled_default = Session::new(&compiled_default_home);
-                let const_value = override_value(&const_override_home, value_kind);
-                let compiled_value = override_value(&compiled_override_home, value_kind);
-                let const_override =
-                    override_session(&const_override_home, id, &const_value, source);
-                let compiled_override =
-                    override_session(&compiled_override_home, id, &compiled_value, source);
-
-                let const_default_plan = const_adapter
-                    .plan(&const_default, &target)
-                    .expect("const default plan");
-                let compiled_default_plan = compiled
-                    .plan(&compiled_default, &target)
-                    .expect("compiled default plan");
-                let const_override_plan = const_adapter
-                    .plan(&const_override, &target)
-                    .expect("const override plan");
-                let compiled_override_plan = compiled
-                    .plan(&compiled_override, &target)
-                    .expect("compiled override plan");
+                let default_home = scratch();
+                let override_home = scratch();
+                let default_session = Session::new(&default_home);
+                let value = override_value(&override_home, value_kind);
+                let override_session = override_session(&override_home, id, &value, source);
+                let default_plan = compiled
+                    .plan(&default_session, &target)
+                    .expect("default plan");
+                let override_plan = compiled
+                    .plan(&override_session, &target)
+                    .expect("override plan");
                 if matches!(value_kind, OverrideValue::Absolute) {
                     assert_eq!(
-                        planned_paths(&const_override_plan, &const_override_home),
+                        planned_paths(&override_plan, &override_home),
                         expected_absolute_paths(id),
-                        "{context}: const absolute paths"
-                    );
-                    assert_eq!(
-                        planned_paths(&compiled_override_plan, &compiled_override_home),
-                        expected_absolute_paths(id),
-                        "{context}: compiled absolute paths"
+                        "{context}: absolute paths"
                     );
                 } else {
                     assert_plan(
-                        &const_default_plan,
-                        &const_override_plan,
-                        &const_default_home,
-                        &const_override_home,
-                        &context,
-                    );
-                    assert_plan(
-                        &compiled_default_plan,
-                        &compiled_override_plan,
-                        &compiled_default_home,
-                        &compiled_override_home,
+                        &default_plan,
+                        &override_plan,
+                        &default_home,
+                        &override_home,
                         &context,
                     );
                 }
-                assert_plan(
-                    &const_override_plan,
-                    &compiled_override_plan,
-                    &const_override_home,
-                    &compiled_override_home,
-                    &context,
-                );
             }
         }
     }
@@ -511,14 +466,6 @@ fn expected_absolute_paths(id: &str) -> Vec<PathBuf> {
     paths.iter().map(PathBuf::from).collect()
 }
 
-#[cfg(feature = "legacy-agent-consts")]
-#[test]
-fn catalog_without_compiled_codex_uses_the_legacy_fallback() {
-    let catalog = catalog(&[]).expect("legacy codex fallback");
-    assert_eq!(catalog.adapters().len(), 4);
-    assert!(catalog.find("codex").is_some());
-}
-
 #[test]
 fn catalog_checks_collisions_and_keeps_builtins_first() {
     let with_extra = catalog(MIGRATED_AND_EXTRA_LIST).expect("extra catalog");
@@ -537,7 +484,7 @@ fn catalog_checks_collisions_and_keeps_builtins_first() {
             "compiled-extra"
         ]
     );
-    assert!(catalog(CLAUDE_LIST).is_ok());
+    assert!(catalog(CLAUDE_LIST).is_err());
     assert!(catalog(DUPLICATE_LIST).is_err());
 }
 
@@ -569,456 +516,11 @@ fn visible_models_and_route_none_filter_gateway_slots() {
     assert!(!models.contains_key("hidden"));
 }
 
-#[derive(Clone, Copy)]
-enum Existing {
-    Absent,
-    Empty,
-    User,
-    Model,
-    Fable,
-}
-
-struct MatrixCase {
-    name: &'static str,
-    existing: Existing,
-    models: &'static [&'static str],
-    override_dir: Option<Override>,
-    jsonc: bool,
-}
-
-#[test]
-fn compiled_matches_const_adapters_across_the_edit_lifecycle() {
-    let cases = [
-        MatrixCase {
-            name: "absent-no-routes",
-            existing: Existing::Absent,
-            models: &[],
-            override_dir: None,
-            jsonc: false,
-        },
-        MatrixCase {
-            name: "empty-single-route",
-            existing: Existing::Empty,
-            models: &["route-a"],
-            override_dir: None,
-            jsonc: false,
-        },
-        MatrixCase {
-            name: "user-keys-multiple-routes",
-            existing: Existing::User,
-            models: &["route-a", "route-b"],
-            override_dir: None,
-            jsonc: false,
-        },
-        MatrixCase {
-            name: "existing-model",
-            existing: Existing::Model,
-            models: &["route-a"],
-            override_dir: None,
-            jsonc: false,
-        },
-        MatrixCase {
-            name: "fable-model",
-            existing: Existing::Fable,
-            models: &["route-a", "route-b"],
-            override_dir: None,
-            jsonc: false,
-        },
-        MatrixCase {
-            name: "relative-env-override",
-            existing: Existing::Absent,
-            models: &["route-a"],
-            override_dir: Some(Override::Relative("relative-root")),
-            jsonc: false,
-        },
-        MatrixCase {
-            name: "override-user-keys",
-            existing: Existing::User,
-            models: &[],
-            override_dir: Some(Override::UnderHome("another-root")),
-            jsonc: false,
-        },
-        MatrixCase {
-            name: "jsonc-present",
-            existing: Existing::User,
-            models: &["route-a", "route-a", "route-b"],
-            override_dir: None,
-            jsonc: true,
-        },
-    ];
-
-    for description in DESCRIPTIONS {
-        let const_adapter = const_adapter(description.id().as_str());
-        let compiled = Compiled::new(description).with_os(TargetOs::Linux);
-        for case in &cases {
-            let context = format!("{} / {}", description.id().as_str(), case.name);
-            let const_home = scratch();
-            let compiled_home = scratch();
-            prepare(&const_home, description, case);
-            prepare(&compiled_home, description, case);
-            let before = tree(&const_home);
-            assert_eq!(before, tree(&compiled_home), "{context}: initial files");
-            let const_session = session_for(&const_home, description, case.override_dir);
-            let compiled_session = session_for(&compiled_home, description, case.override_dir);
-            let target = target_with(case.models);
-
-            assert_eq!(
-                model_result(const_adapter, &const_session, &const_home),
-                model_result(&compiled, &compiled_session, &compiled_home),
-                "{context}: initial configured model"
-            );
-            assert_status(
-                const_adapter,
-                &const_session,
-                &compiled,
-                &compiled_session,
-                &target,
-                &const_home,
-                &compiled_home,
-                &context,
-            );
-            assert_plan(
-                &const_adapter
-                    .plan(&const_session, &target)
-                    .expect("static plan"),
-                &compiled
-                    .plan(&compiled_session, &target)
-                    .expect("compiled plan"),
-                &const_home,
-                &compiled_home,
-                &context,
-            );
-            let const_apply = const_adapter
-                .apply(&const_session, &target)
-                .expect("static apply");
-            let compiled_apply = compiled
-                .apply(&compiled_session, &target)
-                .expect("compiled apply");
-            assert_plan(
-                &const_apply,
-                &compiled_apply,
-                &const_home,
-                &compiled_home,
-                &context,
-            );
-            let applied = tree(&const_home);
-            let compiled_applied = tree(&compiled_home);
-            assert_eq!(applied, compiled_applied, "{context}: applied files");
-            assert!(
-                compiled_applied
-                    .keys()
-                    .any(|path| { path.as_os_str().to_string_lossy().contains(".hofund.") }),
-                "{context}: markers missing from comparison"
-            );
-            assert_override_placement(case.override_dir, &before, &applied, &context);
-
-            let const_force = scratch();
-            let compiled_force = scratch();
-            copy_tree(&const_home, &const_force);
-            copy_tree(&compiled_home, &compiled_force);
-
-            let rotated = target.clone().with_token("rotated-token");
-            let const_updated = const_adapter
-                .refresh_token(&const_session, &rotated)
-                .expect("static refresh");
-            let compiled_updated = compiled
-                .refresh_token(&compiled_session, &rotated)
-                .expect("compiled refresh");
-            assert_eq!(
-                relative_paths(&const_home, &const_updated),
-                relative_paths(&compiled_home, &compiled_updated),
-                "{context}: refreshed paths"
-            );
-            assert_eq!(
-                tree(&const_home),
-                tree(&compiled_home),
-                "{context}: refresh"
-            );
-            edit_token(&const_home, &const_updated);
-            edit_token(&compiled_home, &compiled_updated);
-            assert_eq!(
-                tree(&const_home),
-                tree(&compiled_home),
-                "{context}: user edit"
-            );
-
-            let const_outcome = const_adapter
-                .disconnect(&const_session, false)
-                .expect("static disconnect");
-            let compiled_outcome = compiled
-                .disconnect(&compiled_session, false)
-                .expect("compiled disconnect");
-            assert_eq!(
-                const_outcome.changed(),
-                compiled_outcome.changed(),
-                "{context}: disconnect changed"
-            );
-            assert_eq!(
-                normalized_warnings(&const_home, const_outcome.warnings()),
-                normalized_warnings(&compiled_home, compiled_outcome.warnings()),
-                "{context}: disconnect warnings"
-            );
-            assert_eq!(
-                tree(&const_home),
-                tree(&compiled_home),
-                "{context}: non-forced disconnect"
-            );
-            assert_status(
-                const_adapter,
-                &const_session,
-                &compiled,
-                &compiled_session,
-                &rotated,
-                &const_home,
-                &compiled_home,
-                &context,
-            );
-            assert_eq!(
-                model_result(const_adapter, &const_session, &const_home),
-                model_result(&compiled, &compiled_session, &compiled_home),
-                "{context}: final configured model"
-            );
-
-            let const_force_session = session_for(&const_force, description, case.override_dir);
-            let compiled_force_session =
-                session_for(&compiled_force, description, case.override_dir);
-            let const_forced = const_adapter
-                .disconnect(&const_force_session, true)
-                .expect("static forced disconnect");
-            let compiled_forced = compiled
-                .disconnect(&compiled_force_session, true)
-                .expect("compiled forced disconnect");
-            assert_eq!(const_forced, compiled_forced, "{context}: forced outcome");
-            assert_eq!(tree(&const_force), before, "{context}: forced restore");
-            assert_eq!(
-                tree(&compiled_force),
-                before,
-                "{context}: compiled forced restore"
-            );
-        }
-    }
-}
-
-fn model_result(
-    adapter: &dyn AgentAdapter,
-    session: &Session,
-    home: &Path,
-) -> Result<Option<String>, String> {
-    adapter.configured_model(session).map_err(|error| {
-        error
-            .to_string()
-            .replace(&home.to_string_lossy().to_string(), "<home>")
-    })
-}
-
-fn prepare(home: &Path, description: &AgentDescription, case: &MatrixCase) {
-    let root = override_root(home, description.id().as_str(), case.override_dir);
-    match description.id().as_str() {
-        "claude-code" => {
-            let path = root.join("settings.json");
-            match case.existing {
-                Existing::Absent => {}
-                Existing::Empty => write(&path, ""),
-                Existing::User => write(&path, r#"{"ui":{"theme":"dark"}}"#),
-                Existing::Model => write(&path, r#"{"model":"user-model"}"#),
-                Existing::Fable => write(&path, r#"{"model":"claude-fable-5"}"#),
-            }
-        }
-        "codex" => {
-            let path = root.join("config.toml");
-            match case.existing {
-                Existing::Absent => {}
-                Existing::Empty => write(&path, ""),
-                Existing::User => write(&path, "# keep\ntemperature = 0.2\n"),
-                Existing::Model => write(&path, "model = \"user-model\"\n"),
-                Existing::Fable => write(&path, "model = \"claude-fable-5\"\n"),
-            }
-        }
-        "gemini-cli" => {
-            let settings = root.join(".gemini").join("settings.json");
-            let env = root.join(".gemini").join(".env");
-            match case.existing {
-                Existing::Absent => {}
-                Existing::Empty => {
-                    write(&settings, "");
-                    write(&env, "");
-                }
-                Existing::User => {
-                    write(&settings, r#"{"ui":{"theme":"dark"}}"#);
-                    write(&env, "KEEP=1\n");
-                }
-                Existing::Model => {
-                    write(&settings, r#"{"model":"user-model"}"#);
-                    write(&env, "KEEP=1\n");
-                }
-                Existing::Fable => {
-                    write(&settings, r#"{"model":"claude-fable-5"}"#);
-                    write(&env, "KEEP=1\n");
-                }
-            }
-        }
-        "opencode" => {
-            let name = if case.jsonc {
-                "opencode.jsonc"
-            } else {
-                "opencode.json"
-            };
-            let path = root.join("opencode").join(name);
-            match case.existing {
-                Existing::Absent => {}
-                Existing::Empty => write(&path, ""),
-                Existing::User => write(&path, r#"{"plugin":["a"]}"#),
-                Existing::Model => write(&path, r#"{"model":"user-model"}"#),
-                Existing::Fable => write(&path, r#"{"model":"claude-fable-5"}"#),
-            }
-        }
-        id => panic!("unknown description {id}"),
-    }
-}
-
-/// Environment override used by a lifecycle matrix case.
-#[derive(Clone, Copy)]
-enum Override {
-    /// A relative value, which is unusable and must fall back to the default.
-    Relative(&'static str),
-    /// An absolute directory under the test home.
-    UnderHome(&'static str),
-}
-
-impl Override {
-    fn path(self, home: &Path) -> PathBuf {
-        match self {
-            Self::Relative(path) => PathBuf::from(path),
-            Self::UnderHome(path) => home.join(path),
-        }
-    }
-}
-
-fn override_root(home: &Path, id: &str, override_dir: Option<Override>) -> PathBuf {
-    if let Some(Override::UnderHome(path)) = override_dir {
-        return home.join(path);
-    }
-    match id {
-        "claude-code" => home.join(".claude"),
-        "codex" => home.join(".codex"),
-        "gemini-cli" => home.to_path_buf(),
-        "opencode" => home.join(".config"),
-        _ => panic!("unknown description {id}"),
-    }
-}
-
-fn session_for(
-    home: &Path,
-    description: &AgentDescription,
-    override_dir: Option<Override>,
-) -> Session {
-    let session = Session::new(home);
-    match (
-        description.id().as_str(),
-        override_dir.map(|dir| dir.path(home)),
-    ) {
-        ("claude-code", Some(path)) => session.with_claude_config_dir(path),
-        ("codex", Some(path)) => session.with_codex_home(path),
-        ("gemini-cli", Some(path)) => session.with_gemini_cli_home(path),
-        ("opencode", Some(path)) => session.with_xdg_config_home(path),
-        _ => session,
-    }
-}
-
-/// Checks that apply edits the prepared user files under an absolute
-/// override root and never writes under a relative override value.
-fn assert_override_placement(
-    override_dir: Option<Override>,
-    before: &BTreeMap<PathBuf, Vec<u8>>,
-    applied: &BTreeMap<PathBuf, Vec<u8>>,
-    context: &str,
-) {
-    let changed: Vec<&PathBuf> = applied
-        .iter()
-        .filter(|(path, contents)| before.get(*path) != Some(*contents))
-        .map(|(path, _)| path)
-        .collect();
-    assert!(!changed.is_empty(), "{context}: apply changed nothing");
-    match override_dir {
-        Some(Override::UnderHome(dir)) => {
-            assert!(
-                !before.is_empty() && before.keys().all(|path| path.starts_with(dir)),
-                "{context}: user files are not planted under the override root"
-            );
-            for path in &changed {
-                assert!(
-                    path.starts_with(dir),
-                    "{context}: {} written outside the override root",
-                    path.display()
-                );
-            }
-            assert!(
-                changed.iter().any(|path| before.contains_key(*path)),
-                "{context}: no user file under the override root was edited"
-            );
-        }
-        Some(Override::Relative(dir)) => {
-            for path in &changed {
-                assert!(
-                    !path.starts_with(dir),
-                    "{context}: {} written under a relative override",
-                    path.display()
-                );
-            }
-        }
-        None => {}
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn assert_status(
-    const_adapter: &dyn AgentAdapter,
-    const_session: &Session,
-    compiled: &Compiled,
-    compiled_session: &Session,
-    target: &GatewayTarget,
-    const_home: &Path,
-    compiled_home: &Path,
-    context: &str,
-) {
-    let const_status = const_adapter
-        .status(const_session, target)
-        .expect("static status");
-    let compiled_status = compiled
-        .status(compiled_session, target)
-        .expect("compiled status");
-    assert_eq!(
-        const_status.id(),
-        compiled_status.id(),
-        "{context}: status id"
-    );
-    assert_eq!(
-        const_status.display_name(),
-        compiled_status.display_name(),
-        "{context}: status name"
-    );
-    assert_eq!(
-        const_status.installed(),
-        compiled_status.installed(),
-        "{context}: installed"
-    );
-    assert_eq!(
-        const_status.connected(),
-        compiled_status.connected(),
-        "{context}: connected"
-    );
-    assert_eq!(
-        relative_paths(const_home, const_status.paths()),
-        relative_paths(compiled_home, compiled_status.paths()),
-        "{context}: status paths"
-    );
-}
-
 fn assert_plan(
-    const_plan: &hofund_agent::Plan,
-    compiled_plan: &hofund_agent::Plan,
-    const_home: &Path,
-    compiled_home: &Path,
+    default_plan: &hofund_agent::Plan,
+    override_plan: &hofund_agent::Plan,
+    default_home: &Path,
+    override_home: &Path,
     context: &str,
 ) {
     let normalize = |plan: &hofund_agent::Plan, home: &Path| {
@@ -1038,69 +540,10 @@ fn assert_plan(
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        normalize(const_plan, const_home),
-        normalize(compiled_plan, compiled_home),
+        normalize(default_plan, default_home),
+        normalize(override_plan, override_home),
         "{context}: plan bytes"
     );
-}
-
-fn edit_token(home: &Path, updated: &[PathBuf]) {
-    for path in updated {
-        let bytes = fs::read(path).expect("token file");
-        let text = String::from_utf8(bytes).expect("token UTF-8");
-        let relative = path.strip_prefix(home).expect("relative").to_path_buf();
-        write(
-            &home.join(relative),
-            &text.replace("rotated-token", "user-token"),
-        );
-    }
-}
-
-fn normalized_warnings(home: &Path, warnings: &[String]) -> Vec<String> {
-    warnings
-        .iter()
-        .map(|warning| warning.replace(&home.to_string_lossy().to_string(), "<home>"))
-        .collect()
-}
-
-fn relative_paths(home: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
-    paths
-        .iter()
-        .map(|path| path.strip_prefix(home).expect("relative").to_path_buf())
-        .collect()
-}
-
-fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    let mut files = BTreeMap::new();
-    collect_files(root, root, &mut files);
-    files
-}
-
-fn collect_files(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries {
-        let path = entry.expect("entry").path();
-        if path.is_dir() {
-            collect_files(root, &path, files);
-        } else if path.is_file() {
-            files.insert(
-                path.strip_prefix(root).expect("relative").to_path_buf(),
-                fs::read(&path).expect("file"),
-            );
-        }
-    }
-}
-
-fn copy_tree(source: &Path, destination: &Path) {
-    for (relative, bytes) in tree(source) {
-        let path = destination.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("parent");
-        }
-        fs::write(path, bytes).expect("copy");
-    }
 }
 
 fn target_with(models: &[&str]) -> GatewayTarget {
@@ -1113,13 +556,6 @@ fn target_with(models: &[&str]) -> GatewayTarget {
 
 fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&fs::read(path).expect("JSON file")).expect("JSON")
-}
-
-fn write(path: &Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("parent");
-    }
-    fs::write(path, contents).expect("write");
 }
 
 fn scratch() -> PathBuf {

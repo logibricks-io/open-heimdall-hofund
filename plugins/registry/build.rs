@@ -18,8 +18,6 @@ mod preset_toml {
 use check::*;
 use preset_toml::{FragmentToml, render_alias, render_preset};
 
-include!("src/reserved_agent_ids.rs");
-
 struct Listed {
     id: String,
     kind: String,
@@ -42,7 +40,6 @@ fn run() -> Result<(), String> {
     println!("cargo:rerun-if-changed=src/check.rs");
     println!("cargo:rerun-if-changed=src/agent_toml.rs");
     println!("cargo:rerun-if-changed=src/preset_toml.rs");
-    println!("cargo:rerun-if-changed=src/reserved_agent_ids.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
     let text = fs::read_to_string("plugins.toml").map_err(|error| error.to_string())?;
     let listed = parse_list(&workspace, &text)?;
