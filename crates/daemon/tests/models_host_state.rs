@@ -1,6 +1,5 @@
 //! Persistent model state and configured-instance reuse against local mocks.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -20,12 +19,24 @@ fn make_host() -> ModelsHost {
     ModelsHost::new(Duration::from_secs(2), Duration::from_secs(2))
 }
 
-fn scratch(test: &str) -> PathBuf {
-    let directory =
-        std::env::temp_dir().join(format!("hofund-model-host-{test}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).expect("directory");
-    directory
+struct Scratch(tempfile::TempDir);
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+impl AsRef<std::path::Path> for Scratch {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+fn scratch(_test: &str) -> Scratch {
+    Scratch(tempfile::tempdir().expect("directory"))
 }
 
 struct CountingUpstream {

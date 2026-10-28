@@ -17,14 +17,24 @@ fn at(millis: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
 }
 
-fn scratch(test: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!(
-        "hofund-model-refresh-{test}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).expect("directory");
-    directory
+struct Scratch(tempfile::TempDir);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+fn scratch(_test: &str) -> Scratch {
+    Scratch(tempfile::tempdir().expect("directory"))
 }
 
 fn host(directory: &Path) -> ModelsHost {

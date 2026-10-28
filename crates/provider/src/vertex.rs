@@ -1527,9 +1527,8 @@ mod tests {
 
     #[test]
     fn a_missing_credentials_file_is_allowed_when_the_adapter_opens() {
-        let missing = std::env::temp_dir()
-            .join(format!("hofund-vertex-missing-{}", std::process::id()))
-            .join("adc.json");
+        let directory = tempfile::tempdir().expect("temp dir");
+        let missing = directory.path().join("adc.json");
         super::Vertex::with_overrides(
             crate::Endpoint::new("vertex-check", "http://127.0.0.1:9"),
             missing.to_string_lossy(),
@@ -1645,7 +1644,7 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         });
-        let credentials = test_credentials("slow-drip");
+        let credentials = test_credentials();
         let mut endpoint = crate::Endpoint::new("vertex", format!("http://{address}/v1"));
         endpoint.client = Some(reqwest::Client::new());
         let mut provider = super::Vertex::with_token_endpoints(
@@ -1680,7 +1679,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let credentials = test_credentials("single-flight");
+        let credentials = test_credentials();
         let provider = std::sync::Arc::new(
             super::Vertex::with_token_endpoints(
                 crate::Endpoint::new("vertex", server.uri()),
@@ -1898,12 +1897,22 @@ mod tests {
         assert!(error.to_string().contains("larger than 1 MiB"));
     }
 
-    fn test_credentials(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("hofund-vertex-unit-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
-        let path = dir.join("adc.json");
+    struct Credentials {
+        _guard: tempfile::TempDir,
+        path: std::path::PathBuf,
+    }
+
+    impl std::ops::Deref for Credentials {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.path
+        }
+    }
+
+    fn test_credentials() -> Credentials {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("adc.json");
         std::fs::write(
             &path,
             serde_json::to_vec(&serde_json::json!({
@@ -1915,7 +1924,7 @@ mod tests {
             .expect("json"),
         )
         .expect("credentials");
-        path
+        Credentials { _guard: dir, path }
     }
 
     fn sign(pkcs8: &[u8], message: &[u8]) -> Vec<u8> {

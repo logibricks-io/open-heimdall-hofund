@@ -294,6 +294,9 @@ impl Control {
         let (shutdown, mut signal) = oneshot::channel();
         let task = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
+            // Tells open connections to finish their current request and
+            // close, so an idle keep-alive client cannot hold shutdown open.
+            let (stop, stopping) = tokio::sync::watch::channel(false);
             loop {
                 tokio::select! {
                     _ = &mut signal => break,
@@ -312,14 +315,25 @@ impl Control {
                             continue;
                         }
                         let router = router.clone();
+                        let mut stopping = stopping.clone();
                         connections.spawn(async move {
                             let service = hyper::service::service_fn(move |request| {
                                 let mut router = router.clone();
                                 async move { router.call(request.map(Body::new)).await }
                             });
-                            let result = hyper::server::conn::http1::Builder::new()
-                                .serve_connection(TokioIo::new(stream), service)
-                                .await;
+                            let connection = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(TokioIo::new(stream), service);
+                            tokio::pin!(connection);
+                            let result = tokio::select! {
+                                result = connection.as_mut() => result,
+                                () = async {
+                                    // The borrowed value is not `Send`; drop it here.
+                                    let _ = stopping.wait_for(|stop| *stop).await.is_ok();
+                                } => {
+                                    connection.as_mut().graceful_shutdown();
+                                    connection.await
+                                }
+                            };
                             if let Err(error) = result {
                                 tracing::debug!(%error, "local control connection ended");
                             }
@@ -328,6 +342,7 @@ impl Control {
                     Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 }
             }
+            stop.send_replace(true);
             while connections.join_next().await.is_some() {}
             Ok(())
         });

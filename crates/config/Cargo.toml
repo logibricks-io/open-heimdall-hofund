@@ -16,5 +16,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 toml_edit = { version = "0.25.17", features = ["serde"] }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

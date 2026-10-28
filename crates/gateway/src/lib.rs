@@ -35,7 +35,7 @@ use hofund_router::{Completion, RouterError, Snapshot};
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tracing::Instrument;
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -102,6 +102,7 @@ pub struct Running {
     control_addr: Option<SocketAddr>,
     control_socket_path: Option<PathBuf>,
     resources: Vec<Box<dyn std::any::Any + Send>>,
+    shutdown_request: Option<watch::Receiver<bool>>,
 }
 
 /// The listener could not be bound.
@@ -274,6 +275,28 @@ impl Running {
             control_addr: None,
             control_socket_path: None,
             resources: Vec::new(),
+            shutdown_request: None,
+        }
+    }
+
+    /// Attaches the flag a control client sets to request shutdown.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_shutdown_request(mut self, request: watch::Receiver<bool>) -> Self {
+        self.shutdown_request = Some(request);
+        self
+    }
+
+    /// Resolves once a linked control client requests shutdown.
+    ///
+    /// Without an attached request flag, or after its sender is gone without
+    /// a request, this never resolves; a signal handler must stop the server.
+    pub async fn shutdown_requested(&mut self) {
+        let Some(request) = self.shutdown_request.as_mut() else {
+            return std::future::pending().await;
+        };
+        if request.wait_for(|requested| *requested).await.is_err() {
+            std::future::pending::<()>().await;
         }
     }
 

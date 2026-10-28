@@ -681,14 +681,32 @@ async fn generative_probe_uses_native_url_body_and_key() {
     assert!(requests[0].headers.get("authorization").is_none());
 }
 
-fn vertex_credentials() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("hofund-model-probe-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("dir");
-    let path = dir.join("adc.json");
+struct Credentials {
+    _guard: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl std::ops::Deref for Credentials {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for Credentials {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+fn vertex_credentials() -> Credentials {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("adc.json");
     std::fs::write(&path, serde_json::to_vec(&json!({
         "type": "authorized_user", "client_id": "client", "client_secret": "secret", "refresh_token": "refresh"
     })).expect("json")).expect("credentials");
-    path
+    Credentials { _guard: dir, path }
 }
 
 #[tokio::test]

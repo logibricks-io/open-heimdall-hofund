@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use hofund_agent::{AgentAdapter, Compiled, GatewayTarget, Plan, Session, TargetOs, resolve};
 use hofund_plugin_api::{AgentDescription, FileKind};
@@ -45,20 +44,21 @@ const OPERATING_SYSTEMS: [(&str, TargetOs); 3] = [
 /// no configured model. This helper panics with the agent and case names when
 /// a contract fails.
 /// `UPDATE_GOLDEN=1` rewrites `after/`, then moves identical three-OS cases to
-/// `all/` and removes their duplicates.
-pub fn conformance(description: &'static AgentDescription, fixtures: &Path) {
+/// `all/` and removes their duplicates. `scratch` is a caller-owned directory
+/// whose lifetime must cover the entire conformance run.
+pub fn conformance(description: &'static AgentDescription, fixtures: &Path, scratch: &Path) {
     let (shared, per_os) = golden_layout(description, fixtures)
         .unwrap_or_else(|error| panic!("{}: {error}", description.id().as_str()));
 
     for case in &shared {
-        verify_shared_paths(description, case);
+        verify_shared_paths(description, case, scratch);
         for (_, os) in OPERATING_SYSTEMS {
-            run_case(description, os, case);
+            run_case(description, os, case, scratch);
         }
     }
     for (_, os, cases) in &per_os {
         for case in cases {
-            run_case(description, *os, case);
+            run_case(description, *os, case, scratch);
         }
     }
     if updating_goldens() {
@@ -264,9 +264,10 @@ fn case_name(case: &Path) -> &str {
         .expect("UTF-8 golden case name")
 }
 
-fn verify_shared_paths(description: &'static AgentDescription, case_dir: &Path) {
+fn verify_shared_paths(description: &'static AgentDescription, case_dir: &Path, scratch: &Path) {
     let case = read_case(case_dir);
-    let home = scratch();
+    let home = scratch.join("shared-home");
+    fs::create_dir_all(&home).expect("conformance temp dir");
     let session = session_for(&home, &case);
     let mut expected = None;
     for (_, os) in OPERATING_SYSTEMS {
@@ -341,10 +342,11 @@ fn updating_goldens_value(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
 }
 
-fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Path) {
+fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Path, scratch: &Path) {
     let label = format!("{} / {}", description.id().as_str(), case_dir.display());
     let case = read_case(case_dir);
-    let home = scratch();
+    let home = scratch.join(format!("{os:?}-{}-home", case_name(case_dir)));
+    fs::create_dir_all(&home).expect("conformance temp dir");
     let before_dir = case_dir.join("before");
     if before_dir.is_dir() {
         copy_tree(&before_dir, &home);
@@ -413,7 +415,8 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
     );
     assert_eq!(managed_tree(&home), expected, "{label}: second apply files");
 
-    let force_home = scratch();
+    let force_home = scratch.join(format!("{os:?}-{}-force", case_name(case_dir)));
+    fs::create_dir_all(&force_home).expect("conformance temp dir");
     copy_tree(&home, &force_home);
     let refreshed = target.clone().with_token(&case.refreshed_token);
     let updated = adapter
@@ -774,15 +777,28 @@ fn write(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).expect("fixture write");
 }
 
-fn scratch() -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "hofund-agent-conformance-{}-{id}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&path).expect("conformance temp dir");
-    path
+#[cfg(test)]
+struct Scratch(tempfile::TempDir);
+
+#[cfg(test)]
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+#[cfg(test)]
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+#[cfg(test)]
+fn scratch() -> Scratch {
+    Scratch(tempfile::tempdir().expect("conformance temp dir"))
 }
 
 #[cfg(test)]
@@ -977,9 +993,9 @@ refreshed_token = "refreshed-token"
             b"FIXTURE_ORIGIN=http://127.0.0.1:3425\nFIXTURE_TOKEN=old-token\n",
         );
 
-        run_case(&OS_DESCRIPTION, TargetOs::Linux, &case);
+        run_case(&OS_DESCRIPTION, TargetOs::Linux, &case, &root);
         let wrong_os = std::panic::catch_unwind(|| {
-            run_case(&OS_DESCRIPTION, TargetOs::Macos, &case);
+            run_case(&OS_DESCRIPTION, TargetOs::Macos, &case, &root);
         });
         assert!(wrong_os.is_err(), "macOS accepted Linux golden paths");
         let _ = fs::remove_dir_all(root);

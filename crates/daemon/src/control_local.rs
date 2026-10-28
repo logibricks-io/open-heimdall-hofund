@@ -495,18 +495,12 @@ mod tests {
     use super::ConfigIdentity;
     #[cfg(windows)]
     use super::{ControlRuntime, ControlSession};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn scratch(label: &str) -> std::path::PathBuf {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "hofund-control-local-{label}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("scratch directory");
-        path
+    fn scratch(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("hofund-control-local-{label}-"))
+            .tempdir()
+            .expect("scratch directory")
     }
 
     #[test]
@@ -518,7 +512,8 @@ mod tests {
     #[test]
     fn runtime_directory_rejects_group_and_world_access() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let dir = scratch("runtime-mode");
+        let dir_guard = scratch("runtime-mode");
+        let dir = dir_guard.path();
         let runtime = dir.join("hofund");
         std::fs::create_dir(&runtime).expect("runtime directory");
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755))
@@ -527,12 +522,12 @@ mod tests {
         let error =
             super::prepare_unix_dir(&runtime, uid, false).expect_err("insecure runtime directory");
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn canonical_config_id_resolves_symlinks_and_normalizes_case() {
-        let dir = scratch("identity");
+        let dir_guard = scratch("identity");
+        let dir = dir_guard.path();
         let target = dir.join("Config.toml");
         std::fs::write(&target, "listen = \"127.0.0.1:0\"\n").expect("config");
         let direct = ConfigIdentity::resolve(&target).expect("direct identity");
@@ -552,23 +547,22 @@ mod tests {
         }
         assert_eq!(direct.id.len(), 16);
         assert!(direct.id.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_single_instance_lock_uses_lockfileex() {
-        let dir = scratch("windows-lock");
+        let dir_guard = scratch("windows-lock");
+        let dir = dir_guard.path();
         let config = dir.join("hofund.toml");
         std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
         let identity = ConfigIdentity::resolve(&config).expect("identity");
-        let runtime = ControlRuntime::new(None, dir.clone());
+        let runtime = ControlRuntime::new(None, dir.to_path_buf());
         let first = ControlSession::acquire(identity.clone(), &runtime).expect("first lock");
         let Err(error) = ControlSession::acquire(identity, &runtime) else {
             panic!("second lock was acquired");
         };
         assert!(error.contains("already served by PID"), "{error}");
         drop(first);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

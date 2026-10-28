@@ -95,7 +95,7 @@ impl StateStore {
         if self.mismatched.contains(id) {
             tracing::warn!(
                 provider.id = id,
-                "model state was not saved because the existing file belongs to another id"
+                "model state was not saved because the existing file was protected from replacement"
             );
             return Err(StateError::Mismatched);
         }
@@ -298,6 +298,14 @@ pub(super) fn models(rows: &[ModelRow]) -> Vec<ModelSpec> {
 }
 
 fn read_state(root: &Path, id: &str) -> (ProviderState, bool) {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    read_state_at(root, id, millis)
+}
+
+fn read_state_at(root: &Path, id: &str, millis: u128) -> (ProviderState, bool) {
     let path = state_path(root, id);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -306,7 +314,7 @@ fn read_state(root: &Path, id: &str) -> (ProviderState, bool) {
         }
         Err(error) => {
             tracing::warn!(provider.id = id, %error, "could not read model state");
-            return (ProviderState::new(id), false);
+            return (ProviderState::new(id), true);
         }
     };
     match serde_json::from_slice::<ProviderState>(&bytes) {
@@ -323,10 +331,6 @@ fn read_state(root: &Path, id: &str) -> (ProviderState, bool) {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("models-state.json");
-            let millis = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
             let corrupt_name = format!("{name}.corrupt-{millis}");
             match std::fs::rename(&path, path.with_file_name(&corrupt_name)) {
                 Ok(()) => {
@@ -364,6 +368,11 @@ fn save_state(root: &Path, state: &ProviderState) -> io::Result<()> {
         builder.mode(0o700);
     }
     builder.create(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
     let bytes = encode_state(state)?;
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = directory.join(format!(
@@ -420,17 +429,30 @@ fn filename(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use hofund_plugin_api::ModelSpec;
 
     use super::{ProviderState, StateStore, filename, models, rows, state_path};
 
-    fn temp_root(test: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("hofund-model-state-{test}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        root
+    struct Scratch(tempfile::TempDir);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn temp_root(_test: &str) -> Scratch {
+        Scratch(tempfile::tempdir().expect("temp dir"))
     }
 
     fn assert_safe_filename(id: &str) {
@@ -497,7 +519,7 @@ mod tests {
             .with_efforts(vec!["high".to_owned()])
             .with_web_search("native")
             .with_service_tiers(vec!["flex".to_owned()]);
-        let mut store = StateStore::new(Some(root.clone()));
+        let mut store = StateStore::new(Some(root.to_path_buf()));
         store.update("Primary", |state| {
             state.fetched_at = Some(100);
             state.tried_at = Some(90);
@@ -516,7 +538,7 @@ mod tests {
                 .insert("chat".to_owned(), "https://example.test/v1".to_owned());
         });
 
-        let mut loaded = StateStore::new(Some(root.clone()));
+        let mut loaded = StateStore::new(Some(root.to_path_buf()));
         let state = loaded.get("Primary");
         assert_eq!(state.fetched_at, Some(100));
         assert_eq!(state.tried_at, Some(90));
@@ -539,7 +561,7 @@ mod tests {
         let bytes = br#"{"version":1,"id":"other"}"#.as_slice();
         std::fs::write(&path, bytes).expect("mismatched state");
 
-        let mut store = StateStore::new(Some(root.clone()));
+        let mut store = StateStore::new(Some(root.to_path_buf()));
         assert_eq!(store.get("wanted"), &ProviderState::new("wanted"));
         store.update("wanted", |state| {
             state.picks = vec!["model".to_owned()];
@@ -555,15 +577,18 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let root = temp_root("private-modes");
-        let mut store = StateStore::new(Some(root.clone()));
+        let path = state_path(&root, "wanted");
+        let directory = path.parent().expect("state directory");
+        std::fs::create_dir_all(directory).expect("state directory");
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755))
+            .expect("wide permissions");
+        let mut store = StateStore::new(Some(root.to_path_buf()));
         store.update("wanted", |state| {
             state.picks = vec!["first".to_owned()];
         });
         store.update("wanted", |state| {
             state.picks = vec!["second".to_owned()];
         });
-        let path = state_path(&root, "wanted");
-        let directory = path.parent().expect("state directory");
         assert_eq!(
             std::fs::metadata(&path)
                 .expect("state metadata")
@@ -591,6 +616,49 @@ mod tests {
                     != Some("tmp"))
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unreadable_state_is_not_overwritten() {
+        let root = temp_root("unreadable");
+        let path = state_path(&root, "wanted");
+        std::fs::create_dir_all(&path).expect("unreadable state directory");
+        std::fs::write(path.join("occupied"), "keep").expect("original contents");
+
+        let mut store = StateStore::new(Some(root.to_path_buf()));
+        assert_eq!(store.get("wanted"), &ProviderState::new("wanted"));
+        store.update("wanted", |state| {
+            state.picks = vec!["model".to_owned()];
+        });
+
+        assert_eq!(
+            std::fs::read(path.join("occupied")).expect("original contents"),
+            b"keep"
+        );
+        assert_eq!(store.get("wanted").picks, ["model"]);
+    }
+
+    #[test]
+    fn failed_move_aside_preserves_corrupt_state() {
+        let root = temp_root("failed-move-aside");
+        let path = state_path(&root, "wanted");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        let bytes = b"not json";
+        std::fs::write(&path, bytes).expect("corrupt state");
+        let name = path.file_name().expect("file name").to_string_lossy();
+        let corrupt = path.with_file_name(format!("{name}.corrupt-42"));
+        std::fs::create_dir_all(&corrupt).expect("corrupt destination directory");
+        std::fs::write(corrupt.join("occupied"), "keep").expect("destination contents");
+
+        let (state, protected) = super::read_state_at(&root, "wanted", 42);
+
+        assert_eq!(state, ProviderState::new("wanted"));
+        assert!(protected);
+        assert_eq!(std::fs::read(&path).expect("original bytes"), bytes);
+        assert_eq!(
+            std::fs::read(corrupt.join("occupied")).expect("destination contents"),
+            b"keep"
+        );
     }
 
     #[test]

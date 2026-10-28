@@ -1,7 +1,6 @@
 //! Picks, manual refresh, and provider test control routes.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use hofund_control_proto::{
     API_VERSION, ControlErrorKind, ModelListResponse, PicksResponse, ProviderTestResponse,
@@ -13,33 +12,16 @@ use sha2::{Digest, Sha256};
 use wiremock::matchers::{method, path};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
-struct Scratch(PathBuf);
+/// A temporary home directory, removed on drop.
+struct Scratch(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = PathBuf::from("/tmp").join(format!(
-            "hofund-daemon-picks-{label}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("scratch directory");
-        Self(path)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                self.0.join(".hofund/host/models"),
-                std::fs::Permissions::from_mode(0o700),
-            );
-        }
-        let _ = std::fs::remove_dir_all(&self.0);
+        let guard = tempfile::Builder::new()
+            .prefix(&format!("hofund-daemon-picks-{label}-"))
+            .tempdir()
+            .expect("scratch directory");
+        Self(guard.path().to_path_buf(), guard)
     }
 }
 
@@ -267,19 +249,20 @@ async fn picks_route_stale_revision_returns_409() {
 #[cfg(unix)]
 #[tokio::test]
 async fn picks_route_save_failure_returns_500_without_revision() {
-    use std::os::unix::fs::PermissionsExt;
     let server = MockServer::start().await;
     let dir = Scratch::new("read-only");
     seed_list(&dir.0, &["a", "b"], &[]);
     let running = start(&dir.0, &config(&server.uri(), "")).await;
     let control = Control::new(&dir.0, &running);
     let before = control.picks().await;
-    let models = dir.0.join(".hofund/host/models");
-    std::fs::set_permissions(&models, std::fs::Permissions::from_mode(0o500))
-        .expect("read-only state directory");
+    // The save path re-applies 0700 to the state directory, so a read-only
+    // directory does not make the save fail. A non-empty directory at the
+    // state file path makes the final rename fail instead.
+    let path = state_path(&dir.0, "chat");
+    std::fs::remove_file(&path).expect("remove state file");
+    std::fs::create_dir(&path).expect("directory at state path");
+    std::fs::write(path.join("blocker"), b"x").expect("blocker file");
     let (status, bytes) = control.put(&before.picks_revision, "ids", &["a"]).await;
-    std::fs::set_permissions(&models, std::fs::Permissions::from_mode(0o700))
-        .expect("writable state directory");
     assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
     assert!(!String::from_utf8_lossy(&bytes).contains("picks_revision"));
     let (kind, _, _) = error_kind(&bytes);

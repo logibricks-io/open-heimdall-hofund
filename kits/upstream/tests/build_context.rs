@@ -105,14 +105,10 @@ impl UpstreamProvider for EchoProtocol {
     }
 }
 
-fn host(test: &str) -> HostContext {
-    let root = std::env::temp_dir().join(format!(
-        "hofund-build-context-{}-{test}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("test root");
-    test_host(PluginId::from_static("multi"), root)
+fn host() -> (HostContext, tempfile::TempDir) {
+    let root = tempfile::tempdir().expect("test root");
+    let host = test_host(PluginId::from_static("multi"), root.path());
+    (host, root)
 }
 
 fn built_protocol(provider: &Arc<dyn UpstreamProvider>) -> String {
@@ -131,7 +127,7 @@ fn built_protocol(provider: &Arc<dyn UpstreamProvider>) -> String {
 
 #[test]
 fn default_build_with_only_builds_the_first_protocol() {
-    let host = host("default");
+    let (host, _root) = host();
     let first = DefaultFactory
         .build_with(
             &TestConfig,
@@ -152,7 +148,7 @@ fn default_build_with_only_builds_the_first_protocol() {
 
 #[test]
 fn dyn_build_rejects_an_undeclared_protocol() {
-    let host = host("dyn");
+    let (host, _root) = host();
     let ctx = BuildContext::new(ProtocolId::ANTHROPIC_MESSAGES);
     let Err(error) = DynUpstreamFactory::validate_and_build_with(
         &OverridingFactory,
@@ -170,7 +166,7 @@ fn dyn_build_rejects_an_undeclared_protocol() {
 
 #[test]
 fn an_overriding_factory_receives_the_selected_protocol() {
-    let host = host("override");
+    let (host, _root) = host();
     for (protocol, expected) in [
         (ProtocolId::OPENAI_RESPONSES, "openai-responses"),
         (ProtocolId::OPENAI_CHAT, "openai-chat"),
