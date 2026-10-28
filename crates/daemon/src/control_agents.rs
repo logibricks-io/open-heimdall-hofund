@@ -667,7 +667,10 @@ mod tests {
                 .await
                 .expect("second gated call")
         };
-        assert!(seen, "the second gated call ran before the first body finished");
+        assert!(
+            seen,
+            "the second gated call ran before the first body finished"
+        );
     }
 
     #[test]
