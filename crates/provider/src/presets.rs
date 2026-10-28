@@ -379,7 +379,7 @@ pub fn credential_for(preset_id: &str, wire: Wire, base_url: &str) -> Credential
         };
     }
     if wire == Wire::Messages {
-        if host.ends_with("anthropic.com")
+        if crate::models::anthropic_host(&host)
             || matches!(preset_id, "bedrock" | "bedrock-mantle")
             || is_bedrock(&host)
         {
@@ -659,6 +659,31 @@ mod tests {
             super::unavailable(&bare).to_string(),
             "preset `bare` has no endpoint"
         );
+    }
+
+    #[test]
+    fn anthropic_workspace_host_keeps_x_api_key() {
+        use crate::Credential;
+        for base in [
+            "https://api.anthropic.com",
+            "https://workspace.anthropic.com/v1",
+        ] {
+            assert_eq!(
+                super::credential_for("custom", Wire::Messages, base),
+                Credential::XApiKey,
+                "{base}"
+            );
+        }
+        for base in [
+            "https://evilanthropic.com",
+            "https://anthropic.com.example.test",
+        ] {
+            assert_eq!(
+                super::credential_for("custom", Wire::Messages, base),
+                Credential::MessagesBoth,
+                "{base}"
+            );
+        }
     }
 
     #[test]
