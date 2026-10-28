@@ -1,0 +1,8 @@
+routes = ["route-a"]
+configured_model = "relative-model"
+base_url = "http://127.0.0.1:3425/"
+token = "old-token"
+refreshed_token = "refreshed-token"
+
+[env]
+GEMINI_CLI_HOME = "relative-gemini"

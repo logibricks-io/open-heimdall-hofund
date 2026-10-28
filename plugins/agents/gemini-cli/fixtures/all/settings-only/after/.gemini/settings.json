@@ -1,0 +1,27 @@
+{
+  "theme": "dark",
+  "ui": {
+    "showBanner": false,
+    "custom": "keep"
+  },
+  "mcpServers": {
+    "local": {
+      "command": "server",
+      "args": [
+        "--stdio"
+      ]
+    }
+  },
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key",
+      "userKey": "keep"
+    },
+    "folderTrust": {
+      "enabled": true
+    }
+  },
+  "model": {
+    "name": "route-a"
+  }
+}

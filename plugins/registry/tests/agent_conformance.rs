@@ -1,6 +1,16 @@
 //! Golden conformance for compiled agent descriptions.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// The one Gemini CLI case whose drift disconnect the shared kit cannot check.
+///
+/// Apply moves a string `model` into `model.name`. A non-forced disconnect
+/// after a user edit then fails with "`name` is not an object", exactly as the
+/// frozen const does (asserted in `gemini_cli_equivalence.rs`). The kit has no
+/// per-case way to expect that refusal, so this case runs on its own and only
+/// that panic is accepted; every other case runs through the strict kit.
+const GEMINI_DRIFT_REFUSAL_CASE: &str = "string-model";
 
 #[test]
 fn shipped_agents_match_their_golden_cases() {
@@ -9,7 +19,11 @@ fn shipped_agents_match_their_golden_cases() {
             .join("../agents")
             .join(description.id().as_str())
             .join("fixtures");
-        hofund_kit_agent::conformance(description, &fixtures);
+        if description.id().as_str() == "gemini-cli" {
+            gemini_cli_conformance(description, &fixtures);
+        } else {
+            hofund_kit_agent::conformance(description, &fixtures);
+        }
     }
 }
 
@@ -23,4 +37,65 @@ fn compiled_agents_match_their_golden_cases() {
             .join("fixtures");
         hofund_kit_agent::conformance(description, &fixtures);
     }
+}
+
+fn gemini_cli_conformance(
+    description: &'static hofund_plugin_api::AgentDescription,
+    fixtures: &Path,
+) {
+    let refusal = fixtures.join("all").join(GEMINI_DRIFT_REFUSAL_CASE);
+    assert!(
+        refusal.join("case.toml").is_file(),
+        "gemini-cli: missing {GEMINI_DRIFT_REFUSAL_CASE} golden case"
+    );
+
+    let strict = scratch("strict");
+    copy_dir(fixtures, &strict);
+    fs::remove_dir_all(strict.join("all").join(GEMINI_DRIFT_REFUSAL_CASE))
+        .expect("remove refusal case from strict copy");
+    hofund_kit_agent::conformance(description, &strict);
+    let _ = fs::remove_dir_all(&strict);
+
+    let single = scratch("refusal");
+    copy_dir(
+        &refusal,
+        &single.join("all").join(GEMINI_DRIFT_REFUSAL_CASE),
+    );
+    let result = std::panic::catch_unwind(|| {
+        hofund_kit_agent::conformance(description, &single);
+    });
+    let _ = fs::remove_dir_all(&single);
+    let payload = result
+        .expect_err("gemini-cli string-model drift disconnect now succeeds; drop the exception");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .expect("string-model drift panic payload");
+    assert!(
+        message.starts_with("drift disconnect:") && message.contains("`name` is not an object"),
+        "unexpected gemini-cli {GEMINI_DRIFT_REFUSAL_CASE} failure: {message}"
+    );
+}
+
+fn copy_dir(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("copy directory");
+    for entry in fs::read_dir(source).expect("read fixture directory") {
+        let entry = entry.expect("fixture entry");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("fixture type").is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).expect("copy fixture");
+        }
+    }
+}
+
+fn scratch(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "hofund-agent-conformance-{label}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&path);
+    path
 }

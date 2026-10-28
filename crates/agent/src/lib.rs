@@ -482,6 +482,72 @@ mod tests {
     }
 
     #[test]
+    fn gemini_cli_windows_environment_names_ignore_ascii_case() {
+        static FILES: [AgentFile; 2] = [
+            AgentFile::from_static(
+                "settings",
+                FileKind::Json,
+                "~/.gemini/settings.json",
+                "~/.gemini/settings.json",
+                "~/.gemini/settings.json",
+                Some("GEMINI_CLI_HOME"),
+            )
+            .with_env_replaces("~"),
+            AgentFile::from_static(
+                "env",
+                FileKind::Env,
+                "~/.gemini/.env",
+                "~/.gemini/.env",
+                "~/.gemini/.env",
+                Some("GEMINI_CLI_HOME"),
+            )
+            .with_env_replaces("~"),
+        ];
+
+        let home = scratch("gemini-names");
+        let override_dir = home.join("gemini-override");
+        let session = Session::new(&home)
+            .with_env_case_insensitive(true)
+            .with_env("gemini_cli_home", override_dir.as_os_str());
+        assert_eq!(session.gemini_cli_home, Some(override_dir.clone()));
+        assert_eq!(
+            session.env("GEMINI_CLI_HOME"),
+            Some(override_dir.as_os_str())
+        );
+        let target = crate::GatewayTarget::new("http://127.0.0.1:3425/", "token", Vec::new());
+        let plan = crate::legacy::gemini_cli()
+            .plan(&session, &target)
+            .expect("mixed-case legacy plan");
+        let mut planned = plan
+            .changes()
+            .iter()
+            .map(|change| change.path().to_path_buf())
+            .collect::<Vec<_>>();
+        planned.sort();
+        let mut expected = FILES
+            .iter()
+            .map(|file| resolve(file, TargetOs::Windows, &session))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(planned, expected);
+        assert!(expected.iter().all(|path| path.starts_with(&override_dir)));
+
+        let sensitive = Session::new(&home)
+            .with_env_case_insensitive(false)
+            .with_env("gemini_cli_home", override_dir.as_os_str());
+        assert_eq!(sensitive.gemini_cli_home, None);
+        assert_eq!(sensitive.env("GEMINI_CLI_HOME"), None);
+        for file in FILES {
+            assert_eq!(
+                resolve(&file, TargetOs::Windows, &sensitive),
+                home.join(".gemini")
+                    .join(file.linux().rsplit('/').next().expect("file"))
+            );
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn windows_environment_writes_replace_case_variants() {
         let session = Session::new("home")
             .with_env_case_insensitive(true)

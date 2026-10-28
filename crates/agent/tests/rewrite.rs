@@ -27,6 +27,7 @@ fn adapter(id: &str) -> &'static dyn hofund_agent::AgentAdapter {
     match id {
         "claude-code" => legacy::claude_code(),
         "codex" => legacy::codex(),
+        "gemini-cli" => legacy::gemini_cli(),
         _ => find(id).expect(id),
     }
 }
@@ -144,7 +145,7 @@ fn gemini_env_keeps_unrelated_lines_and_a_second_apply_is_a_no_op() {
     let original = "# note\r\nexport KEEP=1\r\nGEMINI_API_KEY=old\r\n";
     write(&env, original);
     let session = Session::new(&home);
-    let adapter = find("gemini-cli").expect("gemini");
+    let adapter = legacy::gemini_cli();
     adapter.apply(&session, &target()).expect("apply");
     let text = read(&env);
     assert!(text.contains("# note"));
@@ -161,7 +162,7 @@ fn gemini_env_keeps_unrelated_lines_and_a_second_apply_is_a_no_op() {
 
 #[test]
 fn gemini_cli_home_controls_both_files_and_unusable_values_use_home() {
-    let adapter = find("gemini-cli").expect("gemini");
+    let adapter = legacy::gemini_cli();
     let home = scratch();
     let override_home = scratch();
     let session = Session::new(&home).with_gemini_cli_home(&override_home);
@@ -265,7 +266,7 @@ fn overrides_and_path_detection_do_not_use_the_real_home() {
     write(&bin.join(file_name), "");
     let session = Session::new(&home).with_path(&bin);
     assert!(legacy::codex().detect(&session));
-    assert!(!find("gemini-cli").expect("gemini").detect(&session));
+    assert!(!legacy::gemini_cli().detect(&session));
 }
 
 #[test]
@@ -494,8 +495,7 @@ fn disconnect_keeps_a_value_the_user_changed() {
 fn gemini_writes_model_name_from_the_only_route() {
     let home = scratch();
     let session = Session::new(&home);
-    find("gemini-cli")
-        .expect("gemini")
+    legacy::gemini_cli()
         .apply(&session, &target_with(&["gemini-2.5-pro"]))
         .expect("apply");
     let settings = home.join(".gemini").join("settings.json");
@@ -503,8 +503,7 @@ fn gemini_writes_model_name_from_the_only_route() {
     assert_eq!(value["model"]["name"], "gemini-2.5-pro");
     assert_eq!(value["model"].as_object().expect("object").len(), 1);
     assert_eq!(
-        find("gemini-cli")
-            .expect("gemini")
+        legacy::gemini_cli()
             .configured_model(&session)
             .expect("read")
             .as_deref(),
@@ -518,7 +517,7 @@ fn gemini_moves_a_string_model_and_keeps_an_existing_name() {
     let settings = home.join(".gemini").join("settings.json");
     write(&settings, "{\n  \"model\": \"gemini-2.5-flash\"\n}\n");
     let session = Session::new(&home);
-    let adapter = find("gemini-cli").expect("gemini");
+    let adapter = legacy::gemini_cli();
     adapter
         .apply(&session, &target_with(&["other-route"]))
         .expect("apply");
@@ -533,8 +532,7 @@ fn gemini_moves_a_string_model_and_keeps_an_existing_name() {
         "{\n  \"model\": { \"name\": \"kept\", \"extra\": true }\n}\n",
     );
     let session = Session::new(&home);
-    find("gemini-cli")
-        .expect("gemini")
+    legacy::gemini_cli()
         .apply(&session, &target_with(&["gemini-2.5-pro"]))
         .expect("apply");
     let value: serde_json::Value = serde_json::from_str(&read(&settings)).expect("json");
@@ -546,8 +544,7 @@ fn gemini_moves_a_string_model_and_keeps_an_existing_name() {
 fn gemini_with_several_routes_does_not_pick_a_model() {
     let home = scratch();
     let session = Session::new(&home);
-    find("gemini-cli")
-        .expect("gemini")
+    legacy::gemini_cli()
         .apply(&session, &target_with(&["one", "two"]))
         .expect("apply");
     let settings = home.join(".gemini").join("settings.json");

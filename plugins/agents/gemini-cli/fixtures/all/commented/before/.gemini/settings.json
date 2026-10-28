@@ -1,0 +1,9 @@
+{
+  // Keep this comment in the original backup.
+  "model": { "name": "commented-model" },
+  "security": {
+    // Replace only the selected authentication type.
+    "auth": { "selectedType": "oauth-personal", "userKey": true },
+  },
+  "ui": { "theme": "dark" },
+}

@@ -82,6 +82,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feature. Catalog order remains `claude-code`, `codex`, `gemini-cli`,
   `opencode`; `RESERVED_AGENT_IDS` now contains only `gemini-cli` and
   `opencode`, and static `adapters()` and `find()` cover those two agents.
+- Gemini CLI is now a compiled data-only agent at
+  `plugins/agents/gemini-cli/agent.toml`; its production Rust const is removed
+  and its frozen oracle remains behind `legacy-agent-consts`. Catalog order is
+  unchanged. An absolute `GEMINI_CLI_HOME` still places both files under
+  `$GEMINI_CLI_HOME/.gemini`, while empty and relative values still use
+  `$HOME/.gemini`. `RESERVED_AGENT_IDS` now contains only `opencode`, and
+  static `adapters()` and `find()` cover only OpenCode.
 - Coding-agent path overrides now treat empty and relative values as unset for
   process environments, explicit environment pairs, and named setters. Const
   and compiled adapters therefore use the same default paths.

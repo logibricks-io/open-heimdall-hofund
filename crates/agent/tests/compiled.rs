@@ -226,6 +226,7 @@ fn const_adapter(id: &str) -> &'static dyn AgentAdapter {
     match id {
         "claude-code" => hofund_agent::legacy::claude_code(),
         "codex" => hofund_agent::legacy::codex(),
+        "gemini-cli" => hofund_agent::legacy::gemini_cli(),
         _ => find(id).expect("static adapter"),
     }
 }
@@ -262,7 +263,7 @@ static EXTRA: AgentDescription = AgentDescription::from_static(
     &[],
 );
 
-static MIGRATED_AND_EXTRA_LIST: &[&AgentDescription] = &[&CLAUDE, &CODEX, &EXTRA];
+static MIGRATED_AND_EXTRA_LIST: &[&AgentDescription] = &[&CLAUDE, &CODEX, &GEMINI, &EXTRA];
 static CLAUDE_LIST: &[&AgentDescription] = &[&CLAUDE];
 static DUPLICATE_LIST: &[&AgentDescription] = &[&EXTRA, &EXTRA];
 

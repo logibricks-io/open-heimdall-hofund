@@ -1,0 +1,4 @@
+{
+  "model": "relative-decoy",
+  "security": { "auth": { "selectedType": "oauth-personal" } }
+}

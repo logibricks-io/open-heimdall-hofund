@@ -1,0 +1,9 @@
+{
+  "theme": "dark",
+  "ui": { "showBanner": false, "custom": "keep" },
+  "mcpServers": { "local": { "command": "server", "args": ["--stdio"] } },
+  "security": {
+    "auth": { "selectedType": "oauth-personal", "userKey": "keep" },
+    "folderTrust": { "enabled": true }
+  }
+}

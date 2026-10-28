@@ -1,0 +1,13 @@
+{
+  "ui": {
+    "theme": "light"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    }
+  },
+  "model": {
+    "name": "route-a"
+  }
+}

@@ -841,4 +841,18 @@ key = "effort"
         .expect_err("shipped claude-code id");
         assert!(error.contains("collides with another agent id"), "{error}");
     }
+
+    #[test]
+    fn validation_rejects_shipped_gemini_cli_fixture_collision() {
+        let error = parse(
+            &base().replacen("fixture-agent", "gemini-cli", 1),
+            "fixtures/agents/gemini-cli/agent.toml",
+            "gemini-cli",
+            &[],
+            &["gemini-cli".to_owned()],
+            &["echo".to_owned()],
+        )
+        .expect_err("shipped gemini-cli id");
+        assert!(error.contains("collides with another agent id"), "{error}");
+    }
 }

@@ -23,106 +23,6 @@ use crate::{
 };
 use crate::{DisconnectOutcome, usable_override};
 
-/// Gemini CLI user settings and env file.
-///
-/// User settings are `~/.gemini/settings.json`. `GEMINI_CLI_HOME` is the
-/// parent directory: `.gemini` is created inside it. `.gemini/.env` is loaded
-/// by the CLI and is not excluded. Gemini CLI's `homedir()` in
-/// `packages/core/src/utils/paths.ts` returns `GEMINI_CLI_HOME` when set, and
-/// `getGlobalGeminiDir` in `packages/core/src/config/storage.ts` joins that
-/// home with `.gemini`. Both files deliberately follow that resolution instead
-/// of always using the user home (`reference: internal/agent/gemini.go:28-31`);
-/// trace discovery uses the same override
-/// (`reference: internal/sessions/traces_gemini.go:17-22`).
-///
-/// `security.auth.selectedType` is set to `gemini-api-key`. The string values
-/// of that enum are not listed in the public docs; they come from
-/// `packages/core/src/core/contentGenerator.ts` (`gemini-api-key`,
-/// `oauth-personal`, `vertex-ai`, `cloud-shell`,
-/// `compute-default-credentials`, `gateway`).
-///
-/// `.env` sets `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` (the origin; HTTP
-/// to localhost is allowed), and `GEMINI_API_KEY_AUTH_MECHANISM=bearer`.
-/// The selected model is `model.name`. A string `model` is moved there.
-/// An existing `model.name` is left as the user wrote it. When neither is
-/// set and the gateway has one route, connect writes that route.
-/// Checked 2026-10-25:
-/// <https://geminicli.com/docs/reference/configuration/>.
-///
-/// `GEMINI_API_KEY_AUTH_MECHANISM` is real. It is not listed on the public
-/// configuration page. In `contentGenerator.ts` the default is
-/// `x-goog-api-key`. The value `bearer` adds `Authorization: Bearer ${apiKey}`
-/// only when the auth type is `gemini-api-key` or `vertex-ai` and an API key
-/// is set. The `gateway` auth type does not get that header.
-/// `contentGenerator.test.ts` covers it ("should pass api key as Authorization
-/// Header when GEMINI_API_KEY_AUTH_MECHANISM is set to bearer").
-///
-/// `getAuthTypeFromEnv` returns `gateway` when `GOOGLE_GEMINI_BASE_URL` is
-/// set, before it considers `GEMINI_API_KEY`. Non-interactive startup uses
-/// the settings value first (`configuredAuthType || getAuthTypeFromEnv()` in
-/// `packages/cli/src/validateNonInterActiveAuth.ts`), so `gemini-api-key`
-/// wins. `createContentGenerator` still uses `GOOGLE_GEMINI_BASE_URL` as the
-/// SDK base URL for that auth type. The SDK sends `x-goog-api-key` when an
-/// API key is passed. The gateway accepts either header, compared in constant
-/// time, and serves `POST /v1beta/models/{model}:generateContent` and
-/// `:streamGenerateContent`.
-///
-/// Sources: <https://geminicli.com/docs/reference/configuration/>,
-/// <https://geminicli.com/docs/get-started/authentication/>,
-/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.ts>,
-/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.test.ts>,
-/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/cli/src/validateNonInterActiveAuth.ts>.
-const GEMINI: Description = Description {
-    id: "gemini-cli",
-    display_name: "Gemini CLI",
-    binary: "gemini",
-    locations: &[
-        Location {
-            file: "settings",
-            kind: FileKind::Json,
-            create: true,
-            resolve: gemini_settings,
-        },
-        Location {
-            file: "env",
-            kind: FileKind::Env,
-            create: true,
-            resolve: gemini_env,
-        },
-    ],
-    sets: &[
-        Set {
-            file: "settings",
-            key: "security.auth.selectedType",
-            slot: Slot::Literal("gemini-api-key"),
-        },
-        Set {
-            file: "env",
-            key: "GEMINI_API_KEY",
-            slot: Slot::Token,
-        },
-        Set {
-            file: "env",
-            key: "GOOGLE_GEMINI_BASE_URL",
-            slot: Slot::Origin,
-        },
-        Set {
-            file: "env",
-            key: "GEMINI_API_KEY_AUTH_MECHANISM",
-            slot: Slot::Literal("bearer"),
-        },
-        Set {
-            file: "settings",
-            key: "model.name",
-            slot: Slot::GeminiModel,
-        },
-    ],
-    model: Some(ModelKey {
-        file: "settings",
-        key: "model.name",
-    }),
-};
-
 /// OpenCode global config.
 ///
 /// The documented global path is `~/.config/opencode/opencode.json` or
@@ -231,11 +131,13 @@ pub(crate) struct Set {
 }
 
 pub(crate) enum Slot {
+    #[cfg(any(test, feature = "legacy-agent-consts"))]
     Origin,
     V1,
     Token,
     Literal(&'static str),
     /// Gemini CLI `model.name`, when this connect has a model to write.
+    #[cfg(any(test, feature = "legacy-agent-consts"))]
     GeminiModel,
     /// OpenCode `models` object built from [`GatewayTarget::models`].
     OpenCodeModels,
@@ -291,21 +193,18 @@ impl Compiled {
     }
 }
 
-const GEMINI_ADAPTER: Described = Described {
-    description: &GEMINI,
-};
 const OPENCODE_ADAPTER: Described = Described {
     description: &OPENCODE,
 };
 const BUILTIN_ORDER: [&str; 4] = ["claude-code", "codex", "gemini-cli", "opencode"];
 
-/// The const built-in adapters; codex and claude-code are compiled separately.
+/// The const built-in adapter; the other agents are compiled separately.
 #[must_use]
-pub fn adapters() -> [&'static dyn AgentAdapter; 2] {
-    [&GEMINI_ADAPTER, &OPENCODE_ADAPTER]
+pub fn adapters() -> [&'static dyn AgentAdapter; 1] {
+    [&OPENCODE_ADAPTER]
 }
 
-/// Finds a const built-in adapter; codex and claude-code are compiled.
+/// Finds the const built-in adapter; the other agents are compiled.
 #[must_use]
 pub fn find(name: &str) -> Option<&'static dyn AgentAdapter> {
     adapters().into_iter().find(|adapter| adapter.id() == name)
@@ -334,9 +233,9 @@ impl Catalog {
 
 /// Composes const and compiled adapters in CLI order and rejects duplicate ids.
 ///
-/// Codex and claude-code come from the compiled list supplied by the daemon's
-/// `agent_descriptions()`. Other compiled ids follow the four built-in slots
-/// in input order.
+/// Codex, claude-code, and gemini-cli come from the compiled list supplied by
+/// the daemon's `agent_descriptions()`. Other compiled ids follow the four
+/// built-in slots in input order.
 ///
 /// # Errors
 ///
@@ -395,7 +294,8 @@ fn builtin_adapter(id: &str) -> Option<Described> {
         "claude-code" => Some(crate::legacy::CLAUDE),
         #[cfg(feature = "legacy-agent-consts")]
         "codex" => Some(crate::legacy::CODEX_ADAPTER),
-        "gemini-cli" => Some(GEMINI_ADAPTER),
+        #[cfg(feature = "legacy-agent-consts")]
+        "gemini-cli" => Some(crate::legacy::GEMINI_ADAPTER),
         "opencode" => Some(OPENCODE_ADAPTER),
         _ => None,
     }
@@ -487,10 +387,12 @@ impl Engine {
                 file: set.file,
                 key: set.key,
                 slot: match set.slot {
+                    #[cfg(any(test, feature = "legacy-agent-consts"))]
                     Slot::Origin => ApiSlot::Origin,
                     Slot::V1 => ApiSlot::V1,
                     Slot::Token => ApiSlot::Token,
                     Slot::Literal(value) => ApiSlot::Literal(value),
+                    #[cfg(any(test, feature = "legacy-agent-consts"))]
                     Slot::GeminiModel => ApiSlot::model_if_unset(Some("model")),
                     Slot::OpenCodeModels => ApiSlot::CatalogModels,
                     #[cfg(any(test, feature = "legacy-agent-consts"))]
@@ -1298,21 +1200,6 @@ fn binary_on_path(session: &Session, name: &str) -> bool {
     false
 }
 
-fn gemini_root(session: &Session) -> PathBuf {
-    session
-        .gemini_cli_home
-        .as_ref()
-        .map_or_else(|| session.home.clone(), |path| path.clone())
-}
-
-fn gemini_settings(session: &Session) -> PathBuf {
-    gemini_root(session).join(".gemini").join("settings.json")
-}
-
-fn gemini_env(session: &Session) -> PathBuf {
-    gemini_root(session).join(".gemini").join(".env")
-}
-
 fn opencode_dir(session: &Session) -> PathBuf {
     match &session.xdg_config_home {
         Some(path) => path.join("opencode"),
@@ -1869,6 +1756,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn legacy_gemini_cli_replays_compiled_goldens_for_every_target_os() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/agents/gemini-cli/fixtures");
+        let (shared, per_os) =
+            golden_layout("gemini-cli", &fixtures).expect("valid gemini-cli layout");
+        assert!(!shared.is_empty());
+        for (directory, cases) in &per_os {
+            let os = match *directory {
+                "linux" => TargetOs::Linux,
+                "macos" => TargetOs::Macos,
+                "windows" => TargetOs::Windows,
+                _ => unreachable!("validated target OS"),
+            };
+            for case in shared.iter().chain(cases.iter()) {
+                replay_gemini_case(crate::legacy::gemini_cli(), case, os);
+            }
+        }
+    }
+
     fn write_layout_case(root: &Path, directory: &str, name: &str, only: Option<&[&str]>) {
         let only = only.map_or_else(String::new, |directories| {
             let directories = directories
@@ -2032,6 +1939,123 @@ mod tests {
         expected.extend(after);
         assert_eq!(managed_tree(&home), expected, "{label}: const apply tree");
         let _ = fs::remove_dir_all(&home);
+    }
+
+    fn replay_gemini_case(adapter: &dyn AgentAdapter, case_dir: &Path, os: TargetOs) {
+        fn directories(root: &Path) -> std::collections::BTreeSet<PathBuf> {
+            fn collect(
+                root: &Path,
+                directory: &Path,
+                directories: &mut std::collections::BTreeSet<PathBuf>,
+            ) {
+                let Ok(entries) = fs::read_dir(directory) else {
+                    return;
+                };
+                for entry in entries {
+                    let path = entry.expect("directory entry").path();
+                    if path.is_dir() {
+                        directories.insert(
+                            path.strip_prefix(root)
+                                .expect("relative directory")
+                                .to_path_buf(),
+                        );
+                        collect(root, &path, directories);
+                    }
+                }
+            }
+
+            let mut directories = std::collections::BTreeSet::new();
+            collect(root, root, &mut directories);
+            directories
+        }
+
+        fn implied_directories<'a>(
+            paths: impl IntoIterator<Item = &'a PathBuf>,
+        ) -> std::collections::BTreeSet<PathBuf> {
+            let mut directories = std::collections::BTreeSet::new();
+            for path in paths {
+                let mut parent = path.parent();
+                while let Some(directory) = parent
+                    && !directory.as_os_str().is_empty()
+                {
+                    directories.insert(directory.to_path_buf());
+                    parent = directory.parent();
+                }
+            }
+            directories
+        }
+
+        let label = format!("{} / {os:?} / {}", adapter.id(), case_dir.display());
+        let case = read_case(&case_dir.join("case.toml"));
+        let home = scratch();
+        let before_dir = case_dir.join("before");
+        if before_dir.is_dir() {
+            copy_tree(&before_dir, &home);
+        }
+        let before = tree(&home);
+        let before_directories = directories(&home);
+        let after = tree(&case_dir.join("after"));
+        let session_for = |home: &Path| {
+            let mut session = Session::new(home);
+            for (name, value) in &case.env {
+                session = session.with_env(name, value.replace("{tmp}", &home.to_string_lossy()));
+            }
+            session
+        };
+        let session = session_for(&home);
+        let target = GatewayTarget::new(&case.base_url, &case.token, case.routes.clone());
+        let plan = adapter.plan(&session, &target).expect("const plan");
+        let after =
+            if std::env::var_os("UPDATE_GOLDEN").as_deref() == Some(std::ffi::OsStr::new("1")) {
+                let after_dir = case_dir.join("after");
+                if after_dir.exists() {
+                    fs::remove_dir_all(&after_dir).expect("remove old Gemini golden");
+                }
+                for change in plan.changes() {
+                    let relative = change.path().strip_prefix(&home).expect("golden relative");
+                    let path = after_dir.join(relative);
+                    fs::create_dir_all(path.parent().expect("golden parent"))
+                        .expect("create golden parent");
+                    fs::write(path, change.after()).expect("write Gemini golden");
+                }
+                tree(&after_dir)
+            } else {
+                after
+            };
+        verify_plan(&label, &home, &plan, &after);
+        let applied = adapter.apply(&session, &target).expect("const apply");
+        verify_plan(&label, &home, &applied, &after);
+        assert_eq!(
+            adapter
+                .configured_model(&session)
+                .expect("const configured model")
+                .as_deref(),
+            case.configured_model.as_deref(),
+            "{label}: const configured model"
+        );
+        let mut expected = before.clone();
+        expected.extend(after.clone());
+        assert_eq!(managed_tree(&home), expected, "{label}: const apply tree");
+        assert_eq!(
+            directories(&home),
+            implied_directories(before.keys().chain(after.keys())),
+            "{label}: apply directories"
+        );
+
+        let forced_home = scratch();
+        copy_tree(&home, &forced_home);
+        let forced = adapter
+            .disconnect(&session_for(&forced_home), true)
+            .expect("const forced disconnect");
+        assert!(forced.changed(), "{label}: forced disconnect unchanged");
+        assert_eq!(tree(&forced_home), before, "{label}: forced bytes");
+        assert_eq!(
+            directories(&forced_home),
+            before_directories,
+            "{label}: forced directories"
+        );
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&forced_home);
     }
 
     fn verify_plan(label: &str, home: &Path, plan: &Plan, after: &BTreeMap<PathBuf, Vec<u8>>) {

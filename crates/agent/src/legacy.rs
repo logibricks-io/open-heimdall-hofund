@@ -189,3 +189,130 @@ fn codex_config(session: &Session) -> PathBuf {
         .map_or_else(|| session.home.join(".codex"), |path| path.clone());
     directory.join("config.toml")
 }
+
+/// Gemini CLI user settings and env file.
+///
+/// User settings are `~/.gemini/settings.json`. `GEMINI_CLI_HOME` is the
+/// parent directory: `.gemini` is created inside it. `.gemini/.env` is loaded
+/// by the CLI and is not excluded. Gemini CLI's `homedir()` in
+/// `packages/core/src/utils/paths.ts` returns `GEMINI_CLI_HOME` when set, and
+/// `getGlobalGeminiDir` in `packages/core/src/config/storage.ts` joins that
+/// home with `.gemini`. Both files deliberately follow that resolution instead
+/// of always using the user home (`reference: internal/agent/gemini.go:28-31`);
+/// trace discovery uses the same override
+/// (`reference: internal/sessions/traces_gemini.go:17-22`).
+///
+/// `security.auth.selectedType` is set to `gemini-api-key`. The string values
+/// of that enum are not listed in the public docs; they come from
+/// `packages/core/src/core/contentGenerator.ts` (`gemini-api-key`,
+/// `oauth-personal`, `vertex-ai`, `cloud-shell`,
+/// `compute-default-credentials`, `gateway`).
+///
+/// `.env` sets `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` (the origin; HTTP
+/// to localhost is allowed), and `GEMINI_API_KEY_AUTH_MECHANISM=bearer`.
+/// The selected model is `model.name`. A string `model` is moved there.
+/// An existing `model.name` is left as the user wrote it. When neither is
+/// set and the gateway has one route, connect writes that route.
+/// Checked 2026-10-25:
+/// <https://geminicli.com/docs/reference/configuration/>.
+///
+/// `GEMINI_API_KEY_AUTH_MECHANISM` is real. It is not listed on the public
+/// configuration page. In `contentGenerator.ts` the default is
+/// `x-goog-api-key`. The value `bearer` adds `Authorization: Bearer ${apiKey}`
+/// only when the auth type is `gemini-api-key` or `vertex-ai` and an API key
+/// is set. The `gateway` auth type does not get that header.
+/// `contentGenerator.test.ts` covers it ("should pass api key as Authorization
+/// Header when GEMINI_API_KEY_AUTH_MECHANISM is set to bearer").
+///
+/// `getAuthTypeFromEnv` returns `gateway` when `GOOGLE_GEMINI_BASE_URL` is
+/// set, before it considers `GEMINI_API_KEY`. Non-interactive startup uses
+/// the settings value first (`configuredAuthType || getAuthTypeFromEnv()` in
+/// `packages/cli/src/validateNonInterActiveAuth.ts`), so `gemini-api-key`
+/// wins. `createContentGenerator` still uses `GOOGLE_GEMINI_BASE_URL` as the
+/// SDK base URL for that auth type. The SDK sends `x-goog-api-key` when an
+/// API key is passed. The gateway accepts either header, compared in constant
+/// time, and serves `POST /v1beta/models/{model}:generateContent` and
+/// `:streamGenerateContent`.
+///
+/// Sources: <https://geminicli.com/docs/reference/configuration/>,
+/// <https://geminicli.com/docs/get-started/authentication/>,
+/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.ts>,
+/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/core/contentGenerator.test.ts>,
+/// <https://github.com/google-gemini/gemini-cli/blob/main/packages/cli/src/validateNonInterActiveAuth.ts>.
+const GEMINI: Description = Description {
+    id: "gemini-cli",
+    display_name: "Gemini CLI",
+    binary: "gemini",
+    locations: &[
+        Location {
+            file: "settings",
+            kind: FileKind::Json,
+            create: true,
+            resolve: gemini_settings,
+        },
+        Location {
+            file: "env",
+            kind: FileKind::Env,
+            create: true,
+            resolve: gemini_env,
+        },
+    ],
+    sets: &[
+        Set {
+            file: "settings",
+            key: "security.auth.selectedType",
+            slot: Slot::Literal("gemini-api-key"),
+        },
+        Set {
+            file: "env",
+            key: "GEMINI_API_KEY",
+            slot: Slot::Token,
+        },
+        Set {
+            file: "env",
+            key: "GOOGLE_GEMINI_BASE_URL",
+            slot: Slot::Origin,
+        },
+        Set {
+            file: "env",
+            key: "GEMINI_API_KEY_AUTH_MECHANISM",
+            slot: Slot::Literal("bearer"),
+        },
+        Set {
+            file: "settings",
+            key: "model.name",
+            slot: Slot::GeminiModel,
+        },
+    ],
+    model: Some(ModelKey {
+        file: "settings",
+        key: "model.name",
+    }),
+};
+
+pub(crate) const GEMINI_ADAPTER: Described = Described {
+    description: &GEMINI,
+};
+
+/// Frozen copy of the pre-F3 Rust const, used only as a test oracle for the
+/// compiled gemini-cli; not part of the public API; removed once F1-F4 are done.
+#[doc(hidden)]
+#[must_use]
+pub fn gemini_cli() -> &'static dyn AgentAdapter {
+    &GEMINI_ADAPTER
+}
+
+fn gemini_root(session: &Session) -> PathBuf {
+    session
+        .gemini_cli_home
+        .as_ref()
+        .map_or_else(|| session.home.clone(), |path| path.clone())
+}
+
+fn gemini_settings(session: &Session) -> PathBuf {
+    gemini_root(session).join(".gemini").join("settings.json")
+}
+
+fn gemini_env(session: &Session) -> PathBuf {
+    gemini_root(session).join(".gemini").join(".env")
+}
