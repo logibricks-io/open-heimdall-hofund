@@ -670,16 +670,17 @@ mod tests {
 
     #[test]
     fn all_lists_every_cooldown_cause() {
-        for cause in CooldownCause::ALL {
-            let index = match cause {
+        let indices = CooldownCause::ALL
+            .into_iter()
+            .map(|cause| match cause {
                 CooldownCause::Failure => 0,
                 CooldownCause::RateLimit => 1,
                 CooldownCause::Quota => 2,
                 CooldownCause::Credit => 3,
                 CooldownCause::Observed => 4,
                 CooldownCause::Panic => 5,
-            };
-            assert_eq!(CooldownCause::ALL[index], cause);
-        }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(indices, (0..CooldownCause::ALL.len()).collect::<Vec<_>>());
     }
 }

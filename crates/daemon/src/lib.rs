@@ -25,7 +25,13 @@ use hofund_secrets::TokenFile;
 use hofund_usage::Ledger;
 
 mod adapt;
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "cooldown and provider-error mapping is wired by the control endpoints in a later L stage"
+    )
+)]
 pub(crate) mod control_map;
 mod membership;
 mod models;
