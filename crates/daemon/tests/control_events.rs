@@ -1,0 +1,178 @@
+//! Daemon event stream and the L6a configuration route skeleton over TCP.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use hofund_agent::Session;
+use hofund_control_proto::{
+    API_VERSION, ConfigApplyRequest, ConfigValidateRequest, ControlErrorKind, EventEnvelope,
+    EventPayload, ReloadRequest, ShutdownState, TokenRotateRequest, Topic, decode_error_envelope,
+    decode_response,
+};
+use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
+
+const CONFIG: &str = "listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"provider-key\"\n\
+[[routes]]\nmodel = \"m\"\nupstreams = [\"chat\"]\n";
+
+struct Scratch(PathBuf, #[allow(dead_code)] tempfile::TempDir);
+
+impl Scratch {
+    fn new(label: &str) -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("hofund-daemon-events-{label}-"))
+            .tempdir()
+            .expect("scratch dir");
+        let path = dir.path().to_path_buf();
+        std::fs::create_dir_all(path.join("home")).expect("scratch home");
+        Self(path, dir)
+    }
+}
+
+async fn start(dir: &Path) -> Running {
+    let config = dir.join("hofund.toml");
+    std::fs::write(&config, CONFIG).expect("config");
+    start_with_options(
+        &config,
+        StartOptions {
+            control_listen: Some("127.0.0.1:0".parse().expect("control address")),
+            control_runtime: Some(ControlRuntime::new(None, dir.to_path_buf())),
+            agent_session: Some(Session::new(dir.join("home")).with_path("")),
+            ..StartOptions::default()
+        },
+    )
+    .await
+    .expect("daemon")
+}
+
+fn token(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("hofund.token"))
+        .expect("token")
+        .trim()
+        .to_owned()
+}
+
+fn url(running: &Running, path: &str) -> String {
+    format!(
+        "http://{}{path}",
+        running.control_local_addr().expect("control")
+    )
+}
+
+/// Reads complete SSE blocks until `count` events or the end of the stream.
+async fn read_events(
+    response: &mut reqwest::Response,
+    count: usize,
+) -> (Vec<(String, String, EventEnvelope)>, bool) {
+    let mut buffer = String::new();
+    let mut events = Vec::new();
+    loop {
+        while let Some(end) = buffer.find("\n\n") {
+            let block: String = buffer.drain(..end + 2).collect();
+            let mut id = String::new();
+            let mut name = String::new();
+            let mut data = String::new();
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("id: ") {
+                    id = value.to_owned();
+                } else if let Some(value) = line.strip_prefix("event: ") {
+                    name = value.to_owned();
+                } else if let Some(value) = line.strip_prefix("data: ") {
+                    data.push_str(value);
+                }
+            }
+            if !name.is_empty() {
+                let envelope = decode_response::<EventEnvelope>(API_VERSION, data.as_bytes())
+                    .expect("event envelope");
+                events.push((id, name, envelope));
+            }
+            if events.len() == count {
+                return (events, false);
+            }
+        }
+        let chunk = tokio::time::timeout(Duration::from_secs(10), response.chunk())
+            .await
+            .expect("event stream progresses")
+            .expect("chunk");
+        match chunk {
+            Some(bytes) => buffer.push_str(std::str::from_utf8(&bytes).expect("utf-8")),
+            None => return (events, true),
+        }
+    }
+}
+
+#[tokio::test]
+async fn config_routes_return_unavailable_until_l6b() {
+    let dir = Scratch::new("config");
+    let running = start(&dir.0).await;
+    let client = reqwest::Client::new();
+    let text = "listen = \"127.0.0.1:0\"\n";
+    let requests = [
+        client.get(url(&running, "/v1/hofund/config")),
+        client
+            .post(url(&running, "/v1/hofund/config/validate"))
+            .json(&ConfigValidateRequest::new(text)),
+        client
+            .post(url(&running, "/v1/hofund/config/apply"))
+            .json(&ConfigApplyRequest::new("0".repeat(64), text)),
+        client
+            .post(url(&running, "/v1/hofund/config/reload"))
+            .json(&ReloadRequest::new("0".repeat(64))),
+    ];
+    for request in requests {
+        let response = request
+            .bearer_auth(token(&dir.0))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.bytes().await.expect("body");
+        let error = decode_error_envelope(API_VERSION, &body).expect("error envelope");
+        assert_eq!(error.error.kind, ControlErrorKind::Unavailable);
+        assert!(!String::from_utf8_lossy(&body).contains("provider-key"));
+    }
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn daemon_stream_starts_with_a_snapshot_and_closes_on_token_rotation() {
+    let dir = Scratch::new("rotate");
+    let running = start(&dir.0).await;
+    let client = reqwest::Client::new();
+    let mut stream = client
+        .get(url(&running, "/v1/hofund/events"))
+        .bearer_auth(token(&dir.0))
+        .send()
+        .await
+        .expect("events");
+    assert_eq!(stream.status(), reqwest::StatusCode::OK);
+    let (events, _) = read_events(&mut stream, 1).await;
+    let (id, name, envelope) = &events[0];
+    assert_eq!(name, "snapshot");
+    let boot = envelope.boot_id.clone();
+    assert_eq!(id, &format!("{boot}:control=0"));
+    match &envelope.payload {
+        EventPayload::Snapshot(snapshot) => {
+            assert_eq!(snapshot.shutdown, ShutdownState::Running);
+            assert_eq!(snapshot.cursors.len(), 1);
+            assert_eq!(snapshot.cursors[0].topic, Topic::Control);
+            assert!(!snapshot.effective_listen.is_empty());
+        }
+        other => panic!("expected snapshot, got {other:?}"),
+    }
+
+    let rotated = client
+        .post(url(&running, "/v1/hofund/token/rotate"))
+        .bearer_auth(token(&dir.0))
+        .json(&TokenRotateRequest::new())
+        .send()
+        .await
+        .expect("rotate");
+    assert_eq!(rotated.status(), reqwest::StatusCode::OK);
+    let (events, ended) = read_events(&mut stream, 2).await;
+    let names: Vec<&str> = events.iter().map(|(_, name, _)| name.as_str()).collect();
+    assert_eq!(names, ["token_rotated"]);
+    assert!(ended, "the stream ends after token_rotated");
+    assert_eq!(events[0].0, format!("{boot}:control=1"));
+    running.shutdown().await;
+}

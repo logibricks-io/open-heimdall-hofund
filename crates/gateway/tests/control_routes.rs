@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use futures_util::StreamExt;
 use hofund_control_proto::{
     API_VERSION, AgentAction, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
     AgentListResponse, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
@@ -15,7 +16,13 @@ use hofund_control_proto::{
     StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
     decode_error_envelope,
 };
-use hofund_gateway::control::{Control, ControlFailure, ControlFuture, ControlState};
+use hofund_control_proto::{
+    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
+    ReloadRequest, Topic,
+};
+use hofund_gateway::control::{
+    Control, ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery, SseFrame,
+};
 use tower::ServiceExt;
 
 const LISTEN: SocketAddr =
@@ -25,6 +32,7 @@ const TOKEN: &str = "route-test-token";
 
 struct FakeControlState {
     calls: Mutex<Vec<String>>,
+    queries: Mutex<Vec<EventsQuery>>,
     draining: AtomicBool,
     failure: Mutex<Option<(ControlErrorKind, Option<u16>)>>,
 }
@@ -33,6 +41,7 @@ impl Default for FakeControlState {
     fn default() -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            queries: Mutex::new(Vec::new()),
             draining: AtomicBool::new(false),
             failure: Mutex::new(None),
         }
@@ -151,6 +160,34 @@ impl ControlState for FakeControlState {
     fn shutdown(&self, _request: ShutdownRequest) -> ControlFuture<'_, ShutdownResponse> {
         self.reply("shutdown")
     }
+
+    fn config(&self) -> ControlFuture<'_, ConfigResponse> {
+        self.reply("config")
+    }
+
+    fn validate_config(
+        &self,
+        _request: ConfigValidateRequest,
+    ) -> ControlFuture<'_, ConfigValidationResponse> {
+        self.reply("config_validate")
+    }
+
+    fn apply_config(&self, _request: ConfigApplyRequest) -> ControlFuture<'_, ConfigResponse> {
+        self.reply("config_apply")
+    }
+
+    fn reload_config(&self, _request: ReloadRequest) -> ControlFuture<'_, ConfigResponse> {
+        self.reply("config_reload")
+    }
+
+    /// One frame, then an open stream so heartbeats can be observed.
+    fn events(&self, query: EventsQuery) -> Result<EventSubscription, ControlFailure> {
+        self.calls.lock().expect("calls").push("events".to_owned());
+        self.queries.lock().expect("queries").push(query);
+        let frame = SseFrame::new("boot:control=1".to_owned(), "snapshot", "{}".into());
+        let frames = futures_util::stream::iter([frame]).chain(futures_util::stream::pending());
+        Ok(EventSubscription::new(Box::pin(frames)))
+    }
 }
 
 fn app(state: &Arc<FakeControlState>) -> axum::Router {
@@ -223,6 +260,25 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             Method::POST,
             "/v1/hofund/shutdown",
             json!(&ShutdownRequest::new()),
+        ),
+        (Method::GET, "/v1/hofund/config", Vec::new()),
+        (
+            Method::POST,
+            "/v1/hofund/config/validate",
+            json!(&ConfigValidateRequest::new("listen = \"127.0.0.1:0\"\n")),
+        ),
+        (
+            Method::POST,
+            "/v1/hofund/config/apply",
+            json!(&ConfigApplyRequest::new(
+                "0".repeat(64),
+                "listen = \"127.0.0.1:0\"\n"
+            )),
+        ),
+        (
+            Method::POST,
+            "/v1/hofund/config/reload",
+            json!(&ReloadRequest::new("0".repeat(64))),
         ),
     ]
 }
@@ -317,6 +373,10 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "usage:Day",
             "rotate_token",
             "shutdown",
+            "config",
+            "config_validate",
+            "config_apply",
+            "config_reload",
         ],
         "each control route must dispatch to its own handler"
     );
@@ -640,4 +700,127 @@ async fn body_above_extractor_default_within_protocol_limit_reaches_handler() {
         Some(1)
     );
     assert_eq!(state.calls.lock().expect("calls").as_slice(), ["shutdown"]);
+}
+
+async fn open_events(
+    app: axum::Router,
+    path: &str,
+    last_event_id: Option<&str>,
+) -> axum::response::Response {
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header(header::HOST, HOST)
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"));
+    if let Some(id) = last_event_id {
+        builder = builder.header("last-event-id", id);
+    }
+    app.oneshot(builder.body(Body::empty()).expect("request"))
+        .await
+        .expect("response")
+}
+
+#[tokio::test]
+async fn events_query_cursor_is_rejected() {
+    let state = Arc::new(FakeControlState::default());
+    for path in [
+        "/v1/hofund/events?last_event_id=boot:control=1",
+        "/v1/hofund/events?lastEventId=boot:control=1",
+        "/v1/hofund/events?topics=control&last_event_id=boot:control=1",
+        "/v1/hofund/events?topics=bogus",
+        "/v1/hofund/events?topics=control&topics=requests",
+        "/v1/hofund/events?since=1",
+    ] {
+        let response = open_events(app(&state), path, None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert_no_store(response.headers());
+    }
+    assert!(
+        state.calls.lock().expect("calls").is_empty(),
+        "a rejected query must not open a subscription"
+    );
+}
+
+#[tokio::test]
+async fn events_default_to_control_and_forward_the_last_event_id_header() {
+    let state = Arc::new(FakeControlState::default());
+    let response = open_events(app(&state), "/v1/hofund/events", None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_no_store(response.headers());
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("content type"),
+        "text/event-stream"
+    );
+    let mut body = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+        .await
+        .expect("first frame")
+        .expect("frame")
+        .expect("bytes");
+    let text = String::from_utf8(first.to_vec()).expect("utf-8");
+    assert!(text.contains("id: boot:control=1\n"), "{text}");
+    assert!(text.contains("event: snapshot\n"), "{text}");
+    assert!(text.contains("data: {}\n"), "{text}");
+    drop(body);
+
+    let response = open_events(
+        app(&state),
+        "/v1/hofund/events?topics=requests,control",
+        Some("boot:control=1,requests=2"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let queries = state.queries.lock().expect("queries");
+    assert_eq!(queries[0].topics, [Topic::Control]);
+    assert_eq!(queries[0].last_event_id, None);
+    assert_eq!(queries[1].topics, [Topic::Control, Topic::Requests]);
+    assert_eq!(
+        queries[1].last_event_id.as_deref(),
+        Some("boot:control=1,requests=2")
+    );
+}
+
+#[tokio::test]
+async fn sse_heartbeat_rereads_token_and_closes_on_mismatch() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let token_file = dir.path().join("hofund.token");
+    std::fs::write(&token_file, TOKEN).expect("token file");
+    let state = Arc::new(FakeControlState::default());
+    let router = Control::with_token_file(state, TOKEN.to_owned(), token_file.clone())
+        .with_heartbeat(std::time::Duration::from_millis(20))
+        .into_router(LISTEN);
+    let response = open_events(router, "/v1/hofund/events", None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    assert!(
+        next_text(&mut body)
+            .await
+            .expect("snapshot")
+            .contains("event: snapshot")
+    );
+    // The token still matches, so heartbeats keep the stream open.
+    assert_eq!(next_text(&mut body).await.expect("heartbeat"), ": \n\n");
+    assert_eq!(next_text(&mut body).await.expect("heartbeat"), ": \n\n");
+    std::fs::write(&token_file, "rotated-token").expect("rotate token file");
+    let mut ended = false;
+    for _ in 0..3 {
+        if next_text(&mut body).await.is_none() {
+            ended = true;
+            break;
+        }
+    }
+    assert!(
+        ended,
+        "the stream must end at the first heartbeat after rotation"
+    );
+}
+
+async fn next_text(body: &mut axum::body::BodyDataStream) -> Option<String> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+        .await
+        .expect("stream progresses")
+        .map(|chunk| String::from_utf8(chunk.expect("bytes").to_vec()).expect("utf-8"))
 }

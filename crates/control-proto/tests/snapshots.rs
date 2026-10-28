@@ -330,6 +330,10 @@ fn json_snapshots_round_trip() {
         EventCursor::new(Topic::Control, 12),
         EventCursor::new(Topic::Requests, 40),
     ];
+    initial.effective_listen = "127.0.0.1:8080".to_owned();
+    initial.listen_source = ListenSource::Environment;
+    initial.shutdown = ShutdownState::Draining;
+    initial.in_flight = 3;
     event_snapshot("snapshot-event", EventPayload::Snapshot(initial));
 
     let mut reloaded = ConfigReloadedEvent::default();
@@ -521,6 +525,7 @@ fn every_event_payload_data_is_an_object_and_tolerates_unknown_fields() {
         envelope.topic = payload.topic().expect("known event topic");
         envelope.payload = payload.clone();
         let mut value = serde_json::to_value(envelope).expect("encode envelope");
+        assert_eq!(value["payload"]["event"], Value::from(payload.name()));
         let data = value["payload"]["data"]
             .as_object_mut()
             .expect("event data must be an object");
@@ -1106,4 +1111,14 @@ fn assert_revision_limit<T: Request + std::fmt::Debug>(
     assert_eq!(error.kind, ControlErrorKind::Unprocessable);
     assert_eq!(error.details[0].field, field);
     assert_eq!(error.details[0].reason, "too_large");
+}
+
+#[test]
+fn snapshot_event_from_an_older_peer_defaults_the_status_fields() {
+    let older = r#"{"disk_revision":"d","runtime_revision":"r","generation":1,"pending_restart":[],"not_applied":[],"members":[],"cursors":[]}"#;
+    let decoded: SnapshotEvent = serde_json::from_str(older).expect("older snapshot decodes");
+    assert_eq!(decoded.effective_listen, "");
+    assert_eq!(decoded.listen_source, ListenSource::Config);
+    assert_eq!(decoded.shutdown, ShutdownState::Running);
+    assert_eq!(decoded.in_flight, 0);
 }

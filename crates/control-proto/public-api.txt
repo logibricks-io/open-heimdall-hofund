@@ -169,6 +169,7 @@ EventPayload::Snapshot
 EventPayload::SnapshotPublished
 EventPayload::TokenRotated
 EventPayload::Unknown #[serde(other)]
+EventPayload::const fn name (& self) -> & 'static str
 EventPayload::const fn topic (& self) -> Option < Topic >
 FieldIssue #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 FieldIssue.field
@@ -332,11 +333,15 @@ SignInProgressEvent.state
 SnapshotEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SnapshotEvent.cursors
 SnapshotEvent.disk_revision
+SnapshotEvent.effective_listen
 SnapshotEvent.generation
+SnapshotEvent.in_flight
+SnapshotEvent.listen_source
 SnapshotEvent.members
 SnapshotEvent.not_applied
 SnapshotEvent.pending_restart
 SnapshotEvent.runtime_revision
+SnapshotEvent.shutdown
 SnapshotPublishedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SnapshotPublishedEvent.generation
 SnapshotPublishedEvent.members

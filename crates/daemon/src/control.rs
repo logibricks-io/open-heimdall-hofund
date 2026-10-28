@@ -14,7 +14,13 @@ use hofund_control_proto::{
     ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
     UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
 };
-use hofund_gateway::control::{ControlFailure, ControlFuture, ControlState};
+use hofund_control_proto::{
+    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
+    MemberSummary, ReloadRequest, SnapshotEvent,
+};
+use hofund_gateway::control::{
+    ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery,
+};
 use hofund_plugin_api::ModelSpec;
 use hofund_router::Cooldowns;
 use hofund_usage::{Ledger, Window};
@@ -22,6 +28,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use super::control_agents::AgentOps;
+use super::events::{EventBus, SnapshotSource};
 use super::models::{PicksError, Timed, test_timeout};
 use super::{
     DaemonError, DaemonRegistry, ErrorKind, ModelsHost, Picks, control_map, membership, plugin_for,
@@ -41,6 +48,7 @@ pub(crate) struct DaemonControl {
     usage: Arc<Ledger>,
     agents: AgentOps,
     shutdown: watch::Sender<bool>,
+    events: Arc<EventBus>,
 }
 
 impl DaemonControl {
@@ -83,7 +91,52 @@ impl DaemonControl {
             usage,
             config,
             shutdown,
+            events: Arc::new(EventBus::new()),
         }
+    }
+
+    /// Serves `/v1/hofund/events` from `bus`.
+    pub(crate) fn with_events(mut self, bus: Arc<EventBus>) -> Self {
+        self.events = bus;
+        self
+    }
+
+    /// Builds snapshots from the same sources as [`ControlState::status`].
+    fn snapshot_source(&self) -> SnapshotSource {
+        let config_path = self.config_path.clone();
+        let runtime_revision = self.runtime_revision.clone();
+        let configured = self.configured.to_string();
+        let config = Arc::clone(&self.config);
+        let cooldowns = Arc::clone(&self.cooldowns);
+        let shutdown = self.shutdown.subscribe();
+        Arc::new(move || {
+            let mut snapshot = SnapshotEvent::default();
+            snapshot.disk_revision = std::fs::read(&config_path)
+                .map(|bytes| revision(&bytes))
+                .unwrap_or_default();
+            snapshot.runtime_revision.clone_from(&runtime_revision);
+            snapshot.generation = 1;
+            snapshot.members = config
+                .providers
+                .iter()
+                .map(|provider| {
+                    let id = membership::member_id(&provider.id);
+                    let mut member = MemberSummary::default();
+                    member.ready = cooldowns.cooling(&id).is_none();
+                    member.id = id.to_string();
+                    member
+                })
+                .collect();
+            snapshot.effective_listen.clone_from(&configured);
+            snapshot.listen_source = ListenSource::Config;
+            snapshot.shutdown = if *shutdown.borrow() {
+                ShutdownState::Draining
+            } else {
+                ShutdownState::Running
+            };
+            snapshot.in_flight = 0;
+            snapshot
+        })
     }
 
     /// Points agent calls at `session` and publishes token rotations on
@@ -347,6 +400,39 @@ impl ControlState for DaemonControl {
         response.draining = true;
         Box::pin(async move { Ok(response) })
     }
+
+    fn config(&self) -> ControlFuture<'_, ConfigResponse> {
+        Box::pin(async { Err(config_unavailable()) })
+    }
+
+    fn validate_config(
+        &self,
+        _request: ConfigValidateRequest,
+    ) -> ControlFuture<'_, ConfigValidationResponse> {
+        Box::pin(async { Err(config_unavailable()) })
+    }
+
+    fn apply_config(&self, _request: ConfigApplyRequest) -> ControlFuture<'_, ConfigResponse> {
+        Box::pin(async { Err(config_unavailable()) })
+    }
+
+    fn reload_config(&self, _request: ReloadRequest) -> ControlFuture<'_, ConfigResponse> {
+        Box::pin(async { Err(config_unavailable()) })
+    }
+
+    fn events(&self, query: EventsQuery) -> Result<EventSubscription, ControlFailure> {
+        Ok(self.events.subscribe(&query, self.snapshot_source()))
+    }
+}
+
+/// Configuration routes are wired in L6a and served by the daemon from L6b.
+fn config_unavailable() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::Unavailable,
+        "configuration control is not available in this daemon yet",
+        "control",
+    )
+    .into()
 }
 
 fn model_entries(models: &[ModelSpec]) -> Vec<ModelEntry> {

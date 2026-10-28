@@ -35,7 +35,11 @@
           "topic": "requests",
           "seq": 40
         }
-      ]
+      ],
+      "effective_listen": "127.0.0.1:8080",
+      "listen_source": "environment",
+      "shutdown": "draining",
+      "in_flight": 3
     }
   }
 }

@@ -37,6 +37,7 @@ mod control_local;
     )
 )]
 pub(crate) mod control_map;
+mod events;
 mod membership;
 mod models;
 mod models_state;
@@ -379,6 +380,15 @@ async fn start_inner(
     if let Some(session) = control_session.as_mut() {
         let (shutdown_request, shutdown_requested) = tokio::sync::watch::channel(false);
         running = running.with_shutdown_request(shutdown_requested);
+        let token_generation = options
+            .token_generation
+            .unwrap_or_else(|| tokio::sync::watch::channel(0).0);
+        let events = Arc::new(events::EventBus::new());
+        events::spawn_lifecycle(
+            Arc::clone(&events),
+            token_generation.subscribe(),
+            shutdown_request.subscribe(),
+        );
         let state = Arc::new(
             control::DaemonControl::new(
                 path,
@@ -394,7 +404,8 @@ async fn start_inner(
                 token_path.clone(),
                 shutdown_request,
             )
-            .with_agent_hooks(options.agent_session, options.token_generation),
+            .with_agent_hooks(options.agent_session, Some(token_generation))
+            .with_events(events),
         );
         let control = hofund_gateway::control::Control::with_token_file(state, token, token_path);
         let mut tcp_listen = options.control_listen;
