@@ -22,6 +22,7 @@ pub struct AgentToml {
     #[serde(default, rename = "set")]
     pub sets: Vec<SetToml>,
     pub model: Option<KeyToml>,
+    pub model_prefix: Option<String>,
     pub effort: Option<KeyToml>,
 }
 
@@ -44,8 +45,7 @@ pub struct FileToml {
     pub windows: String,
     pub env_override: Option<String>,
     pub env_replaces: Option<String>,
-    #[serde(default = "create_by_default")]
-    pub create: bool,
+    pub create: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -107,10 +107,6 @@ fn gateway() -> String {
     "gateway".to_owned()
 }
 
-fn create_by_default() -> bool {
-    true
-}
-
 pub fn parse(
     text: &str,
     source: &str,
@@ -168,6 +164,15 @@ fn validate(
     if !matches!(agent.route.as_str(), "gateway" | "none") {
         return Err(error(source, "route", "must be `gateway` or `none`"));
     }
+    if let Some(prefix) = &agent.model_prefix
+        && (prefix.is_empty() || !prefix.ends_with('/'))
+    {
+        return Err(error(
+            source,
+            "model_prefix",
+            "must be non-empty and end with `/`",
+        ));
+    }
     if let VisibleToml::Name(name) = &agent.visible
         && name != "all"
     {
@@ -210,6 +215,20 @@ fn validate(
             return Err(error(source, format!("{field}.id"), "must not be empty"));
         }
         file_ids.insert(file.id.as_str());
+        if file.create.is_some()
+            && agent
+                .files
+                .iter()
+                .filter(|candidate| candidate.id == file.id)
+                .count()
+                == 1
+        {
+            return Err(error(
+                source,
+                format!("{field}.create"),
+                "is only allowed with multiple locations for the same file id",
+            ));
+        }
         if !matches!(file.kind.as_str(), "toml" | "json" | "env") {
             return Err(error(
                 source,
@@ -455,7 +474,7 @@ pub fn render(agent: &AgentToml) -> (String, String) {
         if let Some(prefix) = &file.env_replaces {
             output.push_str(&format!(".with_env_replaces({prefix:?})"));
         }
-        if !file.create {
+        if file.create == Some(false) {
             output.push_str(".with_create(false)");
         }
         output.push_str(",\n");
@@ -501,6 +520,9 @@ pub fn render(agent: &AgentToml) -> (String, String) {
     ));
     if let Some(model) = &agent.model {
         output.push_str(&format!(".with_model_file({:?})", model.file));
+    }
+    if let Some(prefix) = &agent.model_prefix {
+        output.push_str(&format!(".with_model_prefix({prefix:?})"));
     }
     if let Some(effort) = &agent.effort {
         output.push_str(&format!(".with_effort_file({:?})", effort.file));
@@ -559,6 +581,12 @@ windows = "~/.fixture/config.json"
 env_override = "FIXTURE_HOME"
 env_replaces = "~/.fixture"
 create = false
+[[file]]
+id = "config"
+kind = "json"
+linux = "~/.fixture/config.json"
+macos = "~/.fixture/config.json"
+windows = "~/.fixture/config.json"
 [[set]]
 file = "config"
 key = "literal"
@@ -591,14 +619,48 @@ key = "effort"
     }
 
     #[test]
+    fn model_prefix_is_validated_and_rendered() {
+        let text = base().replace(
+            "route = \"gateway\"",
+            "route = \"gateway\"\nmodel_prefix = \"hofund/\"",
+        );
+        let agent = validate(&text).expect("model prefix");
+        assert_eq!(agent.model_prefix.as_deref(), Some("hofund/"));
+        assert!(render(&agent).1.contains(".with_model_prefix(\"hofund/\")"));
+
+        for prefix in ["", "hofund"] {
+            reject(
+                base().replace(
+                    "route = \"gateway\"",
+                    &format!("route = \"gateway\"\nmodel_prefix = \"{prefix}\""),
+                ),
+                "model_prefix",
+            );
+        }
+    }
+
+    #[test]
     fn valid_defaults_and_no_creator_are_accepted() {
         let agent = validate(&base()).expect("valid agent");
         assert_eq!(agent.route, "gateway");
-        assert!(!agent.files[0].create);
+        assert_eq!(agent.files[0].create, Some(false));
+        assert_eq!(agent.files[1].create, None);
         let source = render(&agent).1;
         assert!(source.contains(".with_model_file(\"config\")"));
         assert!(source.contains(".with_effort_file(\"config\")"));
         assert!(source.contains(".with_create(false)"));
+    }
+
+    #[test]
+    fn create_is_rejected_for_a_single_location() {
+        let candidate = "create = false\n[[file]]\nid = \"config\"\nkind = \"json\"\nlinux = \"~/.fixture/config.json\"\nmacos = \"~/.fixture/config.json\"\nwindows = \"~/.fixture/config.json\"\n";
+        let single = base().replace(candidate, "create = false\n");
+        for value in ["true", "false"] {
+            reject(
+                single.replace("create = false", &format!("create = {value}")),
+                "file[0].create",
+            );
+        }
     }
 
     #[test]

@@ -25,6 +25,11 @@ fn production_agent_list_contains_migrated_agents() {
         agent("opencode").expect("opencode").id().as_str(),
         "opencode"
     );
+    assert_eq!(
+        agent("opencode").expect("opencode").model_prefix(),
+        Some("hofund/")
+    );
+    assert_eq!(agent("codex").expect("codex").model_prefix(), None);
     assert!(agent("missing").is_none());
 }
 

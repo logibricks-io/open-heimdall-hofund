@@ -1409,6 +1409,7 @@ pub struct AgentDescription {
     sets: &'static [AgentSet],
     model_key: Option<&'static str>,
     model_file: Option<&'static str>,
+    model_prefix: Option<&'static str>,
     effort_key: Option<&'static str>,
     effort_file: Option<&'static str>,
     visible: Visible,
@@ -1456,6 +1457,7 @@ impl AgentDescription {
             sets,
             model_key,
             model_file: None,
+            model_prefix: None,
             effort_key,
             effort_file: None,
             visible,
@@ -1470,6 +1472,15 @@ impl AgentDescription {
     pub const fn with_model_file(mut self, file: &'static str) -> Self {
         assert!(!file.is_empty(), "model file is empty");
         self.model_file = Some(file);
+        self
+    }
+
+    /// Sets the prefix the agent uses for gateway route names.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_model_prefix(mut self, prefix: &'static str) -> Self {
+        assert!(!prefix.is_empty(), "model prefix is empty");
+        self.model_prefix = Some(prefix);
         self
     }
 
@@ -1522,6 +1533,12 @@ impl AgentDescription {
     #[must_use]
     pub const fn model_file(&self) -> Option<&'static str> {
         self.model_file
+    }
+
+    /// Prefix the agent uses for gateway route names.
+    #[must_use]
+    pub const fn model_prefix(&self) -> Option<&'static str> {
+        self.model_prefix
     }
 
     /// Optional effort key.

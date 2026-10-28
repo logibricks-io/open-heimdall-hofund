@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   descriptions through the same editing engine. The registry compiles
   validated data-only `agent.toml` descriptions and delivers them through the
   daemon to the CLI and desktop.
+- Agent descriptors can declare `model_prefix` so route validation uses the
+  agent's model spelling without agent-specific CLI rules (#183).
 - `hofund-kit-agent` now runs per-OS golden conformance for planning, apply and
   backup safety, token refresh, and disconnect drift. Shared `all/` cases run
   on every OS, OS-specific cases run only on their own OS, and regeneration
@@ -91,6 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `agent.toml` rejects `create` on single-location files, where the field had
+  no observable effect; multi-location candidate selection is unchanged (#177).
 - Removed the frozen agent const engine, migration-only oracle feature, static
   legacy catalog lookups, reserved agent id list, and legacy-only test seams.
   Shipped behavior remains covered by unchanged goldens and shipped-plugin
@@ -104,6 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The third batch of nine vendor and relay preset rows, including their regions
   and credential metadata, now lives in `plugins/providers/openai-compat/presets.toml`
   with catalog-equivalent registry behavior.
+- The fourth batch of seven vendor and relay preset rows, including their model
+  metadata and decision endpoints, now lives in
+  `plugins/providers/openai-compat/presets.toml` with catalog-equivalent registry
+  selection and model planning.
 - `ProviderModels` is now non-exhaustive so future aggregation fields do not
   break downstream construction at compile time.
 - Plugin-host responses now strip every RFC 9110 hop-by-hop header, including
