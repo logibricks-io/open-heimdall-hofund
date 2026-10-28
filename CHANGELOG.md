@@ -200,6 +200,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Model-list redaction masks only whole secret tokens of at least eight characters,
+  strips URL userinfo, and removes every URL query value through one shared helper.
 - Token URLs containing userinfo are rejected.
 
 ### Deprecated
@@ -225,6 +227,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- SigV4 form and STS tests now use the literal AWS suite inputs. Release and
+  desktop-bundle apt installs now have bounded steps, retries, and HTTP timeouts.
 - Over-long Unix control socket paths now warn and fall back to TCP instead of
   preventing daemon startup. Socket tests use short paths on macOS, and the
   Windows single-instance test no longer requires session debug output.

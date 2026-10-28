@@ -5,6 +5,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use hofund_plugin_api::{
     AuthChoice, ListKind, ListQuery, ModelList, ModelSpec, PluginError, PluginErrorKind,
+    redact_token, safe_url,
 };
 use hofund_plugin_sdk::{
     PageError, PageErrorKind, after_id, gemini_models_with_dropped, json_error_message,
@@ -120,7 +121,7 @@ impl ModelClient {
                     if models.is_empty() {
                         errors.push(PluginError::decode(format!(
                             "{}: no models listed",
-                            self.safe_url(&candidate.url)
+                            safe_url(&candidate.url)
                         )));
                         continue;
                     }
@@ -224,7 +225,7 @@ impl ModelClient {
         } else {
             json_error_message(&page.body)
         };
-        let mut message = format!("{}: HTTP {}", self.safe_url(url), page.status);
+        let mut message = format!("{}: HTTP {}", safe_url(url), page.status);
         if !detail.is_empty() {
             message.push_str(&format!(" ({detail})"));
         }
@@ -376,17 +377,9 @@ impl ModelClient {
             .chain(self.endpoint.headers.iter().map(|(_, value)| value))
             .filter(|value| !value.is_empty())
         {
-            clean = clean.replace(secret, "[redacted]");
+            clean = redact_token(&clean, secret);
         }
         clean
-    }
-
-    pub fn safe_url(&self, url: &str) -> String {
-        let without_fragment = url.split('#').next().unwrap_or(url);
-        match without_fragment.split_once('?') {
-            Some((base, _)) => format!("{base}?<redacted>"),
-            None => without_fragment.to_owned(),
-        }
     }
 }
 
@@ -1004,6 +997,35 @@ mod tests {
         assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Cancelled);
         assert_eq!(error.message(), "cancel [redacted]");
         assert!(!error.message().contains("SECRET-API-KEY"));
+    }
+
+    #[test]
+    fn redaction_does_not_mask_secret_substrings() {
+        let mut endpoint = crate::http::Endpoint::new("azure", "https://example.test/openai/v1");
+        endpoint.api_key = "secret-token".to_owned();
+        let client = super::ModelClient::new(&endpoint).expect("client");
+        assert_eq!(
+            client.redact("secret-token prefixsecret-token secret-tokensuffix"),
+            "[redacted] prefixsecret-token secret-tokensuffix"
+        );
+    }
+
+    #[test]
+    fn redaction_ignores_short_header_values() {
+        let mut endpoint = crate::http::Endpoint::new("azure", "https://example.test/openai/v1");
+        endpoint
+            .headers
+            .push(("x-short".to_owned(), "tiny".to_owned()));
+        let client = super::ModelClient::new(&endpoint).expect("client");
+        assert_eq!(client.redact("tiny tinyish"), "tiny tinyish");
+    }
+
+    #[test]
+    fn model_urls_hide_userinfo_and_short_query_values() {
+        assert_eq!(
+            super::safe_url("https://user:pass@example.test/models?key=tiny#fragment"),
+            "https://example.test/models?<redacted>"
+        );
     }
 
     #[test]

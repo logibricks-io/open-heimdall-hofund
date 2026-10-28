@@ -591,6 +591,8 @@ WriteCtx::fn home (& self) -> & Path
 WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
 const API
 const PROBE_CAP
+fn redact_token (text : & str , secret : & str) -> String
+fn safe_url (url : & str) -> String
 kernel::AccountBackend
 kernel::AccountBackend::async fn list (& self , plugin : & PluginId) -> Result < Vec < Account > , PluginError >
 kernel::AccountBackend::async fn remove (& self , plugin : & PluginId , id : & AccountId) -> Result < () , PluginError >
@@ -622,3 +624,5 @@ kernel::SecretsBackend
 kernel::SecretsBackend::async fn get (& self , plugin : & PluginId , id : & str) -> Result < Option < SecretString > , PluginError >
 kernel::fn expose_secret (secret : & SecretString) -> & str
 mod kernel
+redact_token
+safe_url

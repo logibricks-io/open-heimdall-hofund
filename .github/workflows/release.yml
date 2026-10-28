@@ -145,9 +145,12 @@ jobs:
       # menu-bar host libraries. See docs/release.md.
       - name: Install Linux host libraries
         if: runner.os == 'Linux'
+        # The apt mirror sometimes stalls; fail fast so the job can be rerun.
+        timeout-minutes: 10
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
             -o Dpkg::Options::="--force-confold" \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
