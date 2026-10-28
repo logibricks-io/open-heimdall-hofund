@@ -312,7 +312,11 @@ fn shipped_codex_disconnect_refuses_a_broken_file_until_force() {
 fn shipped_codex_read_and_revert_cover_existing_and_missing_files() {
     let description = hofund_plugin_registry::agent("codex").expect("shipped codex");
     for os in [TargetOs::Linux, TargetOs::Macos, TargetOs::Windows] {
-        for (name, initial) in [("existing", Some(USER_CONFIG)), ("missing", None)] {
+        for (name, initial) in [
+            ("existing", Some(USER_CONFIG)),
+            ("missing", None),
+            ("missing-parent", None),
+        ] {
             let context = format!("{os:?} / {name}");
             let legacy_home = scratch();
             let compiled_home = scratch();
@@ -321,7 +325,7 @@ fn shipped_codex_read_and_revert_cover_existing_and_missing_files() {
             if let Some(initial) = initial {
                 write(&legacy_path, initial);
                 write(&compiled_path, initial);
-            } else {
+            } else if name == "missing" {
                 fs::create_dir_all(legacy_path.parent().expect("parent")).expect("legacy parent");
                 fs::create_dir_all(compiled_path.parent().expect("parent"))
                     .expect("compiled parent");
@@ -387,20 +391,33 @@ fn shipped_codex_read_and_revert_cover_existing_and_missing_files() {
                 .revert(&legacy_session)
                 .expect("legacy revert");
             compiled.revert(&compiled_session).expect("compiled revert");
-            assert_eq!(tree(&legacy_home), before, "{context}: legacy revert");
-            assert_eq!(
-                tree(&compiled_home),
-                before,
-                "{context}: revert did not restore the initial tree"
-            );
-            if let Some(initial) = initial {
+            if name == "missing-parent" {
                 assert_eq!(
-                    fs::read(&compiled_path).expect("compiled reverted bytes"),
-                    initial.as_bytes(),
-                    "{context}: reverted bytes"
+                    tree(&legacy_home),
+                    tree(&compiled_home),
+                    "{context}: revert tree"
+                );
+                assert!(!compiled_path.exists(), "{context}: created file remains");
+                assert!(
+                    compiled_home.join(".codex").is_dir(),
+                    "{context}: revert removed the empty directory"
                 );
             } else {
-                assert!(!compiled_path.exists(), "{context}: created file remains");
+                assert_eq!(tree(&legacy_home), before, "{context}: legacy revert");
+                assert_eq!(
+                    tree(&compiled_home),
+                    before,
+                    "{context}: revert did not restore the initial tree"
+                );
+                if let Some(initial) = initial {
+                    assert_eq!(
+                        fs::read(&compiled_path).expect("compiled reverted bytes"),
+                        initial.as_bytes(),
+                        "{context}: reverted bytes"
+                    );
+                } else {
+                    assert!(!compiled_path.exists(), "{context}: created file remains");
+                }
             }
         }
     }
