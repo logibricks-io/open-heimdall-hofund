@@ -19,6 +19,12 @@ struct Row {
     keys_url: &'static str,
 }
 
+struct Alias {
+    id: &'static str,
+    preset: &'static str,
+    region: Option<&'static str>,
+}
+
 struct Region {
     id: &'static str,
     name: &'static str,
@@ -552,6 +558,161 @@ const ROWS: &[Row] = &[
         website: "https://opencode.ai/docs/zen",
         keys_url: "https://opencode.ai/auth",
     },
+    // reference: internal/provider/presets.go:231
+    // note kept ASCII as in the old catalog
+    Row {
+        id: "baidu-qianfan",
+        name: "Baidu Qianfan",
+        kind: "vendor",
+        catalog: "",
+        note: "Token Plan - pay as you go",
+        chat: "https://qianfan.baidubce.com/v2/tokenplan/personal",
+        responses: "https://qianfan.baidubce.com/v2/tokenplan/personal",
+        anthropic: "https://qianfan.baidubce.com/anthropic/tokenplan/personal",
+        website: "https://cloud.baidu.com/doc/qianfan/s/Dmrabu8b6",
+        keys_url: "https://console.bce.baidu.com/qianfan/resource/token-plan",
+    },
+    // reference: internal/provider/presets.go:144
+    Row {
+        id: "deepseek",
+        name: "DeepSeek",
+        kind: "vendor",
+        catalog: "deepseek",
+        note: "",
+        chat: "https://api.deepseek.com/v1",
+        responses: "https://api.deepseek.com/v1",
+        anthropic: "https://api.deepseek.com/anthropic",
+        website: "https://platform.deepseek.com",
+        keys_url: "https://platform.deepseek.com/api_keys",
+    },
+    // reference: internal/provider/presets.go:267
+    // note and region names kept ASCII as in the old catalog
+    Row {
+        id: "tencent-cloud",
+        name: "Tencent Cloud",
+        kind: "vendor",
+        catalog: "",
+        note: "Token Plan - pay as you go",
+        chat: "https://api.lkeap.cloud.tencent.com/plan/v3",
+        responses: "",
+        anthropic: "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+        website: "https://cloud.tencent.com/document/product/1823/130060",
+        keys_url: "https://console.cloud.tencent.com/tokenhub/tokenplan",
+    },
+    // reference: internal/provider/presets.go:166
+    Row {
+        id: "zhipu",
+        name: "Zhipu GLM",
+        kind: "vendor",
+        catalog: "zhipuai",
+        note: "",
+        chat: "https://open.bigmodel.cn/api/paas/v4",
+        responses: "",
+        anthropic: "https://open.bigmodel.cn/api/anthropic",
+        website: "https://open.bigmodel.cn",
+        keys_url: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys",
+    },
+];
+
+const ALIASES: &[Alias] = &[
+    // reference: internal/provider/presets.go:672
+    Alias {
+        id: "qianfan-token-plan",
+        preset: "baidu-qianfan",
+        region: None,
+    },
+    // reference: internal/provider/presets.go:673
+    Alias {
+        id: "tencent-token-plan",
+        preset: "tencent-cloud",
+        region: Some("plan"),
+    },
+    // reference: internal/provider/presets.go:675
+    Alias {
+        id: "tencent-tokenhub",
+        preset: "tencent-cloud",
+        region: Some("intl"),
+    },
+    // reference: internal/provider/presets.go:674
+    Alias {
+        id: "tencent-tokenhub-cn",
+        preset: "tencent-cloud",
+        region: Some("cn"),
+    },
+];
+
+const BAIDU_QIANFAN_MODELS: &[&str] = &[
+    "qianfan-code-latest",
+    "deepseek-v4.1-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-pro-0813",
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-0731",
+    "deepseek-v3.2",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "glm-5.1",
+    "glm-5",
+];
+
+const TENCENT_PLAN_MODELS: &[&str] = &[
+    "tc-code-latest",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "glm-5.1",
+    "glm-5",
+    "kimi-k3",
+    "kimi-k2.7-code",
+    "deepseek-v4-pro-202606",
+    "deepseek-v4-flash-202605",
+    "minimax-m3",
+    "minimax-m2.7",
+    "hy4-preview",
+    "hy3",
+];
+
+const TENCENT_ENTERPRISE_MODELS: &[&str] = &[
+    "auto",
+    "hy4-preview",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "kimi-k3",
+    "kimi-k2.7-code",
+    "kimi-k2.7-code-highspeed",
+    "kimi-k2.6",
+    "minimax-m3",
+    "minimax-m2.7",
+    "deepseek-v4.1-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-pro-0813",
+    "deepseek-v4-flash-0731",
+    "deepseek-v4-pro-202606",
+    "deepseek-v4-flash-202605",
+    "mimo-v2.6-pro",
+    "mimo-v2.6-flash",
+];
+
+const TENCENT_ENTERPRISE_INTL_MODELS: &[&str] = &[
+    "auto",
+    "hy4-preview",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "kimi-k3",
+    "kimi-k2.7-code",
+    "kimi-k2.7-code-highspeed",
+    "minimax-m3",
+    "deepseek-v4.1-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-pro-0813",
+    "deepseek-v4-flash-0731",
+    "deepseek-v4-pro-202606",
+    "deepseek-v4-flash-202605",
+    "mimo-v2.6-pro",
+    "mimo-v2.6-flash",
 ];
 
 const ALIBABA_PLAN_MODELS: &[&str] = &[
@@ -972,6 +1133,130 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
             ..NO_DETAILS
         },
     ),
+    (
+        "baidu-qianfan",
+        Details {
+            regions: &[
+                Region {
+                    id: "personal",
+                    name: "Token Plan Personal",
+                    chat: "https://qianfan.baidubce.com/v2/tokenplan/personal",
+                    responses: "https://qianfan.baidubce.com/v2/tokenplan/personal",
+                    anthropic: "https://qianfan.baidubce.com/anthropic/tokenplan/personal",
+                    ..NO_REGION
+                },
+                Region {
+                    id: "team",
+                    name: "Token Plan Enterprise",
+                    chat: "https://qianfan.baidubce.com/v2/tokenplan/team",
+                    responses: "https://qianfan.baidubce.com/v2/tokenplan/team",
+                    anthropic: "https://qianfan.baidubce.com/anthropic/tokenplan/team",
+                    ..NO_REGION
+                },
+                Region {
+                    id: "api",
+                    name: "Pay as you go",
+                    chat: "https://qianfan.baidubce.com/v2",
+                    responses: "https://qianfan.baidubce.com/v2",
+                    anthropic: "https://qianfan.baidubce.com/anthropic",
+                    lists: true,
+                    keys_url: "https://console.bce.baidu.com/iam/#/iam/apikey/list",
+                    ..NO_REGION
+                },
+            ],
+            region_label: "Plan",
+            no_list: true,
+            models: BAIDU_QIANFAN_MODELS,
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "tencent-cloud",
+        Details {
+            regions: &[
+                Region {
+                    id: "plan",
+                    name: "Plan - China",
+                    chat: "https://api.lkeap.cloud.tencent.com/plan/v3",
+                    anthropic: "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+                    website: "https://cloud.tencent.com/document/product/1823/130060",
+                    keys_url: "https://console.cloud.tencent.com/tokenhub/tokenplan",
+                    models: Some(TENCENT_PLAN_MODELS),
+                    ..NO_REGION
+                },
+                Region {
+                    id: "cn",
+                    name: "Pay as you go - China",
+                    chat: "https://tokenhub.tencentmaas.com/v1",
+                    responses: "https://tokenhub.tencentmaas.com/v1",
+                    anthropic: "https://tokenhub.tencentmaas.com",
+                    catalog: "tencent-tokenhub",
+                    website: "https://cloud.tencent.com/document/product/1823/130078",
+                    keys_url: "https://console.cloud.tencent.com/tokenhub/apikey",
+                    ..NO_REGION
+                },
+                Region {
+                    id: "intl",
+                    name: "Pay as you go - Global",
+                    chat: "https://tokenhub-intl.tencentmaas.com/v1",
+                    responses: "https://tokenhub-intl.tencentmaas.com/v1",
+                    anthropic: "https://tokenhub-intl.tencentmaas.com",
+                    catalog: "tencent-tokenhub",
+                    website: "https://www.tencentcloud.com/document/product/1300/78939",
+                    keys_url: "https://console.tencentcloud.com/tokenhub/apikey",
+                    ..NO_REGION
+                },
+                Region {
+                    id: "enterprise",
+                    name: "Enterprise plan - China",
+                    chat: "https://tokenhub.tencentmaas.com/plan/v3",
+                    responses: "https://tokenhub.tencentmaas.com/plan/v3",
+                    anthropic: "https://tokenhub.tencentmaas.com/plan/anthropic",
+                    website: "https://cloud.tencent.com/document/product/1823/130659",
+                    keys_url: "https://console.cloud.tencent.com/tokenhub/tokenplan",
+                    models: Some(TENCENT_ENTERPRISE_MODELS),
+                    ..NO_REGION
+                },
+                Region {
+                    id: "enterprise-intl",
+                    name: "Enterprise plan - Global",
+                    chat: "https://tokenhub-intl.tencentmaas.com/plan/v3",
+                    responses: "https://tokenhub-intl.tencentmaas.com/plan/v3",
+                    anthropic: "https://tokenhub-intl.tencentmaas.com/plan/anthropic",
+                    website: "https://cloud.tencent.com/document/product/1823/130659",
+                    keys_url: "https://console.tencentcloud.com/tokenhub/tokenplan",
+                    models: Some(TENCENT_ENTERPRISE_INTL_MODELS),
+                    ..NO_REGION
+                },
+            ],
+            hosts: true,
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "zhipu",
+        Details {
+            regions: &[
+                Region {
+                    id: "api",
+                    name: "Pay as you go",
+                    chat: "https://open.bigmodel.cn/api/paas/v4",
+                    anthropic: "https://open.bigmodel.cn/api/anthropic",
+                    ..NO_REGION
+                },
+                Region {
+                    id: "coding",
+                    name: "Coding Plan",
+                    chat: "https://open.bigmodel.cn/api/coding/paas/v4",
+                    responses: "https://open.bigmodel.cn/api/v1",
+                    anthropic: "https://open.bigmodel.cn/api/anthropic",
+                    ..NO_REGION
+                },
+            ],
+            region_label: "Plan",
+            ..NO_DETAILS
+        },
+    ),
 ];
 
 fn details(row: &Row) -> &'static Details {
@@ -983,6 +1268,22 @@ fn details(row: &Row) -> &'static Details {
 
 fn regions(row: &Row) -> impl Iterator<Item = Option<&'static Region>> {
     std::iter::once(None).chain(details(row).regions.iter().map(Some))
+}
+
+fn preset_row(id: &str) -> &'static Row {
+    ROWS.iter().find(|row| row.id == id).expect("batch row")
+}
+
+fn effective_alias_region(
+    alias: &Alias,
+    requested: Option<&'static Region>,
+) -> Option<&'static Region> {
+    requested.or_else(|| {
+        let row = preset_row(alias.preset);
+        alias
+            .region
+            .and_then(|id| details(row).regions.iter().find(|region| region.id == id))
+    })
 }
 
 fn endpoint(row: &Row, region: Option<&Region>, wire: Wire) -> &'static str {
@@ -1061,6 +1362,23 @@ fn batch_rows_live_in_openai_compat_and_left_the_catalog() {
         .expect_err("row left the built-in catalog");
         assert_eq!(error.to_string(), format!("unknown preset `{}`", row.id));
     }
+    for alias in ALIASES {
+        let (preset, region) = find_preset(alias.id).expect("compiled batch alias");
+        assert_eq!(preset.id, alias.preset);
+        assert_eq!(preset.plugin, "openai-compat");
+        assert_eq!(region, alias.region);
+        assert!(!catalog.contains(&alias.id), "{}", alias.id);
+        let error = resolve(&Resolve {
+            id: alias.id,
+            region: None,
+            wire: None,
+            base_url: "",
+            project: "",
+            location: "",
+        })
+        .expect_err("alias left the built-in catalog");
+        assert_eq!(error.to_string(), format!("unknown preset `{}`", alias.id));
+    }
 }
 
 #[test]
@@ -1104,6 +1422,14 @@ fn batch_rows_match_the_reference_literal() {
             assert_eq!(actual.videos, expected.videos);
         }
     }
+    for alias in ALIASES {
+        let actual = hofund_plugin_registry::compiled_aliases()
+            .iter()
+            .find(|actual| actual.id == alias.id)
+            .expect("compiled batch alias");
+        assert_eq!(actual.preset, alias.preset);
+        assert_eq!(actual.region, alias.region);
+    }
 }
 
 #[test]
@@ -1141,6 +1467,40 @@ fn batch_rows_resolve_like_the_old_catalog() {
             }
         }
     }
+    for alias in ALIASES {
+        let row = preset_row(alias.preset);
+        let (preset, _) = find_preset(alias.id).expect("compiled batch alias");
+        for requested in regions(row) {
+            let region = effective_alias_region(alias, requested);
+            let region_id = region.map(|region| region.id);
+            let cases = std::iter::once((None, Wire::Chat))
+                .chain(served(row, region).map(|(protocol, wire)| (Some(protocol), wire)));
+            for (protocol, wire) in cases {
+                for base_url in ["", OVERRIDE] {
+                    let selected = select(preset, region_id, &protocols, protocol, base_url)
+                        .expect("old catalog alias resolution");
+                    let expected_base = if base_url.is_empty() {
+                        endpoint(row, region, wire)
+                    } else {
+                        OVERRIDE
+                    };
+                    assert_eq!(
+                        selected.protocol,
+                        protocol.unwrap_or(ProtocolId::OPENAI_CHAT)
+                    );
+                    assert_eq!(selected.wire, wire, "{}", alias.id);
+                    assert_eq!(selected.base_url, expected_base, "{}", alias.id);
+                    assert_eq!(selected.region.map(|region| region.id), region_id);
+                    assert_eq!(
+                        credential_for(row.id, selected.wire, &selected.base_url),
+                        expected_credential(wire),
+                        "{} {wire:?} {base_url:?}",
+                        alias.id
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -1173,6 +1533,26 @@ fn batch_rows_reject_an_unknown_region_like_the_old_catalog() {
             );
         }
     }
+    for alias in ALIASES {
+        let row = preset_row(alias.preset);
+        let (preset, _) = find_preset(alias.id).expect("compiled batch alias");
+        let error = select(preset, Some("missing"), &protocols, None, "")
+            .expect_err("unknown alias region must fail");
+        let ids = details(row)
+            .regions
+            .iter()
+            .map(|region| region.id)
+            .collect::<Vec<_>>();
+        let (last, rest) = ids.split_last().expect("nonempty regions");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "preset `{}` has no region `missing`; expected {}, or {last}",
+                row.id,
+                rest.join(", ")
+            )
+        );
+    }
 }
 
 #[test]
@@ -1180,6 +1560,24 @@ fn batch_rows_model_plan_like_the_old_catalog() {
     for row in ROWS {
         let (preset, _) = find_preset(row.id).expect("compiled batch row");
         for region in regions(row) {
+            let compiled_region = region.map(|region| {
+                preset
+                    .regions
+                    .iter()
+                    .find(|actual| actual.id == region.id)
+                    .expect("compiled region")
+            });
+            assert_eq!(
+                model_plan_of(preset, compiled_region),
+                expected_model_plan(row, region)
+            );
+        }
+    }
+    for alias in ALIASES {
+        let row = preset_row(alias.preset);
+        let (preset, _) = find_preset(alias.id).expect("compiled batch alias");
+        for requested in regions(row) {
+            let region = effective_alias_region(alias, requested);
             let compiled_region = region.map(|region| {
                 preset
                     .regions

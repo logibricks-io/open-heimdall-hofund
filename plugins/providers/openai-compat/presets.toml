@@ -1,6 +1,25 @@
 # Rows recorded from the reference preset list
 # (`internal/provider/presets.go`) at commit cbbf3163cb3c87ee0c327a56bc5689ddc5eda947.
 
+[[alias]]
+id = "qianfan-token-plan"
+preset = "baidu-qianfan"
+
+[[alias]]
+id = "tencent-token-plan"
+preset = "tencent-cloud"
+region = "plan"
+
+[[alias]]
+id = "tencent-tokenhub"
+preset = "tencent-cloud"
+region = "intl"
+
+[[alias]]
+id = "tencent-tokenhub-cn"
+preset = "tencent-cloud"
+region = "cn"
+
 [[preset]]
 id = "302ai"
 name = "302.AI"
@@ -18,6 +37,43 @@ chat = "https://aihubmix.com/v1"
 anthropic = "https://aihubmix.com"
 website = "https://aihubmix.com"
 keys_url = "https://console.aihubmix.com/token"
+
+[[preset]]
+id = "baidu-qianfan"
+name = "Baidu Qianfan"
+kind = "vendor"
+note = "Token Plan - pay as you go"
+chat = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+responses = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+anthropic = "https://qianfan.baidubce.com/anthropic/tokenplan/personal"
+website = "https://cloud.baidu.com/doc/qianfan/s/Dmrabu8b6"
+keys_url = "https://console.bce.baidu.com/qianfan/resource/token-plan"
+no_list = true
+models = ["qianfan-code-latest", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash", "deepseek-v4-flash-0731", "deepseek-v3.2", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5"]
+region_label = "Plan"
+
+[[preset.region]]
+id = "personal"
+name = "Token Plan Personal"
+chat = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+responses = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+anthropic = "https://qianfan.baidubce.com/anthropic/tokenplan/personal"
+
+[[preset.region]]
+id = "team"
+name = "Token Plan Enterprise"
+chat = "https://qianfan.baidubce.com/v2/tokenplan/team"
+responses = "https://qianfan.baidubce.com/v2/tokenplan/team"
+anthropic = "https://qianfan.baidubce.com/anthropic/tokenplan/team"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://qianfan.baidubce.com/v2"
+responses = "https://qianfan.baidubce.com/v2"
+anthropic = "https://qianfan.baidubce.com/anthropic"
+lists = true
+keys_url = "https://console.bce.baidu.com/iam/#/iam/apikey/list"
 
 [[preset]]
 id = "bailian-token-plan"
@@ -62,6 +118,17 @@ responses = "https://api.commandcode.ai/provider/v1"
 anthropic = "https://api.commandcode.ai/provider"
 website = "https://commandcode.ai/docs/provider"
 keys_url = "https://commandcode.ai/settings/keys"
+
+[[preset]]
+id = "deepseek"
+name = "DeepSeek"
+kind = "vendor"
+catalog = "deepseek"
+chat = "https://api.deepseek.com/v1"
+responses = "https://api.deepseek.com/v1"
+anthropic = "https://api.deepseek.com/anthropic"
+website = "https://platform.deepseek.com"
+keys_url = "https://platform.deepseek.com/api_keys"
 
 [[preset]]
 id = "fireworks"
@@ -371,6 +438,66 @@ chat = "https://api.stepfun.com/v1"
 anthropic = "https://api.stepfun.com"
 
 [[preset]]
+id = "tencent-cloud"
+name = "Tencent Cloud"
+kind = "vendor"
+note = "Token Plan - pay as you go"
+chat = "https://api.lkeap.cloud.tencent.com/plan/v3"
+anthropic = "https://api.lkeap.cloud.tencent.com/plan/anthropic"
+website = "https://cloud.tencent.com/document/product/1823/130060"
+keys_url = "https://console.cloud.tencent.com/tokenhub/tokenplan"
+hosts = true
+
+[[preset.region]]
+id = "plan"
+name = "Plan - China"
+chat = "https://api.lkeap.cloud.tencent.com/plan/v3"
+anthropic = "https://api.lkeap.cloud.tencent.com/plan/anthropic"
+keys_url = "https://console.cloud.tencent.com/tokenhub/tokenplan"
+website = "https://cloud.tencent.com/document/product/1823/130060"
+models = ["tc-code-latest", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "kimi-k3", "kimi-k2.7-code", "deepseek-v4-pro-202606", "deepseek-v4-flash-202605", "minimax-m3", "minimax-m2.7", "hy4-preview", "hy3"]
+
+[[preset.region]]
+id = "cn"
+name = "Pay as you go - China"
+chat = "https://tokenhub.tencentmaas.com/v1"
+responses = "https://tokenhub.tencentmaas.com/v1"
+anthropic = "https://tokenhub.tencentmaas.com"
+keys_url = "https://console.cloud.tencent.com/tokenhub/apikey"
+website = "https://cloud.tencent.com/document/product/1823/130078"
+catalog = "tencent-tokenhub"
+
+[[preset.region]]
+id = "intl"
+name = "Pay as you go - Global"
+chat = "https://tokenhub-intl.tencentmaas.com/v1"
+responses = "https://tokenhub-intl.tencentmaas.com/v1"
+anthropic = "https://tokenhub-intl.tencentmaas.com"
+keys_url = "https://console.tencentcloud.com/tokenhub/apikey"
+website = "https://www.tencentcloud.com/document/product/1300/78939"
+catalog = "tencent-tokenhub"
+
+[[preset.region]]
+id = "enterprise"
+name = "Enterprise plan - China"
+chat = "https://tokenhub.tencentmaas.com/plan/v3"
+responses = "https://tokenhub.tencentmaas.com/plan/v3"
+anthropic = "https://tokenhub.tencentmaas.com/plan/anthropic"
+keys_url = "https://console.cloud.tencent.com/tokenhub/tokenplan"
+website = "https://cloud.tencent.com/document/product/1823/130659"
+models = ["auto", "hy4-preview", "glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6", "minimax-m3", "minimax-m2.7", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "deepseek-v4-pro-202606", "deepseek-v4-flash-202605", "mimo-v2.6-pro", "mimo-v2.6-flash"]
+
+[[preset.region]]
+id = "enterprise-intl"
+name = "Enterprise plan - Global"
+chat = "https://tokenhub-intl.tencentmaas.com/plan/v3"
+responses = "https://tokenhub-intl.tencentmaas.com/plan/v3"
+anthropic = "https://tokenhub-intl.tencentmaas.com/plan/anthropic"
+keys_url = "https://console.tencentcloud.com/tokenhub/tokenplan"
+website = "https://cloud.tencent.com/document/product/1823/130659"
+models = ["auto", "hy4-preview", "glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "minimax-m3", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "deepseek-v4-pro-202606", "deepseek-v4-flash-202605", "mimo-v2.6-pro", "mimo-v2.6-flash"]
+
+[[preset]]
 id = "together"
 name = "Together AI"
 kind = "relay"
@@ -524,3 +651,27 @@ name = "Coding Plan"
 chat = "https://api.z.ai/api/coding/paas/v4"
 responses = "https://api.z.ai/api/v1"
 anthropic = "https://api.z.ai/api/anthropic"
+
+[[preset]]
+id = "zhipu"
+name = "Zhipu GLM"
+kind = "vendor"
+catalog = "zhipuai"
+chat = "https://open.bigmodel.cn/api/paas/v4"
+anthropic = "https://open.bigmodel.cn/api/anthropic"
+website = "https://open.bigmodel.cn"
+keys_url = "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys"
+region_label = "Plan"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://open.bigmodel.cn/api/paas/v4"
+anthropic = "https://open.bigmodel.cn/api/anthropic"
+
+[[preset.region]]
+id = "coding"
+name = "Coding Plan"
+chat = "https://open.bigmodel.cn/api/coding/paas/v4"
+responses = "https://open.bigmodel.cn/api/v1"
+anthropic = "https://open.bigmodel.cn/api/anthropic"

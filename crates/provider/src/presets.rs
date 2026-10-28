@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 22);
+        assert_eq!(catalog.preset.len(), 18);
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
@@ -733,18 +733,6 @@ mod tests {
         assert_eq!(anthropic.wire, Wire::Messages);
         assert_eq!(anthropic.base_url, "https://api.anthropic.com");
         assert_eq!(anthropic.credential, crate::Credential::XApiKey);
-
-        let deepseek = resolve(&Resolve {
-            id: "deepseek",
-            region: None,
-            wire: Some(Wire::Messages),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("deepseek");
-        assert_eq!(deepseek.base_url, "https://api.deepseek.com/anthropic");
-        assert_eq!(deepseek.credential, crate::Credential::MessagesBoth);
 
         let bedrock = resolve(&Resolve {
             id: "bedrock",
@@ -838,29 +826,6 @@ mod tests {
         .expect("pasted");
         assert_eq!(pasted.base_url, "https://mine.openai.azure.com/openai/v1");
         assert_eq!(pasted.wire, Wire::Responses);
-
-        let alias = resolve(&Resolve {
-            id: "tencent-tokenhub",
-            region: None,
-            wire: Some(Wire::Responses),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("alias");
-        assert_eq!(alias.preset_id, "tencent-cloud");
-        assert_eq!(alias.base_url, "https://tokenhub-intl.tencentmaas.com/v1");
-
-        let zhipu = resolve(&Resolve {
-            id: "zhipu",
-            region: Some("coding"),
-            wire: Some(Wire::Responses),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("zhipu");
-        assert_eq!(zhipu.base_url, "https://open.bigmodel.cn/api/v1");
 
         let google = resolve(&Resolve {
             id: "google",
