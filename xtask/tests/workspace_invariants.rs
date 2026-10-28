@@ -420,6 +420,26 @@ fn process_temp_dir_scanner_has_positive_and_negative_cases() {
     assert!(!uses_process_temp_dir(
         "let root = tempfile::tempdir().expect(\"temp dir\");"
     ));
+    for spelling in [
+        concat!("use std::env::", "temp_dir;\nlet root = temp_dir();"),
+        concat!("use std::env;\nlet root = env::", "temp_dir();"),
+        concat!("let root = env :: ", "temp_dir ();"),
+        concat!("use std::env::{self, ", "temp_dir};"),
+        concat!("use std::env::{", "temp_dir as scratch};"),
+        concat!("let root = std::env::var_os(\"TM", "PDIR\");"),
+        concat!("let root = std::env::var(\"TE", "MP\");"),
+        concat!("let root = std::env::var(\"T", "MP\");"),
+    ] {
+        assert!(uses_process_temp_dir(spelling), "{spelling}");
+    }
+    for clean in [
+        "let root = tempfile::TempDir::new();",
+        "use std::env::{self, var};",
+        "fn scratch_temp_dir_guard() {}",
+        concat!("let name = \"TM", "PDIR_SUFFIX\";"),
+    ] {
+        assert!(!uses_process_temp_dir(clean), "{clean}");
+    }
     let runtime = concat!(
         "fn runtime() -> PathBuf { std::env::",
         "temp_dir() }\n#[cfg(test)]\nmod tests {}\n"
@@ -464,7 +484,27 @@ fn test_code<'a>(relative: &str, source: &'a str) -> &'a str {
 }
 
 fn uses_process_temp_dir(source: &str) -> bool {
-    source.contains(concat!("std::env::", "temp_dir"))
+    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains(concat!("env::", "temp_dir")) {
+        return true;
+    }
+    // Grouped imports of the temp-dir function from the env module.
+    let group = concat!("env::", "{");
+    let mut rest = compact.as_str();
+    while let Some(start) = rest.find(group) {
+        rest = &rest[start + group.len()..];
+        let end = rest.find('}').unwrap_or(rest.len());
+        if rest[..end]
+            .split(',')
+            .any(|item| item == "temp_dir" || item.starts_with(concat!("temp_dir", "as")))
+        {
+            return true;
+        }
+    }
+    // Paths built from the temp-dir environment variables.
+    [concat!("TM", "PDIR"), concat!("TE", "MP"), concat!("T", "MP")]
+        .into_iter()
+        .any(|name| compact.contains(&format!("\"{name}\"")))
 }
 
 fn platform_win_exempt(member: &str) -> bool {

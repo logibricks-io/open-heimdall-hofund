@@ -1589,6 +1589,12 @@ fn batch_rows_match_the_reference_literal() {
         assert_eq!(preset.anthropic, row.anthropic);
         assert_eq!(preset.website, row.website);
         assert_eq!(preset.keys_url, row.keys_url);
+        // Keys these reference rows never set must stay empty on the moved rows.
+        assert_eq!(preset.generative, "", "{}", row.id);
+        assert_eq!(preset.endpoint, "", "{}", row.id);
+        assert_eq!(preset.endpoint_hint, "", "{}", row.id);
+        assert_eq!(preset.site_host, "", "{}", row.id);
+        assert!(preset.config.is_empty(), "{}", row.id);
         let details = details(row);
         assert_eq!(preset.region_label, details.region_label);
         assert_eq!(preset.hosts, details.hosts);
@@ -1611,6 +1617,7 @@ fn batch_rows_match_the_reference_literal() {
             assert_eq!(actual.catalog, expected.catalog);
             assert_eq!(actual.website, expected.website);
             assert_eq!(actual.keys_url, expected.keys_url);
+            assert_eq!(actual.site_host, "", "{} {}", row.id, actual.id);
             assert_eq!(actual.models, expected.models);
             assert_eq!(actual.lists, expected.lists);
             assert_eq!(actual.embeddings, expected.embeddings);
