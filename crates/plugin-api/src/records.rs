@@ -178,14 +178,14 @@ impl QuotaObservation {
     ///
     /// This is a retry hint, not a quota window reset.
     #[must_use]
-    pub fn with_retry_after(mut self, after: Duration) -> Self {
+    pub const fn with_retry_after(mut self, after: Duration) -> Self {
         self.retry_after = Some(after);
         self
     }
 
     /// Sets the remaining units.
     #[must_use]
-    pub fn with_remaining(mut self, remaining: u64) -> Self {
+    pub const fn with_remaining(mut self, remaining: u64) -> Self {
         self.remaining = Some(remaining);
         self
     }
@@ -194,7 +194,7 @@ impl QuotaObservation {
     ///
     /// Together with `remaining`, this lets the kernel compute the used share.
     #[must_use]
-    pub fn with_limit(mut self, limit: u64) -> Self {
+    pub const fn with_limit(mut self, limit: u64) -> Self {
         self.limit = Some(limit);
         self
     }
@@ -203,7 +203,7 @@ impl QuotaObservation {
     ///
     /// A window reset is distinct from an HTTP retry hint.
     #[must_use]
-    pub fn with_window_reset(mut self, after: Duration) -> Self {
+    pub const fn with_window_reset(mut self, after: Duration) -> Self {
         self.window_reset = Some(after);
         self
     }
