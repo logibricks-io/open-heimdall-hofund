@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encrypted-file fallback, secret-free backend selection, and crash-safe migration
   from the legacy plaintext metadata file. Reads route by stored reference and
   load secrets per row, while kind-scoped v2 entries prevent cross-kind collisions.
+  Fallback keys publish without overwrite, and Linux links libdbus statically.
 - Opt-in loopback TCP control health and status with strict Bearer, Host, Origin,
   and mutation defenses, live disk/runtime revisions, and a typed TCP control client.
   Model `/health` now identifies the service as hofund.

@@ -172,7 +172,6 @@ impl Snapshot {
         {
             return Ok(secret);
         }
-        backend.prepare()?;
         let secret = backend.get(&row.kind, &row.plugin, &row.account, &row.secret_ref)?;
         self.secrets
             .lock()
@@ -754,7 +753,6 @@ impl AccountBackend for AccountStore {
                     return Ok(());
                 };
                 let reference = row.secret_ref.clone();
-                store.backend.prepare()?;
                 let mut rows = snapshot.rows.clone();
                 rows.retain(|row| {
                     !(row.kind == kind && row.plugin == plugin_id && row.account == id.as_str())

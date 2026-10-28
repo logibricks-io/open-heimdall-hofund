@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -9,12 +9,13 @@ use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use hofund_plugin_api::kernel;
 use hofund_plugin_api::{PluginKind, SecretString};
 #[cfg(target_os = "windows")]
-use keyring_core::CredentialStoreApi;
+use keyring_core::api::CredentialStoreApi;
 use secrecy::{ExposeSecret, SecretBox};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::accounts::{
-    AccountStorageKind, StoreError, backend_error, set_mode, sibling_path, write_atomic,
+    AccountStorageKind, StoreError, backend_error, set_mode, sibling_path, sync_parent,
+    write_atomic,
 };
 
 pub(crate) const KEYCHAIN_REFERENCE_V1: &str = "os-keychain:v1";
@@ -59,7 +60,6 @@ pub(crate) trait AccountSecretBackend: Send + Sync {
 
 pub(crate) fn default_backend(metadata_path: &Path) -> Arc<dyn AccountSecretBackend> {
     Arc::new(AutoBackend {
-        metadata_path: metadata_path.to_path_buf(),
         selected: Mutex::new(None),
         native: Mutex::new(None),
         native_error: None,
@@ -71,7 +71,6 @@ pub(crate) fn default_backend(metadata_path: &Path) -> Arc<dyn AccountSecretBack
 }
 
 struct AutoBackend {
-    metadata_path: PathBuf,
     selected: Mutex<Option<Arc<dyn AccountSecretBackend>>>,
     native: Mutex<Option<Arc<dyn AccountSecretBackend>>>,
     native_error: Option<String>,
@@ -90,7 +89,6 @@ impl AutoBackend {
             Err(error) => (None, Some(error)),
         };
         Self {
-            metadata_path: PathBuf::new(),
             selected: Mutex::new(Some(selected)),
             native: Mutex::new(native),
             native_error,
@@ -137,10 +135,7 @@ impl AutoBackend {
                     reason = %reason,
                     "OS credential store unavailable; using encrypted account file"
                 );
-                Arc::new(EncryptedFileBackend::new(
-                    sibling_path(&self.metadata_path, ".secrets"),
-                    sibling_path(&self.metadata_path, ".key"),
-                ))
+                Arc::clone(&self.file)
             }
         };
         let mut guard = self.selected.lock().map_err(|_| self.selection_lock())?;
@@ -179,7 +174,6 @@ impl AccountSecretBackend for AutoBackend {
         reference: &str,
     ) -> Result<SecretString, StoreError> {
         let backend = self.for_reference(reference)?;
-        backend.prepare()?;
         backend.get(kind, plugin, account, reference)
     }
 
@@ -204,7 +198,6 @@ impl AccountSecretBackend for AutoBackend {
         reference: &str,
     ) -> Result<(), StoreError> {
         let backend = self.for_reference(reference)?;
-        backend.prepare()?;
         backend.delete(kind, plugin, account, reference)
     }
 }
@@ -263,7 +256,7 @@ impl OsKeychainBackend {
         let backend = Self {
             store: windows_native_keyring_store::Store::new().map_err(|error| error.to_string())?,
         };
-        let entry = backend.entry("backend", "probe", KEYCHAIN_REFERENCE)?;
+        let entry = backend.entry("backend", "backend", "probe", KEYCHAIN_REFERENCE)?;
         match entry.get_secret() {
             Ok(mut secret) => {
                 secret.zeroize();
@@ -533,12 +526,23 @@ impl EncryptedFileBackend {
     }
 
     fn cipher(&self, plugin: &str, account: &str) -> Result<XChaCha20Poly1305, StoreError> {
+        if self.key.get().is_none() {
+            let key = load_existing_key(&self.key_path).map_err(|error| {
+                backend_error(
+                    AccountStorageKind::EncryptedFile,
+                    plugin,
+                    account,
+                    error.to_string(),
+                )
+            })?;
+            let _ = self.key.set(key);
+        }
         let key = self.key.get().ok_or_else(|| {
             backend_error(
                 AccountStorageKind::EncryptedFile,
                 plugin,
                 account,
-                "encrypted backend was not prepared under the account lock",
+                "encryption key is unavailable",
             )
         })?;
         XChaCha20Poly1305::new_from_slice(key.expose_secret()).map_err(|_| {
@@ -736,10 +740,16 @@ fn associated_data(version: u8, kind: &str, plugin: &str, account: &str) -> Stri
     }
 }
 
-fn load_or_create_key(
-    secrets_path: &Path,
-    key_path: &Path,
-) -> Result<SecretBox<[u8; KEY_LEN]>, StoreError> {
+fn load_existing_key(key_path: &Path) -> Result<SecretBox<[u8; KEY_LEN]>, StoreError> {
+    read_key_file(key_path)?.ok_or_else(|| {
+        StoreError::Format(format!(
+            "account encryption key `{}` is missing",
+            key_path.display()
+        ))
+    })
+}
+
+fn read_key_file(key_path: &Path) -> Result<Option<SecretBox<[u8; KEY_LEN]>>, StoreError> {
     match fs::symlink_metadata(key_path) {
         Ok(metadata) => {
             if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
@@ -759,51 +769,102 @@ fn load_or_create_key(
                 }
             }
         }
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(StoreError::Io(error.to_string())),
+    }
+    let mut bytes = match fs::read(key_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(StoreError::Io(error.to_string())),
+    };
+    if bytes.len() != KEY_LEN {
+        bytes.zeroize();
+        return Err(StoreError::Format(format!(
+            "account encryption key `{}` is not {KEY_LEN} bytes",
+            key_path.display()
+        )));
+    }
+    let mut array = [0_u8; KEY_LEN];
+    array.copy_from_slice(&bytes);
+    bytes.zeroize();
+    Ok(Some(boxed_key(array)))
+}
+
+fn boxed_key(mut array: [u8; KEY_LEN]) -> SecretBox<[u8; KEY_LEN]> {
+    let secret = SecretBox::new(Box::new(array));
+    array.zeroize();
+    secret
+}
+
+fn load_or_create_key(
+    secrets_path: &Path,
+    key_path: &Path,
+) -> Result<SecretBox<[u8; KEY_LEN]>, StoreError> {
+    if let Some(key) = read_key_file(key_path)? {
+        return Ok(key);
+    }
+    match fs::metadata(secrets_path) {
+        Ok(metadata) if metadata.len() > 0 => {
+            return Err(StoreError::Format(format!(
+                "account encryption key `{}` is missing while encrypted records exist",
+                key_path.display()
+            )));
+        }
+        Ok(_) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(StoreError::Io(error.to_string())),
     }
-    match fs::read(key_path) {
-        Ok(mut bytes) => {
-            if bytes.len() != KEY_LEN {
-                bytes.zeroize();
-                return Err(StoreError::Format(format!(
-                    "account encryption key `{}` is not {KEY_LEN} bytes",
-                    key_path.display()
-                )));
-            }
-            let mut array = [0_u8; KEY_LEN];
-            array.copy_from_slice(&bytes);
-            bytes.zeroize();
-            let secret = SecretBox::new(Box::new(array));
-            array.zeroize();
-            Ok(secret)
+    let mut key = Zeroizing::new([0_u8; KEY_LEN]);
+    getrandom::getrandom(&mut key[..])
+        .map_err(|error| StoreError::Io(format!("cannot generate account key: {error}")))?;
+    publish_key(key_path, &key)
+}
+
+fn publish_key(
+    key_path: &Path,
+    key: &[u8; KEY_LEN],
+) -> Result<SecretBox<[u8; KEY_LEN]>, StoreError> {
+    let mut suffix = [0_u8; 8];
+    getrandom::getrandom(&mut suffix)
+        .map_err(|error| StoreError::Io(format!("cannot generate key temporary name: {error}")))?;
+    let suffix: String = suffix.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temporary = sibling_path(key_path, &format!(".tmp-{suffix}"));
+    let write_result = (|| {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            if fs::metadata(secrets_path)
-                .map(|metadata| metadata.len() > 0)
-                .unwrap_or(false)
-            {
-                return Err(StoreError::Format(format!(
-                    "account encryption key `{}` is missing while encrypted records exist",
-                    key_path.display()
-                )));
-            }
-            let mut key = [0_u8; KEY_LEN];
-            getrandom::getrandom(&mut key).map_err(|error| {
-                key.zeroize();
-                StoreError::Io(format!("cannot generate account key: {error}"))
-            })?;
-            write_atomic(key_path, &key).inspect_err(|_| {
-                key.zeroize();
-            })?;
-            set_mode(key_path).inspect_err(|_| {
-                key.zeroize();
-            })?;
-            let secret = SecretBox::new(Box::new(key));
-            key.zeroize();
-            Ok(secret)
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| StoreError::Io(error.to_string()))?;
+        set_mode(&temporary)?;
+        file.write_all(key)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| StoreError::Io(error.to_string()))?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        fs::remove_file(&temporary).ok();
+        return Err(error);
+    }
+    match fs::hard_link(&temporary, key_path) {
+        Ok(()) => {
+            fs::remove_file(&temporary).map_err(|error| StoreError::Io(error.to_string()))?;
+            sync_parent(key_path)?;
+            Ok(boxed_key(*key))
         }
-        Err(error) => Err(StoreError::Io(error.to_string())),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            fs::remove_file(&temporary).ok();
+            sync_parent(key_path)?;
+            load_existing_key(key_path)
+        }
+        Err(error) => {
+            fs::remove_file(&temporary).ok();
+            Err(StoreError::Io(error.to_string()))
+        }
     }
 }
 
@@ -1220,11 +1281,68 @@ mod tests {
     }
 
     #[test]
-    fn native_backend_rejects_an_encrypted_file_reference() {
+    fn native_backend_rejects_encrypted_file_operations() {
         let backend = MemoryAccountSecrets::default();
         backend
+            .set(KIND, PLUGIN, ACCOUNT, KEYCHAIN_REFERENCE, secret())
+            .expect("seed");
+        let get_error = backend
             .get(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE)
             .expect_err("wrong backend reference");
+        assert!(get_error.to_string().contains("different backend"));
+        let set_error = backend
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .expect_err("wrong backend reference");
+        assert!(set_error.to_string().contains("different backend"));
+        let delete_error = backend
+            .delete(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE)
+            .expect_err("wrong backend reference");
+        assert!(delete_error.to_string().contains("different backend"));
+        backend
+            .get(KIND, PLUGIN, ACCOUNT, KEYCHAIN_REFERENCE)
+            .expect("original entry");
+    }
+
+    #[test]
+    fn file_backend_rejects_native_operations() {
+        let dir = scratch();
+        let path = dir.join("accounts.secrets");
+        let backend = EncryptedFileBackend::from_key(path, [29_u8; KEY_LEN]);
+        backend
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .expect("seed");
+        let get_error = backend
+            .get(KIND, PLUGIN, ACCOUNT, KEYCHAIN_REFERENCE)
+            .expect_err("wrong backend reference");
+        assert!(get_error.to_string().contains("different backend"));
+        let set_error = backend
+            .set(KIND, PLUGIN, ACCOUNT, KEYCHAIN_REFERENCE, secret())
+            .expect_err("wrong backend reference");
+        assert!(set_error.to_string().contains("different backend"));
+        let delete_error = backend
+            .delete(KIND, PLUGIN, ACCOUNT, KEYCHAIN_REFERENCE)
+            .expect_err("wrong backend reference");
+        assert!(delete_error.to_string().contains("different backend"));
+        backend
+            .get(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE)
+            .expect("original entry");
+    }
+
+    #[test]
+    fn changing_a_record_kind_fails_associated_data_authentication() {
+        let dir = scratch();
+        let path = dir.join("accounts.secrets");
+        let backend = EncryptedFileBackend::from_key(path.clone(), [31_u8; KEY_LEN]);
+        backend
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .expect("set");
+        let mut rows = read_records(&path).expect("records");
+        rows[0].kind = "agent".to_owned();
+        fs::write(&path, encode_records(&rows).expect("encode")).expect("tamper");
+        let error = backend
+            .get("agent", PLUGIN, ACCOUNT, FILE_REFERENCE)
+            .expect_err("wrong kind");
+        assert!(error.to_string().contains("authentication failed"));
     }
 
     #[test]
@@ -1240,6 +1358,25 @@ mod tests {
         fs::remove_file(&key_path).expect("remove key");
         let error = EncryptedFileBackend::open(path, key_path).expect_err("missing key");
         assert!(!format!("{error} {error:?}").contains(MARKER));
+    }
+
+    #[test]
+    fn second_key_publish_does_not_replace_the_first_key() {
+        let root = scratch();
+        let secrets_path = root.join("accounts.secrets");
+        let key_path = root.join("accounts.key");
+        load_or_create_key(&secrets_path, &key_path).expect("first key");
+        let first = fs::read(&key_path).expect("first bytes");
+        load_or_create_key(&secrets_path, &key_path).expect("second key");
+        let second = fs::read(&key_path).expect("second bytes");
+        assert!(first == second, "second publish replaced the key");
+        assert!(!root.0.read_dir().expect("directory").any(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-")
+        }));
     }
 
     #[test]
@@ -1345,7 +1482,6 @@ mod store_tests {
         let dir = tests::scratch();
         let path = dir.join("accounts.json");
         let backend = Arc::new(AutoBackend {
-            metadata_path: path.clone(),
             selected: Mutex::new(None),
             native: Mutex::new(None),
             native_error: None,
@@ -1358,6 +1494,23 @@ mod store_tests {
         assert!(backend.selected.lock().expect("selection").is_none());
         assert!(backend.native.lock().expect("native").is_none());
         assert!(!sibling_path(&path, ".lock").exists());
+    }
+
+    #[tokio::test]
+    async fn read_with_missing_key_does_not_create_key_file() {
+        let root = tests::scratch();
+        let path = root.join("accounts.json");
+        write_rows(&path, &[("work", FILE_REFERENCE)]);
+        let backend = Arc::new(EncryptedFileBackend::new(
+            sibling_path(&path, ".secrets"),
+            sibling_path(&path, ".key"),
+        ));
+        let store = AccountStore::open_with_backend(&path, backend).expect("open");
+        store
+            .secret(&key(), &AccountId::from_static("work"))
+            .await
+            .expect_err("missing key");
+        assert!(!sibling_path(&path, ".key").exists());
     }
 
     #[tokio::test]
