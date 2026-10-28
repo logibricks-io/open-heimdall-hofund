@@ -3,25 +3,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hofund_agent::Session;
 use hofund_config::Config;
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError, ControlErrorKind,
-    HealthResponse, ListenSource, ModelEntry, ModelListResponse, PicksResponse, PicksSetRequest,
-    ProviderListResponse, ProviderSummary, ProviderTestRequest, ProviderTestResponse, RouteModel,
-    RouteModelListResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
-    UsageTotals,
+    FieldIssue, HealthResponse, ListenSource, ModelEntry, ModelListResponse, PicksResponse,
+    PicksSetRequest, ProviderListResponse, ProviderSummary, ProviderTestRequest,
+    ProviderTestResponse, ProviderTestResult, RouteModel, RouteModelListResponse, ShutdownRequest,
+    ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
 };
-use hofund_agent::Session;
 use hofund_gateway::control::{ControlFailure, ControlFuture, ControlState};
+use hofund_plugin_api::ModelSpec;
 use hofund_router::Cooldowns;
 use hofund_usage::{Ledger, Window};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use super::control_agents::AgentOps;
-use super::{DaemonRegistry, ModelsHost, membership, plugin_for, protocol_of};
+use super::models::{PicksError, Timed, test_timeout};
+use super::{
+    DaemonError, DaemonRegistry, ErrorKind, ModelsHost, Picks, control_map, membership, plugin_for,
+    protocol_of,
+};
 
 pub(crate) struct DaemonControl {
     config_path: PathBuf,
@@ -68,7 +73,11 @@ impl DaemonControl {
                 registry_agents,
                 config_path,
                 format!("http://{}", config.listen),
-                config.routes.iter().map(|route| route.model.clone()).collect(),
+                config
+                    .routes
+                    .iter()
+                    .map(|route| route.model.clone())
+                    .collect(),
                 token_path,
             ),
             usage,
@@ -179,45 +188,85 @@ impl ControlState for DaemonControl {
             response.provider = id;
             response.fetched_at_ms = cached.fetched_at;
             response.delisted = cached.delisted;
-            response.models = cached
-                .models
-                .iter()
-                .map(|model| {
-                    let mut entry = ModelEntry::default();
-                    entry.id = model.id().to_owned();
-                    entry.display_name = model.display_name().map(str::to_owned);
-                    entry.context = (model.context() != 0).then(|| model.context());
-                    entry.max_output = (model.max_output() != 0).then(|| model.max_output());
-                    entry
-                })
-                .collect();
+            response.models = model_entries(&cached.models);
             response
         });
         Box::pin(async move { result.map_err(Into::into) })
     }
 
-    fn refresh_models(&self, _id: String) -> ControlFuture<'_, ModelListResponse> {
-        unavailable()
+    fn refresh_models(&self, id: String) -> ControlFuture<'_, ModelListResponse> {
+        Box::pin(async move {
+            self.provider_exists(&id)?;
+            let refreshed = self
+                .models
+                .refresh(self.config(), &self.config_path, &id)
+                .await
+                .map_err(daemon_failure)?;
+            let mut response = ModelListResponse::default();
+            response.provider = id;
+            response.fetched_at_ms = refreshed.fetched_at;
+            response.delisted = refreshed.delisted;
+            response.added = refreshed.added;
+            response.removed = refreshed.removed;
+            response.models = model_entries(&refreshed.models);
+            Ok(response)
+        })
     }
 
     fn test_provider(
         &self,
-        _id: String,
-        _request: ProviderTestRequest,
+        id: String,
+        request: ProviderTestRequest,
     ) -> ControlFuture<'_, ProviderTestResponse> {
-        unavailable()
+        Box::pin(async move {
+            self.provider_exists(&id)?;
+            let named = request.models.unwrap_or_default();
+            let limit = test_timeout(!named.is_empty());
+            let probes = tokio::time::timeout(
+                limit,
+                self.models.probe_timed(
+                    self.config(),
+                    &self.config_path,
+                    &id,
+                    named.iter().map(String::as_str).collect(),
+                ),
+            )
+            .await
+            .map_err(|_| {
+                ControlFailure::from(ControlError::new(
+                    ControlErrorKind::Timeout,
+                    format!("testing provider `{id}` timed out"),
+                    "control",
+                ))
+            })?
+            .map_err(daemon_failure)?;
+            let mut response = ProviderTestResponse::default();
+            response.provider = id;
+            response.results = probes.into_iter().map(test_result).collect();
+            Ok(response)
+        })
     }
 
-    fn picks(&self, _id: String) -> ControlFuture<'_, PicksResponse> {
-        unavailable()
+    fn picks(&self, id: String) -> ControlFuture<'_, PicksResponse> {
+        let result = self.provider_exists(&id).map(|()| {
+            let (picks, revision) = self.models.picks_with_revision(&id);
+            picks_response(&picks, revision)
+        });
+        Box::pin(async move { result.map_err(Into::into) })
     }
 
-    fn set_picks(
-        &self,
-        _id: String,
-        _request: PicksSetRequest,
-    ) -> ControlFuture<'_, PicksResponse> {
-        unavailable()
+    fn set_picks(&self, id: String, request: PicksSetRequest) -> ControlFuture<'_, PicksResponse> {
+        let result = self
+            .provider_exists(&id)
+            .and_then(|()| request.form())
+            .map_err(ControlFailure::from)
+            .and_then(|form| {
+                self.models
+                    .edit_picks(&id, Some(&request.expected_picks_revision), form)
+                    .map_err(|error| picks_failure(&id, error))
+            })
+            .map(|(picks, revision)| picks_response(&picks, revision));
+        Box::pin(async move { result })
     }
 
     fn route_models(&self) -> ControlFuture<'_, RouteModelListResponse> {
@@ -300,6 +349,109 @@ impl ControlState for DaemonControl {
     }
 }
 
+fn model_entries(models: &[ModelSpec]) -> Vec<ModelEntry> {
+    models
+        .iter()
+        .map(|model| {
+            let mut entry = ModelEntry::default();
+            entry.id = model.id().to_owned();
+            entry.display_name = model.display_name().map(str::to_owned);
+            entry.context = (model.context() != 0).then(|| model.context());
+            entry.max_output = (model.max_output() != 0).then(|| model.max_output());
+            entry
+        })
+        .collect()
+}
+
+fn picks_response(picks: &Picks, revision: String) -> PicksResponse {
+    let mut response = PicksResponse::default();
+    response.picks = picks.picks().to_vec();
+    response.picked_from = picks.picked_from().to_vec();
+    response.delisted = picks.delisted().to_vec();
+    response.picks_revision = revision;
+    response
+}
+
+fn picks_failure(id: &str, error: PicksError) -> ControlFailure {
+    let error = match error {
+        PicksError::Stale => ControlError::new(
+            ControlErrorKind::Conflict,
+            format!("the picks of provider `{id}` changed since they were read"),
+            "control",
+        )
+        .with_details(FieldIssue::new(
+            "expected_picks_revision",
+            "stale",
+            "read the picks again and retry",
+        )),
+        PicksError::Invalid(issue) => ControlError::new(
+            ControlErrorKind::Unprocessable,
+            issue.message.clone(),
+            "control",
+        )
+        .with_details(issue),
+        PicksError::Save(error) => ControlError::new(
+            ControlErrorKind::Internal,
+            format!("the picks of provider `{id}` were not saved: {error}"),
+            "control",
+        ),
+    };
+    error.into()
+}
+
+/// Maps a daemon failure to its control error, keeping an upstream status
+/// so a rate limit answers 429.
+fn daemon_failure(error: DaemonError) -> ControlFailure {
+    let message = error.to_string();
+    let retry_after = error.retry_after();
+    let (kind, status) = match error.kind() {
+        ErrorKind::NotFound => (ControlErrorKind::NotFound, None),
+        ErrorKind::Selection => (ControlErrorKind::Unprocessable, None),
+        ErrorKind::Timeout => (ControlErrorKind::Timeout, None),
+        ErrorKind::Internal => (ControlErrorKind::Internal, None),
+        ErrorKind::Upstream { kind, status } => {
+            let wire = control_map::provider_error(kind, status, retry_after);
+            (wire.kind, Some(wire.http_status))
+        }
+    };
+    let mut control = ControlError::new(kind, message, "control");
+    control.retry_after_ms = retry_after.map(control_map::round_up_ms);
+    ControlFailure {
+        error: control,
+        status,
+    }
+}
+
+fn test_result(timed: Timed) -> ProviderTestResult {
+    let mut result = ProviderTestResult::default();
+    result.model = timed.model;
+    result.latency_ms = Some(u64::try_from(timed.latency.as_millis()).unwrap_or(u64::MAX));
+    match timed.result {
+        Ok(outcome) => {
+            result.model = outcome.model;
+            result.ok = true;
+        }
+        Err(error) => {
+            if let ErrorKind::Upstream { status, .. } = error.kind() {
+                result.status = status;
+            }
+            result.error = Some(daemon_failure(error).error);
+        }
+    }
+    result
+}
+
+trait WithDetails {
+    fn with_details(self, issue: FieldIssue) -> Self;
+}
+
+impl WithDetails for ControlError {
+    fn with_details(mut self, issue: FieldIssue) -> Self {
+        self.details.push(issue);
+        self
+    }
+}
+
 /// The most rows one usage response carries. Totals still cover the whole
 /// period; `rows_truncated` reports that older rows were left out.
 pub(crate) const USAGE_ROW_LIMIT: usize = 10_000;
@@ -354,17 +506,6 @@ fn usage_row(row: hofund_usage::Row) -> UsageRow {
 
 fn internal(message: String) -> ControlError {
     ControlError::new(ControlErrorKind::Internal, message, "usage")
-}
-
-fn unavailable<T>() -> ControlFuture<'static, T> {
-    Box::pin(async {
-        Err(ControlError::new(
-            ControlErrorKind::Unavailable,
-            "not wired in this build",
-            "control",
-        )
-        .into())
-    })
 }
 
 pub(crate) fn unix_milliseconds() -> u64 {

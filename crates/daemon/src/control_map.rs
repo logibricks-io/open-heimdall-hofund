@@ -62,7 +62,7 @@ pub fn cooldown_reason(cause: CooldownCause) -> CooldownReason {
     }
 }
 
-fn round_up_ms(duration: Duration) -> u64 {
+pub(crate) fn round_up_ms(duration: Duration) -> u64 {
     let milliseconds = duration.as_millis().saturating_add(u128::from(
         !duration.subsec_nanos().is_multiple_of(1_000_000),
     ));

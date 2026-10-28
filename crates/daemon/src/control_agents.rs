@@ -554,7 +554,13 @@ mod tests {
         );
         let variants = [
             plan_revision("b", AgentAction::Connect, false, &target("t1"), &file(None)),
-            plan_revision("a", AgentAction::Disconnect, false, &target("t1"), &file(None)),
+            plan_revision(
+                "a",
+                AgentAction::Disconnect,
+                false,
+                &target("t1"),
+                &file(None),
+            ),
             plan_revision("a", AgentAction::Connect, true, &target("t1"), &file(None)),
             plan_revision(
                 "a",
@@ -570,8 +576,20 @@ mod tests {
                 &GatewayTarget::new("http://127.0.0.1:3425", "t1", Vec::new()),
                 &file(None),
             ),
-            plan_revision("a", AgentAction::Connect, false, &target("t1"), &file(Some(b""))),
-            plan_revision("a", AgentAction::Connect, false, &target("t1"), &file(Some(b"{}"))),
+            plan_revision(
+                "a",
+                AgentAction::Connect,
+                false,
+                &target("t1"),
+                &file(Some(b"")),
+            ),
+            plan_revision(
+                "a",
+                AgentAction::Connect,
+                false,
+                &target("t1"),
+                &file(Some(b"{}")),
+            ),
             plan_revision("a", AgentAction::Connect, false, &target("t1"), &[]),
         ];
         for (index, variant) in variants.iter().enumerate() {
@@ -582,9 +600,15 @@ mod tests {
 
     #[test]
     fn scrub_replaces_each_nonempty_token() {
-        assert_eq!(redact_diff("a tok b tok", "tok"), "a [redacted] b [redacted]");
+        assert_eq!(
+            redact_diff("a tok b tok", "tok"),
+            "a [redacted] b [redacted]"
+        );
         assert_eq!(redact_diff("unchanged", ""), "unchanged");
-        assert_eq!(scrub("old new", &["old", "", "new"]), "[redacted] [redacted]");
+        assert_eq!(
+            scrub("old new", &["old", "", "new"]),
+            "[redacted] [redacted]"
+        );
     }
 
     #[test]

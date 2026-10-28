@@ -33,12 +33,45 @@ impl StateStore {
             .unwrap_or_else(|| unreachable!("loading inserts provider state"))
     }
 
+    /// Applies `change` in memory and saves it, logging a failed save.
+    ///
+    /// The in-memory change is kept even when the save fails, so the
+    /// scheduled refresh keeps serving a fetched list.
     pub(super) fn update(&mut self, id: &str, change: impl FnOnce(&mut ProviderState)) {
+        let _ = self.update_saved(id, change);
+    }
+
+    /// Like [`Self::update`], but also reports whether the save succeeded.
+    pub(super) fn update_saved(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut ProviderState),
+    ) -> Result<(), StateError> {
         self.load(id);
         if let Some(state) = self.states.get_mut(id) {
             change(state);
         }
-        self.save(id);
+        self.save(id)
+    }
+
+    /// Applies `change` and saves it, or restores the previous in-memory
+    /// state and returns the error when the file cannot be written.
+    pub(super) fn try_update(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut ProviderState),
+    ) -> Result<(), StateError> {
+        self.load(id);
+        let Some(state) = self.states.get_mut(id) else {
+            return Ok(());
+        };
+        let before = state.clone();
+        change(state);
+        let saved = self.save(id);
+        if saved.is_err() {
+            self.states.insert(id.to_owned(), before);
+        }
+        saved
     }
 
     fn load(&mut self, id: &str) {
@@ -55,24 +88,57 @@ impl StateStore {
         self.states.insert(id.to_owned(), state.0);
     }
 
-    fn save(&mut self, id: &str) {
+    fn save(&mut self, id: &str) -> Result<(), StateError> {
         let Some(root) = &self.root else {
-            return;
+            return Ok(());
         };
         if self.mismatched.contains(id) {
             tracing::warn!(
                 provider.id = id,
                 "model state was not saved because the existing file was protected from replacement"
             );
-            return;
+            return Err(StateError::Mismatched);
         }
         let Some(state) = self.states.get(id) else {
-            return;
+            return Ok(());
         };
-        if let Err(error) = save_state(root, state) {
+        save_state(root, state).map_err(|error| {
             tracing::warn!(provider.id = id, %error, "could not save model state");
+            StateError::Save(error)
+        })
+    }
+}
+
+/// Why a provider's model state could not be written.
+#[derive(Debug)]
+pub(super) enum StateError {
+    /// The existing file belongs to another id and is never overwritten.
+    Mismatched,
+    /// Writing the file failed.
+    Save(io::Error),
+}
+
+impl std::fmt::Display for StateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mismatched => {
+                formatter.write_str("the existing model state file belongs to another provider id")
+            }
+            Self::Save(error) => write!(formatter, "could not save model state: {error}"),
         }
     }
+}
+
+/// Serializes provider state exactly as it is written to disk.
+pub(super) fn encode_state(state: &ProviderState) -> io::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(state).map_err(io::Error::other)
+}
+
+/// Hex SHA-256 of the bytes [`save_state`] writes for `state`.
+pub(super) fn revision(state: &ProviderState) -> String {
+    encode_state(state)
+        .map(|bytes| crate::control::revision(&bytes))
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,7 +373,7 @@ fn save_state(root: &Path, state: &ProviderState) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
     }
-    let bytes = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
+    let bytes = encode_state(state)?;
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = directory.join(format!(
         ".{}.{}.{}.tmp",

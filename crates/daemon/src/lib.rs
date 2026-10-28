@@ -53,6 +53,26 @@ pub use registry::{CompiledPreset, DaemonRegistry, RegistryAdapter};
 pub struct DaemonError {
     message: String,
     retry_after: Option<std::time::Duration>,
+    kind: ErrorKind,
+}
+
+/// What a [`DaemonError`] means to the control plane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ErrorKind {
+    /// The named provider is not configured.
+    NotFound,
+    /// No model could be chosen from the request and the provider's list.
+    Selection,
+    /// The provider answered with an error, or could not be reached.
+    Upstream {
+        kind: hofund_provider::ProviderErrorKind,
+        status: Option<u16>,
+    },
+    /// The control route ran past its deadline.
+    Timeout,
+    /// Anything else.
+    #[default]
+    Internal,
 }
 
 impl DaemonError {
@@ -60,7 +80,17 @@ impl DaemonError {
         Self {
             message: message.into(),
             retry_after: None,
+            kind: ErrorKind::Internal,
         }
+    }
+
+    const fn with_kind(mut self, kind: ErrorKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    const fn kind(&self) -> ErrorKind {
+        self.kind
     }
 
     fn with_retry_after(mut self, retry_after: Option<std::time::Duration>) -> Self {
@@ -349,21 +379,23 @@ async fn start_inner(
     if let Some(session) = control_session.as_mut() {
         let (shutdown_request, shutdown_requested) = tokio::sync::watch::channel(false);
         running = running.with_shutdown_request(shutdown_requested);
-        let state = Arc::new(control::DaemonControl::new(
-            path,
-            config.listen,
-            running.local_addr,
-            started_at_ms,
-            runtime_revision,
-            Arc::clone(&models_host),
-            Arc::clone(&config),
-            Arc::clone(&registry),
-            cooldowns,
-            Arc::clone(&usage),
-            token_path.clone(),
-            shutdown_request,
-        )
-        .with_agent_hooks(options.agent_session, options.token_generation));
+        let state = Arc::new(
+            control::DaemonControl::new(
+                path,
+                config.listen,
+                running.local_addr,
+                started_at_ms,
+                runtime_revision,
+                Arc::clone(&models_host),
+                Arc::clone(&config),
+                Arc::clone(&registry),
+                cooldowns,
+                Arc::clone(&usage),
+                token_path.clone(),
+                shutdown_request,
+            )
+            .with_agent_hooks(options.agent_session, options.token_generation),
+        );
         let control = hofund_gateway::control::Control::with_token_file(state, token, token_path);
         let mut tcp_listen = options.control_listen;
         #[cfg(unix)]
