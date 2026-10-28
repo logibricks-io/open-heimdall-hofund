@@ -463,7 +463,7 @@ fn warn_unrouted_model(
         return Ok(());
     };
     let routes = route_models(config).map_err(|error| error.to_string())?;
-    if !model_has_route(adapter.id(), &model, &routes) {
+    if !model_has_route(adapter.model_prefix(), &model, &routes) {
         eprintln!(
             "warning: {} model `{model}` has no route in {}",
             adapter.id(),
@@ -473,10 +473,10 @@ fn warn_unrouted_model(
     Ok(())
 }
 
-fn model_has_route(adapter_id: &str, model: &str, routes: &[String]) -> bool {
-    if adapter_id == "opencode" {
+fn model_has_route(model_prefix: Option<&str>, model: &str, routes: &[String]) -> bool {
+    if let Some(prefix) = model_prefix {
         return model
-            .strip_prefix("hofund/")
+            .strip_prefix(prefix)
             .is_some_and(|model| routes.iter().any(|route| route == model));
     }
     routes.iter().any(|route| route == model)
@@ -542,13 +542,34 @@ mod tests {
     }
 
     #[test]
-    fn opencode_route_matching_strips_only_its_own_provider_prefix() {
+    fn route_matching_uses_the_compiled_model_prefix() {
+        let catalog = hofund_agent::catalog(hofund_daemon::agent_descriptions())
+            .expect("compiled agent catalog");
+        let opencode = catalog.find("opencode").expect("compiled opencode");
+        let codex = catalog.find("codex").expect("compiled codex");
         let routes = vec!["route-a".to_owned()];
-        assert!(model_has_route("opencode", "hofund/route-a", &routes));
-        assert!(!model_has_route("opencode", "other/route-a", &routes));
+        assert!(model_has_route(
+            opencode.model_prefix(),
+            "hofund/route-a",
+            &routes
+        ));
+        assert!(!model_has_route(
+            opencode.model_prefix(),
+            "other/route-a",
+            &routes
+        ));
         // OpenCode spells selections as provider/model, so a bare model warns.
-        assert!(!model_has_route("opencode", "route-a", &routes));
-        assert!(!model_has_route("codex", "hofund/route-a", &routes));
+        assert!(!model_has_route(
+            opencode.model_prefix(),
+            "route-a",
+            &routes
+        ));
+        assert!(!model_has_route(
+            codex.model_prefix(),
+            "hofund/route-a",
+            &routes
+        ));
+        assert!(model_has_route(codex.model_prefix(), "route-a", &routes));
     }
 
     #[test]

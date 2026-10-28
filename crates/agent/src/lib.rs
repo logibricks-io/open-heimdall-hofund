@@ -390,6 +390,11 @@ pub trait AgentAdapter: Sync {
     /// Returns [`AgentError`] when the file exists but cannot be parsed.
     fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError>;
 
+    /// Prefix the agent uses for gateway route names, if any.
+    fn model_prefix(&self) -> Option<&str> {
+        None
+    }
+
     /// Reports install and connection state for `target`.
     ///
     /// # Errors

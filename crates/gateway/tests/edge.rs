@@ -429,7 +429,7 @@ async fn health_is_open_and_names_no_secret() {
         .await
         .expect("body");
     let text = String::from_utf8_lossy(&bytes);
-    assert_eq!(text, "{\"status\":\"ok\"}");
+    assert_eq!(text, "{\"status\":\"ok\",\"service\":\"hofund\"}");
     assert!(!text.contains("secret"));
 }
 
