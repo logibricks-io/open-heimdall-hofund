@@ -832,10 +832,9 @@ fn shipped_agents_honor_windows_mixed_case_environment_overrides() {
             })
             .collect::<Vec<_>>();
         paths.sort();
-        assert_eq!(
-            paths,
-            expected.iter().map(PathBuf::from).collect::<Vec<_>>()
-        );
+        let mut expected = expected.iter().map(PathBuf::from).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(paths, expected);
     }
 }
 
