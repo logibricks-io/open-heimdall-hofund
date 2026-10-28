@@ -782,18 +782,6 @@ keys_url = "https://openrouter.ai/keys"
 header_hints = ["HTTP-Referer", "X-OpenRouter-Title"]
 
 [[preset]]
-id = "opencode-go"
-name = "OpenCode Go"
-kind = "relay"
-catalog = "opencode-go"
-note = "open coding models, $10/month"
-chat = "https://opencode.ai/zen/go/v1"
-responses = "https://opencode.ai/zen/go/v1"
-anthropic = "https://opencode.ai/zen/go"
-website = "https://opencode.ai/docs/go"
-keys_url = "https://opencode.ai/auth"
-
-[[preset]]
 id = "clinepass"
 name = "ClinePass"
 kind = "relay"
@@ -830,34 +818,6 @@ no_key = true
 key_hint = "optional: free models need no key"
 
 [[preset]]
-id = "commandcode"
-name = "Command Code"
-kind = "relay"
-chat = "https://api.commandcode.ai/provider/v1"
-responses = "https://api.commandcode.ai/provider/v1"
-anthropic = "https://api.commandcode.ai/provider"
-website = "https://commandcode.ai/docs/provider"
-keys_url = "https://commandcode.ai/settings/keys"
-
-[[preset]]
-id = "together"
-name = "Together AI"
-kind = "relay"
-catalog = "togetherai"
-chat = "https://api.together.xyz/v1"
-website = "https://api.together.ai"
-keys_url = "https://api.together.ai/settings/api-keys"
-
-[[preset]]
-id = "fireworks"
-name = "Fireworks"
-kind = "relay"
-catalog = "fireworks-ai"
-chat = "https://api.fireworks.ai/inference/v1"
-website = "https://fireworks.ai"
-keys_url = "https://app.fireworks.ai/settings/users/api-keys"
-
-[[preset]]
 id = "siliconflow"
 name = "SiliconFlow"
 kind = "relay"
@@ -877,64 +837,6 @@ name = "Global"
 chat = "https://api.siliconflow.com/v1"
 keys_url = "https://cloud.siliconflow.com/account/ak"
 website = "https://cloud.siliconflow.com"
-
-[[preset]]
-id = "nvidia"
-name = "NVIDIA NIM"
-kind = "relay"
-catalog = "nvidia"
-chat = "https://integrate.api.nvidia.com/v1"
-website = "https://build.nvidia.com"
-keys_url = "https://build.nvidia.com/settings/api-keys"
-
-[[preset]]
-id = "modelscope"
-name = "ModelScope"
-kind = "relay"
-catalog = "modelscope"
-note = "API-Inference. Not the DashScope endpoints."
-chat = "https://api-inference.modelscope.cn/v1"
-responses = "https://api-inference.modelscope.cn/v1"
-website = "https://modelscope.cn/docs/model-service/API-Inference/intro"
-keys_url = "https://modelscope.cn/my/myaccesstoken"
-
-[[preset]]
-id = "aihubmix"
-name = "AiHubMix"
-kind = "relay"
-chat = "https://aihubmix.com/v1"
-anthropic = "https://aihubmix.com"
-website = "https://aihubmix.com"
-keys_url = "https://console.aihubmix.com/token"
-
-[[preset]]
-id = "pipellm"
-name = "PipeLLM"
-kind = "relay"
-chat = "https://api.pipellm.ai/openai/v1"
-responses = "https://api.pipellm.ai/v1"
-anthropic = "https://api.pipellm.ai"
-website = "https://www.pipellm.ai"
-keys_url = "https://console.pipellm.ai"
-
-[[preset]]
-id = "302ai"
-name = "302.AI"
-kind = "relay"
-chat = "https://api.302.ai/v1"
-anthropic = "https://api.302.ai"
-website = "https://302.ai"
-keys_url = "https://302.ai/api-keys/list"
-
-[[preset]]
-id = "cherryin"
-name = "CherryIN"
-kind = "relay"
-chat = "https://open.cherryin.ai/v1"
-responses = "https://open.cherryin.ai/v1"
-anthropic = "https://open.cherryin.ai"
-website = "https://open.cherryin.ai"
-keys_url = "https://open.cherryin.ai/console/token"
 
 [[preset]]
 id = "yylx"
