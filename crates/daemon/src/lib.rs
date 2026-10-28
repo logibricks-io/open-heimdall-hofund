@@ -52,6 +52,26 @@ pub use registry::{CompiledPreset, DaemonRegistry, RegistryAdapter};
 pub struct DaemonError {
     message: String,
     retry_after: Option<std::time::Duration>,
+    kind: ErrorKind,
+}
+
+/// What a [`DaemonError`] means to the control plane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ErrorKind {
+    /// The named provider is not configured.
+    NotFound,
+    /// No model could be chosen from the request and the provider's list.
+    Selection,
+    /// The provider answered with an error, or could not be reached.
+    Upstream {
+        kind: hofund_provider::ProviderErrorKind,
+        status: Option<u16>,
+    },
+    /// The control route ran past its deadline.
+    Timeout,
+    /// Anything else.
+    #[default]
+    Internal,
 }
 
 impl DaemonError {
@@ -59,7 +79,17 @@ impl DaemonError {
         Self {
             message: message.into(),
             retry_after: None,
+            kind: ErrorKind::Internal,
         }
+    }
+
+    const fn with_kind(mut self, kind: ErrorKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    const fn kind(&self) -> ErrorKind {
+        self.kind
     }
 
     fn with_retry_after(mut self, retry_after: Option<std::time::Duration>) -> Self {

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 use hofund_config::Config;
+use hofund_control_proto::{FieldIssue, PickEdit, PicksForm};
 use hofund_plugin_api::{
     AuthChoice, CredentialStyle, DynUpstreamFactory, HostContext, ListKind, ListQuery, ModelSpec,
     PluginError, ProbeQuery, ProbeReport, ProtocolId, RawTable, RawValue, SecretString,
@@ -20,7 +21,7 @@ use hofund_provider::{Credential, Endpoint, ModelPlan, Vertex, Wire};
 use tracing::Instrument;
 
 use super::{
-    DaemonError, DaemonRegistry, Planned, RegistryAdapter, beside, build_raw_plugin,
+    DaemonError, DaemonRegistry, ErrorKind, Planned, RegistryAdapter, beside, build_raw_plugin,
     credential_name, endpoint_for, implementation_id, insert_options, option_present, plan_using,
     plugin_for, protocol_of, resolve, show,
 };
@@ -177,6 +178,137 @@ struct Applied {
     models: ProviderModels,
     dropped: Vec<String>,
     taken: Vec<String>,
+    saved: Result<(), super::models_state::StateError>,
+}
+
+/// What a manual refresh fetched and changed.
+pub(crate) struct Refreshed {
+    pub(crate) models: Vec<ModelSpec>,
+    pub(crate) added: Vec<String>,
+    pub(crate) removed: Vec<String>,
+    pub(crate) delisted: Vec<String>,
+    pub(crate) fetched_at: Option<u64>,
+}
+
+/// One probe's result and how long it took.
+pub(crate) struct Timed {
+    pub(crate) model: String,
+    pub(crate) latency: std::time::Duration,
+    pub(crate) result: Result<ProbeOutcome, DaemonError>,
+}
+
+/// Why a picks edit was refused or not saved.
+#[derive(Debug)]
+pub(crate) enum PicksError {
+    /// The expected revision no longer matches the saved state.
+    Stale,
+    /// The edit is not valid against the current picks.
+    Invalid(FieldIssue),
+    /// The state file could not be written.
+    Save(super::models_state::StateError),
+}
+
+/// How long a manual refresh may take.
+pub(crate) const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a provider test may take: host-side selection gets 30 s and
+/// named models 90 s, as the reference CLI allows.
+pub(crate) const fn test_timeout(named: bool) -> std::time::Duration {
+    if named {
+        std::time::Duration::from_secs(90)
+    } else {
+        std::time::Duration::from_secs(30)
+    }
+}
+
+fn picks_of(state: &super::models_state::ProviderState) -> Picks {
+    Picks {
+        picks: state.picks.clone(),
+        picked_from: state.picked_from.clone(),
+        delisted: state.delisted.clone(),
+    }
+}
+
+/// Listed ids served when a provider has no picks: every model that is not
+/// an image, video, or router model.
+fn default_exposed(models: &[ModelSpec]) -> Vec<String> {
+    models
+        .iter()
+        .filter(|model| !model.draws() && !model.films() && !model.decides())
+        .map(|model| model.id().to_owned())
+        .collect()
+}
+
+/// The picks a form leaves, following the reference `editPicks`.
+fn next_picks(
+    provider_id: &str,
+    current: &[String],
+    listed: &[ModelSpec],
+    form: PicksForm,
+) -> Result<Vec<String>, PicksError> {
+    match form {
+        PicksForm::Replace(ids) => {
+            let mut picks = Vec::with_capacity(ids.len());
+            for id in ids {
+                if !picks.contains(&id) {
+                    picks.push(id);
+                }
+            }
+            Ok(picks)
+        }
+        PicksForm::Edit(edits) => {
+            let mut picks = if current.is_empty() {
+                default_exposed(listed)
+            } else {
+                current.to_vec()
+            };
+            let prefix = format!("{provider_id}/");
+            for edit in edits {
+                match edit {
+                    PickEdit::Add(id) => {
+                        let id = id.strip_prefix(&prefix).unwrap_or(&id).to_owned();
+                        if !picks.contains(&id) {
+                            picks.push(id);
+                        }
+                    }
+                    PickEdit::Remove(id) => {
+                        let id = id.strip_prefix(&prefix).unwrap_or(&id);
+                        let Some(index) = picks.iter().position(|pick| pick == id) else {
+                            return Err(PicksError::Invalid(FieldIssue::new(
+                                "edit",
+                                "not_exposed",
+                                format!(
+                                    "{provider_id}/{id} isn't exposed, so there is nothing to take out"
+                                ),
+                            )));
+                        };
+                        picks.remove(index);
+                    }
+                    _ => {
+                        return Err(PicksError::Invalid(FieldIssue::new(
+                            "edit",
+                            "unsupported",
+                            "this edit is not supported",
+                        )));
+                    }
+                }
+            }
+            if picks.is_empty() {
+                return Err(PicksError::Invalid(FieldIssue::new(
+                    "edit",
+                    "empty_result",
+                    format!("that leaves no model of {provider_id} exposed"),
+                )));
+            }
+            Ok(picks)
+        }
+        PicksForm::Reset => Ok(Vec::new()),
+        _ => Err(PicksError::Invalid(FieldIssue::new(
+            "ids",
+            "unsupported",
+            "this picks form is not supported",
+        ))),
+    }
 }
 
 /// A provider's cached model state, read without contacting an upstream.
@@ -257,13 +389,50 @@ impl ModelsHost {
     /// Reads a provider's picks, source-list ids, and delisted ids.
     #[must_use]
     pub fn picks(&self, provider_id: &str) -> Picks {
+        self.picks_with_revision(provider_id).0
+    }
+
+    /// Reads a provider's picks and the revision of its saved state under
+    /// one lock.
+    pub(crate) fn picks_with_revision(&self, provider_id: &str) -> (Picks, String) {
         let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let state = store.get(provider_id);
-        Picks {
-            picks: state.picks.clone(),
-            picked_from: state.picked_from.clone(),
-            delisted: state.delisted.clone(),
+        (picks_of(state), super::models_state::revision(state))
+    }
+
+    /// Changes a provider's picks and saves them.
+    ///
+    /// The lock is held from reading the revision through the save, so a
+    /// concurrent edit cannot slip between the check and the write. A failed
+    /// save leaves memory as it was.
+    pub(crate) fn edit_picks(
+        &self,
+        provider_id: &str,
+        expected: Option<&str>,
+        form: PicksForm,
+    ) -> Result<(Picks, String), PicksError> {
+        let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let state = store.get(provider_id);
+        if let Some(expected) = expected
+            && super::models_state::revision(state) != expected
+        {
+            return Err(PicksError::Stale);
         }
+        let listed = super::models_state::models(&state.list);
+        let next = next_picks(provider_id, &state.picks, &listed, form)?;
+        let picked_from = listed
+            .iter()
+            .map(|model| model.id().to_owned())
+            .collect::<Vec<_>>();
+        store
+            .try_update(provider_id, |state| {
+                state.delisted.retain(|id| !next.contains(id));
+                state.picks = next;
+                state.picked_from = picked_from;
+            })
+            .map_err(PicksError::Save)?;
+        let state = store.get(provider_id);
+        Ok((picks_of(state), super::models_state::revision(state)))
     }
 
     /// Reads cached models without building a provider or contacting an upstream.
@@ -279,18 +448,22 @@ impl ModelsHost {
     }
 
     /// Saves picked ids in the supplied order and restores them from delisted.
+    ///
+    /// Duplicates keep their first place. An empty slice restores the
+    /// default list. A failed save is logged and memory is left unchanged.
     pub fn set_picks(&self, provider_id: &str, ids: &[String]) {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .update(provider_id, |state| {
-                state.picks = ids.to_vec();
-                state.picked_from = super::models_state::models(&state.list)
-                    .iter()
-                    .map(|model| model.id().to_owned())
-                    .collect();
-                state.delisted.retain(|id| !ids.contains(id));
-            });
+        let form = if ids.is_empty() {
+            PicksForm::Reset
+        } else {
+            PicksForm::Replace(ids.to_vec())
+        };
+        if let Err(error) = self.edit_picks(provider_id, None, form) {
+            tracing::warn!(
+                provider.id = provider_id,
+                ?error,
+                "could not set model picks"
+            );
+        }
     }
 
     /// Installs the limits seam used only by the static-fallback planning path.
@@ -535,6 +708,70 @@ impl ModelsHost {
         .await
     }
 
+    /// Fetches a provider's list now, applies it, and reports what changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError`] when the fetch fails or runs past
+    /// [`REFRESH_TIMEOUT`], or when the result cannot be saved.
+    pub(crate) async fn refresh(
+        &self,
+        config: &Config,
+        config_path: &Path,
+        provider_id: &str,
+    ) -> Result<Refreshed, DaemonError> {
+        let provider = provider(config, provider_id)?;
+        let planned = self.planned(provider)?;
+        let endpoint = endpoint_for(provider, &planned)?;
+        let redactor = Redactor::new(provider, &endpoint, None);
+        let applied = tokio::time::timeout(
+            REFRESH_TIMEOUT,
+            self.fetch_applied(
+                config_path,
+                provider,
+                unix_ms(),
+                Some(&provider.model_list.auto_include),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            DaemonError::new(format!(
+                "listing models for provider `{provider_id}` timed out"
+            ))
+            .with_kind(ErrorKind::Timeout)
+        })?
+        .map_err(|error| redactor.clean_error(error))?;
+        if let Err(error) = applied.saved {
+            return Err(DaemonError::new(error.to_string()));
+        }
+        let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let state = store.get(provider_id);
+        Ok(Refreshed {
+            models: applied.models.models,
+            added: applied.taken,
+            removed: applied.dropped,
+            delisted: state.delisted.clone(),
+            fetched_at: state.fetched_at,
+        })
+    }
+
+    /// Probes models and times each probe, keeping input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError`] for provider construction or selection
+    /// failures; no probe is sent then.
+    pub(crate) async fn probe_timed(
+        &self,
+        config: &Config,
+        config_path: &Path,
+        provider_id: &str,
+        named: Vec<&str>,
+    ) -> Result<Vec<Timed>, DaemonError> {
+        self.probe_inner(config, config_path, provider_id, named)
+            .await
+    }
+
     /// Refreshes the list, selects one model, and probes the configured wire.
     ///
     /// `named` may name an exposed route id or a listed upstream id. Absent
@@ -578,6 +815,21 @@ impl ModelsHost {
         provider_id: &str,
         named: Vec<&str>,
     ) -> Result<Vec<Result<ProbeOutcome, DaemonError>>, DaemonError> {
+        Ok(self
+            .probe_inner(config, config_path, provider_id, named)
+            .await?
+            .into_iter()
+            .map(|timed| timed.result)
+            .collect())
+    }
+
+    async fn probe_inner(
+        &self,
+        config: &Config,
+        config_path: &Path,
+        provider_id: &str,
+        named: Vec<&str>,
+    ) -> Result<Vec<Timed>, DaemonError> {
         let provider = provider(config, provider_id)?;
         let planned = self.planned(provider)?;
         let endpoint = endpoint_for(provider, &planned)?;
@@ -621,11 +873,19 @@ impl ModelsHost {
             let planned = planned.clone();
             let redactor = redactor.clone();
             async move {
-                self.probe_one(
-                    provider, &planned, upstream, protocol, selected, learned, extra,
-                )
-                .await
-                .map_err(|error| redactor.clean_error(error))
+                let model = selected.exposed.clone();
+                let started = std::time::Instant::now();
+                let result = self
+                    .probe_one(
+                        provider, &planned, upstream, protocol, selected, learned, extra,
+                    )
+                    .await
+                    .map_err(|error| redactor.clean_error(error));
+                Timed {
+                    model,
+                    latency: started.elapsed(),
+                    result,
+                }
             }
         }))
         .buffered(4)
@@ -673,19 +933,17 @@ impl ModelsHost {
             .iter()
             .map(|row| row.id.clone())
             .collect::<HashSet<_>>();
-        let chat_ids = fetched
-            .models
-            .models
-            .iter()
-            .filter(|model| !model.draws() && !model.films() && !model.decides())
-            .map(|model| model.id().to_owned())
-            .collect::<Vec<_>>();
+        let chat_ids = default_exposed(&fetched.models.models);
         let mut dropped = Vec::new();
         let mut taken = Vec::new();
-        self.state
+        // Memory keeps the new list even when the save fails, so a list
+        // request and the scheduled refresh still serve what was fetched;
+        // the refresh route reports the failed save.
+        let saved = self
+            .state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .update(&provider.id, |state| {
+            .update_saved(&provider.id, |state| {
                 state.tried_at = Some(now);
                 if listed.is_empty() {
                     return;
@@ -762,6 +1020,7 @@ impl ModelsHost {
             models: fetched.models,
             dropped,
             taken,
+            saved,
         }
     }
 
@@ -909,6 +1168,7 @@ impl ModelsHost {
         let mut merged = Merged::default();
         let mut errors = Vec::new();
         let mut retry_after: Option<std::time::Duration> = None;
+        let mut failure: Option<ErrorKind> = None;
         let mut winning_base = None;
         let mut corrected_base = None;
         let mut fallback = false;
@@ -1031,6 +1291,13 @@ impl ModelsHost {
                         (left, None) => left,
                     };
                     let message = error.to_string();
+                    let converted = crate::adapt::provider_error(error);
+                    if failure.is_none() || converted.status == Some(429) {
+                        failure = Some(ErrorKind::Upstream {
+                            kind: converted.kind,
+                            status: converted.status,
+                        });
+                    }
                     if !errors.contains(&message) {
                         errors.push(message);
                     }
@@ -1050,7 +1317,9 @@ impl ModelsHost {
             } else {
                 format!("{} — {ALL_FAILED}", errors.join("; "))
             };
-            return Err(DaemonError::new(message).with_retry_after(retry_after));
+            return Err(DaemonError::new(message)
+                .with_retry_after(retry_after)
+                .with_kind(failure.unwrap_or_default()));
         }
         // reference: internal/provider/models.go:809-822 and 927-968
         if !dead.is_empty() {
@@ -1580,7 +1849,7 @@ impl ModelsHost {
                         wire = protocol_of(planned.wire),
                         outcome = "error"
                     );
-                    Err(show(error))
+                    Err(upstream_failure(error))
                 }
             }
         }
@@ -1692,12 +1961,26 @@ fn list_only_raw(
     Ok((plugin_id, raw, own))
 }
 
+/// A provider's failure, keeping its kind and status for the control plane.
+fn upstream_failure(error: PluginError) -> DaemonError {
+    let message = error.to_string();
+    let converted = crate::adapt::provider_error(error);
+    DaemonError::new(message)
+        .with_retry_after(converted.retry_after)
+        .with_kind(ErrorKind::Upstream {
+            kind: converted.kind,
+            status: converted.status,
+        })
+}
+
 fn provider<'a>(config: &'a Config, id: &str) -> Result<&'a hofund_config::Provider, DaemonError> {
     config
         .providers
         .iter()
         .find(|provider| provider.id == id)
-        .ok_or_else(|| DaemonError::new(format!("unknown provider `{id}`")))
+        .ok_or_else(|| {
+            DaemonError::new(format!("unknown provider `{id}`")).with_kind(ErrorKind::NotFound)
+        })
 }
 
 fn bounded_kind(wanted: ListKind, bound: ListKind) -> ListKind {
@@ -1830,13 +2113,14 @@ fn select_model(
             return Err(DaemonError::new(format!(
                 "model `{named}` is not served on this protocol ({})",
                 protocol_of(planned.wire)
-            )));
+            ))
+            .with_kind(ErrorKind::Selection));
         }
         if listed
             .iter()
             .any(|model| model.id() == named && model.decides())
         {
-            return Err(DaemonError::new(NO_MODEL));
+            return Err(DaemonError::new(NO_MODEL).with_kind(ErrorKind::Selection));
         }
         return Ok(Selected {
             exposed: named.to_owned(),
@@ -1909,7 +2193,7 @@ fn select_model(
             }
         }
     }
-    Err(DaemonError::new(NO_MODEL))
+    Err(DaemonError::new(NO_MODEL).with_kind(ErrorKind::Selection))
 }
 
 fn exposed(config: &Config, provider: &str) -> Vec<(String, String)> {
@@ -2121,11 +2405,16 @@ impl Redactor {
     }
 
     fn clean(&self, error: PluginError) -> DaemonError {
-        DaemonError::new(self.text(error.message())).with_retry_after(error.retry_after())
+        let message = self.text(error.message());
+        let mut cleaned = upstream_failure(error);
+        cleaned.message = message;
+        cleaned
     }
 
     fn clean_error(&self, error: DaemonError) -> DaemonError {
-        DaemonError::new(self.text(&error.to_string())).with_retry_after(error.retry_after())
+        DaemonError::new(self.text(&error.to_string()))
+            .with_retry_after(error.retry_after())
+            .with_kind(error.kind())
     }
 
     fn text(&self, text: &str) -> String {
@@ -2393,5 +2682,18 @@ mod tests {
             bounded_kind(ListKind::Live, ListKind::Deployments),
             ListKind::Deployments
         );
+    }
+
+    #[test]
+    fn provider_test_timeout_gives_named_models_longer() {
+        assert_eq!(
+            super::test_timeout(false),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            super::test_timeout(true),
+            std::time::Duration::from_secs(90)
+        );
+        assert_eq!(super::REFRESH_TIMEOUT, std::time::Duration::from_secs(30));
     }
 }
