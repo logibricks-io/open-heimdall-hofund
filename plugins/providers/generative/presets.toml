@@ -1,0 +1,13 @@
+# Rows recorded from the reference preset list
+# (`internal/provider/presets.go`) at commit cbbf3163cb3c87ee0c327a56bc5689ddc5eda947.
+
+[[preset]]
+id = "google"
+name = "Google Gemini"
+kind = "vendor"
+catalog = "google"
+note = "Gemini Developer API"
+generative = "https://generativelanguage.googleapis.com/v1beta"
+chat = "https://generativelanguage.googleapis.com/v1beta/openai"
+website = "https://aistudio.google.com"
+keys_url = "https://aistudio.google.com/apikey"
