@@ -1,6 +1,7 @@
 id = "opencode"
 display_name = "OpenCode"
 binary = "opencode"
+model_prefix = "hofund/"
 
 # The documented global path is ~/.config/opencode/opencode.json or
 # opencode.jsonc, including on Windows (the docs say ~/.config, not %APPDATA%).
@@ -59,7 +60,8 @@ file = "config"
 key = "provider.hofund.models"
 slot = "catalog_models"
 
-# A string model is compared with route names and is not rewritten.
+# A string model is compared with route names after stripping model_prefix and
+# is not rewritten.
 # hofund agent connect opencode says how many routes were written. The v2 docs
 # describe providers plus package and settings; this adapter follows the current
 # providers page instead. Both pages document ~/.config and do not name an

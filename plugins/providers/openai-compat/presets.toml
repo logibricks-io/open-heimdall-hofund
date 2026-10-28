@@ -49,6 +49,28 @@ website = "https://fireworks.ai"
 keys_url = "https://app.fireworks.ai/settings/users/api-keys"
 
 [[preset]]
+id = "groq"
+name = "Groq"
+kind = "vendor"
+catalog = "groq"
+chat = "https://api.groq.com/openai/v1"
+responses = "https://api.groq.com/openai/v1"
+website = "https://console.groq.com"
+keys_url = "https://console.groq.com/keys"
+hosts = true
+
+[[preset]]
+id = "kilo"
+name = "Kilo Gateway"
+kind = "relay"
+note = "free models with no key"
+chat = "https://api.kilo.ai/api/openrouter"
+website = "https://kilo.ai/docs/gateway"
+keys_url = "https://app.kilo.ai"
+no_key = true
+key_hint = "optional: free models need no key"
+
+[[preset]]
 id = "kimi-code"
 name = "Kimi Code"
 kind = "vendor"
@@ -131,6 +153,16 @@ website = "https://platform.moonshot.cn"
 keys_url = "https://platform.moonshot.cn/console/api-keys"
 
 [[preset]]
+id = "nous"
+name = "Nous Portal"
+kind = "vendor"
+note = "Nous Research - Hermes and other models"
+chat = "https://inference-api.nousresearch.com/v1"
+website = "https://portal.nousresearch.com"
+keys_url = "https://portal.nousresearch.com"
+hosts = true
+
+[[preset]]
 id = "nvidia"
 name = "NVIDIA NIM"
 kind = "relay"
@@ -184,6 +216,73 @@ website = "https://bailian.console.aliyun.com"
 keys_url = "https://bailian.console.aliyun.com/?tab=model#/api-key"
 
 [[preset]]
+id = "siliconflow"
+name = "SiliconFlow"
+kind = "relay"
+catalog = "siliconflow"
+chat = "https://api.siliconflow.cn/v1"
+website = "https://cloud.siliconflow.cn"
+keys_url = "https://cloud.siliconflow.cn/account/ak"
+
+[[preset.region]]
+id = "cn"
+name = "China"
+chat = "https://api.siliconflow.cn/v1"
+
+[[preset.region]]
+id = "intl"
+name = "Global"
+chat = "https://api.siliconflow.com/v1"
+keys_url = "https://cloud.siliconflow.com/account/ak"
+website = "https://cloud.siliconflow.com"
+
+[[preset]]
+id = "stepfun"
+name = "StepFun"
+kind = "vendor"
+catalog = "stepfun-ai-step-plan, stepfun-ai"
+chat = "https://api.stepfun.ai/step_plan/v1"
+anthropic = "https://api.stepfun.ai/step_plan"
+website = "https://platform.stepfun.ai"
+keys_url = "https://platform.stepfun.ai/interface-key"
+region_label = "Plan"
+
+[[preset.region]]
+id = "plan"
+name = "Step Plan"
+chat = "https://api.stepfun.ai/step_plan/v1"
+anthropic = "https://api.stepfun.ai/step_plan"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.stepfun.ai/v1"
+anthropic = "https://api.stepfun.ai"
+
+[[preset]]
+id = "stepfun-cn"
+name = "StepFun (China)"
+kind = "vendor"
+catalog = "stepfun-step-plan, stepfun"
+chat = "https://api.stepfun.com/step_plan/v1"
+anthropic = "https://api.stepfun.com/step_plan"
+website = "https://platform.stepfun.com"
+keys_url = "https://platform.stepfun.com/interface-key"
+region_label = "Plan"
+
+[[preset.region]]
+id = "plan"
+name = "Step Plan"
+chat = "https://api.stepfun.com/step_plan/v1"
+anthropic = "https://api.stepfun.com/step_plan"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.stepfun.com/v1"
+anthropic = "https://api.stepfun.com"
+
+[[preset]]
 id = "together"
 name = "Together AI"
 kind = "relay"
@@ -202,3 +301,98 @@ responses = "https://api.x.ai/v1"
 anthropic = "https://api.x.ai"
 website = "https://console.x.ai"
 keys_url = "https://console.x.ai"
+
+[[preset]]
+id = "xiaomi"
+name = "Xiaomi MiMo"
+kind = "vendor"
+catalog = "xiaomi-token-plan-cn, xiaomi"
+note = "Token Plan - pay as you go"
+chat = "https://token-plan-cn.xiaomimimo.com/v1"
+responses = "https://token-plan-cn.xiaomimimo.com/v1"
+anthropic = "https://token-plan-cn.xiaomimimo.com/anthropic"
+website = "https://platform.xiaomimimo.com"
+keys_url = "https://platform.xiaomimimo.com/token-plan"
+
+[[preset.region]]
+id = "plan-cn"
+name = "Plan - China"
+chat = "https://token-plan-cn.xiaomimimo.com/v1"
+responses = "https://token-plan-cn.xiaomimimo.com/v1"
+anthropic = "https://token-plan-cn.xiaomimimo.com/anthropic"
+catalog = "xiaomi-token-plan-cn, xiaomi"
+
+[[preset.region]]
+id = "plan-sgp"
+name = "Plan - Singapore"
+chat = "https://token-plan-sgp.xiaomimimo.com/v1"
+responses = "https://token-plan-sgp.xiaomimimo.com/v1"
+anthropic = "https://token-plan-sgp.xiaomimimo.com/anthropic"
+catalog = "xiaomi-token-plan-sgp, xiaomi"
+
+[[preset.region]]
+id = "plan-ams"
+name = "Plan - Europe"
+chat = "https://token-plan-ams.xiaomimimo.com/v1"
+responses = "https://token-plan-ams.xiaomimimo.com/v1"
+anthropic = "https://token-plan-ams.xiaomimimo.com/anthropic"
+catalog = "xiaomi-token-plan-ams, xiaomi"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.xiaomimimo.com/v1"
+responses = "https://api.xiaomimimo.com/v1"
+anthropic = "https://api.xiaomimimo.com/anthropic"
+catalog = "xiaomi"
+
+[[preset]]
+id = "yylx"
+name = "Yylx"
+kind = "relay"
+chat = "https://app.yylx.io/v1"
+anthropic = "https://app.yylx.io"
+website = "https://yylx.io"
+keys_url = "https://app.yylx.io/keys"
+
+[[preset.region]]
+id = "auto"
+name = "Auto"
+chat = "https://app.yylx.io/v1"
+anthropic = "https://app.yylx.io"
+
+[[preset.region]]
+id = "global"
+name = "Global"
+chat = "https://global.yylx.io/v1"
+anthropic = "https://global.yylx.io"
+
+[[preset.region]]
+id = "cn"
+name = "China Mainland"
+chat = "https://cn.yylx.io/v1"
+anthropic = "https://cn.yylx.io"
+
+[[preset]]
+id = "zai"
+name = "Z.ai"
+kind = "vendor"
+catalog = "zhipuai"
+chat = "https://api.z.ai/api/paas/v4"
+anthropic = "https://api.z.ai/api/anthropic"
+website = "https://z.ai"
+keys_url = "https://z.ai/manage-apikey/apikey-list"
+region_label = "Plan"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.z.ai/api/paas/v4"
+anthropic = "https://api.z.ai/api/anthropic"
+
+[[preset.region]]
+id = "coding"
+name = "Coding Plan"
+chat = "https://api.z.ai/api/coding/paas/v4"
+responses = "https://api.z.ai/api/v1"
+anthropic = "https://api.z.ai/api/anthropic"

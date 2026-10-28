@@ -1610,6 +1610,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-control-client"
+version = "0.1.0"
+dependencies = [
+ "hofund-control-proto",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hofund-control-proto"
 version = "0.1.0"
 dependencies = [
@@ -1675,6 +1688,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "hofund-codec",
+ "hofund-control-proto",
  "hofund-ir",
  "hofund-plugin-api",
  "hofund-plugin-host",

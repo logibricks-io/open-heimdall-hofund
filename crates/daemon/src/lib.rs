@@ -5,11 +5,12 @@
 //! functions.
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
-use hofund_config::{Config, Value, load_path};
+use hofund_config::{Config, ConfigError, Value, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 use hofund_plugin_api::{
     AgentDescription, BuildContext, DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue,
@@ -25,6 +26,7 @@ use hofund_secrets::TokenFile;
 use hofund_usage::Ledger;
 
 mod adapt;
+mod control;
 #[cfg_attr(
     not(test),
     expect(
@@ -177,16 +179,47 @@ pub fn usage_report(path: &Path) -> Result<String, DaemonError> {
     ledger.table().map_err(show)
 }
 
+/// Optional listeners for a daemon start.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StartOptions {
+    /// Numeric loopback address for the opt-in control listener.
+    pub control_listen: Option<SocketAddr>,
+}
+
 /// Binds the address in the config and serves until shutdown.
 ///
-/// The bound address is available on the returned [`Running`] value.
+/// The bound address is available on the returned [`Running`] value. This
+/// entry point does not start a control listener.
 ///
 /// # Errors
 ///
 /// Returns [`DaemonError`] when startup fails. A later accept error stays on
 /// the server task.
 pub async fn start(path: &Path) -> Result<Running, DaemonError> {
-    start_inner(path, None, None, Arc::new(RegistryAdapter)).await
+    start_inner(
+        path,
+        None,
+        None,
+        Arc::new(RegistryAdapter),
+        StartOptions::default(),
+    )
+    .await
+}
+
+/// Starts a daemon with optional control TCP enabled.
+///
+/// The control address is supplied programmatically; no configuration field is
+/// introduced. The returned [`Running::control_local_addr`] reports its bound
+/// address.
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] when startup or a listener bind fails.
+pub async fn start_with_options(
+    path: &Path,
+    options: StartOptions,
+) -> Result<Running, DaemonError> {
+    start_inner(path, None, None, Arc::new(RegistryAdapter), options).await
 }
 
 /// Starts a daemon with an injected registry.
@@ -200,7 +233,7 @@ pub async fn start_with_registry(
     path: &Path,
     registry: Arc<dyn DaemonRegistry>,
 ) -> Result<Running, DaemonError> {
-    start_inner(path, Some(0), None, registry).await
+    start_inner(path, Some(0), None, registry, StartOptions::default()).await
 }
 
 /// Starts the daemon without retaining idle upstream sockets.
@@ -214,7 +247,14 @@ pub async fn start_with_registry(
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub async fn start_for_test(path: &Path) -> Result<Running, DaemonError> {
-    start_inner(path, Some(0), None, Arc::new(RegistryAdapter)).await
+    start_inner(
+        path,
+        Some(0),
+        None,
+        Arc::new(RegistryAdapter),
+        StartOptions::default(),
+    )
+    .await
 }
 
 /// Starts a test daemon with short refresh-loop timings.
@@ -224,7 +264,14 @@ pub async fn start_for_test_with_refresh(
     path: &Path,
     timing: RefreshTiming,
 ) -> Result<Running, DaemonError> {
-    start_inner(path, Some(0), Some(timing), Arc::new(RegistryAdapter)).await
+    start_inner(
+        path,
+        Some(0),
+        Some(timing),
+        Arc::new(RegistryAdapter),
+        StartOptions::default(),
+    )
+    .await
 }
 
 async fn start_inner(
@@ -232,8 +279,13 @@ async fn start_inner(
     max_idle_per_host: Option<usize>,
     refresh_timing: Option<RefreshTiming>,
     registry: Arc<dyn DaemonRegistry>,
+    options: StartOptions,
 ) -> Result<Running, DaemonError> {
-    let config = load_path(path).map_err(show)?;
+    let started_at_ms = control::unix_milliseconds();
+    let config_text = std::fs::read_to_string(path)
+        .map_err(|error| show(ConfigError::Read(error.to_string())))?;
+    let config = hofund_config::load(&config_text).map_err(show)?;
+    let runtime_revision = control::revision(config_text.as_bytes());
     warn(&config);
     let token_path = beside(path, &config.token_file);
     let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
@@ -243,12 +295,32 @@ async fn start_inner(
         .with_state_root(beside(path, ".hofund"))
         .with_registry(Arc::clone(&registry));
     let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
-    let gateway = Gateway::with_token_file(snapshot, token, token_path, inbound_codecs(), usage)
-        .with_surfaces(registry.surfaces());
-    let running = gateway
+    let gateway = Gateway::with_token_file(
+        snapshot,
+        token.clone(),
+        token_path.clone(),
+        inbound_codecs(),
+        usage,
+    )
+    .with_surfaces(registry.surfaces());
+    let mut running = gateway
         .bind(config.listen)
         .await
         .map_err(|error| DaemonError::new(error.to_string()))?;
+    if let Some(control_listen) = options.control_listen {
+        let state = Arc::new(control::DaemonControl::new(
+            path,
+            config.listen,
+            running.local_addr,
+            started_at_ms,
+            runtime_revision,
+        ));
+        let control = hofund_gateway::control::Control::with_token_file(state, token, token_path)
+            .bind(control_listen)
+            .await
+            .map_err(|error| DaemonError::new(error.to_string()))?;
+        running = running.with_control(control);
+    }
     let models_host = Arc::new(models_host);
     let refresh = models_host.spawn_refresh(
         config,
