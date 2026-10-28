@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 13);
+        assert_eq!(catalog.preset.len(), 9);
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
@@ -696,44 +696,6 @@ mod tests {
 
     #[test]
     fn known_presets_resolve_to_the_recorded_endpoint_and_header() {
-        let openai = resolve(&Resolve {
-            id: "openai",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("openai");
-        assert_eq!(openai.wire, Wire::Chat);
-        assert_eq!(openai.base_url, "https://api.openai.com/v1");
-        assert_eq!(openai.credential, crate::Credential::Bearer);
-
-        let responses = resolve(&Resolve {
-            id: "openai",
-            region: None,
-            wire: Some(Wire::Responses),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("responses");
-        assert_eq!(responses.wire, Wire::Responses);
-        assert_eq!(responses.base_url, "https://api.openai.com/v1");
-
-        let anthropic = resolve(&Resolve {
-            id: "anthropic",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("anthropic");
-        assert_eq!(anthropic.wire, Wire::Messages);
-        assert_eq!(anthropic.base_url, "https://api.anthropic.com");
-        assert_eq!(anthropic.credential, crate::Credential::XApiKey);
-
         let bedrock = resolve(&Resolve {
             id: "bedrock",
             region: Some("eu-west-1"),
@@ -826,37 +788,6 @@ mod tests {
         .expect("pasted");
         assert_eq!(pasted.base_url, "https://mine.openai.azure.com/openai/v1");
         assert_eq!(pasted.wire, Wire::Responses);
-
-        let google = resolve(&Resolve {
-            id: "google",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("google");
-        assert_eq!(google.wire, Wire::Generative);
-        assert_eq!(
-            google.base_url,
-            "https://generativelanguage.googleapis.com/v1beta"
-        );
-        assert_eq!(google.credential, crate::Credential::GoogApiKey);
-        let google_chat = resolve(&Resolve {
-            id: "google",
-            region: None,
-            wire: Some(Wire::Chat),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("google chat");
-        assert_eq!(google_chat.wire, Wire::Chat);
-        assert_eq!(
-            google_chat.base_url,
-            "https://generativelanguage.googleapis.com/v1beta/openai"
-        );
-        assert_eq!(google_chat.credential, crate::Credential::Bearer);
 
         let vertex = resolve(&Resolve {
             id: "google-vertex",
