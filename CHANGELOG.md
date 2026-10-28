@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed save, and follow the reference edit forms. Refresh has a 30 s timeout
   and reports added, removed, and delisted ids. Provider tests report per-model
   latency and status with 30 s or 90 s timeouts.
+- Control agent routes: list, status, redacted plans with a content revision, connect
+  and disconnect under a shared gate with stale-plan 409s, and token rotation that
+  refreshes connected agents, bumps a token generation once, and scrubs tokens from
+  errors and logs.
 - Encrypted account storage with native OS credential entries, an authenticated
   encrypted-file fallback, secret-free backend selection, and crash-safe migration
   from the legacy plaintext metadata file. Reads route by stored reference and

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hofund_agent::Session;
 use hofund_config::Config;
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
@@ -14,13 +15,13 @@ use hofund_control_proto::{
     UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
 };
 use hofund_gateway::control::{ControlFailure, ControlFuture, ControlState};
+use hofund_plugin_api::ModelSpec;
 use hofund_router::Cooldowns;
 use hofund_usage::{Ledger, Window};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
-use hofund_plugin_api::ModelSpec;
-
+use super::control_agents::AgentOps;
 use super::models::{PicksError, Timed, test_timeout};
 use super::{
     DaemonError, DaemonRegistry, ErrorKind, ModelsHost, Picks, control_map, membership, plugin_for,
@@ -38,9 +39,8 @@ pub(crate) struct DaemonControl {
     registry: Arc<dyn DaemonRegistry>,
     cooldowns: Arc<Cooldowns>,
     usage: Arc<Ledger>,
+    agents: AgentOps,
     shutdown: watch::Sender<bool>,
-    #[expect(dead_code, reason = "token rotation is wired in L5c")]
-    token_path: PathBuf,
 }
 
 impl DaemonControl {
@@ -59,6 +59,7 @@ impl DaemonControl {
         token_path: PathBuf,
         shutdown: watch::Sender<bool>,
     ) -> Self {
+        let registry_agents = registry.agents();
         Self {
             config_path: config_path.to_path_buf(),
             configured,
@@ -66,13 +67,37 @@ impl DaemonControl {
             started_at_ms,
             runtime_revision,
             models,
-            config,
             registry,
             cooldowns,
+            agents: AgentOps::new(
+                registry_agents,
+                config_path,
+                format!("http://{}", config.listen),
+                config
+                    .routes
+                    .iter()
+                    .map(|route| route.model.clone())
+                    .collect(),
+                token_path,
+            ),
             usage,
-            token_path,
+            config,
             shutdown,
         }
+    }
+
+    /// Points agent calls at `session` and publishes token rotations on
+    /// `generation`. `None` keeps the process environment and a private channel.
+    pub(crate) fn with_agent_hooks(
+        mut self,
+        session: Option<Session>,
+        generation: Option<watch::Sender<u64>>,
+    ) -> Self {
+        self.agents = self
+            .agents
+            .with_session(session)
+            .with_token_generation(generation);
+        self
     }
 
     fn config(&self) -> &Config {
@@ -260,35 +285,40 @@ impl ControlState for DaemonControl {
     }
 
     fn agents(&self) -> ControlFuture<'_, AgentListResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.list().await.map_err(Into::into) })
     }
 
     fn agent_status(&self) -> ControlFuture<'_, AgentStatusResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.status().await.map_err(Into::into) })
     }
 
     fn plan_agent(
         &self,
-        _id: String,
-        _request: AgentPlanRequest,
+        id: String,
+        request: AgentPlanRequest,
     ) -> ControlFuture<'_, AgentPlanResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.plan(id, request).await.map_err(Into::into) })
     }
 
     fn connect_agent(
         &self,
-        _id: String,
-        _request: AgentConnectRequest,
+        id: String,
+        request: AgentConnectRequest,
     ) -> ControlFuture<'_, AgentChangeResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.connect(id, request).await.map_err(Into::into) })
     }
 
     fn disconnect_agent(
         &self,
-        _id: String,
-        _request: AgentDisconnectRequest,
+        id: String,
+        request: AgentDisconnectRequest,
     ) -> ControlFuture<'_, AgentChangeResponse> {
-        unavailable()
+        Box::pin(async move {
+            self.agents
+                .disconnect(id, request)
+                .await
+                .map_err(Into::into)
+        })
     }
 
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
@@ -306,7 +336,7 @@ impl ControlState for DaemonControl {
     }
 
     fn rotate_token(&self, _request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.rotate_token().await.map_err(Into::into) })
     }
 
     fn shutdown(&self, _request: ShutdownRequest) -> ControlFuture<'_, ShutdownResponse> {
@@ -476,17 +506,6 @@ fn usage_row(row: hofund_usage::Row) -> UsageRow {
 
 fn internal(message: String) -> ControlError {
     ControlError::new(ControlErrorKind::Internal, message, "usage")
-}
-
-fn unavailable<T>() -> ControlFuture<'static, T> {
-    Box::pin(async {
-        Err(ControlError::new(
-            ControlErrorKind::Unavailable,
-            "not wired in this build",
-            "control",
-        )
-        .into())
-    })
 }
 
 pub(crate) fn unix_milliseconds() -> u64 {

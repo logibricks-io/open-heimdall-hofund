@@ -27,6 +27,7 @@ use hofund_usage::Ledger;
 
 mod adapt;
 mod control;
+mod control_agents;
 mod control_local;
 #[cfg_attr(
     not(test),
@@ -224,6 +225,14 @@ pub struct StartOptions {
     /// Isolated runtime roots, primarily for tests. `None` reads the environment.
     #[doc(hidden)]
     pub control_runtime: Option<ControlRuntime>,
+    /// Home directory and environment for agent control calls, for tests.
+    /// `None` reads the process environment on each call.
+    #[doc(hidden)]
+    pub agent_session: Option<hofund_agent::Session>,
+    /// Receives one increment per successful control token rotation, for
+    /// tests and the event stream. `None` uses a private channel.
+    #[doc(hidden)]
+    pub token_generation: Option<tokio::sync::watch::Sender<u64>>,
 }
 
 /// Binds the address in the config and serves until shutdown.
@@ -370,20 +379,23 @@ async fn start_inner(
     if let Some(session) = control_session.as_mut() {
         let (shutdown_request, shutdown_requested) = tokio::sync::watch::channel(false);
         running = running.with_shutdown_request(shutdown_requested);
-        let state = Arc::new(control::DaemonControl::new(
-            path,
-            config.listen,
-            running.local_addr,
-            started_at_ms,
-            runtime_revision,
-            Arc::clone(&models_host),
-            Arc::clone(&config),
-            Arc::clone(&registry),
-            cooldowns,
-            Arc::clone(&usage),
-            token_path.clone(),
-            shutdown_request,
-        ));
+        let state = Arc::new(
+            control::DaemonControl::new(
+                path,
+                config.listen,
+                running.local_addr,
+                started_at_ms,
+                runtime_revision,
+                Arc::clone(&models_host),
+                Arc::clone(&config),
+                Arc::clone(&registry),
+                cooldowns,
+                Arc::clone(&usage),
+                token_path.clone(),
+                shutdown_request,
+            )
+            .with_agent_hooks(options.agent_session, options.token_generation),
+        );
         let control = hofund_gateway::control::Control::with_token_file(state, token, token_path);
         let mut tcp_listen = options.control_listen;
         #[cfg(unix)]
