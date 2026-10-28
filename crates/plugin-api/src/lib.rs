@@ -58,9 +58,9 @@ pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfi
 pub use error::{PluginError, PluginErrorKind};
 pub use hofund_ir::{Request, Response, StreamEvent};
 pub use host::{
-    AccountsHandle, AuthResult, ClockHandle, DirHandle, HostContext, HttpHandle, Job, JobId,
-    JobSpec, ObserveHandle, ProcessHandle, SchedulerHandle, SecretsHandle, SpawnRequest, Spawned,
-    SurfaceHost,
+    AccountLease, AccountsHandle, AuthResult, ClockHandle, DirHandle, HostContext, HttpHandle, Job,
+    JobId, JobSpec, ObserveHandle, ProcessHandle, SchedulerHandle, SecretsHandle, SpawnRequest,
+    Spawned, SurfaceHost,
 };
 pub use id::{
     AccountId, IdError, MemberId, MemberKey, PluginId, PluginKey, PluginKind, PresetId, ProtocolId,
@@ -68,10 +68,10 @@ pub use id::{
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use records::{
-    Account, AgentDescription, AgentFile, AgentRoute, AgentSet, AuthChoice, BinaryName, FileKind,
-    ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery, QuotaObservation, QuotaQuery,
-    QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof, Slot, StaticUrl,
-    SubscriptionSpec, Visible,
+    Account, AccountStatus, AgentDescription, AgentFile, AgentRoute, AgentSet, AuthChoice,
+    BinaryName, FileKind, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
+    QuotaObservation, QuotaQuery, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof,
+    Slot, StaticUrl, SubscriptionSpec, Visible,
 };
 pub use redaction::{redact_token, safe_url};
 pub use secrecy::SecretString;

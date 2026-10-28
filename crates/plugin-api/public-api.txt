@@ -9,8 +9,18 @@ Account::fn label (& self) -> & str
 AccountId
 AccountId::as_str
 AccountId::from_static
+AccountLease
+AccountLease #[non_exhaustive]
+AccountLease::async fn commit (self , label : Option < String > , secret : SecretString ,) -> Result < () , PluginError >
+AccountLease::fn account (& self) -> & Account
+AccountLease::fn secret (& self) -> & SecretString
+AccountStatus
+AccountStatus #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+AccountStatus::NeedsSignIn
+AccountStatus::Ready
 AccountsHandle
 AccountsHandle #[non_exhaustive] derives(Clone)
+AccountsHandle::async fn lease (& self , id : & AccountId , wait : Duration) -> Result < AccountLease , PluginError >
 AccountsHandle::async fn list (& self) -> Result < Vec < Account > , PluginError >
 AccountsHandle::async fn remove (& self , id : & AccountId) -> Result < () , PluginError >
 AccountsHandle::async fn secret (& self , id : & AccountId) -> Result < Option < SecretString > , PluginError >
@@ -443,11 +453,15 @@ QuotaQuery::fn for_account (account : AccountId) -> Self
 QuotaQuery::fn new () -> Self
 QuotaWindow
 QuotaWindow #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+QuotaWindow::const fn blocking (& self) -> bool
 QuotaWindow::const fn limit (& self) -> Option < u64 >
 QuotaWindow::const fn resets_at (& self) -> Option < SystemTime >
 QuotaWindow::const fn used (& self) -> u64
+QuotaWindow::const fn with_blocking (mut self , blocking : bool) -> Self
 QuotaWindow::fn name (& self) -> & str
 QuotaWindow::fn new (name : impl Into < String > , used : u64 , limit : Option < u64 > , resets_at : Option < SystemTime > ,) -> Result < Self , PluginError >
+QuotaWindow::fn scope_model (& self) -> Option < & str >
+QuotaWindow::fn with_scope_model (mut self , model : impl Into < String >) -> Self
 RawTable
 RawTable #[non_exhaustive] derives(Clone, Default, PartialEq, Eq)
 RawTable::fn get (& self , key : & str) -> Option < & RawValue >
@@ -474,6 +488,7 @@ SchedulerHandle
 SchedulerHandle #[non_exhaustive] derives(Clone)
 SchedulerHandle::fn cancel (& self , id : JobId) -> Result < () , PluginError >
 SchedulerHandle::fn register (& self , spec : & JobSpec , job : Job) -> Result < JobId , PluginError >
+SchedulerHandle::fn run_once (& self , name : & str , work : BoxFuture < 'static , () >) -> Result < JobId , PluginError >
 Schema
 Schema #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 Schema::fn array (item : Self) -> Self
@@ -498,7 +513,11 @@ SignInChallenge::fn open_url (url : impl Into < String >) -> Result < Self , Plu
 SignInCtx
 SignInCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SignInCtx::fn new (plugin : PluginId) -> Self
+SignInCtx::fn option (& self , key : & str) -> Option < & str >
 SignInCtx::fn plugin (& self) -> & PluginId
+SignInCtx::fn session (& self) -> & str
+SignInCtx::fn with_option (mut self , key : impl Into < String > , value : impl Into < String > ,) -> Result < Self , PluginError >
+SignInCtx::fn with_session (mut self , session : impl Into < String >) -> Result < Self , PluginError >
 SignInFlow
 SignInFlow #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 SignInFlow::Bridge
@@ -507,6 +526,7 @@ SignInFlow::Pkce
 SignInFlow::TokenFile
 SignInProof
 SignInProof #[non_exhaustive] derives(Clone)
+SignInProof::Await
 SignInProof::Callback
 SignInProof::Device
 SignInProof::Token
@@ -539,6 +559,8 @@ StaticUrl::const fn as_str (self) -> & 'static str
 StaticUrl::const fn new (value : & 'static str) -> Self
 StreamEvent
 Subscription
+Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
+Subscription::async fn cancel_sign_in (& self , ctx : & SignInCtx , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn complete_sign_in (& self , ctx : & SignInCtx , proof : SignInProof , host : & HostContext ,) -> Result < AccountId , PluginError >
 Subscription::async fn health (& self) -> Result < () , PluginError >
 Subscription::async fn list_models (& self , account : & AccountId , host : & HostContext ,) -> Result < ModelList , PluginError >
@@ -611,10 +633,15 @@ const PROBE_CAP
 fn redact_token (text : & str , secret : & str) -> String
 fn safe_url (url : & str) -> String
 kernel::AccountBackend
+kernel::AccountBackend::async fn lease (& self , plugin : & PluginKey , id : & AccountId , wait : Duration ,) -> Result < Box < dyn AccountLeaseBackend > , PluginError >
 kernel::AccountBackend::async fn list (& self , plugin : & PluginKey) -> Result < Vec < Account > , PluginError >
 kernel::AccountBackend::async fn remove (& self , plugin : & PluginKey , id : & AccountId) -> Result < () , PluginError >
 kernel::AccountBackend::async fn secret (& self , plugin : & PluginKey , id : & AccountId ,) -> Result < Option < SecretString > , PluginError >
 kernel::AccountBackend::async fn upsert (& self , account : Account , secret : SecretString) -> Result < () , PluginError >
+kernel::AccountLeaseBackend
+kernel::AccountLeaseBackend::async fn commit (self : Box < Self > , label : Option < String > , secret : SecretString ,) -> Result < () , PluginError >
+kernel::AccountLeaseBackend::fn account (& self) -> & Account
+kernel::AccountLeaseBackend::fn secret (& self) -> & SecretString
 kernel::ClockBackend
 kernel::ClockBackend::fn monotonic (& self) -> Duration
 kernel::ClockBackend::fn now (& self) -> SystemTime
@@ -636,6 +663,7 @@ kernel::ProcessBackend::fn kill (& self , id : u32) -> Result < () , PluginError
 kernel::SchedulerBackend
 kernel::SchedulerBackend::fn cancel (& self , id : u64)
 kernel::SchedulerBackend::fn register (& self , name : & str , every_ms : u64 , job : Job) -> Result < u64 , PluginError >
+kernel::SchedulerBackend::fn run_once (& self , name : & str , work : BoxFuture < 'static , () >) -> Result < u64 , PluginError >
 kernel::SchedulerBackend::fn shutdown (& self)
 kernel::SecretsBackend
 kernel::SecretsBackend::async fn get (& self , plugin : & PluginKey , id : & str) -> Result < Option < SecretString > , PluginError >
