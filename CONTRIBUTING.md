@@ -63,6 +63,8 @@ publish them.
   unless the issue asks for it.
 - CI must be green: formatting, Clippy (`-D warnings`), tests on Linux, macOS,
   and Windows, and `cargo deny` (advisories, licenses, bans, and sources).
+  The `test-each-package` job also tests every workspace package with only its
+  default features.
 
 ## Reporting issues
 
