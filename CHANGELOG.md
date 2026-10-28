@@ -77,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ProviderModels` is now non-exhaustive so future aggregation fields do not
+  break downstream construction at compile time.
+- Plugin-host responses now strip every RFC 9110 hop-by-hop header, including
+  headers named by `Connection`, while preserving `Set-Cookie` for plugins.
+  Truncated non-2xx responses retain the partial body bytes read so far.
 - Body breaks after a 2xx reply are now classified as `Interrupted` instead of
   `Connect` on the provider path and `Transport` on the plugin-host path.
   Plugin-host body breaks now fail over across members before a completion or
@@ -90,13 +95,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plugins/agents/claude-code/agent.toml`; its production Rust const is removed
   and its frozen oracle uses the renamed test-only `legacy-agent-consts`
   feature. Catalog order remains `claude-code`, `codex`, `gemini-cli`,
-  `opencode`; `RESERVED_AGENT_IDS` now contains only `gemini-cli` and
-  `opencode`, and static `adapters()` and `find()` cover those two agents.
+  `opencode`.
+- Gemini CLI is now a compiled data-only agent at
+  `plugins/agents/gemini-cli/agent.toml`; its production Rust const is removed
+  and its frozen oracle remains behind `legacy-agent-consts`. Catalog order is
+  unchanged. An absolute `GEMINI_CLI_HOME` still places both files under
+  `$GEMINI_CLI_HOME/.gemini`, while empty and relative values still use
+  `$HOME/.gemini`.
 - OpenCode is now a compiled data-only agent at
   `plugins/agents/opencode/agent.toml`; its production Rust const is removed
   and its frozen oracle remains behind `legacy-agent-consts`. Catalog order is
-  unchanged, `RESERVED_AGENT_IDS` now contains only `gemini-cli`, and static
-  `adapters()` and `find()` cover only Gemini CLI.
+  unchanged.
+- No const-backed built-in agent remains. `RESERVED_AGENT_IDS` is empty, and
+  static `adapters()` is empty and `find()` always returns `None`; use
+  `Catalog::find`. The const engine types are compiled only for tests and
+  `legacy-agent-consts`.
 - Coding-agent path overrides now treat empty and relative values as unset for
   process environments, explicit environment pairs, and named setters. Const
   and compiled adapters therefore use the same default paths.
@@ -162,6 +175,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OpenCode's configured `hofund/<route>` model no longer produces an unrouted
+  model warning; other provider prefixes and bare model names still warn.
 - Non-2xx body-read failures now preserve the original `Status` and
   `Retry-After`, including live model pages, Vertex token responses, and the
   plugin host.

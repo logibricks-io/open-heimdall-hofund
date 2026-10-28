@@ -1,0 +1,15 @@
+{
+  "model": {
+    "name": "kept-model",
+    "temperature": 0.4,
+    "custom": true
+  },
+  "ui": {
+    "theme": "dark"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    }
+  }
+}

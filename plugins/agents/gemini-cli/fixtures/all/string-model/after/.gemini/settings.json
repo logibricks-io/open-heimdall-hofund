@@ -1,0 +1,14 @@
+{
+  "user_added": "keep",
+  "ui": {
+    "theme": "dark"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    }
+  },
+  "model": {
+    "name": "user-model"
+  }
+}

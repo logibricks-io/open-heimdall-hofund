@@ -129,9 +129,9 @@ on `agent` for the shared engine and `plugin-api` for descriptions. The upstream
 kit depends on `plugin-api` for the factory contract. The kits are not on the
 diagram. `plugin-relay` and `plugin-registry` dev-depend on `kit-upstream` for
 conformance tests; the registry also dev-depends on `kit-agent` and on `agent`
-for the frozen Codex, Claude Code, and OpenCode equivalence oracles. Those three
-agents ship as `plugins/agents/<id>/agent.toml`; Gemini CLI is the only remaining
-const-backed agent.
+for the frozen Codex, Claude Code, Gemini CLI, and OpenCode equivalence oracles.
+All four agents ship as `plugins/agents/<id>/agent.toml`; no const-backed agent
+remains.
 
 This table covers normal and build dependencies, including their target-specific forms. Dev-dependencies have a separate explicit allow-map in `xtask/tests/workspace_invariants.rs`; test-only edges below are labelled `(tests)`.
 
