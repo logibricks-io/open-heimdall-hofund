@@ -159,9 +159,6 @@ fn validate(
     if agent_ids.contains(&agent.id) {
         return Err(error(source, "id", "collides with another agent id"));
     }
-    if super::RESERVED_AGENT_IDS.contains(&agent.id.as_str()) {
-        return Err(error(source, "id", "collides with a built-in agent id"));
-    }
     if agent.display_name.is_empty() {
         return Err(error(source, "display_name", "must not be empty"));
     }
@@ -795,29 +792,6 @@ key = "effort"
     fn validation_rejects_empty_or_duplicate_visible_entries() {
         for visible in ["visible = [\"one\", \"\"]", "visible = [\"one\", \"one\"]"] {
             reject(base().replace("requires = [\"echo\"]", visible), "visible");
-        }
-    }
-
-    #[test]
-    fn validation_rejects_builtin_agent_ids() {
-        // No const-backed agent remains, so the list is empty and the loop
-        // below is dead until #147 removes it. Fail loudly if an id returns.
-        assert!(
-            super::super::RESERVED_AGENT_IDS.is_empty(),
-            "RESERVED_AGENT_IDS is not empty; restore real coverage: {:?}",
-            super::super::RESERVED_AGENT_IDS
-        );
-        for id in super::super::RESERVED_AGENT_IDS {
-            let error = parse(
-                &base().replacen("fixture-agent", id, 1),
-                "fixture/agent.toml",
-                id,
-                &[],
-                &[],
-                &["echo".to_owned()],
-            )
-            .expect_err("built-in id");
-            assert!(error.contains("built-in agent id"), "{error}");
         }
     }
 

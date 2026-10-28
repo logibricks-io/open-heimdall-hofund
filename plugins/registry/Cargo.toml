@@ -30,7 +30,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 toml = "0.8.2"
 
 [dev-dependencies]
-hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
+hofund-agent = { workspace = true }
 hofund-kit-agent = { workspace = true }
 hofund-kit-upstream = { workspace = true }
 hofund-plugin-registry = { path = ".", features = ["test-fixtures"] }
