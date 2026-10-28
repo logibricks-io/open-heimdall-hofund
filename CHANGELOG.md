@@ -121,6 +121,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The pooled plugin HTTP client streams a success body as the upstream sends
+  it instead of buffering the whole response (row H0g). A read failure after
+  the headers is one `Interrupted` chunk that ends the stream; error bodies
+  are still buffered. `Call::send` in the SDK still reads the full body, so its
+  retry rules do not change.
 - Plugin ids are now unique per kind rather than globally, allowing an agent and
   subscription to share an id without changing existing config or CLI commands.
   Registry contributions and host secrets, accounts, cache directories, and state
@@ -266,6 +271,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Anthropic host checks match `anthropic.com` and its subdomains only, so a
+  lookalike host such as `evilanthropic.com` no longer gets official Anthropic
+  credential placement or model-list handling.
 - The test temp-path invariant also catches `env::temp_dir()`, imported or
   grouped `temp_dir` imports, and paths read from `TMPDIR`, `TEMP` or `TMP`.
 - Test fixtures now retain temporary-directory guards until test completion,

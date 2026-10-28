@@ -1,0 +1,1 @@
+15:25 #258 H0g-a Opus r0 REQUEST_CHANGES (RFC notes missing). r1: RFC H0g-a notes + E1 amendment, drop/empty-body tests, stronger error-body test, CHANGELOG under Changed; optionals 1,2 filed #259 #260. post-impl r1 running, queues 813 review r1. E8a brief updated.

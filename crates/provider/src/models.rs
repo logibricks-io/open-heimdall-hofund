@@ -342,7 +342,7 @@ impl ModelClient {
     }
 
     pub fn is_official_anthropic(&self) -> bool {
-        url_host(&self.endpoint.base_url).ends_with("anthropic.com")
+        anthropic_host(&url_host(&self.endpoint.base_url))
     }
 
     pub fn redact_error(&self, error: PluginError) -> PluginError {
@@ -455,13 +455,22 @@ pub fn both_auth_applies(
         && base_present
         && credential != Credential::ApiKey
         && !azure_host(&host)
-        && !host.ends_with("anthropic.com")
+        && !anthropic_host(&host)
         && !bedrock
         && !pinned_auth
 }
 
 pub(crate) fn azure_url(base: &str) -> bool {
     azure_host(&url_host(base))
+}
+
+/// Whether `host` is `anthropic.com` or one of its subdomains.
+///
+/// Lookalike hosts such as `evilanthropic.com` do not match.
+#[must_use]
+pub(crate) fn anthropic_host(host: &str) -> bool {
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    host == "anthropic.com" || host.ends_with(".anthropic.com")
 }
 
 /// Whether `host` is an Azure OpenAI resource host, with an optional port.
@@ -891,6 +900,51 @@ mod tests {
         assert!(super::both_auth_refused(401, body.as_bytes()));
         assert!(!super::both_auth_refused(403, body.as_bytes()));
         assert!(!super::both_auth_refused(401, b"x-api-key only"));
+    }
+
+    #[test]
+    fn anthropic_host_matches_the_domain_and_subdomains_only() {
+        for host in [
+            "anthropic.com",
+            "api.anthropic.com",
+            "API.Anthropic.com:443",
+        ] {
+            assert!(super::anthropic_host(host), "{host}");
+        }
+        for host in [
+            "evilanthropic.com",
+            "anthropic.com.example.test",
+            "notanthropic.com",
+            "",
+        ] {
+            assert!(!super::anthropic_host(host), "{host}");
+        }
+        assert!(!super::both_auth_applies(
+            "api.anthropic.com",
+            true,
+            true,
+            crate::Credential::Default,
+            false,
+        ));
+        assert!(super::both_auth_applies(
+            "evilanthropic.com",
+            true,
+            true,
+            crate::Credential::Default,
+            false,
+        ));
+        let lookalike = crate::http::Endpoint::new("lookalike", "https://evilanthropic.com/v1");
+        assert!(
+            !super::ModelClient::new(&lookalike)
+                .expect("client")
+                .is_official_anthropic()
+        );
+        let official = crate::http::Endpoint::new("official", "https://api.anthropic.com");
+        assert!(
+            super::ModelClient::new(&official)
+                .expect("client")
+                .is_official_anthropic()
+        );
     }
 
     #[test]

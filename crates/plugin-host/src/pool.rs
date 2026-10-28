@@ -873,6 +873,16 @@ mod tests {
         rest: Option<&'static [u8]>,
         total: usize,
     ) -> (u16, std::sync::mpsc::Sender<()>) {
+        gated_status("200 OK", first, rest, total)
+    }
+
+    /// Like `gated`, with the status line given.
+    fn gated_status(
+        status: &'static str,
+        first: &'static [u8],
+        rest: Option<&'static [u8]>,
+        total: usize,
+    ) -> (u16, std::sync::mpsc::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let (release, released) = std::sync::mpsc::channel::<()>();
@@ -883,8 +893,9 @@ mod tests {
             let _ = stream.set_nodelay(true);
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let _ = read_request(&mut stream, false);
-            let header =
-                format!("HTTP/1.1 200 OK\r\ncontent-length: {total}\r\nconnection: close\r\n\r\n");
+            let header = format!(
+                "HTTP/1.1 {status}\r\ncontent-length: {total}\r\nconnection: close\r\n\r\n"
+            );
             let _ = stream.write_all(header.as_bytes());
             let _ = stream.write_all(first);
             let _ = stream.flush();
@@ -958,7 +969,13 @@ mod tests {
     #[tokio::test]
     async fn an_error_body_is_buffered_and_a_break_keeps_what_arrived() {
         let _guard = exclusive().await;
-        let port = raw(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 64\r\nconnection: close\r\n\r\nbusy");
+        // The body arrives in two writes and then breaks short of its
+        // length, so the buffer must keep reading past the first chunk.
+        let (port, release) = gated_status("503 Service Unavailable", b"bu", Some(b"sy"), 64);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = release.send(());
+        });
         let mut response = PooledHttp::direct()
             .send(get_request(port))
             .await
@@ -972,5 +989,69 @@ mod tests {
             .expect("ok");
         assert_eq!(&body[..], b"busy");
         assert!(response.body_mut().next_chunk().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_empty_success_body_yields_no_chunks() {
+        let _guard = exclusive().await;
+        let port = raw(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        let mut response = PooledHttp::direct()
+            .send(get_request(port))
+            .await
+            .expect("send");
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(response.body_mut().next_chunk().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_streamed_body_closes_the_connection() {
+        let _guard = exclusive().await;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (closed_tx, closed) = std::sync::mpsc::channel::<bool>();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_nodelay(true);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = read_request(&mut stream, false);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 64\r\n\r\ndata: one\n\n");
+            let _ = stream.flush();
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut buffer = [0_u8; 16];
+            // EOF or a reset means the client closed; a timeout means it
+            // kept the connection open.
+            let closed = match std::io::Read::read(&mut stream, &mut buffer) {
+                Ok(0) => true,
+                Ok(_) => false,
+                Err(error) => !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+            };
+            let _ = closed_tx.send(closed);
+        });
+        let mut response = PooledHttp::direct()
+            .send(get_request(port))
+            .await
+            .expect("send");
+        let first = response
+            .body_mut()
+            .next_chunk()
+            .await
+            .expect("chunk")
+            .expect("ok");
+        assert_eq!(&first[..], b"data: one\n\n");
+        drop(response);
+        let closed =
+            tokio::task::spawn_blocking(move || closed.recv_timeout(Duration::from_secs(8)))
+                .await
+                .expect("join")
+                .expect("server result");
+        assert!(
+            closed,
+            "dropping the body must close the upstream connection"
+        );
     }
 }
