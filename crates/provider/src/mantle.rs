@@ -11,17 +11,26 @@
 //! it is not supported on that route. The API key stays a bearer token
 //! (<https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html>).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use crate::http::Endpoint;
 use crate::presets::Wire;
 
+const LEARNED_ROUTE_CAPACITY: usize = 256;
+
 /// Learned prefix overrides. `true` means the model was refused at the
-/// guessed prefix, so the next call uses the other one.
+/// guessed prefix, so the next call uses the other one. The oldest learned
+/// route is evicted when the map reaches its capacity.
 #[derive(Debug, Default)]
 pub(crate) struct LearnedRoutes {
-    other: Mutex<HashMap<String, bool>>,
+    other: Mutex<RouteMemory>,
+}
+
+#[derive(Debug, Default)]
+struct RouteMemory {
+    other: HashMap<String, bool>,
+    order: VecDeque<String>,
 }
 
 impl LearnedRoutes {
@@ -29,23 +38,30 @@ impl LearnedRoutes {
         self.other
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+            .other
             .get(model)
             .copied()
             .unwrap_or(false)
     }
 
     pub(crate) fn learn_other(&self, model: &str) {
-        self.other
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(model.to_owned(), true);
+        let mut routes = self.other.lock().unwrap_or_else(|error| error.into_inner());
+        if routes.other.insert(model.to_owned(), true).is_some() {
+            return;
+        }
+        routes.order.push_back(model.to_owned());
+        if routes.other.len() > LEARNED_ROUTE_CAPACITY
+            && let Some(oldest) = routes.order.pop_front()
+        {
+            routes.other.remove(&oldest);
+        }
     }
 
     pub(crate) fn forget(&self, model: &str) {
-        self.other
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(model);
+        let mut routes = self.other.lock().unwrap_or_else(|error| error.into_inner());
+        if routes.other.remove(model).is_some() {
+            routes.order.retain(|entry| entry != model);
+        }
     }
 }
 
@@ -182,7 +198,10 @@ fn host_of(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{closed_model, is_mantle, is_mantle_root, mantle_base, normalize, wrong_route};
+    use super::{
+        LEARNED_ROUTE_CAPACITY, LearnedRoutes, closed_model, is_mantle, is_mantle_root,
+        mantle_base, normalize, wrong_route,
+    };
     use crate::{Endpoint, Wire};
 
     const V1: &str = "https://bedrock-mantle.us-east-1.api.aws/v1";
@@ -192,6 +211,26 @@ mod tests {
         let mut endpoint = Endpoint::new("test", base);
         endpoint.preset = preset.map(str::to_owned);
         endpoint
+    }
+
+    #[test]
+    fn learned_routes_evict_the_oldest_entry_at_the_capacity() {
+        let routes = LearnedRoutes::default();
+        for index in 0..=LEARNED_ROUTE_CAPACITY {
+            routes.learn_other(&format!("model-{index}"));
+        }
+        assert!(!routes.other("model-0"));
+        assert!(routes.other("model-1"));
+        assert!(routes.other(&format!("model-{LEARNED_ROUTE_CAPACITY}")));
+        assert_eq!(
+            routes
+                .other
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .other
+                .len(),
+            LEARNED_ROUTE_CAPACITY
+        );
     }
 
     #[test]

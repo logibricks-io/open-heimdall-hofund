@@ -281,7 +281,7 @@ impl fmt::Debug for Call {
 
 fn header_value(header: &Header) -> Result<http::HeaderValue, PluginError> {
     let mut value = http::HeaderValue::from_str(&header.value)
-        .map_err(|_| PluginError::auth(format!("{} is not a valid header value", header.name)))?;
+        .map_err(|_| PluginError::config(format!("{} is not a valid header value", header.name)))?;
     value.set_sensitive(header.sensitive);
     Ok(value)
 }
@@ -814,6 +814,19 @@ mod tests {
 
     fn secret(value: &str) -> SecretString {
         SecretString::from(value)
+    }
+
+    #[test]
+    fn an_invalid_local_header_value_is_a_config_error() {
+        let error = Call::get("https://example.test")
+            .header("x-local-setting", "invalid\nvalue")
+            .request()
+            .expect_err("invalid header");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+        assert_eq!(
+            error.message(),
+            "x-local-setting is not a valid header value"
+        );
     }
 
     #[test]
