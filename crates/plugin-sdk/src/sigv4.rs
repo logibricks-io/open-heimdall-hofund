@@ -453,43 +453,34 @@ mod tests {
 
     #[test]
     fn aws_post_sts_token_signs_the_security_token_header() {
+        // Literal input and expected value from the AWS SigV4 test suite case
+        // post-sts-token/post-sts-header-before.
         let headers = [
-            (
-                "content-type",
-                "application/x-www-form-urlencoded; charset=utf-8",
-            ),
             ("host", "example.amazonaws.com"),
             ("x-amz-date", "20150830T123600Z"),
             (
                 "x-amz-security-token",
-                "AQoDYXdzEPT//////////wEXAMPLEtc764b5uF7example",
+                "AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQWLWsKWHGBuFqwAeMicRXmxfpSPfIeoIYRqTflfKD8YUuwthAx7mSEI/qkPpKPi/kMcGdQrmGdeehM4IC1NtBmUpp2wUE8phUZampKsburEDy0KPkyQDYwT7WZ0wq5VSXDvp75YU9HFvlRd8Tx6q6fE8YQcHNVXAkiY9q6d+xo0rKwT38xVqr7ZD0u0iPPkUL64lIZbqBAz+scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSYvKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA==",
             ),
         ];
         let signed = sign(&aws_suite_input(b"", &headers)).expect("signature");
         assert_eq!(
             signed.authorization(),
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token, Signature=8f0ebc5e61a73d2bb71f01e63ff0cfc18d8b211700ccab5f4f5d3a70019ddf82"
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=85d96828115b5dc0cfc3bd16ad9e210dd772bbebba041836c64533a82be05ead"
         );
     }
 
     #[test]
     fn aws_post_x_www_form_urlencoded_matches_the_botocore_signature() {
         let headers = [
-            (
-                "content-type",
-                "application/x-www-form-urlencoded; charset=utf-8",
-            ),
+            ("content-type", "application/x-www-form-urlencoded"),
             ("host", "example.amazonaws.com"),
             ("x-amz-date", "20150830T123600Z"),
         ];
-        let signed = sign(&aws_suite_input(
-            b"Action=ListUsers&Version=2010-05-08",
-            &headers,
-        ))
-        .expect("signature");
+        let signed = sign(&aws_suite_input(b"Param1=value1", &headers)).expect("signature");
         assert_eq!(
             signed.authorization(),
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=7bf7a551911485bb3bd4fd78c64e975f72b2e50877e5d2e1c0add8cbde89a68f"
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=ff11897932ad3f4e8b18135d722051e5ac45fc38421b1da7b9d196a0fe09473a"
         );
     }
 

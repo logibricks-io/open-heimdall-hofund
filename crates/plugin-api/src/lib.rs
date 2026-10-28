@@ -40,6 +40,7 @@ pub mod kernel;
 #[cfg(not(feature = "kernel"))]
 mod kernel;
 mod records;
+mod redaction;
 mod subscription;
 mod upstream;
 
@@ -72,6 +73,7 @@ pub use records::{
     QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof, Slot, StaticUrl,
     SubscriptionSpec, Visible,
 };
+pub use redaction::{redact_token, safe_url};
 pub use secrecy::SecretString;
 pub use subscription::{DynSubscriptionFactory, Subscription, SubscriptionFactory};
 pub use upstream::{
