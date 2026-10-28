@@ -20,9 +20,9 @@ use hofund_provider::{Credential, Endpoint, ModelPlan, Vertex, Wire};
 use tracing::Instrument;
 
 use super::{
-    DaemonError, Planned, PresetLookup, beside, build_raw_plugin, credential_name, endpoint_for,
-    implementation_id, insert_options, option_present, plan_with, plugin_for, protocol_of, resolve,
-    show,
+    DaemonError, DaemonRegistry, Planned, RegistryAdapter, beside, build_raw_plugin,
+    credential_name, endpoint_for, implementation_id, insert_options, option_present, plan_using,
+    plugin_for, protocol_of, resolve, show,
 };
 
 const NO_MODEL: &str = "no model to try: expose one, or refresh the model list";
@@ -188,6 +188,7 @@ pub struct ModelsHost {
     plan_overrides: HashMap<String, ModelPlan>,
     host_overrides: HashMap<String, String>,
     instances: HashMap<String, RegisteredInstance>,
+    registry: Arc<dyn DaemonRegistry>,
     state: Mutex<super::models_state::StateStore>,
 }
 
@@ -203,8 +204,14 @@ impl ModelsHost {
             plan_overrides: HashMap::new(),
             host_overrides: HashMap::new(),
             instances: HashMap::new(),
+            registry: Arc::new(RegistryAdapter),
             state: Mutex::new(super::models_state::StateStore::new(None)),
         }
+    }
+
+    pub(super) fn with_registry(mut self, registry: Arc<dyn DaemonRegistry>) -> Self {
+        self.registry = registry;
+        self
     }
 
     /// Stores learned state under `root/host/models` and reloads it lazily by provider id.
@@ -342,7 +349,7 @@ impl ModelsHost {
             let refreshable = (|| {
                 let planned = self.planned(provider)?;
                 let model_plan = self.model_plan(provider)?;
-                let configured_plugin = plugin_for(provider, planned.wire);
+                let configured_plugin = plugin_for(provider, planned.wire, &self.registry);
                 self.kind(provider, &planned, model_plan.as_ref(), &configured_plugin)
             })();
             let Ok(kind) = refreshable else {
@@ -742,7 +749,7 @@ impl ModelsHost {
         endpoint: &Endpoint,
     ) -> Result<Fetched, DaemonError> {
         let model_plan = self.model_plan(provider)?;
-        let configured_plugin = plugin_for(provider, planned.wire);
+        let configured_plugin = plugin_for(provider, planned.wire, &self.registry);
         let kind = self.kind(provider, planned, model_plan.as_ref(), &configured_plugin)?;
         tracing::Span::current().record("kind", format_args!("{kind:?}"));
         let configured = self.configured(provider, planned, endpoint, path)?;
@@ -1087,13 +1094,14 @@ impl ModelsHost {
             provider,
             plugin_id,
             raw,
-            hofund_plugin_registry::protocol_for(wire),
+            super::registry::protocol_for(wire),
             &endpoint.api_key,
             path,
             self.limits,
             own,
             false,
             None,
+            &self.registry,
         )
     }
 
@@ -1111,8 +1119,8 @@ impl ModelsHost {
         {
             return Ok(Arc::clone(&instance.upstream));
         }
-        let plugin_id = plugin_for(provider, planned.wire);
-        let mut raw = super::raw_for(provider, planned, endpoint)?;
+        let plugin_id = plugin_for(provider, planned.wire, &self.registry);
+        let mut raw = super::raw_for(provider, planned, endpoint, &self.registry)?;
         raw.insert("base_url", RawValue::String(planned.base_url.clone()));
         build_raw_plugin(
             provider,
@@ -1125,6 +1133,7 @@ impl ModelsHost {
             true,
             false,
             None,
+            &self.registry,
         )
     }
 
@@ -1157,15 +1166,20 @@ impl ModelsHost {
         &self,
         provider: &hofund_config::Provider,
     ) -> Result<Planned, DaemonError> {
-        self.planned_with(provider, hofund_plugin_registry::find_preset)
+        self.planned_with(provider, |id| self.registry.find_preset(id))
     }
 
     fn planned_with(
         &self,
         provider: &hofund_config::Provider,
-        lookup: PresetLookup,
+        lookup: impl Fn(
+            &str,
+        ) -> Option<(
+            &'static super::registry::CompiledPreset,
+            Option<&'static str>,
+        )> + Copy,
     ) -> Result<Planned, DaemonError> {
-        let mut planned = plan_with(provider, lookup)?;
+        let mut planned = plan_using(provider, lookup, &self.registry)?;
         if provider.base_url.trim().is_empty()
             && let Some(model_plan) = self.model_plan_with(provider, lookup)?
         {
@@ -1199,13 +1213,18 @@ impl ModelsHost {
         &self,
         provider: &hofund_config::Provider,
     ) -> Result<Option<ModelPlan>, DaemonError> {
-        self.model_plan_with(provider, hofund_plugin_registry::find_preset)
+        self.model_plan_with(provider, |id| self.registry.find_preset(id))
     }
 
     fn model_plan_with(
         &self,
         provider: &hofund_config::Provider,
-        lookup: PresetLookup,
+        lookup: impl Fn(
+            &str,
+        ) -> Option<(
+            &'static super::registry::CompiledPreset,
+            Option<&'static str>,
+        )>,
     ) -> Result<Option<ModelPlan>, DaemonError> {
         if let Some(plan) = self.plan_overrides.get(&provider.id) {
             return Ok(Some(plan.clone()));
@@ -1214,14 +1233,12 @@ impl ModelsHost {
             return Ok(None);
         };
         if let Some((compiled, alias_region)) = lookup(preset) {
-            let region = hofund_plugin_registry::resolve_region(
+            let region = super::registry::resolve_region(
                 compiled,
                 option_present(provider, "region")?.or(alias_region),
             )
             .map_err(show)?;
-            return Ok(Some(hofund_plugin_registry::model_plan_of(
-                compiled, region,
-            )));
+            return Ok(Some(super::registry::model_plan_of(compiled, region)));
         }
         hofund_provider::model_plan(preset, option_present(provider, "region")?).map_err(show)
     }
@@ -1246,7 +1263,9 @@ impl ModelsHost {
         } else {
             ListKind::Live
         };
-        let factory = hofund_plugin_registry::factory(plugin_id)
+        let factory = self
+            .registry
+            .factory(plugin_id)
             .ok_or_else(|| DaemonError::new(format!("no factory for plugin `{plugin_id}`")))?;
         Ok(bounded_kind(
             wanted,
@@ -1259,21 +1278,26 @@ impl ModelsHost {
         provider: &hofund_config::Provider,
         wire: Wire,
     ) -> Result<Credential, DaemonError> {
-        self.credential_with(provider, wire, hofund_plugin_registry::find_preset)
+        self.credential_with(provider, wire, |id| self.registry.find_preset(id))
     }
 
     fn credential_with(
         &self,
         provider: &hofund_config::Provider,
         wire: Wire,
-        lookup: PresetLookup,
+        lookup: impl Fn(
+            &str,
+        ) -> Option<(
+            &'static super::registry::CompiledPreset,
+            Option<&'static str>,
+        )>,
     ) -> Result<Credential, DaemonError> {
         let Some(preset) = provider.preset.as_deref() else {
             return Ok(Credential::Default);
         };
         if let Some((compiled, alias_region)) = lookup(preset) {
             let region = option_present(provider, "region")?.or(alias_region);
-            return super::compiled_credential(compiled, region, wire);
+            return super::compiled_credential(compiled, region, wire, &self.registry);
         }
         resolve(&hofund_provider::Resolve {
             id: preset,
