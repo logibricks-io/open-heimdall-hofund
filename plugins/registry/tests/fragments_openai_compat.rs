@@ -28,7 +28,28 @@ struct Region {
     catalog: &'static str,
     website: &'static str,
     keys_url: &'static str,
+    models: Option<&'static [&'static str]>,
+    lists: bool,
+    embeddings: &'static [&'static str],
+    drawers: &'static [&'static str],
+    videos: &'static [&'static str],
 }
+
+const NO_REGION: Region = Region {
+    id: "",
+    name: "",
+    chat: "",
+    responses: "",
+    anthropic: "",
+    catalog: "",
+    website: "",
+    keys_url: "",
+    models: None,
+    lists: false,
+    embeddings: &[],
+    drawers: &[],
+    videos: &[],
+};
 
 #[derive(Clone, Copy)]
 struct Details {
@@ -37,6 +58,11 @@ struct Details {
     hosts: bool,
     key_hint: &'static str,
     no_key: bool,
+    short: &'static str,
+    no_list: bool,
+    decide: &'static str,
+    only: &'static str,
+    models: &'static [&'static str],
 }
 
 const NO_DETAILS: Details = Details {
@@ -45,6 +71,11 @@ const NO_DETAILS: Details = Details {
     hosts: false,
     key_hint: "",
     no_key: false,
+    short: "",
+    no_list: false,
+    decide: "",
+    only: "",
+    models: &[],
 };
 
 const ROWS: &[Row] = &[
@@ -426,9 +457,152 @@ const ROWS: &[Row] = &[
         website: "https://yylx.io",
         keys_url: "https://app.yylx.io/keys",
     },
+    // reference: internal/provider/presets.go:295
+    // note kept ASCII as in the old catalog
+    Row {
+        id: "huaweicloud",
+        name: "Huawei Cloud MaaS",
+        kind: "vendor",
+        catalog: "",
+        note: "Token Plan, southwest China (Guiyang)",
+        chat: "https://api.modelarts-maas.com/plan/v2",
+        responses: "",
+        anthropic: "https://api.modelarts-maas.com/plan/anthropic",
+        website: "https://support.huaweicloud.com/Token-plan-maas/tokenplan-maas-0001.html",
+        keys_url: "https://console.huaweicloud.com/modelarts/?#/model-studio/authmanage",
+    },
+    // reference: internal/provider/presets.go:313
+    // note kept ASCII as in the old catalog
+    Row {
+        id: "volcengine",
+        name: "Volcengine Ark",
+        kind: "vendor",
+        catalog: "",
+        note: "Coding plan, agent plan, and pay as you go",
+        chat: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        responses: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        anthropic: "https://ark.cn-beijing.volces.com/api/coding",
+        website: "https://www.volcengine.com/docs/82379/1925114",
+        keys_url: "https://ark.volcengine.com/region:cn-beijing/apikey",
+    },
+    // reference: internal/provider/presets.go:349
+    // note kept ASCII as in the old catalog
+    Row {
+        id: "qwen-token-plan",
+        name: "Qwen Token Plan",
+        kind: "vendor",
+        catalog: "",
+        note: "Qwen AI platform - subscription",
+        chat: "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+        responses: "",
+        anthropic: "https://token-plan.maas.qianwenaiapi.com/apps/anthropic",
+        website: "https://platform.qianwenai.com/docs/token-plan/overview",
+        keys_url: "https://platform.qianwenai.com/home/analytics/token-plan/individual",
+    },
+    // reference: internal/provider/presets.go:358
+    // note kept ASCII as in the old catalog
+    Row {
+        id: "bailian-token-plan",
+        name: "Bailian Token Plan",
+        kind: "vendor",
+        catalog: "",
+        note: "Alibaba Cloud Bailian - subscription",
+        chat: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        responses: "",
+        anthropic: "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+        website: "https://help.aliyun.com/zh/model-studio/token-plan-overview",
+        keys_url: "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal",
+    },
+    // reference: internal/provider/presets.go:423
+    Row {
+        id: "ollama-cloud",
+        name: "Ollama Cloud",
+        kind: "vendor",
+        catalog: "ollama-cloud",
+        note: "cloud models, with an API key",
+        chat: "https://ollama.com/v1",
+        responses: "",
+        anthropic: "https://ollama.com",
+        website: "https://docs.ollama.com/cloud",
+        keys_url: "https://ollama.com/settings/keys",
+    },
+    // reference: internal/provider/presets.go:457
+    Row {
+        id: "clinepass",
+        name: "ClinePass",
+        kind: "relay",
+        catalog: "",
+        note: "open coding models, $9.99/month",
+        chat: "https://api.cline.bot/api/v1",
+        responses: "",
+        anthropic: "",
+        website: "https://docs.cline.bot/getting-started/clinepass",
+        keys_url: "https://app.cline.bot",
+    },
+    // reference: internal/provider/presets.go:465
+    Row {
+        id: "opencode-zen",
+        name: "OpenCode Zen",
+        kind: "relay",
+        catalog: "opencode",
+        note: "",
+        chat: "https://opencode.ai/zen/v1",
+        responses: "https://opencode.ai/zen/v1",
+        anthropic: "https://opencode.ai/zen",
+        website: "https://opencode.ai/docs/zen",
+        keys_url: "https://opencode.ai/auth",
+    },
 ];
 
-const BATCH3_DETAILS: &[(&str, Details)] = &[
+const ALIBABA_PLAN_MODELS: &[&str] = &[
+    "auto",
+    "qwen3.8-max",
+    "qwen3.8-flash",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-flash",
+    "deepseek-v4.1-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-pro-0813",
+    "deepseek-v4-flash-0731",
+    "glm-5.3",
+    "glm-5.2",
+];
+
+const CLINEPASS_MODELS: &[&str] = &[
+    "cline-pass/glm-5.3",
+    "cline-pass/glm-5.3-flash",
+    "cline-pass/kimi-k3",
+    "cline-pass/deepseek-v4-pro",
+    "cline-pass/deepseek-v4.1-flash",
+    "cline-pass/mimo-v2.5",
+    "cline-pass/mimo-v2.5-pro",
+    "cline-pass/minimax-m3",
+    "cline-pass/muse-spark-1.3-contributor",
+    "cline-pass/qwen3.8-max",
+    "cline-pass/qwen3.7-max",
+    "cline-pass/qwen3.7-plus",
+];
+
+const VOLCENGINE_PLAN_MODELS: &[&str] = &[
+    "ark-code-latest",
+    "doubao-seed-evolving",
+    "doubao-seed-2.1-pro",
+    "doubao-seed-2.1-lite",
+    "doubao-seed-2.1-turbo",
+    "doubao-seed-2.0-mini",
+    "minimax-m3",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "deepseek-v4.1-flash",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "kimi-k2.7-code",
+    "kimi-k2.8-preview",
+    "kimi-k3",
+];
+
+const BATCH_DETAILS: &[(&str, Details)] = &[
     (
         "zai",
         Details {
@@ -442,6 +616,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
                 Region {
                     id: "coding",
@@ -452,12 +627,14 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
             ],
             region_label: "Plan",
             hosts: false,
             key_hint: "",
             no_key: false,
+            ..NO_DETAILS
         },
     ),
     (
@@ -473,6 +650,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
                 Region {
                     id: "api",
@@ -483,12 +661,14 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
             ],
             region_label: "Plan",
             hosts: false,
             key_hint: "",
             no_key: false,
+            ..NO_DETAILS
         },
     ),
     (
@@ -504,6 +684,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
                 Region {
                     id: "api",
@@ -514,12 +695,14 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
             ],
             region_label: "Plan",
             hosts: false,
             key_hint: "",
             no_key: false,
+            ..NO_DETAILS
         },
     ),
     (
@@ -535,6 +718,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "xiaomi-token-plan-cn, xiaomi",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
                 Region {
                     id: "plan-sgp",
@@ -545,6 +729,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "xiaomi-token-plan-sgp, xiaomi",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
                 Region {
                     id: "plan-ams",
@@ -555,6 +740,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "xiaomi-token-plan-ams, xiaomi",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
                 Region {
                     id: "api",
@@ -565,12 +751,14 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "xiaomi",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
             ],
             region_label: "",
             hosts: false,
             key_hint: "",
             no_key: false,
+            ..NO_DETAILS
         },
     ),
     (
@@ -608,6 +796,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
                 Region {
                     id: "intl",
@@ -618,6 +807,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "https://cloud.siliconflow.com",
                     keys_url: "https://cloud.siliconflow.com/account/ak",
+                    ..NO_REGION
                 },
             ],
             ..NO_DETAILS
@@ -636,6 +826,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
                 Region {
                     id: "global",
@@ -646,6 +837,7 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
                 Region {
                     id: "cn",
@@ -656,15 +848,134 @@ const BATCH3_DETAILS: &[(&str, Details)] = &[
                     catalog: "",
                     website: "",
                     keys_url: "",
+                    ..NO_REGION
                 },
             ],
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "huaweicloud",
+        Details {
+            regions: &[
+                Region {
+                    id: "plan",
+                    name: "Token Plan",
+                    chat: "https://api.modelarts-maas.com/plan/v2",
+                    anthropic: "https://api.modelarts-maas.com/plan/anthropic",
+                    ..NO_REGION
+                },
+                Region {
+                    id: "api",
+                    name: "Pay as you go",
+                    chat: "https://api.modelarts-maas.com/openai/v1",
+                    anthropic: "https://api.modelarts-maas.com/anthropic",
+                    ..NO_REGION
+                },
+            ],
+            region_label: "Plan",
+            short: "Huawei Cloud",
+            models: &[
+                "glm-5.3",
+                "glm-5.1",
+                "kimi-k2.6",
+                "deepseek-v4.1-flash",
+                "deepseek-v4-flash",
+            ],
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "volcengine",
+        Details {
+            regions: &[
+                Region {
+                    id: "coding",
+                    name: "Coding Plan",
+                    chat: "https://ark.cn-beijing.volces.com/api/coding/v3",
+                    responses: "https://ark.cn-beijing.volces.com/api/coding/v3",
+                    anthropic: "https://ark.cn-beijing.volces.com/api/coding",
+                    models: Some(VOLCENGINE_PLAN_MODELS),
+                    embeddings: &["doubao-embedding-vision"],
+                    ..NO_REGION
+                },
+                Region {
+                    id: "agent",
+                    name: "Agent Plan",
+                    chat: "https://ark.cn-beijing.volces.com/api/plan/v3",
+                    responses: "https://ark.cn-beijing.volces.com/api/plan/v3",
+                    anthropic: "https://ark.cn-beijing.volces.com/api/plan",
+                    models: Some(VOLCENGINE_PLAN_MODELS),
+                    embeddings: &["doubao-embedding-vision"],
+                    drawers: &["doubao-seedream-5-0-pro"],
+                    videos: &[
+                        "doubao-seedance-2.0",
+                        "doubao-seedance-2.0-fast",
+                        "doubao-seedance-2.0-mini",
+                        "doubao-seedance-2.5",
+                    ],
+                    ..NO_REGION
+                },
+                Region {
+                    id: "api",
+                    name: "Pay as you go",
+                    chat: "https://ark.cn-beijing.volces.com/api/v3",
+                    responses: "https://ark.cn-beijing.volces.com/api/v3",
+                    lists: true,
+                    ..NO_REGION
+                },
+            ],
+            region_label: "Plan",
+            no_list: true,
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "qwen-token-plan",
+        Details {
+            short: "Qwen Plan",
+            models: ALIBABA_PLAN_MODELS,
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "bailian-token-plan",
+        Details {
+            short: "Bailian Plan",
+            decide: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            models: ALIBABA_PLAN_MODELS,
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "ollama-cloud",
+        Details {
+            hosts: true,
+            decide: "https://ollama.com/v1",
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "clinepass",
+        Details {
+            only: "cline-pass/",
+            models: CLINEPASS_MODELS,
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "opencode-zen",
+        Details {
+            key_hint: "optional: free models need no key",
+            no_key: true,
+            decide: "https://opencode.ai/zen/v1",
             ..NO_DETAILS
         },
     ),
 ];
 
 fn details(row: &Row) -> &'static Details {
-    BATCH3_DETAILS
+    BATCH_DETAILS
         .iter()
         .find_map(|(id, details)| (*id == row.id).then_some(details))
         .unwrap_or(&NO_DETAILS)
@@ -711,15 +1022,21 @@ fn expected_credential(wire: Wire) -> Credential {
 }
 
 fn expected_model_plan(row: &Row, region: Option<&Region>) -> ModelPlan {
+    let details = details(row);
     ModelPlan {
         chat: endpoint(row, region, Wire::Chat).to_owned(),
         responses: endpoint(row, region, Wire::Responses).to_owned(),
         anthropic: endpoint(row, region, Wire::Messages).to_owned(),
         generative: String::new(),
-        no_list: false,
-        lists: false,
-        only: String::new(),
-        models: Vec::new(),
+        no_list: details.no_list,
+        lists: region.is_some_and(|region| region.lists),
+        only: details.only.to_owned(),
+        models: region
+            .and_then(|region| region.models)
+            .unwrap_or(details.models)
+            .iter()
+            .map(|model| (*model).to_owned())
+            .collect(),
         quirks: None,
         extra_body: None,
     }
@@ -765,6 +1082,11 @@ fn batch_rows_match_the_reference_literal() {
         assert_eq!(preset.hosts, details.hosts);
         assert_eq!(preset.key_hint, details.key_hint);
         assert_eq!(preset.no_key, details.no_key);
+        assert_eq!(preset.short, details.short);
+        assert_eq!(preset.no_list, details.no_list);
+        assert_eq!(preset.decide, details.decide);
+        assert_eq!(preset.only, details.only);
+        assert_eq!(preset.models, details.models);
         assert_eq!(preset.regions.len(), details.regions.len());
         for (actual, expected) in preset.regions.iter().zip(details.regions) {
             assert_eq!(actual.id, expected.id);
@@ -775,6 +1097,11 @@ fn batch_rows_match_the_reference_literal() {
             assert_eq!(actual.catalog, expected.catalog);
             assert_eq!(actual.website, expected.website);
             assert_eq!(actual.keys_url, expected.keys_url);
+            assert_eq!(actual.models, expected.models);
+            assert_eq!(actual.lists, expected.lists);
+            assert_eq!(actual.embeddings, expected.embeddings);
+            assert_eq!(actual.drawers, expected.drawers);
+            assert_eq!(actual.videos, expected.videos);
         }
     }
 }

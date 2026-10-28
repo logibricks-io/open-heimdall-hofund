@@ -20,6 +20,19 @@ website = "https://aihubmix.com"
 keys_url = "https://console.aihubmix.com/token"
 
 [[preset]]
+id = "bailian-token-plan"
+name = "Bailian Token Plan"
+short = "Bailian Plan"
+kind = "vendor"
+note = "Alibaba Cloud Bailian - subscription"
+chat = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+anthropic = "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic"
+decide = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+website = "https://help.aliyun.com/zh/model-studio/token-plan-overview"
+keys_url = "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal"
+models = ["auto", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "glm-5.3", "glm-5.2"]
+
+[[preset]]
 id = "cherryin"
 name = "CherryIN"
 kind = "relay"
@@ -28,6 +41,17 @@ responses = "https://open.cherryin.ai/v1"
 anthropic = "https://open.cherryin.ai"
 website = "https://open.cherryin.ai"
 keys_url = "https://open.cherryin.ai/console/token"
+
+[[preset]]
+id = "clinepass"
+name = "ClinePass"
+kind = "relay"
+note = "open coding models, $9.99/month"
+chat = "https://api.cline.bot/api/v1"
+website = "https://docs.cline.bot/getting-started/clinepass"
+keys_url = "https://app.cline.bot"
+only = "cline-pass/"
+models = ["cline-pass/glm-5.3", "cline-pass/glm-5.3-flash", "cline-pass/kimi-k3", "cline-pass/deepseek-v4-pro", "cline-pass/deepseek-v4.1-flash", "cline-pass/mimo-v2.5", "cline-pass/mimo-v2.5-pro", "cline-pass/minimax-m3", "cline-pass/muse-spark-1.3-contributor", "cline-pass/qwen3.8-max", "cline-pass/qwen3.7-max", "cline-pass/qwen3.7-plus"]
 
 [[preset]]
 id = "commandcode"
@@ -58,6 +82,31 @@ responses = "https://api.groq.com/openai/v1"
 website = "https://console.groq.com"
 keys_url = "https://console.groq.com/keys"
 hosts = true
+
+[[preset]]
+id = "huaweicloud"
+name = "Huawei Cloud MaaS"
+short = "Huawei Cloud"
+kind = "vendor"
+note = "Token Plan, southwest China (Guiyang)"
+chat = "https://api.modelarts-maas.com/plan/v2"
+anthropic = "https://api.modelarts-maas.com/plan/anthropic"
+website = "https://support.huaweicloud.com/Token-plan-maas/tokenplan-maas-0001.html"
+keys_url = "https://console.huaweicloud.com/modelarts/?#/model-studio/authmanage"
+models = ["glm-5.3", "glm-5.1", "kimi-k2.6", "deepseek-v4.1-flash", "deepseek-v4-flash"]
+region_label = "Plan"
+
+[[preset.region]]
+id = "plan"
+name = "Token Plan"
+chat = "https://api.modelarts-maas.com/plan/v2"
+anthropic = "https://api.modelarts-maas.com/plan/anthropic"
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://api.modelarts-maas.com/openai/v1"
+anthropic = "https://api.modelarts-maas.com/anthropic"
 
 [[preset]]
 id = "kilo"
@@ -172,6 +221,19 @@ website = "https://build.nvidia.com"
 keys_url = "https://build.nvidia.com/settings/api-keys"
 
 [[preset]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+kind = "vendor"
+catalog = "ollama-cloud"
+note = "cloud models, with an API key"
+chat = "https://ollama.com/v1"
+anthropic = "https://ollama.com"
+decide = "https://ollama.com/v1"
+website = "https://docs.ollama.com/cloud"
+keys_url = "https://ollama.com/settings/keys"
+hosts = true
+
+[[preset]]
 id = "opencode-go"
 name = "OpenCode Go"
 kind = "relay"
@@ -182,6 +244,20 @@ responses = "https://opencode.ai/zen/go/v1"
 anthropic = "https://opencode.ai/zen/go"
 website = "https://opencode.ai/docs/go"
 keys_url = "https://opencode.ai/auth"
+
+[[preset]]
+id = "opencode-zen"
+name = "OpenCode Zen"
+kind = "relay"
+catalog = "opencode"
+chat = "https://opencode.ai/zen/v1"
+responses = "https://opencode.ai/zen/v1"
+anthropic = "https://opencode.ai/zen"
+decide = "https://opencode.ai/zen/v1"
+website = "https://opencode.ai/docs/zen"
+keys_url = "https://opencode.ai/auth"
+no_key = true
+key_hint = "optional: free models need no key"
 
 [[preset]]
 id = "pipellm"
@@ -214,6 +290,18 @@ chat = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 anthropic = "https://dashscope.aliyuncs.com/apps/anthropic"
 website = "https://bailian.console.aliyun.com"
 keys_url = "https://bailian.console.aliyun.com/?tab=model#/api-key"
+
+[[preset]]
+id = "qwen-token-plan"
+name = "Qwen Token Plan"
+short = "Qwen Plan"
+kind = "vendor"
+note = "Qwen AI platform - subscription"
+chat = "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+anthropic = "https://token-plan.maas.qianwenaiapi.com/apps/anthropic"
+website = "https://platform.qianwenai.com/docs/token-plan/overview"
+keys_url = "https://platform.qianwenai.com/home/analytics/token-plan/individual"
+models = ["auto", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "glm-5.3", "glm-5.2"]
 
 [[preset]]
 id = "siliconflow"
@@ -290,6 +378,46 @@ catalog = "togetherai"
 chat = "https://api.together.xyz/v1"
 website = "https://api.together.ai"
 keys_url = "https://api.together.ai/settings/api-keys"
+
+[[preset]]
+id = "volcengine"
+name = "Volcengine Ark"
+kind = "vendor"
+note = "Coding plan, agent plan, and pay as you go"
+chat = "https://ark.cn-beijing.volces.com/api/coding/v3"
+responses = "https://ark.cn-beijing.volces.com/api/coding/v3"
+anthropic = "https://ark.cn-beijing.volces.com/api/coding"
+website = "https://www.volcengine.com/docs/82379/1925114"
+keys_url = "https://ark.volcengine.com/region:cn-beijing/apikey"
+no_list = true
+region_label = "Plan"
+
+[[preset.region]]
+id = "coding"
+name = "Coding Plan"
+chat = "https://ark.cn-beijing.volces.com/api/coding/v3"
+responses = "https://ark.cn-beijing.volces.com/api/coding/v3"
+anthropic = "https://ark.cn-beijing.volces.com/api/coding"
+models = ["ark-code-latest", "doubao-seed-evolving", "doubao-seed-2.1-pro", "doubao-seed-2.1-lite", "doubao-seed-2.1-turbo", "doubao-seed-2.0-mini", "minimax-m3", "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.7-code", "kimi-k2.8-preview", "kimi-k3"]
+embeddings = ["doubao-embedding-vision"]
+
+[[preset.region]]
+id = "agent"
+name = "Agent Plan"
+chat = "https://ark.cn-beijing.volces.com/api/plan/v3"
+responses = "https://ark.cn-beijing.volces.com/api/plan/v3"
+anthropic = "https://ark.cn-beijing.volces.com/api/plan"
+models = ["ark-code-latest", "doubao-seed-evolving", "doubao-seed-2.1-pro", "doubao-seed-2.1-lite", "doubao-seed-2.1-turbo", "doubao-seed-2.0-mini", "minimax-m3", "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.7-code", "kimi-k2.8-preview", "kimi-k3"]
+embeddings = ["doubao-embedding-vision"]
+drawers = ["doubao-seedream-5-0-pro"]
+videos = ["doubao-seedance-2.0", "doubao-seedance-2.0-fast", "doubao-seedance-2.0-mini", "doubao-seedance-2.5"]
+
+[[preset.region]]
+id = "api"
+name = "Pay as you go"
+chat = "https://ark.cn-beijing.volces.com/api/v3"
+responses = "https://ark.cn-beijing.volces.com/api/v3"
+lists = true
 
 [[preset]]
 id = "xai"
