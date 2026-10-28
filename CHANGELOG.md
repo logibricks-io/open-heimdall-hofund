@@ -91,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The first ten relay preset rows now live in
   `plugins/providers/openai-compat/presets.toml`. Registry selection, credential
   derivation, and model planning preserve their catalog behavior.
+- The second batch of ten vendor preset rows now lives in
+  `plugins/providers/openai-compat/presets.toml`, with catalog-equivalent
+  registry selection, credential derivation, and model planning.
 - `ProviderModels` is now non-exhaustive so future aggregation fields do not
   break downstream construction at compile time.
 - Plugin-host responses now strip every RFC 9110 hop-by-hop header, including
@@ -189,6 +192,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Default control error envelopes now round-trip with a valid request-id
+  placeholder, validation messages use their limit constants, CI workflow
+  parsing covers both cache-step forms and missing per-package test jobs, and
+  accepted L1 fallback decisions are documented (#189, #194, #196, #197).
 - Control response decoding now validates event boot ids and topic membership
   and rejects oversized or invalid error-envelope fields instead of accepting
   unbounded wire content (#184, #190).

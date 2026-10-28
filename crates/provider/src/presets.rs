@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 48);
+        assert_eq!(catalog.preset.len(), 38);
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
