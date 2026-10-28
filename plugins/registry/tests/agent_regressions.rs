@@ -347,6 +347,31 @@ fn shipped_agents_disconnect_refuses_broken_files_until_force() {
 }
 
 #[test]
+fn shipped_codex_forced_disconnect_removes_created_config_directory() {
+    for os in OPERATING_SYSTEMS {
+        let home = scratch();
+        let session = Session::new(&home);
+        let adapter = adapter("codex", os);
+        adapter.apply(&session, &target()).expect("apply");
+        let path = home.join(".codex/config.toml");
+        assert!(path.is_file());
+        write(&path, spec("codex").invalid);
+        adapter
+            .disconnect(&session, false)
+            .expect_err("broken disconnect");
+
+        assert!(adapter.disconnect(&session, true).expect("force").changed());
+        assert!(!path.exists(), "{os:?}: config remains");
+        assert!(
+            !home.join(".codex").exists(),
+            "{os:?}: config directory remains"
+        );
+        assert!(home.is_dir(), "{os:?}: home was removed");
+        assert!(tree(&home).is_empty(), "{os:?}: markers remain");
+    }
+}
+
+#[test]
 fn shipped_agents_read_and_revert_cover_existing_and_missing_files() {
     for os in OPERATING_SYSTEMS {
         for spec in SPECS {

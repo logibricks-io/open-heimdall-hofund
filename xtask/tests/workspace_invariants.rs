@@ -799,15 +799,35 @@ fn legacy_agent_consts_feature_is_absent(manifest: &str) -> bool {
 
 #[test]
 fn legacy_agent_consts_feature_is_rejected() {
-    let manifest = r#"
+    for manifest in [
+        r#"
 [features]
 legacy-agent-consts = []
+"#,
+        r#"
+[features]
 default = ["agent/legacy-agent-consts"]
-
+"#,
+        r#"
 [dependencies]
 hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
+"#,
+    ] {
+        assert!(
+            !legacy_agent_consts_feature_is_absent(manifest),
+            "{manifest}"
+        );
+    }
+
+    let unrelated = r#"
+[features]
+other-feature = []
+default = ["agent/other-feature"]
+
+[dependencies]
+hofund-agent = { workspace = true, features = ["other-feature"] }
 "#;
-    assert!(!legacy_agent_consts_feature_is_absent(manifest));
+    assert!(legacy_agent_consts_feature_is_absent(unrelated));
 }
 
 #[test]
