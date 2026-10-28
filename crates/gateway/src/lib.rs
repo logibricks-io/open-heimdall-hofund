@@ -137,10 +137,6 @@ pub enum GatewayError {
         /// The rejected socket path.
         path: PathBuf,
     },
-    /// Local IPC is unavailable on this target.
-    #[cfg(unix)]
-    #[error("local control IPC is unavailable")]
-    UnsupportedLocalControl,
 }
 
 impl Gateway {

@@ -97,13 +97,17 @@ impl ConfigIdentity {
         let normalized = text.to_lowercase();
         #[cfg(not(any(target_os = "macos", windows)))]
         let normalized = text.to_owned();
-        let digest = Sha256::digest(normalized.as_bytes());
-        let id = digest[..8]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let id = config_id(&normalized);
         Ok(Self { resolved_path, id })
     }
+}
+
+fn config_id(normalized_path: &str) -> String {
+    let digest = Sha256::digest(normalized_path.as_bytes());
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,40 +172,7 @@ pub(crate) async fn discover(
         else {
             continue;
         };
-        let mut endpoints = Vec::new();
-        #[cfg(unix)]
-        if let Some(path) = discovery.socket_path {
-            if !path.is_absolute() {
-                return Err(ClientError::Discovery(format!(
-                    "discovery {} contains a relative socket path",
-                    path.display()
-                )));
-            }
-            endpoints.push(Endpoint::Unix(path));
-        }
-        #[cfg(not(unix))]
-        if discovery.socket_path.is_some() {
-            return Err(ClientError::Discovery(format!(
-                "discovery {} names unsupported local IPC",
-                path.display()
-            )));
-        }
-        for addr in discovery.tcp_endpoints {
-            if !addr.ip().is_loopback() {
-                return Err(ClientError::Discovery(format!(
-                    "discovery {} contains a non-loopback TCP endpoint",
-                    path.display()
-                )));
-            }
-            endpoints.push(Endpoint::Tcp(addr));
-        }
-        if endpoints.is_empty() {
-            return Err(ClientError::Discovery(format!(
-                "discovery {} contains no control endpoint",
-                path.display()
-            )));
-        }
-        for endpoint in endpoints {
+        for endpoint in discovery_endpoints(discovery, &path)? {
             match probe(Client::from_endpoint(endpoint, token.clone())).await {
                 Err(error) if error.is_unavailable() => {}
                 result => return result,
@@ -228,6 +199,46 @@ pub(crate) async fn discover(
     probe(Client::tcp(addr, token)).await
 }
 
+fn discovery_endpoints(
+    discovery: DiscoveryFile,
+    discovery_path: &Path,
+) -> Result<Vec<Endpoint>, ClientError> {
+    let mut endpoints = Vec::new();
+    #[cfg(unix)]
+    if let Some(path) = discovery.socket_path {
+        if !path.is_absolute() {
+            return Err(ClientError::Discovery(format!(
+                "discovery {} contains a relative socket path",
+                discovery_path.display()
+            )));
+        }
+        endpoints.push(Endpoint::Unix(path));
+    }
+    #[cfg(not(unix))]
+    if discovery.socket_path.is_some() {
+        return Err(ClientError::Discovery(format!(
+            "discovery {} names unsupported local IPC",
+            discovery_path.display()
+        )));
+    }
+    for addr in discovery.tcp_endpoints {
+        if !addr.ip().is_loopback() {
+            return Err(ClientError::Discovery(format!(
+                "discovery {} contains a non-loopback TCP endpoint",
+                discovery_path.display()
+            )));
+        }
+        endpoints.push(Endpoint::Tcp(addr));
+    }
+    if endpoints.is_empty() {
+        return Err(ClientError::Discovery(format!(
+            "discovery {} contains no control endpoint",
+            discovery_path.display()
+        )));
+    }
+    Ok(endpoints)
+}
+
 async fn probe(client: Client) -> Result<Client, ClientError> {
     let health = client.health().await?;
     if health.api_version != API_VERSION {
@@ -236,6 +247,7 @@ async fn probe(client: Client) -> Result<Client, ClientError> {
             health.api_version
         )));
     }
+    client.status().await?;
     Ok(client)
 }
 
@@ -391,7 +403,7 @@ fn valid_unix_dir(path: &Path, uid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn current_uid(temp_dir: &Path) -> Result<u32, ClientError> {
+pub(crate) fn current_uid(temp_dir: &Path) -> Result<u32, ClientError> {
     use std::os::unix::fs::MetadataExt;
     for _ in 0..16 {
         let path = temp_dir.join(format!(
@@ -429,4 +441,102 @@ fn current_uid(temp_dir: &Path) -> Result<u32, ClientError> {
     Err(ClientError::Discovery(
         "cannot allocate a current-user probe".to_owned(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DiscoveryFile, config_id, discovery_endpoints, read_discovery};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "hofund-client-discovery-{label}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("scratch directory");
+            Self(path)
+        }
+
+        fn join(&self, path: &str) -> PathBuf {
+            self.0.join(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_discovery(path: &Path, config_id: &str) {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({
+                "api_version": 1,
+                "pid": 7,
+                "boot_id": "boot",
+                "config_id": config_id,
+                "tcp_endpoints": ["127.0.0.1:3426"],
+                "socket_path": null,
+            }))
+            .expect("discovery JSON"),
+        )
+        .expect("discovery file");
+    }
+
+    #[test]
+    fn config_id_known_vector() {
+        assert_eq!(config_id("/tmp/hofund.toml"), "1664910274138c0f");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_wrong_owner() {
+        let dir = Scratch::new("owner");
+        let path = dir.join("control.json");
+        write_discovery(&path, "expected");
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata(&path).expect("metadata").uid();
+        let error = read_discovery(&path, "expected", uid.wrapping_add(1))
+            .expect_err("wrong owner was accepted");
+        assert!(matches!(error, crate::ClientError::Discovery(_)));
+    }
+
+    #[test]
+    fn discovery_rejects_mismatched_config_id() {
+        let dir = Scratch::new("config-id");
+        let path = dir.join("control.json");
+        write_discovery(&path, "other-config");
+        #[cfg(unix)]
+        let error = {
+            use std::os::unix::fs::MetadataExt;
+            let uid = std::fs::metadata(&path).expect("metadata").uid();
+            read_discovery(&path, "expected", uid).expect_err("wrong config id")
+        };
+        #[cfg(not(unix))]
+        let error = read_discovery(&path, "expected").expect_err("wrong config id");
+        assert!(matches!(error, crate::ClientError::Discovery(_)));
+    }
+
+    #[test]
+    fn discovery_rejects_non_loopback_tcp_endpoint() {
+        let discovery = DiscoveryFile {
+            api_version: 1,
+            _pid: 7,
+            boot_id: "boot".to_owned(),
+            config_id: "expected".to_owned(),
+            tcp_endpoints: vec!["192.0.2.1:3426".parse().expect("TCP address")],
+            socket_path: None,
+        };
+        let error = discovery_endpoints(discovery, Path::new("control.json"))
+            .expect_err("non-loopback endpoint");
+        assert!(matches!(error, crate::ClientError::Discovery(_)));
+    }
 }

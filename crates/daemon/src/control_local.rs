@@ -55,11 +55,7 @@ impl ConfigIdentity {
         let resolved_path = std::fs::canonicalize(path)
             .map_err(|error| format!("cannot resolve config path {}: {error}", path.display()))?;
         let normalized = normalized_path(&resolved_path)?;
-        let digest = Sha256::digest(normalized.as_bytes());
-        let id = digest[..8]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let id = config_id(&normalized);
         Ok(Self { resolved_path, id })
     }
 }
@@ -79,6 +75,14 @@ fn normalized_path(path: &Path) -> Result<String, String> {
     {
         Ok(text.to_owned())
     }
+}
+
+fn config_id(normalized_path: &str) -> String {
+    let digest = Sha256::digest(normalized_path.as_bytes());
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(crate) struct ControlSession {
@@ -291,22 +295,11 @@ fn write_discovery(path: &Path, discovery: &DiscoveryFile) -> Result<(), String>
     let bytes = serde_json::to_vec(discovery)
         .map_err(|error| format!("cannot encode control discovery: {error}"))?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "cannot remove stale control discovery {}: {error}",
-                path.display()
-            ));
-        }
-    }
     for _ in 0..16 {
         let temporary = parent.join(format!(
-            ".control-{}-{}-{}.tmp",
+            ".control-{}-{}.tmp",
             std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            std::process::id()
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
         ));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -514,6 +507,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("scratch directory");
         path
+    }
+
+    #[test]
+    fn config_id_known_vector() {
+        assert_eq!(super::config_id("/tmp/hofund.toml"), "1664910274138c0f");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_directory_rejects_group_and_world_access() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = scratch("runtime-mode");
+        let runtime = dir.join("hofund");
+        std::fs::create_dir(&runtime).expect("runtime directory");
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755))
+            .expect("runtime mode");
+        let uid = std::fs::metadata(&runtime).expect("metadata").uid();
+        let error =
+            super::prepare_unix_dir(&runtime, uid, false).expect_err("insecure runtime directory");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

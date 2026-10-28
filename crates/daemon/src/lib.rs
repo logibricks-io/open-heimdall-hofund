@@ -356,8 +356,12 @@ async fn start_inner(
                     Err(error @ hofund_gateway::GatewayError::SocketPathTooLong { .. }) => {
                         return Err(DaemonError::new(error.to_string()));
                     }
-                    Err(hofund_gateway::GatewayError::BindUnix { .. })
-                    | Err(hofund_gateway::GatewayError::UnsupportedLocalControl) => {
+                    Err(error @ hofund_gateway::GatewayError::BindUnix { .. }) => {
+                        tracing::warn!(
+                            path = %candidate.display(),
+                            %error,
+                            "Unix control socket unavailable; falling back to TCP"
+                        );
                         if tcp_listen.is_none() {
                             tcp_listen = Some(hofund_gateway::control::DEFAULT_CONTROL_ADDR);
                         }

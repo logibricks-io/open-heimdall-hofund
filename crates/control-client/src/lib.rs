@@ -157,6 +157,7 @@ impl Client {
             }
             #[cfg(unix)]
             Endpoint::Unix(socket) => {
+                verify_unix_socket(socket)?;
                 let stream = tokio::net::UnixStream::connect(socket)
                     .await
                     .map_err(|error| connect_error("control Unix connection failed", error))?;
@@ -200,6 +201,32 @@ impl Client {
         }
         decode_response(hofund_control_proto::API_VERSION, &body).map_err(ClientError::Decode)
     }
+}
+
+#[cfg(unix)]
+fn verify_unix_socket(path: &std::path::Path) -> Result<(), ClientError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            connect_error("control Unix connection failed", error)
+        } else {
+            ClientError::Discovery(format!(
+                "cannot inspect control socket {}: {error}",
+                path.display()
+            ))
+        }
+    })?;
+    let uid = discovery::current_uid(&std::env::temp_dir())?;
+    if metadata.file_type().is_symlink()
+        || !metadata.file_type().is_socket()
+        || metadata.uid() != uid
+    {
+        return Err(ClientError::Discovery(format!(
+            "control socket must be a current-user-owned socket, not a symlink: {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn connect_error(context: &str, error: std::io::Error) -> ClientError {

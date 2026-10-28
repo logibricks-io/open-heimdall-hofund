@@ -168,7 +168,17 @@ impl Control {
                 tokio::select! {
                     _ = &mut signal => break,
                     accepted = listener.accept() => {
-                        let (stream, _) = accepted?;
+                        let (stream, _) = match accepted {
+                            Ok(accepted) => accepted,
+                            Err(error) => {
+                                let resource_exhausted = matches!(error.raw_os_error(), Some(23 | 24));
+                                tracing::warn!(%error, "local control accept failed");
+                                if resource_exhausted {
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                }
+                                continue;
+                            }
+                        };
                         if !same_user_peer(&stream, expected_uid).unwrap_or(false) {
                             continue;
                         }
@@ -208,7 +218,12 @@ impl Drop for SocketCleanup {
 
 #[cfg(unix)]
 fn same_user_peer(stream: &UnixStream, expected_uid: u32) -> std::io::Result<bool> {
-    Ok(stream.peer_cred()?.uid() == expected_uid)
+    Ok(peer_allowed(stream.peer_cred()?.uid(), expected_uid))
+}
+
+#[cfg(unix)]
+fn peer_allowed(peer_uid: u32, expected_uid: u32) -> bool {
+    peer_uid == expected_uid
 }
 
 #[cfg(unix)]
@@ -403,4 +418,13 @@ fn json_response(status: StatusCode, body: Vec<u8>) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn unix_peer_rejects_a_different_uid() {
+        assert!(super::peer_allowed(1000, 1000));
+        assert!(!super::peer_allowed(1001, 1000));
+    }
 }
