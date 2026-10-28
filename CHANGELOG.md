@@ -109,6 +109,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata and decision endpoints, now lives in
   `plugins/providers/openai-compat/presets.toml` with catalog-equivalent registry
   selection and model planning.
+- The fifth batch of four vendor preset rows and their four aliases, including
+  regional endpoints and model metadata, now lives in
+  `plugins/providers/openai-compat/presets.toml` with catalog-equivalent registry
+  selection, credential derivation, and model planning.
 - `ProviderModels` is now non-exhaustive so future aggregation fields do not
   break downstream construction at compile time.
 - Plugin-host responses now strip every RFC 9110 hop-by-hop header, including

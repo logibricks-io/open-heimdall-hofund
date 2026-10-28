@@ -11,7 +11,7 @@ use hofund_plugin_registry::{
     find_preset, fixture_aliases, fixture_presets, model_plan_of, resolve_region, select,
 };
 #[cfg(feature = "test-fixtures")]
-use hofund_provider::{Resolve, Wire};
+use hofund_provider::Wire;
 
 #[cfg(feature = "test-fixtures")]
 const OPENAI: &[ProtocolId] = &[ProtocolId::OPENAI_CHAT, ProtocolId::OPENAI_RESPONSES];
@@ -45,8 +45,8 @@ fn protocol(wire: Wire) -> ProtocolId {
 #[cfg(feature = "test-fixtures")]
 #[test]
 fn fixtures_are_separate_and_aliases_resolve_their_region() {
-    assert_eq!(compiled_presets().len(), 37);
-    assert!(compiled_aliases().is_empty());
+    assert_eq!(compiled_presets().len(), 41);
+    assert_eq!(compiled_aliases().len(), 4);
     assert!(fixture_presets().len() >= 5);
     assert_eq!(fixture_aliases().len(), 1);
     let alias = fixture_aliases()[0];
@@ -288,23 +288,16 @@ fn region_models_replace_preset_models() {
 
 #[cfg(feature = "test-fixtures")]
 #[test]
-fn copied_catalog_row_resolves_identically() {
+fn copied_fragment_row_resolves_identically() {
     let preset = fixture("fixture-equivalence");
+    let (expected_preset, _) = find_preset("tencent-cloud").expect("production preset");
     for region in [None, Some("plan"), Some("cn"), Some("intl")] {
         let compiled_region = resolve_region(preset, region).expect("compiled region");
-        let expected_plan = hofund_provider::model_plan("tencent-cloud", region)
-            .expect("catalog plan")
-            .expect("catalog preset");
+        let expected_region = resolve_region(expected_preset, region).expect("production region");
+        let expected_plan = model_plan_of(expected_preset, expected_region);
         assert_eq!(model_plan_of(preset, compiled_region), expected_plan);
         for wire in [Wire::Chat, Wire::Responses, Wire::Messages] {
-            let expected = hofund_provider::resolve(&Resolve {
-                id: "tencent-cloud",
-                region,
-                wire: Some(wire),
-                base_url: "",
-                project: "",
-                location: "",
-            });
+            let expected = select(expected_preset, region, ALL, Some(protocol(wire)), "");
             let actual = select(preset, region, ALL, Some(protocol(wire)), "");
             match expected {
                 Ok(expected) => {
@@ -313,7 +306,11 @@ fn copied_catalog_row_resolves_identically() {
                     assert_eq!(actual.base_url, expected.base_url);
                     assert_eq!(
                         hofund_provider::credential_for(preset.id, wire, &actual.base_url),
-                        expected.credential
+                        hofund_provider::credential_for(
+                            expected_preset.id,
+                            wire,
+                            &expected.base_url
+                        )
                     );
                 }
                 Err(error) => {
