@@ -91,6 +91,11 @@ fn error_envelope_rejects_oversized_message_and_accepts_limit() {
     envelope.error.message = "x".repeat(MAX_ERROR_MESSAGE_BYTES);
     let decoded = decode_error(&envelope).expect("message at limit");
     assert_eq!(decoded.error.message.len(), MAX_ERROR_MESSAGE_BYTES);
+
+    let mut envelope = valid_error_envelope();
+    envelope.error.message = "x".repeat(MAX_ERROR_MESSAGE_BYTES + 1);
+    let error = decode_error(&envelope).expect_err("message over limit");
+    assert_validation_error(&error, "error.message", "too_large");
 }
 
 #[test]
@@ -114,22 +119,32 @@ fn error_envelope_rejects_invalid_request_ids_without_echoing_them() {
 #[test]
 fn error_envelope_bounds_detail_count_and_text() {
     let mut envelope = valid_error_envelope();
+    envelope.error.details = vec![FieldIssue::default(); MAX_IDS];
+    decode_error(&envelope).expect("details at limit");
+
+    let mut envelope = valid_error_envelope();
     envelope.error.details = vec![FieldIssue::default(); MAX_IDS + 1];
     let error = decode_error(&envelope).expect_err("too many details");
     assert_validation_error(&error, "error.details", "too_many");
 
     for name in ["field", "reason", "message"] {
-        let mut envelope = valid_error_envelope();
-        let issue = &mut envelope.error.details[0];
-        let text = match name {
-            "field" => &mut issue.field,
-            "reason" => &mut issue.reason,
-            "message" => &mut issue.message,
-            _ => unreachable!(),
-        };
-        *text = "x".repeat(MAX_ERROR_MESSAGE_BYTES + 1);
-        let error = decode_error(&envelope).expect_err("oversized detail text");
-        assert_validation_error(&error, &format!("error.details.0.{name}"), "too_large");
+        for length in [MAX_ERROR_MESSAGE_BYTES, MAX_ERROR_MESSAGE_BYTES + 1] {
+            let mut envelope = valid_error_envelope();
+            let issue = &mut envelope.error.details[0];
+            let text = match name {
+                "field" => &mut issue.field,
+                "reason" => &mut issue.reason,
+                "message" => &mut issue.message,
+                _ => unreachable!(),
+            };
+            *text = "x".repeat(length);
+            if length == MAX_ERROR_MESSAGE_BYTES {
+                decode_error(&envelope).expect("detail text at limit");
+            } else {
+                let error = decode_error(&envelope).expect_err("oversized detail text");
+                assert_validation_error(&error, &format!("error.details.0.{name}"), "too_large");
+            }
+        }
     }
 }
 
