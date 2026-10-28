@@ -91,6 +91,10 @@ BinaryName
 BinaryName #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 BinaryName::const fn as_str (self) -> & 'static str
 BinaryName::const fn new (value : & 'static str) -> Self
+BindBlocked
+BindBlocked #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+BindBlocked::Busy
+BindBlocked::Reserved
 Body
 Body #[non_exhaustive] derives(Clone, PartialEq, Eq)
 Body::fn bytes (& self) -> & Bytes
@@ -205,10 +209,12 @@ HostContext::fn dirs (& self) -> & DirHandle
 HostContext::fn from_backends (plugin : PluginId , http : Arc < dyn HttpBackend > , secrets : Arc < dyn SecretsBackend > , accounts : Arc < dyn AccountBackend > , clock : Arc < dyn ClockBackend > , scheduler : Arc < dyn SchedulerBackend > , process : Arc < dyn ProcessBackend > , dirs : Arc < dyn DirBackend > , observe : Arc < dyn ObserveBackend > ,) -> Self
 HostContext::fn from_backends_for (key : PluginKey , http : Arc < dyn HttpBackend > , secrets : Arc < dyn SecretsBackend > , accounts : Arc < dyn AccountBackend > , clock : Arc < dyn ClockBackend > , scheduler : Arc < dyn SchedulerBackend > , process : Arc < dyn ProcessBackend > , dirs : Arc < dyn DirBackend > , observe : Arc < dyn ObserveBackend > ,) -> Self
 HostContext::fn http (& self) -> & HttpHandle
+HostContext::fn loopback (& self) -> & LoopbackHandle
 HostContext::fn observe (& self) -> & ObserveHandle
 HostContext::fn scheduler (& self) -> & SchedulerHandle
 HostContext::fn secrets (& self) -> & SecretsHandle
 HostContext::fn spawn_process (& self) -> & ProcessHandle
+HostContext::fn with_loopback (mut self , loopback : Arc < dyn LoopbackBackend >) -> Self
 HttpHandle
 HttpHandle #[non_exhaustive] derives(Clone)
 HttpHandle::async fn send (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
@@ -242,6 +248,7 @@ JobSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 JobSpec::const fn every (& self) -> Duration
 JobSpec::fn name (& self) -> & str
 JobSpec::fn new (name : impl Into < String > , every : Duration) -> Result < Self , PluginError >
+LOOPBACK_CANCEL_PATH
 ListKind
 ListKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 ListKind::Catalog
@@ -259,6 +266,27 @@ ListQuery::fn new () -> Self
 ListQuery::fn page (& self) -> Option < & str >
 ListQuery::fn with_limit (mut self , limit : u32) -> Self
 ListQuery::fn with_page (mut self , page : impl Into < String >) -> Self
+LoopbackBinding
+LoopbackBinding #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+LoopbackBinding::const fn blocked (& self) -> Option < BindBlocked >
+LoopbackBinding::const fn port (& self) -> u16
+LoopbackBinding::fn from_parts (redirect_uri : String , port : u16 , blocked : Option < BindBlocked >) -> Self
+LoopbackBinding::fn redirect_uri (& self) -> & str
+LoopbackHandle
+LoopbackHandle #[non_exhaustive] derives(Clone)
+LoopbackHandle::fn bind (& self , ctx : & SignInCtx , spec : & LoopbackSpec ,) -> Result < LoopbackBinding , PluginError >
+LoopbackHandle::fn release (& self , ctx : & SignInCtx)
+LoopbackSpec
+LoopbackSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+LoopbackSpec::const fn callback_path (& self) -> & 'static str
+LoopbackSpec::const fn ephemeral () -> Self
+LoopbackSpec::const fn fixed (port : u16) -> Self
+LoopbackSpec::const fn host (& self) -> RedirectHost
+LoopbackSpec::const fn path (mut self , path : & 'static str) -> Self
+LoopbackSpec::const fn redirect_host (mut self , host : RedirectHost) -> Self
+LoopbackSpec::const fn requested_port (& self) -> Option < u16 >
+LoopbackSpec::fn expect_state (mut self , state : impl Into < String >) -> Self
+LoopbackSpec::fn state (& self) -> Option < & str >
 MatchNeedle
 MatchNeedle #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 MatchNeedle::const fn as_str (self) -> & 'static str
@@ -485,6 +513,10 @@ RawValue::Boolean
 RawValue::Integer
 RawValue::String
 RawValue::Table
+RedirectHost
+RedirectHost #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
+RedirectHost::Ipv4
+RedirectHost::Localhost
 Request
 Response
 Role
@@ -638,6 +670,7 @@ WriteCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 WriteCtx::fn home (& self) -> & Path
 WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
 const API
+const LOOPBACK_CANCEL_PATH
 const PROBE_CAP
 fn redact_token (text : & str , secret : & str) -> String
 fn safe_url (url : & str) -> String
@@ -663,6 +696,9 @@ kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send 
 kernel::HttpRequest
 kernel::HttpResponse
 kernel::Job
+kernel::LoopbackBackend
+kernel::LoopbackBackend::fn bind (& self , plugin : & PluginKey , session : & str , spec : & crate :: LoopbackSpec ,) -> Result < crate :: LoopbackBinding , PluginError >
+kernel::LoopbackBackend::fn release (& self , plugin : & PluginKey , session : & str)
 kernel::ObserveBackend
 kernel::ObserveBackend::fn observe (& self , observation : QuotaObservation) -> Result < () , PluginError >
 kernel::PipedChildBackend
