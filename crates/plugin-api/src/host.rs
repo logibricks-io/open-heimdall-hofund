@@ -1,4 +1,5 @@
-//! Handles a plugin receives. Construction is `hofund_plugin_host::host_context`.
+//! Handles a plugin receives. Construction uses `hofund_plugin_host::host_context`
+//! or `hofund_plugin_host::host_context_for`.
 
 #[cfg(feature = "kernel-internal")]
 use std::any::Any;
@@ -11,7 +12,9 @@ use std::time::{Duration, SystemTime};
 use crate::SecretString;
 use crate::body::{Body, BodyStream};
 use crate::error::PluginError;
-use crate::id::{AccountId, MemberId, PluginId, ProtocolId};
+#[cfg(feature = "kernel")]
+use crate::id::PluginKind;
+use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
 use crate::kernel::{
     AccountBackend, ClockBackend, DirBackend, HttpBackend, ObserveBackend, ProcessBackend,
     SchedulerBackend, SecretsBackend,
@@ -60,7 +63,7 @@ impl HttpHandle {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct SecretsHandle {
-    plugin: PluginId,
+    plugin: PluginKey,
     inner: Arc<dyn SecretsBackend>,
 }
 
@@ -87,7 +90,7 @@ impl SecretsHandle {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AccountsHandle {
-    plugin: PluginId,
+    plugin: PluginKey,
     inner: Arc<dyn AccountBackend>,
 }
 
@@ -116,7 +119,7 @@ impl AccountsHandle {
     ///
     /// Returns [`PluginError`] when `account` belongs to another plugin or the write fails.
     pub async fn upsert(&self, account: Account, secret: SecretString) -> Result<(), PluginError> {
-        if account.plugin() != &self.plugin {
+        if account.key() != &self.plugin {
             return Err(PluginError::config("account belongs to another plugin"));
         }
         self.inner.upsert(account, secret).await
@@ -412,7 +415,7 @@ impl ProcessHandle {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct DirHandle {
-    plugin: PluginId,
+    plugin: PluginKey,
     inner: Arc<dyn DirBackend>,
 }
 
@@ -468,11 +471,12 @@ impl ObserveHandle {
 /// What `build` and subscription calls receive.
 ///
 /// Clone the handles. That clones an [`Arc`], not a secret. The only
-/// constructor outside this crate is `hofund_plugin_host::host_context`.
+/// constructors outside this crate are `hofund_plugin_host::host_context` and
+/// `hofund_plugin_host::host_context_for`.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct HostContext {
-    plugin: PluginId,
+    key: PluginKey,
     http: HttpHandle,
     secrets: SecretsHandle,
     accounts: AccountsHandle,
@@ -486,6 +490,7 @@ pub struct HostContext {
 impl HostContext {
     /// Kernel-only. Plugins do not call this.
     ///
+    /// This compatibility constructor scopes `plugin` to the provider kind.
     /// `plugin` is stored in the handles. Account, secret, directory, and
     /// observation calls use it. A plugin cannot pass a different id.
     #[cfg(feature = "kernel")]
@@ -503,15 +508,43 @@ impl HostContext {
         dirs: Arc<dyn DirBackend>,
         observe: Arc<dyn ObserveBackend>,
     ) -> Self {
+        Self::from_backends_for(
+            PluginKey::new(PluginKind::Provider, plugin),
+            http,
+            secrets,
+            accounts,
+            clock,
+            scheduler,
+            process,
+            dirs,
+            observe,
+        )
+    }
+
+    /// Kernel-only constructor for a kind-qualified plugin identity.
+    #[cfg(feature = "kernel")]
+    #[doc(hidden)]
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_backends_for(
+        key: PluginKey,
+        http: Arc<dyn HttpBackend>,
+        secrets: Arc<dyn SecretsBackend>,
+        accounts: Arc<dyn AccountBackend>,
+        clock: Arc<dyn ClockBackend>,
+        scheduler: Arc<dyn SchedulerBackend>,
+        process: Arc<dyn ProcessBackend>,
+        dirs: Arc<dyn DirBackend>,
+        observe: Arc<dyn ObserveBackend>,
+    ) -> Self {
         Self {
-            plugin: plugin.clone(),
             http: HttpHandle { inner: http },
             secrets: SecretsHandle {
-                plugin: plugin.clone(),
+                plugin: key.clone(),
                 inner: secrets,
             },
             accounts: AccountsHandle {
-                plugin: plugin.clone(),
+                plugin: key.clone(),
                 inner: accounts,
             },
             clock: ClockHandle { inner: clock },
@@ -521,20 +554,27 @@ impl HostContext {
             },
             process: ProcessHandle { inner: process },
             dirs: DirHandle {
-                plugin: plugin.clone(),
+                plugin: key.clone(),
                 inner: dirs,
             },
             observe: ObserveHandle {
-                plugin,
+                plugin: key.id().clone(),
                 inner: observe,
             },
+            key,
         }
     }
 
     /// The plugin this context was built for.
     #[must_use]
-    pub fn plugin(&self) -> &PluginId {
-        &self.plugin
+    pub const fn plugin(&self) -> &PluginId {
+        self.key.id()
+    }
+
+    /// The kind-qualified identity used by host storage.
+    #[must_use]
+    pub const fn key(&self) -> &PluginKey {
+        &self.key
     }
 
     /// The pooled HTTP client.

@@ -63,7 +63,8 @@ pub use host::{
     SurfaceHost,
 };
 pub use id::{
-    AccountId, IdError, MemberId, MemberKey, PluginId, PresetId, ProtocolId, SurfaceId, TierId,
+    AccountId, IdError, MemberId, MemberKey, PluginId, PluginKey, PluginKind, PresetId, ProtocolId,
+    SurfaceId, TierId,
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use records::{
