@@ -641,6 +641,26 @@ struct Region {
 mod tests {
     use super::{Resolve, Wire, catalog, resolve};
 
+    fn synthetic(body: &str) -> super::Preset {
+        toml_edit::de::from_str(body).expect("synthetic preset")
+    }
+
+    #[test]
+    fn unavailable_reports_decide_only_and_endpointless_rows() {
+        let decide_only = synthetic(
+            "id = \"router-only\"\nname = \"Router\"\nkind = \"gateway\"\ndecide = \"https://router.example.test/v1\"\n",
+        );
+        assert_eq!(
+            super::unavailable(&decide_only).to_string(),
+            "preset `router-only` only classifies a route. It has no chat, responses, or messages endpoint."
+        );
+        let bare = synthetic("id = \"bare\"\nname = \"Bare\"\nkind = \"gateway\"\n");
+        assert_eq!(
+            super::unavailable(&bare).to_string(),
+            "preset `bare` has no endpoint"
+        );
+    }
+
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
