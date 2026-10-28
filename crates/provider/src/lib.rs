@@ -30,7 +30,8 @@ pub use http::{Credential, Endpoint, pooled_reqwest};
 pub use models::{azure_host, both_auth_applies, both_auth_refused, parse_model_rows};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
 pub use presets::{
-    ModelPlan, PresetError, Resolve, Resolved, Wire, catalog_commit, model_plan, resolve,
+    ModelPlan, PresetError, Resolve, Resolved, Wire, catalog_commit, catalog_ids, credential_for,
+    model_plan, resolve,
 };
 pub use vertex::{Vertex, check_credentials_file as check_vertex_credentials_file};
 

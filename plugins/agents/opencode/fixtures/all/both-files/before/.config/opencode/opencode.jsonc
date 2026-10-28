@@ -1,0 +1,5 @@
+{
+  // JSONC wins when both files exist.
+  "model": "jsonc-model",
+  "plugin": ["jsonc"],
+}

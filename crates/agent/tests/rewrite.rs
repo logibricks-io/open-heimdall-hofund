@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hofund_agent::{DisconnectOutcome, GatewayTarget, Session, find, legacy};
+use hofund_agent::{DisconnectOutcome, GatewayTarget, Session, legacy};
 use sha2::{Digest, Sha256};
 
 fn scratch() -> PathBuf {
@@ -28,7 +28,8 @@ fn adapter(id: &str) -> &'static dyn hofund_agent::AgentAdapter {
         "claude-code" => legacy::claude_code(),
         "codex" => legacy::codex(),
         "gemini-cli" => legacy::gemini_cli(),
-        _ => find(id).expect(id),
+        "opencode" => legacy::opencode(),
+        _ => panic!("no const adapter for {id}"),
     }
 }
 
@@ -222,7 +223,7 @@ fn creating_a_missing_file_reverts_by_deleting_it() {
 fn opencode_without_jsonc_creates_json() {
     let home = scratch();
     let session = Session::new(&home);
-    let adapter = find("opencode").expect("opencode");
+    let adapter = legacy::opencode();
     adapter.apply(&session, &target()).expect("apply");
     let json = home.join(".config").join("opencode").join("opencode.json");
     let jsonc = home.join(".config").join("opencode").join("opencode.jsonc");
@@ -367,7 +368,7 @@ fn opencode_honors_xdg_config_home() {
     let home = scratch();
     let xdg = scratch();
     let session = Session::new(&home).with_xdg_config_home(&xdg);
-    let adapter = find("opencode").expect("opencode");
+    let adapter = legacy::opencode();
     adapter.apply(&session, &target()).expect("apply");
     let json = xdg.join("opencode").join("opencode.json");
     assert!(json.is_file());
@@ -556,8 +557,7 @@ fn gemini_with_several_routes_does_not_pick_a_model() {
 fn opencode_lists_each_route_without_invented_catalog_fields() {
     let home = scratch();
     let session = Session::new(&home);
-    find("opencode")
-        .expect("opencode")
+    legacy::opencode()
         .apply(&session, &target_with(&["alpha", "beta", "alpha"]))
         .expect("apply");
     let json = home.join(".config").join("opencode").join("opencode.json");

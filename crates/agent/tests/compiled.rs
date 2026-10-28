@@ -5,9 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hofund_agent::{
-    AgentAdapter, Compiled, GatewayTarget, Session, TargetOs, catalog, find, resolve,
-};
+use hofund_agent::{AgentAdapter, Compiled, GatewayTarget, Session, TargetOs, catalog, resolve};
 use hofund_plugin_api::{
     AgentDescription, AgentFile, AgentRoute, AgentSet, FileKind, MatchNeedle, PluginId, Slot,
     TierId, Visible,
@@ -227,7 +225,8 @@ fn const_adapter(id: &str) -> &'static dyn AgentAdapter {
         "claude-code" => hofund_agent::legacy::claude_code(),
         "codex" => hofund_agent::legacy::codex(),
         "gemini-cli" => hofund_agent::legacy::gemini_cli(),
-        _ => find(id).expect("static adapter"),
+        "opencode" => hofund_agent::legacy::opencode(),
+        _ => panic!("no const adapter for {id}"),
     }
 }
 
@@ -263,7 +262,8 @@ static EXTRA: AgentDescription = AgentDescription::from_static(
     &[],
 );
 
-static MIGRATED_AND_EXTRA_LIST: &[&AgentDescription] = &[&CLAUDE, &CODEX, &GEMINI, &EXTRA];
+static MIGRATED_AND_EXTRA_LIST: &[&AgentDescription] =
+    &[&CLAUDE, &CODEX, &GEMINI, &OPENCODE, &EXTRA];
 static CLAUDE_LIST: &[&AgentDescription] = &[&CLAUDE];
 static DUPLICATE_LIST: &[&AgentDescription] = &[&EXTRA, &EXTRA];
 

@@ -1,0 +1,74 @@
+id = "opencode"
+display_name = "OpenCode"
+binary = "opencode"
+
+# The documented global path is ~/.config/opencode/opencode.json or
+# opencode.jsonc, including on Windows (the docs say ~/.config, not %APPDATA%).
+# When opencode.jsonc already exists it is the file that is edited. Otherwise
+# opencode.json is edited or created. A JSONC comment does not survive apply;
+# revert puts the original bytes back.
+[[file]]
+id = "config"
+kind = "json"
+linux = "~/.config/opencode/opencode.jsonc"
+macos = "~/.config/opencode/opencode.jsonc"
+windows = "~/.config/opencode/opencode.jsonc"
+env_override = "XDG_CONFIG_HOME"
+env_replaces = "~/.config"
+create = false
+
+[[file]]
+id = "config"
+kind = "json"
+linux = "~/.config/opencode/opencode.json"
+macos = "~/.config/opencode/opencode.json"
+windows = "~/.config/opencode/opencode.json"
+env_override = "XDG_CONFIG_HOME"
+env_replaces = "~/.config"
+create = true
+
+# The provider entry is provider.<id> with npm @ai-sdk/openai-compatible,
+# options.baseURL, options.apiKey, and models.
+[[set]]
+file = "config"
+key = "provider.hofund.name"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "config"
+key = "provider.hofund.npm"
+slot = { literal = "@ai-sdk/openai-compatible" }
+
+# options.baseURL includes /v1 because that package appends /chat/completions.
+[[set]]
+file = "config"
+key = "provider.hofund.options.baseURL"
+slot = "v1"
+
+[[set]]
+file = "config"
+key = "provider.hofund.options.apiKey"
+slot = "token"
+
+# models has one entry per route: name is the route id and variants is {}.
+# Modalities, context, output limits, and a reasoning flag are omitted; this
+# build has no catalog values for them. An empty variants object keeps OpenCode
+# from adding low, medium, and high on its own.
+[[set]]
+file = "config"
+key = "provider.hofund.models"
+slot = "catalog_models"
+
+# A string model is compared with route names and is not rewritten.
+# hofund agent connect opencode says how many routes were written. The v2 docs
+# describe providers plus package and settings; this adapter follows the current
+# providers page instead. Both pages document ~/.config and do not name an
+# override (checked 2026-10-25). When XDG_CONFIG_HOME is set to an absolute path
+# this adapter uses $XDG_CONFIG_HOME/opencode. Otherwise (unset, empty, or
+# relative) the path stays ~/.config/opencode, including on Windows.
+# Sources: https://opencode.ai/docs/providers/,
+# https://opencode.ai/docs/config/. The v2 shape is
+# https://opencode.ai/v2/docs/providers/.
+[model]
+file = "config"
+key = "model"
