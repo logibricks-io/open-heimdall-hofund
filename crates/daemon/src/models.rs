@@ -179,6 +179,18 @@ struct Applied {
     taken: Vec<String>,
 }
 
+/// A provider's cached model state, read without contacting an upstream.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Cached {
+    /// Cached merged models.
+    pub models: Vec<ModelSpec>,
+    /// Unix milliseconds when the list was fetched, when known.
+    pub fetched_at: Option<u64>,
+    /// Former picks absent from the latest nonempty list.
+    pub delisted: Vec<String>,
+}
+
 /// Host-side model list and probe composition, with optional persistent state.
 pub struct ModelsHost {
     limits: HttpLimits,
@@ -250,6 +262,18 @@ impl ModelsHost {
         Picks {
             picks: state.picks.clone(),
             picked_from: state.picked_from.clone(),
+            delisted: state.delisted.clone(),
+        }
+    }
+
+    /// Reads cached models without building a provider or contacting an upstream.
+    #[must_use]
+    pub fn cached(&self, provider_id: &str) -> Cached {
+        let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let state = store.get(provider_id);
+        Cached {
+            models: super::models_state::models(&state.list),
+            fetched_at: state.fetched_at,
             delisted: state.delisted.clone(),
         }
     }
