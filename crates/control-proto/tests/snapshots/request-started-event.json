@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "requests",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "request_started",
+    "data": {
+      "request_id": "request-1",
+      "route": "default",
+      "inbound_protocol": "example-protocol",
+      "started_at_ms": 1700000003000
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "agent": "example-agent",
+  "action": "connect",
+  "changes": [
+    {
+      "path": "/home/example/.agent/config.json",
+      "diff": "+ model = default"
+    }
+  ],
+  "plan_revision": "plan-revision-1"
+}

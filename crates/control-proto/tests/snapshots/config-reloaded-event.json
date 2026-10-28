@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "control",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "config_reloaded",
+    "data": {
+      "disk_revision": "disk-revision-3",
+      "runtime_revision": "runtime-revision-3",
+      "generation": 5,
+      "changed_members": [
+        "member-1"
+      ],
+      "pending_restart": [
+        "usage_file"
+      ],
+      "not_applied": [
+        {
+          "field": "listen",
+          "reason": "env_override",
+          "message": "HOFUND_ADDR overrides the configured listener"
+        }
+      ]
+    }
+  }
+}

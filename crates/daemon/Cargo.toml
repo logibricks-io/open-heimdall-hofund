@@ -17,6 +17,7 @@ test-util = []
 [dependencies]
 hofund-codec = { workspace = true }
 hofund-config = { workspace = true }
+hofund-control-proto = { workspace = true }
 hofund-gateway = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-plugin-host = { workspace = true }

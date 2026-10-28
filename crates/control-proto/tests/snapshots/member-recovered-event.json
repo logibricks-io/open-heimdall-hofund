@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "control",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "member_recovered",
+    "data": {
+      "member_id": "member-1",
+      "ready": true
+    }
+  }
+}

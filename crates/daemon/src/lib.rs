@@ -25,6 +25,8 @@ use hofund_secrets::TokenFile;
 use hofund_usage::Ledger;
 
 mod adapt;
+#[doc(hidden)]
+pub mod control_map;
 mod membership;
 mod models;
 mod models_state;

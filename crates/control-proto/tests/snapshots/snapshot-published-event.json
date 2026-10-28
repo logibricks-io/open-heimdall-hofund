@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "control",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "snapshot_published",
+    "data": {
+      "generation": 5,
+      "routes": 1,
+      "members": 1
+    }
+  }
+}

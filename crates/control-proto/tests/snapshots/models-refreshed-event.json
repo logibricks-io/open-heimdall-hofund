@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "control",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "models_refreshed",
+    "data": {
+      "provider": "primary",
+      "list_kind": "live",
+      "model_count": 2,
+      "ok": true,
+      "error": null
+    }
+  }
+}
