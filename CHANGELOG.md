@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encrypted account storage with native OS credential entries, an authenticated
+  encrypted-file fallback, secret-free backend selection, and crash-safe migration
+  from the legacy plaintext metadata file. Reads route by stored reference and
+  load secrets per row, while kind-scoped v2 entries prevent cross-kind collisions.
+  Fallback keys publish without overwrite, and Linux links libdbus statically.
 - Full typed control route and client surface, with ordered request defenses,
   bounded bodies, error envelopes, no-store responses, and drain guards. The daemon
   now serves secret-free provider summaries, cached models without upstream calls,
@@ -213,6 +218,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Model-list redaction masks only whole secret tokens of at least eight characters,
+  strips URL userinfo, and removes every URL query value through one shared helper.
+  This applies to every URL in an error message, including pagination URLs and
+  URLs quoted in transport errors.
 - Token URLs containing userinfo are rejected.
 
 ### Deprecated
@@ -243,6 +252,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   temp paths. Existing host model-state directories are tightened to `0700` on
   Unix, and unreadable or unmovable state files are preserved instead of being
   overwritten (#212, #101, #102).
+- SigV4 form and STS tests now use the literal AWS suite inputs. Release and
+  desktop-bundle apt installs now have bounded steps, retries, and HTTP timeouts.
 - Control request bodies between 2 MiB and the protocol request limit now reach
   their handler instead of getting the HTTP framework's plain-text 413 without
   an error envelope or `Cache-Control: no-store`. The control pre-route check is

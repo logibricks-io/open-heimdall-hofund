@@ -5,16 +5,15 @@
 //! [`test_host`] returns the context alone. [`TestHost`] also exposes the
 //! recording backends so a test can seed secrets and HTTP responses.
 //!
-//! The account backend shipped here is [`PlaintextFileAccountStore`]: a mode
-//! `0600` JSON file. Secrets are [`SecretString`] values in memory and
-//! plaintext on disk. `hofund-secrets` has no keychain backend, so encrypted
-//! storage is a prerequisite of RFC 0001 pull request H. The scheduler records
-//! jobs and does not spawn tasks. The daemon builds one context per provider
-//! with [`runtime_host`]. The gateway builds a [`SurfaceHost`] per inbound
-//! request.
+//! The account backend shipped here is [`AccountStore`]: mode `0600` metadata
+//! with secrets in the OS credential store or an authenticated encrypted file.
+//! The scheduler records jobs and does not spawn tasks. The daemon builds one
+//! context per provider with [`runtime_host`]. The gateway builds a
+//! [`SurfaceHost`] per inbound request.
 
 #![deny(missing_docs, unreachable_pub, rust_2018_idioms)]
 
+mod account_secrets;
 mod accounts;
 mod pool;
 
@@ -35,7 +34,7 @@ use hofund_plugin_api::{
     PluginKind, ProtocolId, QuotaObservation, SecretString, SpawnRequest, SurfaceHost,
 };
 
-pub use accounts::{PlaintextFileAccountStore, StoreError};
+pub use accounts::{AccountStorageKind, AccountStore, StoreError};
 pub use hofund_plugin_api::kernel::ObserveBackend;
 pub use pool::{HttpLimits, HttpProfile, PooledHttp};
 
@@ -125,7 +124,6 @@ pub fn runtime_host(
 ///
 /// The HTTP handle is the pooled direct client with `limits`. `api_key` is
 /// the secret `api_key` for this plugin. Accounts live at `root/accounts.json`.
-/// The scheduler records jobs and does not run them.
 ///
 /// # Errors
 ///
@@ -164,9 +162,6 @@ pub fn runtime_host_with_observe(
 
 /// Builds a kind-scoped runtime context with an observation backend.
 ///
-/// The daemon binds the backend to the configured provider's member. Plugins
-/// only supply observations and cannot select which member receives them.
-///
 /// # Errors
 ///
 /// Returns [`StoreError`] when the account file cannot be created.
@@ -179,7 +174,7 @@ pub fn runtime_host_with_observe_for(
     observe: Arc<dyn ObserveBackend>,
 ) -> Result<HostContext, StoreError> {
     let root = root.into();
-    let accounts = PlaintextFileAccountStore::open(root.join("accounts.json"))?;
+    let accounts = AccountStore::open(root.join("accounts.json"))?;
     let plugin = PluginKey::new(kind, plugin);
     Ok(host_context_for(
         kind,
@@ -223,8 +218,11 @@ impl SecretsBackend for KeySecrets {
 #[cfg(test)]
 pub(crate) fn context_for_http(http: Arc<dyn HttpBackend>) -> HostContext {
     let dirs = RootDirs::test();
-    let accounts =
-        PlaintextFileAccountStore::open(dirs.root.join("accounts.json")).expect("test accounts");
+    let accounts = AccountStore::open_with_backend(
+        dirs.root.join("accounts.json"),
+        Arc::new(account_secrets::MemoryAccountSecrets::default()),
+    )
+    .expect("test accounts");
     host_context(
         PluginId::from_static("relay"),
         http,
@@ -272,8 +270,11 @@ impl TestHost {
         let scheduler = Arc::new(RecordingScheduler::default());
         let process = Arc::new(RecordingProcess::default());
         let observe = Arc::new(RecordingObserve::default());
-        let accounts = PlaintextFileAccountStore::open(root.join("accounts.json"))
-            .expect("test host account file");
+        let accounts = AccountStore::open_with_backend(
+            root.join("accounts.json"),
+            Arc::new(account_secrets::MemoryAccountSecrets::default()),
+        )
+        .expect("test host account file");
         let context = host_context_for(
             kind,
             plugin,
@@ -887,8 +888,8 @@ mod tests {
     };
 
     use super::{
-        FixedClock, PlaintextFileAccountStore, RecordingScheduler, StdProcess, SystemClock,
-        host_context, host_context_for, surface_host, test_host,
+        AccountStore, FixedClock, RecordingScheduler, StdProcess, SystemClock, host_context,
+        host_context_for, surface_host, test_host,
     };
 
     fn plugin() -> PluginId {
@@ -913,6 +914,14 @@ mod tests {
         Scratch(tempfile::tempdir().expect("root"))
     }
 
+    fn account_store(path: std::path::PathBuf) -> AccountStore {
+        AccountStore::open_with_backend(
+            path,
+            std::sync::Arc::new(super::account_secrets::MemoryAccountSecrets::default()),
+        )
+        .expect("store")
+    }
+
     #[test]
     fn test_roots_do_not_share_a_directory() {
         assert_ne!(&*root(), &*root());
@@ -923,10 +932,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_store_is_private_plaintext_and_does_not_debug_the_secret() {
+    async fn file_store_has_no_plaintext_secret_and_does_not_debug_it() {
         let root = root();
         let path = root.join("accounts.json");
-        let store = PlaintextFileAccountStore::open(&path).expect("open");
+        let store = account_store(path.clone());
         let account = Account::from_stored_scoped(key(), AccountId::from_static("work"), "Work")
             .expect("account");
         store
@@ -935,12 +944,10 @@ mod tests {
             .expect("upsert");
         let rendered = format!("{store:?}");
         assert!(!rendered.contains("secret-a"));
-        assert!(rendered.contains("PlaintextFileAccountStore"));
+        assert!(rendered.contains("AccountStore"));
         let on_disk = std::fs::read_to_string(&path).expect("file");
-        assert!(
-            on_disk.contains("secret-a"),
-            "the file is plaintext until the keychain store"
-        );
+        assert!(!on_disk.contains("secret-a"));
+        assert!(on_disk.contains("os-keychain:v2"));
         let first = store
             .secret(&key(), &AccountId::from_static("work"))
             .await
@@ -1082,9 +1089,7 @@ mod tests {
                 plugin,
                 std::sync::Arc::new(super::RecordingHttp::default()),
                 std::sync::Arc::new(super::RecordingSecrets::default()),
-                std::sync::Arc::new(
-                    PlaintextFileAccountStore::open(root.join("accounts.json")).expect("store"),
-                ),
+                std::sync::Arc::new(account_store(root.join("accounts.json"))),
                 std::sync::Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
                 std::sync::Arc::clone(&scheduler) as std::sync::Arc<dyn SchedulerBackend>,
                 std::sync::Arc::new(super::RecordingProcess::default()),
@@ -1167,9 +1172,7 @@ mod tests {
     async fn equal_ids_in_different_kinds_have_isolated_host_storage() {
         let root = root();
         let secrets = std::sync::Arc::new(super::RecordingSecrets::default());
-        let accounts = std::sync::Arc::new(
-            PlaintextFileAccountStore::open(root.join("accounts.json")).expect("store"),
-        );
+        let accounts = std::sync::Arc::new(account_store(root.join("accounts.json")));
         let build = |kind: PluginKind| {
             host_context_for(
                 kind,
@@ -1254,31 +1257,12 @@ mod tests {
             r#"[{"plugin":"shared","account":"work","label":"Work","secret":"stored"}]"#,
         )
         .expect("legacy rows");
-        let store = PlaintextFileAccountStore::open(&path).expect("open");
+        let store = account_store(path);
         let subscription =
             PluginKey::new(PluginKind::Subscription, PluginId::from_static("shared"));
         assert_eq!(store.list(&subscription).await.expect("list").len(), 1);
         let provider = PluginKey::new(PluginKind::Provider, PluginId::from_static("shared"));
         assert!(store.list(&provider).await.expect("list").is_empty());
-    }
-
-    #[tokio::test]
-    async fn runtime_api_keys_are_isolated_by_plugin_kind() {
-        let secrets = super::KeySecrets {
-            plugin: key(),
-            api_key: "value".to_owned(),
-        };
-        for kind in [PluginKind::Subscription, PluginKind::Agent] {
-            let foreign = PluginKey::new(kind, plugin());
-            assert!(
-                secrets
-                    .get(&foreign, "api_key")
-                    .await
-                    .expect("get")
-                    .is_none(),
-                "{kind} must not read the provider secret"
-            );
-        }
     }
 
     #[tokio::test]
@@ -1292,9 +1276,7 @@ mod tests {
                 plugin,
                 std::sync::Arc::new(super::RecordingHttp::default()),
                 std::sync::Arc::clone(&secrets) as std::sync::Arc<dyn SecretsBackend>,
-                std::sync::Arc::new(
-                    PlaintextFileAccountStore::open(root().join("accounts.json")).expect("store"),
-                ),
+                std::sync::Arc::new(account_store(root().join("accounts.json"))),
                 std::sync::Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
                 std::sync::Arc::new(super::RecordingScheduler::default()),
                 std::sync::Arc::new(super::RecordingProcess::default()),

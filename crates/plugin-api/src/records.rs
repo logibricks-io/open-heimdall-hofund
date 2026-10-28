@@ -545,16 +545,11 @@ impl ModelList {
 
     /// Records the list URL that answered, for host-side response deduplication.
     ///
-    /// Any query is replaced by `<redacted>` and any fragment is removed, so
-    /// this value is safe for the derived `Debug` output.
+    /// Userinfo and fragments are removed, and any query is replaced by
+    /// `<redacted>`, so this value is safe for the derived `Debug` output.
     #[must_use]
     pub fn with_source_url(mut self, url: impl Into<String>) -> Self {
-        let url = url.into();
-        let without_fragment = url.split('#').next().unwrap_or(&url);
-        self.source_url = Some(match without_fragment.split_once('?') {
-            Some((base, _)) => format!("{base}?<redacted>"),
-            None => without_fragment.to_owned(),
-        });
+        self.source_url = Some(crate::safe_url(&url.into()));
         self
     }
 

@@ -147,6 +147,8 @@ When the user set `base_url` on the provider, only the configured wire is listed
 
 The aggregator merges by id, in protocol order, within that one configured provider.
 
+A plugin records the answering list URL in `ModelList::source_url` with `with_source_url`; the aggregator uses that sanitized URL as part of its deduplication key. The builder strips userinfo and fragments and replaces every query with `<redacted>`, so the record is safe for its derived `Debug` output. Error redaction masks standalone secret tokens of at least eight characters, while URL query values are removed at any length.
+
 - The same list URL, asked with the same auth, is fetched once.
 - A duplicate id keeps one row. Image input follows `sharedImageInput` (`models.go` lines 1331-1344). An explicit text-only answer from either base wins. Image input is kept only when both bases report it. If either side left it unknown, the merged value stays unknown, unless the other side is explicitly text-only. `anyImageInput` (`models.go` lines 1346-1350), where either side having image input is enough, is the rule for groups. It is not the rule for two bases of one preset. A mock where one base says text-only and the other says image expects text-only. Drops and tags follow the cross-wire precedence above.
 - OpenRouter's Anthropic base is skipped when the provider also has a chat or responses base (`models.go` lines 754-763). With `anthropic-version`, that host returns its catalog under an `anthropic/` prefix. When that Anthropic base is the only base, it is asked, and a namespaced answer is an error that names `https://openrouter.ai/api/v1`.
