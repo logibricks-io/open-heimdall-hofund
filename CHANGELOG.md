@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The pooled plugin HTTP client streams a success body as the upstream sends
+  it instead of buffering the whole response (row H0g). A read failure after
+  the headers is one `Interrupted` chunk that ends the stream; error bodies
+  are still buffered. `Call::send` in the SDK still reads the full body, so its
+  retry rules do not change.
 - Control picks, model refresh, and provider test routes. Picks edits check a
   revision equal to the state file hash under the state lock, roll back on a
   failed save, and follow the reference edit forms. Refresh has a 30 s timeout

@@ -2,8 +2,9 @@
 //!
 //! The pool is the `reqwest` client in the plugin stack. Plugins call
 //! [`crate::host_context`]'s [`HttpHandle`](hofund_plugin_api::HttpHandle), and
-//! the SDK builds the request. Built-in adapters that still stream take the
-//! same client from [`HttpBackend::pooled_client`](hofund_plugin_api::kernel::HttpBackend::pooled_client).
+//! the SDK builds the request. A success body streams as it arrives. Built-in
+//! adapters that have not moved to the handle yet take the same client from
+//! [`HttpBackend::pooled_client`](hofund_plugin_api::kernel::HttpBackend::pooled_client).
 //! This module does not add a profile argument to
 //! [`HttpBackend`](hofund_plugin_api::kernel::HttpBackend): the profile is
 //! chosen when the handle is built.
@@ -231,6 +232,24 @@ fn map_body(error: reqwest::Error) -> PluginError {
     PluginError::interrupted(message)
 }
 
+/// A success body streamed chunk by chunk as the upstream sends it.
+///
+/// A read failure becomes one [`PluginError::interrupted`] chunk and ends the
+/// stream. Dropping the stream drops the response and closes the connection.
+fn live_body(response: reqwest::Response) -> BodyStream {
+    BodyStream::from_stream(futures_util::stream::unfold(
+        Some(response),
+        |state| async move {
+            let mut response = state?;
+            match response.chunk().await {
+                Ok(Some(chunk)) => Some((Ok(chunk), Some(response))),
+                Ok(None) => None,
+                Err(error) => Some((Err(map_body(error)), None)),
+            }
+        },
+    ))
+}
+
 #[cfg(test)]
 std::thread_local! {
     static SENDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -301,17 +320,18 @@ impl HttpBackend for PooledHttp {
         }
         // Set-Cookie stays because plugins are the HTTP clients and the host
         // keeps no cookie jar on their behalf.
-        let success = status.is_success();
-        let mut collected = Vec::new();
-        loop {
-            match response.chunk().await {
-                Ok(Some(chunk)) => collected.extend_from_slice(&chunk),
-                Ok(None) => break,
-                Err(_) if !success => break,
-                Err(error) => return Err(map_body(error)),
+        let body = if status.is_success() {
+            live_body(response)
+        } else {
+            // An error body is short and only read for its message, so it is
+            // buffered, and a break while reading it keeps what arrived.
+            let mut collected = Vec::new();
+            while let Ok(Some(chunk)) = response.chunk().await {
+                collected.extend_from_slice(&chunk);
             }
-        }
-        let mut output = HttpResponse::new(BodyStream::from_bytes(collected));
+            BodyStream::from_bytes(collected)
+        };
+        let mut output = HttpResponse::new(body);
         *output.status_mut() = status;
         *output.headers_mut() = headers;
         Ok(output)
@@ -844,5 +864,113 @@ mod tests {
             let _ = stream.read(&mut buf);
         });
         (port, hits)
+    }
+
+    /// Serves one 200 response: `first`, then waits for `release`, then
+    /// `rest` (or closes early when `rest` is `None`).
+    fn gated(
+        first: &'static [u8],
+        rest: Option<&'static [u8]>,
+        total: usize,
+    ) -> (u16, std::sync::mpsc::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_nodelay(true);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = read_request(&mut stream, false);
+            let header =
+                format!("HTTP/1.1 200 OK\r\ncontent-length: {total}\r\nconnection: close\r\n\r\n");
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(first);
+            let _ = stream.flush();
+            let _ = released.recv_timeout(Duration::from_secs(5));
+            if let Some(rest) = rest {
+                let _ = stream.write_all(rest);
+            }
+        });
+        (port, release)
+    }
+
+    fn get_request(port: u16) -> HttpRequest<Body> {
+        HttpRequest::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{port}/sse"))
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn a_success_body_streams_before_the_upstream_finishes() {
+        let _guard = exclusive().await;
+        let (port, release) = gated(b"data: one\n\n", Some(b"data: two\n\n"), 22);
+        let mut response = PooledHttp::direct()
+            .send(get_request(port))
+            .await
+            .expect("send");
+        assert_eq!(response.status().as_u16(), 200);
+        // The upstream holds the rest until released, so a buffering send
+        // would never return the first chunk here.
+        let first = tokio::time::timeout(Duration::from_secs(2), response.body_mut().next_chunk())
+            .await
+            .expect("first chunk before the upstream finished")
+            .expect("chunk")
+            .expect("ok");
+        assert_eq!(&first[..], b"data: one\n\n");
+        release.send(()).expect("release");
+        let mut rest = Vec::new();
+        while let Some(chunk) = response.body_mut().next_chunk().await {
+            rest.extend_from_slice(&chunk.expect("ok"));
+        }
+        assert_eq!(rest, b"data: two\n\n");
+    }
+
+    #[tokio::test]
+    async fn a_success_body_break_is_an_interrupted_chunk_after_the_data() {
+        let _guard = exclusive().await;
+        let (port, release) = gated(b"data: one\n\n", None, 64);
+        let mut response = PooledHttp::direct()
+            .send(get_request(port))
+            .await
+            .expect("headers arrive before the break");
+        let first = response
+            .body_mut()
+            .next_chunk()
+            .await
+            .expect("chunk")
+            .expect("ok");
+        assert_eq!(&first[..], b"data: one\n\n");
+        release.send(()).expect("release");
+        let error = response
+            .body_mut()
+            .next_chunk()
+            .await
+            .expect("an error chunk")
+            .expect_err("truncated");
+        assert_eq!(error.kind(), PluginErrorKind::Interrupted);
+        assert!(response.body_mut().next_chunk().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_error_body_is_buffered_and_a_break_keeps_what_arrived() {
+        let _guard = exclusive().await;
+        let port = raw(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 64\r\nconnection: close\r\n\r\nbusy");
+        let mut response = PooledHttp::direct()
+            .send(get_request(port))
+            .await
+            .expect("send");
+        assert_eq!(response.status().as_u16(), 503);
+        let body = response
+            .body_mut()
+            .next_chunk()
+            .await
+            .expect("chunk")
+            .expect("ok");
+        assert_eq!(&body[..], b"busy");
+        assert!(response.body_mut().next_chunk().await.is_none());
     }
 }

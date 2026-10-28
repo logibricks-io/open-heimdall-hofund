@@ -13,6 +13,7 @@ rust-version.workspace = true
 [dependencies]
 hofund-plugin-api = { workspace = true, features = ["kernel", "kernel-internal"] }
 async-trait = "0.1.89"
+futures-util = "0.3.32"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2.0.21"
@@ -35,7 +36,6 @@ windows-native-keyring-store = { version = "1.1.0", default-features = false }
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"] }
 
 [dev-dependencies]
-futures-util = "0.3.32"
 hofund-plugin-sdk = { workspace = true }
 tempfile = { workspace = true }
 tokio = { version = "1.52.2", features = ["macros", "rt", "time"] }
