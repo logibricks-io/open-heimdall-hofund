@@ -158,6 +158,13 @@ mod tests {
     }
 
     #[test]
+    fn every_cooldown_cause_has_a_known_control_reason() {
+        for cause in CooldownCause::ALL {
+            assert_ne!(cooldown_reason(cause), CooldownReason::Unknown);
+        }
+    }
+
+    #[test]
     fn cooldown_cause_mapping_is_stable() {
         let causes = [
             CooldownCause::Failure,

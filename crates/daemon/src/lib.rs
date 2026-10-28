@@ -27,8 +27,14 @@ use hofund_usage::Ledger;
 
 mod adapt;
 mod control;
-#[doc(hidden)]
-pub mod control_map;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "cooldown and provider-error mapping is wired by the control endpoints in a later L stage"
+    )
+)]
+pub(crate) mod control_map;
 mod membership;
 mod models;
 mod models_state;
