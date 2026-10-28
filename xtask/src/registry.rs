@@ -2,6 +2,16 @@
 
 use std::path::Path;
 
+struct ArrayFinder<'a>(Option<&'a syn::ExprArray>);
+
+impl<'ast> syn::visit::Visit<'ast> for ArrayFinder<'ast> {
+    fn visit_expr_array(&mut self, array: &'ast syn::ExprArray) {
+        if self.0.is_none() {
+            self.0 = Some(array);
+        }
+    }
+}
+
 /// Reads the builtin factory ids declared by the registry's shared build checks.
 ///
 /// # Errors
@@ -12,24 +22,25 @@ pub fn builtin_factory_ids(workspace_root: &Path) -> Result<Vec<String>, String>
     let path = workspace_root.join("plugins/registry/src/check.rs");
     let source = std::fs::read_to_string(&path)
         .map_err(|error| format!("read {}: {error}", path.display()))?;
-    let function = source
-        .find("pub fn builtin_factory_ids()")
+    let file: syn::File =
+        syn::parse_str(&source).map_err(|error| format!("parse {}: {error}", path.display()))?;
+    let function = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "builtin_factory_ids" => {
+                Some(function)
+            }
+            _ => None,
+        })
         .ok_or_else(|| format!("{} has no builtin_factory_ids function", path.display()))?;
-    let function = &source[function..];
-    let array = function
-        .find("&[")
-        .map(|start| &function[start + 1..])
+    let mut finder = ArrayFinder(None);
+    syn::visit::Visit::visit_block(&mut finder, &function.block);
+    let array = finder
+        .0
         .ok_or_else(|| format!("{} has no builtin factory array", path.display()))?;
-    let end = array.find(']').ok_or_else(|| {
-        format!(
-            "{} has an unterminated builtin factory array",
-            path.display()
-        )
-    })?;
-    let array: syn::ExprArray = syn::parse_str(&array[..=end])
-        .map_err(|error| format!("parse {} builtin factory array: {error}", path.display()))?;
     let mut ids = Vec::new();
-    for element in array.elems {
+    for element in &array.elems {
         let syn::Expr::Lit(syn::ExprLit {
             lit: syn::Lit::Str(id),
             ..

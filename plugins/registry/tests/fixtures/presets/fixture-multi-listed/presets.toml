@@ -1,4 +1,10 @@
 [[preset]]
+id = "fixture-listed-decide"
+name = "Fixture Listed Decide"
+kind = "remote"
+decide = "https://decide.example.test"
+
+[[preset]]
 id = "fixture-listed-multi"
 name = "Fixture Listed Multi"
 kind = "vendor"
