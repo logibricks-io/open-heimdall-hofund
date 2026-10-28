@@ -1,17 +1,21 @@
 //! Compiled preset fragments and catalog-equivalent selection.
 
-#![cfg(feature = "test-fixtures")]
-
 use std::collections::BTreeSet;
 
 use hofund_plugin_api::{DynUpstreamFactory, ProtocolId};
 use hofund_plugin_registry::{
-    CompiledPreset, compiled_aliases, compiled_presets, factory, find_preset, fixture_aliases,
-    fixture_presets, model_plan_of, resolve_region, select,
+    CompiledAlias, CompiledPreset, compiled_aliases, compiled_presets, factory,
 };
+#[cfg(feature = "test-fixtures")]
+use hofund_plugin_registry::{
+    find_preset, fixture_aliases, fixture_presets, model_plan_of, resolve_region, select,
+};
+#[cfg(feature = "test-fixtures")]
 use hofund_provider::{Resolve, Wire};
 
+#[cfg(feature = "test-fixtures")]
 const OPENAI: &[ProtocolId] = &[ProtocolId::OPENAI_CHAT, ProtocolId::OPENAI_RESPONSES];
+#[cfg(feature = "test-fixtures")]
 const ALL: &[ProtocolId] = &[
     ProtocolId::GENERATIVE_LANGUAGE,
     ProtocolId::OPENAI_CHAT,
@@ -19,6 +23,7 @@ const ALL: &[ProtocolId] = &[
     ProtocolId::ANTHROPIC_MESSAGES,
 ];
 
+#[cfg(feature = "test-fixtures")]
 fn fixture(id: &str) -> &'static CompiledPreset {
     fixture_presets()
         .iter()
@@ -26,6 +31,7 @@ fn fixture(id: &str) -> &'static CompiledPreset {
         .expect("fixture preset")
 }
 
+#[cfg(feature = "test-fixtures")]
 fn protocol(wire: Wire) -> ProtocolId {
     match wire {
         Wire::Chat => ProtocolId::OPENAI_CHAT,
@@ -36,6 +42,7 @@ fn protocol(wire: Wire) -> ProtocolId {
     }
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn fixtures_are_separate_and_aliases_resolve_their_region() {
     assert_eq!(compiled_presets().len(), 1);
@@ -48,6 +55,7 @@ fn fixtures_are_separate_and_aliases_resolve_their_region() {
     assert_eq!(alias.region, Some("second"));
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn default_selection_follows_wire_order() {
     for (index, wire) in [
@@ -78,6 +86,7 @@ fn default_selection_follows_wire_order() {
     }
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn selected_protocol_must_be_served() {
     let error = select(
@@ -98,6 +107,7 @@ fn selected_protocol_must_be_served() {
     assert!(text.contains("openai-chat, or openai-responses"), "{text}");
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn selected_wire_must_have_a_url() {
     let error = select(
@@ -114,6 +124,7 @@ fn selected_wire_must_have_a_url() {
     );
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn region_urls_override_per_wire_and_fall_back() {
     let selected = select(
@@ -136,6 +147,7 @@ fn region_urls_override_per_wire_and_fall_back() {
     assert_eq!(selected.base_url, "https://second.example.test/v1");
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn unknown_region_lists_ids_in_declared_order() {
     let error = select(fixture("fixture-multi"), Some("missing"), OPENAI, None, "")
@@ -158,6 +170,7 @@ fn unknown_region_lists_ids_in_declared_order() {
     );
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn caller_base_url_overrides_the_selected_url() {
     let selected = select(
@@ -171,13 +184,14 @@ fn caller_base_url_overrides_the_selected_url() {
     assert_eq!(selected.base_url, "https://override.example.test/v1");
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
-fn no_url_preset_requires_a_base_url() {
-    let error =
-        select(fixture("fixture-no-url"), None, OPENAI, None, "").expect_err("missing base URL");
-    assert_eq!(error.to_string(), "preset `fixture-no-url` needs base_url");
+fn relay_no_url_preset_requires_a_base_url() {
+    let relay = hofund_plugin_registry::preset("relay").expect("relay preset");
+    let error = select(relay, None, OPENAI, None, "").expect_err("missing base URL");
+    assert_eq!(error.to_string(), "preset `relay` needs base_url");
     let selected = select(
-        fixture("fixture-no-url"),
+        relay,
         None,
         OPENAI,
         Some(ProtocolId::OPENAI_RESPONSES),
@@ -188,22 +202,49 @@ fn no_url_preset_requires_a_base_url() {
     assert_eq!(selected.base_url, "https://relay.example.test/v1");
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
-fn builtin_no_url_preset_defaults_to_chat() {
+fn builtin_no_url_presets_match_catalog_endpoint_rules() {
     let served = hofund_plugin_registry::builtin_protocols();
-    assert_eq!(served.first(), Some(&ProtocolId::OPENAI_CHAT));
-    let selected = select(
-        fixture("fixture-no-url"),
+    let preset = fixture("fixture-no-url");
+    let selected = select(preset, None, &served, None, "https://relay.example.test/v1")
+        .expect("builtin default");
+    assert_eq!(selected.wire, Wire::Chat);
+    assert_eq!(selected.protocol, ProtocolId::OPENAI_CHAT);
+    assert_eq!(selected.base_url, "https://relay.example.test/v1");
+
+    let error = select(preset, None, &served, None, "").expect_err("missing base URL");
+    assert_eq!(error.to_string(), "preset `fixture-no-url` needs base_url");
+
+    let error = select(
+        preset,
+        None,
+        &served,
+        Some(ProtocolId::OPENAI_RESPONSES),
+        "https://relay.example.test/v1",
+    )
+    .expect_err("missing responses endpoint");
+    assert_eq!(
+        error.to_string(),
+        "preset `fixture-no-url` has no responses endpoint"
+    );
+
+    let without_endpoint = Box::leak(Box::new(CompiledPreset {
+        endpoint: "",
+        ..*preset
+    }));
+    let error = select(
+        without_endpoint,
         None,
         &served,
         None,
         "https://relay.example.test/v1",
     )
-    .expect("builtin default");
-    assert_eq!(selected.wire, Wire::Chat);
-    assert_eq!(selected.protocol, ProtocolId::OPENAI_CHAT);
+    .expect_err("missing endpoint declaration");
+    assert_eq!(error.to_string(), "preset `fixture-no-url` has no endpoint");
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn decide_only_preset_is_not_callable() {
     for protocol in [None, Some(ProtocolId::OPENAI_CHAT)] {
@@ -216,6 +257,7 @@ fn decide_only_preset_is_not_callable() {
     }
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn alias_region_is_default_and_user_region_wins() {
     let alias = fixture_aliases()[0];
@@ -229,6 +271,7 @@ fn alias_region_is_default_and_user_region_wins() {
     assert_eq!(selected.base_url, "https://first.example.test/v1");
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn region_models_replace_preset_models() {
     let preset = fixture("fixture-multi");
@@ -243,6 +286,7 @@ fn region_models_replace_preset_models() {
     assert!(!plan.lists);
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn copied_catalog_row_resolves_identically() {
     let preset = fixture("fixture-equivalence");
@@ -280,10 +324,9 @@ fn copied_catalog_row_resolves_identically() {
     }
 }
 
-#[test]
-fn compiled_wires_are_served_and_ids_do_not_collide_with_the_catalog() {
+fn assert_wires_and_ids(presets: &[CompiledPreset], aliases: &[CompiledAlias]) {
     let catalog: BTreeSet<&str> = hofund_provider::catalog_ids().into_iter().collect();
-    for preset in compiled_presets().iter().chain(fixture_presets()) {
+    for preset in presets {
         assert!(!catalog.contains(preset.id), "duplicate {}", preset.id);
         let served = if hofund_plugin_registry::builtin_factory_ids().contains(&preset.plugin) {
             hofund_plugin_registry::builtin_protocols()
@@ -319,11 +362,23 @@ fn compiled_wires_are_served_and_ids_do_not_collide_with_the_catalog() {
             }
         }
     }
-    for alias in compiled_aliases().iter().chain(fixture_aliases()) {
+    for alias in aliases {
         assert!(!catalog.contains(alias.id), "duplicate {}", alias.id);
     }
 }
 
+#[test]
+fn compiled_wires_are_served_and_ids_do_not_collide_with_the_catalog() {
+    assert_wires_and_ids(compiled_presets(), compiled_aliases());
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn fixture_wires_are_served_and_ids_do_not_collide_with_the_catalog() {
+    assert_wires_and_ids(fixture_presets(), fixture_aliases());
+}
+
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn an_empty_region_wire_falls_back_to_the_preset() {
     let preset = fixture("fixture-fallback");
@@ -347,6 +402,7 @@ fn an_empty_region_wire_falls_back_to_the_preset() {
     assert_eq!(responses.base_url, "https://region.example.test/v1");
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
 fn default_selection_skips_unserved_wires() {
     let selected = select(
@@ -364,25 +420,31 @@ fn default_selection_skips_unserved_wires() {
     );
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
-fn explicit_protocol_on_a_no_url_preset_requires_a_base_url() {
-    let error = select(
-        fixture("fixture-no-url"),
-        None,
-        OPENAI,
-        Some(ProtocolId::OPENAI_RESPONSES),
-        "",
-    )
-    .expect_err("missing base URL");
-    assert_eq!(error.to_string(), "preset `fixture-no-url` needs base_url");
+fn explicit_protocol_on_a_relay_no_url_preset_requires_a_base_url() {
+    let relay = hofund_plugin_registry::preset("relay").expect("relay preset");
+    let error = select(relay, None, OPENAI, Some(ProtocolId::OPENAI_RESPONSES), "")
+        .expect_err("missing base URL");
+    assert_eq!(error.to_string(), "preset `relay` needs base_url");
 }
 
+#[cfg(feature = "test-fixtures")]
 #[test]
-fn find_preset_resolves_a_fixture_alias_with_its_region() {
-    let (preset, region) = find_preset("fixture-alias").expect("alias");
-    assert_eq!(preset.id, "fixture-multi");
-    assert_eq!(region, Some("second"));
-    let (preset, region) = find_preset("fixture-multi").expect("preset");
-    assert_eq!(preset.id, "fixture-multi");
-    assert_eq!(region, None);
+fn fixture_lookup_is_separate_from_production_lookup() {
+    assert!(find_preset("fixture-multi").is_none());
+    for preset in fixture_presets() {
+        assert!(find_preset(preset.id).is_none(), "{}", preset.id);
+        let (found, region) =
+            hofund_plugin_registry::find_fixture_preset(preset.id).expect("fixture preset lookup");
+        assert_eq!(found.id, preset.id);
+        assert_eq!(region, None);
+    }
+    for alias in fixture_aliases() {
+        assert!(find_preset(alias.id).is_none(), "{}", alias.id);
+        let (found, region) =
+            hofund_plugin_registry::find_fixture_preset(alias.id).expect("fixture alias lookup");
+        assert_eq!(found.id, alias.preset);
+        assert_eq!(region, alias.region);
+    }
 }

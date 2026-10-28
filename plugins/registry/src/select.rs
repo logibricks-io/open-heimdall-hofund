@@ -149,6 +149,13 @@ pub fn select(
                 })?;
             return Ok(finish(protocol, wire, override_or(base, base_url), region));
         }
+        if crate::builtin_factory_ids().contains(&preset.plugin) {
+            return Err(SelectError::new(format!(
+                "preset `{}` has no {} endpoint",
+                preset.id,
+                wire_name(wire)
+            )));
+        }
         if base_url.is_empty() {
             return Err(SelectError::new(format!(
                 "preset `{}` needs base_url",
@@ -178,9 +185,20 @@ pub fn select(
             preset.id, preset.plugin
         )));
     }
-    let protocol = served.first().copied().ok_or_else(|| {
-        SelectError::new(format!("plugin `{}` declares no protocol", preset.plugin))
-    })?;
+    let builtin = crate::builtin_factory_ids().contains(&preset.plugin);
+    if builtin && preset.endpoint.is_empty() {
+        return Err(SelectError::new(format!(
+            "preset `{}` has no endpoint",
+            preset.id
+        )));
+    }
+    let protocol = if builtin {
+        ProtocolId::OPENAI_CHAT
+    } else {
+        served.first().copied().ok_or_else(|| {
+            SelectError::new(format!("plugin `{}` declares no protocol", preset.plugin))
+        })?
+    };
     let wire = wire_for_protocol(protocol).ok_or_else(|| {
         SelectError::new(format!(
             "plugin `{}` speaks an unknown protocol `{protocol}`",

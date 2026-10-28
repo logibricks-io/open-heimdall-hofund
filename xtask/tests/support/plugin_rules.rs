@@ -1441,6 +1441,8 @@ fn kernel_under_plugin_api(segments: &[String]) -> bool {
 }
 
 fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
+    let builtin_factory_ids = xtask::registry::builtin_factory_ids(&workspace_root())
+        .expect("registry builtin factory ids");
     let mut violations = Vec::new();
     let kinds = ["providers", "subscriptions", "agents", "inbound"];
     let Ok(entries) = fs::read_dir(plugins) else {
@@ -1483,7 +1485,7 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                 && !manifest_path.exists()
                 && path.join("presets.toml").is_file()
             {
-                if matches!(id.as_str(), "anthropic" | "generative" | "openai-compat") {
+                if builtin_factory_ids.contains(&id) {
                     continue;
                 }
                 violations.push(format!(

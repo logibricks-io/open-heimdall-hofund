@@ -396,9 +396,20 @@ fn endpoint_for(
     Ok(endpoint)
 }
 
+type PresetLookup = fn(
+    &str,
+) -> Option<(
+    &'static hofund_plugin_registry::CompiledPreset,
+    Option<&'static str>,
+)>;
+
 fn plugin_for(provider: &hofund_config::Provider, wire: Wire) -> String {
+    plugin_for_with(provider, wire, hofund_plugin_registry::find_preset)
+}
+
+fn plugin_for_with(provider: &hofund_config::Provider, wire: Wire, lookup: PresetLookup) -> String {
     if let Some(preset) = &provider.preset
-        && let Some((compiled, _)) = hofund_plugin_registry::find_preset(preset)
+        && let Some((compiled, _)) = lookup(preset)
     {
         if hofund_plugin_registry::builtin_factory_ids().contains(&compiled.plugin) {
             return implementation_id(wire).to_owned();
@@ -481,8 +492,22 @@ fn raw_for(
     planned: &Planned,
     endpoint: &Endpoint,
 ) -> Result<RawTable, DaemonError> {
+    raw_for_with(
+        provider,
+        planned,
+        endpoint,
+        hofund_plugin_registry::find_preset,
+    )
+}
+
+fn raw_for_with(
+    provider: &hofund_config::Provider,
+    planned: &Planned,
+    endpoint: &Endpoint,
+    lookup: PresetLookup,
+) -> Result<RawTable, DaemonError> {
     if let Some(preset) = &provider.preset
-        && let Some((compiled, _)) = hofund_plugin_registry::find_preset(preset)
+        && let Some((compiled, _)) = lookup(preset)
         && !hofund_plugin_registry::builtin_factory_ids().contains(&compiled.plugin)
     {
         return raw_from_preset(compiled, provider, &planned.base_url);
@@ -675,16 +700,35 @@ fn compiled_credential(
     ))
 }
 
+fn served_for(plugin: &str, protocols: &[ProtocolId]) -> Result<Vec<ProtocolId>, DaemonError> {
+    let Some(protocol) = protocols.first().copied() else {
+        return Err(DaemonError::new(format!(
+            "plugin `{plugin}` declares no protocol"
+        )));
+    };
+    // Passing the selected protocol through plugin-api is a follow-up that
+    // must land before any fragment batch adds a multi-protocol listed plugin.
+    Ok(vec![protocol])
+}
+
 fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
+    plan_with(provider, hofund_plugin_registry::find_preset)
+}
+
+fn plan_with(
+    provider: &hofund_config::Provider,
+    lookup: PresetLookup,
+) -> Result<Planned, DaemonError> {
     let selected = match provider.protocol.as_deref() {
         Some(protocol) => Some(selected_protocol(&provider.id, protocol)?),
         None => None,
     };
     if let Some(preset) = &provider.preset
-        && let Some((compiled, alias_region)) = hofund_plugin_registry::find_preset(preset)
+        && let Some((compiled, alias_region)) = lookup(preset)
     {
         let region = option_present(provider, "region")?.or(alias_region);
-        let served = if hofund_plugin_registry::builtin_factory_ids().contains(&compiled.plugin) {
+        let builtin = hofund_plugin_registry::builtin_factory_ids().contains(&compiled.plugin);
+        let served = if builtin {
             hofund_plugin_registry::builtin_protocols()
         } else {
             let factory = hofund_plugin_registry::factory(compiled.plugin).ok_or_else(|| {
@@ -693,10 +737,19 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
                     compiled.plugin
                 ))
             })?;
-            DynUpstreamFactory::spec(factory.as_ref())
-                .protocols()
-                .to_vec()
+            served_for(
+                compiled.plugin,
+                DynUpstreamFactory::spec(factory.as_ref()).protocols(),
+            )?
         };
+        if !builtin
+            && selected.is_some_and(|(protocol, _)| Some(protocol) != served.first().copied())
+        {
+            return Err(DaemonError::new(format!(
+                "provider `{}` protocol does not match plugin `{}`",
+                provider.id, compiled.plugin
+            )));
+        }
         let selection = hofund_plugin_registry::select(
             compiled,
             region,
@@ -707,8 +760,7 @@ fn plan(provider: &hofund_config::Provider) -> Result<Planned, DaemonError> {
         .map_err(show)?;
         // Same as `resolve`: the credential follows the final base, so a
         // `base_url` override applies its host rules.
-        let credential = if hofund_plugin_registry::builtin_factory_ids().contains(&compiled.plugin)
-        {
+        let credential = if builtin {
             hofund_provider::credential_for(compiled.id, selection.wire, &selection.base_url)
         } else {
             Credential::Default
@@ -863,7 +915,8 @@ mod tests {
         )
         .expect("config");
         let provider = &config.providers[0];
-        let planned = super::plan(provider).expect("responses plan");
+        let planned = super::plan_with(provider, hofund_plugin_registry::find_fixture_preset)
+            .expect("responses plan");
         assert_eq!(planned.wire, hofund_provider::Wire::Responses);
         assert_eq!(planned.base_url, "https://first.example.test/v1");
         assert_eq!(planned.credential, hofund_provider::Credential::Bearer);
@@ -882,9 +935,16 @@ mod tests {
         )
         .expect("config");
         let provider = &config.providers[0];
-        let planned = super::plan(provider).expect("plan");
+        let planned =
+            super::plan_with(provider, hofund_plugin_registry::find_fixture_preset).expect("plan");
         let endpoint = super::endpoint_for(provider, &planned).expect("endpoint");
-        let raw = super::raw_for(provider, &planned, &endpoint).expect("raw");
+        let raw = super::raw_for_with(
+            provider,
+            &planned,
+            &endpoint,
+            hofund_plugin_registry::find_fixture_preset,
+        )
+        .expect("raw");
         assert_eq!(
             raw.get("protocol"),
             Some(&hofund_plugin_api::RawValue::String("chat".to_owned()))
@@ -924,10 +984,14 @@ mod tests {
             ))
             .expect("fixture config");
             let provider = &fixture.providers[0];
-            let planned = super::plan(provider).expect("fixture plan");
+            let planned = super::plan_with(provider, hofund_plugin_registry::find_fixture_preset)
+                .expect("fixture plan");
             assert_eq!(planned.wire, wire);
             assert_eq!(planned.base_url, base_url);
-            assert_eq!(super::plugin_for(provider, wire), plugin);
+            assert_eq!(
+                super::plugin_for_with(provider, wire, hofund_plugin_registry::find_fixture_preset),
+                plugin
+            );
 
             let catalog = hofund_config::load(&format!(
                 "[[providers]]\nid = \"catalog\"\npreset = \"tencent-cloud\"\napi_key = \"test-key\"\n{settings}"
@@ -938,6 +1002,45 @@ mod tests {
             assert_eq!(planned.wire, expected.wire);
             assert_eq!(planned.credential, expected.credential);
         }
+    }
+
+    #[test]
+    fn production_plan_does_not_resolve_fixture_presets() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"fixture\"\npreset = \"fixture-equivalence\"\napi_key = \"test-key\"\n",
+        )
+        .expect("config");
+        let Err(error) = super::plan(&config.providers[0]) else {
+            panic!("production plan resolved a fixture preset");
+        };
+        assert_eq!(error.to_string(), "unknown preset `fixture-equivalence`");
+    }
+
+    #[test]
+    fn non_builtin_plugins_use_only_their_first_protocol() {
+        let served = super::served_for(
+            "multi",
+            &[
+                hofund_plugin_api::ProtocolId::OPENAI_CHAT,
+                hofund_plugin_api::ProtocolId::OPENAI_RESPONSES,
+            ],
+        )
+        .expect("served protocol");
+        assert_eq!(served, [hofund_plugin_api::ProtocolId::OPENAI_CHAT]);
+        let error = super::served_for("empty", &[]).expect_err("missing protocol");
+        assert_eq!(error.to_string(), "plugin `empty` declares no protocol");
+
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"relay\"\npreset = \"relay\"\nprotocol = \"openai-responses\"\nbase_url = \"https://relay.example.test/v1\"\n",
+        )
+        .expect("config");
+        let Err(error) = super::plan(&config.providers[0]) else {
+            panic!("protocol mismatch was accepted");
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider `relay` protocol does not match plugin `relay`"
+        );
     }
 
     #[test]

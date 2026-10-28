@@ -231,6 +231,8 @@ fn validate_preset(source: &str, plugin: &str, preset: &PresetToml) -> Result<()
             ("responses", &region.responses),
             ("anthropic", &region.anthropic),
             ("decide", &region.decide),
+            ("website", &region.website),
+            ("keys_url", &region.keys_url),
         ] {
             validate_url(&context, key, url)?;
         }
@@ -242,8 +244,24 @@ fn validate_preset(source: &str, plugin: &str, preset: &PresetToml) -> Result<()
         ("generative", &preset.generative),
         ("decide", &preset.decide),
         ("endpoint", &preset.endpoint),
+        ("website", &preset.website),
+        ("keys_url", &preset.keys_url),
     ] {
         validate_url(&context, key, url)?;
+    }
+    if let Some(region) = preset.regions.first() {
+        for (key, url, region_url) in [
+            ("chat", &preset.chat, &region.chat),
+            ("responses", &preset.responses, &region.responses),
+            ("anthropic", &preset.anthropic, &region.anthropic),
+            ("generative", &preset.generative, &String::new()),
+        ] {
+            if url != region_url {
+                return Err(format!(
+                    "{context} has mismatched {key} wire: preset URL `{url}` must equal first region URL `{region_url}`"
+                ));
+            }
+        }
     }
     validate_placement(source, plugin, preset)?;
     Ok(())
@@ -257,6 +275,31 @@ fn validate_placement(source: &str, plugin: &str, preset: &PresetToml) -> Result
     if plugin != expected {
         return Err(format!(
             "{source}: preset `{}` belongs in `plugins/providers/{expected}`, not `plugins/providers/{plugin}`",
+            preset.id
+        ));
+    }
+    let has_wire_url = [
+        &preset.chat,
+        &preset.responses,
+        &preset.anthropic,
+        &preset.generative,
+    ]
+    .into_iter()
+    .chain(
+        preset
+            .regions
+            .iter()
+            .flat_map(|region| [&region.chat, &region.responses, &region.anthropic]),
+    )
+    .any(|url| !url.is_empty());
+    let has_decide = !preset.decide.is_empty()
+        || preset
+            .regions
+            .iter()
+            .any(|region| !region.decide.is_empty());
+    if !has_wire_url && preset.endpoint.is_empty() && !has_decide {
+        return Err(format!(
+            "{source}: preset `{}` has no wire URL and no endpoint",
             preset.id
         ));
     }
@@ -289,8 +332,13 @@ fn default_wire_factory(preset: &PresetToml) -> &'static str {
 }
 
 pub fn validate_preset_file(manifest: &str, file: &str) -> Result<(), String> {
-    if !file.ends_with(".toml") || file.contains('/') || file.contains('\\') || file.contains("..")
-    {
+    let valid = file.strip_suffix(".toml").is_some_and(|stem| {
+        !stem.is_empty()
+            && stem
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    });
+    if !valid {
         return Err(format!(
             "{manifest}: presets entry `{file}` must be a plain .toml file name"
         ));
@@ -467,7 +515,7 @@ mod tests {
     use super::{FragmentToml, parse, render_preset, valid_data_only_provider, validate_all};
 
     fn valid() -> &'static str {
-        "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\n"
+        "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\nendpoint = \"https://example.test\"\n"
     }
 
     fn error(text: &str) -> String {
@@ -529,6 +577,51 @@ mod tests {
             "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\nchat = \"https://example.test/a path\"\n",
         );
         assert!(text.contains("without whitespace"), "{text}");
+        for key in ["website", "keys_url"] {
+            for url in [
+                "javascript:alert(1)",
+                "data:text/plain,hello",
+                "ftp://example.test",
+            ] {
+                let text = error(&format!(
+                    "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\n{key} = \"{url}\"\n"
+                ));
+                assert!(text.contains(&format!("invalid {key} URL")), "{text}");
+                let text = error(&format!(
+                    "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\n[[preset.region]]\nid = \"one\"\n{key} = \"{url}\"\n"
+                ));
+                assert!(text.contains(&format!("invalid {key} URL")), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn regioned_presets_mirror_the_first_region_wires() {
+        parse(
+            "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\nchat = \"https://one.example.test\"\n[[preset.region]]\nid = \"one\"\nchat = \"https://one.example.test\"\n[[preset.region]]\nid = \"two\"\nchat = \"https://two.example.test\"\n",
+            "fixture/presets.toml",
+            "openai-compat",
+        )
+        .expect("mirrored first region");
+        for (text, wire) in [
+            (
+                "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\nchat = \"https://one.example.test\"\n[[preset.region]]\nid = \"one\"\nchat = \"https://other.example.test\"\n",
+                "chat",
+            ),
+            (
+                "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\nchat = \"https://one.example.test\"\nresponses = \"https://one.example.test\"\n[[preset.region]]\nid = \"one\"\nchat = \"https://one.example.test\"\n",
+                "responses",
+            ),
+            (
+                "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\nchat = \"https://one.example.test\"\n[[preset.region]]\nid = \"one\"\nchat = \"https://one.example.test\"\nresponses = \"https://one.example.test\"\n",
+                "responses",
+            ),
+        ] {
+            let text = error(text);
+            assert!(text.contains(&format!("mismatched {wire} wire")), "{text}");
+            assert!(text.contains("fixture/presets.toml"), "{text}");
+            assert!(text.contains("preset `example`"), "{text}");
+        }
     }
 
     #[test]
@@ -607,7 +700,7 @@ mod tests {
             parse(&text, "fixture/presets.toml", plugin).expect("default wire placement");
         }
         parse(
-            "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\n[[preset.region]]\nid = \"one\"\nanthropic = \"https://example.test\"\n",
+            "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\nanthropic = \"https://example.test\"\n[[preset.region]]\nid = \"one\"\nanthropic = \"https://example.test\"\n",
             "fixture/presets.toml",
             "anthropic",
         )
@@ -625,6 +718,21 @@ mod tests {
     }
 
     #[test]
+    fn builtin_no_url_rows_require_an_endpoint_unless_decide_only() {
+        let text = error("[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\n");
+        assert!(text.contains("no wire URL and no endpoint"), "{text}");
+        assert!(text.contains("fixture/presets.toml"), "{text}");
+        assert!(text.contains("preset `example`"), "{text}");
+        parse(valid(), "fixture/presets.toml", "openai-compat").expect("endpoint row");
+        parse(
+            "[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"remote\"\ndecide = \"https://example.test/decide\"\n",
+            "fixture/presets.toml",
+            "openai-compat",
+        )
+        .expect("decide-only row");
+    }
+
+    #[test]
     fn preset_file_entries_are_plain_toml_file_names() {
         super::validate_preset_file("plugin.toml", "presets.toml").expect("plain file name");
         for file in [
@@ -633,6 +741,9 @@ mod tests {
             "../presets.toml",
             "presets..toml",
             "presets.txt",
+            "C:x.toml",
+            "a b.toml",
+            "X.toml",
         ] {
             let text = super::validate_preset_file("plugin.toml", file)
                 .expect_err("invalid preset file name");
@@ -643,7 +754,7 @@ mod tests {
 
     #[test]
     fn rendering_escapes_config_keys_and_values() {
-        let fragment: FragmentToml = parse("[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\n[preset.config]\nquote = \"say \\\"hello\\\" and use C:\\\\tmp\"\n", "fixture.toml", "openai-compat").expect("valid");
+        let fragment: FragmentToml = parse("[[preset]]\nid = \"example\"\nname = \"Example\"\nkind = \"vendor\"\nendpoint = \"https://example.test\"\n[preset.config]\nquote = \"say \\\"hello\\\" and use C:\\\\tmp\"\n", "fixture.toml", "openai-compat").expect("valid");
         let rendered = render_preset(&fragment.presets[0], "openai-compat");
         assert!(
             rendered.contains("say \\\"hello\\\" and use C:\\\\tmp"),

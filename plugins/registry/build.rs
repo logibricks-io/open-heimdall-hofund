@@ -127,12 +127,7 @@ fn run() -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         let preset_fixtures =
             load_builtin_fragments(&workspace, "plugins/registry/tests/fixtures/presets")?;
-        let all: Vec<FragmentToml> = fragments
-            .iter()
-            .chain(preset_fixtures.iter())
-            .cloned()
-            .collect();
-        preset_toml::validate_all(&all)?;
+        preset_toml::validate_all(&preset_fixtures)?;
         fs::write(
             out.join("fixture_presets.rs"),
             emit_fixture_presets(&preset_fixtures),

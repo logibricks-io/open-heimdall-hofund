@@ -105,6 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[providers.options]` is forwarded to the plugin factory. Each factory has
   an option schema. An unknown key or a wrong type is a check error that
   names the provider and the key and does not include the value.
+- Relay with no `base_url` now fails at plan time with
+  `preset \`relay\` needs base_url`.
 - Vertex and Bedrock are built through `registry.factory`, like the other
   wires. The daemon no longer constructs those adapters itself.
 - Built-in adapters use the pooled host client, so `connect_timeout_ms` and

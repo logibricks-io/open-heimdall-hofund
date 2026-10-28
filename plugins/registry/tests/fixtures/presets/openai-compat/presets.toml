@@ -51,6 +51,11 @@ kind = "vendor"
 chat = "https://fallback.example.test/v1"
 
 [[preset.region]]
+id = "default"
+name = "Default"
+chat = "https://fallback.example.test/v1"
+
+[[preset.region]]
 id = "only-responses"
 name = "Only Responses"
 responses = "https://region.example.test/v1"
@@ -81,6 +86,7 @@ lists = true
 id = "fixture-no-url"
 name = "Fixture No URL"
 kind = "relay"
+endpoint = "https://relay.example.test/v1"
 
 [[alias]]
 id = "fixture-alias"

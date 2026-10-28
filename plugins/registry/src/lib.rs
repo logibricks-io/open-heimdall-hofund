@@ -112,19 +112,22 @@ pub fn find_preset(id: &str) -> Option<(&'static CompiledPreset, Option<&'static
     if let Some(alias) = compiled_aliases().iter().find(|alias| alias.id == id) {
         return preset(alias.preset).map(|preset| (preset, alias.region));
     }
-    #[cfg(feature = "test-fixtures")]
-    {
-        if let Some(preset) = fixture_presets().iter().find(|preset| preset.id == id) {
-            return Some((preset, None));
-        }
-        if let Some(alias) = fixture_aliases().iter().find(|alias| alias.id == id) {
-            return fixture_presets()
-                .iter()
-                .find(|preset| preset.id == alias.preset)
-                .map(|preset| (preset, alias.region));
-        }
-    }
     None
+}
+
+/// Resolves a test fixture preset id or alias and returns the alias's default region.
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+#[must_use]
+pub fn find_fixture_preset(id: &str) -> Option<(&'static CompiledPreset, Option<&'static str>)> {
+    if let Some(preset) = fixture_presets().iter().find(|preset| preset.id == id) {
+        return Some((preset, None));
+    }
+    let alias = fixture_aliases().iter().find(|alias| alias.id == id)?;
+    fixture_presets()
+        .iter()
+        .find(|preset| preset.id == alias.preset)
+        .map(|preset| (preset, alias.region))
 }
 
 /// Every inbound surface the linked plugins contribute.
@@ -228,6 +231,26 @@ mod tests {
         assert!(super::factory("generative").is_some());
         assert!(super::factory("missing").is_none());
         assert!(super::factory("relay").is_some());
+    }
+
+    #[test]
+    fn builtin_factory_list_matches_fragment_factories() {
+        assert_eq!(
+            super::builtin_factory_ids(),
+            ["anthropic", "generative", "openai-compat"]
+        );
+        for (id, protocols) in [
+            (
+                "openai-compat",
+                &[ProtocolId::OPENAI_CHAT, ProtocolId::OPENAI_RESPONSES][..],
+            ),
+            ("anthropic", &[ProtocolId::ANTHROPIC_MESSAGES][..]),
+            ("generative", &[ProtocolId::GENERATIVE_LANGUAGE][..]),
+        ] {
+            let factory = super::factory(id).expect("fragment factory");
+            assert_eq!(factory.spec().plugin().as_str(), id);
+            assert_eq!(factory.spec().protocols(), protocols);
+        }
     }
 
     #[test]

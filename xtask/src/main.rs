@@ -60,6 +60,7 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<(String, PathBuf)>, String
     if !plugins.is_dir() {
         return Err(format!("{} is not a directory", plugins.display()));
     }
+    let builtin_factory_ids = xtask::registry::builtin_factory_ids(&workspace_root())?;
     let mut names = Vec::new();
     let mut data_only = false;
     let entries = std::fs::read_dir(plugins)
@@ -99,7 +100,7 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<(String, PathBuf)>, String
                 && !manifest_path.exists()
                 && child.path().join("presets.toml").is_file()
             {
-                if !matches!(id.as_str(), "anthropic" | "generative" | "openai-compat") {
+                if !builtin_factory_ids.contains(&id) {
                     return Err(format!(
                         "providers/{id} is not a builtin factory data-only directory"
                     ));
@@ -475,12 +476,16 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let plugins = root.join("plugins");
-        std::fs::create_dir_all(plugins.join("providers/openai-compat")).expect("provider");
-        std::fs::write(
-            plugins.join("providers/openai-compat/presets.toml"),
-            "[[preset]]\nid = \"example\"\n",
-        )
-        .expect("presets");
+        let ids = xtask::registry::builtin_factory_ids(&workspace_root()).expect("builtin ids");
+        assert!(ids.len() >= 3, "{ids:?}");
+        for id in &ids {
+            std::fs::create_dir_all(plugins.join("providers").join(id)).expect("provider");
+            std::fs::write(
+                plugins.join("providers").join(id).join("presets.toml"),
+                "[[preset]]\nid = \"example\"\n",
+            )
+            .expect("presets");
+        }
         assert!(
             load_plugin_packages(&plugins)
                 .expect("data-only")
