@@ -18,7 +18,6 @@ macos = "~/.gemini/settings.json"
 windows = "~/.gemini/settings.json"
 env_override = "GEMINI_CLI_HOME"
 env_replaces = "~"
-create = true
 
 # .gemini/.env is loaded by the CLI and is not excluded. Empty and relative
 # GEMINI_CLI_HOME values are treated as unset, matching the reference's
@@ -31,7 +30,6 @@ macos = "~/.gemini/.env"
 windows = "~/.gemini/.env"
 env_override = "GEMINI_CLI_HOME"
 env_replaces = "~"
-create = true
 
 # security.auth.selectedType is set to gemini-api-key. The string values of
 # that enum are not listed in the public docs; they come from

@@ -215,7 +215,8 @@ static OPENCODE: AgentDescription = AgentDescription::from_static(
     AgentRoute::Gateway,
     &[],
 )
-.with_model_file("config");
+.with_model_file("config")
+.with_model_prefix("hofund/");
 
 static DESCRIPTIONS: &[&AgentDescription] = &[&CLAUDE, &CODEX, &GEMINI, &OPENCODE];
 

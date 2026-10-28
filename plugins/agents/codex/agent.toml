@@ -13,7 +13,6 @@ macos = "~/.codex/config.toml"
 windows = "~/.codex/config.toml"
 env_override = "CODEX_HOME"
 env_replaces = "~/.codex"
-create = true
 
 # model_provider selects the hofund table. base_url includes /v1 because
 # wire_api = "responses" posts to {base_url}/responses.
