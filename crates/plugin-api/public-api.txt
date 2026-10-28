@@ -134,6 +134,7 @@ ConnectionStatus::const fn id (& self) -> & 'static str
 ConnectionStatus::const fn installed (& self) -> bool
 ConnectionStatus::fn new (id : & 'static str , display_name : & 'static str , installed : bool , connected : bool , paths : Vec < PathBuf > ,) -> Self
 ConnectionStatus::fn paths (& self) -> & [PathBuf]
+ContentPart
 CountOutcome
 CountOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 CountOutcome::Counted
@@ -486,6 +487,7 @@ RawValue::String
 RawValue::Table
 Request
 Response
+Role
 RouteSpec
 RouteSpec #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 RouteSpec::const fn from_static (method : Method , prefix : & 'static str) -> Self

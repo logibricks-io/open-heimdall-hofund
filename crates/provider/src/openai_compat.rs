@@ -30,6 +30,8 @@ pub struct OpenAiCompat {
     upstream: Upstream,
     /// Set only when the base URL is a Mantle `/v1` root.
     mantle: Option<Mantle>,
+    /// The normalized base URL, set only when the base is not a Mantle root.
+    direct: Option<String>,
     models: crate::models::ModelClient,
 }
 
@@ -60,6 +62,7 @@ impl OpenAiCompat {
             base: endpoint.base_url.clone(),
             routes: LearnedRoutes::default(),
         });
+        let direct = mantle.is_none().then(|| endpoint.base_url.clone());
         let mut headers = HeaderMap::new();
         http::insert_credential(
             &mut headers,
@@ -73,8 +76,19 @@ impl OpenAiCompat {
             protocol,
             upstream: Upstream::open(endpoint, path, headers)?,
             mantle,
+            direct,
             models,
         })
+    }
+
+    /// The base URL a caller may post to directly.
+    ///
+    /// This is the configured base after Mantle normalization. It is `None` for
+    /// a Mantle `/v1` root, whose path prefix depends on the model id and on
+    /// routes learned at run time, so only this adapter can send to it.
+    #[must_use]
+    pub fn direct_base(&self) -> Option<&str> {
+        self.direct.as_deref()
     }
 
     fn path(&self) -> &'static str {
@@ -254,6 +268,34 @@ mod tests {
             runtime.url_for("openai.gpt-oss-120b", false),
             "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn only_a_base_that_is_not_a_mantle_root_is_direct() {
+        let mantle = OpenAiCompat::new(
+            OpenAiProtocol::Chat,
+            Endpoint::new("mantle", "https://bedrock-mantle.us-east-1.api.aws/v1"),
+        )
+        .expect("mantle");
+        assert_eq!(mantle.direct_base(), None);
+        let normalized = OpenAiCompat::new(
+            OpenAiProtocol::Chat,
+            Endpoint::new(
+                "mantle",
+                "https://bedrock-mantle.us-east-1.api.aws/openai/v1",
+            ),
+        )
+        .expect("normalized");
+        assert_eq!(
+            normalized.direct_base().is_some(),
+            normalized.mantle.is_none()
+        );
+        let plain = OpenAiCompat::new(
+            OpenAiProtocol::Responses,
+            Endpoint::new("plain", "http://127.0.0.1:9/v1/"),
+        )
+        .expect("plain");
+        assert_eq!(plain.direct_base(), Some("http://127.0.0.1:9/v1/"));
     }
 
     #[test]

@@ -36,6 +36,7 @@ mod page
 mod register
 mod sigv4
 mod transport
+mod wire
 next_cursor
 oauth::AccessToken
 oauth::AccessToken::const fn expires_in (& self) -> Duration
@@ -103,6 +104,7 @@ string_items
 text_response
 tracing
 transport::Call derives(Clone)
+transport::Call::async fn open (self , http : & HttpHandle , attempts : u8) -> Result < HttpResponse , PluginError >
 transport::Call::async fn send (self , http : & HttpHandle) -> Result < Reply , PluginError >
 transport::Call::async fn send_with_retry (self , http : & HttpHandle , attempts : u8 ,) -> Result < Reply , PluginError >
 transport::Call::fn bearer (self , token : & SecretString) -> Result < Self , PluginError >
@@ -124,3 +126,9 @@ transport::fn is_quota_error (status : u16 , body : & [u8]) -> bool
 transport::fn parse_retry_after (value : & str , now : std :: time :: SystemTime) -> Option < Duration >
 transport::fn parse_retry_after_headers (headers : & http :: HeaderMap , now : std :: time :: SystemTime ,) -> Option < Duration >
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse
+wire::Target derives(Clone)
+wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
+wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
+wire::Target::fn new (protocol : ProtocolId , base_url : impl Into < String >) -> Self
+wire::Target::fn quirks (mut self , quirks : Option < & 'static hofund_quirks :: Profile >) -> Self
+wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
