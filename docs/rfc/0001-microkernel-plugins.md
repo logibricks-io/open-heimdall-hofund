@@ -1136,6 +1136,15 @@ Kernel globs, `plugins/registry`, the control crates, and `fuzz/` belong to whoe
 - A leading in-band error event fails the call before any event is yielded, and a non-2xx status keeps its `Retry-After`. Error messages are capped at 512 bytes.
 - `hofund-kit-upstream` re-exports `runtime_host` and `HttpLimits` so registry tests can run both transports on the pooled client against a mock.
 
+### PR H0b notes
+
+- `HostContext::loopback()` returns a `LoopbackHandle` over the `#[doc(hidden)]` kernel trait `LoopbackBackend`. Hosts without a listener report `Unsupported`. The handle checks the sign-in session, the plugin id and the spec before the backend sees it. `bind` takes `&LoopbackSpec` rather than a value, since nothing in it is consumed.
+- `hofund_plugin_host::LoopbackRegistry` is the backend. It listens on `127.0.0.1` only (`SO_REUSEADDR` on Unix only, so a fixed port is not shared on Windows), reads at most 8 KiB of request head within 10 s per connection, and serves each connection on its own task, so an idle connection does not block the callback. GET and HTTP/1.x only.
+- Routing: `/cancel` cancels without a `state` (as the reference does). Any other path than the bound one is 404. A wrong `state` is 400 and the listener keeps waiting. The first matching request claims the sign-in; later ones get 409. `error=` fails the sign-in and the error token is repeated only if it is short and plain. Replies carry `no-store`, `Referrer-Policy: no-referrer`, `nosniff`, `Connection: close`, and never the code. The listener closes 1 s after the claim.
+- A fixed port that is busy (`AddrInUse`) reports `Busy`, and one that is not permitted reports `Reserved`; either way the sign-in carries on paste-only. Per the design divergence, the kernel never sends `/cancel` to a foreign listener.
+- The kernel awaits the result with `LoopbackRegistry::await_callback(session, paste, deadline)`, a method rather than a free function so the registry is explicit. A pasted line is checked with `sign_in::parse_pasted_callback`, which lives in the kernel next to the listener rather than in SDK `oauth/callback.rs`: a pasted provider error fails the sign-in, and anything else that does not match is ignored. The deadline is a `Timeout` error and closes the listener; the session entry stays until `release`, so a second wait is refused.
+- SDK `oauth::Pkce::generate` (S256, 32 random bytes), `oauth::new_state` (32 random bytes, base64url) and `oauth::authorize_url` (https, or http on a loopback host only; no fragment or user info).
+
 ## 7. Comparison with magpie at `cbbf316`
 
 Pins: hofund `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4`, magpie `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`.

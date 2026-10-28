@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is not a Bedrock Mantle root, so a streamed reply reaches the client as the
   upstream sends it. A reset after the request was written is not replayed and
   does not fail over.
+- Loopback sign-in callbacks: plugins bind a kernel-owned listener on
+  `127.0.0.1` through `HostContext::loopback()`, on a fixed or ephemeral port.
+  The first request with the expected `state` and a `code` completes the
+  sign-in, `error=` fails it, and `/cancel` cancels it. A busy fixed port
+  carries on paste-only, and a pasted URL must match the redirect's host, port,
+  path and `state`. The SDK gains `oauth::Pkce`, `oauth::new_state` and
+  `oauth::authorize_url`.
 - Account refresh leases: a per-account cross-process lock that reads the stored
   secret past the cache and commits a refreshed one, with bounded waits for
   refreshes and upserts. Plugins also gain one-shot background jobs, blocking

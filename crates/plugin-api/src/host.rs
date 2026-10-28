@@ -16,10 +16,10 @@ use crate::error::PluginError;
 use crate::id::PluginKind;
 use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
 use crate::kernel::{
-    AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, HttpBackend, ObserveBackend,
-    ProcessBackend, SchedulerBackend, SecretsBackend,
+    AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, HttpBackend, LoopbackBackend,
+    NoLoopback, ObserveBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
 };
-use crate::records::{Account, QuotaObservation};
+use crate::records::{Account, QuotaObservation, SignInCtx};
 use futures_util::future::BoxFuture;
 
 pub use crate::kernel::Job;
@@ -581,6 +581,7 @@ pub struct HostContext {
     process: ProcessHandle,
     dirs: DirHandle,
     observe: ObserveHandle,
+    loopback: LoopbackHandle,
 }
 
 impl HostContext {
@@ -657,8 +658,27 @@ impl HostContext {
                 plugin: key.id().clone(),
                 inner: observe,
             },
+            loopback: LoopbackHandle {
+                plugin: key.clone(),
+                inner: Arc::new(NoLoopback),
+            },
             key,
         }
+    }
+
+    /// Kernel-only. Plugins do not call this.
+    ///
+    /// Gives this context a loopback callback listener. Without one,
+    /// [`LoopbackHandle::bind`] returns [`crate::PluginErrorKind::Unsupported`].
+    #[cfg(feature = "kernel")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_loopback(mut self, loopback: Arc<dyn LoopbackBackend>) -> Self {
+        self.loopback = LoopbackHandle {
+            plugin: self.key.clone(),
+            inner: loopback,
+        };
+        self
     }
 
     /// The plugin this context was built for.
@@ -719,6 +739,12 @@ impl HostContext {
     #[must_use]
     pub fn observe(&self) -> &ObserveHandle {
         &self.observe
+    }
+
+    /// Loopback callback listener for browser sign-in.
+    #[must_use]
+    pub fn loopback(&self) -> &LoopbackHandle {
+        &self.loopback
     }
 }
 
@@ -790,6 +816,224 @@ impl SurfaceHost {
     }
 }
 
+/// The host name a loopback redirect URI names. The listener always binds
+/// `127.0.0.1`; this only changes the URI the provider sees.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RedirectHost {
+    /// `http://localhost:<port><path>`, the form most providers register.
+    #[default]
+    Localhost,
+    /// `http://127.0.0.1:<port><path>`.
+    Ipv4,
+}
+
+/// Why a fixed loopback port could not be bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BindBlocked {
+    /// Another process holds the port.
+    Busy,
+    /// The system refused the port, such as a Windows excluded range.
+    Reserved,
+}
+
+/// The path a loopback listener treats as the cancel link.
+pub const LOOPBACK_CANCEL_PATH: &str = "/cancel";
+
+/// What loopback listener a sign-in wants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LoopbackSpec {
+    port: Option<u16>,
+    path: &'static str,
+    redirect_host: RedirectHost,
+    state: Option<String>,
+}
+
+impl LoopbackSpec {
+    /// A listener on `port`, for a provider that registered one redirect URI.
+    #[must_use]
+    pub const fn fixed(port: u16) -> Self {
+        Self {
+            port: Some(port),
+            path: "/callback",
+            redirect_host: RedirectHost::Localhost,
+            state: None,
+        }
+    }
+
+    /// A listener on a port the system picks.
+    #[must_use]
+    pub const fn ephemeral() -> Self {
+        Self {
+            port: None,
+            path: "/callback",
+            redirect_host: RedirectHost::Localhost,
+            state: None,
+        }
+    }
+
+    /// The callback path, such as `/auth/callback`. The default is `/callback`.
+    #[must_use]
+    pub const fn path(mut self, path: &'static str) -> Self {
+        self.path = path;
+        self
+    }
+
+    /// The host the redirect URI names.
+    #[must_use]
+    pub const fn redirect_host(mut self, host: RedirectHost) -> Self {
+        self.redirect_host = host;
+        self
+    }
+
+    /// The `state` value the callback must carry. Required.
+    #[must_use]
+    pub fn expect_state(mut self, state: impl Into<String>) -> Self {
+        self.state = Some(state.into());
+        self
+    }
+
+    /// The fixed port, or `None` for an ephemeral one.
+    #[must_use]
+    pub const fn requested_port(&self) -> Option<u16> {
+        self.port
+    }
+
+    /// The callback path.
+    #[must_use]
+    pub const fn callback_path(&self) -> &'static str {
+        self.path
+    }
+
+    /// The host the redirect URI names.
+    #[must_use]
+    pub const fn host(&self) -> RedirectHost {
+        self.redirect_host
+    }
+
+    /// The expected `state`.
+    #[must_use]
+    pub fn state(&self) -> Option<&str> {
+        self.state.as_deref()
+    }
+
+    /// Checks the path and state before a backend sees the spec.
+    fn validate(&self) -> Result<(), PluginError> {
+        let path = self.path;
+        if !path.starts_with('/')
+            || path == LOOPBACK_CANCEL_PATH
+            || !path
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() && byte != b'?' && byte != b'#' && byte != b'%')
+        {
+            return Err(PluginError::config(
+                "loopback callback path must be a plain absolute path other than /cancel",
+            ));
+        }
+        match self.state.as_deref() {
+            Some(state) if !state.is_empty() => Ok(()),
+            _ => Err(PluginError::config(
+                "loopback sign-in needs an expected state",
+            )),
+        }
+    }
+}
+
+/// A loopback listener bound for one sign-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LoopbackBinding {
+    redirect_uri: String,
+    port: u16,
+    blocked: Option<BindBlocked>,
+}
+
+impl LoopbackBinding {
+    /// Kernel-only. Plugins do not call this.
+    #[cfg(feature = "kernel")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_parts(redirect_uri: String, port: u16, blocked: Option<BindBlocked>) -> Self {
+        Self {
+            redirect_uri,
+            port,
+            blocked,
+        }
+    }
+
+    /// The redirect URI to send in the authorize URL.
+    #[must_use]
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    /// The port in the redirect URI.
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Set when the port could not be bound. The sign-in then completes only
+    /// from a pasted address.
+    #[must_use]
+    pub const fn blocked(&self) -> Option<BindBlocked> {
+        self.blocked
+    }
+}
+
+/// Loopback callback listener for browser sign-in. The kernel awaits the
+/// callback and hands the result to `complete_sign_in`.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct LoopbackHandle {
+    plugin: PluginKey,
+    inner: Arc<dyn LoopbackBackend>,
+}
+
+impl LoopbackHandle {
+    /// Binds a listener for the sign-in in `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `ctx` has no session id or belongs to
+    /// another plugin, the spec has no state or a bad path, the session
+    /// already has a listener, or this host has none.
+    pub fn bind(
+        &self,
+        ctx: &SignInCtx,
+        spec: &LoopbackSpec,
+    ) -> Result<LoopbackBinding, PluginError> {
+        if ctx.session().is_empty() {
+            return Err(PluginError::config("loopback sign-in needs a session id"));
+        }
+        if ctx.plugin() != self.plugin.id() {
+            return Err(PluginError::config(
+                "loopback sign-in context belongs to another plugin",
+            ));
+        }
+        spec.validate()?;
+        self.inner.bind(&self.plugin, ctx.session(), spec)
+    }
+
+    /// Closes the listener for the sign-in in `ctx`, if any.
+    pub fn release(&self, ctx: &SignInCtx) {
+        if !ctx.session().is_empty() {
+            self.inner.release(ctx.session());
+        }
+    }
+}
+
+impl std::fmt::Debug for LoopbackHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoopbackHandle")
+            .field("plugin", &self.plugin)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -812,5 +1056,144 @@ mod tests {
             PathBuf::from("/tmp")
         };
         assert!(SpawnRequest::new(program, Vec::new(), Vec::new(), cwd).is_ok());
+    }
+
+    mod loopback {
+        use std::sync::{Arc, Mutex};
+
+        use super::super::{
+            BindBlocked, LoopbackBinding, LoopbackHandle, LoopbackSpec, RedirectHost,
+        };
+        use crate::error::{PluginError, PluginErrorKind};
+        use crate::id::{PluginId, PluginKey, PluginKind};
+        use crate::kernel::{LoopbackBackend, NoLoopback};
+        use crate::records::SignInCtx;
+
+        const SESSION: &str = "0123456789abcdef0123456789abcdef";
+
+        #[derive(Default)]
+        struct Fake {
+            calls: Mutex<Vec<String>>,
+        }
+
+        impl LoopbackBackend for Fake {
+            fn bind(
+                &self,
+                plugin: &PluginKey,
+                session: &str,
+                spec: &LoopbackSpec,
+            ) -> Result<LoopbackBinding, PluginError> {
+                self.calls.lock().expect("calls").push(format!(
+                    "bind {} {session} {:?} {} {:?} {:?}",
+                    plugin.id(),
+                    spec.requested_port(),
+                    spec.callback_path(),
+                    spec.host(),
+                    spec.state()
+                ));
+                Ok(LoopbackBinding {
+                    redirect_uri: "http://localhost:1455/auth/callback".to_owned(),
+                    port: 1455,
+                    blocked: Some(BindBlocked::Busy),
+                })
+            }
+
+            fn release(&self, session: &str) {
+                self.calls
+                    .lock()
+                    .expect("calls")
+                    .push(format!("release {session}"));
+            }
+        }
+
+        fn handle(inner: Arc<dyn LoopbackBackend>) -> LoopbackHandle {
+            LoopbackHandle {
+                plugin: PluginKey::new(PluginKind::Subscription, PluginId::from_static("codex")),
+                inner,
+            }
+        }
+
+        fn ctx() -> SignInCtx {
+            SignInCtx::new(PluginId::from_static("codex"))
+                .with_session(SESSION)
+                .expect("session")
+        }
+
+        #[test]
+        fn bind_passes_the_session_and_spec_to_the_backend() {
+            let fake = Arc::new(Fake::default());
+            let handle = handle(Arc::clone(&fake) as Arc<dyn LoopbackBackend>);
+            let binding = handle
+                .bind(
+                    &ctx(),
+                    &LoopbackSpec::fixed(1455)
+                        .path("/auth/callback")
+                        .redirect_host(RedirectHost::Ipv4)
+                        .expect_state("s"),
+                )
+                .expect("bind");
+            assert_eq!(
+                binding.redirect_uri(),
+                "http://localhost:1455/auth/callback"
+            );
+            assert_eq!(binding.port(), 1455);
+            assert_eq!(binding.blocked(), Some(BindBlocked::Busy));
+            handle.release(&ctx());
+            handle.release(&SignInCtx::new(PluginId::from_static("codex")));
+            assert_eq!(
+                *fake.calls.lock().expect("calls"),
+                vec![
+                    format!("bind codex {SESSION} Some(1455) /auth/callback Ipv4 Some(\"s\")"),
+                    format!("release {SESSION}"),
+                ]
+            );
+            let ephemeral = LoopbackSpec::ephemeral();
+            assert_eq!(ephemeral.requested_port(), None);
+            assert_eq!(ephemeral.callback_path(), "/callback");
+            assert_eq!(ephemeral.host(), RedirectHost::Localhost);
+        }
+
+        #[test]
+        fn bind_rejects_a_bad_context_or_spec_before_the_backend() {
+            let fake = Arc::new(Fake::default());
+            let handle = handle(Arc::clone(&fake) as Arc<dyn LoopbackBackend>);
+            let state = |spec: LoopbackSpec| spec.expect_state("s");
+            let cases = [
+                (
+                    SignInCtx::new(PluginId::from_static("codex")),
+                    state(LoopbackSpec::ephemeral()),
+                ),
+                (
+                    SignInCtx::new(PluginId::from_static("gemini"))
+                        .with_session(SESSION)
+                        .expect("session"),
+                    state(LoopbackSpec::ephemeral()),
+                ),
+                (ctx(), LoopbackSpec::ephemeral()),
+                (ctx(), LoopbackSpec::ephemeral().expect_state("")),
+                (ctx(), state(LoopbackSpec::ephemeral().path("callback"))),
+                (ctx(), state(LoopbackSpec::ephemeral().path("/cancel"))),
+                (ctx(), state(LoopbackSpec::ephemeral().path("/cb?x=1"))),
+                (ctx(), state(LoopbackSpec::ephemeral().path("/cb#x"))),
+                (ctx(), state(LoopbackSpec::ephemeral().path("/c b"))),
+                (ctx(), state(LoopbackSpec::ephemeral().path("/c%2f"))),
+            ];
+            for (ctx, spec) in cases {
+                let error = handle.bind(&ctx, &spec).expect_err("rejected");
+                assert_eq!(error.kind(), PluginErrorKind::Config, "{spec:?}");
+            }
+            assert!(fake.calls.lock().expect("calls").is_empty());
+        }
+
+        #[test]
+        fn a_host_without_a_listener_is_unsupported() {
+            let handle = handle(Arc::new(NoLoopback));
+            let error = handle
+                .bind(&ctx(), &LoopbackSpec::ephemeral().expect_state("s"))
+                .expect_err("unsupported");
+            assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+            handle.release(&ctx());
+            assert!(format!("{handle:?}").contains("codex"));
+        }
     }
 }
