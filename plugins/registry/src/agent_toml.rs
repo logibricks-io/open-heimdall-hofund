@@ -145,14 +145,10 @@ fn validate(
             format!("must equal directory name `{directory}`"),
         ));
     }
-    if plugin_ids.contains(&agent.id) {
-        return Err(error(
-            source,
-            "id",
-            "collides with a plugins.toml plugin id",
-        ));
+    if matches!(agent.id.as_str(), "api" | "sdk" | "host" | "registry") {
+        return Err(error(source, "id", "is a reserved plugin id"));
     }
-    if agent_ids.contains(&agent.id) {
+    if plugin_ids.contains(&agent.id) || agent_ids.contains(&agent.id) {
         return Err(error(source, "id", "collides with another agent id"));
     }
     if agent.display_name.is_empty() {
@@ -667,9 +663,13 @@ key = "effort"
     fn validation_rejects_every_invalid_field() {
         let cases = [
             ("Bad", "id", "kebab-case"),
-            ("plugin-id", "id", "plugins.toml"),
+            ("plugin-id", "id", "another agent"),
             ("other-agent", "id", "another agent"),
             ("wrong-directory", "id", "directory name"),
+            ("api", "id", "reserved"),
+            ("sdk", "id", "reserved"),
+            ("host", "id", "reserved"),
+            ("registry", "id", "reserved"),
         ];
         for (id, field, needle) in cases {
             let text = base().replacen("fixture-agent", id, 1);

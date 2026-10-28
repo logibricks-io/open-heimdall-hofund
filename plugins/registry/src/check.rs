@@ -61,6 +61,24 @@ pub fn duplicate_id<'a>(ids: &[&'a str]) -> Option<&'a str> {
     None
 }
 
+/// The first repeated `(kind, id)` pair, if any.
+#[must_use]
+pub fn duplicate_kind_id<'a>(ids: &[(&'a str, &'a str)]) -> Option<(&'a str, &'a str)> {
+    let mut seen = BTreeSet::new();
+    for (kind, id) in ids {
+        if !seen.insert((*kind, *id)) {
+            return Some((*kind, *id));
+        }
+    }
+    None
+}
+
+/// True when `(id, kind)` pairs are strictly increasing.
+#[must_use]
+pub fn strictly_sorted_plugin_ids(ids: &[(&str, &str)]) -> bool {
+    ids.windows(2).all(|pair| pair[0] < pair[1])
+}
+
 /// True when `ids` is strictly increasing.
 #[must_use]
 pub fn strictly_sorted(ids: &[&str]) -> bool {
@@ -132,8 +150,8 @@ pub fn route_conflicts(routes: &[DeclaredRoute]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeclaredRoute, duplicate_id, invalid_prefix, path_matches, prefixes_conflict,
-        route_conflicts, strictly_sorted,
+        DeclaredRoute, duplicate_id, duplicate_kind_id, invalid_prefix, path_matches,
+        prefixes_conflict, route_conflicts, strictly_sorted, strictly_sorted_plugin_ids,
     };
 
     fn route(plugin: &str, method: &str, prefix: &str) -> DeclaredRoute {
@@ -173,6 +191,27 @@ mod tests {
         assert!(path_matches("/hofund/echo", "/hofund/echo/nested"));
         assert!(!path_matches("/hofund/echo", "/hofund/echov2"));
         assert!(path_matches("/", "/anywhere"));
+    }
+
+    #[test]
+    fn plugin_ids_are_unique_per_kind_and_sorted_by_id_then_kind() {
+        assert_eq!(
+            duplicate_kind_id(&[("agent", "shared"), ("subscription", "shared")]),
+            None
+        );
+        assert_eq!(
+            duplicate_kind_id(&[("agent", "shared"), ("agent", "shared")]),
+            Some(("agent", "shared"))
+        );
+        assert!(strictly_sorted_plugin_ids(&[
+            ("other", "provider"),
+            ("shared", "agent"),
+            ("shared", "subscription")
+        ]));
+        assert!(!strictly_sorted_plugin_ids(&[
+            ("shared", "subscription"),
+            ("shared", "agent")
+        ]));
     }
 
     #[test]

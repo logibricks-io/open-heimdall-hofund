@@ -62,17 +62,21 @@ pub use select::{
     SelectError, Selection, model_plan_of, protocol_for, resolve_region, select, wire_for_protocol,
 };
 
-/// Every linked plugin contribution, keyed by plugin id, in `plugins.toml` order.
+/// Every linked plugin contribution, keyed by plugin kind and id, in `plugins.toml` order.
 ///
 /// With the `test-fixtures` feature, the test-only two-protocol listed
 /// fixture `fixture-multi-listed` is appended. The generated list never names
 /// a fixture.
 #[must_use]
-pub fn contributions() -> Vec<(&'static str, hofund_plugin_sdk::Contribution)> {
+pub fn contributions() -> Vec<(&'static str, &'static str, hofund_plugin_sdk::Contribution)> {
     #[cfg_attr(not(feature = "test-fixtures"), allow(unused_mut))]
     let mut linked = generated::contributions();
     #[cfg(feature = "test-fixtures")]
-    linked.push(("fixture-multi-listed", fixture_upstream::contribute()));
+    linked.push((
+        "provider",
+        "fixture-multi-listed",
+        fixture_upstream::contribute(),
+    ));
     linked
 }
 
@@ -159,19 +163,21 @@ pub fn find_fixture_preset(id: &str) -> Option<(&'static CompiledPreset, Option<
 #[must_use]
 pub fn surfaces() -> Vec<Arc<dyn InboundSurface>> {
     let mut found = Vec::new();
-    for (_, contribution) in contributions() {
-        found.extend(contribution.surfaces().iter().cloned());
+    for (kind, _, contribution) in contributions() {
+        if kind == "inbound" {
+            found.extend(contribution.surfaces().iter().cloned());
+        }
     }
     found
 }
 
-/// The upstream factory for `id`, when that plugin is linked and contributes one.
+/// The upstream factory for `id`, when that provider plugin is linked and contributes one.
 #[must_use]
 pub fn upstream(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
     contributions()
         .into_iter()
-        .find_map(|(name, contribution)| {
-            if name == id {
+        .find_map(|(kind, name, contribution)| {
+            if kind == "provider" && name == id {
                 contribution.upstreams().first().cloned()
             } else {
                 None
@@ -179,13 +185,13 @@ pub fn upstream(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
         })
 }
 
-/// The inbound surface for `id`, when that plugin is linked and contributes one.
+/// The inbound surface for `id`, when that inbound plugin is linked and contributes one.
 #[must_use]
 pub fn surface(id: &str) -> Option<Arc<dyn InboundSurface>> {
     contributions()
         .into_iter()
-        .find_map(|(name, contribution)| {
-            if name == id {
+        .find_map(|(kind, name, contribution)| {
+            if kind == "inbound" && name == id {
                 contribution.surfaces().first().cloned()
             } else {
                 None
@@ -294,7 +300,7 @@ mod tests {
             assert!(super::builtin::factory(id).is_none(), "{id}");
             assert!(!super::is_kernel_factory(id), "{id}");
         }
-        for (id, _) in super::contributions() {
+        for (_, id, _) in super::contributions() {
             assert!(!super::is_kernel_factory(id), "{id}");
         }
     }

@@ -19,7 +19,7 @@ use futures_util::future::BoxFuture;
 
 use crate::body::{Body, BodyStream};
 use crate::error::PluginError;
-use crate::id::{AccountId, PluginId};
+use crate::id::{AccountId, PluginKey};
 use crate::records::{Account, QuotaObservation};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -68,7 +68,7 @@ pub trait SecretsBackend: Send + Sync {
     /// The current secret for `plugin` and `id`, or `None` when it is unset.
     ///
     /// A secret stored for a different plugin is not returned.
-    async fn get(&self, plugin: &PluginId, id: &str) -> Result<Option<SecretString>, PluginError>;
+    async fn get(&self, plugin: &PluginKey, id: &str) -> Result<Option<SecretString>, PluginError>;
 }
 
 /// The account store. Writes take a cross-process lock and drop the cache.
@@ -76,18 +76,18 @@ pub trait SecretsBackend: Send + Sync {
 #[doc(hidden)]
 pub trait AccountBackend: Send + Sync {
     /// Accounts stored for `plugin`.
-    async fn list(&self, plugin: &PluginId) -> Result<Vec<Account>, PluginError>;
+    async fn list(&self, plugin: &PluginKey) -> Result<Vec<Account>, PluginError>;
 
     /// Inserts or replaces `account` and its secret.
     async fn upsert(&self, account: Account, secret: SecretString) -> Result<(), PluginError>;
 
     /// Removes one account.
-    async fn remove(&self, plugin: &PluginId, id: &AccountId) -> Result<(), PluginError>;
+    async fn remove(&self, plugin: &PluginKey, id: &AccountId) -> Result<(), PluginError>;
 
     /// The current secret, from the cache until a write drops it.
     async fn secret(
         &self,
-        plugin: &PluginId,
+        plugin: &PluginKey,
         id: &AccountId,
     ) -> Result<Option<SecretString>, PluginError>;
 }
@@ -170,14 +170,14 @@ pub trait DirBackend: Send + Sync {
     /// # Errors
     ///
     /// Returns [`PluginError`] when the directory cannot be created.
-    fn cache_dir(&self, plugin: &PluginId) -> Result<PathBuf, PluginError>;
+    fn cache_dir(&self, plugin: &PluginKey) -> Result<PathBuf, PluginError>;
 
     /// The state directory for `plugin`.
     ///
     /// # Errors
     ///
     /// Returns [`PluginError`] when the directory cannot be created.
-    fn state_dir(&self, plugin: &PluginId) -> Result<PathBuf, PluginError>;
+    fn state_dir(&self, plugin: &PluginKey) -> Result<PathBuf, PluginError>;
 }
 
 /// Accepts a quota observation. The plugin does not edit router state.

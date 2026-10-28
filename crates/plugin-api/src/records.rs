@@ -7,13 +7,13 @@ use hofund_ir::{ContentPart, Message, Request, Role};
 use secrecy::SecretString;
 
 use crate::error::PluginError;
-use crate::id::{AccountId, PluginId, ProtocolId, TierId};
+use crate::id::{AccountId, PluginId, PluginKey, PluginKind, ProtocolId, TierId};
 
 /// One account in the store. The secret stays in the store, not on this value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Account {
-    plugin: PluginId,
+    key: PluginKey,
     id: AccountId,
     label: String,
 }
@@ -28,7 +28,7 @@ impl Account {
     ///
     /// Returns [`PluginError`] when `label` is empty.
     pub(crate) fn new(
-        plugin: PluginId,
+        plugin: PluginKey,
         id: AccountId,
         label: impl Into<String>,
     ) -> Result<Self, PluginError> {
@@ -36,10 +36,14 @@ impl Account {
         if label.is_empty() {
             return Err(PluginError::config("account label is empty"));
         }
-        Ok(Self { plugin, id, label })
+        Ok(Self {
+            key: plugin,
+            id,
+            label,
+        })
     }
 
-    /// Rebuilds an account the store already accepted.
+    /// Rebuilds a subscription account stored before kinds were explicit.
     ///
     /// # Errors
     ///
@@ -50,13 +54,33 @@ impl Account {
         id: AccountId,
         label: impl Into<String>,
     ) -> Result<Self, PluginError> {
+        Self::from_stored_scoped(PluginKey::new(PluginKind::Subscription, plugin), id, label)
+    }
+
+    /// Rebuilds an account with its storage kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `label` is empty.
+    #[doc(hidden)]
+    pub fn from_stored_scoped(
+        plugin: PluginKey,
+        id: AccountId,
+        label: impl Into<String>,
+    ) -> Result<Self, PluginError> {
         Self::new(plugin, id, label)
     }
 
     /// The plugin that owns the account.
     #[must_use]
-    pub fn plugin(&self) -> &PluginId {
-        &self.plugin
+    pub const fn plugin(&self) -> &PluginId {
+        self.key.id()
+    }
+
+    /// The kind-qualified plugin identity that owns the account.
+    #[must_use]
+    pub const fn key(&self) -> &PluginKey {
+        &self.key
     }
 
     /// The account id.
@@ -1656,7 +1680,7 @@ mod tests {
     #[test]
     fn account_label_and_quota_limit_are_checked() {
         assert!(
-            Account::new(
+            Account::from_stored(
                 PluginId::from_static("example-agent"),
                 AccountId::from_static("work"),
                 ""
