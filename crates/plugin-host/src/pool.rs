@@ -270,7 +270,7 @@ impl HttpBackend for PooledHttp {
             outbound = outbound.header(name.as_str(), header);
         }
         let bytes = request.body().bytes().clone();
-        let response = outbound.body(bytes).send().await.map_err(map_error)?;
+        let mut response = outbound.body(bytes).send().await.map_err(map_error)?;
         let status = response.status();
         let mut headers = response.headers().clone();
         let nominated = headers
@@ -300,7 +300,6 @@ impl HttpBackend for PooledHttp {
         // Set-Cookie stays because plugins are the HTTP clients and the host
         // keeps no cookie jar on their behalf.
         let success = status.is_success();
-        let mut response = response;
         let mut collected = Vec::new();
         loop {
             match response.chunk().await {
