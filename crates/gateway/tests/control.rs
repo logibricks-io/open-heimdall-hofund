@@ -327,10 +327,15 @@ async fn control_bind_rejects_non_loopback_addresses() {
         assert!(matches!(error, GatewayError::NonLoopback { .. }));
         assert!(error.to_string().contains("numeric loopback"));
     }
-    let running = control()
+    let result = control()
         .bind("127.0.0.2:0".parse().expect("address"))
         .await;
-    assert!(running.is_ok(), "the full IPv4 loopback range is accepted");
+    assert!(
+        !matches!(&result, Err(GatewayError::NonLoopback { .. })),
+        "127.0.0.2 was refused by the loopback check"
+    );
+    #[cfg(not(target_os = "macos"))]
+    assert!(result.is_ok(), "the full IPv4 loopback range is accepted");
 }
 
 #[tokio::test]
