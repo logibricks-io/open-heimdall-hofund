@@ -71,6 +71,7 @@ struct Details {
     decide: &'static str,
     only: &'static str,
     models: &'static [&'static str],
+    header_hints: &'static [&'static str],
 }
 
 const NO_DETAILS: Details = Details {
@@ -84,6 +85,7 @@ const NO_DETAILS: Details = Details {
     decide: "",
     only: "",
     models: &[],
+    header_hints: &[],
 };
 
 const ROWS: &[Row] = &[
@@ -683,6 +685,32 @@ const ROWS: &[Row] = &[
         anthropic: "",
         website: "https://www.qianwenai.com/models/decision-model-preview",
         keys_url: "https://platform.qianwenai.com/home/api-keys",
+    },
+    // reference: internal/provider/presets.go:123
+    Row {
+        id: "openai",
+        name: "OpenAI",
+        kind: "vendor",
+        catalog: "openai",
+        note: "",
+        chat: "https://api.openai.com/v1",
+        responses: "https://api.openai.com/v1",
+        anthropic: "",
+        website: "https://platform.openai.com",
+        keys_url: "https://platform.openai.com/api-keys",
+    },
+    // reference: internal/provider/presets.go:440
+    Row {
+        id: "openrouter",
+        name: "OpenRouter",
+        kind: "relay",
+        catalog: "openrouter",
+        note: "",
+        chat: "https://openrouter.ai/api/v1",
+        responses: "",
+        anthropic: "https://openrouter.ai/api",
+        website: "https://openrouter.ai",
+        keys_url: "https://openrouter.ai/keys",
     },
 ];
 
@@ -1389,6 +1417,14 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
             ..NO_DETAILS
         },
     ),
+    (
+        "openrouter",
+        Details {
+            decide: "https://openrouter.ai/api/v1",
+            header_hints: &["HTTP-Referer", "X-OpenRouter-Title"],
+            ..NO_DETAILS
+        },
+    ),
 ];
 
 fn details(row: &Row) -> &'static Details {
@@ -1563,6 +1599,7 @@ fn batch_rows_match_the_reference_literal() {
         assert_eq!(preset.decide, details.decide);
         assert_eq!(preset.only, details.only);
         assert_eq!(preset.models, details.models);
+        assert_eq!(preset.header_hints, details.header_hints);
         assert_eq!(preset.regions.len(), details.regions.len());
         for (actual, expected) in preset.regions.iter().zip(details.regions) {
             assert_eq!(actual.id, expected.id);
@@ -1804,4 +1841,47 @@ fn moved_decide_only_row_reports_explicit_wire_error() {
 fn moved_decide_only_row_preserves_decide_url() {
     let (preset, _) = find_preset("typesafe").expect("moved decide-only preset");
     assert_eq!(preset.decide, "https://api.typesafe.ai/v1");
+}
+
+#[test]
+fn moved_openai_rows_reject_unserved_wires_like_the_old_catalog() {
+    for (id, protocol, expected) in [
+        (
+            "openai",
+            ProtocolId::ANTHROPIC_MESSAGES,
+            "preset `openai` has no messages endpoint",
+        ),
+        (
+            "openrouter",
+            ProtocolId::OPENAI_RESPONSES,
+            "preset `openrouter` has no responses endpoint",
+        ),
+        (
+            "openai",
+            ProtocolId::GENERATIVE_LANGUAGE,
+            "preset `openai` has no generative endpoint",
+        ),
+        (
+            "openrouter",
+            ProtocolId::GENERATIVE_LANGUAGE,
+            "preset `openrouter` has no generative endpoint",
+        ),
+        (
+            "openai",
+            ProtocolId::BEDROCK_CONVERSE,
+            "preset `openai` is served by plugin `openai-compat`, which does not speak `bedrock-converse`; expected openai-chat, openai-responses, anthropic-messages, or generative-language",
+        ),
+        (
+            "openrouter",
+            ProtocolId::BEDROCK_CONVERSE,
+            "preset `openrouter` is served by plugin `openai-compat`, which does not speak `bedrock-converse`; expected openai-chat, openai-responses, anthropic-messages, or generative-language",
+        ),
+    ] {
+        let (preset, _) = find_preset(id).expect("compiled batch 7 row");
+        for base_url in ["", OVERRIDE] {
+            let error = select(preset, None, &builtin_protocols(), Some(protocol), base_url)
+                .expect_err("unserved wire must fail even with a base override");
+            assert_eq!(error.to_string(), expected, "{id} {base_url}");
+        }
+    }
 }
