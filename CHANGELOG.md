@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encrypted account storage with native OS credential entries, an authenticated
+  encrypted-file fallback, secret-free backend selection, and crash-safe migration
+  from the legacy plaintext metadata file.
 - Opt-in loopback TCP control health and status with strict Bearer, Host, Origin,
   and mutation defenses, live disk/runtime revisions, and a typed TCP control client.
   Model `/health` now identifies the service as hofund.

@@ -1,17 +1,12 @@
-//! Plaintext file account store.
+//! Encrypted account storage.
 //!
-//! `hofund-secrets` resolves environment specs and the gateway token file. It
-//! does not talk to an OS keychain, so this PR cannot store secret material
-//! there. The file holds the account rows, including the secret, as JSON.
-//! The mode is `0600`. The type name is [`PlaintextFileAccountStore`] so that
-//! trade-off stays visible. Encrypted storage (metadata in the file, secret
-//! refs in the keychain) is a prerequisite of RFC 0001 pull request H.
-//! Plugins do not open the file.
+//! Account metadata lives in a mode `0600` JSON file. Secret values live in
+//! the OS credential store, or in an authenticated encrypted file when that
+//! store is unavailable. A legacy plaintext file is migrated under the same
+//! exclusive cross-process lock used by ordinary writes.
 //!
-//! The cache is an [`Arc`] of the parsed rows. A write drops it. A read
-//! reloads when the file's mtime, length, or inode changes, so a replace
-//! from another process is visible. Writes take an exclusive advisory lock
-//! on a sibling lock file. Reads take a shared lock.
+//! The cache is an [`Arc`] of parsed rows and their secrets. Every write drops
+//! it. A read reloads when the metadata file's mtime, length, or inode changes.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -20,20 +15,60 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use hofund_plugin_api::kernel::{self, AccountBackend};
+use hofund_plugin_api::kernel::AccountBackend;
 use hofund_plugin_api::{Account, AccountId, PluginError, PluginId, SecretString};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
+use zeroize::Zeroizing;
 
-/// A failure while reading or writing the account file.
+use crate::account_secrets::{AccountSecretBackend, default_backend};
+
+/// The selected account secret backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AccountStorageKind {
+    /// The platform-native OS credential store.
+    OsKeychain,
+    /// XChaCha20-Poly1305 records in a mode `0600` sibling file.
+    EncryptedFile,
+}
+
+impl AccountStorageKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::OsKeychain => "os-keychain",
+            Self::EncryptedFile => "encrypted-file",
+        }
+    }
+}
+
+impl std::fmt::Display for AccountStorageKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A failure while reading or writing account metadata or secrets.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StoreError {
-    /// The file could not be read, locked, or replaced.
+    /// A metadata, key, or lock file operation failed.
     #[error("{0}")]
     Io(String),
-    /// The file is not the store format.
+    /// A metadata or encrypted record is not in the store format.
     #[error("{0}")]
     Format(String),
+    /// A secret backend rejected an operation for one account.
+    #[error("account `{plugin}/{account}` {backend} backend: {message}")]
+    Backend {
+        /// The backend that rejected the operation.
+        backend: AccountStorageKind,
+        /// The plugin that owns the account.
+        plugin: String,
+        /// The account id.
+        account: String,
+        /// A secret-free description of the failure.
+        message: String,
+    },
 }
 
 impl From<StoreError> for PluginError {
@@ -41,27 +76,49 @@ impl From<StoreError> for PluginError {
         match error {
             StoreError::Format(message) => PluginError::config(message),
             StoreError::Io(message) => PluginError::io(message),
+            StoreError::Backend {
+                backend,
+                plugin,
+                account,
+                message,
+            } => PluginError::io(format!(
+                "account `{plugin}/{account}` {backend} backend: {message}"
+            )),
         }
     }
 }
 
+pub(crate) fn backend_error(
+    backend: AccountStorageKind,
+    plugin: &str,
+    account: &str,
+    message: impl Into<String>,
+) -> StoreError {
+    StoreError::Backend {
+        backend,
+        plugin: plugin.to_owned(),
+        account: account.to_owned(),
+        message: message.into(),
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
-struct Row {
+#[serde(deny_unknown_fields)]
+struct MetadataRow {
     plugin: String,
     account: String,
     label: String,
-    #[serde(
-        serialize_with = "serialize_secret",
-        deserialize_with = "deserialize_secret"
-    )]
-    secret: SecretString,
+    secret_ref: String,
 }
 
-fn serialize_secret<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_str(kernel::expose_secret(secret))
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyRow {
+    plugin: String,
+    account: String,
+    label: String,
+    #[serde(deserialize_with = "deserialize_secret")]
+    secret: SecretString,
 }
 
 fn deserialize_secret<'de, D>(deserializer: D) -> Result<SecretString, D::Error>
@@ -69,6 +126,33 @@ where
     D: Deserializer<'de>,
 {
     Ok(SecretString::from(String::deserialize(deserializer)?))
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DiskRow {
+    Metadata(MetadataRow),
+    Legacy(LegacyRow),
+}
+
+#[derive(Clone)]
+struct Row {
+    plugin: String,
+    account: String,
+    label: String,
+    secret_ref: String,
+    secret: SecretString,
+}
+
+impl Row {
+    fn metadata(&self) -> MetadataRow {
+        MetadataRow {
+            plugin: self.plugin.clone(),
+            account: self.account.clone(),
+            label: self.label.clone(),
+            secret_ref: self.secret_ref.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,65 +167,202 @@ struct Snapshot {
     rows: Vec<Row>,
 }
 
-/// Accounts in a mode `0600` JSON file.
+/// Accounts whose metadata is in JSON and whose secrets are encrypted at rest.
 ///
-/// The secret is a [`SecretString`] in memory. [`Debug`] prints the path and
-/// not the rows. The bytes on disk are still the secret: this store is
-/// plaintext until the keychain backend in pull request H.
-pub struct PlaintextFileAccountStore {
+/// [`Debug`] prints only the path. The fallback key file protects against
+/// accidental disclosure or backup of the ciphertext alone; it does not protect
+/// against an attacker who can read both files as the user.
+pub struct AccountStore {
     path: PathBuf,
+    backend: Arc<dyn AccountSecretBackend>,
     cache: Arc<Mutex<Option<Arc<Snapshot>>>>,
+    #[cfg(test)]
+    migration_failure: Option<MigrationFailure>,
 }
 
-impl std::fmt::Debug for PlaintextFileAccountStore {
+impl std::fmt::Debug for AccountStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("PlaintextFileAccountStore")
+            .debug_struct("AccountStore")
             .field("path", &self.path)
             .finish_non_exhaustive()
     }
 }
 
-impl Clone for PlaintextFileAccountStore {
+impl Clone for AccountStore {
     fn clone(&self) -> Self {
         Self {
             path: self.path.clone(),
+            backend: Arc::clone(&self.backend),
             cache: Arc::clone(&self.cache),
+            #[cfg(test)]
+            migration_failure: self.migration_failure,
         }
     }
 }
 
-impl PlaintextFileAccountStore {
-    /// Opens or creates the store at `path`.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MigrationFailure {
+    Backup,
+    Metadata,
+    Cleanup,
+}
+
+impl AccountStore {
+    /// Opens or creates the store at `path`, migrating legacy plaintext rows.
+    ///
+    /// On first account use, the OS credential store is probed. If it is
+    /// unusable, the reason is logged without secret material and the
+    /// encrypted-file backend is selected. Existing records from another
+    /// backend are not silently moved. Opening an empty store does not probe.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] when the parent directory or the file cannot be created.
+    /// Returns [`StoreError`] when a file or the selected secret backend fails.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
+        Self::open_with_backend(&path, default_backend(&path))
+    }
+
+    pub(crate) fn open_with_backend(
+        path: impl Into<PathBuf>,
+        backend: Arc<dyn AccountSecretBackend>,
+    ) -> Result<Self, StoreError> {
+        Self::open_inner(path.into(), backend, None)
+    }
+
+    #[cfg(test)]
+    fn open_with_migration_failure(
+        path: impl Into<PathBuf>,
+        backend: Arc<dyn AccountSecretBackend>,
+        failure: MigrationFailure,
+    ) -> Result<Self, StoreError> {
+        Self::open_inner(path.into(), backend, Some(failure))
+    }
+
+    fn open_inner(
+        path: PathBuf,
+        backend: Arc<dyn AccountSecretBackend>,
+        #[cfg_attr(not(test), allow(unused_variables))] failure: Option<MigrationFailure>,
+    ) -> Result<Self, StoreError> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
             fs::create_dir_all(parent).map_err(|error| StoreError::Io(error.to_string()))?;
         }
-        if !path.exists() {
-            write_rows(&path, &[])?;
-        }
-        set_mode(&path)?;
-        Ok(Self {
+        let store = Self {
             path,
+            backend,
             cache: Arc::new(Mutex::new(None)),
-        })
+            #[cfg(test)]
+            migration_failure: failure,
+        };
+        match create_empty_metadata(&store.path) {
+            Ok(()) => sync_parent(&store.path)?,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                set_mode(&store.path)?;
+                if store.migration_lock_required()? {
+                    store.with_lock(false, || store.initialize())?;
+                }
+            }
+            Err(error) => return Err(StoreError::Io(error.to_string())),
+        }
+        Ok(store)
+    }
+
+    /// The backend selected on first account use.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if native backend detection fails unexpectedly.
+    pub fn storage_kind(&self) -> Result<AccountStorageKind, StoreError> {
+        self.backend.kind()
+    }
+
+    fn migration_lock_required(&self) -> Result<bool, StoreError> {
+        let original = Zeroizing::new(
+            fs::read(&self.path).map_err(|error| StoreError::Io(error.to_string()))?,
+        );
+        let rows = parse_disk_rows(&original)?;
+        Ok(rows.iter().any(|row| matches!(row, DiskRow::Legacy(_)))
+            || legacy_backup_path(&self.path).exists()
+            || temporary_path(&legacy_backup_path(&self.path)).exists())
+    }
+
+    fn initialize(&self) -> Result<(), StoreError> {
+        if !self.path.exists() {
+            write_metadata(&self.path, &[])?;
+        }
+        set_mode(&self.path)?;
+        let original = Zeroizing::new(
+            fs::read(&self.path).map_err(|error| StoreError::Io(error.to_string()))?,
+        );
+        let rows = parse_disk_rows(&original)?;
+        let has_legacy = rows.iter().any(|row| matches!(row, DiskRow::Legacy(_)));
+        if has_legacy || !rows.is_empty() {
+            self.backend.prepare()?;
+        }
+        if has_legacy {
+            self.migrate(rows)?;
+        } else {
+            self.remove_legacy_copies()?;
+        }
+        Ok(())
+    }
+
+    fn migrate(&self, rows: Vec<DiskRow>) -> Result<(), StoreError> {
+        let mut metadata = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row {
+                DiskRow::Metadata(row) => metadata.push(row),
+                DiskRow::Legacy(row) => {
+                    let reference = self.backend.reference()?;
+                    self.backend
+                        .set(&row.plugin, &row.account, reference, row.secret)?;
+                    metadata.push(MetadataRow {
+                        plugin: row.plugin,
+                        account: row.account,
+                        label: row.label,
+                        secret_ref: reference.to_owned(),
+                    });
+                }
+            }
+        }
+
+        #[cfg(test)]
+        if self.migration_failure == Some(MigrationFailure::Backup) {
+            return Err(StoreError::Io(
+                "injected migration backup failure".to_owned(),
+            ));
+        }
+        preserve_legacy_inode(&self.path)?;
+
+        #[cfg(test)]
+        if self.migration_failure == Some(MigrationFailure::Metadata) {
+            return Err(StoreError::Io(
+                "injected migration metadata failure".to_owned(),
+            ));
+        }
+        write_metadata(&self.path, &metadata)?;
+
+        #[cfg(test)]
+        if self.migration_failure == Some(MigrationFailure::Cleanup) {
+            return Err(StoreError::Io(
+                "injected migration cleanup failure".to_owned(),
+            ));
+        }
+        self.remove_legacy_copies()
+    }
+
+    fn remove_legacy_copies(&self) -> Result<(), StoreError> {
+        secure_remove(&legacy_backup_path(&self.path))?;
+        secure_remove(&temporary_path(&legacy_backup_path(&self.path)))?;
+        Ok(())
     }
 
     fn lock_path(&self) -> PathBuf {
-        let mut name = self
-            .path
-            .file_name()
-            .map(std::ffi::OsStr::to_os_string)
-            .unwrap_or_else(|| "accounts".into());
-        name.push(".lock");
-        self.path.with_file_name(name)
+        sibling_path(&self.path, ".lock")
     }
 
     fn with_lock<T>(
@@ -189,18 +410,36 @@ impl PlaintextFileAccountStore {
                 return Ok(Arc::clone(cached));
             }
         }
-        let rows = read_rows(&self.path)?;
+        let metadata = read_metadata(&self.path)?;
+        let mut rows = Vec::with_capacity(metadata.len());
+        for row in metadata {
+            let secret = self
+                .backend
+                .get(&row.plugin, &row.account, &row.secret_ref)?;
+            rows.push(Row {
+                plugin: row.plugin,
+                account: row.account,
+                label: row.label,
+                secret_ref: row.secret_ref,
+                secret,
+            });
+        }
         let snapshot = Arc::new(Snapshot { stamp, rows });
         let mut guard = self.cache.lock().map_err(|_| poisoned())?;
         *guard = Some(Arc::clone(&snapshot));
         Ok(snapshot)
     }
 
-    fn store(&self, rows: Vec<Row>) -> Result<(), StoreError> {
-        write_rows(&self.path, &rows)?;
+    fn invalidate(&self) -> Result<(), StoreError> {
         let mut guard = self.cache.lock().map_err(|_| poisoned())?;
         *guard = None;
         Ok(())
+    }
+
+    fn store(&self, rows: Vec<Row>) -> Result<(), StoreError> {
+        let metadata: Vec<_> = rows.iter().map(Row::metadata).collect();
+        self.invalidate()?;
+        write_metadata(&self.path, &metadata)
     }
 }
 
@@ -225,9 +464,6 @@ fn file_id(meta: &fs::Metadata) -> u64 {
 
 #[cfg(windows)]
 fn file_id(_meta: &fs::Metadata) -> u64 {
-    // `MetadataExt::file_index` is still unstable (`windows_by_handle`,
-    // rust-lang/rust#63010). The stamp still changes when the mtime or the
-    // length changes, which a rewrite of this file does.
     0
 }
 
@@ -236,7 +472,14 @@ fn file_id(_meta: &fs::Metadata) -> u64 {
     0
 }
 
-fn read_rows(path: &Path) -> Result<Vec<Row>, StoreError> {
+fn parse_disk_rows(bytes: &[u8]) -> Result<Vec<DiskRow>, StoreError> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Vec::new());
+    }
+    serde_json::from_slice(bytes).map_err(|error| StoreError::Format(error.to_string()))
+}
+
+fn read_metadata(path: &Path) -> Result<Vec<MetadataRow>, StoreError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
@@ -249,10 +492,51 @@ fn read_rows(path: &Path) -> Result<Vec<Row>, StoreError> {
     }
 }
 
-fn write_rows(path: &Path, rows: &[Row]) -> Result<(), StoreError> {
-    let bytes =
+fn create_empty_metadata(path: &Path) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(b"[]\n")?;
+    file.sync_all()
+}
+
+fn write_metadata(path: &Path, rows: &[MetadataRow]) -> Result<(), StoreError> {
+    let mut bytes =
         serde_json::to_vec_pretty(rows).map_err(|error| StoreError::Format(error.to_string()))?;
-    let tmp = path.with_extension("tmp");
+    bytes.push(b'\n');
+    write_atomic(path, &bytes)
+}
+
+pub(crate) fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_else(|| "accounts".into());
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+fn legacy_backup_path(path: &Path) -> PathBuf {
+    sibling_path(path, ".legacy")
+}
+
+pub(crate) fn temporary_path(path: &Path) -> PathBuf {
+    sibling_path(path, ".tmp")
+}
+
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| StoreError::Io(error.to_string()))?;
+    }
+    let temporary = temporary_path(path);
     {
         let mut options = OpenOptions::new();
         options.create(true).write(true).truncate(true);
@@ -262,20 +546,58 @@ fn write_rows(path: &Path, rows: &[Row]) -> Result<(), StoreError> {
             options.mode(0o600);
         }
         let mut file = options
-            .open(&tmp)
+            .open(&temporary)
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        file.write_all(&bytes)
-            .and_then(|()| file.write_all(b"\n"))
+        set_mode(&temporary)?;
+        file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|error| StoreError::Io(error.to_string()))?;
     }
-    fs::rename(&tmp, path).map_err(|error| StoreError::Io(error.to_string()))?;
+    fs::rename(&temporary, path).map_err(|error| StoreError::Io(error.to_string()))?;
     sync_parent(path)?;
     set_mode(path)?;
     Ok(())
 }
 
-fn sync_parent(path: &Path) -> Result<(), StoreError> {
+fn preserve_legacy_inode(path: &Path) -> Result<(), StoreError> {
+    let backup = legacy_backup_path(path);
+    match fs::remove_file(&backup) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(StoreError::Io(error.to_string())),
+    }
+    fs::hard_link(path, &backup).map_err(|error| StoreError::Io(error.to_string()))?;
+    sync_parent(path)
+}
+
+fn secure_remove(path: &Path) -> Result<(), StoreError> {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(StoreError::Io(error.to_string())),
+    };
+    let len = file
+        .metadata()
+        .map_err(|error| StoreError::Io(error.to_string()))?
+        .len();
+    let zeros = [0_u8; 8192];
+    let mut remaining = len;
+    while remaining > 0 {
+        let count = usize::try_from(remaining.min(zeros.len() as u64)).unwrap_or(zeros.len());
+        file.write_all(&zeros[..count])
+            .map_err(|error| StoreError::Io(error.to_string()))?;
+        remaining -= count as u64;
+    }
+    file.sync_all()
+        .map_err(|error| StoreError::Io(error.to_string()))?;
+    drop(file);
+    fs::remove_file(path).map_err(|error| StoreError::Io(error.to_string()))?;
+    sync_parent(path)
+}
+
+pub(crate) fn sync_parent(path: &Path) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
         let Some(parent) = path
@@ -296,7 +618,7 @@ fn sync_parent(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn set_mode(path: &Path) -> Result<(), StoreError> {
+pub(crate) fn set_mode(path: &Path) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -323,7 +645,7 @@ fn account_from(row: &Row) -> Result<Account, PluginError> {
 }
 
 #[async_trait]
-impl AccountBackend for PlaintextFileAccountStore {
+impl AccountBackend for AccountStore {
     async fn list(&self, plugin: &PluginId) -> Result<Vec<Account>, PluginError> {
         let store = self.clone();
         let plugin = plugin.clone();
@@ -345,15 +667,20 @@ impl AccountBackend for PlaintextFileAccountStore {
         run_blocking(move || {
             store.with_lock(false, || {
                 let snapshot = store.load()?;
+                let plugin = account.plugin().as_str().to_owned();
+                let id = account.id().as_str().to_owned();
+                let secret_ref = store.backend.reference()?.to_owned();
+                store.invalidate()?;
+                store
+                    .backend
+                    .set(&plugin, &id, &secret_ref, secret.clone())?;
                 let mut rows = snapshot.rows.clone();
-                rows.retain(|row| {
-                    !(row.plugin == account.plugin().as_str()
-                        && row.account == account.id().as_str())
-                });
+                rows.retain(|row| !(row.plugin == plugin && row.account == id));
                 rows.push(Row {
-                    plugin: account.plugin().as_str().to_owned(),
-                    account: account.id().as_str().to_owned(),
+                    plugin,
+                    account: id,
                     label: account.label().to_owned(),
+                    secret_ref,
                     secret,
                 });
                 store.store(rows)
@@ -372,7 +699,12 @@ impl AccountBackend for PlaintextFileAccountStore {
                 let snapshot = store.load()?;
                 let mut rows = snapshot.rows.clone();
                 rows.retain(|row| !(row.plugin == plugin.as_str() && row.account == id.as_str()));
-                store.store(rows)
+                store.store(rows)?;
+                let reference = store.backend.reference()?;
+                store
+                    .backend
+                    .delete(plugin.as_str(), id.as_str(), reference)?;
+                store.invalidate()
             })?;
             Ok(())
         })
@@ -410,5 +742,269 @@ where
             .await
             .map_err(|error| PluginError::internal(error.to_string()))?,
         Err(_) => work(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use hofund_plugin_api::kernel;
+
+    use super::*;
+    use crate::account_secrets::MemoryAccountSecrets;
+
+    const MARKER: &str = "account-secret-marker-7f3c91";
+
+    #[derive(Default)]
+    struct FakeSecrets {
+        inner: MemoryAccountSecrets,
+        reads: AtomicUsize,
+        fail_next_set: AtomicBool,
+    }
+
+    impl AccountSecretBackend for FakeSecrets {
+        fn kind(&self) -> Result<AccountStorageKind, StoreError> {
+            self.inner.kind()
+        }
+
+        fn reference(&self) -> Result<&'static str, StoreError> {
+            self.inner.reference()
+        }
+
+        fn get(
+            &self,
+            plugin: &str,
+            account: &str,
+            reference: &str,
+        ) -> Result<SecretString, StoreError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.get(plugin, account, reference)
+        }
+
+        fn set(
+            &self,
+            plugin: &str,
+            account: &str,
+            reference: &str,
+            secret: SecretString,
+        ) -> Result<(), StoreError> {
+            if self.fail_next_set.swap(false, Ordering::Relaxed) {
+                return Err(backend_error(
+                    self.kind()?,
+                    plugin,
+                    account,
+                    "injected credential write failure",
+                ));
+            }
+            self.inner.set(plugin, account, reference, secret)
+        }
+
+        fn delete(&self, plugin: &str, account: &str, reference: &str) -> Result<(), StoreError> {
+            self.inner.delete(plugin, account, reference)
+        }
+    }
+
+    fn scratch() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "hofund-accounts-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).expect("scratch");
+        path
+    }
+
+    fn account(id: &'static str) -> Account {
+        Account::from_stored(
+            PluginId::from_static("example-agent"),
+            AccountId::from_static(id),
+            "Work",
+        )
+        .expect("account")
+    }
+
+    fn write_legacy(path: &Path) {
+        let text = format!(
+            "[{{\"plugin\":\"example-agent\",\"account\":\"work\",\"label\":\"Work\",\"secret\":\"{MARKER}\"}}]\n"
+        );
+        fs::write(path, text).expect("legacy");
+    }
+
+    async fn assert_secret(store: &AccountStore) {
+        let secret = store
+            .secret(
+                &PluginId::from_static("example-agent"),
+                &AccountId::from_static("work"),
+            )
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(kernel::expose_secret(&secret), MARKER);
+    }
+
+    #[tokio::test]
+    async fn migration_is_idempotent_and_leaves_no_plaintext_in_metadata() {
+        let path = scratch().join("accounts.json");
+        write_legacy(&path);
+        let backend = Arc::new(FakeSecrets::default());
+        let store = AccountStore::open_with_backend(&path, backend.clone()).expect("migrate");
+        assert_secret(&store).await;
+        let bytes = fs::read(&path).expect("metadata");
+        assert!(!String::from_utf8(bytes).expect("JSON").contains(MARKER));
+        assert!(!legacy_backup_path(&path).exists());
+        assert!(!temporary_path(&legacy_backup_path(&path)).exists());
+
+        let reopened = AccountStore::open_with_backend(&path, backend).expect("reopen");
+        assert_secret(&reopened).await;
+        assert!(
+            !fs::read_to_string(&path)
+                .expect("metadata")
+                .contains(MARKER)
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_recovers_from_each_injected_commit_failure() {
+        for failure in [
+            MigrationFailure::Backup,
+            MigrationFailure::Metadata,
+            MigrationFailure::Cleanup,
+        ] {
+            let path = scratch().join("accounts.json");
+            write_legacy(&path);
+            let backend = Arc::new(FakeSecrets::default());
+            AccountStore::open_with_migration_failure(&path, backend.clone(), failure)
+                .expect_err("injected failure");
+            let reopened = AccountStore::open_with_backend(&path, backend).expect("recover");
+            assert_secret(&reopened).await;
+            assert!(
+                !fs::read_to_string(&path)
+                    .expect("metadata")
+                    .contains(MARKER)
+            );
+            assert!(!legacy_backup_path(&path).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_recovers_from_a_backend_write_failure() {
+        let path = scratch().join("accounts.json");
+        write_legacy(&path);
+        let backend = Arc::new(FakeSecrets::default());
+        backend.fail_next_set.store(true, Ordering::Relaxed);
+        AccountStore::open_with_backend(&path, backend.clone()).expect_err("backend failure");
+        assert!(fs::read_to_string(&path).expect("legacy").contains(MARKER));
+
+        let reopened = AccountStore::open_with_backend(&path, backend).expect("recover");
+        assert_secret(&reopened).await;
+        assert!(
+            !fs::read_to_string(&path)
+                .expect("metadata")
+                .contains(MARKER)
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_avoids_repeat_reads_and_reload_observes_another_writer() {
+        let path = scratch().join("accounts.json");
+        let backend = Arc::new(FakeSecrets::default());
+        let first = AccountStore::open_with_backend(&path, backend.clone()).expect("first");
+        let second = AccountStore::open_with_backend(&path, backend.clone()).expect("second");
+        first
+            .upsert(account("work"), SecretString::from(MARKER))
+            .await
+            .expect("upsert");
+        assert_secret(&second).await;
+        let reads = backend.reads.load(Ordering::Relaxed);
+        assert_secret(&second).await;
+        assert_eq!(backend.reads.load(Ordering::Relaxed), reads);
+
+        first
+            .upsert(account("work"), SecretString::from("replacement-marker"))
+            .await
+            .expect("replace");
+        let secret = second
+            .secret(
+                &PluginId::from_static("example-agent"),
+                &AccountId::from_static("work"),
+            )
+            .await
+            .expect("reload")
+            .expect("present");
+        assert_eq!(kernel::expose_secret(&secret), "replacement-marker");
+        assert!(backend.reads.load(Ordering::Relaxed) > reads);
+    }
+
+    #[test]
+    fn exclusive_lock_blocks_an_account_write() {
+        let path = scratch().join("accounts.json");
+        let store =
+            AccountStore::open_with_backend(&path, Arc::new(MemoryAccountSecrets::default()))
+                .expect("open");
+        let lock = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(store.lock_path())
+            .expect("lock file");
+        lock.lock().expect("lock");
+        let writer = store.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            let result =
+                runtime.block_on(writer.upsert(account("work"), SecretString::from(MARKER)));
+            sender.send(result).expect("result");
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(receiver.try_recv().is_err(), "write crossed the lock");
+        lock.unlock().expect("unlock");
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("finished")
+            .expect("write");
+    }
+
+    #[tokio::test]
+    async fn public_debug_display_and_backend_errors_do_not_contain_secrets() {
+        let path = scratch().join("accounts.json");
+        let backend = Arc::new(FakeSecrets::default());
+        let store = AccountStore::open_with_backend(&path, backend.clone()).expect("open");
+        backend.fail_next_set.store(true, Ordering::Relaxed);
+        let error = store
+            .upsert(account("work"), SecretString::from(MARKER))
+            .await
+            .expect_err("write failure");
+        let rendered = format!("{store:?} {error} {error:?}");
+        assert!(!rendered.contains(MARKER));
+        assert!(rendered.contains("example-agent/work"));
+        assert!(rendered.contains("os-keychain"));
+        let kind = store.storage_kind().expect("kind");
+        assert!(!format!("{kind} {kind:?}").contains(MARKER));
+    }
+
+    #[tokio::test]
+    #[ignore = "touches the real OS credential store"]
+    async fn real_backend_smoke_test() {
+        let path = scratch().join("accounts.json");
+        let store = AccountStore::open(&path).expect("open");
+        store
+            .upsert(account("work"), SecretString::from(MARKER))
+            .await
+            .expect("upsert");
+        assert_secret(&store).await;
+        store
+            .remove(
+                &PluginId::from_static("example-agent"),
+                &AccountId::from_static("work"),
+            )
+            .await
+            .expect("remove");
     }
 }
