@@ -1,1 +1,0 @@
-16:12 H0a: records tests (40 pass), public-api regenerated, merged main, docs/RFC/CHANGELOG. Box lost GTK dev libs after replacement and apt mirror fails (500/SSL eof via proxy) so local gates exclude hofund-desktop via GATES_EXCLUDE (CI still builds it). post-impl-sup h0a r1 launched with mut spec mut/h0a.json (17 mutants).
