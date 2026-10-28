@@ -78,6 +78,23 @@ fn workflow_parser_accepts_dash_line_cache_step_with_timeout() {
     assert!(workflow_violations(workflow).is_empty());
 }
 
+#[test]
+fn workflow_parser_reports_dash_line_cache_step_without_timeout() {
+    let workflow = r#"jobs:
+  dash:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: Swatinem/rust-cache@v2
+      - name: Test each package
+        run: bash .github/scripts/test-each-package.sh
+"#;
+    assert_eq!(
+        workflow_violations(workflow),
+        ["job dash cache step 1 has no timeout-minutes"]
+    );
+}
+
 fn workflow_violations(workflow: &str) -> Vec<String> {
     let mut jobs = Vec::<Job>::new();
     let mut in_jobs = false;

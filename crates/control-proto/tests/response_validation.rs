@@ -167,6 +167,28 @@ fn error_message_validation_uses_configured_limit() {
 }
 
 #[test]
+fn error_detail_text_validation_uses_configured_limit() {
+    let mut envelope = valid_error_envelope();
+    envelope.error.details[0].message = "x".repeat(MAX_ERROR_MESSAGE_BYTES + 1);
+    let error = decode_error(&envelope).expect_err("error detail text over limit");
+    assert_eq!(
+        error.message,
+        format!("decoded error detail text exceeds the {MAX_ERROR_MESSAGE_BYTES}-byte limit")
+    );
+}
+
+#[test]
+fn error_details_count_validation_uses_configured_limit() {
+    let mut envelope = valid_error_envelope();
+    envelope.error.details = vec![FieldIssue::default(); MAX_IDS + 1];
+    let error = decode_error(&envelope).expect_err("too many error details");
+    assert_eq!(
+        error.message,
+        format!("decoded error details exceed the {MAX_IDS}-entry limit")
+    );
+}
+
+#[test]
 fn valid_error_envelope_decodes() {
     let envelope = valid_error_envelope();
     let decoded = decode_error(&envelope).expect("valid error envelope");
