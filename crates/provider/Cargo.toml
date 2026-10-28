@@ -34,6 +34,7 @@ hofund-ir = { workspace = true }
 hofund-quirks = { workspace = true }
 futures-util = "0.3.32"
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tempfile = { workspace = true }
 tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = "0.6.5"
 

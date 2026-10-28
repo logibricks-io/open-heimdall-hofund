@@ -1325,13 +1325,24 @@ async fn generative_count_reads_total_tokens_and_a_missing_method_is_unsupported
     assert!(matches!(outcome, CountOutcome::Unsupported));
 }
 
-fn creds_file(name: &str, body: &Value) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("hofund-vertex-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("dir");
-    let path = dir.join("adc.json");
+struct Credentials {
+    _guard: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl std::ops::Deref for Credentials {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+fn creds_file(_name: &str, body: &Value) -> Credentials {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("adc.json");
     std::fs::write(&path, serde_json::to_vec(body).expect("json")).expect("write");
-    path
+    Credentials { _guard: dir, path }
 }
 
 fn vertex_at(server: &MockServer, creds: &std::path::Path, impersonate: &str) -> Vertex {
@@ -1632,10 +1643,8 @@ async fn vertex_impersonation_token_errors_redact_tokens_and_response_bodies() {
 
 #[tokio::test]
 async fn vertex_uses_a_credentials_file_created_after_construction() {
-    let dir = std::env::temp_dir().join(format!("hofund-vertex-{}-late-file", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("dir");
-    let credentials = dir.join("adc.json");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let credentials = dir.path().join("adc.json");
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/token"))
@@ -1693,16 +1702,12 @@ async fn vertex_uses_a_credentials_file_created_after_construction() {
     let requests = server.received_requests().await.expect("requests");
     assert_eq!(requests.len(), 2);
     assert_eq!(bearer(&requests[1]), "Bearer ya29.late-file");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn vertex_rejects_a_missing_file_workload_identity_and_an_api_key() {
-    let missing = std::env::temp_dir().join(format!(
-        "hofund-vertex-missing-{}-adc.json",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&missing);
+    let directory = tempfile::tempdir().expect("temp dir");
+    let missing = directory.path().join("adc.json");
     let provider = Vertex::new(
         Endpoint::new(
             "vertex",

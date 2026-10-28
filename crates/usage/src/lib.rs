@@ -219,16 +219,12 @@ fn push_line(out: &mut String, cells: &[String; 7], widths: &[usize; 7]) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::{Ledger, Row};
 
     #[test]
     fn a_row_round_trips_into_the_table() {
-        let dir = std::env::temp_dir().join(format!("hofund-usage-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("dir");
-        let path = dir.join("usage.sqlite");
-        let _ = fs::remove_file(&path);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("usage.sqlite");
         let ledger = Ledger::open(&path).expect("open");
         ledger
             .record(&Row {
@@ -264,6 +260,5 @@ mod tests {
             "{table}"
         );
         assert!(table.contains("totals  requests=2  in=5  out=4"), "{table}");
-        fs::remove_dir_all(dir).ok();
     }
 }

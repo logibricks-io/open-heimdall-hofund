@@ -37,6 +37,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 [dev-dependencies]
 futures-util = "0.3.32"
 hofund-plugin-sdk = { workspace = true }
+tempfile = { workspace = true }
 tokio = { version = "1.52.2", features = ["macros", "rt", "time"] }
 
 [lints]

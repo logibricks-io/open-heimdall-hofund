@@ -110,7 +110,6 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use hofund_config::Config;
     use hofund_plugin_api::PluginError;
@@ -118,8 +117,6 @@ mod tests {
     use super::Runtime;
     use crate::RegistryAdapter;
     use crate::membership::member_id;
-
-    static NEXT: AtomicU64 = AtomicU64::new(0);
 
     fn config(ids: &[&str]) -> Config {
         let providers = ids
@@ -141,20 +138,15 @@ mod tests {
         .expect("config")
     }
 
-    fn runtime(config: &Config) -> Arc<Runtime> {
-        let path = std::env::temp_dir().join(format!(
-            "hofund-runtime-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).expect("runtime directory");
+    fn runtime(config: &Config) -> (Arc<Runtime>, tempfile::TempDir) {
+        let root = tempfile::tempdir().expect("runtime directory");
         let runtime = Runtime::new(
             Arc::new(RegistryAdapter),
-            &path.join("hofund.toml"),
+            &root.path().join("hofund.toml"),
             Some(0),
         );
         runtime.initial_snapshot(config, None).expect("snapshot");
-        runtime
+        (runtime, root)
     }
 
     fn fingerprint(config: &Config, index: usize) -> String {
@@ -173,7 +165,7 @@ mod tests {
     #[test]
     fn cooldown_survives_repeated_publication() {
         let config = config(&["member"]);
-        let runtime = runtime(&config);
+        let (runtime, _root) = runtime(&config);
         cool(&runtime, "member");
         for _ in 0..4 {
             runtime.table.get().expect("table").publish();
@@ -187,7 +179,7 @@ mod tests {
     #[test]
     fn cooldown_survives_candidate_reload() {
         let config = config(&["member"]);
-        let runtime = runtime(&config);
+        let (runtime, _root) = runtime(&config);
         cool(&runtime, "member");
         runtime.publish_candidate(&config).expect("candidate");
         assert!(runtime.cooldowns.cooling(&member_id("member")).is_some());
@@ -196,7 +188,7 @@ mod tests {
     #[test]
     fn removed_member_is_pruned_on_reload() {
         let original = config(&["kept", "removed"]);
-        let runtime = runtime(&original);
+        let (runtime, _root) = runtime(&original);
         cool(&runtime, "kept");
         cool(&runtime, "removed");
         runtime
@@ -209,7 +201,7 @@ mod tests {
     #[test]
     fn rejected_candidate_does_not_prune() {
         let original = config(&["member"]);
-        let runtime = runtime(&original);
+        let (runtime, _root) = runtime(&original);
         cool(&runtime, "member");
         let mut rejected = original.clone();
         rejected.routes[0].upstreams[0].provider = "missing".to_owned();
@@ -280,7 +272,7 @@ mod tests {
             assert_ne!(digest, changed_digest);
             assert_secret_free(&changed_digest, &["rotated-secret"]);
 
-            let runtime = runtime(&original);
+            let (runtime, _root) = runtime(&original);
             cool(&runtime, "first");
             cool(&runtime, "second");
             runtime.publish_candidate(&changed).expect("changed");
@@ -292,7 +284,7 @@ mod tests {
     #[test]
     fn provider_fingerprint_change_clears_only_that_cooldown() {
         let original = config(&["first", "second"]);
-        let runtime = runtime(&original);
+        let (runtime, _root) = runtime(&original);
         cool(&runtime, "first");
         cool(&runtime, "second");
         runtime.publish_candidate(&original).expect("baseline");
@@ -309,7 +301,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn maintenance_task_recovers_expired_rest_without_reads() {
         let config = config(&["member"]);
-        let runtime = runtime(&config);
+        let (runtime, _root) = runtime(&config);
         cool(&runtime, "member");
         let task = runtime.spawn_maintenance();
         tokio::time::advance(std::time::Duration::from_secs(61)).await;

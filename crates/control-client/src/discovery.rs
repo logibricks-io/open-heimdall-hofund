@@ -447,31 +447,21 @@ pub(crate) fn current_uid(temp_dir: &Path) -> Result<u32, ClientError> {
 mod tests {
     use super::{DiscoveryFile, config_id, discovery_endpoints, read_discovery};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    struct Scratch(PathBuf);
+    struct Scratch(tempfile::TempDir);
 
     impl Scratch {
         fn new(label: &str) -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "hofund-client-discovery-{label}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("scratch directory");
-            Self(path)
+            Self(
+                tempfile::Builder::new()
+                    .prefix(&format!("hofund-client-discovery-{label}-"))
+                    .tempdir()
+                    .expect("scratch directory"),
+            )
         }
 
         fn join(&self, path: &str) -> PathBuf {
-            self.0.join(path)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            self.0.path().join(path)
         }
     }
 

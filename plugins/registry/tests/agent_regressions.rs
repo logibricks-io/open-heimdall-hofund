@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use hofund_agent::{AgentAdapter, Compiled, GatewayTarget, Session, TargetOs};
 use hofund_plugin_api::{
@@ -305,7 +304,7 @@ fn check_invalid(spec: Spec, os: TargetOs, relative: &str) {
     plant(&home, spec);
     write(&home.join(relative), spec.invalid);
     let before = tree(&home);
-    let session = Session::new(&home);
+    let session = Session::new(&*home);
     let adapter = adapter(spec.id, os);
     adapter.plan(&session, &target()).expect_err("invalid plan");
     adapter
@@ -326,7 +325,7 @@ fn shipped_agents_disconnect_refuses_broken_files_until_force() {
             let home = scratch();
             plant(&home, spec);
             let before = tree(&home);
-            let session = Session::new(&home);
+            let session = Session::new(&*home);
             let adapter = adapter(spec.id, os);
             adapter.apply(&session, &target()).expect("apply");
             let path = home.join(spec.files[0]);
@@ -350,7 +349,7 @@ fn shipped_agents_disconnect_refuses_broken_files_until_force() {
 fn shipped_codex_forced_disconnect_removes_created_config_directory() {
     for os in OPERATING_SYSTEMS {
         let home = scratch();
-        let session = Session::new(&home);
+        let session = Session::new(&*home);
         let adapter = adapter("codex", os);
         adapter.apply(&session, &target()).expect("apply");
         let path = home.join(".codex/config.toml");
@@ -381,7 +380,7 @@ fn shipped_agents_read_and_revert_cover_existing_and_missing_files() {
                     plant(&home, spec);
                 }
                 let before = tree(&home);
-                let session = Session::new(&home);
+                let session = Session::new(&*home);
                 let adapter = adapter(spec.id, os);
                 adapter.apply(&session, &target()).expect("apply");
                 let read = adapter.read(&session).expect("read");
@@ -417,7 +416,7 @@ fn shipped_agents_detect_managed_files_without_binaries() {
         for spec in SPECS {
             for (index, relative) in spec.files.iter().enumerate() {
                 let home = scratch();
-                let session = Session::new(&home).with_path(home.join("empty-bin"));
+                let session = Session::new(&*home).with_path(home.join("empty-bin"));
                 let adapter = adapter(spec.id, os);
                 assert!(!adapter.detect(&session));
                 write(&home.join(relative), spec.contents[index]);
@@ -431,7 +430,7 @@ fn shipped_agents_detect_managed_files_without_binaries() {
 fn shipped_opencode_detects_jsonc_without_a_binary() {
     for os in OPERATING_SYSTEMS {
         let home = scratch();
-        let session = Session::new(&home).with_path(home.join("empty-bin"));
+        let session = Session::new(&*home).with_path(home.join("empty-bin"));
         let adapter = adapter("opencode", os);
         assert!(!adapter.detect(&session));
         write(
@@ -453,7 +452,7 @@ fn shipped_agents_detect_binaries_without_config_files() {
                 description_binary(spec.id).to_owned()
             };
             write(&home.join("bin").join(binary), "");
-            let session = Session::new(&home).with_path(home.join("bin"));
+            let session = Session::new(&*home).with_path(home.join("bin"));
             assert!(adapter(spec.id, os).detect(&session), "{}", spec.id);
         }
     }
@@ -470,7 +469,7 @@ fn shipped_agents_disconnect_keeps_directories_with_user_files() {
     for os in OPERATING_SYSTEMS {
         for spec in SPECS {
             let home = scratch();
-            let session = Session::new(&home);
+            let session = Session::new(&*home);
             let adapter = adapter(spec.id, os);
             adapter.apply(&session, &target()).expect("apply");
             let parent = home
@@ -499,7 +498,7 @@ fn shipped_agents_disconnect_removes_only_directories_they_created() {
         for spec in SPECS {
             for overridden in [false, true] {
                 let home = scratch();
-                let session = Session::new(&home);
+                let session = Session::new(&*home);
                 let session = if overridden {
                     set_override(session, spec.id, home.join("absolute-root"))
                 } else {
@@ -557,7 +556,7 @@ fn check_rejected(id: &str, os: TargetOs, relative: &str, initial: &[u8], expect
     let home = scratch();
     write_bytes(&home.join(relative), initial);
     let before = tree(&home);
-    let session = Session::new(&home);
+    let session = Session::new(&*home);
     let adapter = adapter(id, os);
     for error in [
         adapter.plan(&session, &target()).expect_err("plan"),
@@ -576,7 +575,7 @@ fn check_round_trip(id: &str, os: TargetOs, relative: &str, initial: &[u8]) {
     let home = scratch();
     write_bytes(&home.join(relative), initial);
     let before = tree(&home);
-    let session = Session::new(&home);
+    let session = Session::new(&*home);
     let adapter = adapter(id, os);
     assert!(!adapter.plan(&session, &target()).expect("plan").is_empty());
     assert_eq!(tree(&home), before);
@@ -609,7 +608,7 @@ fn shipped_gemini_cli_absolute_override_detection_ignores_default_home_decoys() 
                     },
                 );
             }
-            let session = Session::new(&home)
+            let session = Session::new(&*home)
                 .with_gemini_cli_home(home.join("absolute-gemini"))
                 .with_path(home.join("empty-bin"));
             assert_eq!(
@@ -627,7 +626,7 @@ fn shipped_gemini_cli_warns_for_user_edits_in_each_file() {
         for relative in spec("gemini-cli").files {
             let home = scratch();
             plant(&home, spec("gemini-cli"));
-            let session = Session::new(&home);
+            let session = Session::new(&*home);
             let adapter = adapter("gemini-cli", os);
             adapter.apply(&session, &target()).expect("apply");
             let path = home.join(relative);
@@ -652,7 +651,7 @@ fn shipped_gemini_cli_status_and_disconnect_restore_when_either_file_is_deleted(
             let home = scratch();
             plant(&home, spec("gemini-cli"));
             let before = tree(&home);
-            let session = Session::new(&home);
+            let session = Session::new(&*home);
             let adapter = adapter("gemini-cli", os);
             adapter.apply(&session, &target()).expect("apply");
             fs::remove_file(home.join(relative)).expect("delete managed file");
@@ -698,7 +697,7 @@ fn shipped_gemini_cli_read_covers_existing_and_missing_files_before_apply() {
                 write(&home.join(".gemini/.env"), contents);
             }
             let read = adapter("gemini-cli", os)
-                .read(&Session::new(&home))
+                .read(&Session::new(&*home))
                 .expect("read");
             assert_eq!(read.len(), 2);
             assert_eq!(read[0].bytes.as_deref(), settings.map(str::as_bytes));
@@ -750,7 +749,7 @@ fn shipped_gemini_cli_discriminates_model_sources_and_route_counts() {
         for (initial, models, expected) in &cases {
             let home = scratch();
             write(&home.join(".gemini/settings.json"), initial);
-            let session = Session::new(&home);
+            let session = Session::new(&*home);
             adapter("gemini-cli", os)
                 .apply(&session, &target_with(models))
                 .expect("apply");
@@ -775,7 +774,7 @@ fn shipped_gemini_cli_second_apply_string_model_disconnect_restores_the_string_m
         write(&home.join(".gemini/settings.json"), initial);
         write(&home.join(".gemini/.env"), GEMINI_ENV);
         let before = tree(&home);
-        let session = Session::new(&home);
+        let session = Session::new(&*home);
         let adapter = adapter("gemini-cli", os);
         adapter.apply(&session, &target()).expect("first apply");
         assert!(
@@ -805,7 +804,7 @@ fn shipped_gemini_cli_string_model_disconnect_rejects_extra_model_keys_without_w
         let settings_path = home.join(".gemini/settings.json");
         write(&settings_path, initial);
         write(&home.join(".gemini/.env"), GEMINI_ENV);
-        let session = Session::new(&home);
+        let session = Session::new(&*home);
         let adapter = adapter("gemini-cli", os);
         adapter.apply(&session, &target()).expect("apply");
 
@@ -857,7 +856,7 @@ fn shipped_agents_honor_windows_mixed_case_environment_overrides() {
     ] {
         let home = scratch();
         let session =
-            Session::from_env_iter(&home, [(variable, home.join("absolute-root").as_os_str())]);
+            Session::from_env_iter(&*home, [(variable, home.join("absolute-root").as_os_str())]);
         let plan = adapter(id, TargetOs::Windows)
             .plan(&session, &target())
             .expect("mixed-case plan");
@@ -867,7 +866,7 @@ fn shipped_agents_honor_windows_mixed_case_environment_overrides() {
             .map(|change| {
                 change
                     .path()
-                    .strip_prefix(&home)
+                    .strip_prefix(&*home)
                     .expect("relative")
                     .to_path_buf()
             })
@@ -926,14 +925,16 @@ fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-fn scratch() -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "hofund-agent-regression-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).expect("scratch");
-    path
+struct Scratch(tempfile::TempDir);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+fn scratch() -> Scratch {
+    Scratch(tempfile::tempdir().expect("scratch"))
 }

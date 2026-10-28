@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use hofund_agent::{AgentAdapter, Compiled, GatewayTarget, Session, TargetOs, catalog, resolve};
 use hofund_plugin_api::{
@@ -306,7 +305,7 @@ static VISIBLE_ONLY: AgentDescription = AgentDescription::from_static(
 #[test]
 fn path_resolution_selects_os_and_handles_environment_overrides() {
     let home = scratch();
-    let session = Session::new(&home);
+    let session = Session::new(&*home);
     for (os, directory) in [
         (TargetOs::Linux, ".linux"),
         (TargetOs::Macos, ".macos"),
@@ -324,14 +323,14 @@ fn path_resolution_selects_os_and_handles_environment_overrides() {
     assert_eq!(EXPLICIT_PATH_FILE.env_replaces(), Some("~/.config"));
 
     let absolute = scratch();
-    let session = Session::new(&home).with_env("EXAMPLE_HOME", &absolute);
+    let session = Session::new(&*home).with_env("EXAMPLE_HOME", &*absolute);
     assert_eq!(session.env("EXAMPLE_HOME"), Some(absolute.as_os_str()));
     assert_eq!(
         resolve(&PATH_FILE, TargetOs::Linux, &session),
         absolute.join("config.json")
     );
 
-    let session = Session::new(&home).with_env("EXAMPLE_HOME", "relative");
+    let session = Session::new(&*home).with_env("EXAMPLE_HOME", "relative");
     assert_eq!(
         resolve(&PATH_FILE, TargetOs::Linux, &session),
         home.join(".linux").join("config.json")
@@ -341,7 +340,7 @@ fn path_resolution_selects_os_and_handles_environment_overrides() {
         home.join(".config").join("example").join(".env")
     );
 
-    let session = Session::new(&home).with_env("EXAMPLE_HOME", "");
+    let session = Session::new(&*home).with_env("EXAMPLE_HOME", "");
     assert_eq!(
         resolve(&PATH_FILE, TargetOs::Linux, &session),
         home.join(".linux").join("config.json")
@@ -381,7 +380,7 @@ fn environment_overrides_select_compiled_adapter_paths() {
                 let context = format!("{id} / {source:?} / {value_kind:?}");
                 let default_home = scratch();
                 let override_home = scratch();
-                let default_session = Session::new(&default_home);
+                let default_session = Session::new(&*default_home);
                 let value = override_value(&override_home, value_kind);
                 let override_session = override_session(&override_home, id, &value, source);
                 let default_plan = compiled
@@ -494,7 +493,7 @@ fn visible_models_and_route_none_filter_gateway_slots() {
     let target = target_with(&["shown", "hidden"]);
 
     let home = scratch();
-    let session = Session::new(&home);
+    let session = Session::new(&*home);
     Compiled::new(&ROUTE_NONE)
         .apply(&session, &target)
         .expect("route none apply");
@@ -506,7 +505,7 @@ fn visible_models_and_route_none_filter_gateway_slots() {
     assert!(value.get("models").is_none());
 
     let home = scratch();
-    let session = Session::new(&home);
+    let session = Session::new(&*home);
     Compiled::new(&VISIBLE_ONLY)
         .apply(&session, &target)
         .expect("visible apply");
@@ -559,10 +558,16 @@ fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&fs::read(path).expect("JSON file")).expect("JSON")
 }
 
-fn scratch() -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("hofund-compiled-{}-{id}", std::process::id()));
-    fs::create_dir_all(&path).expect("dir");
-    path
+struct Scratch(tempfile::TempDir);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+fn scratch() -> Scratch {
+    Scratch(tempfile::tempdir().expect("temp dir"))
 }

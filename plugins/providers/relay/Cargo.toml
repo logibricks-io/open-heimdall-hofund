@@ -16,6 +16,7 @@ hofund-plugin-sdk = { workspace = true }
 
 [dev-dependencies]
 hofund-kit-upstream = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

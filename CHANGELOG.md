@@ -247,6 +247,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Test fixtures now retain temporary-directory guards until test completion,
+  including panic paths, and a workspace invariant rejects hand-built process
+  temp paths. Existing host model-state directories are tightened to `0700` on
+  Unix, and unreadable or unmovable state files are preserved instead of being
+  overwritten (#212, #101, #102).
 - Quota refusals are now recognized from the response body with the reference's
   rule order: a 402 naming a used-up limit, a 429 naming its reset time or a
   planned allowance, a 5xx quota code, or another 4xx naming a used-up limit.

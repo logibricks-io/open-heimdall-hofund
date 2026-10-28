@@ -19,6 +19,7 @@ wiremock = "0.6.5"
 
 [dev-dependencies]
 async-trait = "0.1.89"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
