@@ -91,6 +91,16 @@ pub enum CooldownCause {
 }
 
 impl CooldownCause {
+    /// Every cooldown cause. A new variant must be added to this list.
+    pub const ALL: [CooldownCause; 6] = [
+        Self::Failure,
+        Self::RateLimit,
+        Self::Quota,
+        Self::Credit,
+        Self::Observed,
+        Self::Panic,
+    ];
+
     /// Stable label used by metrics.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -652,4 +662,25 @@ fn apply(state: &mut State, candidate: Cooling) -> Cooling {
 
 fn u128_as_u64(value: u128) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CooldownCause;
+
+    #[test]
+    fn all_lists_every_cooldown_cause() {
+        let indices = CooldownCause::ALL
+            .into_iter()
+            .map(|cause| match cause {
+                CooldownCause::Failure => 0,
+                CooldownCause::RateLimit => 1,
+                CooldownCause::Quota => 2,
+                CooldownCause::Credit => 3,
+                CooldownCause::Observed => 4,
+                CooldownCause::Panic => 5,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(indices, (0..CooldownCause::ALL.len()).collect::<Vec<_>>());
+    }
 }

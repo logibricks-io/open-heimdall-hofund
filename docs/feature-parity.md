@@ -90,6 +90,11 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
     the request (`crates/ir/src/effort.rs:16`), mapped by each codec. Token
     counts ask a Messages upstream and otherwise return an estimate
     (`crates/gateway/src/lib.rs:319`).
+11. **Connection-nominated headers.** hofund strips every header a response
+    nominates in `Connection` (RFC 9110), including `Retry-After`
+    (`crates/plugin-host/src/pool.rs:276-301`). The reference strips only a fixed
+    hop-by-hop list and forwards nominated headers
+    (`reference: internal/gateway/codex_backend.go:1571-1577`). This is an intentional standards fix.
 
 ## Matrix
 

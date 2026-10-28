@@ -294,6 +294,8 @@ impl HttpBackend for PooledHttp {
         ] {
             headers.remove(name);
         }
+        // RFC 9110 section 7.6.1 makes every Connection-nominated header
+        // hop-by-hop, including Retry-After.
         for name in nominated {
             headers.remove(name);
         }
@@ -698,6 +700,29 @@ mod tests {
             assert_eq!(error.status(), Some(429));
             assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
         }
+    }
+
+    #[tokio::test]
+    async fn connection_nominates_retry_after_as_hop_by_hop() {
+        const RESPONSE: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 1\r\nconnection: retry-after\r\nretry-after: 5\r\n\r\n{";
+
+        let _guard = exclusive().await;
+        let port = raw(RESPONSE);
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{port}/v1"))
+            .body(Body::from_bytes(b"hello".to_vec()))
+            .expect("request");
+        let response = PooledHttp::direct()
+            .send(request)
+            .await
+            .expect("status response");
+        assert_eq!(response.status().as_u16(), 429);
+        assert!(
+            !response
+                .headers()
+                .contains_key(reqwest::header::RETRY_AFTER)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
