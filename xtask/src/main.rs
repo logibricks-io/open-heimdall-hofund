@@ -330,6 +330,16 @@ fn check_plugins() -> ExitCode {
         eprintln!("check-plugins: plugins path is not absolute");
         return ExitCode::from(1);
     }
+    let registry_list = plugins.join("registry/plugins.toml");
+    let registry_text = std::fs::read_to_string(&registry_list)
+        .map_err(|error| format!("read {}: {error}", registry_list.display()));
+    match registry_text.and_then(|text| xtask::registry::check_plugin_list(&text)) {
+        Ok(()) => {}
+        Err(error) => {
+            eprintln!("check-plugins: {error}");
+            return ExitCode::from(1);
+        }
+    }
     let packages = match load_plugin_packages(&plugins) {
         Ok(packages) if packages.is_empty() => {
             println!("no plugin packages to check");

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-config control identities, single-instance locks, atomic token-free discovery,
+  secure runtime-directory fallback, and same-user Unix socket transport with ordered
+  client discovery. Windows keeps authenticated loopback TCP until named-pipe support lands.
 - Opt-in loopback TCP control health and status with strict Bearer, Host, Origin,
   and mutation defenses, live disk/runtime revisions, and a typed TCP control client.
   Model `/health` now identifies the service as hofund.
@@ -90,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Plugin ids are now unique per kind rather than globally, allowing an agent and
+  subscription to share an id without changing existing config or CLI commands.
+  Registry contributions and host secrets, accounts, cache directories, and state
+  directories are keyed by kind and id; legacy account rows remain subscriptions.
 - Passive quota observations now distinguish one-hour retry hints from
   eight-day window resets, rest at 98% used only when the window reset is
   known, and exempt accounts spending credits. `Cooldowns::observe` now takes
@@ -227,6 +234,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   temp paths. Existing host model-state directories are tightened to `0700` on
   Unix, and unreadable or unmovable state files are preserved instead of being
   overwritten (#212, #101, #102).
+- Over-long Unix control socket paths now warn and fall back to TCP instead of
+  preventing daemon startup. Socket tests use short paths on macOS, and the
+  Windows single-instance test no longer requires session debug output.
 - Wrong-method control responses now use the `method_not_allowed` error kind
   while retaining HTTP 405 (#206).
 - Decide-only presets with an explicit wire now report the same missing-endpoint

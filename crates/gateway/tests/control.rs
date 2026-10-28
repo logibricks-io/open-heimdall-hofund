@@ -49,6 +49,30 @@ fn scratch(_label: &str) -> tempfile::TempDir {
     tempfile::tempdir().expect("scratch directory")
 }
 
+#[cfg(unix)]
+struct UnixScratch(tempfile::TempDir);
+
+#[cfg(unix)]
+impl UnixScratch {
+    fn new(label: &str) -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("hofund-gateway-{label}-"))
+            .tempdir_in("/tmp")
+            .expect("scratch directory");
+        let socket = dir.path().join("control.sock");
+        assert!(
+            socket.as_os_str().as_encoded_bytes().len() < 100,
+            "socket path must be shorter than 100 bytes: {}",
+            socket.display()
+        );
+        Self(dir)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
 fn model_app(token: &str) -> (axum::Router, tempfile::TempDir) {
     let dir = scratch("model");
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
@@ -457,4 +481,100 @@ async fn control_routes_are_not_on_model_listener() {
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     assert!(body.get("pid").is_none());
     assert!(body.get("runtime_revision").is_none());
+}
+
+#[cfg(unix)]
+async fn unix_request(socket: &std::path::Path, host: &str) -> String {
+    unix_request_result(socket, host)
+        .await
+        .expect("Unix request")
+}
+
+#[cfg(unix)]
+async fn unix_request_result(socket: &std::path::Path, host: &str) -> std::io::Result<String> {
+    let mut stream = tokio::net::UnixStream::connect(socket).await?;
+    let request = format!(
+        "GET /v1/hofund/status HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await?;
+    Ok(String::from_utf8(response).expect("HTTP response"))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_socket_round_trip_with_permissions_and_safe_peer_cred() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = UnixScratch::new("unix-round-trip");
+    let socket = dir.path().join("control.sock");
+    let running = control().bind_unix(&socket).await.expect("Unix bind");
+    let mode = std::fs::metadata(&socket)
+        .expect("socket metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let response = unix_request(&socket, "hofund-control").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(response.contains("\"pid\":42"), "{response}");
+    running.shutdown().await;
+    assert!(!socket.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_listener_rejects_wrong_peer_uid_before_http() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = UnixScratch::new("unix-peer-uid");
+    let uid = std::fs::metadata(dir.path()).expect("directory metadata").uid();
+    let socket = dir.path().join("control.sock");
+    let running = control()
+        .bind_unix_with_expected_uid(&socket, uid.wrapping_add(1))
+        .await
+        .expect("Unix bind with wrong expected uid");
+    match unix_request_result(&socket, "hofund-control").await {
+        Ok(response) => assert!(response.is_empty(), "wrong peer received HTTP: {response}"),
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+            ),
+            "unexpected connection error: {error}"
+        ),
+    }
+    running.shutdown().await;
+
+    let running = control()
+        .bind_unix_with_expected_uid(&socket, uid)
+        .await
+        .expect("Unix bind with current uid");
+    let response = unix_request(&socket, "hofund-control").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    running.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_ipc_host_is_pinned_constant() {
+    let dir = UnixScratch::new("unix-host");
+    let socket = dir.path().join("control.sock");
+    let running = control().bind_unix(&socket).await.expect("Unix bind");
+    let response = unix_request(&socket, "127.0.0.1:3426").await;
+    assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+    running.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_socket_long_path_is_refused() {
+    let dir = scratch("unix-long-path");
+    let socket = dir.path().join("x".repeat(200));
+    let Err(error) = control().bind_unix(&socket).await else {
+        panic!("long socket path was accepted");
+    };
+    assert!(matches!(error, GatewayError::SocketPathTooLong { .. }));
+    assert!(!socket.exists());
+    let _ = std::fs::remove_dir_all(dir);
 }
