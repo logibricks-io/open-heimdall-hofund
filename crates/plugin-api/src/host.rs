@@ -36,7 +36,9 @@ impl HttpHandle {
     ///
     /// # Errors
     ///
-    /// Returns [`PluginError`] when the kernel client fails.
+    /// Returns [`PluginError`] when the kernel client fails. A success body
+    /// streams as it arrives, so a later read failure is an
+    /// [`Interrupted`](crate::PluginErrorKind::Interrupted) chunk.
     pub async fn send(
         &self,
         request: http::Request<Body>,
@@ -46,9 +48,8 @@ impl HttpHandle {
 
     /// The pooled client behind this handle, when the kernel built one.
     ///
-    /// Built-in adapters still stream. [`Self::send`] buffers the body, so
-    /// those adapters downcast this value and send on the same client.
-    /// A recording test handle returns `None`.
+    /// Built-in adapters that have not moved to [`Self::send`] downcast this
+    /// value and send on the same client. A recording test handle returns `None`.
     ///
     /// This is removed in row E, the first PR that moves an adapter into its
     /// own plugin crate (E3, Vertex), when built-ins stream through [`Self::send`].

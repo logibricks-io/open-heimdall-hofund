@@ -44,6 +44,9 @@ pub fn expose_secret(secret: &SecretString) -> &str {
 #[doc(hidden)]
 pub trait HttpBackend: Send + Sync {
     /// Sends `request` and returns the response stream.
+    ///
+    /// A success body streams as the upstream sends it; a read failure is an
+    /// [`Interrupted`](crate::PluginErrorKind::Interrupted) chunk.
     async fn send(
         &self,
         request: HttpRequest<Body>,
@@ -53,7 +56,7 @@ pub trait HttpBackend: Send + Sync {
     ///
     /// The default is `None`. Streaming adapters downcast the value so they
     /// use the same client as [`HttpBackend::send`], including its connect
-    /// and idle-read limits. [`HttpBackend::send`] still buffers the body.
+    /// and idle-read limits.
     #[cfg(feature = "kernel-internal")]
     #[must_use]
     fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {

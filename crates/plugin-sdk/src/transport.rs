@@ -4,9 +4,9 @@
 //! client. [`Call::send`] uses [`HttpHandle::send`](hofund_plugin_api::HttpHandle::send).
 //! A status of 400 or higher becomes [`PluginErrorKind::Status`].
 //!
-//! The Chat, Responses, Messages, Generative, and Converse transports move here,
-//! with streaming through `HttpHandle::send`, in the first row E PR that moves
-//! an adapter into its own plugin crate (E3, Vertex).
+//! `HttpHandle::send` streams a 2xx body, but [`Call`] still reads the whole
+//! body. The Chat, Responses, Messages, Generative, and Converse transports move
+//! into the SDK later, starting with Chat and Responses.
 //!
 //! [`Call::send_with_retry`] retries at most three times. [`PluginErrorKind::Connect`]
 //! (the request was not sent) is retried for every method. [`PluginErrorKind::Timeout`]
