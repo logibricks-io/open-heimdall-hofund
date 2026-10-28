@@ -664,6 +664,10 @@ impl AgentAdapter for Compiled {
         self.engine(session)?.configured_model()
     }
 
+    fn model_prefix(&self) -> Option<&str> {
+        self.description.model_prefix()
+    }
+
     fn status(
         &self,
         session: &Session,
