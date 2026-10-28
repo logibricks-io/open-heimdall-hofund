@@ -96,6 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin-host responses now strip every RFC 9110 hop-by-hop header, including
   headers named by `Connection`, while preserving `Set-Cookie` for plugins.
   Truncated non-2xx responses retain the partial body bytes read so far.
+- Regression coverage now pins RFC 9110 stripping of `Retry-After` nominated by
+  `Connection`, exhaustive daemon mappings for every `CooldownCause`, and
+  recursive daemon registry-call scanning; `control_map` is crate-private.
 - Body breaks after a 2xx reply are now classified as `Interrupted` instead of
   `Connect` on the provider path and `Transport` on the plugin-host path.
   Plugin-host body breaks now fail over across members before a completion or
