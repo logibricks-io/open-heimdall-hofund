@@ -160,7 +160,7 @@ impl Provider for Bedrock {
             );
             return Ok(Completion::Stream(Box::pin(events)));
         }
-        let bytes = response.bytes().await.map_err(http::map_transport)?;
+        let bytes = response.bytes().await.map_err(http::map_body)?;
         let mut decoded = codec
             .decode_response(&bytes)
             .map_err(|error| ProviderError::decode(error.to_string()))?;
@@ -309,6 +309,7 @@ fn plugin_error(error: ProviderError) -> hofund_plugin_api::PluginError {
         crate::ProviderErrorKind::Connect => PluginError::connect(error.message),
         crate::ProviderErrorKind::Timeout => PluginError::timeout(error.message),
         crate::ProviderErrorKind::Transport => PluginError::transport(error.message),
+        crate::ProviderErrorKind::Interrupted => PluginError::interrupted(error.message),
         crate::ProviderErrorKind::Status => {
             PluginError::status_error(error.status.unwrap_or(502), error.message)
         }

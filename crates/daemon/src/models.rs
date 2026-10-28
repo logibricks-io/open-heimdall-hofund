@@ -70,6 +70,8 @@ pub struct ProviderModels {
     pub corrected_base: Option<String>,
     /// Whether Azure returned its explicitly labelled base-model fallback.
     pub base_model_fallback: bool,
+    /// Side failures hidden by a successful response from another side.
+    pub side_errors: Vec<String>,
 }
 
 /// Refresh-loop timings, with a test constructor for short local runs.
@@ -820,6 +822,7 @@ impl ModelsHost {
                     kind,
                     corrected_base: None,
                     base_model_fallback: false,
+                    side_errors: Vec::new(),
                 },
                 planned.base_url.clone(),
                 std::collections::BTreeMap::new(),
@@ -968,6 +971,15 @@ impl ModelsHost {
                     merged.add(list.models(), list.dropped());
                 }
                 Err(error) => {
+                    // reference: internal/provider/models.go:774-785
+                    tracing::warn!(
+                        provider.id = provider.id,
+                        wire = wire_name(wire),
+                        base = %safe_url(&base),
+                        error.kind = ?error.kind(),
+                        error.message = error.message(),
+                        "model list side failed"
+                    );
                     retry_after = match (retry_after, error.retry_after()) {
                         (Some(left), Some(right)) => Some(left.max(right)),
                         (None, right) => right,
@@ -1027,6 +1039,7 @@ impl ModelsHost {
                 kind,
                 corrected_base,
                 base_model_fallback: fallback,
+                side_errors: errors,
             },
             winning_base.unwrap_or_else(|| planned.base_url.clone()),
             side_lists,
@@ -1328,6 +1341,7 @@ impl ModelsHost {
             kind: ListKind::Live,
             corrected_base: None,
             base_model_fallback: false,
+            side_errors: Vec::new(),
         })
     }
 

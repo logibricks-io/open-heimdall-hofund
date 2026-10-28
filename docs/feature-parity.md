@@ -46,14 +46,14 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | Status | Rows |
 | --- | --- |
 | Done | 28 |
-| Partial | 21 |
+| Partial | 22 |
 | Missing | 105 |
-| Total counted | 154 |
+| Total counted | 155 |
 | Not planned (not counted) | 1 |
 
 | Stage | Counted rows |
 | --- | --- |
-| core | 77 |
+| core | 78 |
 | auxiliary | 77 |
 
 ### Where hofund is already better
@@ -276,8 +276,9 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 | 11.1 | Starter config and validation | `internal/appdir`; `internal/settings` | core | Done | `examples/hofund.toml`; `crates/cli/src/main.rs:230` (`config check`), `:339` | `--help`, `-h`, and `help` print usage. `config check` prints `config ok:` and the path it read. `examples/hofund.toml` has `[[providers]]` and `[[routes]]`. Next: point a validation error at the exact key. |
 | 11.2 | Changes apply without a restart | `internal/filememo`; app edits apply live | core | Missing | none | Watch the config file and swap the router atomically (`arc-swap`). Keep running requests on the old config. |
 | 11.3 | Atomic writes, cross-process file locks, last-good fallback | `internal/filelock`, `internal/steady`, `internal/lastgood` | auxiliary | Partial | atomic writes in `crates/agent` and `crates/secrets` | Add advisory locks and keep the last good config. |
-| 11.4 | Environment overrides (`MAGPIE_ADDR` and others) | `ref.md:1843` | auxiliary | Partial | `crates/cli/src/main.rs` (`--config` only) | `HOFUND_` variables for listen, config and log level. |
+| 11.4 | Environment overrides (`MAGPIE_ADDR` and others) | `ref.md:1843`; `internal/settings/settings.go:1362-1370` | auxiliary | Partial | Code has `crates/cli/src/main.rs` (`--config` only). The L control-plane plan specifies `HOFUND_ADDR` for the daemon model listener and healthcheck (`docs/plugins/control-plane.md`), but implementation remains open. | Implement shared `HOFUND_ADDR`-then-config listen resolution, report the effective address and source, and keep an environment override from relistening on config reload. `HOFUND_` variables for config and log level remain. |
 | 11.5 | Config surgery from the CLI (`provider add`, `group set`, `key`) | `internal/cli`; `ref.md:319` | core | Missing | none | Edit commands that keep comments in `hofund.toml`, built on `toml_edit`. |
+| 11.6 | Provider rename (`provider set <id> id=`) that follows every reference | `internal/provider/rename.go:28-131`; `internal/agent/rename.go:14`; `internal/cli/providers_cli.go:438-459` | core | Missing | none; the L control-plane plan rejects `id=` until this row lands (`docs/plugins/control-plane.md`) | Under the config sidecar lock, rewrite every `[[routes]]` upstream, group, and fallback reference with `toml_edit`; move the picks and model-state file under the old and new state locks; rewrite agent model references through row 5.2's backup and restore. Fail atomically rather than leave a half-renamed config. |
 
 ### 12. Observability
 

@@ -84,11 +84,12 @@ impl Answers {
 impl Respond for Answers {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         let mut answers = self.answers.lock().expect("answers");
-        if answers.len() > 1 {
+        let response = if answers.len() > 1 {
             answers.pop_front().expect("answer")
         } else {
             answers.front().expect("answer").clone()
-        }
+        };
+        response.insert_header("connection", "close")
     }
 }
 
@@ -345,19 +346,39 @@ async fn sibling_fix_v1_side_is_found_at_its_next_request_base() {
     );
     let config = multi_config();
 
-    host.list_models(&config, &config_path, "multi")
+    let initial = host
+        .list_models(&config, &config_path, "multi")
         .await
         .expect("initial corrected sides");
     let saved = state(&directory, "multi");
     let sibling_base = format!("{}/responses", server.uri());
-    assert_eq!(saved["bases"]["responses"], format!("{sibling_base}/v1"));
-    assert_eq!(saved["sides"][sibling_base.clone()][0]["id"], "response");
+    assert_eq!(
+        saved["bases"]["responses"],
+        format!("{sibling_base}/v1"),
+        "side errors: {:?}",
+        initial.side_errors
+    );
+    assert_eq!(
+        saved["sides"][sibling_base.clone()][0]["id"],
+        "response",
+        "side errors: {:?}",
+        initial.side_errors
+    );
+    assert!(initial.side_errors.is_empty());
 
     let listed = host
         .list_models(&config, &config_path, "multi")
         .await
         .expect("dead sibling side");
-    assert_eq!(ids(&listed), ["chat-new", "response"]);
+    assert_eq!(
+        ids(&listed),
+        ["chat-new", "response"],
+        "side errors: {:?}",
+        listed.side_errors
+    );
+    assert_eq!(listed.side_errors.len(), 1);
+    assert!(listed.side_errors[0].contains("responses"));
+    assert!(listed.side_errors[0].contains("500"));
     let _ = std::fs::remove_dir_all(directory);
 }
 

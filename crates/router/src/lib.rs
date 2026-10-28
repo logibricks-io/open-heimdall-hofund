@@ -28,7 +28,7 @@ pub use snapshot::Snapshot;
 /// Which failures may try the next member.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailoverPolicy {
-    /// Connect and timeout errors try the next member.
+    /// Connect, timeout, and interrupted-body errors try the next member.
     pub connect_errors: bool,
     /// HTTP statuses that try the next member.
     pub statuses: BTreeSet<u16>,
@@ -47,15 +47,23 @@ impl FailoverPolicy {
     /// Whether `error` happened early enough, and is of a kind, that another
     /// member may be tried.
     ///
-    /// Kinds other than connect, timeout, and a listed status do not fail
-    /// over. A transport failure means the request was already sent, so it
-    /// does not try another member. The wildcard is required because
+    /// Kinds other than connect, timeout, interrupted, and a listed status do
+    /// not fail over. An interrupted 2xx body has not reached the client yet:
+    /// failover occurs before a completion or first stream event is returned,
+    /// like the reference's held reply that ends short and goes to the next
+    /// candidate (`reference: internal/gateway/fallback.go:1859-1866`,
+    /// `reference: internal/gateway/fallback.go:2364-2368`,
+    /// `reference: internal/gateway/gateway.go:2854`). A transport failure has
+    /// no reply and gives no evidence about what the upstream processed, so the
+    /// request is not resent elsewhere. The wildcard is required because
     /// [`PluginErrorKind`] is `#[non_exhaustive]`: a new kind does not break
     /// this match.
     #[must_use]
     pub fn allows(&self, error: &PluginError) -> bool {
         match error.kind() {
-            PluginErrorKind::Connect | PluginErrorKind::Timeout => self.connect_errors,
+            PluginErrorKind::Connect | PluginErrorKind::Timeout | PluginErrorKind::Interrupted => {
+                self.connect_errors
+            }
             PluginErrorKind::Status => error
                 .status()
                 .is_some_and(|code| self.statuses.contains(&code)),
