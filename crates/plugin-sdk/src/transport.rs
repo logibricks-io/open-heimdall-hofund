@@ -567,7 +567,7 @@ fn without_urls(text: &str) -> String {
     {
         output.push_str(&rest[..index]);
         rest = &rest[index..];
-        let end = rest.find(char::is_whitespace).map_or(rest.len(), |end| end);
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         output.push(' ');
         rest = &rest[end..];
     }
@@ -678,11 +678,11 @@ fn parse_duration(value: &str) -> Option<Duration> {
 }
 
 fn parse_unix_reset(value: &str, now: std::time::SystemTime) -> Option<Duration> {
-    let seconds = value.parse::<i64>().ok()?;
+    let seconds = value.parse::<u64>().ok()?;
     if seconds <= 1_000_000_000 {
         return None;
     }
-    let at = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))?;
+    let at = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))?;
     positive(at.duration_since(now).ok()?)
 }
 
@@ -744,9 +744,9 @@ fn parse_rfc3339(value: &str, now: std::time::SystemTime) -> Option<Duration> {
         _ => return None,
     };
     let days = days_from_civil(year, month, day);
-    let timestamp = (days * 86_400 + hour * 3_600 + minute * 60 + second - offset) as i128;
+    let timestamp = i128::from(days * 86_400 + hour * 3_600 + minute * 60 + second - offset);
     let target = timestamp * 1_000_000_000 + fraction;
-    let now = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as i128;
+    let now = i128::try_from(now.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos()).ok()?;
     let difference = target - now;
     if difference <= 0 {
         return None;
