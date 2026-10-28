@@ -6,11 +6,15 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use hofund_control_proto::{
-    ControlError, ErrorEnvelope, HealthResponse, MAX_RESPONSE_BODY_BYTES, StatusResponse,
-    decode_error_envelope, decode_response,
+    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError, ErrorEnvelope,
+    HealthResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
+    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, RouteModelListResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UsagePeriod, UsageQuery, UsageResponse, decode_error_envelope, decode_response,
 };
 use http::header;
-use http_body_util::{BodyExt, Empty, Limited};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
@@ -147,13 +151,179 @@ impl Client {
         self.get("/v1/hofund/status").await
     }
 
+    /// Lists configured providers.
+    pub async fn providers(&self) -> Result<ProviderListResponse, ClientError> {
+        self.get("/v1/hofund/providers").await
+    }
+
+    /// Reads a provider's cached models.
+    pub async fn provider_models(&self, id: &str) -> Result<ModelListResponse, ClientError> {
+        self.get(&format!(
+            "/v1/hofund/providers/{}/models",
+            encode_segment(id)
+        ))
+        .await
+    }
+
+    /// Refreshes a provider's models.
+    pub async fn refresh_models(&self, id: &str) -> Result<ModelListResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/providers/{}/models/refresh", encode_segment(id)),
+            Some(Vec::new()),
+        )
+        .await
+    }
+
+    /// Tests connectivity to a provider.
+    pub async fn test_provider(
+        &self,
+        id: &str,
+        request: ProviderTestRequest,
+    ) -> Result<ProviderTestResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/providers/{}/test", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Reads a provider's model picks.
+    pub async fn picks(&self, id: &str) -> Result<PicksResponse, ClientError> {
+        self.get(&format!(
+            "/v1/hofund/providers/{}/picks",
+            encode_segment(id)
+        ))
+        .await
+    }
+
+    /// Replaces or edits a provider's model picks.
+    pub async fn set_picks(
+        &self,
+        id: &str,
+        request: PicksSetRequest,
+    ) -> Result<PicksResponse, ClientError> {
+        self.request(
+            http::Method::PUT,
+            &format!("/v1/hofund/providers/{}/picks", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Lists configured client-facing route models.
+    pub async fn route_models(&self) -> Result<RouteModelListResponse, ClientError> {
+        self.get("/v1/hofund/models").await
+    }
+
+    /// Lists known agents.
+    pub async fn agents(&self) -> Result<AgentListResponse, ClientError> {
+        self.get("/v1/hofund/agents").await
+    }
+
+    /// Reports agent connection states.
+    pub async fn agent_status(&self) -> Result<AgentStatusResponse, ClientError> {
+        self.get("/v1/hofund/agents/status").await
+    }
+
+    /// Plans an agent lifecycle change.
+    pub async fn plan_agent(
+        &self,
+        id: &str,
+        request: AgentPlanRequest,
+    ) -> Result<AgentPlanResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/plan", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Connects an agent.
+    pub async fn connect_agent(
+        &self,
+        id: &str,
+        request: AgentConnectRequest,
+    ) -> Result<AgentChangeResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/connect", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Disconnects an agent.
+    pub async fn disconnect_agent(
+        &self,
+        id: &str,
+        request: AgentDisconnectRequest,
+    ) -> Result<AgentChangeResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/disconnect", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Reports usage for a period.
+    pub async fn usage(&self, query: UsageQuery) -> Result<UsageResponse, ClientError> {
+        let period = match query.period {
+            UsagePeriod::Day => "day",
+            UsagePeriod::Week => "week",
+            UsagePeriod::Month => "month",
+            UsagePeriod::All => "all",
+            _ => "unknown",
+        };
+        self.get(&format!("/v1/hofund/usage?period={period}")).await
+    }
+
+    /// Rotates the control and model bearer token.
+    pub async fn rotate_token(
+        &self,
+        request: TokenRotateRequest,
+    ) -> Result<TokenRotateResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/token/rotate",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Starts graceful daemon shutdown.
+    pub async fn shutdown(
+        &self,
+        request: ShutdownRequest,
+    ) -> Result<ShutdownResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/shutdown",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
     async fn get<T: hofund_control_proto::Response>(&self, path: &str) -> Result<T, ClientError> {
+        self.request(http::Method::GET, path, None).await
+    }
+
+    async fn request<T: hofund_control_proto::Response>(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+    ) -> Result<T, ClientError> {
         match &self.endpoint {
             Endpoint::Tcp(addr) => {
                 let stream = TcpStream::connect(addr)
                     .await
                     .map_err(|error| connect_error("control TCP connection failed", error))?;
-                self.get_over(stream, path, addr.to_string()).await
+                self.request_over(stream, method, path, body, addr.to_string())
+                    .await
             }
             #[cfg(unix)]
             Endpoint::Unix(socket) => {
@@ -161,12 +331,20 @@ impl Client {
                 let stream = tokio::net::UnixStream::connect(socket)
                     .await
                     .map_err(|error| connect_error("control Unix connection failed", error))?;
-                self.get_over(stream, path, LOCAL_IPC_HOST.to_owned()).await
+                self.request_over(stream, method, path, body, LOCAL_IPC_HOST.to_owned())
+                    .await
             }
         }
     }
 
-    async fn get_over<T, S>(&self, stream: S, path: &str, host: String) -> Result<T, ClientError>
+    async fn request_over<T, S>(
+        &self,
+        stream: S,
+        method: http::Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+        host: String,
+    ) -> Result<T, ClientError>
     where
         T: hofund_control_proto::Response,
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -177,12 +355,16 @@ impl Client {
         tokio::spawn(async move {
             let _ = connection.await;
         });
-        let request = http::Request::builder()
-            .method(http::Method::GET)
+        let mut builder = http::Request::builder()
+            .method(method.clone())
             .uri(path)
             .header(header::HOST, host)
-            .header(header::AUTHORIZATION, self.token.header())
-            .body(Empty::<&[u8]>::new())
+            .header(header::AUTHORIZATION, self.token.header());
+        if method != http::Method::GET {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let request = builder
+            .body(Full::new(std::io::Cursor::new(body.unwrap_or_default())))
             .map_err(|_| ClientError::Transport("cannot construct control request".to_owned()))?;
         let response = sender
             .send_request(request)
@@ -201,6 +383,26 @@ impl Client {
         }
         decode_response(hofund_control_proto::API_VERSION, &body).map_err(ClientError::Decode)
     }
+}
+
+fn json_body<T: serde::Serialize>(request: &T) -> Result<Vec<u8>, ClientError> {
+    serde_json::to_vec(request)
+        .map_err(|_| ClientError::Transport("cannot encode control request".to_owned()))
+}
+
+fn encode_segment(id: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 #[cfg(unix)]
@@ -294,5 +496,52 @@ mod tests {
         let error = super::verify_unix_socket_for(&socket, owner_uid.wrapping_add(1))
             .expect_err("wrong owner uid");
         assert!(matches!(error, super::ClientError::Discovery(_)));
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use std::convert::Infallible;
+
+    use http_body_util::Full;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+
+    #[tokio::test]
+    async fn client_percent_encodes_provider_id_segments() {
+        assert_eq!(super::encode_segment("AZaz09-._~"), "AZaz09-._~");
+        let id = "a/b c%é";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("connection");
+            let service = service_fn(
+                move |request: http::Request<hyper::body::Incoming>| async move {
+                    assert_eq!(request.method(), http::Method::GET);
+                    assert_eq!(
+                        request.uri().path(),
+                        "/v1/hofund/providers/a%2Fb%20c%25%C3%A9/models"
+                    );
+                    let mut response = hofund_control_proto::ModelListResponse::default();
+                    response.provider = id.to_owned();
+                    let body = serde_json::to_vec(&response).expect("response JSON");
+                    let response = http::Response::builder()
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .body(Full::new(std::io::Cursor::new(body)))
+                        .expect("response");
+                    Ok::<_, Infallible>(response)
+                },
+            );
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .expect("serve connection");
+        });
+        let client = super::Client::tcp(address, "test-token");
+        let response = client.provider_models(id).await.expect("model response");
+        assert_eq!(response.provider, id);
+        server.await.expect("server");
     }
 }

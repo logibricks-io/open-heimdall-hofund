@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Full typed control route and client surface, with ordered request defenses,
+  bounded bodies, error envelopes, no-store responses, and drain guards. The daemon
+  now serves secret-free provider summaries, cached models without upstream calls,
+  and route models over control TCP and Unix sockets.
 - Per-config control identities, single-instance locks, atomic token-free discovery,
   secure runtime-directory fallback, and same-user Unix socket transport with ordered
   client discovery. Windows keeps authenticated loopback TCP until named-pipe support lands.

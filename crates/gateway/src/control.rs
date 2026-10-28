@@ -8,13 +8,22 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::path::Path;
 
-use axum::body::Body;
-use axum::extract::Request;
+use axum::body::{Body, Bytes};
+use axum::extract::rejection::{PathRejection, QueryRejection};
+use axum::extract::{Path as AxumPath, Query, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
 use axum::response::Response;
+use axum::routing::{get, post};
+use futures_util::future::BoxFuture;
 use hofund_control_proto::{
-    ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES,
-    StatusResponse,
+    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError, ControlErrorKind,
+    ErrorEnvelope, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES, ModelListResponse,
+    PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
+    ProviderTestResponse, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
+    decode_request,
 };
 #[cfg(unix)]
 use hyper_util::rt::TokioIo;
@@ -33,13 +42,80 @@ pub const DEFAULT_CONTROL_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr
 /// The only Host value accepted over local IPC.
 pub const LOCAL_IPC_HOST: &str = "hofund-control";
 
+/// A boxed daemon operation exposed through the control protocol.
+pub type ControlFuture<'a, T> = BoxFuture<'a, Result<T, ControlFailure>>;
+
+/// A control error and its optional upstream HTTP status.
+pub struct ControlFailure {
+    /// Transport-independent failure details.
+    pub error: ControlError,
+    /// Upstream status used only for an upstream rate limit.
+    pub status: Option<u16>,
+}
+
+impl From<ControlError> for ControlFailure {
+    fn from(error: ControlError) -> Self {
+        Self {
+            error,
+            status: None,
+        }
+    }
+}
+
 /// Daemon operations exposed through the control protocol.
 pub trait ControlState: Send + Sync {
     /// Returns control health.
     fn health(&self) -> HealthResponse;
-
     /// Returns the current daemon status.
     fn status(&self) -> StatusResponse;
+    /// Reports whether mutations are draining.
+    fn draining(&self) -> bool;
+    /// Lists configured providers.
+    fn providers(&self) -> ControlFuture<'_, ProviderListResponse>;
+    /// Reads a provider's cached models.
+    fn provider_models(&self, id: String) -> ControlFuture<'_, ModelListResponse>;
+    /// Refreshes a provider's models.
+    fn refresh_models(&self, id: String) -> ControlFuture<'_, ModelListResponse>;
+    /// Tests connectivity to a provider.
+    fn test_provider(
+        &self,
+        id: String,
+        request: ProviderTestRequest,
+    ) -> ControlFuture<'_, ProviderTestResponse>;
+    /// Reads a provider's model picks.
+    fn picks(&self, id: String) -> ControlFuture<'_, PicksResponse>;
+    /// Replaces or edits a provider's model picks.
+    fn set_picks(&self, id: String, request: PicksSetRequest) -> ControlFuture<'_, PicksResponse>;
+    /// Lists configured client-facing route models.
+    fn route_models(&self) -> ControlFuture<'_, RouteModelListResponse>;
+    /// Lists known agents.
+    fn agents(&self) -> ControlFuture<'_, AgentListResponse>;
+    /// Reports agent connection states.
+    fn agent_status(&self) -> ControlFuture<'_, AgentStatusResponse>;
+    /// Plans an agent lifecycle change.
+    fn plan_agent(
+        &self,
+        id: String,
+        request: AgentPlanRequest,
+    ) -> ControlFuture<'_, AgentPlanResponse>;
+    /// Connects an agent.
+    fn connect_agent(
+        &self,
+        id: String,
+        request: AgentConnectRequest,
+    ) -> ControlFuture<'_, AgentChangeResponse>;
+    /// Disconnects an agent.
+    fn disconnect_agent(
+        &self,
+        id: String,
+        request: AgentDisconnectRequest,
+    ) -> ControlFuture<'_, AgentChangeResponse>;
+    /// Reports usage for a period.
+    fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
+    /// Rotates the control and model bearer token.
+    fn rotate_token(&self, request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse>;
+    /// Starts graceful daemon shutdown.
+    fn shutdown(&self, request: ShutdownRequest) -> ControlFuture<'_, ShutdownResponse>;
 }
 
 /// A control server with its own router and token-file state.
@@ -97,12 +173,49 @@ impl Control {
     }
 
     fn router(self, listen: Option<SocketAddr>) -> axum::Router {
+        let state = HttpState {
+            control: Arc::clone(&self.inner),
+            listen,
+        };
         axum::Router::new()
-            .fallback(axum::routing::any(handle))
-            .with_state(HttpState {
-                control: Arc::clone(&self.inner),
-                listen,
-            })
+            .route("/v1/hofund/health", get(health).head(method_not_allowed))
+            .route("/v1/hofund/status", get(status).head(method_not_allowed))
+            .route(
+                "/v1/hofund/providers",
+                get(providers).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/providers/{id}/models",
+                get(provider_models).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/providers/{id}/models/refresh",
+                post(refresh_models),
+            )
+            .route("/v1/hofund/providers/{id}/test", post(test_provider))
+            .route(
+                "/v1/hofund/providers/{id}/picks",
+                get(picks).put(set_picks).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/models",
+                get(route_models).head(method_not_allowed),
+            )
+            .route("/v1/hofund/agents", get(agents).head(method_not_allowed))
+            .route(
+                "/v1/hofund/agents/status",
+                get(agent_status).head(method_not_allowed),
+            )
+            .route("/v1/hofund/agents/{id}/plan", post(plan_agent))
+            .route("/v1/hofund/agents/{id}/connect", post(connect_agent))
+            .route("/v1/hofund/agents/{id}/disconnect", post(disconnect_agent))
+            .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
+            .route("/v1/hofund/token/rotate", post(rotate_token))
+            .route("/v1/hofund/shutdown", post(shutdown))
+            .fallback(not_found)
+            .method_not_allowed_fallback(method_not_allowed)
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, pre_route))
     }
 
     /// Binds a numeric loopback address and serves only control routes.
@@ -270,15 +383,24 @@ impl fmt::Debug for Control {
     }
 }
 
-async fn handle(
-    axum::extract::State(state): axum::extract::State<HttpState>,
-    request: Request,
-) -> Response {
+macro_rules! operation_response {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => json_response(
+                StatusCode::OK,
+                serde_json::to_vec(&value).unwrap_or_default(),
+            ),
+            Err(failure) => failure_response(failure),
+        }
+    };
+}
+
+async fn pre_route(State(state): State<HttpState>, mut request: Request, next: Next) -> Response {
     if let Some(response) = check_host_and_origin(request.headers(), state.listen) {
         return response;
     }
-    let method = request.method();
-    let path = request.uri().path();
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
     let open_health = method == Method::GET && path == "/v1/hofund/health";
     if !open_health
         && !authorized(
@@ -293,58 +415,259 @@ async fn handle(
             "unauthorized",
         );
     }
-    if method != Method::GET && method != Method::HEAD {
-        if !json_content_type(request.headers()) {
-            return error_response(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                ControlErrorKind::BadRequest,
-                "mutations require Content-Type: application/json",
-            );
-        }
-        if axum::body::to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES)
-            .await
-            .is_err()
-        {
-            return error_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                ControlErrorKind::BadRequest,
-                "request body is too large",
-            );
-        }
+    if method != Method::GET && method != Method::HEAD && !json_content_type(request.headers()) {
         return error_response(
-            StatusCode::METHOD_NOT_ALLOWED,
-            ControlErrorKind::MethodNotAllowed,
-            "method not allowed",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ControlErrorKind::BadRequest,
+            "mutations require Content-Type: application/json",
         );
     }
-
-    match (method, path) {
-        (&Method::GET, "/v1/hofund/health") => json_response(
-            StatusCode::OK,
-            serde_json::to_vec(&state.control.state.health()).unwrap_or_default(),
-        ),
-        (&Method::GET, "/v1/hofund/status") => json_response(
-            StatusCode::OK,
-            serde_json::to_vec(&state.control.state.status()).unwrap_or_default(),
-        ),
-        (&Method::GET, _) if path.starts_with("/v1/hofund/") || path == "/v1/hofund" => {
-            error_response(
-                StatusCode::NOT_FOUND,
-                ControlErrorKind::NotFound,
-                "not found",
-            )
-        }
-        _ if path == "/v1/hofund/health" || path == "/v1/hofund/status" => error_response(
-            StatusCode::METHOD_NOT_ALLOWED,
-            ControlErrorKind::MethodNotAllowed,
-            "method not allowed",
-        ),
-        _ => error_response(
-            StatusCode::NOT_FOUND,
-            ControlErrorKind::NotFound,
-            "not found",
-        ),
+    let body = std::mem::replace(request.body_mut(), Body::empty());
+    let Ok(body) = axum::body::to_bytes(body, MAX_REQUEST_BODY_BYTES).await else {
+        return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ControlErrorKind::BadRequest,
+            "request body is too large",
+        );
+    };
+    if state.control.state.draining()
+        && method != Method::GET
+        && !(method == Method::POST && path == "/v1/hofund/shutdown")
+    {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ControlErrorKind::Unavailable,
+            "daemon is draining",
+        );
     }
+    *request.body_mut() = Body::from(body);
+    next.run(request).await
+}
+
+async fn health(State(state): State<HttpState>) -> Response {
+    json_response(
+        StatusCode::OK,
+        serde_json::to_vec(&state.control.state.health()).unwrap_or_default(),
+    )
+}
+
+async fn status(State(state): State<HttpState>) -> Response {
+    json_response(
+        StatusCode::OK,
+        serde_json::to_vec(&state.control.state.status()).unwrap_or_default(),
+    )
+}
+
+async fn providers(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.providers().await)
+}
+
+async fn provider_models(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.provider_models(id).await)
+}
+
+async fn refresh_models(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    if !body.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            ControlErrorKind::BadRequest,
+            "model refresh requires an empty body",
+        );
+    }
+    operation_response!(state.control.state.refresh_models(id).await)
+}
+
+async fn test_provider(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<ProviderTestRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.test_provider(id, request).await)
+}
+
+async fn picks(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.picks(id).await)
+}
+
+async fn set_picks(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<PicksSetRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.set_picks(id, request).await)
+}
+
+async fn route_models(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.route_models().await)
+}
+
+async fn agents(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.agents().await)
+}
+
+async fn agent_status(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.agent_status().await)
+}
+
+async fn plan_agent(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentPlanRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.plan_agent(id, request).await)
+}
+
+async fn connect_agent(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentConnectRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.connect_agent(id, request).await)
+}
+
+async fn disconnect_agent(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentDisconnectRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.disconnect_agent(id, request).await)
+}
+
+async fn usage(
+    State(state): State<HttpState>,
+    uri: Uri,
+    query: Result<Query<UsageQuery>, QueryRejection>,
+) -> Response {
+    let query = if uri.query().is_none_or(str::is_empty) {
+        UsageQuery::default()
+    } else {
+        match query {
+            Ok(Query(query)) => query,
+            Err(_) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    ControlErrorKind::BadRequest,
+                    "invalid usage query",
+                );
+            }
+        }
+    };
+    if let Err(error) = query.validate() {
+        return failure_response(error.into());
+    }
+    operation_response!(state.control.state.usage(query).await)
+}
+
+async fn rotate_token(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<TokenRotateRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.rotate_token(request).await)
+}
+
+async fn shutdown(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<ShutdownRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.shutdown(request).await)
+}
+
+async fn not_found() -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        ControlErrorKind::NotFound,
+        "not found",
+    )
+}
+
+async fn method_not_allowed() -> Response {
+    error_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        ControlErrorKind::MethodNotAllowed,
+        "method not allowed",
+    )
+}
+
+fn path_id(id: Result<AxumPath<String>, PathRejection>) -> Result<String, ControlFailure> {
+    let AxumPath(id) =
+        id.map_err(|_| ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http"))?;
+    if id.is_empty() || id.len() > MAX_ID_BYTES {
+        return Err(ControlError::new(
+            ControlErrorKind::BadRequest,
+            "id must be nonempty and at most 256 bytes",
+            "http",
+        )
+        .into());
+    }
+    Ok(id)
+}
+
+fn decode_body<T: hofund_control_proto::Request>(body: &Bytes) -> Result<T, ControlFailure> {
+    decode_request(1, body).map_err(ControlFailure::from)
 }
 
 fn check_host_and_origin(headers: &HeaderMap, listen: Option<SocketAddr>) -> Option<Response> {
@@ -435,10 +758,24 @@ fn error_response(status: StatusCode, kind: ControlErrorKind, message: &str) -> 
     json_response(status, serde_json::to_vec(&envelope).unwrap_or_default())
 }
 
+fn failure_response(failure: ControlFailure) -> Response {
+    let status = if failure.error.kind == ControlErrorKind::Upstream && failure.status == Some(429)
+    {
+        StatusCode::TOO_MANY_REQUESTS
+    } else {
+        StatusCode::from_u16(failure.error.kind.http_status())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+    };
+    let mut envelope = ErrorEnvelope::default();
+    envelope.error = failure.error;
+    json_response(status, serde_json::to_vec(&envelope).unwrap_or_default())
+}
+
 fn json_response(status: StatusCode, body: Vec<u8>) -> Response {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(body))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
