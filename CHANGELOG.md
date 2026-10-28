@@ -257,6 +257,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Anthropic host checks match `anthropic.com` and its subdomains only, so a
+  lookalike host such as `evilanthropic.com` no longer gets official Anthropic
+  credential placement or model-list handling.
 - Test fixtures now retain temporary-directory guards until test completion,
   including panic paths, and a workspace invariant rejects hand-built process
   temp paths. Existing host model-state directories are tightened to `0700` on

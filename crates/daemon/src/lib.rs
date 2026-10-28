@@ -1378,9 +1378,10 @@ mod tests {
 
     #[test]
     fn moved_generative_and_messages_presets_plan_through_the_real_registry() {
-        for (preset, wire, base_url, credential, plugin) in [
+        for (preset, extra, wire, base_url, credential, plugin) in [
             (
                 "google",
+                "",
                 hofund_provider::Wire::Generative,
                 "https://generativelanguage.googleapis.com/v1beta",
                 hofund_provider::Credential::GoogApiKey,
@@ -1388,19 +1389,33 @@ mod tests {
             ),
             (
                 "anthropic",
+                "",
                 hofund_provider::Wire::Messages,
                 "https://api.anthropic.com",
                 hofund_provider::Credential::XApiKey,
                 "anthropic",
             ),
+            (
+                "anthropic",
+                "base_url = \"https://relay.example.test\"\n",
+                hofund_provider::Wire::Messages,
+                "https://relay.example.test",
+                hofund_provider::Credential::MessagesBoth,
+                "anthropic",
+            ),
         ] {
             let config = hofund_config::load(&format!(
-                "[[providers]]\nid = \"{preset}\"\npreset = \"{preset}\"\napi_key = \"test-key\"\n"
+                "[[providers]]\nid = \"{preset}\"\npreset = \"{preset}\"\n{extra}api_key = \"test-key\"\n"
             ))
             .expect("config");
             let provider = &config.providers[0];
             let planned = super::plan(provider).expect("real registry plan");
             assert_eq!(planned.wire, wire);
+            let protocol = match wire {
+                hofund_provider::Wire::Generative => hofund_plugin_api::ProtocolId::GENERATIVE_LANGUAGE,
+                _ => hofund_plugin_api::ProtocolId::ANTHROPIC_MESSAGES,
+            };
+            assert_eq!(planned.protocol, Some(protocol), "{preset} {extra}");
             assert_eq!(planned.base_url, base_url);
             assert_eq!(planned.credential, credential);
             assert_eq!(super::plugin_for(provider, wire, &registry()), plugin);
