@@ -7,9 +7,14 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use hofund_control_proto::{
-    API_VERSION, ControlErrorKind, HealthResponse, StatusResponse, decode_error_envelope,
+    API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
+    AgentListResponse, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
+    ControlErrorKind, HealthResponse, ModelListResponse, PicksResponse, PicksSetRequest,
+    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, RouteModelListResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UsageQuery, UsageResponse, decode_error_envelope,
 };
-use hofund_gateway::control::{Control, ControlState};
+use hofund_gateway::control::{Control, ControlFuture, ControlState};
 use hofund_gateway::{Gateway, GatewayError};
 use hofund_router::{FailoverPolicy, Router, Snapshot};
 use hofund_usage::Ledger;
@@ -35,6 +40,101 @@ impl ControlState for State {
         status.pid = 42;
         status
     }
+
+    fn draining(&self) -> bool {
+        false
+    }
+
+    fn providers(&self) -> ControlFuture<'_, ProviderListResponse> {
+        unavailable()
+    }
+
+    fn provider_models(&self, _id: String) -> ControlFuture<'_, ModelListResponse> {
+        unavailable()
+    }
+
+    fn refresh_models(&self, _id: String) -> ControlFuture<'_, ModelListResponse> {
+        unavailable()
+    }
+
+    fn test_provider(
+        &self,
+        _id: String,
+        _request: ProviderTestRequest,
+    ) -> ControlFuture<'_, ProviderTestResponse> {
+        unavailable()
+    }
+
+    fn picks(&self, _id: String) -> ControlFuture<'_, PicksResponse> {
+        unavailable()
+    }
+
+    fn set_picks(
+        &self,
+        _id: String,
+        _request: PicksSetRequest,
+    ) -> ControlFuture<'_, PicksResponse> {
+        unavailable()
+    }
+
+    fn route_models(&self) -> ControlFuture<'_, RouteModelListResponse> {
+        unavailable()
+    }
+
+    fn agents(&self) -> ControlFuture<'_, AgentListResponse> {
+        unavailable()
+    }
+
+    fn agent_status(&self) -> ControlFuture<'_, AgentStatusResponse> {
+        unavailable()
+    }
+
+    fn plan_agent(
+        &self,
+        _id: String,
+        _request: AgentPlanRequest,
+    ) -> ControlFuture<'_, AgentPlanResponse> {
+        unavailable()
+    }
+
+    fn connect_agent(
+        &self,
+        _id: String,
+        _request: AgentConnectRequest,
+    ) -> ControlFuture<'_, AgentChangeResponse> {
+        unavailable()
+    }
+
+    fn disconnect_agent(
+        &self,
+        _id: String,
+        _request: AgentDisconnectRequest,
+    ) -> ControlFuture<'_, AgentChangeResponse> {
+        unavailable()
+    }
+
+    fn usage(&self, _query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
+        unavailable()
+    }
+
+    fn rotate_token(&self, _request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse> {
+        unavailable()
+    }
+
+    fn shutdown(&self, _request: ShutdownRequest) -> ControlFuture<'_, ShutdownResponse> {
+        unavailable()
+    }
+}
+
+fn unavailable<T>() -> ControlFuture<'static, T> {
+    Box::pin(async {
+        Err(ControlError::new(
+            ControlErrorKind::Unavailable,
+            "not wired in this test",
+            "test",
+        )
+        .into())
+    })
 }
 
 fn control() -> Control {

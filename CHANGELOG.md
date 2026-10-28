@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Full typed control route and client surface, with ordered request defenses,
+  bounded bodies, error envelopes, no-store responses, and drain guards. The daemon
+  now serves secret-free provider summaries, cached models without upstream calls,
+  and route models over control TCP and Unix sockets.
 - Per-config control identities, single-instance locks, atomic token-free discovery,
   secure runtime-directory fallback, and same-user Unix socket transport with ordered
   client discovery. Windows keeps authenticated loopback TCP until named-pipe support lands.
@@ -239,6 +243,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   temp paths. Existing host model-state directories are tightened to `0700` on
   Unix, and unreadable or unmovable state files are preserved instead of being
   overwritten (#212, #101, #102).
+- Control request bodies between 2 MiB and the protocol request limit now reach
+  their handler instead of getting the HTTP framework's plain-text 413 without
+  an error envelope or `Cache-Control: no-store`. The control pre-route check is
+  the only body size gate.
 - Over-long Unix control socket paths now warn and fall back to TCP instead of
   preventing daemon startup. Socket tests use short paths on macOS, and the
   Windows single-instance test no longer requires session debug output.
