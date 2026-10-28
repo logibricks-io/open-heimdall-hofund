@@ -539,7 +539,7 @@ mod tests {
         fs::write(bin.join("codex.exe"), "").expect("fake binary");
         let override_dir = home.join("codex-override");
         let session = Session::from_env_iter(
-            &home,
+            &*home,
             [
                 (OsStr::new("Path"), bin.as_os_str()),
                 (OsStr::new("Codex_Home"), override_dir.as_os_str()),

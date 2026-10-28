@@ -856,7 +856,7 @@ fn shipped_agents_honor_windows_mixed_case_environment_overrides() {
     ] {
         let home = scratch();
         let session =
-            Session::from_env_iter(&home, [(variable, home.join("absolute-root").as_os_str())]);
+            Session::from_env_iter(&*home, [(variable, home.join("absolute-root").as_os_str())]);
         let plan = adapter(id, TargetOs::Windows)
             .plan(&session, &target())
             .expect("mixed-case plan");
@@ -866,7 +866,7 @@ fn shipped_agents_honor_windows_mixed_case_environment_overrides() {
             .map(|change| {
                 change
                     .path()
-                    .strip_prefix(&home)
+                    .strip_prefix(&*home)
                     .expect("relative")
                     .to_path_buf()
             })
