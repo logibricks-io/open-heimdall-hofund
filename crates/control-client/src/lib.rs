@@ -502,8 +502,9 @@ mod tests {
 #[cfg(test)]
 mod route_tests {
     use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
 
-    use http_body_util::Full;
+    use http_body_util::{BodyExt, Full};
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
 
@@ -543,5 +544,266 @@ mod route_tests {
         let response = client.provider_models(id).await.expect("model response");
         assert_eq!(response.provider, id);
         server.await.expect("server");
+    }
+
+    /// One request as seen by the recording server.
+    struct Recorded {
+        method: http::Method,
+        path_and_query: String,
+        content_types: Vec<String>,
+        body: Vec<u8>,
+    }
+
+    fn reply_body(path: &str) -> Vec<u8> {
+        use hofund_control_proto as proto;
+        let encoded = match path {
+            "/v1/hofund/health" => serde_json::to_vec(&proto::HealthResponse::default()),
+            "/v1/hofund/status" => serde_json::to_vec(&proto::StatusResponse::default()),
+            "/v1/hofund/providers" => serde_json::to_vec(&proto::ProviderListResponse::default()),
+            "/v1/hofund/providers/provider-1/models"
+            | "/v1/hofund/providers/provider-1/models/refresh" => {
+                serde_json::to_vec(&proto::ModelListResponse::default())
+            }
+            "/v1/hofund/providers/provider-1/test" => {
+                serde_json::to_vec(&proto::ProviderTestResponse::default())
+            }
+            "/v1/hofund/providers/provider-1/picks" => {
+                serde_json::to_vec(&proto::PicksResponse::default())
+            }
+            "/v1/hofund/models" => serde_json::to_vec(&proto::RouteModelListResponse::default()),
+            "/v1/hofund/agents" => serde_json::to_vec(&proto::AgentListResponse::default()),
+            "/v1/hofund/agents/status" => {
+                serde_json::to_vec(&proto::AgentStatusResponse::default())
+            }
+            "/v1/hofund/agents/agent-1/plan" => {
+                serde_json::to_vec(&proto::AgentPlanResponse::default())
+            }
+            "/v1/hofund/agents/agent-1/connect" | "/v1/hofund/agents/agent-1/disconnect" => {
+                serde_json::to_vec(&proto::AgentChangeResponse::default())
+            }
+            "/v1/hofund/usage" => serde_json::to_vec(&proto::UsageResponse::default()),
+            "/v1/hofund/token/rotate" => serde_json::to_vec(&proto::TokenRotateResponse::default()),
+            "/v1/hofund/shutdown" => serde_json::to_vec(&proto::ShutdownResponse::default()),
+            other => panic!("unexpected control path {other}"),
+        };
+        encoded.expect("response JSON")
+    }
+
+    async fn recording_server() -> (
+        std::net::SocketAddr,
+        Arc<Mutex<Vec<Recorded>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&recorded);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let log = Arc::clone(&log);
+                tokio::spawn(async move {
+                    let service =
+                        service_fn(move |request: http::Request<hyper::body::Incoming>| {
+                            let log = Arc::clone(&log);
+                            async move {
+                                let method = request.method().clone();
+                                let path = request.uri().path().to_owned();
+                                let path_and_query = request
+                                    .uri()
+                                    .path_and_query()
+                                    .map(ToString::to_string)
+                                    .unwrap_or_default();
+                                let content_types = request
+                                    .headers()
+                                    .get_all(http::header::CONTENT_TYPE)
+                                    .iter()
+                                    .map(|value| value.to_str().expect("content type").to_owned())
+                                    .collect();
+                                let body = request
+                                    .into_body()
+                                    .collect()
+                                    .await
+                                    .expect("request body")
+                                    .to_bytes()
+                                    .to_vec();
+                                log.lock().expect("recorded").push(Recorded {
+                                    method,
+                                    path_and_query,
+                                    content_types,
+                                    body,
+                                });
+                                let response = http::Response::builder()
+                                    .header(http::header::CONTENT_TYPE, "application/json")
+                                    .body(Full::new(std::io::Cursor::new(reply_body(&path))))
+                                    .expect("response");
+                                Ok::<_, Infallible>(response)
+                            }
+                        });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (address, recorded, server)
+    }
+
+    #[tokio::test]
+    async fn every_typed_method_sends_its_verb_path_headers_and_body() {
+        use hofund_control_proto::{
+            AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentPlanRequest,
+            PicksSetRequest, ProviderTestRequest, ShutdownRequest, TokenRotateRequest, UsagePeriod,
+            UsageQuery, decode_request,
+        };
+
+        let (address, recorded, server) = recording_server().await;
+        let client = super::Client::tcp(address, "test-token");
+
+        let test_request = ProviderTestRequest::new(Some(vec!["model-a".to_owned()]));
+        let picks_request = PicksSetRequest::replace("picks-rev", vec!["model-a".to_owned()]);
+        let plan_request = AgentPlanRequest::new(AgentAction::Disconnect, true);
+        let connect_request = AgentConnectRequest::new(Some("plan-rev".to_owned()));
+        let disconnect_request = AgentDisconnectRequest::new(true, Some("plan-rev".to_owned()));
+        let rotate_request = TokenRotateRequest::new();
+        let shutdown_request = ShutdownRequest::new();
+
+        client.health().await.expect("health");
+        client.status().await.expect("status");
+        client.providers().await.expect("providers");
+        client
+            .provider_models("provider-1")
+            .await
+            .expect("provider models");
+        client
+            .refresh_models("provider-1")
+            .await
+            .expect("refresh models");
+        client
+            .test_provider("provider-1", test_request.clone())
+            .await
+            .expect("test provider");
+        client.picks("provider-1").await.expect("picks");
+        client
+            .set_picks("provider-1", picks_request.clone())
+            .await
+            .expect("set picks");
+        client.route_models().await.expect("route models");
+        client.agents().await.expect("agents");
+        client.agent_status().await.expect("agent status");
+        client
+            .plan_agent("agent-1", plan_request.clone())
+            .await
+            .expect("plan agent");
+        client
+            .connect_agent("agent-1", connect_request.clone())
+            .await
+            .expect("connect agent");
+        client
+            .disconnect_agent("agent-1", disconnect_request.clone())
+            .await
+            .expect("disconnect agent");
+        client
+            .usage(UsageQuery::new(UsagePeriod::Week))
+            .await
+            .expect("usage");
+        client
+            .rotate_token(rotate_request.clone())
+            .await
+            .expect("rotate token");
+        client
+            .shutdown(shutdown_request.clone())
+            .await
+            .expect("shutdown");
+        server.abort();
+
+        let recorded = std::mem::take(&mut *recorded.lock().expect("recorded"));
+        let seen: Vec<(http::Method, &str)> = recorded
+            .iter()
+            .map(|request| (request.method.clone(), request.path_and_query.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (http::Method::GET, "/v1/hofund/health"),
+                (http::Method::GET, "/v1/hofund/status"),
+                (http::Method::GET, "/v1/hofund/providers"),
+                (http::Method::GET, "/v1/hofund/providers/provider-1/models"),
+                (
+                    http::Method::POST,
+                    "/v1/hofund/providers/provider-1/models/refresh"
+                ),
+                (http::Method::POST, "/v1/hofund/providers/provider-1/test"),
+                (http::Method::GET, "/v1/hofund/providers/provider-1/picks"),
+                (http::Method::PUT, "/v1/hofund/providers/provider-1/picks"),
+                (http::Method::GET, "/v1/hofund/models"),
+                (http::Method::GET, "/v1/hofund/agents"),
+                (http::Method::GET, "/v1/hofund/agents/status"),
+                (http::Method::POST, "/v1/hofund/agents/agent-1/plan"),
+                (http::Method::POST, "/v1/hofund/agents/agent-1/connect"),
+                (http::Method::POST, "/v1/hofund/agents/agent-1/disconnect"),
+                (http::Method::GET, "/v1/hofund/usage?period=week"),
+                (http::Method::POST, "/v1/hofund/token/rotate"),
+                (http::Method::POST, "/v1/hofund/shutdown"),
+            ]
+        );
+
+        for request in &recorded {
+            if request.method == http::Method::GET {
+                assert!(
+                    request.content_types.is_empty(),
+                    "GET {} must not send Content-Type",
+                    request.path_and_query
+                );
+                assert!(
+                    request.body.is_empty(),
+                    "GET {} must not send a body",
+                    request.path_and_query
+                );
+            } else {
+                assert_eq!(
+                    request.content_types,
+                    ["application/json"],
+                    "{} {} must send exactly one JSON Content-Type",
+                    request.method,
+                    request.path_and_query
+                );
+            }
+        }
+
+        let body = |index: usize| recorded[index].body.as_slice();
+        assert!(body(4).is_empty(), "refresh_models must send an empty body");
+        assert_eq!(
+            decode_request::<ProviderTestRequest>(1, body(5)).expect("test body"),
+            test_request
+        );
+        assert_eq!(
+            decode_request::<PicksSetRequest>(1, body(7)).expect("picks body"),
+            picks_request
+        );
+        assert_eq!(
+            decode_request::<AgentPlanRequest>(1, body(11)).expect("plan body"),
+            plan_request
+        );
+        assert_eq!(
+            decode_request::<AgentConnectRequest>(1, body(12)).expect("connect body"),
+            connect_request
+        );
+        assert_eq!(
+            decode_request::<AgentDisconnectRequest>(1, body(13)).expect("disconnect body"),
+            disconnect_request
+        );
+        assert_eq!(
+            decode_request::<TokenRotateRequest>(1, body(15)).expect("rotate body"),
+            rotate_request
+        );
+        assert_eq!(
+            decode_request::<ShutdownRequest>(1, body(16)).expect("shutdown body"),
+            shutdown_request
+        );
     }
 }

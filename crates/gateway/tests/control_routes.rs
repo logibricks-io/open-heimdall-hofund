@@ -299,6 +299,27 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             Some(1)
         );
     }
+    assert_eq!(
+        state.calls.lock().expect("calls").as_slice(),
+        [
+            "providers",
+            "provider_models:provider",
+            "refresh_models:provider",
+            "test_provider:provider",
+            "picks:provider",
+            "set_picks:provider",
+            "route_models",
+            "agents",
+            "agent_status",
+            "plan_agent:agent",
+            "connect_agent:agent",
+            "disconnect_agent:agent",
+            "usage:Day",
+            "rotate_token",
+            "shutdown",
+        ],
+        "each control route must dispatch to its own handler"
+    );
 
     state.set_failure(ControlErrorKind::Internal, None);
     for (method, path, body) in operation_routes()
@@ -591,4 +612,32 @@ async fn oversize_body_returns_413_with_no_store() {
     assert_no_store(&headers);
     assert_error(&body, ControlErrorKind::BadRequest);
     assert!(state.calls.lock().expect("calls").is_empty());
+}
+
+#[tokio::test]
+async fn body_above_extractor_default_within_protocol_limit_reaches_handler() {
+    const PADDED_BYTES: usize = 3 * 1024 * 1024;
+    const EXTRACTOR_DEFAULT_BYTES: usize = 2 * 1024 * 1024;
+    let state = Arc::new(FakeControlState::default());
+    let mut body = br#"{"version":1}"#.to_vec();
+    body.resize(PADDED_BYTES, b' ');
+    assert!(body.len() > EXTRACTOR_DEFAULT_BYTES);
+    assert!(body.len() < MAX_REQUEST_BODY_BYTES);
+    let (status, headers, response) = call(
+        app(&state),
+        Method::POST,
+        "/v1/hofund/shutdown",
+        body,
+        true,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_no_store(&headers);
+    let value: serde_json::Value = serde_json::from_slice(&response).expect("response JSON");
+    assert_eq!(
+        value.get("version").and_then(|value| value.as_u64()),
+        Some(1)
+    );
+    assert_eq!(state.calls.lock().expect("calls").as_slice(), ["shutdown"]);
 }

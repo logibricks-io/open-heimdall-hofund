@@ -10,7 +10,7 @@ use std::path::Path;
 
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{Path as AxumPath, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -215,6 +215,11 @@ impl Control {
             .fallback(not_found)
             .method_not_allowed_fallback(method_not_allowed)
             .with_state(state.clone())
+            // `pre_route` buffers the body up to `MAX_REQUEST_BODY_BYTES` and is
+            // the only size gate. Disable the extractor default (2 MiB) so a
+            // body within the protocol limit is never rejected outside the
+            // control error envelope.
+            .layer(DefaultBodyLimit::disable())
             .layer(middleware::from_fn_with_state(state, pre_route))
     }
 

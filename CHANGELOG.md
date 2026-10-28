@@ -238,6 +238,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Control request bodies between 2 MiB and the protocol request limit now reach
+  their handler instead of getting the HTTP framework's plain-text 413 without
+  an error envelope or `Cache-Control: no-store`. The control pre-route check is
+  the only body size gate.
 - Over-long Unix control socket paths now warn and fall back to TCP instead of
   preventing daemon startup. Socket tests use short paths on macOS, and the
   Windows single-instance test no longer requires session debug output.
