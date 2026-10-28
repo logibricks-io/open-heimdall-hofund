@@ -229,6 +229,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Vertex token mint failures are shared with concurrent waiters and negatively
+  cached for five seconds. Mantle learned-route maps are bounded to 256 entries
+  per provider instance with oldest-entry eviction. Invalid local plugin header
+  values now report `Config` instead of `Auth` (#65, #137, #118).
 - Over-long Unix control socket paths now warn and fall back to TCP instead of
   preventing daemon startup. Socket tests use short paths on macOS, and the
   Windows single-instance test no longer requires session debug output.

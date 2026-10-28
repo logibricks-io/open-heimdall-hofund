@@ -20,6 +20,7 @@
 //! Not read: the metadata server, workload identity federation
 //! (`external_account`), and express-mode API keys.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -43,6 +44,7 @@ const IAM_ROOT: &str = "https://iamcredentials.googleapis.com/v1";
 const SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const REFRESH_LEAD: Duration = Duration::from_secs(5 * 60);
 const MINT_TIMEOUT: Duration = Duration::from_secs(30);
+const MINT_FAILURE_CACHE_TTL: Duration = Duration::from_secs(5);
 const MAX_CREDENTIALS_BYTES: u64 = 1 << 20;
 
 const US_EU_MODELS: &[&str] = &[
@@ -65,7 +67,8 @@ const REGION_MODELS: &[&str] = &[
 /// The access token is cached on this value until five minutes before it
 /// expires, or until the credentials file's size or modification time
 /// changes. Concurrent cache misses share one mint, bounded by a 30 second
-/// total deadline on both pooled and private clients.
+/// total deadline on both pooled and private clients. A failed mint is shared
+/// with its waiters and cached for five seconds.
 pub struct Vertex {
     upstream: Upstream,
     base: String,
@@ -77,13 +80,24 @@ pub struct Vertex {
     iam_root: String,
     token_client: reqwest::Client,
     mint_deadline: Duration,
-    cache: tokio::sync::Mutex<Option<CachedToken>>,
+    cache: tokio::sync::Mutex<Option<CachedMint>>,
+}
+
+enum CachedMint {
+    Token(CachedToken),
+    Failure(CachedFailure),
 }
 
 struct CachedToken {
     stamp: String,
     token: String,
     expiry: SystemTime,
+}
+
+struct CachedFailure {
+    stamp: String,
+    error: ProviderError,
+    at: tokio::time::Instant,
 }
 
 impl std::fmt::Debug for Vertex {
@@ -612,49 +626,82 @@ impl Vertex {
             ));
         }
         let stamp = file_stamp(&meta);
-        if let Some(token) = self.cached(&stamp).await {
-            return Ok(token);
-        }
-        let mut cache = self.cache.lock().await;
-        if let Some(token) = cached_token(&cache, &stamp) {
-            return Ok(token);
-        }
-        let mint = mint_file(
-            &self.token_client,
-            &file,
-            &self.impersonate,
-            &self.token_url,
-            &self.iam_root,
-        );
-        let (token, expiry) = tokio::time::timeout(self.mint_deadline, mint)
-            .await
-            .map_err(|_| {
-                ProviderError::timeout("Google token mint exceeded its total deadline")
-            })??;
-        *cache = Some(CachedToken {
-            stamp,
-            token: token.clone(),
-            expiry,
-        });
-        Ok(token)
+        self.mint_cached(
+            &stamp,
+            mint_file(
+                &self.token_client,
+                &file,
+                &self.impersonate,
+                &self.token_url,
+                &self.iam_root,
+            ),
+        )
+        .await
     }
 
-    async fn cached(&self, stamp: &str) -> Option<String> {
+    async fn mint_cached(
+        &self,
+        stamp: &str,
+        mint: impl Future<Output = Result<(String, SystemTime), ProviderError>>,
+    ) -> Result<String, ProviderError> {
+        if let Some(cached) = self.cached(stamp).await {
+            return cached;
+        }
+        let mut cache = self.cache.lock().await;
+        if let Some(cached) = cached_mint(&cache, stamp) {
+            return cached;
+        }
+        let result = tokio::time::timeout(self.mint_deadline, mint)
+            .await
+            .map_err(|_| ProviderError::timeout("Google token mint exceeded its total deadline"))
+            .and_then(|result| result);
+        match result {
+            Ok((token, expiry)) => {
+                *cache = Some(CachedMint::Token(CachedToken {
+                    stamp: stamp.to_owned(),
+                    token: token.clone(),
+                    expiry,
+                }));
+                Ok(token)
+            }
+            Err(error) => {
+                *cache = Some(CachedMint::Failure(CachedFailure {
+                    stamp: stamp.to_owned(),
+                    error: copy_error(&error),
+                    at: tokio::time::Instant::now(),
+                }));
+                Err(error)
+            }
+        }
+    }
+
+    async fn cached(&self, stamp: &str) -> Option<Result<String, ProviderError>> {
         let cache = self.cache.lock().await;
-        cached_token(&cache, stamp)
+        cached_mint(&cache, stamp)
     }
 }
 
-fn cached_token(cache: &Option<CachedToken>, stamp: &str) -> Option<String> {
-    let cached = cache.as_ref()?;
-    if cached.stamp != stamp {
-        return None;
+fn cached_mint(cache: &Option<CachedMint>, stamp: &str) -> Option<Result<String, ProviderError>> {
+    match cache.as_ref()? {
+        CachedMint::Token(cached) if cached.stamp == stamp => {
+            let fresh_until = cached.expiry.checked_sub(REFRESH_LEAD)?;
+            (SystemTime::now() < fresh_until).then(|| Ok(cached.token.clone()))
+        }
+        CachedMint::Failure(cached)
+            if cached.stamp == stamp && cached.at.elapsed() < MINT_FAILURE_CACHE_TTL =>
+        {
+            Some(Err(copy_error(&cached.error)))
+        }
+        _ => None,
     }
-    let fresh_until = cached.expiry.checked_sub(REFRESH_LEAD)?;
-    if SystemTime::now() < fresh_until {
-        Some(cached.token.clone())
-    } else {
-        None
+}
+
+fn copy_error(error: &ProviderError) -> ProviderError {
+    ProviderError {
+        kind: error.kind,
+        message: error.message.clone(),
+        status: error.status,
+        retry_after: error.retry_after,
     }
 }
 
@@ -1650,6 +1697,78 @@ mod tests {
             assert_eq!(token.expect("token"), "shared-test-token");
         }
         let _ = std::fs::remove_dir_all(credentials.parent().expect("parent"));
+    }
+
+    fn cache_test_provider() -> super::Vertex {
+        super::Vertex::new(
+            crate::Endpoint::new("vertex-cache", "http://127.0.0.1:9"),
+            "",
+            "",
+        )
+        .expect("vertex")
+    }
+
+    async fn fail_mint(
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Result<(String, std::time::SystemTime), super::ProviderError> {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::task::yield_now().await;
+        Err(super::ProviderError::status(503, "shared mint failure")
+            .with_retry_after(std::time::Duration::from_secs(30)))
+    }
+
+    #[tokio::test]
+    async fn concurrent_mint_failures_are_shared_with_all_waiters() {
+        let provider = std::sync::Arc::new(cache_test_provider());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waiting = (0..8).map(|_| {
+            let provider = std::sync::Arc::clone(&provider);
+            let calls = std::sync::Arc::clone(&calls);
+            async move { provider.mint_cached("stamp", fail_mint(calls)).await }
+        });
+        let results = futures_util::future::join_all(waiting).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(results.len(), 8);
+        for result in results {
+            let error = result.expect_err("mint failure");
+            assert_eq!(error.kind, crate::ProviderErrorKind::Status);
+            assert_eq!(error.message, "shared mint failure");
+            assert_eq!(error.status, Some(503));
+            assert_eq!(error.retry_after, Some(std::time::Duration::from_secs(30)));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cached_mint_failure_does_not_mint_inside_the_negative_cache_window() {
+        let provider = cache_test_provider();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        provider
+            .mint_cached("stamp", fail_mint(std::sync::Arc::clone(&calls)))
+            .await
+            .expect_err("first failure");
+        tokio::time::advance(super::MINT_FAILURE_CACHE_TTL - std::time::Duration::from_nanos(1))
+            .await;
+        provider
+            .mint_cached("stamp", fail_mint(std::sync::Arc::clone(&calls)))
+            .await
+            .expect_err("cached failure");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_mint_is_retried_after_the_negative_cache_window() {
+        let provider = cache_test_provider();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        provider
+            .mint_cached("stamp", fail_mint(std::sync::Arc::clone(&calls)))
+            .await
+            .expect_err("first failure");
+        tokio::time::advance(super::MINT_FAILURE_CACHE_TTL).await;
+        provider
+            .mint_cached("stamp", fail_mint(std::sync::Arc::clone(&calls)))
+            .await
+            .expect_err("new failure");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
