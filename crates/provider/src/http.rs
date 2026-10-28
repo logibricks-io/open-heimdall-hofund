@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
 use hofund_ir::Request;
-use hofund_plugin_sdk::transport::parse_retry_after;
+use hofund_plugin_sdk::transport::parse_retry_after_headers;
 use hofund_quirks::Profile;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -19,8 +19,7 @@ use crate::stream::SseEvents;
 pub(crate) use crate::stream::{map_body, map_transport, message_from};
 
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    parse_retry_after(value, std::time::SystemTime::now())
+    parse_retry_after_headers(headers, std::time::SystemTime::now())
 }
 
 /// Where an API key is written.
@@ -589,7 +588,7 @@ async fn send<'a>(
     if !status.is_success() {
         let retry_after = retry_after(response.headers());
         let bytes = response.bytes().await.unwrap_or_default();
-        let error = ProviderError::status(status.as_u16(), message_from(&bytes));
+        let error = ProviderError::response(status.as_u16(), &bytes);
         return Err(match retry_after {
             Some(after) => error.with_retry_after(after),
             None => error,
@@ -697,7 +696,8 @@ mod tests {
 
     use tokio::io::AsyncReadExt;
 
-    use super::{note_dropped, parse_retry_after, send_builder};
+    use super::{note_dropped, send_builder};
+    use hofund_plugin_sdk::transport::parse_retry_after;
 
     #[test]
     fn retry_after_parses_seconds_and_http_dates_at_a_fixed_time() {
