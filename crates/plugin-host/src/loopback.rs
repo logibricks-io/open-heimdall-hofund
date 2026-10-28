@@ -74,6 +74,7 @@ impl Shared {
 }
 
 struct Session {
+    plugin: PluginKey,
     redirect_uri: String,
     state: String,
     shared: Arc<Shared>,
@@ -212,7 +213,7 @@ impl LoopbackRegistry {
 impl LoopbackBackend for LoopbackRegistry {
     fn bind(
         &self,
-        _plugin: &PluginKey,
+        plugin: &PluginKey,
         session: &str,
         spec: &LoopbackSpec,
     ) -> Result<LoopbackBinding, PluginError> {
@@ -281,6 +282,7 @@ impl LoopbackBackend for LoopbackRegistry {
         sessions.insert(
             session.to_owned(),
             Arc::new(Session {
+                plugin: plugin.clone(),
                 redirect_uri: redirect_uri.clone(),
                 state,
                 shared,
@@ -291,8 +293,13 @@ impl LoopbackBackend for LoopbackRegistry {
         Ok(LoopbackBinding::from_parts(redirect_uri, port, blocked))
     }
 
-    fn release(&self, session: &str) {
-        Self::release(self, session);
+    fn release(&self, plugin: &PluginKey, session: &str) {
+        let owned = self
+            .session(session)
+            .is_some_and(|entry| entry.plugin == *plugin);
+        if owned {
+            Self::release(self, session);
+        }
     }
 }
 
@@ -995,6 +1002,32 @@ mod tests {
             .bind(&key(), &self::session(), &LoopbackSpec::ephemeral())
             .expect_err("no state");
         assert_eq!(error.kind(), PluginErrorKind::Config);
+    }
+
+    #[tokio::test]
+    async fn only_the_binding_plugin_releases_through_the_backend() {
+        let registry = LoopbackRegistry::new();
+        let session = session();
+        let port = registry
+            .bind(&key(), &session, &spec())
+            .expect("bind")
+            .port();
+        let other = PluginKey::new(PluginKind::Subscription, PluginId::from_static("gemini"));
+        LoopbackBackend::release(&registry, &other, &session);
+        let (status, _) = get(port, &format!("/callback?code=c&state={STATE}")).await;
+        assert_eq!(status, 200, "another plugin closed the listener");
+        let proof = registry
+            .await_callback(&session, no_paste(), WAIT)
+            .await
+            .expect("claimed");
+        assert_eq!(code(&proof), "c");
+        LoopbackBackend::release(&registry, &key(), &session);
+        let error = registry
+            .await_callback(&session, no_paste(), WAIT)
+            .await
+            .expect_err("released");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+        assert!(port_is_free(port).await, "the port is still bound");
     }
 
     #[test]

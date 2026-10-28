@@ -300,8 +300,9 @@ pub trait LoopbackBackend: Send + Sync {
         spec: &crate::LoopbackSpec,
     ) -> Result<crate::LoopbackBinding, PluginError>;
 
-    /// Closes the listener for `session`, if any. An unknown session is a no-op.
-    fn release(&self, session: &str);
+    /// Closes the listener for `session` if `plugin` bound it. An unknown
+    /// session, or one bound by another plugin, is a no-op.
+    fn release(&self, plugin: &PluginKey, session: &str);
 }
 
 /// The backend a context gets when the kernel has no loopback listener.
@@ -319,7 +320,7 @@ impl LoopbackBackend for NoLoopback {
         ))
     }
 
-    fn release(&self, _session: &str) {}
+    fn release(&self, _plugin: &PluginKey, _session: &str) {}
 }
 
 /// Per-plugin directories the kernel creates.

@@ -1099,10 +1099,11 @@ impl LoopbackHandle {
         self.inner.bind(&self.plugin, ctx.session(), spec)
     }
 
-    /// Closes the listener for the sign-in in `ctx`, if any.
+    /// Closes the listener for the sign-in in `ctx`, if any. A context
+    /// without a session or for another plugin is a no-op.
     pub fn release(&self, ctx: &SignInCtx) {
-        if !ctx.session().is_empty() {
-            self.inner.release(ctx.session());
+        if !ctx.session().is_empty() && ctx.plugin() == self.plugin.id() {
+            self.inner.release(&self.plugin, ctx.session());
         }
     }
 }
@@ -1286,11 +1287,11 @@ mod tests {
                 })
             }
 
-            fn release(&self, session: &str) {
+            fn release(&self, plugin: &PluginKey, session: &str) {
                 self.calls
                     .lock()
                     .expect("calls")
-                    .push(format!("release {session}"));
+                    .push(format!("release {} {session}", plugin.id()));
             }
         }
 
@@ -1328,11 +1329,16 @@ mod tests {
             assert_eq!(binding.blocked(), Some(BindBlocked::Busy));
             handle.release(&ctx());
             handle.release(&SignInCtx::new(PluginId::from_static("codex")));
+            handle.release(
+                &SignInCtx::new(PluginId::from_static("gemini"))
+                    .with_session(SESSION)
+                    .expect("session"),
+            );
             assert_eq!(
                 *fake.calls.lock().expect("calls"),
                 vec![
                     format!("bind codex {SESSION} Some(1455) /auth/callback Ipv4 Some(\"s\")"),
-                    format!("release {SESSION}"),
+                    format!("release codex {SESSION}"),
                 ]
             );
             let ephemeral = LoopbackSpec::ephemeral();

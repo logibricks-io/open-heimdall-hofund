@@ -698,7 +698,7 @@ kernel::HttpResponse
 kernel::Job
 kernel::LoopbackBackend
 kernel::LoopbackBackend::fn bind (& self , plugin : & PluginKey , session : & str , spec : & crate :: LoopbackSpec ,) -> Result < crate :: LoopbackBinding , PluginError >
-kernel::LoopbackBackend::fn release (& self , session : & str)
+kernel::LoopbackBackend::fn release (& self , plugin : & PluginKey , session : & str)
 kernel::ObserveBackend
 kernel::ObserveBackend::fn observe (& self , observation : QuotaObservation) -> Result < () , PluginError >
 kernel::PipedChildBackend
