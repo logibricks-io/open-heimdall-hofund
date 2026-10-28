@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].as_ref().map(Vec::len), Ok(MAX_LINE + 1));
         assert_eq!(out[1], Ok(b"next\n".to_vec()));
-        assert_eq!(lines(vec![b'b'; MAX_LINE]).len(), 1);
+        assert_eq!(lines(vec![b'b'; MAX_LINE]), vec![Ok(vec![b'b'; MAX_LINE])]);
     }
 
     #[test]
