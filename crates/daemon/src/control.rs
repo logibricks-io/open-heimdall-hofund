@@ -12,11 +12,14 @@ use hofund_control_proto::{
     RouteModelListResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
     TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
 };
+use hofund_agent::Session;
 use hofund_gateway::control::{ControlFuture, ControlState};
 use hofund_router::Cooldowns;
 use hofund_usage::Ledger;
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
+use super::control_agents::AgentOps;
 use super::{DaemonRegistry, ModelsHost, membership, plugin_for, protocol_of};
 
 pub(crate) struct DaemonControl {
@@ -31,8 +34,7 @@ pub(crate) struct DaemonControl {
     cooldowns: Arc<Cooldowns>,
     #[expect(dead_code, reason = "the usage route is wired in L5d")]
     usage: Arc<Ledger>,
-    #[expect(dead_code, reason = "token rotation is wired in L5c")]
-    token_path: PathBuf,
+    agents: AgentOps,
 }
 
 impl DaemonControl {
@@ -50,6 +52,7 @@ impl DaemonControl {
         usage: Arc<Ledger>,
         token_path: PathBuf,
     ) -> Self {
+        let registry_agents = registry.agents();
         Self {
             config_path: config_path.to_path_buf(),
             configured,
@@ -57,12 +60,32 @@ impl DaemonControl {
             started_at_ms,
             runtime_revision,
             models,
-            config,
             registry,
             cooldowns,
+            agents: AgentOps::new(
+                registry_agents,
+                config_path,
+                format!("http://{}", config.listen),
+                config.routes.iter().map(|route| route.model.clone()).collect(),
+                token_path,
+            ),
             usage,
-            token_path,
+            config,
         }
+    }
+
+    /// Points agent calls at `session` and publishes token rotations on
+    /// `generation`. `None` keeps the process environment and a private channel.
+    pub(crate) fn with_agent_hooks(
+        mut self,
+        session: Option<Session>,
+        generation: Option<watch::Sender<u64>>,
+    ) -> Self {
+        self.agents = self
+            .agents
+            .with_session(session)
+            .with_token_generation(generation);
+        self
     }
 
     fn config(&self) -> &Config {
@@ -206,35 +229,40 @@ impl ControlState for DaemonControl {
     }
 
     fn agents(&self) -> ControlFuture<'_, AgentListResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.list().await.map_err(Into::into) })
     }
 
     fn agent_status(&self) -> ControlFuture<'_, AgentStatusResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.status().await.map_err(Into::into) })
     }
 
     fn plan_agent(
         &self,
-        _id: String,
-        _request: AgentPlanRequest,
+        id: String,
+        request: AgentPlanRequest,
     ) -> ControlFuture<'_, AgentPlanResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.plan(id, request).await.map_err(Into::into) })
     }
 
     fn connect_agent(
         &self,
-        _id: String,
-        _request: AgentConnectRequest,
+        id: String,
+        request: AgentConnectRequest,
     ) -> ControlFuture<'_, AgentChangeResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.connect(id, request).await.map_err(Into::into) })
     }
 
     fn disconnect_agent(
         &self,
-        _id: String,
-        _request: AgentDisconnectRequest,
+        id: String,
+        request: AgentDisconnectRequest,
     ) -> ControlFuture<'_, AgentChangeResponse> {
-        unavailable()
+        Box::pin(async move {
+            self.agents
+                .disconnect(id, request)
+                .await
+                .map_err(Into::into)
+        })
     }
 
     fn usage(&self, _query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
@@ -242,7 +270,7 @@ impl ControlState for DaemonControl {
     }
 
     fn rotate_token(&self, _request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse> {
-        unavailable()
+        Box::pin(async move { self.agents.rotate_token().await.map_err(Into::into) })
     }
 
     fn shutdown(&self, _request: ShutdownRequest) -> ControlFuture<'_, ShutdownResponse> {

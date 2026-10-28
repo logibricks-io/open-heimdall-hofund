@@ -102,6 +102,7 @@ flowchart BT
   daemon --> pluginRegistry
   daemon --> pluginSdk
   daemon --> usage
+  daemon --> agent
   agent --> config
   agent --> pluginApi
   cli --> daemon
@@ -126,6 +127,8 @@ adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.
 `daemon` depends on `plugin-registry` and
 `plugin-host` so it can call `factory` and build a `HostContext`. It depends on
 `plugin-sdk` for the bounded pager used by an exact configured model-list URL.
+It depends on `agent` so the control plane can plan, connect, and disconnect
+agent configs and refresh them after a token rotation.
 `gateway` depends on `plugin-host` so it can build a `SurfaceHost`.
 The subscription kit depends only on `plugin-host`. The agent kit also depends
 on `agent` for the shared engine and `plugin-api` for descriptions. The upstream
@@ -162,7 +165,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
-| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent` (tests) |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent` |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
