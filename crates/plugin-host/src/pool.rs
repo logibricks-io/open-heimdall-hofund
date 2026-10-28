@@ -1079,4 +1079,35 @@ mod tests {
         assert_eq!(error.status(), Some(503));
         assert_eq!(error.message(), "busy");
     }
+
+    #[tokio::test]
+    async fn open_returns_a_2xx_body_unread_and_an_error_status_as_send_does() {
+        const OK: &[u8] = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        const BUSY: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\nretry-after: 3\r\ncontent-length: 4\r\nconnection: close\r\n\r\nbusy";
+
+        let _guard = exclusive().await;
+        let context = http(HttpLimits::default());
+        let port = raw(OK);
+        let response = Call::get(format!("http://127.0.0.1:{port}/v1"))
+            .open(context.http(), 1)
+            .await
+            .expect("open");
+        assert_eq!(response.status().as_u16(), 200);
+        let mut stream = response.into_body();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await {
+            body.extend_from_slice(&chunk.expect("chunk"));
+        }
+        assert_eq!(body, b"hello");
+
+        let port = raw(BUSY);
+        let error = Call::get(format!("http://127.0.0.1:{port}/v1"))
+            .open(context.http(), 1)
+            .await
+            .expect_err("status");
+        assert_eq!(error.kind(), PluginErrorKind::Status);
+        assert_eq!(error.status(), Some(429));
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
+        assert_eq!(error.message(), "busy");
+    }
 }

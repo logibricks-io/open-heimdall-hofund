@@ -348,6 +348,40 @@ fn status_errors_match_with_retry_after() {
                 panic!("expected 500: {broken:?}");
             };
             assert_eq!(failure.status, Some(500));
+
+            let (_, quota) = compare(
+                protocol,
+                protocol_id(protocol),
+                || request(false),
+                || {
+                    ResponseTemplate::new(429)
+                        .set_body_string(r#"{"error":{"message":"monthly quota exhausted"}}"#)
+                },
+            )
+            .await;
+            let Outcome::Failed(failure) = quota else {
+                panic!("expected quota: {quota:?}");
+            };
+            assert_eq!(failure.kind, "Quota");
+
+            let (_, empty) = compare(
+                protocol,
+                protocol_id(protocol),
+                || request(false),
+                || ResponseTemplate::new(503),
+            )
+            .await;
+            assert!(matches!(empty, Outcome::Failed(_)), "{empty:?}");
+
+            let long = "x".repeat(700);
+            let (_, cut) = compare(
+                protocol,
+                ProtocolId::ANTHROPIC_MESSAGES,
+                || request(false),
+                move || ResponseTemplate::new(502).set_body_string(long.clone()),
+            )
+            .await;
+            assert!(matches!(cut, Outcome::Failed(_)), "{cut:?}");
         }
     });
 }
