@@ -52,15 +52,46 @@ fn workflow_parser_reports_missing_job_and_cache_timeouts() {
     steps:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
-      - name: Test each package
-        run: bash .github/scripts/test-each-package.sh
 "#;
     assert_eq!(
         workflow_violations(workflow),
         [
             "job broken has no timeout-minutes",
             "job broken cache step 1 has no timeout-minutes",
+            "no job runs .github/scripts/test-each-package.sh",
         ]
+    );
+}
+
+#[test]
+fn workflow_parser_accepts_dash_line_cache_step_with_timeout() {
+    let workflow = r#"jobs:
+  cached:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 5
+      - name: Test each package
+        run: bash .github/scripts/test-each-package.sh
+"#;
+    assert!(workflow_violations(workflow).is_empty());
+}
+
+#[test]
+fn workflow_parser_reports_dash_line_cache_step_without_timeout() {
+    let workflow = r#"jobs:
+  dash:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: Swatinem/rust-cache@v2
+      - name: Test each package
+        run: bash .github/scripts/test-each-package.sh
+"#;
+    assert_eq!(
+        workflow_violations(workflow),
+        ["job dash cache step 1 has no timeout-minutes"]
     );
 }
 
@@ -93,7 +124,12 @@ fn workflow_violations(workflow: &str) -> Vec<String> {
         };
         match indentation {
             4 if trimmed.starts_with("timeout-minutes:") => job.has_timeout = true,
-            6 if trimmed.starts_with("- ") => job.steps.push(Step::default()),
+            6 if trimmed.starts_with("- ") => {
+                job.steps.push(Step {
+                    is_cargo_cache: trimmed.starts_with("- uses: Swatinem/rust-cache"),
+                    has_timeout: false,
+                });
+            }
             8 => {
                 if trimmed.starts_with("timeout-minutes:") {
                     if let Some(step) = job.steps.last_mut() {
