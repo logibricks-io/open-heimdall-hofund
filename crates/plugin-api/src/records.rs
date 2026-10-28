@@ -1,5 +1,6 @@
 //! Data the traits pass around. None of these types perform I/O.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use hofund_ir::{ContentPart, Message, Request, Role};
@@ -104,6 +105,8 @@ pub struct QuotaWindow {
     used: u64,
     limit: Option<u64>,
     resets_at: Option<SystemTime>,
+    blocking: bool,
+    scope_model: Option<String>,
 }
 
 impl QuotaWindow {
@@ -133,7 +136,38 @@ impl QuotaWindow {
             used,
             limit,
             resets_at,
+            blocking: true,
+            scope_model: None,
         })
+    }
+
+    /// Whether an exhausted window stops routing to the account. The default is `true`.
+    ///
+    /// Set `false` for a window the vendor reports but does not enforce, such
+    /// as a weekly total shown next to an enforced five-hour window.
+    #[must_use]
+    pub const fn with_blocking(mut self, blocking: bool) -> Self {
+        self.blocking = blocking;
+        self
+    }
+
+    /// Limits the window to one model. Without it the window covers every model.
+    #[must_use]
+    pub fn with_scope_model(mut self, model: impl Into<String>) -> Self {
+        self.scope_model = Some(model.into());
+        self
+    }
+
+    /// Whether an exhausted window stops routing to the account.
+    #[must_use]
+    pub const fn blocking(&self) -> bool {
+        self.blocking
+    }
+
+    /// The one model this window covers, when it is not account-wide.
+    #[must_use]
+    pub fn scope_model(&self) -> Option<&str> {
+        self.scope_model.as_deref()
     }
 
     /// Window name.
@@ -1043,13 +1077,63 @@ impl SignInChallenge {
 #[non_exhaustive]
 pub struct SignInCtx {
     plugin: PluginId,
+    session: String,
+    options: BTreeMap<String, String>,
 }
 
+/// Hex digits in a sign-in session id: 128 bits.
+const SESSION_HEX_LEN: usize = 32;
+
 impl SignInCtx {
-    /// A sign-in for `plugin`.
+    /// A sign-in for `plugin` with an empty session id and no options.
+    ///
+    /// The kernel builds its contexts with `hofund_plugin_host::sign_in_ctx`,
+    /// which sets a fresh session id.
     #[must_use]
     pub fn new(plugin: PluginId) -> Self {
-        Self { plugin }
+        Self {
+            plugin,
+            session: String::new(),
+            options: BTreeMap::new(),
+        }
+    }
+
+    /// Sets the session id: 32 lowercase hex digits, 128 bits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `session` is not 32 lowercase hex digits.
+    pub fn with_session(mut self, session: impl Into<String>) -> Result<Self, PluginError> {
+        let session = session.into();
+        if session.len() != SESSION_HEX_LEN
+            || !session
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(PluginError::config(
+                "sign-in session id is not 32 lowercase hex digits",
+            ));
+        }
+        self.session = session;
+        Ok(self)
+    }
+
+    /// Adds one per-sign-in option, such as `host` or `label` from the CLI.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `key` is empty.
+    pub fn with_option(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, PluginError> {
+        let key = key.into();
+        if key.is_empty() {
+            return Err(PluginError::config("sign-in option name is empty"));
+        }
+        self.options.insert(key, value.into());
+        Ok(self)
     }
 
     /// The plugin signing in.
@@ -1057,6 +1141,34 @@ impl SignInCtx {
     pub fn plugin(&self) -> &PluginId {
         &self.plugin
     }
+
+    /// The session id, the same in `start_sign_in`, `complete_sign_in`, and
+    /// `cancel_sign_in` for one sign-in. It is not a secret. It is empty when
+    /// the context was not built by the kernel.
+    #[must_use]
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
+    /// One per-sign-in option, when it was given.
+    #[must_use]
+    pub fn option(&self, key: &str) -> Option<&str> {
+        self.options.get(key).map(String::as_str)
+    }
+}
+
+/// Whether a stored account can serve calls. The default is [`AccountStatus::Ready`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AccountStatus {
+    /// The account can serve calls.
+    #[default]
+    Ready,
+    /// The account must sign in again before it serves calls.
+    NeedsSignIn {
+        /// Why, without secret material. The UI shows it.
+        reason: String,
+    },
 }
 
 /// Proof the UI collected. Secrets are redacted in [`Debug`].
@@ -1077,6 +1189,9 @@ pub enum SignInProof {
     },
     /// A pasted token.
     Token(SecretString),
+    /// Nothing to send: the plugin waits for a flow it started, such as a
+    /// loopback callback or a device-code poll.
+    Await,
 }
 
 impl SignInProof {
@@ -1114,6 +1229,7 @@ impl std::fmt::Debug for SignInProof {
                 .finish(),
             Self::Device { .. } => formatter.write_str("Device { user_code: <redacted> }"),
             Self::Token(_) => formatter.write_str("Token(<redacted>)"),
+            Self::Await => formatter.write_str("Await"),
         }
     }
 }
@@ -1647,8 +1763,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        Account, AuthChoice, BinaryName, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
-        QuotaObservation, QuotaWindow, SignInChallenge, StaticUrl,
+        Account, AccountStatus, AuthChoice, BinaryName, ListQuery, MatchNeedle, ModelList,
+        ModelSpec, ProbeQuery, QuotaObservation, QuotaWindow, SignInChallenge, SignInCtx,
+        SignInProof, StaticUrl,
     };
     use crate::ListKind;
     use crate::id::{AccountId, PluginId, ProtocolId};
@@ -1782,5 +1899,59 @@ mod tests {
         assert!(SignInChallenge::device_code("", "https://example.com").is_err());
         let _url = StaticUrl::new("https://auth.example.com/device");
         let _binary = BinaryName::new("example-agent");
+    }
+
+    #[test]
+    fn quota_windows_block_by_default_and_cover_every_model() {
+        let window = QuotaWindow::new("weekly", 1, Some(10), None).expect("window");
+        assert!(window.blocking());
+        assert_eq!(window.scope_model(), None);
+        let window = window.with_blocking(false).with_scope_model("model-a");
+        assert!(!window.blocking());
+        assert_eq!(window.scope_model(), Some("model-a"));
+    }
+
+    #[test]
+    fn account_status_defaults_to_ready() {
+        assert_eq!(AccountStatus::default(), AccountStatus::Ready);
+        let needs = AccountStatus::NeedsSignIn {
+            reason: "token revoked".to_owned(),
+        };
+        assert_ne!(needs, AccountStatus::Ready);
+    }
+
+    #[test]
+    fn sign_in_session_must_be_32_lowercase_hex_digits() {
+        let plugin = PluginId::from_static("example-agent");
+        assert_eq!(SignInCtx::new(plugin.clone()).session(), "");
+        let good = "0123456789abcdef0123456789abcdef";
+        let ctx = SignInCtx::new(plugin.clone())
+            .with_session(good)
+            .expect("valid");
+        assert_eq!(ctx.session(), good);
+        for bad in [
+            "",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789ABCDEF0123456789abcdef",
+            "0123456789abcdeg0123456789abcdef",
+        ] {
+            assert!(
+                SignInCtx::new(plugin.clone()).with_session(bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn sign_in_options_need_a_name() {
+        let plugin = PluginId::from_static("example-agent");
+        let ctx = SignInCtx::new(plugin.clone())
+            .with_option("host", "example.test")
+            .expect("option");
+        assert_eq!(ctx.option("host"), Some("example.test"));
+        assert_eq!(ctx.option("label"), None);
+        assert!(SignInCtx::new(plugin).with_option("", "x").is_err());
+        assert_eq!(format!("{:?}", SignInProof::Await), "Await");
     }
 }

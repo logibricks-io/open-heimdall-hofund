@@ -7,7 +7,8 @@
 //!
 //! The account backend shipped here is [`AccountStore`]: mode `0600` metadata
 //! with secrets in the OS credential store or an authenticated encrypted file.
-//! The scheduler records jobs and does not spawn tasks. The daemon builds one
+//! The scheduler records periodic jobs and does not run them; it runs
+//! one-shot work on the current Tokio runtime. The daemon builds one
 //! context per provider with [`runtime_host`]. The gateway builds a
 //! [`SurfaceHost`] per inbound request.
 
@@ -31,12 +32,33 @@ use hofund_plugin_api::kernel::{
 };
 use hofund_plugin_api::{
     AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,
-    PluginKind, ProtocolId, QuotaObservation, SecretString, SpawnRequest, SurfaceHost,
+    PluginKind, ProtocolId, QuotaObservation, SecretString, SignInCtx, SpawnRequest, SurfaceHost,
 };
 
 pub use accounts::{AccountStorageKind, AccountStore, StoreError};
 pub use hofund_plugin_api::kernel::ObserveBackend;
 pub use pool::{HttpLimits, HttpProfile, PooledHttp};
+
+/// Builds the context for one sign-in attempt with a fresh random session id.
+///
+/// The session is 16 bytes from the OS random source, as 32 lowercase hex
+/// digits. A plugin uses it to key in-flight sign-in state.
+///
+/// # Errors
+///
+/// Returns an internal [`PluginError`] when the OS random source fails.
+pub fn sign_in_ctx(plugin: PluginId) -> Result<SignInCtx, PluginError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0_u8; 16];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| PluginError::internal(format!("sign-in session id: {error}")))?;
+    let mut session = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        session.push(char::from(HEX[usize::from(byte >> 4)]));
+        session.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    SignInCtx::new(plugin).with_session(session)
+}
 
 /// Builds a provider-scoped [`HostContext`] bound to `plugin`.
 ///
@@ -702,11 +724,19 @@ struct ScheduledJob {
     every_ms: u64,
 }
 
+/// One-shot work still running, keyed by job id.
+type OnceJobs = Arc<Mutex<BTreeMap<u64, (String, tokio::task::AbortHandle)>>>;
+
 /// Jobs keyed by a stable id. Cancelling one id does not renumber the others.
+///
+/// Periodic jobs are recorded and not run. One-shot work from
+/// [`SchedulerBackend::run_once`] runs on the current Tokio runtime until it
+/// finishes, is cancelled, or [`RecordingScheduler::shutdown`] aborts it.
 #[derive(Default)]
 pub struct RecordingScheduler {
     next: Mutex<u64>,
     jobs: Mutex<BTreeMap<u64, ScheduledJob>>,
+    once: OnceJobs,
 }
 
 impl RecordingScheduler {
@@ -727,22 +757,40 @@ impl RecordingScheduler {
         self.jobs.lock().expect("scheduler lock").contains_key(&id)
     }
 
-    /// Drops every registered job. The kernel calls this on process shutdown.
+    /// One-shot work still running, as `(id, name)`.
+    #[must_use]
+    pub fn running_once(&self) -> Vec<(u64, String)> {
+        self.once
+            .lock()
+            .expect("scheduler lock")
+            .iter()
+            .map(|(id, (name, _))| (*id, name.clone()))
+            .collect()
+    }
+
+    /// Drops every registered job and aborts one-shot work. The kernel calls this on process shutdown.
     pub fn shutdown(&self) {
         self.clear();
     }
 
     fn clear(&self) {
         self.jobs.lock().expect("scheduler lock").clear();
+        let once = std::mem::take(&mut *self.once.lock().expect("scheduler lock"));
+        for (_, (_, handle)) in once {
+            handle.abort();
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        let mut next = self.next.lock().expect("scheduler lock");
+        *next = next.saturating_add(1);
+        *next
     }
 }
 
 impl SchedulerBackend for RecordingScheduler {
     fn register(&self, name: &str, every_ms: u64, _job: Job) -> Result<u64, PluginError> {
-        let mut next = self.next.lock().expect("scheduler lock");
-        *next = next.saturating_add(1);
-        let id = *next;
-        drop(next);
+        let id = self.next_id();
         self.jobs.lock().expect("scheduler lock").insert(
             id,
             ScheduledJob {
@@ -755,10 +803,34 @@ impl SchedulerBackend for RecordingScheduler {
 
     fn cancel(&self, id: u64) {
         self.jobs.lock().expect("scheduler lock").remove(&id);
+        let once = self.once.lock().expect("scheduler lock").remove(&id);
+        if let Some((_, handle)) = once {
+            handle.abort();
+        }
     }
 
     fn shutdown(&self) {
         self.clear();
+    }
+
+    fn run_once(
+        &self,
+        name: &str,
+        work: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<u64, PluginError> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| PluginError::internal("one-shot job needs a Tokio runtime"))?;
+        let id = self.next_id();
+        let once = Arc::clone(&self.once);
+        // The entry is inserted while this lock is held, so the task's own
+        // removal below runs after the insert even when the work is instant.
+        let mut running = self.once.lock().expect("scheduler lock");
+        let task = runtime.spawn(async move {
+            work.await;
+            once.lock().expect("scheduler lock").remove(&id);
+        });
+        running.insert(id, (name.to_owned(), task.abort_handle()));
+        Ok(id)
     }
 }
 
@@ -1299,5 +1371,280 @@ mod tests {
                 .expect("get")
                 .is_none()
         );
+    }
+
+    fn lease_host(root: &std::path::Path) -> super::TestHost {
+        super::TestHost::open_for(PluginKind::Subscription, plugin(), root.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn run_once_completes_after_the_waiter_is_dropped() {
+        let root = root();
+        let host = lease_host(&root);
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let context = host.context().clone();
+        let waiter = tokio::spawn(async move {
+            let id = context
+                .scheduler()
+                .run_once(
+                    "sign-in-wait",
+                    async move {
+                        let _ = go_rx.await;
+                        let _ = done_tx.send(());
+                    }
+                    .boxed(),
+                )
+                .expect("run_once");
+            std::future::pending::<()>().await;
+            id
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(host.scheduler().running_once().len(), 1);
+        assert_eq!(host.scheduler().running_once()[0].1, "sign-in-wait");
+        waiter.abort();
+        assert!(waiter.await.expect_err("aborted").is_cancelled());
+        go_tx.send(()).expect("work still waiting");
+        tokio::time::timeout(Duration::from_secs(5), done_rx)
+            .await
+            .expect("work finished")
+            .expect("done");
+        for _ in 0..100 {
+            if host.scheduler().running_once().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(host.scheduler().running_once().is_empty());
+        assert!(
+            host.scheduler().jobs().is_empty(),
+            "one-shot is not periodic"
+        );
+    }
+
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_once_is_cancelled_on_shutdown() {
+        let root = root();
+        let host = lease_host(&root);
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        let guard = DropSignal(Some(dropped_tx));
+        host.context()
+            .scheduler()
+            .run_once(
+                "forever",
+                async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                }
+                .boxed(),
+            )
+            .expect("run_once");
+        tokio::task::yield_now().await;
+        assert_eq!(host.scheduler().running_once().len(), 1);
+        host.scheduler().shutdown();
+        assert!(host.scheduler().running_once().is_empty());
+        tokio::time::timeout(Duration::from_secs(5), dropped_rx)
+            .await
+            .expect("work was dropped")
+            .expect("signal");
+    }
+
+    #[tokio::test]
+    async fn run_once_cancel_aborts_the_work() {
+        let root = root();
+        let host = lease_host(&root);
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        let guard = DropSignal(Some(dropped_tx));
+        let id = host
+            .context()
+            .scheduler()
+            .run_once(
+                "forever",
+                async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                }
+                .boxed(),
+            )
+            .expect("run_once");
+        host.context().scheduler().cancel(id).expect("cancel");
+        assert!(host.scheduler().running_once().is_empty());
+        tokio::time::timeout(Duration::from_secs(5), dropped_rx)
+            .await
+            .expect("work was dropped")
+            .expect("signal");
+        let error = host
+            .context()
+            .scheduler()
+            .run_once("", async {}.boxed())
+            .expect_err("empty name");
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Config);
+    }
+
+    #[test]
+    fn run_once_without_a_runtime_is_an_internal_error() {
+        let scheduler = RecordingScheduler::default();
+        let error = scheduler
+            .run_once("no-runtime", async {}.boxed())
+            .expect_err("no runtime");
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Internal);
+        assert!(scheduler.running_once().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lease_through_the_handle_redacts_and_commits() {
+        let root = root();
+        let host = lease_host(&root);
+        let accounts = host.context().accounts();
+        let account = accounts
+            .account(AccountId::from_static("work"), "Work")
+            .expect("account");
+        accounts
+            .upsert(account, SecretString::from("lease-secret-marker-41"))
+            .await
+            .expect("upsert");
+        let lease = accounts
+            .lease(&AccountId::from_static("work"), Duration::from_secs(1))
+            .await
+            .expect("lease");
+        let rendered = format!("{lease:?}");
+        assert!(!rendered.contains("lease-secret-marker-41"), "{rendered}");
+        assert!(rendered.contains("<redacted>"));
+        assert_eq!(
+            kernel::expose_secret(lease.secret()),
+            "lease-secret-marker-41"
+        );
+        let error = lease
+            .commit(Some(String::new()), SecretString::from("x"))
+            .await
+            .expect_err("empty label");
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Config);
+        let lease = accounts
+            .lease(&AccountId::from_static("work"), Duration::ZERO)
+            .await
+            .expect("the failed commit released the lease");
+        lease
+            .commit(None, SecretString::from("refreshed"))
+            .await
+            .expect("commit");
+        let secret = accounts
+            .secret(&AccountId::from_static("work"))
+            .await
+            .expect("secret")
+            .expect("present");
+        assert_eq!(kernel::expose_secret(&secret), "refreshed");
+    }
+
+    #[test]
+    fn sign_in_ctx_has_a_fresh_hex_session() {
+        let first = super::sign_in_ctx(plugin()).expect("ctx");
+        let second = super::sign_in_ctx(plugin()).expect("ctx");
+        assert_eq!(first.session().len(), 32);
+        assert!(
+            first
+                .session()
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert_ne!(first.session(), second.session());
+        assert_eq!(first.plugin(), &plugin());
+    }
+
+    struct MinimalSubscription(hofund_plugin_api::SignInFlow);
+
+    #[async_trait::async_trait]
+    impl hofund_plugin_api::Subscription for MinimalSubscription {
+        fn id(&self) -> &PluginId {
+            static ID: PluginId = PluginId::from_static("example-agent");
+            &ID
+        }
+
+        fn flow(&self) -> &hofund_plugin_api::SignInFlow {
+            &self.0
+        }
+
+        async fn start_sign_in(
+            &self,
+            _ctx: &hofund_plugin_api::SignInCtx,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<hofund_plugin_api::SignInChallenge, hofund_plugin_api::PluginError> {
+            Err(hofund_plugin_api::PluginError::unsupported("test"))
+        }
+
+        async fn complete_sign_in(
+            &self,
+            _ctx: &hofund_plugin_api::SignInCtx,
+            _proof: hofund_plugin_api::SignInProof,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<AccountId, hofund_plugin_api::PluginError> {
+            Err(hofund_plugin_api::PluginError::unsupported("test"))
+        }
+
+        async fn refresh(
+            &self,
+            _account: &AccountId,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<(), hofund_plugin_api::PluginError> {
+            Ok(())
+        }
+
+        async fn quota(
+            &self,
+            _account: &AccountId,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<Vec<hofund_plugin_api::QuotaWindow>, hofund_plugin_api::PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_models(
+            &self,
+            _account: &AccountId,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+            Err(hofund_plugin_api::PluginError::unsupported("test"))
+        }
+
+        fn upstream(
+            &self,
+            _account: &AccountId,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<
+            std::sync::Arc<dyn hofund_plugin_api::UpstreamProvider>,
+            hofund_plugin_api::PluginError,
+        > {
+            Err(hofund_plugin_api::PluginError::unsupported("test"))
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_defaults_are_ready_and_cancel_is_ok() {
+        use hofund_plugin_api::Subscription as _;
+        let root = root();
+        let host = lease_host(&root);
+        let subscription = MinimalSubscription(hofund_plugin_api::SignInFlow::TokenFile);
+        let status = subscription
+            .account_status(&AccountId::from_static("work"), host.context())
+            .await
+            .expect("status");
+        assert_eq!(status, hofund_plugin_api::AccountStatus::Ready);
+        assert_eq!(
+            hofund_plugin_api::AccountStatus::default(),
+            hofund_plugin_api::AccountStatus::Ready
+        );
+        let ctx = super::sign_in_ctx(plugin()).expect("ctx");
+        subscription
+            .cancel_sign_in(&ctx, host.context())
+            .await
+            .expect("cancel");
     }
 }

@@ -16,10 +16,11 @@ use crate::error::PluginError;
 use crate::id::PluginKind;
 use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
 use crate::kernel::{
-    AccountBackend, ClockBackend, DirBackend, HttpBackend, ObserveBackend, ProcessBackend,
-    SchedulerBackend, SecretsBackend,
+    AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, HttpBackend, ObserveBackend,
+    ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use crate::records::{Account, QuotaObservation};
+use futures_util::future::BoxFuture;
 
 pub use crate::kernel::Job;
 
@@ -143,6 +144,77 @@ impl AccountsHandle {
     pub async fn secret(&self, id: &AccountId) -> Result<Option<SecretString>, PluginError> {
         self.inner.secret(&self.plugin, id).await
     }
+
+    /// Takes the exclusive lease on one account of this context's plugin.
+    ///
+    /// Use this for a token refresh. Other processes and other tasks that
+    /// lease, or upsert, the same account wait until this lease is committed
+    /// or dropped. [`AccountLease::secret`] is read after the lease is held,
+    /// so a refresh another process just wrote is visible.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Io` [`PluginError`] when `wait` runs out, a `Config` error
+    /// when the account is not stored, and an `Unsupported` error when the
+    /// store has no leases.
+    pub async fn lease(&self, id: &AccountId, wait: Duration) -> Result<AccountLease, PluginError> {
+        let inner = self.inner.lease(&self.plugin, id, wait).await?;
+        if inner.account().key() != &self.plugin {
+            return Err(PluginError::internal(
+                "account store leased another plugin's account",
+            ));
+        }
+        Ok(AccountLease { inner })
+    }
+}
+
+/// An exclusive hold on one account. Dropping it releases the hold without a write.
+///
+/// It is not `Clone`. [`Debug`] does not print the secret.
+#[non_exhaustive]
+pub struct AccountLease {
+    inner: Box<dyn AccountLeaseBackend>,
+}
+
+impl AccountLease {
+    /// The account as stored when the lease was taken.
+    #[must_use]
+    pub fn account(&self) -> &Account {
+        self.inner.account()
+    }
+
+    /// The secret read after the lease was taken. It is not from the cache.
+    #[must_use]
+    pub fn secret(&self) -> &SecretString {
+        self.inner.secret()
+    }
+
+    /// Stores `secret`, and `label` when it is set, then releases the lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `label` is empty or the write fails. The
+    /// lease is released either way.
+    pub async fn commit(
+        self,
+        label: Option<String>,
+        secret: SecretString,
+    ) -> Result<(), PluginError> {
+        if label.as_deref().is_some_and(str::is_empty) {
+            return Err(PluginError::config("account label is empty"));
+        }
+        self.inner.commit(label, secret).await
+    }
+}
+
+impl std::fmt::Debug for AccountLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AccountLease")
+            .field("account", self.inner.account())
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The kernel clock.
@@ -253,6 +325,29 @@ impl SchedulerHandle {
                 Err(PluginError::internal("scheduler lock is poisoned"))
             }
         }
+    }
+
+    /// Runs `work` once, off the caller. The id cancels it.
+    ///
+    /// The kernel owns the future: dropping whatever awaited this call does
+    /// not cancel it. [`Self::cancel`] and kernel shutdown do. Use it for a
+    /// sign-in wait that outlives the request that started it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `name` is empty or the scheduler cannot
+    /// run the work.
+    pub fn run_once(&self, name: &str, work: BoxFuture<'static, ()>) -> Result<JobId, PluginError> {
+        if name.is_empty() {
+            return Err(PluginError::config("job name is empty"));
+        }
+        let mut owned = self
+            .owned
+            .lock()
+            .map_err(|_| PluginError::internal("scheduler lock is poisoned"))?;
+        let id = self.inner.run_once(name, work)?;
+        owned.insert(id);
+        Ok(JobId::new(id))
     }
 
     /// Cancels one job this context registered.

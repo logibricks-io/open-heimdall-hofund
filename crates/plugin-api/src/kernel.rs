@@ -93,6 +93,49 @@ pub trait AccountBackend: Send + Sync {
         plugin: &PluginKey,
         id: &AccountId,
     ) -> Result<Option<SecretString>, PluginError>;
+
+    /// Takes the exclusive lease on one account, waiting up to `wait`.
+    ///
+    /// The lease is held across processes until the returned value is
+    /// committed or dropped. The secret it carries is read after the lease is
+    /// held and does not come from a cache.
+    ///
+    /// # Errors
+    ///
+    /// The default returns an `Unsupported` error. A store that implements
+    /// leases returns an `Io` error when `wait` runs out, and a `Config`
+    /// error when the account is not stored.
+    async fn lease(
+        &self,
+        plugin: &PluginKey,
+        id: &AccountId,
+        wait: Duration,
+    ) -> Result<Box<dyn AccountLeaseBackend>, PluginError> {
+        let _ = (plugin, id, wait);
+        Err(PluginError::unsupported("this account store has no leases"))
+    }
+}
+
+/// One held account lease. Dropping it releases the lease without a write.
+#[async_trait]
+#[doc(hidden)]
+pub trait AccountLeaseBackend: Send + Sync {
+    /// The leased account as stored when the lease was taken.
+    fn account(&self) -> &Account;
+
+    /// The secret read after the lease was taken.
+    fn secret(&self) -> &SecretString;
+
+    /// Writes `secret`, and `label` when it is set, then releases the lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the write fails. The lease is released either way.
+    async fn commit(
+        self: Box<Self>,
+        label: Option<String>,
+        secret: SecretString,
+    ) -> Result<(), PluginError>;
 }
 
 /// The kernel clock. Plugins do not call [`SystemTime::now`](SystemTime::now).
@@ -128,7 +171,25 @@ pub trait SchedulerBackend: Send + Sync {
     fn cancel(&self, id: u64);
 
     /// Cancels every job. Kernel shutdown calls this. It is not on [`crate::SchedulerHandle`].
+    ///
+    /// One-shot work from [`SchedulerBackend::run_once`] is cancelled too.
     fn shutdown(&self);
+
+    /// Runs `work` once and returns an id that [`SchedulerBackend::cancel`] accepts.
+    ///
+    /// The backend owns the future. Nothing the caller drops cancels it; only
+    /// `cancel` and `shutdown` do.
+    ///
+    /// # Errors
+    ///
+    /// The default returns an `Unsupported` error. A backend returns an error
+    /// when it cannot run work, for example outside a runtime.
+    fn run_once(&self, name: &str, work: BoxFuture<'static, ()>) -> Result<u64, PluginError> {
+        let _ = (name, work);
+        Err(PluginError::unsupported(
+            "this scheduler has no one-shot jobs",
+        ))
+    }
 }
 
 /// Spawns a process without a shell.
