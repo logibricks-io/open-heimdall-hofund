@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encrypted account storage with native OS credential entries, an authenticated
+  encrypted-file fallback, secret-free backend selection, and crash-safe migration
+  from the legacy plaintext metadata file. Reads route by stored reference and
+  load secrets per row, while kind-scoped v2 entries prevent cross-kind collisions.
+  Fallback keys publish without overwrite, and Linux links libdbus statically.
 - Full typed control route and client surface, with ordered request defenses,
   bounded bodies, error envelopes, no-store responses, and drain guards. The daemon
   now serves secret-free provider summaries, cached models without upstream calls,
