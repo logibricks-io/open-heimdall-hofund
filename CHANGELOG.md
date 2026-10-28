@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CI tests every workspace package with only its default features and bounds
+  every Cargo cache step so a stalled cache restore cannot hang a job.
 - Plugin API `BuildContext` and protocol-aware upstream build methods let listed
   provider plugins receive the selected protocol. The daemon now accepts any
   protocol a listed plugin declares instead of restricting it to the first.
