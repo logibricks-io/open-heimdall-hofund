@@ -1,9 +1,11 @@
 Account
 Account #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+Account::const fn key (& self) -> & PluginKey
+Account::const fn plugin (& self) -> & PluginId
 Account::fn from_stored (plugin : PluginId , id : AccountId , label : impl Into < String > ,) -> Result < Self , PluginError >
+Account::fn from_stored_scoped (plugin : PluginKey , id : AccountId , label : impl Into < String > ,) -> Result < Self , PluginError >
 Account::fn id (& self) -> & AccountId
 Account::fn label (& self) -> & str
-Account::fn plugin (& self) -> & PluginId
 AccountId
 AccountId::as_str
 AccountId::from_static
@@ -184,13 +186,15 @@ HeaderName::const fn as_str (self) -> & 'static str
 HeaderName::const fn new (value : & 'static str) -> Self
 HostContext
 HostContext #[non_exhaustive] derives(Clone)
+HostContext::const fn key (& self) -> & PluginKey
+HostContext::const fn plugin (& self) -> & PluginId
 HostContext::fn accounts (& self) -> & AccountsHandle
 HostContext::fn clock (& self) -> & ClockHandle
 HostContext::fn dirs (& self) -> & DirHandle
 HostContext::fn from_backends (plugin : PluginId , http : Arc < dyn HttpBackend > , secrets : Arc < dyn SecretsBackend > , accounts : Arc < dyn AccountBackend > , clock : Arc < dyn ClockBackend > , scheduler : Arc < dyn SchedulerBackend > , process : Arc < dyn ProcessBackend > , dirs : Arc < dyn DirBackend > , observe : Arc < dyn ObserveBackend > ,) -> Self
+HostContext::fn from_backends_for (key : PluginKey , http : Arc < dyn HttpBackend > , secrets : Arc < dyn SecretsBackend > , accounts : Arc < dyn AccountBackend > , clock : Arc < dyn ClockBackend > , scheduler : Arc < dyn SchedulerBackend > , process : Arc < dyn ProcessBackend > , dirs : Arc < dyn DirBackend > , observe : Arc < dyn ObserveBackend > ,) -> Self
 HostContext::fn http (& self) -> & HttpHandle
 HostContext::fn observe (& self) -> & ObserveHandle
-HostContext::fn plugin (& self) -> & PluginId
 HostContext::fn scheduler (& self) -> & SchedulerHandle
 HostContext::fn secrets (& self) -> & SecretsHandle
 HostContext::fn spawn_process (& self) -> & ProcessHandle
@@ -363,6 +367,18 @@ PluginErrorKind::Unsupported
 PluginId
 PluginId::as_str
 PluginId::from_static
+PluginKey
+PluginKey #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)
+PluginKey::const fn id (& self) -> & PluginId
+PluginKey::const fn kind (& self) -> PluginKind
+PluginKey::const fn new (kind : PluginKind , id : PluginId) -> Self
+PluginKind
+PluginKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)
+PluginKind::Agent
+PluginKind::Inbound
+PluginKind::Provider
+PluginKind::Subscription
+PluginKind::const fn as_str (self) -> & 'static str
 PresetId
 PresetId::as_str
 PresetId::from_static
@@ -592,16 +608,16 @@ WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
 const API
 const PROBE_CAP
 kernel::AccountBackend
-kernel::AccountBackend::async fn list (& self , plugin : & PluginId) -> Result < Vec < Account > , PluginError >
-kernel::AccountBackend::async fn remove (& self , plugin : & PluginId , id : & AccountId) -> Result < () , PluginError >
-kernel::AccountBackend::async fn secret (& self , plugin : & PluginId , id : & AccountId ,) -> Result < Option < SecretString > , PluginError >
+kernel::AccountBackend::async fn list (& self , plugin : & PluginKey) -> Result < Vec < Account > , PluginError >
+kernel::AccountBackend::async fn remove (& self , plugin : & PluginKey , id : & AccountId) -> Result < () , PluginError >
+kernel::AccountBackend::async fn secret (& self , plugin : & PluginKey , id : & AccountId ,) -> Result < Option < SecretString > , PluginError >
 kernel::AccountBackend::async fn upsert (& self , account : Account , secret : SecretString) -> Result < () , PluginError >
 kernel::ClockBackend
 kernel::ClockBackend::fn monotonic (& self) -> Duration
 kernel::ClockBackend::fn now (& self) -> SystemTime
 kernel::DirBackend
-kernel::DirBackend::fn cache_dir (& self , plugin : & PluginId) -> Result < PathBuf , PluginError >
-kernel::DirBackend::fn state_dir (& self , plugin : & PluginId) -> Result < PathBuf , PluginError >
+kernel::DirBackend::fn cache_dir (& self , plugin : & PluginKey) -> Result < PathBuf , PluginError >
+kernel::DirBackend::fn state_dir (& self , plugin : & PluginKey) -> Result < PathBuf , PluginError >
 kernel::HttpBackend
 kernel::HttpBackend::async fn send (& self , request : HttpRequest < Body > ,) -> Result < HttpResponse < BodyStream > , PluginError >
 kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
@@ -619,6 +635,6 @@ kernel::SchedulerBackend::fn cancel (& self , id : u64)
 kernel::SchedulerBackend::fn register (& self , name : & str , every_ms : u64 , job : Job) -> Result < u64 , PluginError >
 kernel::SchedulerBackend::fn shutdown (& self)
 kernel::SecretsBackend
-kernel::SecretsBackend::async fn get (& self , plugin : & PluginId , id : & str) -> Result < Option < SecretString > , PluginError >
+kernel::SecretsBackend::async fn get (& self , plugin : & PluginKey , id : & str) -> Result < Option < SecretString > , PluginError >
 kernel::fn expose_secret (secret : & SecretString) -> & str
 mod kernel

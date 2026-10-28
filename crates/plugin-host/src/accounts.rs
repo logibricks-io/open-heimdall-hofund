@@ -21,7 +21,9 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{self, AccountBackend};
-use hofund_plugin_api::{Account, AccountId, PluginError, PluginId, SecretString};
+use hofund_plugin_api::{
+    Account, AccountId, PluginError, PluginId, PluginKey, PluginKind, SecretString,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A failure while reading or writing the account file.
@@ -47,6 +49,8 @@ impl From<StoreError> for PluginError {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Row {
+    #[serde(default = "legacy_account_kind")]
+    kind: String,
     plugin: String,
     account: String,
     label: String,
@@ -55,6 +59,10 @@ struct Row {
         deserialize_with = "deserialize_secret"
     )]
     secret: SecretString,
+}
+
+fn legacy_account_kind() -> String {
+    PluginKind::Subscription.as_str().to_owned()
 }
 
 fn serialize_secret<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
@@ -315,23 +323,25 @@ fn set_mode(path: &Path) -> Result<(), StoreError> {
 }
 
 fn account_from(row: &Row) -> Result<Account, PluginError> {
+    let kind = PluginKind::try_from(row.kind.as_str())
+        .map_err(|error| PluginError::config(error.to_string()))?;
     let plugin = PluginId::try_from(row.plugin.as_str())
         .map_err(|error| PluginError::config(error.to_string()))?;
     let id = AccountId::try_from(row.account.as_str())
         .map_err(|error| PluginError::config(error.to_string()))?;
-    Account::from_stored(plugin, id, row.label.clone())
+    Account::from_stored_scoped(PluginKey::new(kind, plugin), id, row.label.clone())
 }
 
 #[async_trait]
 impl AccountBackend for PlaintextFileAccountStore {
-    async fn list(&self, plugin: &PluginId) -> Result<Vec<Account>, PluginError> {
+    async fn list(&self, plugin: &PluginKey) -> Result<Vec<Account>, PluginError> {
         let store = self.clone();
         let plugin = plugin.clone();
         run_blocking(move || {
             let snapshot = store.with_lock(true, || store.load())?;
             let mut accounts = Vec::new();
             for row in &snapshot.rows {
-                if row.plugin == plugin.as_str() {
+                if row.kind == plugin.kind().as_str() && row.plugin == plugin.id().as_str() {
                     accounts.push(account_from(row)?);
                 }
             }
@@ -347,10 +357,12 @@ impl AccountBackend for PlaintextFileAccountStore {
                 let snapshot = store.load()?;
                 let mut rows = snapshot.rows.clone();
                 rows.retain(|row| {
-                    !(row.plugin == account.plugin().as_str()
+                    !(row.kind == account.key().kind().as_str()
+                        && row.plugin == account.plugin().as_str()
                         && row.account == account.id().as_str())
                 });
                 rows.push(Row {
+                    kind: account.key().kind().as_str().to_owned(),
                     plugin: account.plugin().as_str().to_owned(),
                     account: account.id().as_str().to_owned(),
                     label: account.label().to_owned(),
@@ -363,7 +375,7 @@ impl AccountBackend for PlaintextFileAccountStore {
         .await
     }
 
-    async fn remove(&self, plugin: &PluginId, id: &AccountId) -> Result<(), PluginError> {
+    async fn remove(&self, plugin: &PluginKey, id: &AccountId) -> Result<(), PluginError> {
         let store = self.clone();
         let plugin = plugin.clone();
         let id = id.clone();
@@ -371,7 +383,11 @@ impl AccountBackend for PlaintextFileAccountStore {
             store.with_lock(false, || {
                 let snapshot = store.load()?;
                 let mut rows = snapshot.rows.clone();
-                rows.retain(|row| !(row.plugin == plugin.as_str() && row.account == id.as_str()));
+                rows.retain(|row| {
+                    !(row.kind == plugin.kind().as_str()
+                        && row.plugin == plugin.id().as_str()
+                        && row.account == id.as_str())
+                });
                 store.store(rows)
             })?;
             Ok(())
@@ -381,7 +397,7 @@ impl AccountBackend for PlaintextFileAccountStore {
 
     async fn secret(
         &self,
-        plugin: &PluginId,
+        plugin: &PluginKey,
         id: &AccountId,
     ) -> Result<Option<SecretString>, PluginError> {
         let store = self.clone();
@@ -390,8 +406,10 @@ impl AccountBackend for PlaintextFileAccountStore {
         run_blocking(move || {
             let snapshot = store.with_lock(true, || store.load())?;
             Ok(snapshot.rows.iter().find_map(|row| {
-                (row.plugin == plugin.as_str() && row.account == id.as_str())
-                    .then(|| row.secret.clone())
+                (row.kind == plugin.kind().as_str()
+                    && row.plugin == plugin.id().as_str()
+                    && row.account == id.as_str())
+                .then(|| row.secret.clone())
             }))
         })
         .await
