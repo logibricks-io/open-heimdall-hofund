@@ -1380,6 +1380,55 @@ mod tests {
     }
 
     #[test]
+    fn publish_key_keeps_an_existing_key_and_returns_its_bytes() {
+        let root = scratch();
+        let key_path = root.join("accounts.key");
+        let winner = [5_u8; KEY_LEN];
+        let loser = [9_u8; KEY_LEN];
+        let published = publish_key(&key_path, &winner).expect("first publish");
+        assert!(published.expose_secret() == &winner);
+        let returned = publish_key(&key_path, &loser).expect("racing publish");
+        assert!(
+            returned.expose_secret() == &winner,
+            "racing publisher did not adopt the existing key"
+        );
+        let on_disk = fs::read(&key_path).expect("key bytes");
+        assert!(on_disk == winner, "racing publish replaced the key file");
+        assert!(!root.0.read_dir().expect("directory").any(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-")
+        }));
+    }
+
+    #[test]
+    fn unprepared_backend_with_absent_key_fails_without_creating_the_key() {
+        let root = scratch();
+        let path = root.join("accounts.secrets");
+        let key_path = root.join("accounts.key");
+
+        let fresh = EncryptedFileBackend::new(path.clone(), key_path.clone());
+        let error = fresh
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .expect_err("set without a key");
+        assert!(error.to_string().contains("is missing"));
+        assert!(!key_path.exists(), "set created the key file");
+        assert!(!path.exists(), "set wrote records without a key");
+
+        EncryptedFileBackend::from_key(path.clone(), [37_u8; KEY_LEN])
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .expect("seed record");
+        let fresh = EncryptedFileBackend::new(path, key_path.clone());
+        let error = fresh
+            .get(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE)
+            .expect_err("get without a key");
+        assert!(!format!("{error} {error:?}").contains(MARKER));
+        assert!(!key_path.exists(), "get created the key file");
+    }
+
+    #[test]
     fn key_file_must_be_a_regular_private_file() {
         let root = scratch();
         let path = root.join("accounts.secrets");
