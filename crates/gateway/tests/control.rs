@@ -160,7 +160,16 @@ async fn control_routes_reject_missing_wrong_malformed_query_and_alternate_token
         }
         for query in ["key", "token"] {
             let uri = format!("{path}?{query}={TOKEN}");
-            let (status, _, _) = call(app(), Method::GET, &uri, Some(HOST), &[], "").await;
+            let authorization = bearer(TOKEN);
+            let (status, _, _) = call(
+                app(),
+                Method::GET,
+                &uri,
+                Some(HOST),
+                &[("authorization", &authorization)],
+                "",
+            )
+            .await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
         }
 
@@ -208,6 +217,22 @@ async fn wrong_host_and_dns_rebinding_host_fail() {
         let envelope = decode_error_envelope(API_VERSION, &body).expect("error envelope");
         assert_eq!(envelope.error.kind, ControlErrorKind::Forbidden);
     }
+
+    let (status, _, body) = call(
+        app(),
+        Method::GET,
+        "/v1/hofund/status",
+        Some(HOST),
+        &[
+            ("authorization", &authorization),
+            ("host", "evil.example:3426"),
+        ],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "duplicate Host headers");
+    let envelope = decode_error_envelope(API_VERSION, &body).expect("error envelope");
+    assert_eq!(envelope.error.kind, ControlErrorKind::Forbidden);
 }
 
 #[tokio::test]
