@@ -819,17 +819,11 @@ mod tests {
 
     const MARKER: &str = "account-secret-marker-7f3c91";
 
-    struct TestDir(PathBuf);
+    struct TestDir(tempfile::TempDir);
 
     impl TestDir {
         fn join(&self, name: &str) -> PathBuf {
-            self.0.join(name)
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).ok();
+            self.0.path().join(name)
         }
     }
 
@@ -891,14 +885,7 @@ mod tests {
     }
 
     fn scratch() -> TestDir {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "hofund-accounts-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).expect("scratch");
-        TestDir(path)
+        TestDir(tempfile::tempdir().expect("scratch"))
     }
 
     fn plugin() -> PluginId {

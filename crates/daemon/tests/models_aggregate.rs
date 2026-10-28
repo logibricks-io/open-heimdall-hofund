@@ -14,10 +14,26 @@ fn load_config(source: &str) -> hofund_config::Config {
     hofund_config::load(source).expect("config")
 }
 
-fn config_path(test: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join(format!("hofund-models-{test}-{}", std::process::id()))
-        .join("hofund.toml")
+struct ConfigPath {
+    _guard: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for ConfigPath {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+fn make_config_path(_test: &str) -> ConfigPath {
+    let guard = tempfile::tempdir().expect("temp dir");
+    let path = guard.path().join("hofund.toml");
+    ConfigPath {
+        _guard: guard,
+        path,
+    }
 }
 
 fn make_host() -> ModelsHost {
@@ -101,8 +117,9 @@ async fn cross_wire_merge_unions_tags_and_text_only_wins() {
     let config = load_config(
         "[[providers]]\nid = \"google\"\npreset = \"google\"\nprotocol = \"openai-chat\"\napi_key = \"test\"\n",
     );
+    let new_config_path = make_config_path("merge");
     let models = host
-        .list_models(&config, &config_path("merge"), "google")
+        .list_models(&config, &new_config_path, "google")
         .await
         .expect("merged list");
     assert_eq!(ids(&models), ["shared", "drawn"]);
@@ -115,12 +132,13 @@ async fn cross_wire_merge_unions_tags_and_text_only_wins() {
 #[tokio::test]
 async fn models_url_env_is_the_only_request_and_query_and_key_are_redacted() {
     const ENV: &str = "HOFUND_TEST_MODELS_URL";
+    let new_config_path = make_config_path("models-url");
     if std::env::var_os(ENV).is_some() {
         let config = load_config(
             "[[providers]]\nid = \"custom\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:1/v1\"\napi_key = \"APIKEY-SENTINEL\"\n[providers.models]\nurl = \"env:HOFUND_TEST_MODELS_URL\"\n",
         );
         let error = make_host()
-            .list_models(&config, &config_path("models-url"), "custom")
+            .list_models(&config, &new_config_path, "custom")
             .await
             .expect_err("refused exact URL");
         let text = error.to_string();
@@ -187,8 +205,9 @@ async fn public_drawers_append_only_new_image_rows_and_failure_adds_nothing() {
     );
     let config = load_config(&source);
     let host = make_host().with_public_drawers_url(format!("{base}/public/models"));
+    let new_config_path = make_config_path("drawers");
     let models = host
-        .list_models(&config, &config_path("drawers"), "mix")
+        .list_models(&config, &new_config_path, "mix")
         .await
         .expect("drawers");
     assert_eq!(
@@ -199,8 +218,9 @@ async fn public_drawers_append_only_new_image_rows_and_failure_adds_nothing() {
     assert_eq!(models.models[2].image_input(), Some(true));
 
     let host = make_host().with_public_drawers_url(format!("{base}/missing-feed"));
+    let failure_path = make_config_path("drawers-failure");
     let models = host
-        .list_models(&config, &config_path("drawers-failure"), "mix")
+        .list_models(&config, &failure_path, "mix")
         .await
         .expect("feed failure is ignored");
     assert_eq!(ids(&models), ["chat", "gpt-image-existing"]);
@@ -228,15 +248,16 @@ async fn custom_base_fixes_v1_and_reuses_it_but_versioned_base_is_untouched() {
         server.uri()
     ));
     let host = make_host();
+    let new_config_path = make_config_path("fix-v1");
     let models = host
-        .list_models(&config, &config_path("fix-v1"), "custom")
+        .list_models(&config, &new_config_path, "custom")
         .await
         .expect("fallback");
     assert_eq!(
         models.corrected_base.as_deref(),
         Some(format!("{}/v1", server.uri()).as_str())
     );
-    host.list_models(&config, &config_path("fix-v1"), "custom")
+    host.list_models(&config, &new_config_path, "custom")
         .await
         .expect("learned base");
     server.verify().await;
@@ -254,8 +275,9 @@ async fn custom_base_fixes_v1_and_reuses_it_but_versioned_base_is_untouched() {
         "[[providers]]\nid = \"versioned\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test\"\n",
         versioned.uri()
     ));
+    let versioned_path = make_config_path("versioned");
     let models = host
-        .list_models(&config, &config_path("versioned"), "versioned")
+        .list_models(&config, &versioned_path, "versioned")
         .await
         .expect("versioned");
     assert_eq!(models.corrected_base, None);
@@ -289,8 +311,9 @@ async fn openrouter_skips_anthropic_with_chat_and_rejects_only_base_namespace() 
     let config = load_config(
         "[[providers]]\nid = \"router\"\npreset = \"openrouter\"\nprotocol = \"openai-chat\"\napi_key = \"test\"\n",
     );
+    let new_config_path = make_config_path("openrouter-skip");
     let models = host
-        .list_models(&config, &config_path("openrouter-skip"), "router")
+        .list_models(&config, &new_config_path, "router")
         .await
         .expect("chat list");
     assert_eq!(ids(&models), ["openai/gpt"]);
@@ -301,8 +324,9 @@ async fn openrouter_skips_anthropic_with_chat_and_rejects_only_base_namespace() 
     let host = make_host()
         .with_model_plan("router", plan("", "", &anthropic, ""))
         .with_base_host(&anthropic, "openrouter.ai");
+    let only_path = make_config_path("openrouter-only");
     let error = host
-        .list_models(&config, &config_path("openrouter-only"), "router")
+        .list_models(&config, &only_path, "router")
         .await
         .expect_err("namespaced list");
     assert!(
@@ -355,31 +379,32 @@ async fn static_region_live_and_only_fallback_follow_preset_policy() {
         .with_model_plan("bedrock", static_plan)
         .with_model_plan("live", live_plan)
         .with_model_plan("mantle", plan(&format!("{base}/mantle"), "", "", ""));
+    let new_config_path = make_config_path("kinds");
     let static_models = host
-        .list_models(&config, &config_path("kinds"), "static")
+        .list_models(&config, &new_config_path, "static")
         .await
         .expect("static");
     assert_eq!(static_models.kind, ListKind::Catalog);
     assert_eq!(ids(&static_models), ["static-model"]);
     let bedrock = host
-        .list_models(&config, &config_path("kinds"), "bedrock")
+        .list_models(&config, &new_config_path, "bedrock")
         .await
         .expect("bedrock static");
     assert_eq!(ids(&bedrock), ["static-model"]);
     let vertex = host
-        .list_models(&config, &config_path("kinds"), "vertex")
+        .list_models(&config, &new_config_path, "vertex")
         .await
         .expect("vertex static");
     assert_eq!(vertex.kind, ListKind::Catalog);
     assert!(!vertex.models.is_empty());
     let live = host
-        .list_models(&config, &config_path("kinds"), "live")
+        .list_models(&config, &new_config_path, "live")
         .await
         .expect("region live");
     assert_eq!(live.kind, ListKind::Live);
     assert_eq!(ids(&live), ["live-model"]);
     let mantle = host
-        .list_models(&config, &config_path("kinds"), "mantle")
+        .list_models(&config, &new_config_path, "mantle")
         .await
         .expect("mantle live");
     assert_eq!(ids(&mantle), ["mantle-model"]);
@@ -417,8 +442,9 @@ async fn only_filter_uses_static_fallback_and_catalog_limits() {
     let config = load_config(
         "[[providers]]\nid = \"cline\"\npreset = \"clinepass\"\nprotocol = \"openai-chat\"\napi_key = \"test\"\n",
     );
+    let new_config_path = make_config_path("only");
     let models = host
-        .list_models(&config, &config_path("only"), "cline")
+        .list_models(&config, &new_config_path, "cline")
         .await
         .expect("static fallback");
     assert_eq!(ids(&models), ["cline-pass/glm"]);
@@ -448,8 +474,9 @@ async fn azure_deployments_and_fallback_are_host_bounded() {
         "[[providers]]\nid = \"azure\"\npreset = \"azure\"\nprotocol = \"openai-chat\"\nbase_url = \"{}\"\napi_key = \"test\"\n",
         server.uri()
     ));
+    let new_config_path = make_config_path("azure");
     let models = make_host()
-        .list_models(&config, &config_path("azure"), "azure")
+        .list_models(&config, &new_config_path, "azure")
         .await
         .expect("base-model fallback");
     assert_eq!(models.kind, ListKind::Deployments);
@@ -470,8 +497,9 @@ async fn every_failed_base_gets_the_manual_entry_suffix() {
         "[[providers]]\nid = \"broken\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test\"\n",
         server.uri()
     ));
+    let new_config_path = make_config_path("all-fail");
     let error = make_host()
-        .list_models(&config, &config_path("all-fail"), "broken")
+        .list_models(&config, &new_config_path, "broken")
         .await
         .expect_err("all failed");
     assert!(
@@ -498,8 +526,9 @@ async fn identical_chat_and_responses_lists_are_fetched_once() {
     let config = load_config(
         "[[providers]]\nid = \"openai\"\npreset = \"openai\"\nprotocol = \"openai-chat\"\napi_key = \"same-key\"\n",
     );
+    let new_config_path = make_config_path("dedupe");
     let models = host
-        .list_models(&config, &config_path("dedupe"), "openai")
+        .list_models(&config, &new_config_path, "openai")
         .await
         .expect("deduplicated list");
     assert_eq!(ids(&models), ["shared"]);
@@ -537,8 +566,9 @@ async fn different_bases_answering_at_one_list_url_are_merged_once() {
     let config = load_config(
         "[[providers]]\nid = \"shared\"\npreset = \"deepseek\"\nprotocol = \"openai-chat\"\napi_key = \"same-key\"\n",
     );
+    let new_config_path = make_config_path("answered-dedupe");
     let models = host
-        .list_models(&config, &config_path("answered-dedupe"), "shared")
+        .list_models(&config, &new_config_path, "shared")
         .await
         .expect("deduplicated response");
     assert_eq!(ids(&models), ["shared"]);
@@ -580,9 +610,10 @@ async fn models_url_learns_and_reuses_bearer_on_messages_only_providers() {
         server.uri()
     ));
     let host = make_host();
+    let new_config_path = make_config_path("models-url-auth");
     for _ in 0..2 {
         let models = host
-            .list_models(&config, &config_path("models-url-auth"), "messages")
+            .list_models(&config, &new_config_path, "messages")
             .await
             .expect("custom list");
         assert_eq!(ids(&models), ["claude"]);
@@ -604,8 +635,9 @@ async fn models_url_rejects_a_non_200_success_status() {
         "[[providers]]\nid = \"custom\"\nprotocol = \"openai-chat\"\nbase_url = \"{0}/v1\"\napi_key = \"test-key\"\n[providers.models]\nurl = \"{0}/exact/models\"\n",
         server.uri()
     ));
+    let new_config_path = make_config_path("models-url-status");
     let error = make_host()
-        .list_models(&config, &config_path("models-url-status"), "custom")
+        .list_models(&config, &new_config_path, "custom")
         .await
         .expect_err("204 is not a list");
     assert!(error.to_string().contains("HTTP 204"), "{error}");
@@ -628,8 +660,9 @@ async fn custom_azure_resource_host_resolves_to_deployments() {
     let config = load_config(&format!(
         "[[providers]]\nid = \"azure-custom\"\nprotocol = \"openai-chat\"\nbase_url = \"{base}\"\napi_key = \"test\"\n"
     ));
+    let new_config_path = make_config_path("azure-host");
     let models = host
-        .list_models(&config, &config_path("azure-host"), "azure-custom")
+        .list_models(&config, &new_config_path, "azure-custom")
         .await
         .expect("custom Azure host");
     assert_eq!(models.kind, ListKind::Deployments);

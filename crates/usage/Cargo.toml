@@ -17,5 +17,8 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }
 thiserror = "2.0.21"
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

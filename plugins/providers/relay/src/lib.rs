@@ -117,8 +117,6 @@ impl UpstreamProvider for Relay {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use hofund_kit_upstream::{TestHost, block_on, check_list_and_probe};
     use hofund_plugin_api::{
         Completion, DynUpstreamFactory, PluginErrorKind, PluginId, ProtocolId, RawTable, RawValue,
@@ -128,14 +126,8 @@ mod tests {
 
     use super::RelayFactory;
 
-    fn scratch() -> std::path::PathBuf {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "hofund-relay-{}",
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).expect("scratch");
-        path
+    fn scratch() -> tempfile::TempDir {
+        tempfile::tempdir().expect("scratch")
     }
 
     fn options(url: &str) -> RawTable {
@@ -168,7 +160,8 @@ mod tests {
     fn posts_the_model_with_a_sensitive_bearer_header() {
         block_on(async {
             let plugin = PluginId::from_static("relay");
-            let host = TestHost::open(plugin.clone(), scratch());
+            let root = scratch();
+            let host = TestHost::open(plugin.clone(), root.path());
             host.secrets().insert(&plugin, "api_key", "secret-token");
             host.http().enqueue(b"pong".to_vec());
             let provider = DynUpstreamFactory::validate_and_build(
@@ -199,7 +192,8 @@ mod tests {
     fn a_missing_api_key_is_auth_and_does_not_send() {
         block_on(async {
             let plugin = PluginId::from_static("relay");
-            let host = TestHost::open(plugin, scratch());
+            let root = scratch();
+            let host = TestHost::open(plugin, root.path());
             let provider = DynUpstreamFactory::validate_and_build(
                 &RelayFactory,
                 &options("https://upstream.test"),
@@ -219,11 +213,13 @@ mod tests {
 
     #[test]
     fn unsupported_factory_passes_list_conformance() {
+        let root = scratch();
         block_on(check_list_and_probe(
             &RelayFactory,
             options,
             ProtocolId::OPENAI_CHAT,
             "",
+            root.path(),
         ));
     }
 
@@ -231,7 +227,8 @@ mod tests {
     fn connect_failures_are_retried() {
         block_on(async {
             let plugin = PluginId::from_static("relay");
-            let host = TestHost::open(plugin, scratch());
+            let root = scratch();
+            let host = TestHost::open(plugin, root.path());
             host.http().enqueue_connect("down");
             host.http().enqueue(b"pong".to_vec());
             let reply = Call::post("http://upstream.test/v1")

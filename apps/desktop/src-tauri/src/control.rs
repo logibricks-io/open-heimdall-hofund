@@ -312,9 +312,6 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use hofund_agent::{Session, catalog};
     use hofund_daemon::agent_descriptions;
@@ -325,28 +322,17 @@ mod tests {
         catalog(agent_descriptions()).expect("agent catalog")
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        static TICK: AtomicU64 = AtomicU64::new(0);
-        let tick = TICK.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!(
-            "hofund-desktop-{}-{nanos}-{tick}-{name}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("temp dir");
-        path
+    fn scratch() -> tempfile::TempDir {
+        tempfile::tempdir().expect("temp dir")
     }
 
     #[tokio::test]
     async fn start_and_stop_report_the_bound_address() {
-        let dir = scratch("bind");
-        let path = dir.join("hofund.toml");
+        let dir = scratch();
+        let path = dir.path().join("hofund.toml");
         fs::write(&path, "listen = \"127.0.0.1:0\"\n").expect("config");
         let mut control = Control::open(&path);
-        let session = Session::new(&dir);
+        let session = Session::new(dir.path());
         control.start().await.expect("start");
         let snapshot = control.snapshot(&session);
         assert!(snapshot.running);
@@ -358,16 +344,15 @@ mod tests {
         let snapshot = control.snapshot(&session);
         assert!(!snapshot.running);
         assert_eq!(snapshot.listen, "127.0.0.1:0");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_menu_lists_every_catalog_agent() {
-        let dir = scratch("menu");
-        let path = dir.join("hofund.toml");
+        let dir = scratch();
+        let path = dir.path().join("hofund.toml");
         fs::write(&path, "listen = \"127.0.0.1:9\"\n").expect("config");
         let mut control = Control::open(&path);
-        let snapshot = control.snapshot(&Session::new(&dir));
+        let snapshot = control.snapshot(&Session::new(dir.path()));
         let entries = menu_entries(&snapshot);
         assert!(
             entries
@@ -394,15 +379,14 @@ mod tests {
             assert_eq!(entry.label, adapter.display_name());
             assert_eq!(entry.checked, Some(false));
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn connecting_an_agent_round_trips() {
-        let dir = scratch("agent");
-        let home = dir.join("home");
+        let dir = scratch();
+        let home = dir.path().join("home");
         fs::create_dir_all(&home).expect("home");
-        let path = dir.join("hofund.toml");
+        let path = dir.path().join("hofund.toml");
         fs::write(&path, "listen = \"127.0.0.1:3425\"\n").expect("config");
         let mut control = Control::open(&path);
         let session = Session::new(&home);
@@ -428,6 +412,5 @@ mod tests {
             .set_agent(&session, "not-an-agent", true)
             .expect_err("unknown");
         assert!(error.contains("unknown agent"));
-        let _ = fs::remove_dir_all(&dir);
     }
 }

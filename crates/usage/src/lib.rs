@@ -340,35 +340,9 @@ fn push_line(out: &mut String, cells: &[String; 7], widths: &[usize; 7]) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use chrono::{FixedOffset, TimeZone};
 
     use super::{Ledger, Row, Totals, Window, window_start};
-
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(label: &str) -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "hofund-usage-{label}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("scratch directory");
-            Self(path)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn row(created_unix: i64, input: Option<i64>, output: Option<i64>) -> Row {
         Row {
@@ -410,8 +384,8 @@ mod tests {
 
     #[test]
     fn summary_caps_rows_but_not_totals() {
-        let dir = Scratch::new("summary");
-        let ledger = Ledger::open(&dir.0.join("usage.sqlite")).expect("open");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("open");
         ledger.record(&row(5, Some(100), Some(100))).expect("old");
         ledger.record(&row(10, Some(1), None)).expect("first");
         ledger
@@ -443,8 +417,8 @@ mod tests {
 
     #[test]
     fn a_row_round_trips_into_the_table() {
-        let dir = Scratch::new("table");
-        let path = dir.0.join("usage.sqlite");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("usage.sqlite");
         let ledger = Ledger::open(&path).expect("open");
         ledger
             .record(&Row {
