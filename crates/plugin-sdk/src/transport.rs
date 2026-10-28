@@ -281,7 +281,7 @@ impl fmt::Debug for Call {
 
 fn header_value(header: &Header) -> Result<http::HeaderValue, PluginError> {
     let mut value = http::HeaderValue::from_str(&header.value)
-        .map_err(|_| PluginError::auth(format!("{} is not a valid header value", header.name)))?;
+        .map_err(|_| PluginError::config(format!("{} is not a valid header value", header.name)))?;
     value.set_sensitive(header.sensitive);
     Ok(value)
 }
@@ -335,7 +335,11 @@ fn classify(
         } else {
             snippet
         };
-        let error = PluginError::status_error(status, message);
+        let error = if is_quota_error(status, &body) {
+            PluginError::quota_status(status, message)
+        } else {
+            PluginError::status_error(status, message)
+        };
         return Err(match retry_after {
             Some(after) => error.with_retry_after(after),
             None => error,
@@ -344,15 +348,238 @@ fn classify(
     Ok(Reply { status, body })
 }
 
+/// Whether an upstream status and response body report exhausted quota.
+///
+/// The rules follow the reference's failure classification, in its order: a
+/// 402 naming a usage limit and no money is quota; a credit or balance
+/// refusal (including `insufficient_quota`) is not; a 429 naming its reset
+/// time is quota; a 429 naming a per-minute limit, a short wait, or a plain
+/// rate limit is not; otherwise a 5xx quota code, a sub-500 status naming a
+/// used-up limit, or a 429 naming a planned allowance is quota.
+#[must_use]
+pub fn is_quota_error(status: u16, body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    let insufficient_quota = text.contains("insufficient_quota");
+    if status == 402 {
+        return used_up_words(&text) && !credit_words(&text) && !insufficient_quota;
+    }
+    if credit_words(&text) && (status != 429 || broke_words(&text)) || insufficient_quota {
+        return false;
+    }
+    if status == 429 {
+        if resets_at(&text) {
+            return true;
+        }
+        if minute_limit(&text) || !credit_words(&text) && back_soon(&text) {
+            return false;
+        }
+        if rate_words(&text) && !planned_words(&without_urls(&text)) {
+            return false;
+        }
+        return used_up_words(&text) || planned_words(&text);
+    }
+    if status >= 500 {
+        quota_codes(&text)
+    } else {
+        used_up_words(&text)
+    }
+}
+
+fn used_up_words(text: &str) -> bool {
+    text.contains("quota")
+        || text.contains("out of budget")
+        || text.contains("budget exceeded")
+        || text.contains("budget exhausted")
+        || optional_separator(text, "usage", "limit")
+        || optional_separator(text, "limit", "reached")
+        || contains_then(text, "hit your ", "limit")
+        || limit_resets(text)
+        || contains_then(text, "exceeded", "plan")
+        || contains_then(text, "exceeded", "limit")
+}
+
+fn planned_words(text: &str) -> bool {
+    text.contains("quota")
+        || optional_separator(text, "usage", "limit")
+        || contains_then(text, "hit your ", "limit")
+        || limit_resets(text)
+        || ["day", "week", "month"]
+            .into_iter()
+            .any(|unit| optional_separator(text, "per", unit))
+        || ["daily", "weekly", "monthly"]
+            .into_iter()
+            .any(|word| text.contains(word))
+}
+
+fn rate_words(text: &str) -> bool {
+    optional_separator(text, "rate", "limit")
+        || optional_separator(text, "frequency", "limit")
+        || text.contains("too many requests")
+        || minute_words(text)
+}
+
+fn minute_limit(text: &str) -> bool {
+    let text = &without_urls(text);
+    minute_words(text)
+        && !long_words(text)
+        && !broke_words(text)
+        && !text.contains("insufficient_quota")
+}
+
+fn minute_words(text: &str) -> bool {
+    ["second", "sec", "minute", "min"]
+        .into_iter()
+        .any(|unit| optional_separator(text, "per", unit))
+        || has_word(text, &["rpm", "tpm", "rps", "tps"])
+        || ["token", "call", "request"]
+            .into_iter()
+            .any(|kind| text.contains(&format!("{kind} rate limit")))
+}
+
+fn long_words(text: &str) -> bool {
+    optional_separator(text, "usage", "limit")
+        || contains_then(text, "hit your ", "limit")
+        || limit_resets(text)
+        || ["hour", "day", "week", "month"]
+            .into_iter()
+            .any(|unit| optional_separator(text, "per", unit))
+        || ["hour", "hourly", "daily", "weekly", "monthly"]
+            .into_iter()
+            .any(|word| text.contains(word))
+        || has_word(text, &["rpd", "tpd", "rph", "tph"])
+}
+
+fn credit_words(text: &str) -> bool {
+    broke_words(text)
+        || [
+            "balance",
+            "credit",
+            "billing",
+            "payment",
+            "arrear",
+            "overdue",
+            "suspended",
+        ]
+        .into_iter()
+        .any(|word| text.contains(word))
+}
+
+fn broke_words(text: &str) -> bool {
+    ["balance", "credit", "fund"]
+        .into_iter()
+        .any(|word| optional_separator(text, "insufficient", word))
+        || [
+            "credit exhausted",
+            "credits exhausted",
+            "credit are exhausted",
+            "credits are exhausted",
+        ]
+        .into_iter()
+        .any(|phrase| text.contains(phrase))
+}
+
+fn quota_codes(text: &str) -> bool {
+    text.contains("usage_limit_reached")
+        || text.contains("resource_exhausted")
+        || text.match_indices("limit reached|").any(|(index, _)| {
+            let suffix = &text[index + "limit reached|".len()..];
+            let mut characters = suffix.chars();
+            let digits = characters.by_ref().take(10).collect::<String>();
+            digits.len() == 10
+                && digits.chars().all(|character| character.is_ascii_digit())
+                && characters
+                    .next()
+                    .is_none_or(|character| !character.is_ascii_digit())
+        })
+}
+
+fn resets_at(text: &str) -> bool {
+    (text.contains("reset at") || text.contains("resets at"))
+        && text.contains(|character: char| character.is_ascii_digit())
+        && (text.contains("utc") || text.contains("gmt"))
+}
+
+fn back_soon(text: &str) -> bool {
+    ["retry in", "try again in", "resets in"]
+        .into_iter()
+        .filter_map(|phrase| text.find(phrase).map(|index| &text[index + phrase.len()..]))
+        .any(|tail| {
+            !tail.contains("hour")
+                && !tail.contains("day")
+                && !tail.contains("week")
+                && !tail.contains("month")
+                && !tail.split_whitespace().take(8).any(|token| {
+                    let unit = token.trim_start_matches(|character: char| {
+                        character.is_ascii_digit() || character == '.'
+                    });
+                    matches!(
+                        unit.trim_matches(|character: char| !character.is_alphabetic()),
+                        "h" | "hr" | "hrs" | "d" | "w"
+                    )
+                })
+        })
+}
+
+fn optional_separator(text: &str, left: &str, right: &str) -> bool {
+    [format!("{left}{right}"), format!("{left} {right}")]
+        .into_iter()
+        .any(|needle| text.contains(&needle))
+        || text.match_indices(left).any(|(index, _)| {
+            let after = &text[index + left.len()..];
+            let mut characters = after.char_indices();
+            let Some((_, separator)) = characters.next() else {
+                return false;
+            };
+            let Some((start, _)) = characters.next() else {
+                return false;
+            };
+            !separator.is_alphanumeric() && after[start..].starts_with(right)
+        })
+}
+
+fn contains_then(text: &str, first: &str, second: &str) -> bool {
+    text.match_indices(first)
+        .any(|(index, _)| text[index + first.len()..].contains(second))
+}
+
+fn limit_resets(text: &str) -> bool {
+    text.match_indices("limit").any(|(index, _)| {
+        text[index + "limit".len()..]
+            .chars()
+            .take(24)
+            .collect::<String>()
+            .contains("resets")
+    })
+}
+
+fn has_word(text: &str, words: &[&str]) -> bool {
+    text.split(|character: char| !character.is_alphanumeric())
+        .any(|word| words.contains(&word))
+}
+
+fn without_urls(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = [rest.find("http://"), rest.find("https://")]
+        .into_iter()
+        .flatten()
+        .min()
+    {
+        output.push_str(&rest[..index]);
+        rest = &rest[index..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        output.push(' ');
+        rest = &rest[end..];
+    }
+    output.push_str(rest);
+    output
+}
+
 async fn read_body(
     mut response: HttpResponse,
 ) -> Result<(u16, Option<Duration>, Vec<u8>), PluginError> {
     let status = response.status().as_u16();
-    let retry_after = response
-        .headers()
-        .get(http::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| parse_retry_after(value, std::time::SystemTime::now()));
+    let retry_after = parse_retry_after_headers(response.headers(), std::time::SystemTime::now());
     let mut body = Vec::new();
     while let Some(chunk) = response.body_mut().next_chunk().await {
         body.extend_from_slice(&chunk?);
@@ -360,19 +587,208 @@ async fn read_body(
     Ok((status, retry_after, body))
 }
 
+/// Parses Retry-After and rate-limit reset headers relative to `now`.
+/// A positive Retry-After value takes precedence. Otherwise the longest
+/// positive `*ratelimit*reset*` header wins: an RFC 3339 time, a duration such
+/// as `1.5s` or `1m30s`, or a Unix timestamp in seconds. Values are not
+/// clamped here; the router clamps every hint to its policy maximum.
+#[must_use]
+pub fn parse_retry_after_headers(
+    headers: &http::HeaderMap,
+    now: std::time::SystemTime,
+) -> Option<Duration> {
+    if let Some(after) = headers
+        .get(http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after(value, now))
+    {
+        return Some(after);
+    }
+    let mut longest = None;
+    for name in headers.keys() {
+        let name = name.as_str();
+        if !name.contains("ratelimit") || !name.contains("reset") {
+            continue;
+        }
+        let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) else {
+            continue;
+        };
+        let after = parse_rfc3339(value, now)
+            .or_else(|| parse_duration(value))
+            .or_else(|| parse_unix_reset(value, now));
+        if after.is_some_and(|after| longest.is_none_or(|longest| after > longest)) {
+            longest = after;
+        }
+    }
+    longest
+}
+
 /// Parses a Retry-After delta-seconds value or HTTP-date relative to `now`.
-/// Zero and past durations are ignored.
+/// Fractional seconds are accepted. Zero and past durations are ignored.
 #[must_use]
 pub fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
-    value
-        .parse::<u64>()
-        .map(Duration::from_secs)
-        .ok()
-        .or_else(|| {
-            let at = httpdate::parse_http_date(value).ok()?;
-            at.duration_since(now).ok()
-        })
-        .filter(|after| !after.is_zero())
+    parse_seconds(value).or_else(|| {
+        let at = httpdate::parse_http_date(value).ok()?;
+        positive(at.duration_since(now).ok()?)
+    })
+}
+
+fn parse_seconds(value: &str) -> Option<Duration> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return positive(Duration::from_secs(seconds));
+    }
+    let seconds = value.parse::<f64>().ok()?;
+    nanos_duration(seconds * 1_000_000_000.0)
+}
+
+fn parse_duration(value: &str) -> Option<Duration> {
+    let rest = value.strip_prefix('+').unwrap_or(value);
+    if rest.starts_with('-') {
+        return None;
+    }
+    let mut rest = rest;
+    let mut nanos = 0.0;
+    let mut terms = 0;
+    while !rest.is_empty() {
+        let number_end = rest
+            .char_indices()
+            .take_while(|(_, character)| character.is_ascii_digit() || *character == '.')
+            .map(|(index, character)| index + character.len_utf8())
+            .last()
+            .unwrap_or(0);
+        let number = rest[..number_end].parse::<f64>().ok()?;
+        rest = &rest[number_end..];
+        let (unit, factor) = [
+            ("ns", 1.0),
+            ("us", 1_000.0),
+            ("µs", 1_000.0),
+            ("μs", 1_000.0),
+            ("ms", 1_000_000.0),
+            ("s", 1_000_000_000.0),
+            ("m", 60_000_000_000.0),
+            ("h", 3_600_000_000_000.0),
+        ]
+        .into_iter()
+        .find(|(unit, _)| rest.starts_with(unit))?;
+        nanos += number * factor;
+        rest = &rest[unit.len()..];
+        terms += 1;
+    }
+    (terms > 0).then(|| nanos_duration(nanos)).flatten()
+}
+
+fn parse_unix_reset(value: &str, now: std::time::SystemTime) -> Option<Duration> {
+    let seconds = value.parse::<u64>().ok()?;
+    if seconds <= 1_000_000_000 {
+        return None;
+    }
+    let at = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))?;
+    positive(at.duration_since(now).ok()?)
+}
+
+fn parse_rfc3339(value: &str, now: std::time::SystemTime) -> Option<Duration> {
+    if !value.is_ascii() || value.len() < 20 || &value[4..5] != "-" || &value[7..8] != "-" {
+        return None;
+    }
+    if !matches!(&value[10..11], "T" | "t") || &value[13..14] != ":" || &value[16..17] != ":" {
+        return None;
+    }
+    let year = fixed_number(value, 0, 4)?;
+    let month = fixed_number(value, 5, 7)?;
+    let day = fixed_number(value, 8, 10)?;
+    let hour = fixed_number(value, 11, 13)?;
+    let minute = fixed_number(value, 14, 16)?;
+    let second = fixed_number(value, 17, 19)?;
+    if !(1..=12).contains(&month)
+        || day < 1
+        || day > i64::from(days_in_month(year, month))
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let mut index = 19;
+    let mut fraction = 0_i128;
+    if matches!(value.as_bytes().get(index), Some(b'.' | b',')) {
+        index += 1;
+        let start = index;
+        while value.as_bytes().get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == start {
+            return None;
+        }
+        for character in value[start..index].chars().take(9) {
+            fraction = fraction * 10 + i128::from(character as u8 - b'0');
+        }
+        for _ in index - start..9 {
+            fraction *= 10;
+        }
+    }
+    let offset = match value.as_bytes().get(index) {
+        Some(b'Z' | b'z') if index + 1 == value.len() => 0,
+        Some(b'+' | b'-') if index + 6 == value.len() => {
+            let hours = fixed_number(value, index + 1, index + 3)?;
+            let minutes = fixed_number(value, index + 4, index + 6)?;
+            if &value[index + 3..index + 4] != ":" || hours > 23 || minutes > 59 {
+                return None;
+            }
+            let seconds = hours * 3_600 + minutes * 60;
+            if value.as_bytes()[index] == b'-' {
+                -seconds
+            } else {
+                seconds
+            }
+        }
+        _ => return None,
+    };
+    let days = days_from_civil(year, month, day);
+    let timestamp = i128::from(days * 86_400 + hour * 3_600 + minute * 60 + second - offset);
+    let target = timestamp * 1_000_000_000 + fraction;
+    let now = i128::try_from(now.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos()).ok()?;
+    let difference = target - now;
+    if difference <= 0 {
+        return None;
+    }
+    let seconds = u64::try_from(difference / 1_000_000_000).unwrap_or(u64::MAX);
+    let nanos = u32::try_from(difference % 1_000_000_000).unwrap_or(0);
+    Some(Duration::new(seconds, nanos))
+}
+
+fn fixed_number(value: &str, start: usize, end: usize) -> Option<i64> {
+    value.get(start..end)?.parse().ok()
+}
+
+fn days_in_month(year: i64, month: i64) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn nanos_duration(nanos: f64) -> Option<Duration> {
+    if !nanos.is_finite() || nanos < 1.0 {
+        return None;
+    }
+    Some(Duration::try_from_secs_f64(nanos / 1_000_000_000.0).unwrap_or(Duration::MAX))
+}
+
+fn positive(after: Duration) -> Option<Duration> {
+    (!after.is_zero()).then_some(after)
 }
 
 /// A text response. Plugins return this from [`InboundSurface::handle`](hofund_plugin_api::InboundSurface::handle).
@@ -391,10 +807,26 @@ mod tests {
 
     use hofund_plugin_api::{CredentialStyle, HeaderName, PluginErrorKind, SecretString};
 
-    use super::{Call, backoff, classify, parse_retry_after, retries, text_response};
+    use super::{
+        Call, backoff, classify, is_quota_error, parse_retry_after, parse_retry_after_headers,
+        retries, text_response,
+    };
 
     fn secret(value: &str) -> SecretString {
         SecretString::from(value)
+    }
+
+    #[test]
+    fn an_invalid_local_header_value_is_a_config_error() {
+        let error = Call::get("https://example.test")
+            .header("x-local-setting", "invalid\nvalue")
+            .request()
+            .expect_err("invalid header");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+        assert_eq!(
+            error.message(),
+            "x-local-setting is not a valid header value"
+        );
     }
 
     #[test]
@@ -545,5 +977,163 @@ mod tests {
             .expect("chunk")
             .expect("bytes");
         assert_eq!(&chunk[..], b"echo");
+    }
+
+    #[test]
+    fn quota_classifier_follows_each_reference_rule() {
+        // 402 naming a usage limit and no money.
+        assert!(is_quota_error(
+            402,
+            b"You've reached your weekly standard usage limit (resets in 3 days)."
+        ));
+        // 429 naming the time it resets.
+        assert!(is_quota_error(
+            429,
+            b"Limit exhausted, resets at 2026-01-02 03:04:05 UTC+8."
+        ));
+        // 5xx quota codes.
+        assert!(is_quota_error(503, b"{\"code\":\"usage_limit_reached\"}"));
+        assert!(is_quota_error(500, b"RESOURCE_EXHAUSTED"));
+        assert!(is_quota_error(500, b"limit reached|1767225600"));
+        // Sub-500 statuses naming a used-up limit.
+        assert!(is_quota_error(403, b"Quota exceeded for this project."));
+        assert!(is_quota_error(400, b"You have hit your monthly limit"));
+        // 429 naming a planned allowance.
+        assert!(is_quota_error(429, b"Daily request quota used up"));
+        assert!(is_quota_error(429, b"You exceeded your plan's usage limit"));
+    }
+
+    #[test]
+    fn quota_classifier_keeps_rate_limits_credit_and_plain_errors_out() {
+        assert!(!is_quota_error(429, b"Too many requests"));
+        assert!(!is_quota_error(
+            429,
+            b"Rate limit reached: 60 requests per minute"
+        ));
+        assert!(!is_quota_error(
+            429,
+            b"Usage limit hit, try again in 20 seconds"
+        ));
+        assert!(!is_quota_error(
+            429,
+            b"rate limit exceeded, see https://example.test/quota-docs"
+        ));
+        // The reference reads these as out of credit, not quota.
+        assert!(!is_quota_error(
+            429,
+            b"{\"error\":{\"type\":\"insufficient_quota\"}}"
+        ));
+        assert!(!is_quota_error(403, b"Insufficient balance for this quota"));
+        assert!(!is_quota_error(402, b"Payment required"));
+        assert!(!is_quota_error(500, b"quota service unavailable"));
+        assert!(!is_quota_error(400, b"invalid request"));
+    }
+
+    #[test]
+    fn classify_reports_quota_bodies_with_their_status() {
+        let error = classify(429, None, b"Daily quota exceeded".to_vec()).expect_err("quota");
+        assert_eq!(error.kind(), PluginErrorKind::Quota);
+        assert_eq!(error.status(), Some(429));
+        let error = classify(429, None, b"Too many requests".to_vec()).expect_err("rate");
+        assert_eq!(error.kind(), PluginErrorKind::Status);
+    }
+
+    #[test]
+    fn retry_after_keeps_fractional_seconds() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(
+            parse_retry_after("1.5", now),
+            Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(
+            parse_retry_after("0.25", now),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(parse_retry_after("-1", now), None);
+        assert_eq!(parse_retry_after("NaN", now), None);
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> http::HeaderMap {
+        let mut map = http::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().expect("header value"));
+        }
+        map
+    }
+
+    #[test]
+    fn rate_limit_reset_headers_parse_each_reference_format() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(
+            parse_retry_after_headers(&headers(&[("x-ratelimit-reset-requests", "1m30.5s")]), now),
+            Some(Duration::from_millis(90_500))
+        );
+        assert_eq!(
+            parse_retry_after_headers(&headers(&[("x-ratelimit-reset-tokens", "250ms")]), now),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            parse_retry_after_headers(
+                &headers(&[(
+                    "anthropic-ratelimit-requests-reset",
+                    "2023-11-14T22:13:27.5Z"
+                )]),
+                now
+            ),
+            Some(Duration::from_millis(7_500))
+        );
+        assert_eq!(
+            parse_retry_after_headers(
+                &headers(&[(
+                    "anthropic-ratelimit-tokens-reset",
+                    "2023-11-14T23:13:27+01:00"
+                )]),
+                now
+            ),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(
+            parse_retry_after_headers(&headers(&[("x-ratelimit-reset", "1700000042")]), now),
+            Some(Duration::from_secs(42))
+        );
+        // A small integer is neither a duration nor a Unix time.
+        assert_eq!(
+            parse_retry_after_headers(&headers(&[("x-ratelimit-reset", "42")]), now),
+            None
+        );
+        // Past times and unrelated headers are ignored.
+        assert_eq!(
+            parse_retry_after_headers(
+                &headers(&[
+                    ("x-ratelimit-reset", "1699999999"),
+                    ("x-request-reset", "5s"),
+                ]),
+                now
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_after_takes_precedence_and_the_longest_reset_header_wins() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(
+            parse_retry_after_headers(
+                &headers(&[("retry-after", "2"), ("x-ratelimit-reset-requests", "9s")]),
+                now
+            ),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            parse_retry_after_headers(
+                &headers(&[
+                    ("retry-after", "0"),
+                    ("x-ratelimit-reset-requests", "3s"),
+                    ("x-ratelimit-reset-tokens", "9s"),
+                ]),
+                now
+            ),
+            Some(Duration::from_secs(9))
+        );
     }
 }

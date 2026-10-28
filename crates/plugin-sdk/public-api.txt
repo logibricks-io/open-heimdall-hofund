@@ -120,5 +120,7 @@ transport::Reply derives(Clone, Debug, PartialEq, Eq)
 transport::Reply::fn body (& self) -> & [u8]
 transport::Reply::fn into_body (self) -> Vec < u8 >
 transport::Reply::fn status (& self) -> u16
+transport::fn is_quota_error (status : u16 , body : & [u8]) -> bool
 transport::fn parse_retry_after (value : & str , now : std :: time :: SystemTime) -> Option < Duration >
+transport::fn parse_retry_after_headers (headers : & http :: HeaderMap , now : std :: time :: SystemTime ,) -> Option < Duration >
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse

@@ -143,7 +143,7 @@ impl Provider for Bedrock {
         if !status.is_success() {
             let retry_after = http::retry_after(response.headers());
             let bytes = response.bytes().await.unwrap_or_default();
-            let error = ProviderError::status(status.as_u16(), http::message_from(&bytes));
+            let error = ProviderError::response(status.as_u16(), &bytes);
             return Err(match retry_after {
                 Some(after) => error.with_retry_after(after),
                 None => error,
@@ -316,7 +316,10 @@ fn plugin_error(error: ProviderError) -> hofund_plugin_api::PluginError {
         crate::ProviderErrorKind::Decode => PluginError::decode(error.message),
         crate::ProviderErrorKind::Unsupported => PluginError::unsupported(error.message),
         crate::ProviderErrorKind::Auth => PluginError::auth(error.message),
-        crate::ProviderErrorKind::Quota => PluginError::quota(error.message),
+        crate::ProviderErrorKind::Quota => match error.status {
+            Some(status) => PluginError::quota_status(status, error.message),
+            None => PluginError::quota(error.message),
+        },
         crate::ProviderErrorKind::Config => PluginError::config(error.message),
         crate::ProviderErrorKind::Cancelled => PluginError::cancelled(error.message),
         crate::ProviderErrorKind::Io => PluginError::io(error.message),

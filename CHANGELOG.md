@@ -252,6 +252,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Quota refusals are now recognized from the response body with the reference's
+  rule order: a 402 naming a used-up limit, a 429 naming its reset time or a
+  planned allowance, a 5xx quota code, or another 4xx naming a used-up limit.
+  Per-minute and short-wait rate limits, `insufficient_quota`, and credit
+  refusals stay out. Quota errors keep their HTTP status for failover.
+- `Retry-After` keeps fractional seconds, and `*ratelimit*reset*` headers in
+  RFC 3339, Go duration, or Unix-time form are read when it is absent; the
+  longest wins and the router still caps the wait.
+- The rate-limit ladder now continues only when the previous rest was a rate
+  rest, and a kept longer rest keeps its own cause and failure count.
+- Vertex token mint failures are shared with concurrent waiters and negatively
+  cached for five seconds. Mantle learned-route maps are bounded to 256 entries
+  per provider instance with oldest-entry eviction. Invalid local plugin header
+  values now report `Config` instead of `Auth` (#65, #137, #118).
 - SigV4 form and STS tests now use the literal AWS suite inputs. Release and
   desktop-bundle apt installs now have bounded steps, retries, and HTTP timeouts.
 - Control request bodies between 2 MiB and the protocol request limit now reach

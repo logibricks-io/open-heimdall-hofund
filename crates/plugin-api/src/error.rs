@@ -140,6 +140,15 @@ impl PluginError {
         Self::new(PluginErrorKind::Quota, message)
     }
 
+    /// An exhausted upstream quota reported with an HTTP status.
+    #[must_use]
+    pub fn quota_status(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            status: Some(status),
+            ..Self::new(PluginErrorKind::Quota, message)
+        }
+    }
+
     /// Configuration did not validate.
     #[must_use]
     pub fn config(message: impl Into<String>) -> Self {

@@ -256,6 +256,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mantle_route_learning_is_per_provider_instance() {
+        let endpoint = || Endpoint::new("mantle", "https://bedrock-mantle.us-east-1.api.aws/v1");
+        let first = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint()).expect("first");
+        let second = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint()).expect("second");
+        first
+            .mantle
+            .as_ref()
+            .expect("first Mantle")
+            .routes
+            .learn_other("newmaker.model-1");
+        assert!(
+            !second
+                .mantle
+                .as_ref()
+                .expect("second Mantle")
+                .routes
+                .other("newmaker.model-1")
+        );
+    }
+
     #[tokio::test]
     async fn a_refused_prefix_is_tried_once_at_the_other() {
         let server = wiremock::MockServer::start().await;
