@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `DaemonRegistry` injection and shared daemon runtime state. Cooldown books now
+  survive candidate publication, prune removed members and changed provider
+  fingerprints, expire idle history, bound eviction, and record one recovery per rest.
 - CI tests every workspace package with only its default features and bounds
   every Cargo cache step so a stalled cache restore cannot hang a job.
 - Plugin API `BuildContext` and protocol-aware upstream build methods let listed

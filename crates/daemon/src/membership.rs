@@ -40,11 +40,12 @@ pub(crate) struct BuiltProvider {
     pub plugin_id: String,
     /// Preset id from configuration. Empty when the provider has no preset.
     pub preset_id: String,
+    pub fingerprint: String,
 }
 
-struct Table {
+pub(crate) struct Table {
     hops: Mutex<BTreeMap<String, Vec<HopSpec>>>,
-    policy: FailoverPolicy,
+    policy: Mutex<FailoverPolicy>,
     cooldowns: Arc<Cooldowns>,
     snapshot: Snapshot,
 }
@@ -120,6 +121,7 @@ pub(crate) fn observe_backend(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn open(
     built: &BTreeMap<String, BuiltProvider>,
     routes: BTreeMap<String, Vec<PlannedHop>>,
@@ -132,8 +134,7 @@ pub(crate) fn open(
     Ok(snapshot.hold(owner))
 }
 
-#[cfg(test)]
-fn open_with_table(
+pub(crate) fn open_with_table(
     built: &BTreeMap<String, BuiltProvider>,
     routes: BTreeMap<String, Vec<PlannedHop>>,
     policy: FailoverPolicy,
@@ -154,10 +155,21 @@ fn build_table(
     );
     let table = Arc::new(Table {
         hops: Mutex::new(BTreeMap::new()),
-        policy,
+        policy: Mutex::new(policy),
         cooldowns,
         snapshot,
     });
+    let stored = build_specs(&table, built, routes)?;
+    *table.hops.lock().expect("membership") = stored;
+    table.publish();
+    Ok(table)
+}
+
+fn build_specs(
+    table: &Arc<Table>,
+    built: &BTreeMap<String, BuiltProvider>,
+    routes: BTreeMap<String, Vec<PlannedHop>>,
+) -> Result<BTreeMap<String, Vec<HopSpec>>, DaemonError> {
     let mut stored = BTreeMap::new();
     let mut seen_ids: BTreeMap<String, String> = BTreeMap::new();
     for (model, planned) in routes {
@@ -183,7 +195,7 @@ fn build_table(
                     built,
                     &hop.provider,
                     Arc::clone(&table.cooldowns),
-                    Arc::downgrade(&table),
+                    Arc::downgrade(table),
                 )),
                 wire_model: hop.wire_model,
                 max_output_tokens: hop.max_output_tokens,
@@ -191,9 +203,7 @@ fn build_table(
         }
         stored.insert(model, specs);
     }
-    *table.hops.lock().expect("membership") = stored;
-    table.publish();
-    Ok(table)
+    Ok(stored)
 }
 
 pub(crate) struct PlannedHop {
@@ -203,7 +213,20 @@ pub(crate) struct PlannedHop {
 }
 
 impl Table {
-    fn publish(&self) {
+    pub(crate) fn replace(
+        self: &Arc<Self>,
+        built: &BTreeMap<String, BuiltProvider>,
+        routes: BTreeMap<String, Vec<PlannedHop>>,
+        policy: FailoverPolicy,
+    ) -> Result<(), DaemonError> {
+        let stored = build_specs(self, built, routes)?;
+        *self.hops.lock().expect("membership") = stored;
+        *self.policy.lock().expect("failover policy") = policy;
+        self.publish();
+        Ok(())
+    }
+
+    pub(crate) fn publish(&self) {
         let hops = self.hops.lock().expect("membership");
         let routes = hops
             .iter()
@@ -220,7 +243,7 @@ impl Table {
                 (model.clone(), list)
             })
             .collect();
-        let policy = self.policy.clone();
+        let policy = self.policy.lock().expect("failover policy").clone();
         self.snapshot
             .store(Router::from_hops(routes, policy).with_cooldowns(Arc::clone(&self.cooldowns)));
     }
@@ -682,7 +705,7 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     converted
 }
 
-fn member_id(provider_id: &str) -> MemberId {
+pub(crate) fn member_id(provider_id: &str) -> MemberId {
     let kebab = kebab_of(provider_id);
     let preset =
         PresetId::try_from(kebab.as_str()).unwrap_or_else(|_| PresetId::from_static("provider"));
@@ -799,6 +822,7 @@ mod tests {
                 timeout: Duration::from_secs(60),
                 plugin_id: "boom".to_owned(),
                 preset_id: String::new(),
+                fingerprint: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -884,6 +908,7 @@ mod tests {
                 timeout: Duration::from_secs(60),
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: "openai".to_owned(),
+                fingerprint: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -960,6 +985,7 @@ mod tests {
                 timeout: Duration::from_millis(40),
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: String::new(),
+                fingerprint: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1035,6 +1061,7 @@ mod tests {
                 timeout: Duration::from_millis(30),
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: String::new(),
+                fingerprint: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1080,6 +1107,7 @@ mod tests {
                     timeout: Duration::from_secs(60),
                     plugin_id: "openai-compat".to_owned(),
                     preset_id: String::new(),
+                    fingerprint: String::new(),
                 },
             );
         }
@@ -1113,6 +1141,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             plugin_id: id.to_owned(),
             preset_id: String::new(),
+            fingerprint: String::new(),
         }
     }
 
