@@ -360,7 +360,10 @@ async fn read_body(
     Ok((status, retry_after, body))
 }
 
-fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
+/// Parses a Retry-After delta-seconds value or HTTP-date relative to `now`.
+/// Zero and past durations are ignored.
+#[must_use]
+pub fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
     value
         .parse::<u64>()
         .map(Duration::from_secs)

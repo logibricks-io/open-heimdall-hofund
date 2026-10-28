@@ -103,6 +103,7 @@ ControlErrorKind::Conflict
 ControlErrorKind::Forbidden
 ControlErrorKind::Internal
 ControlErrorKind::InvalidConfig
+ControlErrorKind::MethodNotAllowed
 ControlErrorKind::NotFound
 ControlErrorKind::Timeout
 ControlErrorKind::Unauthorized

@@ -836,6 +836,8 @@ fn own_advice_link(text: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
+/// Joins error messages, preserving their shared kind. For mixed kinds, the
+/// last error supplies the kind, status, and retry hint.
 pub(crate) fn join_errors(errors: Vec<PluginError>, fallback: &str, suffix: &str) -> PluginError {
     let Some(last) = errors.last() else {
         return PluginError::decode(format!("{fallback}{suffix}"));
@@ -852,7 +854,14 @@ pub(crate) fn join_errors(errors: Vec<PluginError>, fallback: &str, suffix: &str
         PluginErrorKind::Transport => PluginError::transport(message),
         PluginErrorKind::Interrupted => PluginError::interrupted(message),
         PluginErrorKind::Status => PluginError::status_error(last.status().unwrap_or(502), message),
+        PluginErrorKind::Decode => PluginError::decode(message),
+        PluginErrorKind::Unsupported => PluginError::unsupported(message),
+        PluginErrorKind::Auth => PluginError::auth(message),
+        PluginErrorKind::Quota => PluginError::quota(message),
+        PluginErrorKind::Config => PluginError::config(message),
         PluginErrorKind::Cancelled => PluginError::cancelled(message),
+        PluginErrorKind::Io => PluginError::io(message),
+        PluginErrorKind::Internal => PluginError::internal(message),
         _ => PluginError::decode(message),
     };
     if let Some(after) = last.retry_after() {
@@ -995,5 +1004,63 @@ mod tests {
         assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Cancelled);
         assert_eq!(error.message(), "cancel [redacted]");
         assert!(!error.message().contains("SECRET-API-KEY"));
+    }
+
+    #[test]
+    fn joined_errors_preserve_every_shared_kind() {
+        use hofund_plugin_api::{PluginError, PluginErrorKind};
+
+        let cases = [
+            (
+                PluginErrorKind::Auth,
+                PluginError::auth("first"),
+                PluginError::auth("second"),
+            ),
+            (
+                PluginErrorKind::Quota,
+                PluginError::quota("first"),
+                PluginError::quota("second"),
+            ),
+            (
+                PluginErrorKind::Io,
+                PluginError::io("first"),
+                PluginError::io("second"),
+            ),
+            (
+                PluginErrorKind::Config,
+                PluginError::config("first"),
+                PluginError::config("second"),
+            ),
+            (
+                PluginErrorKind::Unsupported,
+                PluginError::unsupported("first"),
+                PluginError::unsupported("second"),
+            ),
+            (
+                PluginErrorKind::Internal,
+                PluginError::internal("first"),
+                PluginError::internal("second"),
+            ),
+        ];
+        for (kind, first, second) in cases {
+            let joined = super::join_errors(vec![first, second], "fallback", "");
+            assert_eq!(joined.kind(), kind);
+            assert_eq!(joined.message(), "first; second");
+        }
+    }
+
+    #[test]
+    fn mixed_joined_errors_use_the_last_kind_status_and_retry_hint() {
+        use hofund_plugin_api::{PluginError, PluginErrorKind};
+
+        let last = PluginError::status_error(429, "second")
+            .with_retry_after(std::time::Duration::from_secs(120));
+        let joined = super::join_errors(vec![PluginError::auth("first"), last], "fallback", "");
+        assert_eq!(joined.kind(), PluginErrorKind::Status);
+        assert_eq!(joined.status(), Some(429));
+        assert_eq!(
+            joined.retry_after(),
+            Some(std::time::Duration::from_secs(120))
+        );
     }
 }
