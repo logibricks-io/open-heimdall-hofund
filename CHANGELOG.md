@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Docs: control plane (row L) plan.
 - Public `PluginErrorKind::Interrupted` and `ProviderErrorKind::Interrupted`
   variants classify a 2xx reply whose body failed while being read.
 - Per-member cooldowns with generic, rate-limit, quota, credit, observation,
