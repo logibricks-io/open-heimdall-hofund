@@ -1120,6 +1120,14 @@ Kernel globs, `plugins/registry`, the control crates, and `fuzz/` belong to whoe
 - SDK `Call::send` still reads the whole body through `read_body`, so its replies and retry rules do not change.
 - H owns row H0g (ruling Q2). The SDK protocol transports, the removal of the raw-client method and the kit conformance test over the plugin transport are deferred to H0g-b. The Chat and Responses transport lands as the SDK `wire` module in PR E8a.
 
+### PR H0a notes
+
+- `AccountsHandle::lease(id, wait)` takes an exclusive per-account lock in a mode `0600` sibling file, then reads the row and its secret past the cache. A refresh holds the lease, calls the vendor, and calls `commit` with the new secret. Dropping the lease without a commit releases the lock and writes nothing. Waiting longer than `wait` is an `Io` error; a missing account is a `Config` error.
+- Lock order is lease, then store. `upsert` takes the lease (bounded at 30 s) so it cannot overwrite a refresh in flight; `remove` does not. A commit after a removal is an error and does not bring the account back.
+- The lease file closes on drop and unlocks explicitly, because a forked child holds the open file description until it execs. Lease files persist. Account ids are sanitized into the file name, so two ids that differ only in unusual characters share one lease, which only over-serializes them.
+- `SchedulerHandle::run_once` runs one named background job. It keeps running when the caller drops its future, and it is cancelled by `cancel` or host shutdown.
+- `QuotaWindow` gains `blocking` (default `true`) and `scope_model`. `SignInCtx` gains a session (32 lowercase hex digits, set by the host) and named options. `SignInProof::Await` reports a sign-in that completes later. `Subscription` gains `cancel_sign_in` and `account_status`, with defaults of no-op and `Ready`.
+
 ## 7. Comparison with magpie at `cbbf316`
 
 Pins: hofund `dfb6e89e64b1eb5d9b489b7f7af2f0685bac41f4`, magpie `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947`.

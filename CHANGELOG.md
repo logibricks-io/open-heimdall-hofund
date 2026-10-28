@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Account refresh leases: a per-account cross-process lock that reads the stored
+  secret past the cache and commits a refreshed one, with bounded waits for
+  refreshes and upserts. Plugins also gain one-shot background jobs, blocking
+  and model-scoped quota windows, sign-in sessions and options, deferred
+  sign-in proofs, and sign-in cancel and account status hooks.
 - Control picks, model refresh, and provider test routes. Picks edits check a
   revision equal to the state file hash under the state lock, roll back on a
   failed save, and follow the reference edit forms. Refresh has a 30 s timeout
