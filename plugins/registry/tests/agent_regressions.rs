@@ -768,7 +768,7 @@ fn shipped_gemini_cli_discriminates_model_sources_and_route_counts() {
 }
 
 #[test]
-fn shipped_gemini_cli_second_apply_string_model_disconnect_requires_force() {
+fn shipped_gemini_cli_second_apply_string_model_disconnect_restores_the_string_model() {
     let initial = "{\n  \"model\": \"user-model\"\n}\n";
     for os in OPERATING_SYSTEMS {
         let home = scratch();
@@ -784,14 +784,15 @@ fn shipped_gemini_cli_second_apply_string_model_disconnect_requires_force() {
                 .expect("second apply")
                 .is_empty()
         );
-        let connected = tree(&home);
-        let error = adapter
+        let disconnected = adapter
             .disconnect(&session, false)
-            .expect_err("string-model drift")
-            .to_string();
-        assert!(error.contains("--force"), "{error}");
-        assert_eq!(tree(&home), connected);
-        assert!(adapter.disconnect(&session, true).expect("force").changed());
+            .expect("string-model disconnect");
+        assert!(disconnected.changed());
+        assert_eq!(tree(&home), before);
+        let second = adapter
+            .disconnect(&session, false)
+            .expect("second string-model disconnect");
+        assert!(!second.changed());
         assert_eq!(tree(&home), before);
     }
 }

@@ -84,10 +84,15 @@ pub(crate) fn is_empty_document(kind: FileKind, bytes: &[u8]) -> Result<bool, Ag
 
 fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
     let mut root = json_root(original)?;
-    if assignments
+    let writes_model_name = assignments
         .iter()
-        .any(|assignment| assignment.key == "model.name")
-    {
+        .any(|assignment| assignment.key == "model.name");
+    let restore_string_model = writes_model_name
+        && root
+            .get("model")
+            .and_then(Value::as_object)
+            .is_some_and(|model| model.contains_key("name"));
+    if writes_model_name {
         promote_string_model(&mut root);
     }
     for assignment in assignments {
@@ -97,6 +102,9 @@ fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, Age
             &assignment.value,
             assignment.raw_json,
         )?;
+    }
+    if restore_string_model {
+        demote_singleton_model(&mut root);
     }
     pretty_json(&root)
 }
@@ -180,6 +188,25 @@ fn promote_string_model(root: &mut Value) {
     }
 }
 
+fn demote_singleton_model(root: &mut Value) {
+    let singleton = root
+        .get("model")
+        .and_then(Value::as_object)
+        .is_some_and(|model| model.len() == 1 && model.get("name").is_some_and(Value::is_string));
+    if !singleton {
+        return;
+    }
+    let model = root
+        .as_object_mut()
+        .and_then(|object| object.get_mut("model"))
+        .expect("singleton model");
+    let name = model
+        .as_object_mut()
+        .and_then(|object| object.remove("name"))
+        .expect("model name");
+    *model = name;
+}
+
 fn pretty_json(root: &Value) -> Result<String, AgentError> {
     let mut bytes = serde_json::to_vec_pretty(root)
         .map_err(|error| AgentError::message(format!("JSON: {error}")))?;
@@ -236,6 +263,9 @@ pub(crate) fn json_string(value: &Value, key: &str) -> Result<Option<String>, Ag
 }
 
 fn json_get(value: &Value, key: &str) -> Result<Option<String>, AgentError> {
+    if key == "model.name" {
+        return json_model_name(value);
+    }
     let mut cursor = value;
     for part in split_key(key) {
         let Some(object) = cursor.as_object() else {
@@ -250,6 +280,31 @@ fn json_get(value: &Value, key: &str) -> Result<Option<String>, AgentError> {
         Value::String(text) => Ok(Some(text.clone())),
         Value::Null => Ok(None),
         _ => Ok(Some(cursor.to_string())),
+    }
+}
+
+fn json_model_name(value: &Value) -> Result<Option<String>, AgentError> {
+    let Some(root) = value.as_object() else {
+        return Err(AgentError::message(
+            "cannot read `model.name` unless the JSON root is an object; restore an object before disconnect",
+        ));
+    };
+    let Some(model) = root.get("model") else {
+        return Ok(None);
+    };
+    let model = match model {
+        Value::String(model) => return Ok(Some(model.clone())),
+        Value::Object(model) => model,
+        _ => {
+            return Err(AgentError::message(
+                "`model` must be a string or an object containing `name`; restore `model` to one of those shapes before disconnect",
+            ));
+        }
+    };
+    match model.get("name") {
+        Some(Value::String(name)) => Ok(Some(name.clone())),
+        Some(Value::Null) | None => Ok(None),
+        Some(name) => Ok(Some(name.to_string())),
     }
 }
 
@@ -709,5 +764,68 @@ experimental_bearer_token = \"local-token\"
         assert!(!text.contains("hofund"));
         assert!(!text.contains("local-token"));
         assert!(!is_empty_document(FileKind::Toml, text.as_bytes()).expect("empty"));
+    }
+
+    #[test]
+    fn json_restores_a_string_model_after_a_user_edit() {
+        let original = r#"{
+  "model": "user-model",
+  "ui": { "theme": "dark" }
+}
+"#;
+        let connect = [
+            Assignment {
+                key: "security.auth.selectedType",
+                value: "gemini-api-key".to_owned(),
+                raw_json: false,
+            },
+            Assignment {
+                key: "model.name",
+                value: "user-model".to_owned(),
+                raw_json: false,
+            },
+        ];
+        let connected = render(FileKind::Json, Some(original), &connect).expect("connect");
+        let connected = String::from_utf8(connected).expect("connected UTF-8");
+        let mut edited: serde_json::Value =
+            serde_json::from_str(&connected).expect("connected JSON");
+        assert_eq!(edited["model"]["name"], "user-model");
+        edited
+            .as_object_mut()
+            .expect("JSON root")
+            .insert("user_added".to_owned(), serde_json::Value::from("keep"));
+        let edited = serde_json::to_string(&edited).expect("edited JSON");
+
+        let original_model = get(FileKind::Json, original, "model.name")
+            .expect("original model")
+            .expect("string model");
+        let restore = [Assignment {
+            key: "model.name",
+            value: original_model,
+            raw_json: false,
+        }];
+        let restored = render(FileKind::Json, Some(&edited), &restore).expect("restore");
+        let restored = String::from_utf8(restored).expect("restored UTF-8");
+        let disconnected = remove_keys(FileKind::Json, &restored, &["security.auth.selectedType"])
+            .expect("disconnect");
+        let disconnected: serde_json::Value =
+            serde_json::from_slice(&disconnected).expect("disconnected JSON");
+        assert_eq!(disconnected["model"], "user-model");
+        assert_eq!(disconnected["user_added"], "keep");
+        assert_eq!(disconnected["ui"]["theme"], "dark");
+        assert!(disconnected.get("security").is_none());
+    }
+
+    #[test]
+    fn json_model_shape_error_names_the_key_and_repair() {
+        let error = get(FileKind::Json, r#"{"model": 42}"#, "model.name")
+            .expect_err("invalid model shape")
+            .to_string();
+        assert!(
+            error.contains("`model` must be a string or an object"),
+            "{error}"
+        );
+        assert!(error.contains("restore `model`"), "{error}");
+        assert!(!error.contains("`name` is not an object"), "{error}");
     }
 }
