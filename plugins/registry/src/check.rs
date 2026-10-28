@@ -61,6 +61,48 @@ pub fn duplicate_id<'a>(ids: &[&'a str]) -> Option<&'a str> {
     None
 }
 
+/// The first repeated `(kind, id)` pair, if any.
+#[must_use]
+pub fn duplicate_kind_id<'a>(ids: &[(&'a str, &'a str)]) -> Option<(&'a str, &'a str)> {
+    let mut seen = BTreeSet::new();
+    for (kind, id) in ids {
+        if !seen.insert((*kind, *id)) {
+            return Some((*kind, *id));
+        }
+    }
+    None
+}
+
+/// Agent implementation ids that data-only agent ids must not collide with.
+#[must_use]
+pub fn agent_collision_ids<'a>(rows: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    rows.iter()
+        .filter(|(kind, _)| *kind == "agent")
+        .map(|(_, id)| *id)
+        .collect()
+}
+
+/// The Cargo feature for one plugin row.
+///
+/// An id shared by multiple kinds is qualified in every row with that id.
+#[must_use]
+pub fn expected_feature(rows: &[(&str, &str)], kind: &str, id: &str) -> String {
+    let shared = rows
+        .iter()
+        .any(|(other_kind, other_id)| *other_id == id && *other_kind != kind);
+    if shared {
+        format!("{kind}-{id}")
+    } else {
+        id.to_owned()
+    }
+}
+
+/// True when `(id, kind)` pairs are strictly increasing.
+#[must_use]
+pub fn strictly_sorted_plugin_ids(ids: &[(&str, &str)]) -> bool {
+    ids.windows(2).all(|pair| pair[0] < pair[1])
+}
+
 /// True when `ids` is strictly increasing.
 #[must_use]
 pub fn strictly_sorted(ids: &[&str]) -> bool {
@@ -132,8 +174,8 @@ pub fn route_conflicts(routes: &[DeclaredRoute]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeclaredRoute, duplicate_id, invalid_prefix, path_matches, prefixes_conflict,
-        route_conflicts, strictly_sorted,
+        DeclaredRoute, duplicate_id, duplicate_kind_id, invalid_prefix, path_matches,
+        prefixes_conflict, route_conflicts, strictly_sorted, strictly_sorted_plugin_ids,
     };
 
     fn route(plugin: &str, method: &str, prefix: &str) -> DeclaredRoute {
@@ -173,6 +215,56 @@ mod tests {
         assert!(path_matches("/hofund/echo", "/hofund/echo/nested"));
         assert!(!path_matches("/hofund/echo", "/hofund/echov2"));
         assert!(path_matches("/", "/anywhere"));
+    }
+
+    #[test]
+    fn agent_collision_ids_exclude_other_kinds_with_the_same_id() {
+        let rows = [
+            ("subscription", "shared"),
+            ("agent", "shared"),
+            ("provider", "other"),
+        ];
+        assert_eq!(super::agent_collision_ids(&rows), ["shared"]);
+    }
+
+    #[test]
+    fn feature_names_qualify_every_row_with_a_cross_kind_id() {
+        let rows = [
+            ("agent", "shared"),
+            ("subscription", "shared"),
+            ("provider", "unique"),
+        ];
+        for (kind, expected) in [
+            ("agent", "agent-shared"),
+            ("subscription", "subscription-shared"),
+        ] {
+            assert_eq!(super::expected_feature(&rows, kind, "shared"), expected);
+        }
+        assert_eq!(
+            super::expected_feature(&rows, "provider", "unique"),
+            "unique"
+        );
+    }
+
+    #[test]
+    fn plugin_ids_are_unique_per_kind_and_sorted_by_id_then_kind() {
+        assert_eq!(
+            duplicate_kind_id(&[("agent", "shared"), ("subscription", "shared")]),
+            None
+        );
+        assert_eq!(
+            duplicate_kind_id(&[("agent", "shared"), ("agent", "shared")]),
+            Some(("agent", "shared"))
+        );
+        assert!(strictly_sorted_plugin_ids(&[
+            ("other", "provider"),
+            ("shared", "agent"),
+            ("shared", "subscription")
+        ]));
+        assert!(!strictly_sorted_plugin_ids(&[
+            ("shared", "subscription"),
+            ("shared", "agent")
+        ]));
     }
 
     #[test]

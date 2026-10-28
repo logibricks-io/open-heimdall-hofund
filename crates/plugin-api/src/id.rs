@@ -199,6 +199,89 @@ kebab_id!(
     "surface id"
 );
 
+/// The kind of a plugin in the registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum PluginKind {
+    /// An upstream provider implementation.
+    Provider,
+    /// A subscription implementation.
+    Subscription,
+    /// A coding-agent integration.
+    Agent,
+    /// An inbound HTTP surface.
+    Inbound,
+}
+
+impl PluginKind {
+    /// The registry kind string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Subscription => "subscription",
+            Self::Agent => "agent",
+            Self::Inbound => "inbound",
+        }
+    }
+}
+
+impl TryFrom<&str> for PluginKind {
+    type Error = IdError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "provider" => Ok(Self::Provider),
+            "subscription" => Ok(Self::Subscription),
+            "agent" => Ok(Self::Agent),
+            "inbound" => Ok(Self::Inbound),
+            _ => Err(IdError::new("unknown plugin kind")),
+        }
+    }
+}
+
+impl fmt::Display for PluginKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// The kind-qualified identity used for per-plugin host storage.
+///
+/// User-facing configuration and CLI commands continue to use [`PluginId`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub struct PluginKey {
+    kind: PluginKind,
+    id: PluginId,
+}
+
+impl PluginKey {
+    /// Builds a kind-qualified plugin identity.
+    #[must_use]
+    pub const fn new(kind: PluginKind, id: PluginId) -> Self {
+        Self { kind, id }
+    }
+
+    /// The plugin kind.
+    #[must_use]
+    pub const fn kind(&self) -> PluginKind {
+        self.kind
+    }
+
+    /// The user-facing plugin id within that kind.
+    #[must_use]
+    pub const fn id(&self) -> &PluginId {
+        &self.id
+    }
+}
+
+impl fmt::Display for PluginKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}:{}", self.kind, self.id)
+    }
+}
+
 /// The key half of a preset [`MemberId`]. Not an account id.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -523,7 +606,20 @@ const _: SurfaceId = SurfaceId::from_static("example-surface");
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountId, IdError, MemberId, MemberKey, PluginId, PresetId, ProtocolId, TierId};
+    use super::{
+        AccountId, IdError, MemberId, MemberKey, PluginId, PluginKey, PluginKind, PresetId,
+        ProtocolId, TierId,
+    };
+
+    #[test]
+    fn plugin_keys_carry_kind_without_changing_the_id() {
+        let key = PluginKey::new(PluginKind::Subscription, PluginId::from_static("shared"));
+        assert_eq!(key.kind(), PluginKind::Subscription);
+        assert_eq!(key.id().as_str(), "shared");
+        assert_eq!(key.to_string(), "subscription:shared");
+        assert_eq!(PluginKind::try_from("provider"), Ok(PluginKind::Provider));
+        assert!(PluginKind::try_from("unknown").is_err());
+    }
 
     #[test]
     fn kebab_ids_reject_shape_errors() {
