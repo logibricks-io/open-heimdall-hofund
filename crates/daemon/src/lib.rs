@@ -353,10 +353,10 @@ async fn start_inner(
                         running = running.with_unix_control(unix, candidate.clone());
                         socket_path = Some(candidate);
                     }
-                    Err(error @ hofund_gateway::GatewayError::SocketPathTooLong { .. }) => {
-                        return Err(DaemonError::new(error.to_string()));
-                    }
-                    Err(error @ hofund_gateway::GatewayError::BindUnix { .. }) => {
+                    Err(
+                        error @ (hofund_gateway::GatewayError::SocketPathTooLong { .. }
+                        | hofund_gateway::GatewayError::BindUnix { .. }),
+                    ) => {
                         tracing::warn!(
                             path = %candidate.display(),
                             %error,

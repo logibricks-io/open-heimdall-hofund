@@ -10,7 +10,11 @@ use hofund_daemon::{ControlRuntime, StartOptions, start_with_options};
 #[tokio::test]
 async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    #[cfg(unix)]
+    let base = std::path::PathBuf::from("/tmp");
+    #[cfg(not(unix))]
+    let base = std::env::temp_dir();
+    let dir = base.join(format!(
         "hofund-daemon-control-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)

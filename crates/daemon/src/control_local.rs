@@ -564,7 +564,9 @@ mod tests {
         let identity = ConfigIdentity::resolve(&config).expect("identity");
         let runtime = ControlRuntime::new(None, dir.clone());
         let first = ControlSession::acquire(identity.clone(), &runtime).expect("first lock");
-        let error = ControlSession::acquire(identity, &runtime).expect_err("second lock");
+        let Err(error) = ControlSession::acquire(identity, &runtime) else {
+            panic!("second lock was acquired");
+        };
         assert!(error.contains("already served by PID"), "{error}");
         drop(first);
         let _ = std::fs::remove_dir_all(dir);

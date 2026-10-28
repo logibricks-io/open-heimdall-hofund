@@ -64,7 +64,21 @@ struct UnixScratch(std::path::PathBuf);
 #[cfg(unix)]
 impl UnixScratch {
     fn new(label: &str) -> Self {
-        Self(scratch(label))
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::path::PathBuf::from("/tmp").join(format!(
+            "hofund-gateway-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("scratch directory");
+        let socket = path.join("control.sock");
+        assert!(
+            socket.as_os_str().as_encoded_bytes().len() < 100,
+            "socket path must be shorter than 100 bytes: {}",
+            socket.display()
+        );
+        Self(path)
     }
 }
 
@@ -495,8 +509,8 @@ async fn unix_request_result(socket: &std::path::Path, host: &str) -> std::io::R
 #[tokio::test]
 async fn unix_socket_round_trip_with_permissions_and_safe_peer_cred() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = scratch("unix-round-trip");
-    let socket = dir.join("control.sock");
+    let dir = UnixScratch::new("unix-round-trip");
+    let socket = dir.0.join("control.sock");
     let running = control().bind_unix(&socket).await.expect("Unix bind");
     let mode = std::fs::metadata(&socket)
         .expect("socket metadata")
@@ -508,7 +522,6 @@ async fn unix_socket_round_trip_with_permissions_and_safe_peer_cred() {
     assert!(response.contains("\"pid\":42"), "{response}");
     running.shutdown().await;
     assert!(!socket.exists());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[cfg(unix)]
@@ -548,13 +561,12 @@ async fn unix_listener_rejects_wrong_peer_uid_before_http() {
 #[cfg(unix)]
 #[tokio::test]
 async fn local_ipc_host_is_pinned_constant() {
-    let dir = scratch("unix-host");
-    let socket = dir.join("control.sock");
+    let dir = UnixScratch::new("unix-host");
+    let socket = dir.0.join("control.sock");
     let running = control().bind_unix(&socket).await.expect("Unix bind");
     let response = unix_request(&socket, "127.0.0.1:3426").await;
     assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
     running.shutdown().await;
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[cfg(unix)]

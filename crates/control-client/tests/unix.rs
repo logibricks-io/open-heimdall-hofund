@@ -24,13 +24,19 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new(label: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "hofund-client-unix-{label}-{}-{}",
+        let path = PathBuf::from("/tmp").join(format!(
+            "hofund-client-{label}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("scratch directory");
+        let socket = path.join("control.sock");
+        assert!(
+            socket.as_os_str().as_encoded_bytes().len() < 100,
+            "socket path must be shorter than 100 bytes: {}",
+            socket.display()
+        );
         Self(path)
     }
 
@@ -297,4 +303,33 @@ async fn discovery_wrong_version_does_not_fall_back_to_tcp() {
         .await
         .expect_err("wrong discovery version");
     assert!(matches!(error, ClientError::Discovery(_)), "{error}");
+}
+
+#[tokio::test]
+async fn discovery_overlong_socket_path_falls_back_to_tcp() {
+    let dir = Scratch::new("long-socket");
+    let (config, id) = write_config(&dir);
+    let socket = dir.0.join("s".repeat(120));
+    std::fs::write(
+        dir.join(".hofund").join(format!("control-{id}.json")),
+        serde_json::to_vec(&serde_json::json!({
+            "api_version": 1,
+            "pid": 7,
+            "boot_id": "boot",
+            "config_id": id,
+            "tcp_endpoints": ["127.0.0.1:9"],
+            "socket_path": socket,
+        }))
+        .expect("discovery JSON"),
+    )
+    .expect("discovery");
+    let options = DiscoveryOptions::isolated(None, dir.0.clone());
+    let error = Client::discover(&config, TOKEN, options)
+        .await
+        .expect_err("unavailable TCP fallback");
+    assert!(
+        matches!(error, ClientError::ConnectionUnavailable(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("TCP"), "{error}");
 }

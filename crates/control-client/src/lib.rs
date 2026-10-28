@@ -260,13 +260,19 @@ mod tests {
     impl Scratch {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "hofund-client-socket-owner-{}-{}",
+            let path = PathBuf::from("/tmp").join(format!(
+                "hofund-client-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("scratch directory");
+            let socket = path.join("control.sock");
+            assert!(
+                socket.as_os_str().as_encoded_bytes().len() < 100,
+                "socket path must be shorter than 100 bytes: {}",
+                socket.display()
+            );
             Self(path)
         }
     }

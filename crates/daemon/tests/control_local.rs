@@ -9,13 +9,19 @@ use hofund_daemon::{ControlRuntime, StartOptions, start_with_options};
 
 fn scratch(label: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "hofund-daemon-local-{label}-{}-{}",
+    let path = PathBuf::from("/tmp").join(format!(
+        "hofund-daemon-{label}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).expect("scratch directory");
+    let socket = path.join("control.sock");
+    assert!(
+        socket.as_os_str().as_encoded_bytes().len() < 100,
+        "socket path must be shorter than 100 bytes: {}",
+        socket.display()
+    );
     path
 }
 
@@ -190,6 +196,46 @@ async fn unix_socket_unavailable_uses_configured_tcp() {
     )
     .await
     .expect("TCP fallback");
+    assert!(running.control_local_addr().is_some());
+    assert!(running.control_socket_path().is_none());
+    let discovery = std::fs::read_dir(dir.join(".hofund"))
+        .expect("state directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        })
+        .expect("discovery");
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(discovery).expect("discovery JSON")).expect("JSON");
+    assert_eq!(value["socket_path"], serde_json::Value::Null);
+    assert!(value["tcp_endpoints"][0].as_str().is_some());
+    running.shutdown().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn overlong_unix_socket_path_uses_configured_tcp() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("long-socket-path");
+    let config = dir.join("hofund.toml");
+    std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
+    let runtime = dir.join("r".repeat(120));
+    std::fs::create_dir(&runtime).expect("long runtime root");
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+        .expect("runtime permissions");
+    let running = start_with_options(
+        &config,
+        StartOptions {
+            control_listen: Some("127.0.0.1:0".parse().expect("control TCP")),
+            control_runtime: Some(ControlRuntime::new(Some(runtime), dir.clone())),
+            ..StartOptions::default()
+        },
+    )
+    .await
+    .expect("overlong socket path falls back to TCP");
     assert!(running.control_local_addr().is_some());
     assert!(running.control_socket_path().is_none());
     let discovery = std::fs::read_dir(dir.join(".hofund"))

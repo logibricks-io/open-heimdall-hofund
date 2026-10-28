@@ -221,6 +221,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Over-long Unix control socket paths now warn and fall back to TCP instead of
+  preventing daemon startup. Socket tests use short paths on macOS, and the
+  Windows single-instance test no longer requires session debug output.
 - Wrong-method control responses now use the `method_not_allowed` error kind
   while retaining HTTP 405 (#206).
 - Decide-only presets with an explicit wire now report the same missing-endpoint
