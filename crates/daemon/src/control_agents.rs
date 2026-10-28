@@ -3,9 +3,11 @@
 //! Every adapter call reads or writes files under the user's home directory,
 //! so it runs on the blocking pool. Connect, disconnect, and token rotation
 //! hold one gate so a rotation cannot interleave with a connect that read
-//! the previous token.
+//! the previous token. The gate guard moves into the blocking task, so a
+//! cancelled request keeps the gate until its file work has finished.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hofund_agent::{AgentAdapter, Catalog, ConfigFile, GatewayTarget, Session};
 use hofund_control_proto::{
@@ -50,7 +52,7 @@ impl TargetParts {
 
 pub(crate) struct AgentOps {
     descriptions: &'static [&'static AgentDescription],
-    gate: Mutex<()>,
+    gate: Arc<Mutex<()>>,
     token_generation: watch::Sender<u64>,
     session: Option<Session>,
     parts: TargetParts,
@@ -66,7 +68,7 @@ impl AgentOps {
     ) -> Self {
         Self {
             descriptions,
-            gate: Mutex::new(()),
+            gate: Arc::new(Mutex::new(())),
             token_generation: watch::channel(0).0,
             session: None,
             parts: TargetParts {
@@ -109,7 +111,24 @@ impl AgentOps {
             work(&catalog, &session)
         })
         .await
-        .map_err(|error| internal(format!("agent task failed: {error}")))?
+        .map_err(|_| internal("agent task failed".to_owned()))?
+    }
+
+    /// Runs `work` like [`Self::blocking`] while holding the agent gate. The
+    /// guard is owned by the blocking task, not by this future, so dropping
+    /// the future (a client disconnect or a timeout) does not release the
+    /// gate before `work` returns.
+    async fn gated<T, F>(&self, work: F) -> Result<T, ControlError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Catalog, &Session) -> Result<T, ControlError> + Send + 'static,
+    {
+        let guard = Arc::clone(&self.gate).lock_owned().await;
+        self.blocking(move |catalog, session| {
+            let _guard = guard;
+            work(catalog, session)
+        })
+        .await
     }
 
     pub(crate) async fn list(&self) -> Result<AgentListResponse, ControlError> {
@@ -205,9 +224,8 @@ impl AgentOps {
         id: String,
         request: AgentConnectRequest,
     ) -> Result<AgentChangeResponse, ControlError> {
-        let _gate = self.gate.lock().await;
         let parts = self.parts.clone();
-        self.blocking(move |catalog, session| {
+        self.gated(move |catalog, session| {
             let adapter = find(catalog, &id)?;
             let token = parts.token()?;
             let target = parts.target(token.clone());
@@ -244,9 +262,8 @@ impl AgentOps {
         id: String,
         request: AgentDisconnectRequest,
     ) -> Result<AgentChangeResponse, ControlError> {
-        let _gate = self.gate.lock().await;
         let parts = self.parts.clone();
-        self.blocking(move |catalog, session| {
+        self.gated(move |catalog, session| {
             let adapter = find(catalog, &id)?;
             let token = parts.token()?;
             let target = parts.target(token.clone());
@@ -278,10 +295,9 @@ impl AgentOps {
     }
 
     pub(crate) async fn rotate_token(&self) -> Result<TokenRotateResponse, ControlError> {
-        let _gate = self.gate.lock().await;
         let parts = self.parts.clone();
         let generation = self.token_generation.clone();
-        self.blocking(move |catalog, session| {
+        self.gated(move |catalog, session| {
             let file = TokenFile::new(&parts.token_path);
             let previous_token = parts.token()?;
             let previous = parts.target(previous_token.clone());
@@ -531,7 +547,7 @@ mod tests {
     use hofund_agent::{ConfigFile, GatewayTarget};
     use hofund_control_proto::AgentAction;
 
-    use super::{model_has_route, plan_revision, redact_diff, scrub};
+    use super::{AgentOps, model_has_route, plan_revision, redact_diff, scrub};
 
     fn target(token: &str) -> GatewayTarget {
         GatewayTarget::new("http://127.0.0.1:3425", token, vec!["m".to_owned()])
@@ -609,6 +625,49 @@ mod tests {
             scrub("old new", &["old", "", "new"]),
             "[redacted] [redacted]"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_gated_call_keeps_the_gate_until_its_work_finishes() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let ops = Arc::new(AgentOps::new(
+            hofund_plugin_registry::agents(),
+            std::path::Path::new("unused.toml"),
+            "http://127.0.0.1:3425".to_owned(),
+            Vec::new(),
+            PathBuf::from("unused-token"),
+        ));
+        let finished = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let first = {
+            let ops = Arc::clone(&ops);
+            let finished = Arc::clone(&finished);
+            tokio::spawn(async move {
+                ops.gated(move |_, _| {
+                    started_tx.send(()).ok();
+                    std::thread::sleep(Duration::from_millis(300));
+                    finished.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+            })
+        };
+        tokio::task::spawn_blocking(move || started_rx.recv())
+            .await
+            .expect("join")
+            .expect("first body started");
+        first.abort();
+        assert!(first.await.expect_err("aborted").is_cancelled());
+        let seen = {
+            let finished = Arc::clone(&finished);
+            ops.gated(move |_, _| Ok(finished.load(Ordering::SeqCst)))
+                .await
+                .expect("second gated call")
+        };
+        assert!(seen, "the second gated call ran before the first body finished");
     }
 
     #[test]
