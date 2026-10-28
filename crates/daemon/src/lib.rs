@@ -1412,7 +1412,9 @@ mod tests {
             let planned = super::plan(provider).expect("real registry plan");
             assert_eq!(planned.wire, wire);
             let protocol = match wire {
-                hofund_provider::Wire::Generative => hofund_plugin_api::ProtocolId::GENERATIVE_LANGUAGE,
+                hofund_provider::Wire::Generative => {
+                    hofund_plugin_api::ProtocolId::GENERATIVE_LANGUAGE
+                }
                 _ => hofund_plugin_api::ProtocolId::ANTHROPIC_MESSAGES,
             };
             assert_eq!(planned.protocol, Some(protocol), "{preset} {extra}");

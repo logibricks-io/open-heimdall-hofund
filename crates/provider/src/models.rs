@@ -464,10 +464,6 @@ pub(crate) fn azure_url(base: &str) -> bool {
     azure_host(&url_host(base))
 }
 
-/// Whether `host` is an Azure OpenAI resource host, with an optional port.
-///
-// reference: internal/provider/azure.go:27-53
-#[must_use]
 /// Whether `host` is `anthropic.com` or one of its subdomains.
 ///
 /// Lookalike hosts such as `evilanthropic.com` do not match.
@@ -477,6 +473,10 @@ pub(crate) fn anthropic_host(host: &str) -> bool {
     host == "anthropic.com" || host.ends_with(".anthropic.com")
 }
 
+/// Whether `host` is an Azure OpenAI resource host, with an optional port.
+///
+// reference: internal/provider/azure.go:27-53
+#[must_use]
 pub fn azure_host(host: &str) -> bool {
     const SUFFIXES: &[&str] = &[
         ".openai.azure.com",
@@ -904,7 +904,11 @@ mod tests {
 
     #[test]
     fn anthropic_host_matches_the_domain_and_subdomains_only() {
-        for host in ["anthropic.com", "api.anthropic.com", "API.Anthropic.com:443"] {
+        for host in [
+            "anthropic.com",
+            "api.anthropic.com",
+            "API.Anthropic.com:443",
+        ] {
             assert!(super::anthropic_host(host), "{host}");
         }
         for host in [
@@ -930,9 +934,17 @@ mod tests {
             false,
         ));
         let lookalike = crate::http::Endpoint::new("lookalike", "https://evilanthropic.com/v1");
-        assert!(!super::ModelClient::new(&lookalike).expect("client").is_official_anthropic());
+        assert!(
+            !super::ModelClient::new(&lookalike)
+                .expect("client")
+                .is_official_anthropic()
+        );
         let official = crate::http::Endpoint::new("official", "https://api.anthropic.com");
-        assert!(super::ModelClient::new(&official).expect("client").is_official_anthropic());
+        assert!(
+            super::ModelClient::new(&official)
+                .expect("client")
+                .is_official_anthropic()
+        );
     }
 
     #[test]
