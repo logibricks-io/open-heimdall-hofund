@@ -58,6 +58,23 @@ fn scratch(label: &str) -> std::path::PathBuf {
     path
 }
 
+#[cfg(unix)]
+struct UnixScratch(std::path::PathBuf);
+
+#[cfg(unix)]
+impl UnixScratch {
+    fn new(label: &str) -> Self {
+        Self(scratch(label))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnixScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn model_app(token: &str) -> axum::Router {
     let dir = scratch("model");
     let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("usage"));
@@ -457,16 +474,21 @@ async fn control_routes_are_not_on_model_listener() {
 
 #[cfg(unix)]
 async fn unix_request(socket: &std::path::Path, host: &str) -> String {
-    let mut stream = tokio::net::UnixStream::connect(socket)
+    unix_request_result(socket, host)
         .await
-        .expect("Unix connection");
+        .expect("Unix request")
+}
+
+#[cfg(unix)]
+async fn unix_request_result(socket: &std::path::Path, host: &str) -> std::io::Result<String> {
+    let mut stream = tokio::net::UnixStream::connect(socket).await?;
     let request = format!(
         "GET /v1/hofund/status HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
     );
-    stream.write_all(request.as_bytes()).await.expect("write");
+    stream.write_all(request.as_bytes()).await?;
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.expect("read");
-    String::from_utf8(response).expect("HTTP response")
+    stream.read_to_end(&mut response).await?;
+    Ok(String::from_utf8(response).expect("HTTP response"))
 }
 
 #[cfg(unix)]
@@ -487,6 +509,40 @@ async fn unix_socket_round_trip_with_permissions_and_safe_peer_cred() {
     running.shutdown().await;
     assert!(!socket.exists());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_listener_rejects_wrong_peer_uid_before_http() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = UnixScratch::new("unix-peer-uid");
+    let uid = std::fs::metadata(&dir.0).expect("directory metadata").uid();
+    let socket = dir.0.join("control.sock");
+    let running = control()
+        .bind_unix_with_expected_uid(&socket, uid.wrapping_add(1))
+        .await
+        .expect("Unix bind with wrong expected uid");
+    match unix_request_result(&socket, "hofund-control").await {
+        Ok(response) => assert!(response.is_empty(), "wrong peer received HTTP: {response}"),
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+            ),
+            "unexpected connection error: {error}"
+        ),
+    }
+    running.shutdown().await;
+
+    let running = control()
+        .bind_unix_with_expected_uid(&socket, uid)
+        .await
+        .expect("Unix bind with current uid");
+    let response = unix_request(&socket, "hofund-control").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    running.shutdown().await;
 }
 
 #[cfg(unix)]

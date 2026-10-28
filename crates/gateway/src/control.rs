@@ -140,7 +140,26 @@ impl Control {
     /// Returns [`GatewayError`] when the path is too long, binding fails, or
     /// socket ownership cannot be established.
     pub async fn bind_unix(self, path: &Path) -> Result<Running, GatewayError> {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::fs::MetadataExt;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let expected_uid = std::fs::metadata(parent)
+            .map_err(|source| GatewayError::BindUnix {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .uid();
+        self.bind_unix_with_expected_uid(path, expected_uid).await
+    }
+
+    /// Binds a Unix socket with an explicit expected peer uid for testing.
+    #[cfg(unix)]
+    #[doc(hidden)]
+    pub async fn bind_unix_with_expected_uid(
+        self,
+        path: &Path,
+        expected_uid: u32,
+    ) -> Result<Running, GatewayError> {
+        use std::os::unix::fs::PermissionsExt;
         validate_socket_path(path)?;
         let listener = UnixListener::bind(path).map_err(|source| GatewayError::BindUnix {
             path: path.to_path_buf(),
@@ -153,13 +172,6 @@ impl Control {
                 source,
             },
         )?;
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let expected_uid = std::fs::metadata(parent)
-            .map_err(|source| GatewayError::BindUnix {
-                path: path.to_path_buf(),
-                source,
-            })?
-            .uid();
         let router = self.into_local_router();
         let (shutdown, mut signal) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -171,10 +183,9 @@ impl Control {
                         let (stream, _) = match accepted {
                             Ok(accepted) => accepted,
                             Err(error) => {
-                                let resource_exhausted = matches!(error.raw_os_error(), Some(23 | 24));
                                 tracing::warn!(%error, "local control accept failed");
-                                if resource_exhausted {
-                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                if let Some(backoff) = accept_backoff(&error) {
+                                    tokio::time::sleep(backoff).await;
                                 }
                                 continue;
                             }
@@ -214,6 +225,18 @@ impl Drop for SocketCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+// Keep these Unix errno values local because gateway does not depend on libc.
+#[cfg(unix)]
+const ENFILE: i32 = 23;
+#[cfg(unix)]
+const EMFILE: i32 = 24;
+
+#[cfg(unix)]
+fn accept_backoff(error: &std::io::Error) -> Option<std::time::Duration> {
+    matches!(error.raw_os_error(), Some(ENFILE | EMFILE))
+        .then_some(std::time::Duration::from_millis(100))
 }
 
 #[cfg(unix)]
@@ -426,5 +449,18 @@ mod tests {
     fn unix_peer_rejects_a_different_uid() {
         assert!(super::peer_allowed(1000, 1000));
         assert!(!super::peer_allowed(1001, 1000));
+    }
+
+    #[test]
+    fn accept_backoff_only_applies_to_descriptor_exhaustion() {
+        for errno in [super::ENFILE, super::EMFILE] {
+            let error = std::io::Error::from_raw_os_error(errno);
+            assert_eq!(
+                super::accept_backoff(&error),
+                Some(std::time::Duration::from_millis(100))
+            );
+        }
+        let error = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "aborted");
+        assert_eq!(super::accept_backoff(&error), None);
     }
 }

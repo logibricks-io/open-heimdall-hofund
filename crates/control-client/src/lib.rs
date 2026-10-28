@@ -205,6 +205,12 @@ impl Client {
 
 #[cfg(unix)]
 fn verify_unix_socket(path: &std::path::Path) -> Result<(), ClientError> {
+    let uid = discovery::current_uid(&std::env::temp_dir())?;
+    verify_unix_socket_for(path, uid)
+}
+
+#[cfg(unix)]
+fn verify_unix_socket_for(path: &std::path::Path, expected_uid: u32) -> Result<(), ClientError> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -216,10 +222,9 @@ fn verify_unix_socket(path: &std::path::Path) -> Result<(), ClientError> {
             ))
         }
     })?;
-    let uid = discovery::current_uid(&std::env::temp_dir())?;
     if metadata.file_type().is_symlink()
         || !metadata.file_type().is_socket()
-        || metadata.uid() != uid
+        || metadata.uid() != expected_uid
     {
         return Err(ClientError::Discovery(format!(
             "control socket must be a current-user-owned socket, not a symlink: {}",
@@ -243,4 +248,45 @@ fn connect_error(context: &str, error: std::io::Error) -> ClientError {
 
 fn transport(context: &str, error: impl fmt::Display) -> ClientError {
     ClientError::Transport(format!("{context}: {error}"))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "hofund-client-socket-owner-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("scratch directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn unix_socket_verifier_rejects_wrong_owner_uid() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = Scratch::new();
+        let socket = dir.0.join("control.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("Unix listener");
+        let owner_uid = std::fs::metadata(&socket).expect("socket metadata").uid();
+        super::verify_unix_socket_for(&socket, owner_uid).expect("current owner");
+        let error = super::verify_unix_socket_for(&socket, owner_uid.wrapping_add(1))
+            .expect_err("wrong owner uid");
+        assert!(matches!(error, super::ClientError::Discovery(_)));
+    }
 }
