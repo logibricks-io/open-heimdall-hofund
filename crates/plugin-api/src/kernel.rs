@@ -279,6 +279,50 @@ pub trait PipedChildBackend: Send + Sync {
     fn take_stdout(&self) -> Option<BodyStream>;
 }
 
+/// Loopback callback listeners for sign-in. The kernel owns the listener and
+/// awaits the callback. The plugin only learns the redirect URI.
+#[doc(hidden)]
+pub trait LoopbackBackend: Send + Sync {
+    /// Binds a listener for `session`, a sign-in started by `plugin`.
+    ///
+    /// A fixed port that is busy or reserved still returns a binding, with
+    /// [`crate::LoopbackBinding::blocked`] set, so the sign-in carries on
+    /// paste-only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `session` already has a binding, or the
+    /// listener cannot be started for another reason.
+    fn bind(
+        &self,
+        plugin: &PluginKey,
+        session: &str,
+        spec: &crate::LoopbackSpec,
+    ) -> Result<crate::LoopbackBinding, PluginError>;
+
+    /// Closes the listener for `session` if `plugin` bound it. An unknown
+    /// session, or one bound by another plugin, is a no-op.
+    fn release(&self, plugin: &PluginKey, session: &str);
+}
+
+/// The backend a context gets when the kernel has no loopback listener.
+pub(crate) struct NoLoopback;
+
+impl LoopbackBackend for NoLoopback {
+    fn bind(
+        &self,
+        _plugin: &PluginKey,
+        _session: &str,
+        _spec: &crate::LoopbackSpec,
+    ) -> Result<crate::LoopbackBinding, PluginError> {
+        Err(PluginError::unsupported(
+            "this host has no loopback callback listener",
+        ))
+    }
+
+    fn release(&self, _plugin: &PluginKey, _session: &str) {}
+}
+
 /// Per-plugin directories the kernel creates.
 #[doc(hidden)]
 pub trait DirBackend: Send + Sync {

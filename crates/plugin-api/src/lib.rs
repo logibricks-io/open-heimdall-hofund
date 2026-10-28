@@ -58,9 +58,10 @@ pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfi
 pub use error::{PluginError, PluginErrorKind};
 pub use hofund_ir::{ContentPart, Request, Response, Role, StreamEvent};
 pub use host::{
-    AccountLease, AccountsHandle, AuthResult, ClockHandle, DirHandle, HostContext, HttpHandle, Job,
-    JobId, JobSpec, ObserveHandle, PipedChild, ProcessHandle, SchedulerHandle, SecretsHandle,
-    SpawnRequest, Spawned, SurfaceHost,
+    AccountLease, AccountsHandle, AuthResult, BindBlocked, ClockHandle, DirHandle, HostContext,
+    HttpHandle, Job, JobId, JobSpec, LOOPBACK_CANCEL_PATH, LoopbackBinding, LoopbackHandle,
+    LoopbackSpec, ObserveHandle, PipedChild, ProcessHandle, RedirectHost, SchedulerHandle,
+    SecretsHandle, SpawnRequest, Spawned, SurfaceHost,
 };
 pub use id::{
     AccountId, IdError, MemberId, MemberKey, PluginId, PluginKey, PluginKind, PresetId, ProtocolId,
@@ -105,6 +106,7 @@ mod tests {
         assert_impl_all!(crate::ProcessHandle: Send, Sync);
         assert_impl_all!(crate::DirHandle: Send, Sync);
         assert_impl_all!(crate::ObserveHandle: Send, Sync);
+        assert_impl_all!(crate::LoopbackHandle: Send, Sync);
         assert_impl_all!(crate::SurfaceHost: Send, Sync);
         assert_impl_all!(crate::PluginError: Send, Sync);
         assert_impl_all!(Arc<dyn crate::DynUpstreamFactory>: Send, Sync);

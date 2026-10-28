@@ -1,8 +1,9 @@
 //! OAuth token responses and form bodies.
 //!
 //! This is the piece a provider needs when it trades a refresh token or a
-//! signed JWT. PKCE, the loopback callback, and device-flow polling are not
-//! here. Error text is a fixed sentence. The response body is never copied
+//! signed JWT. [`Pkce`], [`new_state`], and [`authorize_url`] build a browser
+//! sign-in; the kernel's loopback listener checks the callback. Device-flow
+//! polling is not here. Error text is a fixed sentence. The response body is never copied
 //! into it. OAuth token caching, refresh, and single-flight move into this
 //! module in row H (subscription plugins); Vertex keeps its own cache until then.
 
@@ -11,6 +12,10 @@ use std::time::Duration;
 
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
+
+mod pkce;
+
+pub use pkce::{Pkce, authorize_url, new_state};
 
 const DEFAULT_EXPIRES_SECS: u64 = 3600;
 const MAX_EXPIRES_SECS: u64 = u64::MAX / 1_000_000_000;

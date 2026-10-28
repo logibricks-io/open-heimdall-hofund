@@ -16,6 +16,7 @@
 
 mod account_secrets;
 mod accounts;
+mod loopback;
 mod piped;
 mod pool;
 
@@ -29,7 +30,7 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{
     AccountBackend, ClockBackend, DirBackend, HttpBackend, HttpRequest, HttpResponse, Job,
-    PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
+    LoopbackBackend, PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use hofund_plugin_api::{
     AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,
@@ -38,7 +39,14 @@ use hofund_plugin_api::{
 
 pub use accounts::{AccountStorageKind, AccountStore, StoreError};
 pub use hofund_plugin_api::kernel::ObserveBackend;
+pub use loopback::LoopbackRegistry;
 pub use pool::{HttpLimits, HttpProfile, PooledHttp};
+
+/// The kernel side of a browser sign-in: the loopback listeners and the
+/// pasted-address check.
+pub mod sign_in {
+    pub use crate::loopback::{LoopbackRegistry, parse_pasted_callback};
+}
 
 /// Builds the context for one sign-in attempt with a fresh random session id.
 ///
@@ -267,6 +275,7 @@ pub struct TestHost {
     scheduler: Arc<RecordingScheduler>,
     process: Arc<RecordingProcess>,
     observe: Arc<RecordingObserve>,
+    loopback: Arc<LoopbackRegistry>,
 }
 
 impl TestHost {
@@ -293,6 +302,7 @@ impl TestHost {
         let scheduler = Arc::new(RecordingScheduler::default());
         let process = Arc::new(RecordingProcess::default());
         let observe = Arc::new(RecordingObserve::default());
+        let loopback = Arc::new(LoopbackRegistry::new());
         let accounts = AccountStore::open_with_backend(
             root.join("accounts.json"),
             Arc::new(account_secrets::MemoryAccountSecrets::default()),
@@ -313,7 +323,8 @@ impl TestHost {
                 _guard: None,
             }),
             Arc::clone(&observe) as Arc<dyn ObserveBackend>,
-        );
+        )
+        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>);
         Self {
             context,
             http,
@@ -321,6 +332,7 @@ impl TestHost {
             scheduler,
             process,
             observe,
+            loopback,
         }
     }
 
@@ -358,6 +370,13 @@ impl TestHost {
     #[must_use]
     pub fn observe(&self) -> &RecordingObserve {
         &self.observe
+    }
+
+    /// The loopback listeners the plugin bound. A test awaits or releases a
+    /// sign-in through it, as the kernel's sign-in driver does.
+    #[must_use]
+    pub fn loopback(&self) -> &LoopbackRegistry {
+        &self.loopback
     }
 }
 
