@@ -40,7 +40,7 @@ const MEMBERS: &[&str] = &[
     "xtask",
 ];
 
-/// Direct workspace dependencies each package is allowed to declare.
+/// Direct normal and build workspace dependencies each package may declare.
 /// Update `docs/architecture.md` in the same change.
 fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
@@ -50,7 +50,6 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-config" => &[],
         "hofund-desktop" => &["hofund-agent", "hofund-daemon"],
         "hofund-daemon" => &[
-            "hofund-agent",
             "hofund-codec",
             "hofund-config",
             "hofund-gateway",
@@ -77,13 +76,10 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-kit-subscription" => &["hofund-plugin-host"],
         "hofund-kit-upstream" => &["hofund-plugin-api", "hofund-plugin-host"],
         "hofund-plugin-api" => &["hofund-ir"],
-        "hofund-plugin-host" => &["hofund-plugin-api", "hofund-plugin-sdk"],
+        "hofund-plugin-host" => &["hofund-plugin-api"],
         "hofund-plugin-echo" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-fixture" => &["hofund-plugin-api"],
         "hofund-plugin-registry" => &[
-            "hofund-agent",
-            "hofund-kit-agent",
-            "hofund-kit-upstream",
             "hofund-plugin-api",
             "hofund-plugin-echo",
             "hofund-plugin-relay",
@@ -91,11 +87,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-provider",
             "hofund-quirks",
         ],
-        "hofund-plugin-relay" => &[
-            "hofund-kit-upstream",
-            "hofund-plugin-api",
-            "hofund-plugin-sdk",
-        ],
+        "hofund-plugin-relay" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-sdk" => &["hofund-plugin-api", "hofund-quirks"],
         "hofund-provider" => &[
             "hofund-codec",
@@ -105,6 +97,48 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-quirks",
         ],
         "hofund-quirks" => &["hofund-ir"],
+        "hofund-router" => &["hofund-ir", "hofund-plugin-api"],
+        "hofund-secrets" => &[],
+        "hofund-usage" => &[],
+        "xtask" => &[],
+        _ => return None,
+    })
+}
+
+/// Direct dev workspace dependencies each package may declare.
+fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
+    Some(match package {
+        "hofund-agent" => &["hofund-agent"],
+        "hofund-cli" => &[],
+        "hofund-codec" => &[],
+        "hofund-config" => &[],
+        "hofund-desktop" => &[],
+        "hofund-daemon" => &["hofund-agent", "hofund-daemon"],
+        "hofund-gateway" => &[
+            "hofund-codec",
+            "hofund-ir",
+            "hofund-plugin-api",
+            "hofund-router",
+            "hofund-usage",
+        ],
+        "hofund-ir" => &[],
+        "hofund-kit-agent" => &[],
+        "hofund-kit-subscription" => &[],
+        "hofund-kit-upstream" => &[],
+        "hofund-plugin-api" => &[],
+        "hofund-plugin-host" => &["hofund-plugin-sdk"],
+        "hofund-plugin-echo" => &[],
+        "hofund-plugin-fixture" => &[],
+        "hofund-plugin-registry" => &[
+            "hofund-agent",
+            "hofund-kit-agent",
+            "hofund-kit-upstream",
+            "hofund-plugin-registry",
+        ],
+        "hofund-plugin-relay" => &["hofund-kit-upstream"],
+        "hofund-plugin-sdk" => &[],
+        "hofund-provider" => &["hofund-ir", "hofund-quirks"],
+        "hofund-quirks" => &[],
         "hofund-router" => &["hofund-ir", "hofund-plugin-api"],
         "hofund-secrets" => &[],
         "hofund-usage" => &[],
@@ -213,7 +247,7 @@ fn dependency_graph_matches_architecture() {
             inherits_workspace_edition(&package_manifest),
             "{name} must inherit edition 2024 from the workspace"
         );
-        let deps = workspace_deps(&package_manifest);
+        let deps = workspace_deps(&package_manifest, DependencySection::Normal);
         let Some(expected) = expected_deps(&name) else {
             panic!("no allowed dependency list for package {name}");
         };
@@ -221,7 +255,21 @@ fn dependency_graph_matches_architecture() {
             expected.iter().map(|dep| (*dep).to_string()).collect();
         assert_eq!(
             deps, expected_set,
-            "package {name} dependencies drifted; update docs/architecture.md and this test together"
+            "package {name} normal/build dependencies drifted; update docs/architecture.md and this test together"
+        );
+        let dev_deps = workspace_deps(&package_manifest, DependencySection::Dev);
+        let Some(expected_dev) = expected_dev_deps(&name) else {
+            panic!("no allowed dev dependency list for package {name}");
+        };
+        let expected_dev_set: BTreeSet<String> =
+            expected_dev.iter().map(|dep| (*dep).to_string()).collect();
+        assert_eq!(
+            dev_deps, expected_dev_set,
+            "package {name} dev dependencies drifted; review the dev allow-map"
+        );
+        assert!(
+            legacy_codex_feature_is_allowed(&name, &package_manifest),
+            "package {name} enables legacy-agent-consts outside dev-dependencies"
         );
         assert!(seen.insert(name), "duplicate package name");
     }
@@ -489,22 +537,173 @@ fn package_name(manifest: &str) -> String {
     panic!("manifest has no package name");
 }
 
-fn workspace_deps(manifest: &str) -> BTreeSet<String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DependencySection {
+    Normal,
+    Dev,
+    Other,
+}
+
+fn workspace_deps(manifest: &str, wanted: DependencySection) -> BTreeSet<String> {
     let mut deps = BTreeSet::new();
+    let mut section = DependencySection::Other;
     for line in manifest.lines() {
         let trimmed = strip_comment(line).trim();
-        if trimmed.is_empty() || trimmed.starts_with('[') {
+        if trimmed.starts_with('[') {
+            section = DependencySection::Other;
+            if let Some((table_section, name)) = dependency_table(trimmed) {
+                section = table_section;
+                if table_section == wanted && is_workspace_crate(name) {
+                    deps.insert(name.to_string());
+                }
+            } else if let Some(header_section) = dependency_section(trimmed) {
+                section = header_section;
+            }
+            continue;
+        }
+        if section != wanted || trimmed.is_empty() {
             continue;
         }
         let Some((key, value)) = trimmed.split_once('=') else {
             continue;
         };
         let key = key.trim();
-        if (key.starts_with("hofund-") || key == "xtask") && value.contains("workspace") {
+        if is_workspace_crate(key) && (value.contains("workspace") || value.contains("path")) {
             deps.insert(key.to_string());
         }
     }
     deps
+}
+
+fn dependency_table(header: &str) -> Option<(DependencySection, &str)> {
+    let inner = header.strip_prefix('[')?.strip_suffix(']')?.trim();
+    for (prefix, section) in [
+        ("dependencies.", DependencySection::Normal),
+        ("build-dependencies.", DependencySection::Normal),
+        ("dev-dependencies.", DependencySection::Dev),
+    ] {
+        if let Some(name) = inner.strip_prefix(prefix) {
+            return Some((section, name.trim_matches(&['\'', '"'][..])));
+        }
+    }
+    None
+}
+
+fn dependency_section(header: &str) -> Option<DependencySection> {
+    let inner = header.strip_prefix('[')?.strip_suffix(']')?.trim();
+    match inner {
+        "dependencies" | "build-dependencies" => Some(DependencySection::Normal),
+        "dev-dependencies" => Some(DependencySection::Dev),
+        _ if inner.starts_with("target.") && inner.ends_with(".dependencies") => {
+            Some(DependencySection::Normal)
+        }
+        _ if inner.starts_with("target.") && inner.ends_with(".build-dependencies") => {
+            Some(DependencySection::Normal)
+        }
+        _ if inner.starts_with("target.") && inner.ends_with(".dev-dependencies") => {
+            Some(DependencySection::Dev)
+        }
+        _ => None,
+    }
+}
+
+fn is_workspace_crate(name: &str) -> bool {
+    name.starts_with("hofund-") || name == "xtask"
+}
+
+fn legacy_codex_feature_is_allowed(package: &str, manifest: &str) -> bool {
+    if package == "hofund-agent" {
+        return true;
+    }
+    let mut section = DependencySection::Other;
+    let mut agent_table = false;
+    for line in manifest.lines() {
+        let trimmed = strip_comment(line).trim();
+        if trimmed.starts_with('[') {
+            agent_table = dependency_table(trimmed).is_some_and(|(table_section, name)| {
+                table_section == DependencySection::Normal && name == "hofund-agent"
+            });
+            section = dependency_table(trimmed).map_or_else(
+                || dependency_section(trimmed).unwrap_or(DependencySection::Other),
+                |(table_section, _)| table_section,
+            );
+            continue;
+        }
+        if section != DependencySection::Normal {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if (agent_table || key.trim() == "hofund-agent") && value.contains("legacy-agent-consts") {
+            return false;
+        }
+    }
+    true
+}
+
+#[test]
+fn legacy_codex_feature_is_rejected_in_normal_dependencies() {
+    let manifest = r#"
+[dependencies]
+hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
+"#;
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest
+    ));
+}
+
+#[test]
+fn legacy_codex_feature_is_allowed_in_dev_dependencies() {
+    let manifest = r#"
+[dev-dependencies]
+hofund-agent = { workspace = true, features = ["legacy-agent-consts"] }
+"#;
+    assert!(legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest
+    ));
+}
+
+#[test]
+fn dependency_table_form_is_detected() {
+    let manifest = r#"
+[dependencies.hofund-agent]
+workspace = true
+features = ["legacy-agent-consts"]
+"#;
+    assert!(workspace_deps(manifest, DependencySection::Normal).contains("hofund-agent"));
+    assert!(!legacy_codex_feature_is_allowed(
+        "hofund-plugin-registry",
+        manifest
+    ));
+}
+
+#[test]
+fn dependency_sections_stay_separate() {
+    let manifest = r#"
+[build-dependencies]
+hofund-ir = { workspace = true }
+[target.'cfg(unix)'.dependencies]
+hofund-codec = { workspace = true }
+[target.'cfg(unix)'.build-dependencies]
+hofund-config = { workspace = true }
+[target.'cfg(unix)'.dev-dependencies]
+hofund-router = { workspace = true }
+"#;
+    let normal = workspace_deps(manifest, DependencySection::Normal);
+    assert_eq!(
+        normal,
+        ["hofund-codec", "hofund-config", "hofund-ir"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
+    assert_eq!(
+        workspace_deps(manifest, DependencySection::Dev),
+        ["hofund-router".to_string()].into_iter().collect()
+    );
 }
 
 fn inherits_workspace_edition(manifest: &str) -> bool {

@@ -516,6 +516,7 @@ fn plugin_error(error: ProviderError) -> PluginError {
         hofund_provider::ProviderErrorKind::Connect => PluginError::connect(error.message),
         hofund_provider::ProviderErrorKind::Timeout => PluginError::timeout(error.message),
         hofund_provider::ProviderErrorKind::Transport => PluginError::transport(error.message),
+        hofund_provider::ProviderErrorKind::Interrupted => PluginError::interrupted(error.message),
         hofund_provider::ProviderErrorKind::Status => {
             PluginError::status_error(error.status.unwrap_or(502), error.message)
         }

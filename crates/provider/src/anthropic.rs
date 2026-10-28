@@ -87,7 +87,11 @@ impl Provider for Anthropic {
         let response = http::post_json(&self.upstream, &url, body).await?;
         let status = response.status().as_u16();
         let retry_after = http::retry_after(response.headers());
-        let bytes = response.bytes().await.map_err(http::map_transport)?;
+        let bytes = if (200..300).contains(&status) {
+            response.bytes().await.map_err(http::map_body)?
+        } else {
+            response.bytes().await.unwrap_or_default()
+        };
         classify_count(status, retry_after, &bytes)
     }
 

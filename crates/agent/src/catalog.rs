@@ -27,7 +27,13 @@ use crate::{DisconnectOutcome, usable_override};
 ///
 /// User settings are `~/.gemini/settings.json`. `GEMINI_CLI_HOME` is the
 /// parent directory: `.gemini` is created inside it. `.gemini/.env` is loaded
-/// by the CLI and is not excluded.
+/// by the CLI and is not excluded. Gemini CLI's `homedir()` in
+/// `packages/core/src/utils/paths.ts` returns `GEMINI_CLI_HOME` when set, and
+/// `getGlobalGeminiDir` in `packages/core/src/config/storage.ts` joins that
+/// home with `.gemini`. Both files deliberately follow that resolution instead
+/// of always using the user home (`reference: internal/agent/gemini.go:28-31`);
+/// trace discovery uses the same override
+/// (`reference: internal/sessions/traces_gemini.go:17-22`).
 ///
 /// `security.auth.selectedType` is set to `gemini-api-key`. The string values
 /// of that enum are not listed in the public docs; they come from
@@ -335,8 +341,16 @@ impl Catalog {
 /// # Errors
 ///
 /// Returns an error when a compiled id duplicates a const built-in or another
-/// compiled id.
+/// compiled id, or when a built-in has no compiled description or enabled
+/// legacy fallback.
 pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog, AgentError> {
+    compose(compiled, builtin_adapter)
+}
+
+fn compose(
+    compiled: &'static [&'static AgentDescription],
+    fallback: fn(&str) -> Option<Described>,
+) -> Result<Catalog, AgentError> {
     let mut ids = adapters()
         .into_iter()
         .map(|adapter| adapter.id().to_owned())
@@ -359,13 +373,12 @@ pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog
             composed.push(Box::new(Compiled::new(description)));
             continue;
         }
-        let description = match id {
-            "claude-code" | "codex" => continue,
-            "gemini-cli" => &GEMINI,
-            "opencode" => &OPENCODE,
-            _ => unreachable!("known built-in id"),
+        let Some(adapter) = fallback(id) else {
+            return Err(AgentError::message(format!(
+                "built-in agent `{id}` has no compiled description"
+            )));
         };
-        composed.push(Box::new(Described { description }));
+        composed.push(Box::new(adapter));
     }
     for description in compiled
         .iter()
@@ -374,6 +387,18 @@ pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog
         composed.push(Box::new(Compiled::new(description)));
     }
     Ok(Catalog { adapters: composed })
+}
+
+fn builtin_adapter(id: &str) -> Option<Described> {
+    match id {
+        #[cfg(feature = "legacy-agent-consts")]
+        "claude-code" => Some(crate::legacy::CLAUDE),
+        #[cfg(feature = "legacy-agent-consts")]
+        "codex" => Some(crate::legacy::CODEX_ADAPTER),
+        "gemini-cli" => Some(GEMINI_ADAPTER),
+        "opencode" => Some(OPENCODE_ADAPTER),
+        _ => None,
+    }
 }
 
 /// Resolves one compiled file location against a session.
@@ -1553,8 +1578,44 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{Described, FIXTURE_JSON_AGENT, FIXTURE_TOML_AGENT, FIXTURE_TOML_EFFORT};
+    use super::{
+        Described, FIXTURE_JSON_AGENT, FIXTURE_TOML_AGENT, FIXTURE_TOML_EFFORT, builtin_adapter,
+        compose,
+    };
     use crate::{AgentAdapter, GatewayTarget, Plan, Session, TargetOs};
+
+    #[test]
+    fn missing_compiled_codex_is_an_error_without_a_fallback() {
+        fn without_codex(id: &str) -> Option<Described> {
+            if id == "codex" {
+                None
+            } else {
+                builtin_adapter(id)
+            }
+        }
+
+        let error = compose(&[], without_codex).err().expect("missing codex");
+        assert_eq!(
+            error.to_string(),
+            "built-in agent `codex` has no compiled description"
+        );
+
+        fn without_claude(id: &str) -> Option<Described> {
+            if id == "claude-code" {
+                None
+            } else {
+                builtin_adapter(id)
+            }
+        }
+
+        let error = compose(&[], without_claude)
+            .err()
+            .expect("missing claude-code");
+        assert_eq!(
+            error.to_string(),
+            "built-in agent `claude-code` has no compiled description"
+        );
+    }
 
     #[derive(Default)]
     struct GoldenCase {

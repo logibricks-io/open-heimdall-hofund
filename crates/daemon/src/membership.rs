@@ -395,6 +395,7 @@ fn count_cools(error: &PluginError) -> bool {
         PluginErrorKind::Connect
         | PluginErrorKind::Timeout
         | PluginErrorKind::Transport
+        | PluginErrorKind::Interrupted
         | PluginErrorKind::Io => true,
         _ => false,
     }
@@ -662,6 +663,7 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
         ProviderErrorKind::Connect => PluginError::connect(error.message),
         ProviderErrorKind::Timeout => PluginError::timeout(error.message),
         ProviderErrorKind::Transport => PluginError::transport(error.message),
+        ProviderErrorKind::Interrupted => PluginError::interrupted(error.message),
         ProviderErrorKind::Status => {
             PluginError::status_error(error.status.unwrap_or(502), error.message)
         }
@@ -738,6 +740,7 @@ mod tests {
             ProviderError::connect("refused"),
             ProviderError::timeout("slow"),
             ProviderError::transport("reset"),
+            ProviderError::interrupted("cut off"),
             ProviderError::decode("invalid"),
             ProviderError::unsupported("no count"),
             ProviderError::auth("denied"),
