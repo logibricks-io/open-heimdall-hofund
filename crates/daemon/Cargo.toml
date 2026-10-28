@@ -50,5 +50,5 @@ hofund-plugin-registry = { workspace = true, features = ["test-fixtures"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tempfile = { workspace = true }
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 wiremock = "0.6.5"

@@ -7,8 +7,10 @@
 //!
 //! [`sigv4`] signs one AWS request. [`oauth`] parses a token response and
 //! builds a form body. [`page`] reads cursors and walks bounded model lists.
-//! PKCE, the loopback callback, and device flow are not here. [`transport::Call`] still
-//! buffers the response body. Streaming adapters use the host's pooled client.
+//! PKCE, the loopback callback, and device flow are not here. The host handle
+//! streams a 2xx body. [`transport::Call::send`] still reads all of it, and
+//! [`transport::Call::open`] returns it unread. [`wire`] sends Chat Completions
+//! and Responses calls and keeps a stream streaming.
 
 #![deny(missing_docs, unreachable_pub, rust_2018_idioms)]
 #![warn(
@@ -27,6 +29,7 @@ pub mod page;
 pub mod register;
 pub mod sigv4;
 pub mod transport;
+pub mod wire;
 
 pub use oauth::{AccessToken, TokenError, form_body, parse_access_token, refresh_form};
 pub use page::{

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SDK Chat and Responses transport (`hofund_plugin_sdk::wire`) on the host HTTP
+  handle. The builtin OpenAI-compatible factory uses it for every endpoint that
+  is not a Bedrock Mantle root, so a streamed reply reaches the client as the
+  upstream sends it. A reset after the request was written is not replayed and
+  does not fail over.
 - Account refresh leases: a per-account cross-process lock that reads the stored
   secret past the cache and commits a refreshed one, with bounded waits for
   refreshes and upserts. Plugins also gain one-shot background jobs, blocking

@@ -1,0 +1,615 @@
+//! Chat Completions and Responses calls on the host's HTTP handle.
+//!
+//! [`execute`] encodes a [`Request`] for the target protocol, posts it with
+//! [`Call`], and returns a [`Completion`]. It mirrors the builtin adapter's
+//! transport step for step:
+//!
+//! - Quirks are applied first. When the inbound protocol differs from the
+//!   target, unmapped tools are logged once per name, the billing line is
+//!   removed from system text, and extension bags are dropped.
+//! - An encode failure is status 400: the client sent something the target
+//!   protocol cannot carry.
+//! - The call is a JSON `POST`. Only a connect failure is retried, once, so a
+//!   body that may have been written is never replayed.
+//! - A status outside 2xx keeps its status and `Retry-After`. Its message is the
+//!   JSON `error.message` or `message`, or the trimmed body cut to 512
+//!   characters.
+//! - Across protocols, a stream decodes into events and a unary body into a
+//!   response, both without extensions. A stream whose first event is an
+//!   upstream failure becomes status 502.
+//! - On the same protocol the body is relayed as raw bytes. A stream is read
+//!   until its first event so an in-band failure is still an error.
+
+use std::collections::{HashSet, VecDeque};
+use std::fmt;
+use std::sync::{Mutex, OnceLock};
+
+use bytes::Bytes;
+use hofund_codec::{Codec, CodecError, OpenAiChat, OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS};
+use hofund_plugin_api::{
+    BodyStream, Completion, ContentPart, CredentialStyle, HttpHandle, PluginError, ProtocolId,
+    Request, Role, SecretString, StreamEvent,
+};
+use secrecy::ExposeSecret;
+
+use crate::transport::{Call, HttpResponse, is_quota_error, read_body};
+
+/// Attempts per call. Only a connect failure is retried.
+const ATTEMPTS: u8 = 2;
+/// Longest plain-text error message kept from a status body.
+const MESSAGE_LIMIT: usize = 512;
+/// Prefix of the billing line some clients put in system text.
+const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
+
+type Prepare = fn(&[u8]) -> Result<Vec<u8>, CodecError>;
+
+/// Where and how [`execute`] sends a call. [`Debug`] omits header values.
+#[derive(Clone)]
+pub struct Target {
+    protocol: ProtocolId,
+    base_url: String,
+    credential: CredentialStyle,
+    headers: Vec<(String, String)>,
+    quirks: Option<&'static hofund_quirks::Profile>,
+}
+
+impl Target {
+    /// A target speaking `protocol` at `base_url`. The credential style is
+    /// [`CredentialStyle::Bearer`], with no extra headers and no quirks.
+    #[must_use]
+    pub fn new(protocol: ProtocolId, base_url: impl Into<String>) -> Self {
+        Self {
+            protocol,
+            base_url: base_url.into(),
+            credential: CredentialStyle::Bearer,
+            headers: Vec::new(),
+            quirks: None,
+        }
+    }
+
+    /// Where the secret is written.
+    #[must_use]
+    pub fn credential(mut self, credential: CredentialStyle) -> Self {
+        self.credential = credential;
+        self
+    }
+
+    /// Extra headers. Values are sensitive and replace a header of the same
+    /// name, including the credential header.
+    #[must_use]
+    pub fn headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// The request rewrites applied before encoding.
+    #[must_use]
+    pub fn quirks(mut self, quirks: Option<&'static hofund_quirks::Profile>) -> Self {
+        self.quirks = quirks;
+        self
+    }
+}
+
+impl fmt::Debug for Target {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        formatter
+            .debug_struct("Target")
+            .field("protocol", &self.protocol.as_str())
+            .field("base_url", &self.base_url)
+            .field("credential", &self.credential)
+            .field("header_names", &names)
+            .field("quirks", &self.quirks.is_some())
+            .finish()
+    }
+}
+
+/// Sends `request` to `target` and returns the completion.
+///
+/// `inbound` is the protocol the client spoke. A missing or empty `secret`
+/// sends no credential header.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the protocol is not Chat Completions or
+/// Responses, the request cannot be encoded, the call fails, the upstream
+/// answers outside 2xx, or the body cannot be decoded.
+pub async fn execute(
+    http: &HttpHandle,
+    target: &Target,
+    secret: Option<&SecretString>,
+    request: Request,
+    inbound: ProtocolId,
+) -> Result<Completion, PluginError> {
+    let (codec, prepare, path): (&'static dyn Codec, Prepare, &str) = match target.protocol {
+        ProtocolId::OPENAI_CHAT => (
+            &OpenAiChat,
+            OpenAiChat::prepare_upstream_body,
+            "chat/completions",
+        ),
+        ProtocolId::OPENAI_RESPONSES => (
+            &OpenAiResponses,
+            OpenAiResponses::prepare_upstream_body,
+            "responses",
+        ),
+        other => {
+            return Err(PluginError::unsupported(format!(
+                "protocol `{}` has no SDK transport",
+                other.as_str()
+            )));
+        }
+    };
+    let cross_protocol = codec.id() != inbound.as_str();
+    let streaming = request.stream;
+    let body = prepare_body(target, codec, request, prepare, inbound)?;
+    let url = format!("{}/{path}", target.base_url.trim_end_matches('/'));
+    let response = call(target, secret, url)?
+        .header("content-type", "application/json")
+        .bytes(body)
+        .open_raw(http, ATTEMPTS)
+        .await?;
+    if !response.status().is_success() {
+        return Err(status_error(response).await);
+    }
+    let body = response.into_body();
+    if cross_protocol {
+        decoded(body, codec, streaming).await
+    } else {
+        raw(body, codec, streaming).await
+    }
+}
+
+fn call(target: &Target, secret: Option<&SecretString>, url: String) -> Result<Call, PluginError> {
+    let mut call = Call::post(url);
+    if let Some(secret) = secret.filter(|secret| !secret.expose_secret().is_empty()) {
+        call = call.credential(target.credential, secret)?;
+    }
+    for (name, value) in &target.headers {
+        call = call.replace_header(name, value.clone(), true);
+    }
+    Ok(call)
+}
+
+fn prepare_body(
+    target: &Target,
+    codec: &dyn Codec,
+    mut request: Request,
+    prepare: Prepare,
+    inbound: ProtocolId,
+) -> Result<Vec<u8>, PluginError> {
+    if let Some(profile) = target.quirks {
+        hofund_quirks::apply(profile, &mut request);
+    }
+    let cross_protocol = codec.id() != inbound.as_str();
+    if cross_protocol {
+        warn_unmapped(&request);
+        strip_billing_header(&mut request);
+        request.strip_extensions();
+    }
+    let body = codec
+        .encode_request(&request)
+        .map_err(|error| PluginError::status_error(400, error.to_string()))?;
+    prepare(&body).map_err(|error| PluginError::decode(error.to_string()))
+}
+
+async fn status_error(response: HttpResponse) -> PluginError {
+    let (status, retry_after, body) = match read_body(response).await {
+        Ok(read) => read,
+        Err(error) => return error,
+    };
+    let message = message_from(&body);
+    let error = if is_quota_error(status, &body) {
+        PluginError::quota(message)
+    } else {
+        PluginError::status_error(status, message)
+    };
+    match retry_after {
+        Some(after) => error.with_retry_after(after),
+        None => error,
+    }
+}
+
+async fn collect(mut body: BodyStream) -> Result<Vec<u8>, PluginError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next_chunk().await {
+        bytes.extend_from_slice(&chunk?);
+    }
+    Ok(bytes)
+}
+
+async fn decoded(
+    body: BodyStream,
+    codec: &dyn Codec,
+    streaming: bool,
+) -> Result<Completion, PluginError> {
+    if streaming {
+        let events = Events {
+            body,
+            decoder: codec.stream_decoder(),
+            pending: VecDeque::new(),
+            finished: false,
+            yielded: false,
+        };
+        return Ok(Completion::Stream(Box::pin(futures_util::stream::unfold(
+            events,
+            |mut events| async move { events.next().await.map(|item| (item, events)) },
+        ))));
+    }
+    let bytes = collect(body).await?;
+    let mut response = codec
+        .decode_response(&bytes)
+        .map_err(|error| PluginError::decode(error.to_string()))?;
+    response.strip_extensions();
+    Ok(Completion::Unary(Box::new(response)))
+}
+
+async fn raw(
+    mut body: BodyStream,
+    codec: &dyn Codec,
+    streaming: bool,
+) -> Result<Completion, PluginError> {
+    if !streaming {
+        let bytes = collect(body).await?;
+        return Ok(Completion::Raw(BodyStream::from_bytes(bytes)));
+    }
+    let mut decoder = codec.stream_decoder();
+    let mut buffered: Vec<Bytes> = Vec::new();
+    while let Some(chunk) = body.next_chunk().await {
+        let chunk = chunk?;
+        let Ok(events) = decoder.push(&chunk) else {
+            buffered.push(chunk);
+            break;
+        };
+        buffered.push(chunk);
+        let Some(first) = events.first() else {
+            continue;
+        };
+        if let Some(error) = failure_of(first) {
+            return Err(error);
+        }
+        break;
+    }
+    let mut stream = body;
+    for chunk in buffered.into_iter().rev() {
+        stream = BodyStream::resume(chunk, stream);
+    }
+    Ok(Completion::Raw(stream))
+}
+
+/// Pull-based decode of a cross-protocol event stream. The next chunk is read
+/// only after the decoded events are consumed.
+struct Events {
+    body: BodyStream,
+    decoder: Box<dyn StreamDecoder>,
+    pending: VecDeque<Result<StreamEvent, PluginError>>,
+    finished: bool,
+    yielded: bool,
+}
+
+impl Events {
+    async fn next(&mut self) -> Option<Result<StreamEvent, PluginError>> {
+        loop {
+            if let Some(item) = self.take_pending() {
+                return Some(item);
+            }
+            if self.finished {
+                return None;
+            }
+            match self.body.next_chunk().await {
+                None => {
+                    self.finished = true;
+                    match self.decoder.finish() {
+                        Ok(events) => self.pending.extend(events.into_iter().map(Ok)),
+                        Err(error) => self
+                            .pending
+                            .push_back(Err(PluginError::decode(error.to_string()))),
+                    }
+                }
+                Some(Err(error)) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                Some(Ok(chunk)) => match self.decoder.push(&chunk) {
+                    Ok(events) => self.pending.extend(events.into_iter().map(Ok)),
+                    Err(error) => {
+                        self.finished = true;
+                        return Some(Err(PluginError::decode(error.to_string())));
+                    }
+                },
+            }
+        }
+    }
+
+    fn take_pending(&mut self) -> Option<Result<StreamEvent, PluginError>> {
+        loop {
+            let mut item = self.pending.pop_front()?;
+            if !self.yielded
+                && let Ok(event) = &item
+                && let Some(error) = failure_of(event)
+            {
+                self.pending.clear();
+                self.finished = true;
+                return Some(Err(error));
+            }
+            if let Ok(event) = &mut item {
+                if matches!(event, StreamEvent::Unknown(_)) {
+                    continue;
+                }
+                event.strip_extensions();
+            }
+            if item.is_ok() {
+                self.yielded = true;
+            }
+            return Some(item);
+        }
+    }
+}
+
+/// An upstream failure reported as the first event is status 502.
+fn failure_of(event: &StreamEvent) -> Option<PluginError> {
+    let StreamEvent::Unknown(unknown) = event else {
+        return None;
+    };
+    let embedded = unknown.name == "data" && unknown.payload.get("error").is_some();
+    if unknown.name != "error" && unknown.name != "response.failed" && !embedded {
+        return None;
+    }
+    let message = ["error.message", "message", "response.error.message"]
+        .into_iter()
+        .find_map(|path| pointer(&unknown.payload, path))
+        .unwrap_or_else(|| "upstream stream failed".to_owned());
+    Some(PluginError::status_error(502, message))
+}
+
+fn pointer(value: &serde_json::Value, path: &str) -> Option<String> {
+    let mut current = value;
+    for key in path.split('.') {
+        current = current.get(key)?;
+    }
+    let text = current.as_str()?.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_owned())
+    }
+}
+
+fn message_from(bytes: &[u8]) -> String {
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        for path in ["error.message", "message"] {
+            if let Some(text) = pointer(&value, path) {
+                return text;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        "upstream request failed".to_owned()
+    } else {
+        trimmed.chars().take(MESSAGE_LIMIT).collect()
+    }
+}
+
+fn warn_unmapped(request: &Request) {
+    let Some(serde_json::Value::Array(items)) = request.extensions.get(UNMAPPED_TOOLS) else {
+        return;
+    };
+    for item in items {
+        let Some(name) = item.as_str() else {
+            continue;
+        };
+        if first_drop(name) {
+            tracing::warn!(
+                tool = name,
+                "dropped a tool with no mapping onto the upstream protocol"
+            );
+        }
+    }
+}
+
+/// `true` the first time `name` is dropped in this process.
+fn first_drop(name: &str) -> bool {
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    seen.insert(name.to_owned())
+}
+
+/// Removes the billing line when crossing protocols.
+///
+/// A system text part that is only the line is dropped, and the same prefix is
+/// cut off the first remaining system text. User text is left alone.
+fn strip_billing_header(request: &mut Request) {
+    let mut saw_text = false;
+    for message in &mut request.messages {
+        if !matches!(message.role, Role::System | Role::Developer) {
+            continue;
+        }
+        message.content.retain(|part| match part {
+            ContentPart::Text(text) => !billing_line_only(&text.text),
+            _ => true,
+        });
+        if saw_text {
+            continue;
+        }
+        for part in &mut message.content {
+            if let ContentPart::Text(text) = part {
+                let cut = strip_billing_prefix(&text.text);
+                if cut != text.text {
+                    text.text = cut;
+                }
+                saw_text = true;
+                break;
+            }
+        }
+    }
+    request.messages.retain(|message| {
+        !(matches!(message.role, Role::System | Role::Developer)
+            && message.content.is_empty()
+            && message.extensions.is_empty())
+    });
+}
+
+fn billing_line_only(text: &str) -> bool {
+    text.starts_with(BILLING_PREFIX) && strip_billing_prefix(text).is_empty()
+}
+
+fn strip_billing_prefix(text: &str) -> String {
+    let Some(rest) = text.strip_prefix(BILLING_PREFIX) else {
+        return text.to_owned();
+    };
+    let rest = consume_fields(rest);
+    rest.trim_start_matches(char::is_whitespace).to_owned()
+}
+
+/// Consumes `(\s*[A-Za-z_]+=[^;\s]*;)*` and leaves the unmatched tail.
+fn consume_fields(mut rest: &str) -> &str {
+    loop {
+        let trimmed = rest.trim_start();
+        let bytes = trimmed.as_bytes();
+        if bytes.first().is_none_or(|byte| !is_key_byte(*byte)) {
+            return rest;
+        }
+        let mut index = 1;
+        while index < bytes.len() && is_key_byte(bytes[index]) {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b'=' {
+            return rest;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index] != b';' && !bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b';' {
+            return rest;
+        }
+        rest = &trimmed[index + 1..];
+    }
+}
+
+fn is_key_byte(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+#[cfg(test)]
+mod tests {
+    use hofund_codec::{AnthropicMessages, Codec};
+    use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
+
+    use super::{Target, consume_fields, failure_of, message_from, strip_billing_header};
+
+    const LINE: &str =
+        "x-anthropic-billing-header: cc_version=2.1.197; cc_entrypoint=cli; cch=abc;";
+
+    fn messages_request(system: &str, user: &str) -> Request {
+        let body = serde_json::json!({
+            "model": "demo",
+            "max_tokens": 16,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        });
+        AnthropicMessages
+            .decode_request(body.to_string().as_bytes())
+            .expect("messages request")
+    }
+
+    fn texts(request: &Request) -> Vec<String> {
+        let encoded = serde_json::to_value(request).expect("request json");
+        encoded["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_billing_prefix_is_cut_from_system_text_and_user_text_is_kept() {
+        let mut request = messages_request(
+            &format!("{LINE}\nYou are helpful."),
+            "see x-anthropic-billing-header: cc_version=1; in the middle",
+        );
+        strip_billing_header(&mut request);
+        let texts = texts(&request);
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts[0].contains("You are helpful."), "{}", texts[0]);
+        assert!(
+            !texts[0].contains("x-anthropic-billing-header"),
+            "{}",
+            texts[0]
+        );
+        assert!(
+            texts[1].contains("x-anthropic-billing-header"),
+            "{}",
+            texts[1]
+        );
+    }
+
+    #[test]
+    fn a_system_message_that_is_only_the_billing_line_is_dropped() {
+        let mut request = messages_request(LINE, "hi");
+        strip_billing_header(&mut request);
+        let texts = texts(&request);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("hi"), "{}", texts[0]);
+        assert!(!texts[0].contains("x-anthropic-billing-header"));
+    }
+
+    #[test]
+    fn system_text_without_the_line_is_unchanged() {
+        let mut request = messages_request("You are helpful.", "hi");
+        let before = texts(&request);
+        strip_billing_header(&mut request);
+        assert_eq!(texts(&request), before);
+    }
+
+    #[test]
+    fn billing_fields_stop_at_the_first_malformed_field() {
+        assert_eq!(consume_fields(" a=1; b=2; rest"), " rest");
+        assert_eq!(consume_fields(" a=1 b=2;"), " a=1 b=2;");
+        assert_eq!(consume_fields(" a1=x;"), " a1=x;");
+        assert_eq!(consume_fields(" a=x"), " a=x");
+        assert_eq!(consume_fields(""), "");
+    }
+
+    #[test]
+    fn a_status_message_prefers_json_fields_then_trimmed_text() {
+        assert_eq!(
+            message_from(br#"{"error":{"message":" slow down "}}"#),
+            "slow down"
+        );
+        assert_eq!(message_from(br#"{"message":"bad key"}"#), "bad key");
+        assert_eq!(message_from(b"  plain failure \n"), "plain failure");
+        assert_eq!(message_from(b"   "), "upstream request failed");
+        let long = "x".repeat(600);
+        assert_eq!(message_from(long.as_bytes()).len(), 512);
+    }
+
+    #[test]
+    fn an_in_band_error_event_is_status_502() {
+        let event: StreamEvent = serde_json::from_value(serde_json::json!({
+            "type": "unknown",
+            "name": "error",
+            "payload": {"error": {"message": "overloaded"}}
+        }))
+        .expect("event");
+        let error = failure_of(&event).expect("failure");
+        assert_eq!(error.kind(), PluginErrorKind::Status);
+        assert_eq!(error.status(), Some(502));
+        assert_eq!(error.message(), "overloaded");
+    }
+
+    #[test]
+    fn target_debug_omits_header_values() {
+        let target = Target::new(ProtocolId::OPENAI_CHAT, "http://127.0.0.1:1/v1")
+            .credential(CredentialStyle::ApiKey)
+            .headers(vec![("x-tenant".to_owned(), "tenant-secret".to_owned())]);
+        let shown = format!("{target:?}");
+        assert!(shown.contains("x-tenant"), "{shown}");
+        assert!(!shown.contains("tenant-secret"), "{shown}");
+    }
+}
