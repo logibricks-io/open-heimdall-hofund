@@ -529,6 +529,43 @@ mod tests {
         let _ = fs::remove_dir_all(home);
     }
 
+    #[test]
+    fn opencode_honors_windows_mixed_case_xdg_config_home() {
+        static FILE: AgentFile = AgentFile::from_static(
+            "config",
+            FileKind::Json,
+            "~/.config/opencode/opencode.json",
+            "~/.config/opencode/opencode.json",
+            "~/.config/opencode/opencode.json",
+            Some("XDG_CONFIG_HOME"),
+        )
+        .with_env_replaces("~/.config");
+
+        let home = scratch("opencode-xdg");
+        let override_dir = home.join("xdg-override");
+        let session = Session::new(&home)
+            .with_env_case_insensitive(true)
+            .with_env("xdg_config_home", override_dir.as_os_str());
+        let expected = override_dir.join("opencode/opencode.json");
+        assert_eq!(session.xdg_config_home, Some(override_dir));
+        assert_eq!(resolve(&FILE, TargetOs::Windows, &session), expected);
+        let target = crate::GatewayTarget::new("http://127.0.0.1:3425/", "token", Vec::new());
+        let plan = crate::legacy::opencode()
+            .plan(&session, &target)
+            .expect("legacy mixed-case plan");
+        assert_eq!(plan.changes()[0].path(), expected);
+
+        let sensitive = Session::new(&home)
+            .with_env_case_insensitive(false)
+            .with_env("xdg_config_home", home.join("xdg-override"));
+        assert_eq!(sensitive.xdg_config_home, None);
+        assert_eq!(
+            resolve(&FILE, TargetOs::Windows, &sensitive),
+            home.join(".config/opencode/opencode.json")
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
     #[cfg(windows)]
     #[test]
     fn public_from_env_iter_uses_windows_environment_casing() {

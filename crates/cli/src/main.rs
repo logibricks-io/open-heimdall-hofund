@@ -416,10 +416,14 @@ fn connect(
             }
         }
     }
-    if adapter.id() == "opencode" {
-        println!("{}", opencode_models_note(target.models().len()));
+    if let Some(note) = connect_models_note(adapter.id(), target.models().len()) {
+        println!("{note}");
     }
     warn_unrouted_model(adapter, &session, config)
+}
+
+fn connect_models_note(adapter_id: &str, model_count: usize) -> Option<String> {
+    (adapter_id == "opencode").then(|| opencode_models_note(model_count))
 }
 
 /// What `hofund agent connect opencode` prints about the models object.
@@ -503,10 +507,28 @@ fn agent_status(config: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, HelpTopic, opencode_models_note, parse, redact_diff};
+    use super::{
+        Command, HelpTopic, connect_models_note, opencode_models_note, parse, redact_diff,
+    };
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn compiled_opencode_triggers_the_models_note() {
+        let catalog = hofund_agent::catalog(hofund_daemon::agent_descriptions())
+            .expect("compiled agent catalog");
+        let adapter = catalog.find("opencode").expect("compiled opencode");
+        for model_count in [0, 2] {
+            assert_eq!(
+                connect_models_note(adapter.id(), model_count),
+                Some(opencode_models_note(model_count))
+            );
+        }
+        for adapter_id in ["codex", "claude-code", "gemini-cli"] {
+            assert_eq!(connect_models_note(adapter_id, 2), None);
+        }
     }
 
     #[test]

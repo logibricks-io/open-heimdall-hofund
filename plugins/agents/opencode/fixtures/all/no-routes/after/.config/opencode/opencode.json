@@ -1,0 +1,13 @@
+{
+  "provider": {
+    "hofund": {
+      "name": "hofund",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:3425/v1",
+        "apiKey": "old-token"
+      },
+      "models": {}
+    }
+  }
+}

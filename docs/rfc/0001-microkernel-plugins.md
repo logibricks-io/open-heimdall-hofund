@@ -49,7 +49,7 @@ The spine, from [architecture.md](../architecture.md), is `ir <- codec <- provid
 
 The daemon match at `crates/daemon/src/lib.rs` lines 251-285 is the composition root, and it names `Vertex` and `Bedrock`. That is why a provider change and a kernel change collide.
 
-`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape for the engine: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. At the original RFC pin, the four adapters were Rust constants in `crates/agent/src/catalog.rs`; F1 and F2 moved Codex and Claude Code to the compiled registry while Gemini CLI and OpenCode remain const-backed. `Slot` (line 363) is `Origin`, `V1`, `Token`, `Literal`, `GeminiModel`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier` (at the original pin; after F2, `ClaudeModel` and `ClaudeTier` are compiled only for the test-only legacy oracle behind `legacy-agent-consts`). `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
+`AgentAdapter` (`crates/agent/src/lib.rs` lines 224-316) is the right shape for the engine: detect, read, plan, apply, revert, disconnect (drift: unchanged keys restored, user-edited keys kept, `force` restores the backup; the method is lines 271-286), `refresh_token`, `configured_model`, `status`. At the original RFC pin, the four adapters were Rust constants in `crates/agent/src/catalog.rs`; F1, F2, and F4 moved Codex, Claude Code, and OpenCode to the compiled registry while Gemini CLI remains const-backed. F3 is still pending and waits for #122. `Slot` (line 363) is `Origin`, `V1`, `Token`, `Literal`, `GeminiModel`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier` (at the original pin; after F4, `V1`, `OpenCodeModels`, `ClaudeModel`, and `ClaudeTier` are compiled only for the test-only legacy oracle behind `legacy-agent-consts`). `FileKind` (`crates/agent/src/edit.rs` line 9) is `Json`, `Toml`, `Env`. `GatewayTarget` (line 67) is `base_url`, `token`, and `models` (line 77). There is no subscription trait anywhere in the workspace. Vertex ADC token mint (`crates/provider/src/vertex.rs`) is API auth for feature-parity row 2.4, which [subscriptions.md](../coverage/subscriptions.md) line 13 already separates from sign-in.
 
 Streaming is already pull-based (`crates/provider/src/lib.rs` lines 5-7, `stream.rs` lines 3-4). That stays. What is missing is the host, the factory, and failure isolation.
 
@@ -328,16 +328,18 @@ pub trait UpstreamProvider: Send + Sync + 'static {
 
 These fields move into `options`: `project`, `location`, `credentials`, `impersonate`, `access_key_id`, `secret_access_key`, `session_token`, and `region` (`crates/config/src/lib.rs` lines 59 and 77-101). The plugin validates them. The kernel does not name them. PR B2 keeps the old keys working for one release: they load, they are copied into `options`, and the load warns. The next release rejects the old keys.
 
-A URL-only preset is a fragment, not a crate. The shape already in `presets.toml` (the `anthropic` and `openai` tables at lines 29-47) moves with the implementation that serves it. `plugins/registry/build.rs` compiles every fragment into a `'static` `UpstreamSpec`. Startup does not parse TOML. Validation fails the build, not the process.
+A URL-only preset is a fragment, not a crate. The shape already in `presets.toml` (the `anthropic` and `openai` tables at lines 29-47) moves with the implementation that serves it. `plugins/registry/build.rs` compiles every fragment into static preset data. Startup does not parse TOML. Validation fails the build, not the process. A builtin factory without a plugin crate uses the data-only location `plugins/providers/<builtin-factory-id>/presets.toml`, with no `Cargo.toml` or `plugin.toml`.
+
+Builtin-owned rows are served per wire by `openai-compat`, `anthropic`, and `generative`; the selected wire chooses the factory as it does for a catalog row. Each row lives in its default wire's factory directory: the first non-empty preset URL in `generative`, `chat`, `responses`, `anthropic` order determines that wire, or the first region's URLs when the preset level has none. Generative uses `generative`, Chat and Responses use `openai-compat`, Messages uses `anthropic`, and a row without wire URLs uses `openai-compat`.
 
 ```toml
 # plugins/providers/openai-compat/presets.toml
 [[preset]]
 id = "openai"
 name = "OpenAI"
+kind = "vendor"
 chat = "https://api.openai.com/v1"
 responses = "https://api.openai.com/v1"
-credential = "bearer"
 ```
 
 ```toml
@@ -347,6 +349,8 @@ kind = "upstream"
 crate = "hofund-plugin-azure"
 presets = ["presets.toml"]
 ```
+
+There is no `credential` key in v1: builtin fragments derive credential placement from the preset, wire, and region-resolved host exactly as the catalog does, avoiding a second source of truth.
 
 ### 2.2 Subscription
 
@@ -465,7 +469,7 @@ The engine stays in `hofund-agent`, which depends on `hofund-plugin-api`. The AP
 On this pin the four consts already write more than a URL and a token:
 
 - Gemini CLI writes `model.name` (`catalog.rs` lines 176-178 and 246, `Slot::GeminiModel` at line 369). A string `model` is moved there. [agents.md](../coverage/agents.md) line 18 records the same fact.
-- OpenCode writes one `models` entry per route, with `name` and `variants` set to `{}` (lines 267-270, `Slot::OpenCodeModels` at line 370). Modalities, limits, and reasoning are omitted because this build has no catalog values.
+- OpenCode writes one `models` entry per route, with `name` and `variants` set to `{}` (at the original pin: `catalog.rs` lines 267-270, `Slot::OpenCodeModels` at line 370). Modalities, limits, and reasoning are omitted because this build has no catalog values. The catalog-model set now lives in `plugins/agents/opencode/agent.toml`, and the frozen const lives in `crates/agent/src/legacy.rs`; `OpenCodeModels` is test-only after F4.
 - Claude Code writes `env.ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, and `ANTHROPIC_DEFAULT_FABLE_MODEL` only for a Fable id (at the original pin: `catalog.rs` lines 31-37 and 72-94, `Slot::ClaudeTier` at line 375). The tier sets now live in `plugins/agents/claude-code/agent.toml`, and the frozen const lives in `crates/agent/src/legacy.rs`. `CLAUDE_CODE_SUBAGENT_MODEL`, `effortLevel`, and `CLAUDE_CODE_EFFORT_LEVEL` stay unset.
 
 A crate exists only when a slot cannot express the write. Known cases from the coverage inventory:
@@ -848,7 +852,7 @@ Each one is branched from latest `main`. Each one updates `docs/architecture.md`
 | D | `plugins/registry` and `build.rs` static presets, agent descriptions, and inbound routes, including the path-conflict check. Gateway mount: auth, span, and timeout, then `InboundSurface::handle`. Move transports, SigV4, OAuth helpers, retry, and paging into the SDK, on the pooled client. `xtask` rules, kits, mandatory `conformance`, `cargo hack --each-feature`, and `fuzz/` targets. Daemon Chat, Responses, Messages, and Generative arms call `registry.factory`. Vertex and Bedrock stay in the match until E. | After C. The pooled client and the ban on `reqwest` land here. |
 | K | Kernel cooldown and passive rate-limit. `retry_after` and `observe` cool a `MemberId` down. Circuit-breaker state survives snapshot swaps. | After C. Must merge before H. May proceed beside D and E. |
 | L | Control plane: `hofund-control-proto`, `hofund-control-client`, `/v1/hofund/*`, loopback plus socket or named pipe, token auth, event stream. Add `apps/hofundd` (`hofund-daemon-bin`, binary `hofundd`) and move the registry link onto it. `hofund serve` execs `hofundd`. Drop the registry edge from the desktop and from the in-process CLI path. Hot reload publishes a new `ArcSwap` snapshot. | After D. Before the desktop rework. Beside E, F, G, and S. H and #28 do not wait for it. |
-| E | One implementation per pull request: azure, vertex, bedrock, mantle, then the URL-only fragments that ride `openai-compat`, `anthropic`, and `generative`, including the six ids `resolve` still rejects. Each pull request moves that code and its `[[preset]]` rows. `hofund-provider` keeps a re-export until the last caller is gone. The plugin depends only on the API and the SDK, and uses `HostContext::http()`. | After D and B2. Disjoint directories. Shared file: the sorted registry manifest. |
+| E | The preset-fragment format and loader land first. Then one implementation per pull request: azure, vertex, bedrock, mantle, then the URL-only fragments that ride `openai-compat`, `anthropic`, and `generative`, including the six ids `resolve` still rejects. Fragment batches are data-only moves of complete `[[preset]]` and `[[alias]]` rows; other pull requests move that code and its rows. `hofund-provider` keeps a re-export until the last caller is gone. The plugin depends only on the API and the SDK, and uses `HostContext::http()`. | After D and B2. Disjoint directories. Shared file: the sorted registry manifest. |
 | S | `InboundSurface` plugins: Ollama, Muse, Codex backend, embeddings, audio. Each implements the trait. None opens a socket. | After D's gateway mount. Codex subscription joined mode waits on the Codex surface. |
 | F | Four pull requests, one per existing agent (`codex`, `claude-code`, `gemini-cli`, `opencode`). Each adds `agent.toml`, compiles it in `build.rs`, and deletes the Rust const after the per-OS golden plan matches, including `model.name`, `ModelTier`, and the OpenCode `models` object as they behave on this pin. | After D. Does not wait for E. |
 | G | `FileKind::Yaml` in the kernel engine, with a kit test. Then the remaining P1 agents as TOML: pi, goose, zed, vscode, crush, hermes, kimi, qwen, droid, cline, grok. A crate is added only for `custom_write`, in its own pull request. | After D. Goose and hermes wait on the YAML pull request. Zed is code if the slot cannot write the OS credential store. |
@@ -941,6 +945,16 @@ F2 migrates Claude Code to the compiled data-only path without changing its conf
 - `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. `RESERVED_AGENT_IDS` now contains `gemini-cli` and `opencode`; static `adapters()` and `find()` cover only those two const-backed agents.
 - No parity fixes or behavior changes are included.
 
+### PR F4 notes
+
+F4 migrates OpenCode to the compiled data-only path without changing its configuration bytes or lifecycle behavior. F3 (Gemini CLI) is still pending and waits for #122.
+
+- `plugins/agents/opencode/agent.toml` carries the former const's ordered JSONC and JSON candidates, XDG override, provider sets, catalog-model slot, model key, and rationale. The production OpenCode const, described adapter, and path resolvers are removed; Gemini CLI is the only const-backed agent left.
+- The non-default `legacy-agent-consts` feature also exposes the frozen OpenCode adapter as an equivalence-test oracle. `Slot::V1`, which only OpenCode used in production, is now test/legacy-only alongside `OpenCodeModels`; both join the other migrated private slots behind test-only compilation.
+- Goldens live at `plugins/agents/opencode/fixtures/all/<case>/`. Fresh, JSON, JSONC, both-files, stale-hofund, route-count, configured-model, and XDG cases pass through both the shipped compiled description and the frozen oracle for Linux, macOS, and Windows. Registry integration tests compare metadata, errors, bytes, directory trees, and the complete edit lifecycle.
+- `BUILTIN_ORDER` retains `claude-code`, `codex`, `gemini-cli`, `opencode`. `RESERVED_AGENT_IDS` now contains only `gemini-cli`; static `adapters()` and `find()` cover only that const-backed agent.
+- No parity fixes or behavior changes are included.
+
 ### PR B2 notes
 
 B2 is the config shape from section 2.1. It does not add a plugin.
@@ -1014,7 +1028,7 @@ After D, four batches run at the same time. H waits until K has also merged. Cou
 
 | Batch | Starts after | Pull requests | Concurrent agents | Merge constraint |
 | --- | --- | --- | --- | --- |
-| E providers | D and B2 | About 8. Four code plugins (azure, vertex, bedrock, mantle) and about four fragment batches (URL-only presets on `openai-compat`, `anthropic`, and `generative`, plus the six ids `resolve` still rejects). | Up to 4, one directory each. | Sorted append to `plugins/registry`. On conflict, keep both lines and re-run `xtask`. I waits until every E pull request has merged. |
+| E providers | D, B2, and the fragment-format pull request | About 8. Four code plugins (azure, vertex, bedrock, mantle) and about four data-only fragment batches (URL-only presets on `openai-compat`, `anthropic`, and `generative`, plus the six ids `resolve` still rejects). | Up to 4, one directory each. | Sorted append to `plugins/registry`. On conflict, keep both lines and re-run `xtask`. I waits until every E pull request has merged. |
 | S inbound surfaces | D, including the gateway mount | 5: Ollama, Muse, Codex backend, embeddings, audio. | Up to 5. | Same registry rule. The Codex subscription waits for the Codex surface. |
 | F and G agents | D. Codegen is in D, so F is the four migrations, not a loader. | F is 4. G is about 12 (one `FileKind::Yaml` change, then pi, goose, zed, vscode, crush, hermes, kimi, qwen, droid, cline, grok). | The four F migrations and the non-YAML G files together. Goose and hermes wait on YAML. Zed is code when `custom_write` is required. | Agent directories are disjoint. YAML is the one shared kernel edit. `CatalogModels` and `ModelTier` are in the engine from D, not a per-agent pull request. |
 | H subscriptions | D, B2, and K. Codex also after S. Not L. | 4: codex, claude, copilot, gemini. N9 is a fifth, kernel-API, pull request immediately before Copilot. | 4 plugin agents, after N9 for Copilot. | Same registry rule as E. They do not edit the router. Cooldown is already in K. Sign-in uses the in-process CLI until L. |

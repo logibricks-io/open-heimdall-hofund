@@ -110,6 +110,111 @@ fn claude_settings(session: &Session) -> PathBuf {
     directory.join("settings.json")
 }
 
+/// OpenCode global config.
+///
+/// The documented global path is `~/.config/opencode/opencode.json` or
+/// `opencode.jsonc`, including on Windows (the docs say `~/.config`, not
+/// `%APPDATA%`). When `opencode.jsonc` already exists it is the file that is
+/// edited. Otherwise `opencode.json` is edited or created. A JSONC comment
+/// does not survive apply; revert puts the original bytes back.
+///
+/// The provider entry is `provider.<id>` with `npm`
+/// `@ai-sdk/openai-compatible`, `options.baseURL`, `options.apiKey`, and
+/// `models`. `options.baseURL` includes `/v1` because that package appends
+/// `/chat/completions`. `models` has one entry per route: `name` is the
+/// route id and `variants` is `{}`. Modalities, context, output limits, and
+/// a reasoning flag are omitted; this build has no catalog values for them.
+/// An empty variants object keeps OpenCode from adding low, medium, and high
+/// on its own. A string `model` is compared with route names and is not
+/// rewritten. `hofund agent connect opencode` says how many routes were
+/// written. The
+/// v2 docs describe `providers` plus `package` and `settings`; this adapter
+/// follows the current providers page instead. Both pages document
+/// `~/.config` and do not name an override (checked 2026-10-25). When
+/// `XDG_CONFIG_HOME` is set this adapter uses `$XDG_CONFIG_HOME/opencode`.
+/// Unset, the path stays `~/.config/opencode`, including on Windows.
+///
+/// Sources: <https://opencode.ai/docs/providers/>,
+/// <https://opencode.ai/docs/config/>. The v2 shape is
+/// <https://opencode.ai/v2/docs/providers/>.
+const OPENCODE: Description = Description {
+    id: "opencode",
+    display_name: "OpenCode",
+    binary: "opencode",
+    locations: &[
+        Location {
+            file: "config",
+            kind: FileKind::Json,
+            create: false,
+            resolve: opencode_jsonc,
+        },
+        Location {
+            file: "config",
+            kind: FileKind::Json,
+            create: true,
+            resolve: opencode_json,
+        },
+    ],
+    sets: &[
+        Set {
+            file: "config",
+            key: "provider.hofund.name",
+            slot: Slot::Literal("hofund"),
+        },
+        Set {
+            file: "config",
+            key: "provider.hofund.npm",
+            slot: Slot::Literal("@ai-sdk/openai-compatible"),
+        },
+        Set {
+            file: "config",
+            key: "provider.hofund.options.baseURL",
+            slot: Slot::V1,
+        },
+        Set {
+            file: "config",
+            key: "provider.hofund.options.apiKey",
+            slot: Slot::Token,
+        },
+        Set {
+            file: "config",
+            key: "provider.hofund.models",
+            slot: Slot::OpenCodeModels,
+        },
+    ],
+    model: Some(ModelKey {
+        file: "config",
+        key: "model",
+    }),
+};
+
+pub(crate) const OPENCODE_ADAPTER: Described = Described {
+    description: &OPENCODE,
+};
+
+/// Frozen copy of the pre-F4 Rust const, used only as a test oracle for the
+/// compiled opencode; not part of the public API; removed once F1-F4 are done.
+#[doc(hidden)]
+#[must_use]
+pub fn opencode() -> &'static dyn AgentAdapter {
+    &OPENCODE_ADAPTER
+}
+
+fn opencode_dir(session: &Session) -> PathBuf {
+    match &session.xdg_config_home {
+        Some(path) => path.join("opencode"),
+        None => session.home.join(".config").join("opencode"),
+    }
+}
+
+fn opencode_json(session: &Session) -> PathBuf {
+    opencode_dir(session).join("opencode.json")
+}
+
+fn opencode_jsonc(session: &Session) -> PathBuf {
+    opencode_dir(session).join("opencode.jsonc")
+}
+
 /// OpenAI Codex CLI user config.
 ///
 /// The file is `~/.codex/config.toml`. `CODEX_HOME` replaces `~/.codex`.
