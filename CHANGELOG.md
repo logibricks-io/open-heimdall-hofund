@@ -90,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Passive quota observations now distinguish one-hour retry hints from
+  eight-day window resets, rest at 98% used when the limit is known, and
+  exempt accounts spending credits.
 - `agent.toml` rejects `create` on single-location files, where the field had
   no observable effect; multi-location candidate selection is unchanged (#177).
 - Removed the frozen agent const engine, migration-only oracle feature, static

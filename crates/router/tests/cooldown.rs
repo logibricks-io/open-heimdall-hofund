@@ -97,7 +97,14 @@ fn router(members: Vec<Arc<dyn Member>>, book: &Arc<Cooldowns>) -> Router {
 }
 
 fn cool(book: &Cooldowns, id: &'static str, seconds: u64) {
-    book.observe(&member_id(id), Some(Duration::from_secs(seconds)), Some(0));
+    let _ = book.observe(
+        &member_id(id),
+        Some(Duration::from_secs(seconds)),
+        Some(0),
+        None,
+        None,
+        false,
+    );
 }
 
 #[tokio::test]

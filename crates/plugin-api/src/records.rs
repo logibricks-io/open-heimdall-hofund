@@ -137,13 +137,16 @@ impl QuotaWindow {
     }
 }
 
-/// Rate-limit headers seen on a call, including a successful response.
+/// Quota and rate-limit facts observed on a call, including a successful response.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct QuotaObservation {
     plugin: PluginId,
     retry_after: Option<Duration>,
     remaining: Option<u64>,
+    limit: Option<u64>,
+    window_reset: Option<Duration>,
+    spending_credits: bool,
     window: Option<String>,
 }
 
@@ -157,6 +160,9 @@ impl QuotaObservation {
             plugin,
             retry_after: None,
             remaining: None,
+            limit: None,
+            window_reset: None,
+            spending_credits: false,
             window: None,
         }
     }
@@ -168,7 +174,9 @@ impl QuotaObservation {
         Self::new(plugin)
     }
 
-    /// Sets the retry hint.
+    /// Sets how long the vendor asked the caller to wait before retrying.
+    ///
+    /// This is a retry hint, not a quota window reset.
     #[must_use]
     pub fn with_retry_after(mut self, after: Duration) -> Self {
         self.retry_after = Some(after);
@@ -182,13 +190,38 @@ impl QuotaObservation {
         self
     }
 
+    /// Sets the total units in the quota window.
+    ///
+    /// Together with `remaining`, this lets the kernel compute the used share.
+    #[must_use]
+    pub fn with_limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Sets how long until the quota window resets.
+    ///
+    /// A window reset is distinct from an HTTP retry hint.
+    #[must_use]
+    pub fn with_window_reset(mut self, after: Duration) -> Self {
+        self.window_reset = Some(after);
+        self
+    }
+
+    /// Sets whether the account continues by spending credits past its allowance.
+    #[must_use]
+    pub const fn with_spending_credits(mut self, spending: bool) -> Self {
+        self.spending_credits = spending;
+        self
+    }
+
     /// The plugin that saw the headers.
     #[must_use]
     pub fn plugin(&self) -> &PluginId {
         &self.plugin
     }
 
-    /// How long to wait, when the headers said.
+    /// How long the vendor asked the caller to wait before retrying.
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         self.retry_after
@@ -198,6 +231,24 @@ impl QuotaObservation {
     #[must_use]
     pub const fn remaining(&self) -> Option<u64> {
         self.remaining
+    }
+
+    /// Total units in the quota window, when known.
+    #[must_use]
+    pub const fn limit(&self) -> Option<u64> {
+        self.limit
+    }
+
+    /// How long until the quota window resets, when known.
+    #[must_use]
+    pub const fn window_reset(&self) -> Option<Duration> {
+        self.window_reset
+    }
+
+    /// Whether the account continues by spending credits past its allowance.
+    #[must_use]
+    pub const fn spending_credits(&self) -> bool {
+        self.spending_credits
     }
 
     /// Window name, when the headers named one.
@@ -1574,9 +1625,11 @@ impl AgentDescription {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
         Account, AuthChoice, BinaryName, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
-        QuotaWindow, SignInChallenge, StaticUrl,
+        QuotaObservation, QuotaWindow, SignInChallenge, StaticUrl,
     };
     use crate::ListKind;
     use crate::id::{AccountId, PluginId, ProtocolId};
@@ -1665,6 +1718,28 @@ mod tests {
         );
         assert!(QuotaWindow::new("five-hour", 3, Some(2), None).is_err());
         assert!(ModelSpec::new("", None).is_err());
+    }
+
+    #[test]
+    fn quota_observation_separates_retry_reset_usage_and_credits() {
+        let observation = QuotaObservation::from_stored(PluginId::from_static("example-agent"))
+            .with_retry_after(Duration::from_secs(30))
+            .with_remaining(2)
+            .with_limit(100)
+            .with_window_reset(Duration::from_secs(3_600))
+            .with_spending_credits(true);
+        assert_eq!(observation.retry_after(), Some(Duration::from_secs(30)));
+        assert_eq!(observation.remaining(), Some(2));
+        assert_eq!(observation.limit(), Some(100));
+        assert_eq!(observation.window_reset(), Some(Duration::from_secs(3_600)));
+        assert!(observation.spending_credits());
+
+        let empty = QuotaObservation::from_stored(PluginId::from_static("example-agent"));
+        assert_eq!(empty.retry_after(), None);
+        assert_eq!(empty.remaining(), None);
+        assert_eq!(empty.limit(), None);
+        assert_eq!(empty.window_reset(), None);
+        assert!(!empty.spending_credits());
     }
 
     #[test]

@@ -105,8 +105,14 @@ struct MemberObserve {
 
 impl ObserveBackend for MemberObserve {
     fn observe(&self, observation: QuotaObservation) -> Result<(), PluginError> {
-        self.cooldowns
-            .observe(&self.id, observation.retry_after(), observation.remaining());
+        self.cooldowns.observe(
+            &self.id,
+            observation.retry_after(),
+            observation.remaining(),
+            observation.limit(),
+            observation.window_reset(),
+            observation.spending_credits(),
+        );
         Ok(())
     }
 }
