@@ -80,59 +80,6 @@ website = "https://platform.deepseek.com"
 keys_url = "https://platform.deepseek.com/api_keys"
 
 [[preset]]
-id = "xai"
-name = "xAI"
-kind = "vendor"
-catalog = "xai"
-chat = "https://api.x.ai/v1"
-responses = "https://api.x.ai/v1"
-anthropic = "https://api.x.ai"
-website = "https://console.x.ai"
-keys_url = "https://console.x.ai"
-
-[[preset]]
-id = "moonshot"
-name = "Kimi"
-kind = "vendor"
-catalog = "moonshotai"
-chat = "https://api.moonshot.ai/v1"
-anthropic = "https://api.moonshot.ai/anthropic"
-website = "https://platform.moonshot.ai"
-keys_url = "https://platform.moonshot.ai/console/api-keys"
-
-[[preset]]
-id = "moonshot-cn"
-name = "Kimi (China)"
-kind = "vendor"
-catalog = "moonshotai"
-chat = "https://api.moonshot.cn/v1"
-anthropic = "https://api.moonshot.cn/anthropic"
-website = "https://platform.moonshot.cn"
-keys_url = "https://platform.moonshot.cn/console/api-keys"
-
-[[preset]]
-id = "kimi-code"
-name = "Kimi Code"
-kind = "vendor"
-catalog = "kimi-code-plan-global"
-note = "Membership"
-chat = "https://api.kimi.ai/coding/v1"
-anthropic = "https://api.kimi.ai/coding"
-website = "https://www.kimi.com/code"
-keys_url = "https://www.kimi.com/code/console"
-
-[[preset]]
-id = "kimi-code-cn"
-name = "Kimi Code (China)"
-kind = "vendor"
-catalog = "kimi-code-plan-cn"
-note = "Membership"
-chat = "https://api.kimi.com/coding/v1"
-anthropic = "https://api.kimi.com/coding"
-website = "https://www.kimi.com/code"
-keys_url = "https://www.kimi.com/code/console"
-
-[[preset]]
 id = "zhipu"
 name = "Zhipu GLM"
 kind = "vendor"
@@ -179,26 +126,6 @@ name = "Coding Plan"
 chat = "https://api.z.ai/api/coding/paas/v4"
 responses = "https://api.z.ai/api/v1"
 anthropic = "https://api.z.ai/api/anthropic"
-
-[[preset]]
-id = "minimax"
-name = "MiniMax"
-kind = "vendor"
-catalog = "minimax"
-chat = "https://api.minimax.io/v1"
-anthropic = "https://api.minimax.io/anthropic"
-website = "https://platform.minimax.io"
-keys_url = "https://platform.minimax.io/user-center/basic-information/interface-key"
-
-[[preset]]
-id = "minimax-cn"
-name = "MiniMax (China)"
-kind = "vendor"
-catalog = "minimax"
-chat = "https://api.minimaxi.com/v1"
-anthropic = "https://api.minimaxi.com/anthropic"
-website = "https://platform.minimaxi.com"
-keys_url = "https://platform.minimaxi.com/user-center/basic-information/interface-key"
 
 [[preset]]
 id = "stepfun"
@@ -453,28 +380,6 @@ responses = "https://ark.cn-beijing.volces.com/api/v3"
 lists = true
 
 [[preset]]
-id = "qwen"
-name = "Qwen"
-kind = "vendor"
-catalog = "alibaba"
-note = "DashScope - intl"
-chat = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-anthropic = "https://dashscope-intl.aliyuncs.com/apps/anthropic"
-website = "https://modelstudio.console.alibabacloud.com"
-keys_url = "https://modelstudio.console.alibabacloud.com/?tab=playground#/api-key"
-
-[[preset]]
-id = "qwen-cn"
-name = "Qwen (China)"
-kind = "vendor"
-catalog = "alibaba"
-note = "DashScope - China"
-chat = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-anthropic = "https://dashscope.aliyuncs.com/apps/anthropic"
-website = "https://bailian.console.aliyun.com"
-keys_url = "https://bailian.console.aliyun.com/?tab=model#/api-key"
-
-[[preset]]
 id = "qwen-token-plan"
 name = "Qwen Token Plan"
 short = "Qwen Plan"
@@ -498,15 +403,6 @@ decide = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 website = "https://help.aliyun.com/zh/model-studio/token-plan-overview"
 keys_url = "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal"
 models = ["auto", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731", "glm-5.3", "glm-5.2"]
-
-[[preset]]
-id = "mistral"
-name = "Mistral"
-kind = "vendor"
-catalog = "mistral"
-chat = "https://api.mistral.ai/v1"
-website = "https://console.mistral.ai"
-keys_url = "https://console.mistral.ai/api-keys"
 
 [[preset]]
 id = "groq"
