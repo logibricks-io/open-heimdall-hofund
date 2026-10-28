@@ -7,13 +7,13 @@ use hofund_ir::{ContentPart, Message, Request, Role};
 use secrecy::SecretString;
 
 use crate::error::PluginError;
-use crate::id::{AccountId, PluginId, ProtocolId, TierId};
+use crate::id::{AccountId, PluginId, PluginKey, PluginKind, ProtocolId, TierId};
 
 /// One account in the store. The secret stays in the store, not on this value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Account {
-    plugin: PluginId,
+    key: PluginKey,
     id: AccountId,
     label: String,
 }
@@ -28,7 +28,7 @@ impl Account {
     ///
     /// Returns [`PluginError`] when `label` is empty.
     pub(crate) fn new(
-        plugin: PluginId,
+        plugin: PluginKey,
         id: AccountId,
         label: impl Into<String>,
     ) -> Result<Self, PluginError> {
@@ -36,10 +36,14 @@ impl Account {
         if label.is_empty() {
             return Err(PluginError::config("account label is empty"));
         }
-        Ok(Self { plugin, id, label })
+        Ok(Self {
+            key: plugin,
+            id,
+            label,
+        })
     }
 
-    /// Rebuilds an account the store already accepted.
+    /// Rebuilds a subscription account stored before kinds were explicit.
     ///
     /// # Errors
     ///
@@ -50,13 +54,33 @@ impl Account {
         id: AccountId,
         label: impl Into<String>,
     ) -> Result<Self, PluginError> {
+        Self::from_stored_scoped(PluginKey::new(PluginKind::Subscription, plugin), id, label)
+    }
+
+    /// Rebuilds an account with its storage kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `label` is empty.
+    #[doc(hidden)]
+    pub fn from_stored_scoped(
+        plugin: PluginKey,
+        id: AccountId,
+        label: impl Into<String>,
+    ) -> Result<Self, PluginError> {
         Self::new(plugin, id, label)
     }
 
     /// The plugin that owns the account.
     #[must_use]
-    pub fn plugin(&self) -> &PluginId {
-        &self.plugin
+    pub const fn plugin(&self) -> &PluginId {
+        self.key.id()
+    }
+
+    /// The kind-qualified plugin identity that owns the account.
+    #[must_use]
+    pub const fn key(&self) -> &PluginKey {
+        &self.key
     }
 
     /// The account id.
@@ -137,13 +161,16 @@ impl QuotaWindow {
     }
 }
 
-/// Rate-limit headers seen on a call, including a successful response.
+/// Quota and rate-limit facts observed on a call, including a successful response.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct QuotaObservation {
     plugin: PluginId,
     retry_after: Option<Duration>,
     remaining: Option<u64>,
+    limit: Option<u64>,
+    window_reset: Option<Duration>,
+    spending_credits: bool,
     window: Option<String>,
 }
 
@@ -157,6 +184,9 @@ impl QuotaObservation {
             plugin,
             retry_after: None,
             remaining: None,
+            limit: None,
+            window_reset: None,
+            spending_credits: false,
             window: None,
         }
     }
@@ -168,17 +198,44 @@ impl QuotaObservation {
         Self::new(plugin)
     }
 
-    /// Sets the retry hint.
+    /// Sets how long the vendor asked the caller to wait before retrying.
+    ///
+    /// This is a retry hint, not a quota window reset.
     #[must_use]
-    pub fn with_retry_after(mut self, after: Duration) -> Self {
+    pub const fn with_retry_after(mut self, after: Duration) -> Self {
         self.retry_after = Some(after);
         self
     }
 
     /// Sets the remaining units.
     #[must_use]
-    pub fn with_remaining(mut self, remaining: u64) -> Self {
+    pub const fn with_remaining(mut self, remaining: u64) -> Self {
         self.remaining = Some(remaining);
+        self
+    }
+
+    /// Sets the total units in the quota window.
+    ///
+    /// Together with `remaining`, this lets the kernel compute the used share.
+    #[must_use]
+    pub const fn with_limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Sets how long until the quota window resets.
+    ///
+    /// A window reset is distinct from an HTTP retry hint.
+    #[must_use]
+    pub const fn with_window_reset(mut self, after: Duration) -> Self {
+        self.window_reset = Some(after);
+        self
+    }
+
+    /// Sets whether the account continues by spending credits past its allowance.
+    #[must_use]
+    pub const fn with_spending_credits(mut self, spending: bool) -> Self {
+        self.spending_credits = spending;
         self
     }
 
@@ -188,7 +245,7 @@ impl QuotaObservation {
         &self.plugin
     }
 
-    /// How long to wait, when the headers said.
+    /// How long the vendor asked the caller to wait before retrying.
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         self.retry_after
@@ -198,6 +255,24 @@ impl QuotaObservation {
     #[must_use]
     pub const fn remaining(&self) -> Option<u64> {
         self.remaining
+    }
+
+    /// Total units in the quota window, when known.
+    #[must_use]
+    pub const fn limit(&self) -> Option<u64> {
+        self.limit
+    }
+
+    /// How long until the quota window resets, when known.
+    #[must_use]
+    pub const fn window_reset(&self) -> Option<Duration> {
+        self.window_reset
+    }
+
+    /// Whether the account continues by spending credits past its allowance.
+    #[must_use]
+    pub const fn spending_credits(&self) -> bool {
+        self.spending_credits
     }
 
     /// Window name, when the headers named one.
@@ -1574,9 +1649,11 @@ impl AgentDescription {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
         Account, AuthChoice, BinaryName, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
-        QuotaWindow, SignInChallenge, StaticUrl,
+        QuotaObservation, QuotaWindow, SignInChallenge, StaticUrl,
     };
     use crate::ListKind;
     use crate::id::{AccountId, PluginId, ProtocolId};
@@ -1656,7 +1733,7 @@ mod tests {
     #[test]
     fn account_label_and_quota_limit_are_checked() {
         assert!(
-            Account::new(
+            Account::from_stored(
                 PluginId::from_static("example-agent"),
                 AccountId::from_static("work"),
                 ""
@@ -1665,6 +1742,28 @@ mod tests {
         );
         assert!(QuotaWindow::new("five-hour", 3, Some(2), None).is_err());
         assert!(ModelSpec::new("", None).is_err());
+    }
+
+    #[test]
+    fn quota_observation_separates_retry_reset_usage_and_credits() {
+        let observation = QuotaObservation::from_stored(PluginId::from_static("example-agent"))
+            .with_retry_after(Duration::from_secs(30))
+            .with_remaining(2)
+            .with_limit(100)
+            .with_window_reset(Duration::from_secs(3_600))
+            .with_spending_credits(true);
+        assert_eq!(observation.retry_after(), Some(Duration::from_secs(30)));
+        assert_eq!(observation.remaining(), Some(2));
+        assert_eq!(observation.limit(), Some(100));
+        assert_eq!(observation.window_reset(), Some(Duration::from_secs(3_600)));
+        assert!(observation.spending_credits());
+
+        let empty = QuotaObservation::from_stored(PluginId::from_static("example-agent"));
+        assert_eq!(empty.retry_after(), None);
+        assert_eq!(empty.remaining(), None);
+        assert_eq!(empty.limit(), None);
+        assert_eq!(empty.window_reset(), None);
+        assert!(!empty.spending_credits());
     }
 
     #[test]

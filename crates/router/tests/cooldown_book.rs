@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use hofund_plugin_api::{MemberKey, PresetId};
+use hofund_plugin_api::{MemberKey, PluginId, PresetId, QuotaObservation};
 use hofund_router::{CooldownCause, CooldownPolicy, Cooldowns, MemberId, PluginError};
 
 const MINUTE: u64 = 60;
@@ -34,6 +34,10 @@ fn remaining(book: &Cooldowns, id: &MemberId, clock: &Mutex<Instant>) -> Duratio
         .expect("cooling")
         .until()
         .duration_since(*clock.lock().expect("clock"))
+}
+
+fn observation() -> QuotaObservation {
+    QuotaObservation::from_stored(PluginId::from_static("member"))
 }
 
 #[test]
@@ -189,31 +193,188 @@ fn a_new_failure_never_shortens_a_longer_cooldown() {
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
 }
 
+fn assert_observed(
+    book: &Cooldowns,
+    id: &MemberId,
+    clock: &Mutex<Instant>,
+    observation: &QuotaObservation,
+    expected: Duration,
+) -> hofund_router::Cooling {
+    let cooling = book.observe(id, observation).expect("observed cooldown");
+    assert_eq!(cooling.cause(), CooldownCause::Observed);
+    assert_eq!(remaining(book, id, clock), expected);
+    assert_ne!(book.revision(id), 0);
+    cooling
+}
+
 #[test]
-fn observations_follow_exhaustion_and_retry_hint_rules() {
+fn zero_remaining_distinguishes_retry_hints_from_window_resets() {
     let (book, id, clock) = fixture();
-    assert_eq!(
-        book.observe(&id, None, Some(0)).expect("empty").cause(),
-        CooldownCause::Observed
+    assert_observed(
+        &book,
+        &id,
+        &clock,
+        &observation().with_remaining(0),
+        Duration::from_secs(900),
     );
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(900));
     book.record_success(&id);
-    book.observe(&id, Some(Duration::from_secs(9 * DAY)), Some(0));
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(8 * DAY));
-    book.record_success(&id);
-    book.observe(&id, Some(Duration::ZERO), Some(0));
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(900));
-    book.record_success(&id);
-    assert_eq!(
-        book.observe(&id, Some(Duration::from_secs(120)), Some(5)),
-        None
+    assert_observed(
+        &book,
+        &id,
+        &clock,
+        &observation()
+            .with_remaining(0)
+            .with_retry_after(Duration::from_secs(9 * DAY)),
+        Duration::from_secs(HOUR),
     );
-    assert_eq!(book.observe(&id, None, Some(5)), None);
-    assert_eq!(
-        book.observe(&id, Some(Duration::from_secs(120)), None),
-        None
+    book.record_success(&id);
+    assert_observed(
+        &book,
+        &id,
+        &clock,
+        &observation()
+            .with_remaining(0)
+            .with_window_reset(Duration::from_secs(9 * DAY)),
+        Duration::from_secs(8 * DAY),
     );
-    assert_eq!(book.observe(&id, None, None), None);
+    book.record_success(&id);
+    assert_observed(
+        &book,
+        &id,
+        &clock,
+        &observation()
+            .with_remaining(0)
+            .with_retry_after(Duration::ZERO)
+            .with_window_reset(Duration::ZERO),
+        Duration::from_secs(900),
+    );
+    book.record_success(&id);
+    assert_observed(
+        &book,
+        &id,
+        &clock,
+        &observation()
+            .with_remaining(0)
+            .with_retry_after(Duration::from_secs(9 * DAY))
+            .with_window_reset(Duration::from_secs(2 * HOUR)),
+        Duration::from_secs(2 * HOUR),
+    );
+}
+
+#[test]
+fn threshold_observations_require_a_positive_window_reset() {
+    let (book, id, _) = fixture();
+    for observed in [
+        observation()
+            .with_remaining(3)
+            .with_limit(100)
+            .with_window_reset(Duration::from_secs(2 * HOUR)),
+        observation().with_remaining(2).with_limit(100),
+        observation()
+            .with_remaining(2)
+            .with_limit(100)
+            .with_retry_after(Duration::from_secs(2 * HOUR)),
+        observation()
+            .with_remaining(2)
+            .with_limit(100)
+            .with_window_reset(Duration::ZERO),
+    ] {
+        assert_eq!(book.observe(&id, &observed), None);
+        assert_eq!(book.revision(&id), 0);
+    }
+}
+
+#[test]
+fn threshold_observations_rest_only_until_the_known_reset() {
+    let (book, id, clock) = fixture();
+    for left in [2, 1] {
+        assert_observed(
+            &book,
+            &id,
+            &clock,
+            &observation()
+                .with_remaining(left)
+                .with_limit(100)
+                .with_retry_after(Duration::from_secs(9 * DAY))
+                .with_window_reset(Duration::from_secs(2 * HOUR)),
+            Duration::from_secs(2 * HOUR),
+        );
+        book.record_success(&id);
+    }
+    assert_observed(
+        &book,
+        &id,
+        &clock,
+        &observation()
+            .with_remaining(1)
+            .with_limit(100)
+            .with_window_reset(Duration::from_secs(9 * DAY)),
+        Duration::from_secs(8 * DAY),
+    );
+}
+
+#[test]
+fn observations_exempt_accounts_spending_credits() {
+    let (book, id, _) = fixture();
+    for observed in [
+        observation()
+            .with_remaining(0)
+            .with_window_reset(Duration::from_secs(2 * HOUR))
+            .with_spending_credits(true),
+        observation()
+            .with_remaining(1)
+            .with_limit(100)
+            .with_window_reset(Duration::from_secs(2 * HOUR))
+            .with_spending_credits(true),
+    ] {
+        assert_eq!(book.observe(&id, &observed), None);
+        assert_eq!(book.revision(&id), 0);
+    }
+}
+
+#[test]
+fn zero_limit_and_inconsistent_observations_follow_exhaustion_rules() {
+    let (book, id, clock) = fixture();
+    assert_observed(
+        &book,
+        &id,
+        &clock,
+        &observation().with_remaining(0).with_limit(0),
+        Duration::from_secs(900),
+    );
+    book.record_success(&id);
+    for observed in [
+        observation()
+            .with_remaining(1)
+            .with_limit(0)
+            .with_window_reset(Duration::from_secs(2 * HOUR)),
+        observation()
+            .with_remaining(101)
+            .with_limit(100)
+            .with_window_reset(Duration::from_secs(2 * HOUR)),
+    ] {
+        assert_eq!(book.observe(&id, &observed), None);
+        assert_eq!(book.revision(&id), 0);
+    }
+}
+
+#[test]
+fn observations_without_exhaustion_inputs_record_nothing() {
+    let (book, id, _) = fixture();
+    for observed in [
+        observation()
+            .with_remaining(5)
+            .with_retry_after(Duration::from_secs(120))
+            .with_window_reset(Duration::from_secs(8 * DAY)),
+        observation()
+            .with_limit(100)
+            .with_retry_after(Duration::from_secs(120))
+            .with_window_reset(Duration::from_secs(8 * DAY)),
+        observation(),
+    ] {
+        assert_eq!(book.observe(&id, &observed), None);
+        assert_eq!(book.revision(&id), 0);
+    }
 }
 
 #[test]
@@ -223,7 +384,12 @@ fn observation_does_not_advance_ladders_or_shorten_a_cooldown() {
         .record_failure(&id, &PluginError::connect("down"))
         .expect("failure");
     let observed = book
-        .observe(&id, Some(Duration::from_secs(1)), Some(0))
+        .observe(
+            &id,
+            &observation()
+                .with_remaining(0)
+                .with_retry_after(Duration::from_secs(1)),
+        )
         .expect("observation");
     assert_eq!(observed.until(), failure.until());
     assert_eq!(observed.failures(), 1);
@@ -238,7 +404,7 @@ fn observation_does_not_advance_ladders_or_shorten_a_cooldown() {
 fn success_does_not_clear_a_newer_observation() {
     let (book, id, _) = fixture();
     let revision = book.revision(&id);
-    book.observe(&id, None, Some(0));
+    let _ = book.observe(&id, &observation().with_remaining(0));
     book.record_success_if_unchanged(&id, revision);
     assert!(book.cooling(&id).is_some());
     book.record_success(&id);
@@ -284,8 +450,12 @@ fn quota_header_retry_after_is_capped_at_one_hour() {
 #[test]
 fn observation_with_remaining_quota_does_not_rest() {
     let (book, id, _) = fixture();
-    let _ = book.observe(&id, Some(Duration::from_secs(30 * MINUTE)), Some(500));
+    let observed = observation()
+        .with_remaining(500)
+        .with_window_reset(Duration::from_secs(30 * MINUTE));
+    assert_eq!(book.observe(&id, &observed), None);
     assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.revision(&id), 0);
 }
 
 #[test]
@@ -354,7 +524,7 @@ fn success_clears_and_removes_entry_without_history() {
     let (book, _) = with_policy(CooldownPolicy::default());
     for conditional in [false, true] {
         let id = member(if conditional { "conditional" } else { "direct" });
-        book.observe(&id, None, Some(0));
+        let _ = book.observe(&id, &observation().with_remaining(0));
         let revision = book.revision(&id);
         if conditional {
             book.record_success_if_unchanged(&id, revision);
@@ -509,7 +679,7 @@ fn candidate_retention_prunes_only_absent_members() {
 fn observation_only_rest_is_pruned_as_soon_as_it_expires() {
     let (book, clock) = with_policy(CooldownPolicy::default());
     let id = member("observed");
-    book.observe(&id, None, Some(0));
+    let _ = book.observe(&id, &observation().with_remaining(0));
     assert_ne!(book.revision(&id), 0);
     advance(&clock, 15 * MINUTE);
     assert_eq!(book.revision(&id), 0);

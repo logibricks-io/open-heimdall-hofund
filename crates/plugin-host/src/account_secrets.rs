@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-use hofund_plugin_api::SecretString;
 use hofund_plugin_api::kernel;
+use hofund_plugin_api::{PluginKind, SecretString};
 #[cfg(target_os = "windows")]
 use keyring_core::CredentialStoreApi;
 use secrecy::{ExposeSecret, SecretBox};
@@ -17,11 +17,13 @@ use crate::accounts::{
     AccountStorageKind, StoreError, backend_error, set_mode, sibling_path, write_atomic,
 };
 
-const KEYCHAIN_REFERENCE: &str = "os-keychain:v1";
-const FILE_REFERENCE: &str = "encrypted-file:v1";
+pub(crate) const KEYCHAIN_REFERENCE_V1: &str = "os-keychain:v1";
+pub(crate) const KEYCHAIN_REFERENCE: &str = "os-keychain:v2";
+pub(crate) const FILE_REFERENCE_V1: &str = "encrypted-file:v1";
+pub(crate) const FILE_REFERENCE: &str = "encrypted-file:v2";
 const KEYCHAIN_SERVICE: &str = "io.logibricks.hofund.accounts";
 const MAGIC: &[u8; 8] = b"HOFACCT\0";
-const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
 const NONCE_LEN: usize = 24;
 const KEY_LEN: usize = 32;
 
@@ -31,46 +33,105 @@ pub(crate) trait AccountSecretBackend: Send + Sync {
     }
     fn kind(&self) -> Result<AccountStorageKind, StoreError>;
     fn reference(&self) -> Result<&'static str, StoreError>;
-    fn get(&self, plugin: &str, account: &str, reference: &str)
-    -> Result<SecretString, StoreError>;
+    fn get(
+        &self,
+        kind: &str,
+        plugin: &str,
+        account: &str,
+        reference: &str,
+    ) -> Result<SecretString, StoreError>;
     fn set(
         &self,
+        kind: &str,
         plugin: &str,
         account: &str,
         reference: &str,
         secret: SecretString,
     ) -> Result<(), StoreError>;
-    fn delete(&self, plugin: &str, account: &str, reference: &str) -> Result<(), StoreError>;
+    fn delete(
+        &self,
+        kind: &str,
+        plugin: &str,
+        account: &str,
+        reference: &str,
+    ) -> Result<(), StoreError>;
 }
 
 pub(crate) fn default_backend(metadata_path: &Path) -> Arc<dyn AccountSecretBackend> {
     Arc::new(AutoBackend {
         metadata_path: metadata_path.to_path_buf(),
         selected: Mutex::new(None),
+        native: Mutex::new(None),
+        native_error: None,
+        file: Arc::new(EncryptedFileBackend::new(
+            sibling_path(metadata_path, ".secrets"),
+            sibling_path(metadata_path, ".key"),
+        )),
     })
 }
 
 struct AutoBackend {
     metadata_path: PathBuf,
     selected: Mutex<Option<Arc<dyn AccountSecretBackend>>>,
+    native: Mutex<Option<Arc<dyn AccountSecretBackend>>>,
+    native_error: Option<String>,
+    file: Arc<dyn AccountSecretBackend>,
 }
 
 impl AutoBackend {
-    fn select(&self) -> Result<Arc<dyn AccountSecretBackend>, StoreError> {
+    #[cfg(test)]
+    fn with_backends(
+        selected: Arc<dyn AccountSecretBackend>,
+        native: Result<Arc<dyn AccountSecretBackend>, String>,
+        file: Arc<dyn AccountSecretBackend>,
+    ) -> Self {
+        let (native, native_error) = match native {
+            Ok(backend) => (Some(backend), None),
+            Err(error) => (None, Some(error)),
+        };
+        Self {
+            metadata_path: PathBuf::new(),
+            selected: Mutex::new(Some(selected)),
+            native: Mutex::new(native),
+            native_error,
+            file,
+        }
+    }
+
+    fn selection_lock(&self) -> StoreError {
+        StoreError::Io("account backend selection lock is poisoned".to_owned())
+    }
+
+    fn native_backend(&self) -> Result<Arc<dyn AccountSecretBackend>, StoreError> {
+        if let Some(error) = &self.native_error {
+            return Err(StoreError::Io(error.clone()));
+        }
         {
-            let guard = self.selected.lock().map_err(|_| {
-                StoreError::Io("account backend selection lock is poisoned".to_owned())
-            })?;
+            let guard = self.native.lock().map_err(|_| self.selection_lock())?;
             if let Some(backend) = guard.as_ref() {
                 return Ok(Arc::clone(backend));
             }
         }
-        let candidate: Arc<dyn AccountSecretBackend> = match OsKeychainBackend::probe() {
+        let backend: Arc<dyn AccountSecretBackend> =
+            Arc::new(OsKeychainBackend::probe().map_err(StoreError::Io)?);
+        let mut guard = self.native.lock().map_err(|_| self.selection_lock())?;
+        Ok(Arc::clone(guard.get_or_insert(backend)))
+    }
+
+    fn select(&self) -> Result<Arc<dyn AccountSecretBackend>, StoreError> {
+        {
+            let guard = self.selected.lock().map_err(|_| self.selection_lock())?;
+            if let Some(backend) = guard.as_ref() {
+                return Ok(Arc::clone(backend));
+            }
+        }
+        let candidate: Arc<dyn AccountSecretBackend> = match self.native_backend() {
             Ok(backend) => {
                 tracing::debug!(backend = "os-keychain", "selected account secret backend");
-                Arc::new(backend)
+                backend
             }
-            Err(reason) => {
+            Err(error) => {
+                let reason = error.to_string();
                 tracing::warn!(
                     backend = "encrypted-file",
                     reason = %reason,
@@ -82,11 +143,18 @@ impl AutoBackend {
                 ))
             }
         };
-        let mut guard = self
-            .selected
-            .lock()
-            .map_err(|_| StoreError::Io("account backend selection lock is poisoned".to_owned()))?;
+        let mut guard = self.selected.lock().map_err(|_| self.selection_lock())?;
         Ok(Arc::clone(guard.get_or_insert(candidate)))
+    }
+
+    fn for_reference(&self, reference: &str) -> Result<Arc<dyn AccountSecretBackend>, StoreError> {
+        match reference {
+            KEYCHAIN_REFERENCE_V1 | KEYCHAIN_REFERENCE => self.native_backend(),
+            FILE_REFERENCE_V1 | FILE_REFERENCE => Ok(Arc::clone(&self.file)),
+            _ => Err(StoreError::Format(
+                "account secret reference has an unknown backend or version".to_owned(),
+            )),
+        }
     }
 }
 
@@ -105,17 +173,19 @@ impl AccountSecretBackend for AutoBackend {
 
     fn get(
         &self,
+        kind: &str,
         plugin: &str,
         account: &str,
         reference: &str,
     ) -> Result<SecretString, StoreError> {
-        let backend = self.select()?;
+        let backend = self.for_reference(reference)?;
         backend.prepare()?;
-        backend.get(plugin, account, reference)
+        backend.get(kind, plugin, account, reference)
     }
 
     fn set(
         &self,
+        kind: &str,
         plugin: &str,
         account: &str,
         reference: &str,
@@ -123,13 +193,19 @@ impl AccountSecretBackend for AutoBackend {
     ) -> Result<(), StoreError> {
         let backend = self.select()?;
         backend.prepare()?;
-        backend.set(plugin, account, reference, secret)
+        backend.set(kind, plugin, account, reference, secret)
     }
 
-    fn delete(&self, plugin: &str, account: &str, reference: &str) -> Result<(), StoreError> {
-        let backend = self.select()?;
+    fn delete(
+        &self,
+        kind: &str,
+        plugin: &str,
+        account: &str,
+        reference: &str,
+    ) -> Result<(), StoreError> {
+        let backend = self.for_reference(reference)?;
         backend.prepare()?;
-        backend.delete(plugin, account, reference)
+        backend.delete(kind, plugin, account, reference)
     }
 }
 
@@ -149,6 +225,22 @@ struct OsKeychainBackend;
 #[cfg(target_os = "windows")]
 struct OsKeychainBackend {
     store: Arc<windows_native_keyring_store::Store>,
+}
+
+fn native_reference_version(reference: &str) -> Option<u8> {
+    match reference {
+        KEYCHAIN_REFERENCE_V1 => Some(1),
+        KEYCHAIN_REFERENCE => Some(2),
+        _ => None,
+    }
+}
+
+fn native_entry_name(kind: &str, plugin: &str, account: &str, version: u8) -> String {
+    if version == 1 {
+        format!("{plugin}/{account}")
+    } else {
+        format!("{kind}/{plugin}/{account}")
+    }
 }
 
 impl OsKeychainBackend {
@@ -171,7 +263,7 @@ impl OsKeychainBackend {
         let backend = Self {
             store: windows_native_keyring_store::Store::new().map_err(|error| error.to_string())?,
         };
-        let entry = backend.entry("backend", "probe")?;
+        let entry = backend.entry("backend", "probe", KEYCHAIN_REFERENCE)?;
         match entry.get_secret() {
             Ok(mut secret) => {
                 secret.zeroize();
@@ -188,29 +280,48 @@ impl OsKeychainBackend {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn entry(&self, plugin: &str, account: &str) -> Result<NativeEntry, String> {
-        keyring::Entry::new(KEYCHAIN_SERVICE, &format!("{plugin}/{account}"))
-            .map_err(|error| error.to_string())
+    fn entry(
+        &self,
+        kind: &str,
+        plugin: &str,
+        account: &str,
+        reference: &str,
+    ) -> Result<NativeEntry, String> {
+        let version = native_reference_version(reference).unwrap_or(2);
+        keyring::Entry::new(
+            KEYCHAIN_SERVICE,
+            &native_entry_name(kind, plugin, account, version),
+        )
+        .map_err(|error| error.to_string())
     }
 
     #[cfg(target_os = "windows")]
-    fn entry(&self, plugin: &str, account: &str) -> Result<NativeEntry, String> {
+    fn entry(
+        &self,
+        kind: &str,
+        plugin: &str,
+        account: &str,
+        reference: &str,
+    ) -> Result<NativeEntry, String> {
+        let version = native_reference_version(reference).unwrap_or(2);
         self.store
-            .build(KEYCHAIN_SERVICE, &format!("{plugin}/{account}"), None)
+            .build(
+                KEYCHAIN_SERVICE,
+                &native_entry_name(kind, plugin, account, version),
+                None,
+            )
             .map_err(|error| error.to_string())
     }
 
-    fn check_reference(plugin: &str, account: &str, reference: &str) -> Result<(), StoreError> {
-        if reference == KEYCHAIN_REFERENCE {
-            Ok(())
-        } else {
-            Err(backend_error(
+    fn check_reference(plugin: &str, account: &str, reference: &str) -> Result<u8, StoreError> {
+        native_reference_version(reference).ok_or_else(|| {
+            backend_error(
                 AccountStorageKind::OsKeychain,
                 plugin,
                 account,
                 "secret reference belongs to a different backend or format",
-            ))
-        }
+            )
+        })
     }
 }
 
@@ -226,14 +337,17 @@ impl AccountSecretBackend for OsKeychainBackend {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn get(
         &self,
+        kind: &str,
         plugin: &str,
         account: &str,
         reference: &str,
     ) -> Result<SecretString, StoreError> {
         Self::check_reference(plugin, account, reference)?;
-        let entry = self.entry(plugin, account).map_err(|error| {
-            backend_error(AccountStorageKind::OsKeychain, plugin, account, error)
-        })?;
+        let entry = self
+            .entry(kind, plugin, account, reference)
+            .map_err(|error| {
+                backend_error(AccountStorageKind::OsKeychain, plugin, account, error)
+            })?;
         let plaintext = entry.get_secret().map_err(|error| {
             backend_error(
                 AccountStorageKind::OsKeychain,
@@ -259,6 +373,7 @@ impl AccountSecretBackend for OsKeychainBackend {
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     fn get(
         &self,
+        _kind: &str,
         plugin: &str,
         account: &str,
         _reference: &str,
@@ -274,15 +389,18 @@ impl AccountSecretBackend for OsKeychainBackend {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn set(
         &self,
+        kind: &str,
         plugin: &str,
         account: &str,
         reference: &str,
         secret: SecretString,
     ) -> Result<(), StoreError> {
         Self::check_reference(plugin, account, reference)?;
-        let entry = self.entry(plugin, account).map_err(|error| {
-            backend_error(AccountStorageKind::OsKeychain, plugin, account, error)
-        })?;
+        let entry = self
+            .entry(kind, plugin, account, reference)
+            .map_err(|error| {
+                backend_error(AccountStorageKind::OsKeychain, plugin, account, error)
+            })?;
         entry
             .set_secret(kernel::expose_secret(&secret).as_bytes())
             .map_err(|error| {
@@ -298,6 +416,7 @@ impl AccountSecretBackend for OsKeychainBackend {
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     fn set(
         &self,
+        _kind: &str,
         plugin: &str,
         account: &str,
         _reference: &str,
@@ -312,11 +431,19 @@ impl AccountSecretBackend for OsKeychainBackend {
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    fn delete(&self, plugin: &str, account: &str, reference: &str) -> Result<(), StoreError> {
+    fn delete(
+        &self,
+        kind: &str,
+        plugin: &str,
+        account: &str,
+        reference: &str,
+    ) -> Result<(), StoreError> {
         Self::check_reference(plugin, account, reference)?;
-        let entry = self.entry(plugin, account).map_err(|error| {
-            backend_error(AccountStorageKind::OsKeychain, plugin, account, error)
-        })?;
+        let entry = self
+            .entry(kind, plugin, account, reference)
+            .map_err(|error| {
+                backend_error(AccountStorageKind::OsKeychain, plugin, account, error)
+            })?;
         match entry.delete_credential() {
             Ok(()) | Err(NativeError::NoEntry) => Ok(()),
             Err(error) => Err(backend_error(
@@ -329,7 +456,13 @@ impl AccountSecretBackend for OsKeychainBackend {
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    fn delete(&self, plugin: &str, account: &str, _reference: &str) -> Result<(), StoreError> {
+    fn delete(
+        &self,
+        _kind: &str,
+        plugin: &str,
+        account: &str,
+        _reference: &str,
+    ) -> Result<(), StoreError> {
         Err(backend_error(
             AccountStorageKind::OsKeychain,
             plugin,
@@ -339,7 +472,10 @@ impl AccountSecretBackend for OsKeychainBackend {
     }
 }
 
+#[derive(Clone)]
 struct CipherRow {
+    version: u8,
+    kind: String,
     plugin: String,
     account: String,
     nonce: [u8; NONCE_LEN],
@@ -358,6 +494,14 @@ impl std::fmt::Debug for EncryptedFileBackend {
             .debug_struct("EncryptedFileBackend")
             .field("path", &self.path)
             .finish_non_exhaustive()
+    }
+}
+
+fn file_reference_version(reference: &str) -> Option<u8> {
+    match reference {
+        FILE_REFERENCE_V1 => Some(1),
+        FILE_REFERENCE => Some(2),
+        _ => None,
     }
 }
 
@@ -407,17 +551,15 @@ impl EncryptedFileBackend {
         })
     }
 
-    fn check_reference(plugin: &str, account: &str, reference: &str) -> Result<(), StoreError> {
-        if reference == FILE_REFERENCE {
-            Ok(())
-        } else {
-            Err(backend_error(
+    fn check_reference(plugin: &str, account: &str, reference: &str) -> Result<u8, StoreError> {
+        file_reference_version(reference).ok_or_else(|| {
+            backend_error(
                 AccountStorageKind::EncryptedFile,
                 plugin,
                 account,
                 "secret reference belongs to a different backend or format",
-            ))
-        }
+            )
+        })
     }
 
     fn read(&self, plugin: &str, account: &str) -> Result<Vec<CipherRow>, StoreError> {
@@ -460,15 +602,21 @@ impl AccountSecretBackend for EncryptedFileBackend {
 
     fn get(
         &self,
+        kind: &str,
         plugin: &str,
         account: &str,
         reference: &str,
     ) -> Result<SecretString, StoreError> {
-        Self::check_reference(plugin, account, reference)?;
+        let version = Self::check_reference(plugin, account, reference)?;
         let rows = self.read(plugin, account)?;
         let row = rows
             .iter()
-            .find(|row| row.plugin == plugin && row.account == account)
+            .find(|row| {
+                row.version == version
+                    && row.kind == kind
+                    && row.plugin == plugin
+                    && row.account == account
+            })
             .ok_or_else(|| {
                 backend_error(
                     AccountStorageKind::EncryptedFile,
@@ -483,7 +631,7 @@ impl AccountSecretBackend for EncryptedFileBackend {
                 XNonce::from_slice(&row.nonce),
                 Payload {
                     msg: &row.ciphertext,
-                    aad: associated_data(plugin, account).as_bytes(),
+                    aad: associated_data(version, kind, plugin, account).as_bytes(),
                 },
             )
             .map_err(|_| {
@@ -510,14 +658,20 @@ impl AccountSecretBackend for EncryptedFileBackend {
 
     fn set(
         &self,
+        kind: &str,
         plugin: &str,
         account: &str,
         reference: &str,
         secret: SecretString,
     ) -> Result<(), StoreError> {
-        Self::check_reference(plugin, account, reference)?;
+        let version = Self::check_reference(plugin, account, reference)?;
         let mut rows = self.read(plugin, account)?;
-        rows.retain(|row| !(row.plugin == plugin && row.account == account));
+        rows.retain(|row| {
+            !(row.version == version
+                && row.kind == kind
+                && row.plugin == plugin
+                && row.account == account)
+        });
         let mut nonce = [0_u8; NONCE_LEN];
         getrandom::getrandom(&mut nonce).map_err(|error| {
             backend_error(
@@ -533,7 +687,7 @@ impl AccountSecretBackend for EncryptedFileBackend {
                 XNonce::from_slice(&nonce),
                 Payload {
                     msg: kernel::expose_secret(&secret).as_bytes(),
-                    aad: associated_data(plugin, account).as_bytes(),
+                    aad: associated_data(version, kind, plugin, account).as_bytes(),
                 },
             )
             .map_err(|_| {
@@ -545,6 +699,8 @@ impl AccountSecretBackend for EncryptedFileBackend {
                 )
             })?;
         rows.push(CipherRow {
+            version,
+            kind: kind.to_owned(),
             plugin: plugin.to_owned(),
             account: account.to_owned(),
             nonce,
@@ -553,22 +709,59 @@ impl AccountSecretBackend for EncryptedFileBackend {
         self.write(plugin, account, &rows)
     }
 
-    fn delete(&self, plugin: &str, account: &str, reference: &str) -> Result<(), StoreError> {
-        Self::check_reference(plugin, account, reference)?;
+    fn delete(
+        &self,
+        kind: &str,
+        plugin: &str,
+        account: &str,
+        reference: &str,
+    ) -> Result<(), StoreError> {
+        let version = Self::check_reference(plugin, account, reference)?;
         let mut rows = self.read(plugin, account)?;
-        rows.retain(|row| !(row.plugin == plugin && row.account == account));
+        rows.retain(|row| {
+            !(row.version == version
+                && row.kind == kind
+                && row.plugin == plugin
+                && row.account == account)
+        });
         self.write(plugin, account, &rows)
     }
 }
 
-fn associated_data(plugin: &str, account: &str) -> String {
-    format!("hofund-account-secret\0format-v1\0{plugin}\0{account}")
+fn associated_data(version: u8, kind: &str, plugin: &str, account: &str) -> String {
+    if version == 1 {
+        format!("hofund-account-secret\0format-v1\0{plugin}\0{account}")
+    } else {
+        format!("hofund-account-secret\0format-v2\0{kind}\0{plugin}\0{account}")
+    }
 }
 
 fn load_or_create_key(
     secrets_path: &Path,
     key_path: &Path,
 ) -> Result<SecretBox<[u8; KEY_LEN]>, StoreError> {
+    match fs::symlink_metadata(key_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(StoreError::Format(format!(
+                    "account encryption key `{}` is not a regular file",
+                    key_path.display()
+                )));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o777 != 0o600 {
+                    return Err(StoreError::Format(format!(
+                        "account encryption key `{}` does not have mode 0600",
+                        key_path.display()
+                    )));
+                }
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(StoreError::Io(error.to_string())),
+    }
     match fs::read(key_path) {
         Ok(mut bytes) => {
             if bytes.len() != KEY_LEN {
@@ -628,12 +821,26 @@ fn decode_records(bytes: &[u8]) -> Result<Vec<CipherRow>, String> {
     if take(bytes, &mut offset, MAGIC.len())? != MAGIC {
         return Err("encrypted account file has invalid magic".to_owned());
     }
-    if take(bytes, &mut offset, 1)? != [FORMAT_VERSION] {
+    let container_version = take(bytes, &mut offset, 1)?[0];
+    if container_version != 1 && container_version != FORMAT_VERSION {
         return Err("encrypted account file has an unsupported version".to_owned());
     }
     let count = read_u32(bytes, &mut offset)?;
     let mut rows = Vec::new();
     for _ in 0..count {
+        let version = if container_version == 1 {
+            1
+        } else {
+            take(bytes, &mut offset, 1)?[0]
+        };
+        if version != 1 && version != FORMAT_VERSION {
+            return Err("encrypted account record has an unsupported version".to_owned());
+        }
+        let kind_len = if version == 1 {
+            0
+        } else {
+            usize::from(read_u16(bytes, &mut offset)?)
+        };
         let plugin_len = usize::from(read_u16(bytes, &mut offset)?);
         let account_len = usize::from(read_u16(bytes, &mut offset)?);
         let nonce_slice = take(bytes, &mut offset, NONCE_LEN)?;
@@ -642,6 +849,13 @@ fn decode_records(bytes: &[u8]) -> Result<Vec<CipherRow>, String> {
             .map_err(|_| "encrypted account nonce has an invalid length".to_owned())?;
         let ciphertext_len = usize::try_from(read_u32(bytes, &mut offset)?)
             .map_err(|_| "encrypted account ciphertext is too large".to_owned())?;
+        let kind = if version == 1 {
+            PluginKind::Subscription.as_str().to_owned()
+        } else {
+            std::str::from_utf8(take(bytes, &mut offset, kind_len)?)
+                .map_err(|_| "encrypted account kind is not UTF-8".to_owned())?
+                .to_owned()
+        };
         let plugin = std::str::from_utf8(take(bytes, &mut offset, plugin_len)?)
             .map_err(|_| "encrypted account plugin id is not UTF-8".to_owned())?
             .to_owned();
@@ -650,6 +864,8 @@ fn decode_records(bytes: &[u8]) -> Result<Vec<CipherRow>, String> {
             .to_owned();
         let ciphertext = take(bytes, &mut offset, ciphertext_len)?.to_vec();
         rows.push(CipherRow {
+            version,
+            kind,
             plugin,
             account,
             nonce,
@@ -669,16 +885,28 @@ fn encode_records(rows: &[CipherRow]) -> Result<Vec<u8>, String> {
     bytes.push(FORMAT_VERSION);
     bytes.extend_from_slice(&count.to_le_bytes());
     for row in rows {
+        if row.version != 1 && row.version != FORMAT_VERSION {
+            return Err("encrypted account record has an unsupported version".to_owned());
+        }
+        bytes.push(row.version);
+        let kind_len =
+            u16::try_from(row.kind.len()).map_err(|_| "account kind is too long".to_owned())?;
         let plugin_len = u16::try_from(row.plugin.len())
             .map_err(|_| "account plugin id is too long".to_owned())?;
         let account_len =
             u16::try_from(row.account.len()).map_err(|_| "account id is too long".to_owned())?;
         let ciphertext_len = u32::try_from(row.ciphertext.len())
             .map_err(|_| "account ciphertext is too large".to_owned())?;
+        if row.version == FORMAT_VERSION {
+            bytes.extend_from_slice(&kind_len.to_le_bytes());
+        }
         bytes.extend_from_slice(&plugin_len.to_le_bytes());
         bytes.extend_from_slice(&account_len.to_le_bytes());
         bytes.extend_from_slice(&row.nonce);
         bytes.extend_from_slice(&ciphertext_len.to_le_bytes());
+        if row.version == FORMAT_VERSION {
+            bytes.extend_from_slice(row.kind.as_bytes());
+        }
         bytes.extend_from_slice(row.plugin.as_bytes());
         bytes.extend_from_slice(row.account.as_bytes());
         bytes.extend_from_slice(&row.ciphertext);
@@ -713,7 +941,13 @@ fn read_u32(bytes: &[u8], offset: &mut usize) -> Result<u32, String> {
 
 #[derive(Default)]
 pub(crate) struct MemoryAccountSecrets {
-    values: Mutex<BTreeMap<(String, String), SecretString>>,
+    values: Mutex<BTreeMap<(String, String, String), SecretString>>,
+}
+
+impl MemoryAccountSecrets {
+    fn check_reference(plugin: &str, account: &str, reference: &str) -> Result<(), StoreError> {
+        OsKeychainBackend::check_reference(plugin, account, reference).map(|_| ())
+    }
 }
 
 impl AccountSecretBackend for MemoryAccountSecrets {
@@ -727,11 +961,12 @@ impl AccountSecretBackend for MemoryAccountSecrets {
 
     fn get(
         &self,
+        kind: &str,
         plugin: &str,
         account: &str,
         reference: &str,
     ) -> Result<SecretString, StoreError> {
-        OsKeychainBackend::check_reference(plugin, account, reference)?;
+        Self::check_reference(plugin, account, reference)?;
         self.values
             .lock()
             .map_err(|_| {
@@ -742,7 +977,7 @@ impl AccountSecretBackend for MemoryAccountSecrets {
                     "memory credential lock is poisoned",
                 )
             })?
-            .get(&(plugin.to_owned(), account.to_owned()))
+            .get(&(kind.to_owned(), plugin.to_owned(), account.to_owned()))
             .cloned()
             .ok_or_else(|| {
                 backend_error(
@@ -756,12 +991,13 @@ impl AccountSecretBackend for MemoryAccountSecrets {
 
     fn set(
         &self,
+        kind: &str,
         plugin: &str,
         account: &str,
         reference: &str,
         secret: SecretString,
     ) -> Result<(), StoreError> {
-        OsKeychainBackend::check_reference(plugin, account, reference)?;
+        Self::check_reference(plugin, account, reference)?;
         self.values
             .lock()
             .map_err(|_| {
@@ -772,12 +1008,21 @@ impl AccountSecretBackend for MemoryAccountSecrets {
                     "memory credential lock is poisoned",
                 )
             })?
-            .insert((plugin.to_owned(), account.to_owned()), secret);
+            .insert(
+                (kind.to_owned(), plugin.to_owned(), account.to_owned()),
+                secret,
+            );
         Ok(())
     }
 
-    fn delete(&self, plugin: &str, account: &str, reference: &str) -> Result<(), StoreError> {
-        OsKeychainBackend::check_reference(plugin, account, reference)?;
+    fn delete(
+        &self,
+        kind: &str,
+        plugin: &str,
+        account: &str,
+        reference: &str,
+    ) -> Result<(), StoreError> {
+        Self::check_reference(plugin, account, reference)?;
         self.values
             .lock()
             .map_err(|_| {
@@ -788,7 +1033,7 @@ impl AccountSecretBackend for MemoryAccountSecrets {
                     "memory credential lock is poisoned",
                 )
             })?
-            .remove(&(plugin.to_owned(), account.to_owned()));
+            .remove(&(kind.to_owned(), plugin.to_owned(), account.to_owned()));
         Ok(())
     }
 }
@@ -802,8 +1047,23 @@ mod tests {
     pub(super) const MARKER: &str = "encrypted-secret-marker-61b42d";
     const PLUGIN: &str = "example-agent";
     const ACCOUNT: &str = "work";
+    const KIND: &str = "subscription";
 
-    pub(super) fn scratch() -> PathBuf {
+    pub(super) struct TestDir(pub(super) PathBuf);
+
+    impl TestDir {
+        pub(super) fn join(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    pub(super) fn scratch() -> TestDir {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "hofund-encrypted-accounts-{}-{}",
@@ -811,7 +1071,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).expect("scratch");
-        path
+        TestDir(path)
     }
 
     pub(super) fn secret() -> SecretString {
@@ -825,9 +1085,11 @@ mod tests {
         let key_path = root.join("accounts.json.key");
         let backend = EncryptedFileBackend::open(path.clone(), key_path.clone()).expect("open");
         backend
-            .set(PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
             .expect("set");
-        let loaded = backend.get(PLUGIN, ACCOUNT, FILE_REFERENCE).expect("get");
+        let loaded = backend
+            .get(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE)
+            .expect("get");
         assert_eq!(kernel::expose_secret(&loaded), MARKER);
         assert!(
             !fs::read(&path)
@@ -837,7 +1099,7 @@ mod tests {
         );
         let first_nonce = read_records(&path).expect("records")[0].nonce;
         backend
-            .set(PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
             .expect("replace");
         let second_nonce = read_records(&path).expect("records")[0].nonce;
         assert_ne!(first_nonce, second_nonce);
@@ -854,14 +1116,15 @@ mod tests {
 
     #[test]
     fn wrong_key_fails_closed_without_leaking_the_secret() {
-        let path = scratch().join("accounts.secrets");
+        let dir = scratch();
+        let path = dir.join("accounts.secrets");
         let writer = EncryptedFileBackend::from_key(path.clone(), [7_u8; KEY_LEN]);
         writer
-            .set(PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
             .expect("set");
         let reader = EncryptedFileBackend::from_key(path, [8_u8; KEY_LEN]);
         let error = reader
-            .get(PLUGIN, ACCOUNT, FILE_REFERENCE)
+            .get(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE)
             .expect_err("wrong key");
         assert!(!format!("{error} {error:?}").contains(MARKER));
     }
@@ -869,10 +1132,11 @@ mod tests {
     #[test]
     fn tampered_ciphertext_and_nonce_fail_closed() {
         for tamper_nonce in [false, true] {
-            let path = scratch().join("accounts.secrets");
+            let dir = scratch();
+            let path = dir.join("accounts.secrets");
             let backend = EncryptedFileBackend::from_key(path.clone(), [11_u8; KEY_LEN]);
             backend
-                .set(PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+                .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
                 .expect("set");
             if tamper_nonce {
                 let mut rows = read_records(&path).expect("records");
@@ -885,25 +1149,82 @@ mod tests {
                 fs::write(&path, bytes).expect("tamper");
             }
             backend
-                .get(PLUGIN, ACCOUNT, FILE_REFERENCE)
+                .get(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE)
                 .expect_err("tampering");
         }
     }
 
     #[test]
+    fn trailing_bytes_after_the_last_record_fail_closed() {
+        let dir = scratch();
+        let path = dir.join("accounts.secrets");
+        let backend = EncryptedFileBackend::from_key(path.clone(), [13_u8; KEY_LEN]);
+        backend
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .expect("set");
+        let mut bytes = fs::read(&path).expect("ciphertext");
+        bytes.extend_from_slice(b"junk");
+        fs::write(&path, bytes).expect("append");
+        backend
+            .get(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE)
+            .expect_err("trailing bytes");
+    }
+
+    #[test]
     fn moving_a_record_to_another_account_fails_associated_data_check() {
-        let path = scratch().join("accounts.secrets");
+        let dir = scratch();
+        let path = dir.join("accounts.secrets");
         let backend = EncryptedFileBackend::from_key(path.clone(), [19_u8; KEY_LEN]);
         backend
-            .set(PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
             .expect("set");
         let mut rows = read_records(&path).expect("records");
         rows[0].account = "other".to_owned();
         fs::write(&path, encode_records(&rows).expect("encode")).expect("move");
         let error = backend
-            .get(PLUGIN, "other", FILE_REFERENCE)
+            .get(KIND, PLUGIN, "other", FILE_REFERENCE)
             .expect_err("wrong associated data");
         assert!(!error.to_string().contains(MARKER));
+    }
+
+    #[test]
+    fn kind_scoped_file_records_do_not_collide() {
+        let dir = scratch();
+        let path = dir.join("accounts.secrets");
+        let backend = EncryptedFileBackend::from_key(path, [23_u8; KEY_LEN]);
+        for (kind, value) in [("subscription", "one"), ("agent", "two")] {
+            backend
+                .set(
+                    kind,
+                    PLUGIN,
+                    ACCOUNT,
+                    FILE_REFERENCE,
+                    SecretString::from(value),
+                )
+                .expect("set");
+        }
+        for (kind, expected) in [("subscription", "one"), ("agent", "two")] {
+            let secret = backend
+                .get(kind, PLUGIN, ACCOUNT, FILE_REFERENCE)
+                .expect("get");
+            assert_eq!(kernel::expose_secret(&secret), expected);
+        }
+        assert_ne!(
+            native_entry_name("subscription", PLUGIN, ACCOUNT, 2),
+            native_entry_name("agent", PLUGIN, ACCOUNT, 2)
+        );
+        assert_eq!(
+            native_entry_name("subscription", PLUGIN, ACCOUNT, 1),
+            format!("{PLUGIN}/{ACCOUNT}")
+        );
+    }
+
+    #[test]
+    fn native_backend_rejects_an_encrypted_file_reference() {
+        let backend = MemoryAccountSecrets::default();
+        backend
+            .get(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE)
+            .expect_err("wrong backend reference");
     }
 
     #[test]
@@ -913,41 +1234,72 @@ mod tests {
         let key_path = root.join("accounts.key");
         let backend = EncryptedFileBackend::open(path.clone(), key_path.clone()).expect("open");
         backend
-            .set(PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
+            .set(KIND, PLUGIN, ACCOUNT, FILE_REFERENCE, secret())
             .expect("set");
         assert!(!format!("{backend:?}").contains(MARKER));
         fs::remove_file(&key_path).expect("remove key");
         let error = EncryptedFileBackend::open(path, key_path).expect_err("missing key");
         assert!(!format!("{error} {error:?}").contains(MARKER));
     }
+
+    #[test]
+    fn key_file_must_be_a_regular_private_file() {
+        let root = scratch();
+        let path = root.join("accounts.secrets");
+        let key_path = root.join("accounts.key");
+        EncryptedFileBackend::open(path.clone(), key_path.clone()).expect("create");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&key_path).expect("metadata").permissions();
+            permissions.set_mode(0o644);
+            fs::set_permissions(&key_path, permissions).expect("permissions");
+            EncryptedFileBackend::open(path.clone(), key_path.clone())
+                .expect_err("insecure key mode");
+            fs::remove_file(&key_path).expect("remove key");
+            std::os::unix::fs::symlink(&path, &key_path).expect("symlink");
+            EncryptedFileBackend::open(path, key_path).expect_err("symlink key");
+        }
+    }
 }
 
 #[cfg(test)]
 mod store_tests {
     use hofund_plugin_api::kernel::AccountBackend;
-    use hofund_plugin_api::{Account, AccountId, PluginId};
+    use hofund_plugin_api::{Account, AccountId, PluginId, PluginKey, PluginKind};
 
     use super::*;
     use crate::AccountStore;
 
-    fn account() -> Account {
-        Account::from_stored(
+    fn key() -> PluginKey {
+        PluginKey::new(
+            PluginKind::Subscription,
             PluginId::from_static("example-agent"),
-            AccountId::from_static("work"),
-            "Work",
         )
-        .expect("account")
     }
 
-    async fn read_secret(store: &AccountStore) -> SecretString {
+    fn account(id: &'static str) -> Account {
+        Account::from_stored_scoped(key(), AccountId::from_static(id), "Work").expect("account")
+    }
+
+    async fn read_secret(store: &AccountStore, id: &'static str) -> SecretString {
         store
-            .secret(
-                &PluginId::from_static("example-agent"),
-                &AccountId::from_static("work"),
-            )
+            .secret(&key(), &AccountId::from_static(id))
             .await
             .expect("secret")
             .expect("present")
+    }
+
+    fn write_rows(path: &Path, rows: &[(&str, &str)]) {
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|(account, reference)| {
+                format!(
+                    "{{\"kind\":\"subscription\",\"plugin\":\"example-agent\",\"account\":\"{account}\",\"label\":\"Work\",\"secret_ref\":\"{reference}\"}}"
+                )
+            })
+            .collect();
+        fs::write(path, format!("[{}]", rows.join(","))).expect("metadata");
     }
 
     #[tokio::test]
@@ -972,7 +1324,7 @@ mod store_tests {
             AccountStorageKind::EncryptedFile
         );
         assert_eq!(
-            kernel::expose_secret(&read_secret(&store).await),
+            kernel::expose_secret(&read_secret(&store, "work").await),
             tests::MARKER
         );
         assert!(
@@ -990,39 +1342,183 @@ mod store_tests {
 
     #[test]
     fn opening_an_empty_store_does_not_probe_the_native_backend() {
-        let path = tests::scratch().join("accounts.json");
+        let dir = tests::scratch();
+        let path = dir.join("accounts.json");
         let backend = Arc::new(AutoBackend {
             metadata_path: path.clone(),
             selected: Mutex::new(None),
+            native: Mutex::new(None),
+            native_error: None,
+            file: Arc::new(EncryptedFileBackend::new(
+                sibling_path(&path, ".secrets"),
+                sibling_path(&path, ".key"),
+            )),
         });
         let _store = AccountStore::open_with_backend(&path, backend.clone()).expect("open");
         assert!(backend.selected.lock().expect("selection").is_none());
+        assert!(backend.native.lock().expect("native").is_none());
         assert!(!sibling_path(&path, ".lock").exists());
     }
 
     #[tokio::test]
-    async fn existing_keychain_references_do_not_silently_use_the_file_backend() {
+    async fn one_store_reads_native_and_file_rows_by_their_stored_references() {
         let root = tests::scratch();
         let path = root.join("accounts.json");
-        let memory = Arc::new(MemoryAccountSecrets::default());
-        let store = AccountStore::open_with_backend(&path, memory).expect("open");
-        store
-            .upsert(account(), tests::secret())
-            .await
-            .expect("upsert");
-        let fallback = Arc::new(EncryptedFileBackend::new(
+        let native = Arc::new(MemoryAccountSecrets::default());
+        native
+            .set(
+                "subscription",
+                "example-agent",
+                "native",
+                KEYCHAIN_REFERENCE,
+                SecretString::from("native-secret"),
+            )
+            .expect("native");
+        let file = Arc::new(EncryptedFileBackend::new(
             sibling_path(&path, ".secrets"),
             sibling_path(&path, ".key"),
         ));
-        let reopened = AccountStore::open_with_backend(&path, fallback).expect("open fallback");
-        let error = reopened
-            .secret(
-                &PluginId::from_static("example-agent"),
-                &AccountId::from_static("work"),
-            )
+        file.prepare().expect("prepare");
+        file.set(
+            "subscription",
+            "example-agent",
+            "file",
+            FILE_REFERENCE,
+            SecretString::from("file-secret"),
+        )
+        .expect("file");
+        write_rows(
+            &path,
+            &[("native", KEYCHAIN_REFERENCE), ("file", FILE_REFERENCE)],
+        );
+        let backend = Arc::new(AutoBackend::with_backends(native.clone(), Ok(native), file));
+        let store = AccountStore::open_with_backend(&path, backend).expect("open");
+        assert_eq!(
+            kernel::expose_secret(&read_secret(&store, "native").await),
+            "native-secret"
+        );
+        assert_eq!(
+            kernel::expose_secret(&read_secret(&store, "file").await),
+            "file-secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_native_backend_fails_only_native_rows() {
+        let root = tests::scratch();
+        let path = root.join("accounts.json");
+        let selected = Arc::new(MemoryAccountSecrets::default());
+        let file = Arc::new(EncryptedFileBackend::new(
+            sibling_path(&path, ".secrets"),
+            sibling_path(&path, ".key"),
+        ));
+        file.prepare().expect("prepare");
+        file.set(
+            "subscription",
+            "example-agent",
+            "file",
+            FILE_REFERENCE,
+            SecretString::from("file-secret"),
+        )
+        .expect("file");
+        write_rows(
+            &path,
+            &[("native", KEYCHAIN_REFERENCE), ("file", FILE_REFERENCE)],
+        );
+        let backend = Arc::new(AutoBackend::with_backends(
+            selected,
+            Err("native unavailable".to_owned()),
+            file,
+        ));
+        let store = AccountStore::open_with_backend(&path, backend).expect("open");
+        assert_eq!(store.list(&key()).await.expect("list").len(), 2);
+        assert_eq!(
+            kernel::expose_secret(&read_secret(&store, "file").await),
+            "file-secret"
+        );
+        store
+            .secret(&key(), &AccountId::from_static("native"))
             .await
-            .expect_err("backend mismatch");
-        assert!(error.to_string().contains("different backend"));
-        assert!(!error.to_string().contains(tests::MARKER));
+            .expect_err("native failure");
+    }
+
+    #[tokio::test]
+    async fn corrupt_secret_does_not_block_list_or_other_writes() {
+        let root = tests::scratch();
+        let path = root.join("accounts.json");
+        let native = Arc::new(MemoryAccountSecrets::default());
+        let file = Arc::new(EncryptedFileBackend::new(
+            sibling_path(&path, ".secrets"),
+            sibling_path(&path, ".key"),
+        ));
+        file.prepare().expect("prepare");
+        for id in ["good", "bad"] {
+            file.set(
+                "subscription",
+                "example-agent",
+                id,
+                FILE_REFERENCE,
+                SecretString::from("file-secret"),
+            )
+            .expect("set");
+        }
+        write_rows(&path, &[("good", FILE_REFERENCE), ("bad", FILE_REFERENCE)]);
+        let mut rows = read_records(&sibling_path(&path, ".secrets")).expect("records");
+        let bad = rows
+            .iter_mut()
+            .find(|row| row.account == "bad")
+            .expect("bad row");
+        bad.ciphertext[0] ^= 1;
+        fs::write(
+            sibling_path(&path, ".secrets"),
+            encode_records(&rows).expect("encode"),
+        )
+        .expect("corrupt");
+        let backend = Arc::new(AutoBackend::with_backends(native.clone(), Ok(native), file));
+        let store = AccountStore::open_with_backend(&path, backend).expect("open");
+        assert_eq!(store.list(&key()).await.expect("list").len(), 2);
+        store
+            .upsert(account("third"), SecretString::from("third-secret"))
+            .await
+            .expect("upsert another");
+        assert_eq!(
+            kernel::expose_secret(&read_secret(&store, "good").await),
+            "file-secret"
+        );
+        assert_eq!(
+            kernel::expose_secret(&read_secret(&store, "third").await),
+            "third-secret"
+        );
+        store
+            .secret(&key(), &AccountId::from_static("bad"))
+            .await
+            .expect_err("corrupt secret");
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_the_encrypted_file_record() {
+        let root = tests::scratch();
+        let path = root.join("accounts.json");
+        let backend = Arc::new(EncryptedFileBackend::new(
+            sibling_path(&path, ".secrets"),
+            sibling_path(&path, ".key"),
+        ));
+        let store = AccountStore::open_with_backend(&path, backend.clone()).expect("open");
+        store
+            .upsert(account("work"), tests::secret())
+            .await
+            .expect("upsert");
+        store
+            .remove(&key(), &AccountId::from_static("work"))
+            .await
+            .expect("remove");
+        backend
+            .get("subscription", "example-agent", "work", FILE_REFERENCE)
+            .expect_err("deleted record");
+        assert!(
+            read_records(&sibling_path(&path, ".secrets"))
+                .expect("records")
+                .is_empty()
+        );
     }
 }

@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use hofund_ir::{ContentPart, Message, Request, Response, Role};
-use hofund_plugin_api::{CountOutcome, MemberId, MemberKey, PluginError, PresetId};
+use hofund_plugin_api::{
+    CountOutcome, MemberId, MemberKey, PluginError, PluginId, PresetId, QuotaObservation,
+};
 use hofund_router::{Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Member, Router};
 
 struct Fake {
@@ -97,7 +99,10 @@ fn router(members: Vec<Arc<dyn Member>>, book: &Arc<Cooldowns>) -> Router {
 }
 
 fn cool(book: &Cooldowns, id: &'static str, seconds: u64) {
-    book.observe(&member_id(id), Some(Duration::from_secs(seconds)), Some(0));
+    let observed = QuotaObservation::from_stored(PluginId::from_static("router"))
+        .with_remaining(0)
+        .with_retry_after(Duration::from_secs(seconds));
+    let _ = book.observe(&member_id(id), &observed);
 }
 
 #[tokio::test]

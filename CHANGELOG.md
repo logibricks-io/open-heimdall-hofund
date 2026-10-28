@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Encrypted account storage with native OS credential entries, an authenticated
   encrypted-file fallback, secret-free backend selection, and crash-safe migration
-  from the legacy plaintext metadata file.
+  from the legacy plaintext metadata file. Reads route by stored reference and
+  load secrets per row, while kind-scoped v2 entries prevent cross-kind collisions.
 - Opt-in loopback TCP control health and status with strict Bearer, Host, Origin,
   and mutation defenses, live disk/runtime revisions, and a typed TCP control client.
   Model `/health` now identifies the service as hofund.
@@ -93,6 +94,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Plugin ids are now unique per kind rather than globally, allowing an agent and
+  subscription to share an id without changing existing config or CLI commands.
+  Registry contributions and host secrets, accounts, cache directories, and state
+  directories are keyed by kind and id; legacy account rows remain subscriptions.
+- Passive quota observations now distinguish one-hour retry hints from
+  eight-day window resets, rest at 98% used only when the window reset is
+  known, and exempt accounts spending credits. `Cooldowns::observe` now takes
+  `&QuotaObservation` instead of separate positional fields.
 - `agent.toml` rejects `create` on single-location files, where the field had
   no observable effect; multi-location candidate selection is unchanged (#177).
 - Removed the frozen agent const engine, migration-only oracle feature, static
