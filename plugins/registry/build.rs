@@ -47,7 +47,7 @@ fn run() -> Result<(), String> {
     let text = fs::read_to_string("plugins.toml").map_err(|error| error.to_string())?;
     let listed = parse_list(&workspace, &text)?;
     let discovered = discover(&workspace)?;
-    let builtins = load_builtin_fragments(&workspace, "plugins/providers")?;
+    let builtins = load_data_fragments(&workspace, "plugins/providers", true)?;
     let listed_ids: Vec<&str> = listed.iter().map(|plugin| plugin.id.as_str()).collect();
     if let Some(id) = duplicate_id(&listed_ids) {
         return Err(format!("duplicate plugin id {id}"));
@@ -126,7 +126,7 @@ fn run() -> Result<(), String> {
         fs::write(out.join("fixture_agents.rs"), emit_agents(&fixtures, true))
             .map_err(|error| error.to_string())?;
         let preset_fixtures =
-            load_builtin_fragments(&workspace, "plugins/registry/tests/fixtures/presets")?;
+            load_data_fragments(&workspace, "plugins/registry/tests/fixtures/presets", false)?;
         preset_toml::validate_all(&preset_fixtures)?;
         fs::write(
             out.join("fixture_presets.rs"),
@@ -237,7 +237,11 @@ fn presets_of(
     Ok(fragments)
 }
 
-fn load_builtin_fragments(workspace: &Path, root: &str) -> Result<Vec<FragmentToml>, String> {
+fn load_data_fragments(
+    workspace: &Path,
+    root: &str,
+    builtin_only: bool,
+) -> Result<Vec<FragmentToml>, String> {
     println!("cargo:rerun-if-changed=../../{root}");
     let directory = workspace.join(root);
     if !directory.is_dir() {
@@ -264,7 +268,7 @@ fn load_builtin_fragments(workspace: &Path, root: &str) -> Result<Vec<FragmentTo
         if !presets.is_file() {
             continue;
         }
-        if !preset_toml::valid_data_only_provider(&id, false, true) {
+        if builtin_only && !preset_toml::valid_data_only_provider(&id, false, true) {
             return Err(format!(
                 "{root}/{id} is not a builtin factory data-only directory"
             ));

@@ -89,6 +89,10 @@ BodyStream::async fn next_chunk (& mut self) -> Option < Result < Bytes , Plugin
 BodyStream::fn from_bytes (bytes : impl Into < Bytes >) -> Self
 BodyStream::fn from_stream (stream : impl Stream < Item = Result < Bytes , PluginError > > + Send + 'static ,) -> Self
 BodyStream::fn resume (chunk : Bytes , rest : Self) -> Self
+BuildContext
+BuildContext #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+BuildContext::const fn new (protocol : ProtocolId) -> Self
+BuildContext::const fn protocol (& self) -> ProtocolId
 BuildError
 BuildError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Error)
 BuildError::fn message (& self) -> & str
@@ -151,6 +155,7 @@ DynUpstreamFactory::fn preflight (& self , raw : & RawTable) -> Result < () , Co
 DynUpstreamFactory::fn spec (& self) -> & 'static UpstreamSpec
 DynUpstreamFactory::fn validate (& self , raw : & RawTable) -> Result < () , ConfigError >
 DynUpstreamFactory::fn validate_and_build (& self , raw : & RawTable , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
+DynUpstreamFactory::fn validate_and_build_with (& self , raw : & RawTable , host : & HostContext , ctx : & BuildContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
 FileChange
 FileChange #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 FileChange::fn after (& self) -> & [u8]
@@ -547,6 +552,7 @@ TierId::fn as_str (& self) -> & str
 UpstreamFactory
 UpstreamFactory::Config
 UpstreamFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
+UpstreamFactory::fn build_with (& self , cfg : & Self :: Config , host : & HostContext , ctx : & BuildContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
 UpstreamFactory::fn config_schema (& self) -> Schema
 UpstreamFactory::fn preflight (& self , cfg : & Self :: Config) -> Result < () , ConfigError >
 UpstreamFactory::fn spec (& self) -> & 'static UpstreamSpec

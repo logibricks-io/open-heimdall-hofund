@@ -172,6 +172,30 @@ impl UpstreamSpec {
     }
 }
 
+/// Kernel-selected values for one upstream build.
+///
+/// These values are separate from [`RawTable`] so plugin configuration schemas
+/// do not need to accept kernel-owned keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BuildContext {
+    protocol: ProtocolId,
+}
+
+impl BuildContext {
+    /// A build context for `protocol`.
+    #[must_use]
+    pub const fn new(protocol: ProtocolId) -> Self {
+        Self { protocol }
+    }
+
+    /// The protocol selected for this provider.
+    #[must_use]
+    pub const fn protocol(&self) -> ProtocolId {
+        self.protocol
+    }
+}
+
 /// Builds an [`UpstreamProvider`] from validated config.
 ///
 /// The associated type is what the plugin validates. The registry stores
@@ -221,6 +245,32 @@ pub trait UpstreamFactory: Send + Sync + 'static {
         cfg: &Self::Config,
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
+
+    /// Builds the provider for the protocol selected in `ctx`.
+    ///
+    /// The default delegates to [`UpstreamFactory::build`] for the spec's first
+    /// protocol. A multi-protocol plugin overrides this method to support its
+    /// other declared protocols.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError`] when the provider cannot be constructed, or when
+    /// the default implementation receives a protocol other than the first.
+    fn build_with(
+        &self,
+        cfg: &Self::Config,
+        host: &HostContext,
+        ctx: &BuildContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+        if Some(ctx.protocol()) == self.spec().protocols().first().copied() {
+            return self.build(cfg, host);
+        }
+        Err(BuildError::new(format!(
+            "plugin `{}` cannot build protocol `{}` without overriding `build_with`",
+            self.spec().plugin(),
+            ctx.protocol()
+        )))
+    }
 }
 
 /// The factory the registry stores.
@@ -251,7 +301,7 @@ pub trait DynUpstreamFactory: Send + Sync + 'static {
     /// Returns [`ConfigError`] when validation or the environment check fails.
     fn preflight(&self, raw: &RawTable) -> Result<(), ConfigError>;
 
-    /// Validates `raw` and builds the provider.
+    /// Validates `raw` and builds the provider for the spec's first protocol.
     ///
     /// # Errors
     ///
@@ -261,6 +311,19 @@ pub trait DynUpstreamFactory: Send + Sync + 'static {
         &self,
         raw: &RawTable,
         host: &HostContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
+
+    /// Validates `raw` and builds the provider for the protocol in `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError`] when validation or construction fails, or when
+    /// `ctx` names a protocol the factory does not declare.
+    fn validate_and_build_with(
+        &self,
+        raw: &RawTable,
+        host: &HostContext,
+        ctx: &BuildContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError>;
 }
 
@@ -292,6 +355,23 @@ where
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
         let cfg = UpstreamFactory::validate(self, raw)?;
         self.build(&cfg, host)
+    }
+
+    fn validate_and_build_with(
+        &self,
+        raw: &RawTable,
+        host: &HostContext,
+        ctx: &BuildContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+        if !self.spec().protocols().contains(&ctx.protocol()) {
+            return Err(BuildError::new(format!(
+                "plugin `{}` does not declare protocol `{}`",
+                self.spec().plugin(),
+                ctx.protocol()
+            )));
+        }
+        let cfg = UpstreamFactory::validate(self, raw)?;
+        self.build_with(&cfg, host, ctx)
     }
 }
 

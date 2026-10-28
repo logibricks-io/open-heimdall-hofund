@@ -1087,6 +1087,7 @@ impl ModelsHost {
             provider,
             plugin_id,
             raw,
+            hofund_plugin_registry::protocol_for(wire),
             &endpoint.api_key,
             path,
             self.limits,
@@ -1117,6 +1118,7 @@ impl ModelsHost {
             provider,
             &plugin_id,
             raw,
+            planned.protocol,
             &endpoint.api_key,
             path,
             self.limits,
@@ -2190,6 +2192,7 @@ mod tests {
         let planned = super::Planned {
             base_url: "https://chat.example/v1".to_owned(),
             wire: Wire::Chat,
+            protocol: Some(hofund_plugin_api::ProtocolId::OPENAI_CHAT),
             credential: Credential::Bearer,
         };
         let endpoint = super::endpoint_for(provider, &planned).expect("endpoint");

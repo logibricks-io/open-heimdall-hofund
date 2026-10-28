@@ -39,6 +39,9 @@ mod fixture_preset_descriptions {
     include!(concat!(env!("OUT_DIR"), "/fixture_presets.rs"));
 }
 
+#[cfg(feature = "test-fixtures")]
+mod fixture_upstream;
+
 #[cfg(test)]
 mod agent_toml;
 #[cfg(test)]
@@ -55,11 +58,25 @@ pub use fixture_agent_descriptions::fixture_agents;
 pub use fixture_preset_descriptions::{fixture_aliases, fixture_presets};
 pub use generated::{
     CompiledAlias, CompiledPreset, CompiledRegion, CompiledRoute, compiled_aliases,
-    compiled_presets, compiled_routes, contributions,
+    compiled_presets, compiled_routes,
 };
 pub use select::{
     SelectError, Selection, model_plan_of, protocol_for, resolve_region, select, wire_for_protocol,
 };
+
+/// Every linked plugin contribution, keyed by plugin id, in `plugins.toml` order.
+///
+/// With the `test-fixtures` feature, the test-only two-protocol listed
+/// fixture `fixture-multi-listed` is appended. The generated list never names
+/// a fixture.
+#[must_use]
+pub fn contributions() -> Vec<(&'static str, hofund_plugin_sdk::Contribution)> {
+    #[cfg_attr(not(feature = "test-fixtures"), allow(unused_mut))]
+    let mut linked = generated::contributions();
+    #[cfg(feature = "test-fixtures")]
+    linked.push(("fixture-multi-listed", fixture_upstream::contribute()));
+    linked
+}
 
 /// The factory for `id`.
 ///
@@ -68,6 +85,16 @@ pub use select::{
 #[must_use]
 pub fn factory(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
     upstream(id).or_else(|| builtin::factory(id))
+}
+
+/// Whether `id` names a kernel-owned factory rather than a linked plugin.
+///
+/// Unlike [`builtin_factory_ids`], which lists only factories eligible for
+/// data-only preset fragments, this includes the catalog-only Vertex and
+/// Bedrock factories and any future factory added to the builtin module.
+#[must_use]
+pub fn is_kernel_factory(id: &str) -> bool {
+    builtin::factory(id).is_some()
 }
 
 /// The protocols served by all builtin factories, in catalog order.
@@ -250,6 +277,27 @@ mod tests {
             let factory = super::factory(id).expect("fragment factory");
             assert_eq!(factory.spec().plugin().as_str(), id);
             assert_eq!(factory.spec().protocols(), protocols);
+        }
+    }
+
+    #[test]
+    fn kernel_factory_predicate_covers_builtins_and_excludes_linked_plugins() {
+        for id in [
+            "openai-compat",
+            "anthropic",
+            "generative",
+            "google-vertex",
+            "bedrock",
+        ] {
+            assert!(super::builtin::factory(id).is_some(), "{id}");
+            assert!(super::is_kernel_factory(id), "{id}");
+        }
+        for id in ["azure", "missing"] {
+            assert!(super::builtin::factory(id).is_none(), "{id}");
+            assert!(!super::is_kernel_factory(id), "{id}");
+        }
+        for (id, _) in super::contributions() {
+            assert!(!super::is_kernel_factory(id), "{id}");
         }
     }
 

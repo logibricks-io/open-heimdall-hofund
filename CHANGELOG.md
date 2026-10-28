@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Plugin API `BuildContext` and protocol-aware upstream build methods let listed
+  provider plugins receive the selected protocol. The daemon now accepts any
+  protocol a listed plugin declares instead of restricting it to the first.
 - `hofund-control-proto` 0.1.0 with versioned DTOs, events, composite SSE ids,
   bounded decoding, and committed JSON and public-API snapshots.
 - A workspace invariant that permits an unsafe-code opt-out only in the future
