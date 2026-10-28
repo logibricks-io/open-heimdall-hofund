@@ -45,7 +45,7 @@ fn protocol(wire: Wire) -> ProtocolId {
 #[cfg(feature = "test-fixtures")]
 #[test]
 fn fixtures_are_separate_and_aliases_resolve_their_region() {
-    assert_eq!(compiled_presets().len(), 11);
+    assert_eq!(compiled_presets().len(), 21);
     assert!(compiled_aliases().is_empty());
     assert!(fixture_presets().len() >= 5);
     assert_eq!(fixture_aliases().len(), 1);
