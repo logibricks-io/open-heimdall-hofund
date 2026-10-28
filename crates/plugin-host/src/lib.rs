@@ -125,6 +125,7 @@ pub fn runtime_host(
 ///
 /// The HTTP handle is the pooled direct client with `limits`. `api_key` is
 /// the secret `api_key` for this plugin. Accounts live at `root/accounts.json`.
+/// The scheduler records jobs and does not run them.
 ///
 /// # Errors
 ///
@@ -162,6 +163,9 @@ pub fn runtime_host_with_observe(
 }
 
 /// Builds a kind-scoped runtime context with an observation backend.
+///
+/// The daemon binds the backend to the configured provider's member. Plugins
+/// only supply observations and cannot select which member receives them.
 ///
 /// # Errors
 ///

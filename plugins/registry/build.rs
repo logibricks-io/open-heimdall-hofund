@@ -74,14 +74,7 @@ fn run() -> Result<(), String> {
         return Err(format!("duplicate plugin feature {feature}"));
     }
     for plugin in &listed {
-        let shared = listed
-            .iter()
-            .any(|other| other.id == plugin.id && other.kind != plugin.kind);
-        let expected_feature = if shared {
-            format!("{}-{}", plugin.kind, plugin.id)
-        } else {
-            plugin.id.clone()
-        };
+        let expected_feature = expected_feature(&kind_ids, &plugin.kind, &plugin.id);
         if plugin.feature != expected_feature {
             return Err(format!(
                 "{} feature is {}, expected {expected_feature}",
@@ -134,10 +127,9 @@ fn run() -> Result<(), String> {
         .collect();
     preset_toml::validate_all(&fragments)?;
     check_features(&listed)?;
-    let agent_plugin_ids: Vec<String> = listed
-        .iter()
-        .filter(|plugin| plugin.kind == "agent")
-        .map(|plugin| plugin.id.clone())
+    let agent_plugin_ids: Vec<String> = agent_collision_ids(&kind_ids)
+        .into_iter()
+        .map(str::to_owned)
         .collect();
     let inbound_ids: Vec<String> = listed
         .iter()

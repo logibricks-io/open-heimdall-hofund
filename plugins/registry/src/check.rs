@@ -73,6 +73,30 @@ pub fn duplicate_kind_id<'a>(ids: &[(&'a str, &'a str)]) -> Option<(&'a str, &'a
     None
 }
 
+/// Agent implementation ids that data-only agent ids must not collide with.
+#[must_use]
+pub fn agent_collision_ids<'a>(rows: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    rows.iter()
+        .filter(|(kind, _)| *kind == "agent")
+        .map(|(_, id)| *id)
+        .collect()
+}
+
+/// The Cargo feature for one plugin row.
+///
+/// An id shared by multiple kinds is qualified in every row with that id.
+#[must_use]
+pub fn expected_feature(rows: &[(&str, &str)], kind: &str, id: &str) -> String {
+    let shared = rows
+        .iter()
+        .any(|(other_kind, other_id)| *other_id == id && *other_kind != kind);
+    if shared {
+        format!("{kind}-{id}")
+    } else {
+        id.to_owned()
+    }
+}
+
 /// True when `(id, kind)` pairs are strictly increasing.
 #[must_use]
 pub fn strictly_sorted_plugin_ids(ids: &[(&str, &str)]) -> bool {
@@ -191,6 +215,35 @@ mod tests {
         assert!(path_matches("/hofund/echo", "/hofund/echo/nested"));
         assert!(!path_matches("/hofund/echo", "/hofund/echov2"));
         assert!(path_matches("/", "/anywhere"));
+    }
+
+    #[test]
+    fn agent_collision_ids_exclude_other_kinds_with_the_same_id() {
+        let rows = [
+            ("subscription", "shared"),
+            ("agent", "shared"),
+            ("provider", "other"),
+        ];
+        assert_eq!(super::agent_collision_ids(&rows), ["shared"]);
+    }
+
+    #[test]
+    fn feature_names_qualify_every_row_with_a_cross_kind_id() {
+        let rows = [
+            ("agent", "shared"),
+            ("subscription", "shared"),
+            ("provider", "unique"),
+        ];
+        for (kind, expected) in [
+            ("agent", "agent-shared"),
+            ("subscription", "subscription-shared"),
+        ] {
+            assert_eq!(super::expected_feature(&rows, kind, "shared"), expected);
+        }
+        assert_eq!(
+            super::expected_feature(&rows, "provider", "unique"),
+            "unique"
+        );
     }
 
     #[test]

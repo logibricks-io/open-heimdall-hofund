@@ -4,7 +4,7 @@ A data-only agent plugin declares its metadata in `agent.toml`. The registry val
 
 ## Ids
 
-Agent ids are unique within the agent kind and may equal a provider, subscription, or inbound plugin id. Existing agent config and commands continue to use the bare id. Reserved infrastructure ids are rejected in every kind. Host storage uses the kind and id together, so another kind with the same id cannot read or overwrite agent state.
+Agent ids are unique within the agent kind and may equal a provider, subscription, or inbound plugin id. Existing agent config and commands continue to use the bare id. Reserved infrastructure ids are rejected in every kind. Code plugins with a `HostContext` isolate host storage by kind and id; data-only agents do not use a `HostContext`.
 
 ## Model spelling
 

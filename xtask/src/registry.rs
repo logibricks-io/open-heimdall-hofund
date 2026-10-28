@@ -3,6 +3,12 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+#[allow(dead_code)]
+mod check {
+    include!("../../plugins/registry/src/check.rs");
+}
+use check::expected_feature;
+
 struct ArrayFinder<'a>(Option<&'a syn::ExprArray>);
 
 impl<'ast> syn::visit::Visit<'ast> for ArrayFinder<'ast> {
@@ -108,6 +114,7 @@ pub fn check_plugin_list(text: &str) -> Result<(), String> {
     if ordered.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err("plugins.toml is not sorted by id and kind".to_owned());
     }
+    let rows: Vec<(&str, &str)> = ordered.iter().map(|(id, kind)| (*kind, *id)).collect();
     for plugin in plugins {
         let id = plugin
             .get("id")
@@ -121,15 +128,7 @@ pub fn check_plugin_list(text: &str) -> Result<(), String> {
             .get("feature")
             .and_then(toml::Value::as_str)
             .expect("feature was checked");
-        let shared = plugins.iter().any(|other| {
-            other.get("id").and_then(toml::Value::as_str) == Some(id)
-                && other.get("kind").and_then(toml::Value::as_str) != Some(kind)
-        });
-        let expected = if shared {
-            format!("{kind}-{id}")
-        } else {
-            id.to_owned()
-        };
+        let expected = expected_feature(&rows, kind, id);
         if feature != expected {
             return Err(format!(
                 "{kind}/{id} feature is {feature}, expected {expected}"
