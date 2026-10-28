@@ -74,6 +74,13 @@ fn run() -> Result<(), String> {
         return Err(format!("duplicate plugin feature {feature}"));
     }
     for plugin in &listed {
+        let expected_feature = expected_feature(&kind_ids, &plugin.kind, &plugin.id);
+        if plugin.feature != expected_feature {
+            return Err(format!(
+                "{} feature is {}, expected {expected_feature}",
+                plugin.id, plugin.feature
+            ));
+        }
         if reserved(&plugin.id) {
             return Err(format!("{} is a reserved plugin id", plugin.id));
         }
@@ -120,10 +127,9 @@ fn run() -> Result<(), String> {
         .collect();
     preset_toml::validate_all(&fragments)?;
     check_features(&listed)?;
-    let agent_plugin_ids: Vec<String> = listed
-        .iter()
-        .filter(|plugin| plugin.kind == "agent")
-        .map(|plugin| plugin.id.clone())
+    let agent_plugin_ids: Vec<String> = agent_collision_ids(&kind_ids)
+        .into_iter()
+        .map(str::to_owned)
         .collect();
     let inbound_ids: Vec<String> = listed
         .iter()
@@ -507,9 +513,16 @@ fn emit(listed: &[Listed], builtins: &[FragmentToml]) -> String {
     let mut aliases = String::new();
     for plugin in listed {
         let rust_name = plugin.package.replace('-', "_");
+        let kind = match plugin.kind.as_str() {
+            "provider" => "Provider",
+            "subscription" => "Subscription",
+            "agent" => "Agent",
+            "inbound" => "Inbound",
+            _ => unreachable!("plugin kind was validated"),
+        };
         calls.push_str(&format!(
-            "        #[cfg(feature = \"{}\")]\n        (\"{}\", \"{}\", {rust_name}::contribute()),\n",
-            plugin.feature, plugin.kind, plugin.id
+            "        #[cfg(feature = \"{}\")]\n        (hofund_plugin_api::PluginKind::{kind}, \"{}\", {rust_name}::contribute()),\n",
+            plugin.feature, plugin.id
         ));
         for route in &plugin.routes {
             routes.push_str(&format!(
@@ -689,7 +702,7 @@ pub fn compiled_aliases() -> &'static [CompiledAlias] {{
 
 /// Kind, id, and contribution for the features enabled on this build.
 #[must_use]
-pub fn contributions() -> Vec<(&'static str, &'static str, hofund_plugin_sdk::Contribution)> {{
+pub fn contributions() -> Vec<(hofund_plugin_api::PluginKind, &'static str, hofund_plugin_sdk::Contribution)> {{
     vec![
 {calls}    ]
 }}

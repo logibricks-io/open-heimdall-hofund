@@ -5,6 +5,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(unix)]
+use std::path::Path;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
@@ -13,13 +16,22 @@ use hofund_control_proto::{
     ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES,
     StatusResponse,
 };
+#[cfg(unix)]
+use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
+#[cfg(unix)]
+use tower::Service;
 
 use super::{GatewayError, Running, TokenState, tokens_match};
 
 /// Default loopback address for the control listener.
 pub const DEFAULT_CONTROL_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3426);
+
+/// The only Host value accepted over local IPC.
+pub const LOCAL_IPC_HOST: &str = "hofund-control";
 
 /// Daemon operations exposed through the control protocol.
 pub trait ControlState: Send + Sync {
@@ -44,7 +56,7 @@ struct Inner {
 #[derive(Clone)]
 struct HttpState {
     control: Arc<Inner>,
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
 }
 
 impl Control {
@@ -76,6 +88,15 @@ impl Control {
 
     /// Builds only the control router. `listen` supplies the exact Host value.
     pub fn into_router(self, listen: SocketAddr) -> axum::Router {
+        self.router(Some(listen))
+    }
+
+    #[cfg(unix)]
+    fn into_local_router(self) -> axum::Router {
+        self.router(None)
+    }
+
+    fn router(self, listen: Option<SocketAddr>) -> axum::Router {
         axum::Router::new()
             .fallback(axum::routing::any(handle))
             .with_state(HttpState {
@@ -110,6 +131,137 @@ impl Control {
         });
         Ok(Running::new(local_addr, shutdown, task))
     }
+
+    /// Binds a Unix socket and serves control routes to same-user peers.
+    #[cfg(unix)]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GatewayError`] when the path is too long, binding fails, or
+    /// socket ownership cannot be established.
+    pub async fn bind_unix(self, path: &Path) -> Result<Running, GatewayError> {
+        use std::os::unix::fs::MetadataExt;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let expected_uid = std::fs::metadata(parent)
+            .map_err(|source| GatewayError::BindUnix {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .uid();
+        self.bind_unix_with_expected_uid(path, expected_uid).await
+    }
+
+    /// Binds a Unix socket with an explicit expected peer uid for testing.
+    #[cfg(unix)]
+    #[doc(hidden)]
+    pub async fn bind_unix_with_expected_uid(
+        self,
+        path: &Path,
+        expected_uid: u32,
+    ) -> Result<Running, GatewayError> {
+        use std::os::unix::fs::PermissionsExt;
+        validate_socket_path(path)?;
+        let listener = UnixListener::bind(path).map_err(|source| GatewayError::BindUnix {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let cleanup = SocketCleanup(path.to_path_buf());
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |source| GatewayError::BindUnix {
+                path: path.to_path_buf(),
+                source,
+            },
+        )?;
+        let router = self.into_local_router();
+        let (shutdown, mut signal) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = &mut signal => break,
+                    accepted = listener.accept() => {
+                        let (stream, _) = match accepted {
+                            Ok(accepted) => accepted,
+                            Err(error) => {
+                                tracing::warn!(%error, "local control accept failed");
+                                if let Some(backoff) = accept_backoff(&error) {
+                                    tokio::time::sleep(backoff).await;
+                                }
+                                continue;
+                            }
+                        };
+                        if !same_user_peer(&stream, expected_uid).unwrap_or(false) {
+                            continue;
+                        }
+                        let router = router.clone();
+                        connections.spawn(async move {
+                            let service = hyper::service::service_fn(move |request| {
+                                let mut router = router.clone();
+                                async move { router.call(request.map(Body::new)).await }
+                            });
+                            let result = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(TokioIo::new(stream), service)
+                                .await;
+                            if let Err(error) = result {
+                                tracing::debug!(%error, "local control connection ended");
+                            }
+                        });
+                    }
+                    Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                }
+            }
+            while connections.join_next().await.is_some() {}
+            Ok(())
+        });
+        Ok(Running::new(DEFAULT_CONTROL_ADDR, shutdown, task).with_resource(cleanup))
+    }
+}
+
+#[cfg(unix)]
+struct SocketCleanup(PathBuf);
+
+#[cfg(unix)]
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+// Keep these Unix errno values local because gateway does not depend on libc.
+#[cfg(unix)]
+const ENFILE: i32 = 23;
+#[cfg(unix)]
+const EMFILE: i32 = 24;
+
+#[cfg(unix)]
+fn accept_backoff(error: &std::io::Error) -> Option<std::time::Duration> {
+    matches!(error.raw_os_error(), Some(ENFILE | EMFILE))
+        .then_some(std::time::Duration::from_millis(100))
+}
+
+#[cfg(unix)]
+fn same_user_peer(stream: &UnixStream, expected_uid: u32) -> std::io::Result<bool> {
+    Ok(peer_allowed(stream.peer_cred()?.uid(), expected_uid))
+}
+
+#[cfg(unix)]
+fn peer_allowed(peer_uid: u32, expected_uid: u32) -> bool {
+    peer_uid == expected_uid
+}
+
+#[cfg(unix)]
+fn validate_socket_path(path: &Path) -> Result<(), GatewayError> {
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    const LIMIT: usize = 104;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+    const LIMIT: usize = 108;
+    if path.as_os_str().as_bytes().len() >= LIMIT {
+        return Err(GatewayError::SocketPathTooLong {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 impl fmt::Debug for Control {
@@ -195,13 +347,18 @@ async fn handle(
     }
 }
 
-fn check_host_and_origin(headers: &HeaderMap, listen: SocketAddr) -> Option<Response> {
-    let expected = listen.to_string();
+fn check_host_and_origin(headers: &HeaderMap, listen: Option<SocketAddr>) -> Option<Response> {
+    let expected = listen.map_or_else(|| LOCAL_IPC_HOST.to_owned(), |addr| addr.to_string());
     if !exact_header(headers, header::HOST, &expected) {
+        let message = if listen.is_some() {
+            "Host must be the numeric loopback control address"
+        } else {
+            "Host must be hofund-control over local IPC"
+        };
         return Some(error_response(
             StatusCode::FORBIDDEN,
             ControlErrorKind::Forbidden,
-            "Host must be the numeric loopback control address",
+            message,
         ));
     }
     if headers.contains_key(header::ORIGIN)
@@ -284,4 +441,26 @@ fn json_response(status: StatusCode, body: Vec<u8>) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn unix_peer_rejects_a_different_uid() {
+        assert!(super::peer_allowed(1000, 1000));
+        assert!(!super::peer_allowed(1001, 1000));
+    }
+
+    #[test]
+    fn accept_backoff_only_applies_to_descriptor_exhaustion() {
+        for errno in [super::ENFILE, super::EMFILE] {
+            let error = std::io::Error::from_raw_os_error(errno);
+            assert_eq!(
+                super::accept_backoff(&error),
+                Some(std::time::Duration::from_millis(100))
+            );
+        }
+        let error = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "aborted");
+        assert_eq!(super::accept_backoff(&error), None);
+    }
 }

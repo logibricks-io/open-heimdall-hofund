@@ -1,4 +1,5 @@
-//! Handles a plugin receives. Construction is `hofund_plugin_host::host_context`.
+//! Handles a plugin receives. Construction uses `hofund_plugin_host::host_context`
+//! or `hofund_plugin_host::host_context_for`.
 
 #[cfg(feature = "kernel-internal")]
 use std::any::Any;
@@ -470,7 +471,8 @@ impl ObserveHandle {
 /// What `build` and subscription calls receive.
 ///
 /// Clone the handles. That clones an [`Arc`], not a secret. The only
-/// constructor outside this crate is `hofund_plugin_host::host_context`.
+/// constructors outside this crate are `hofund_plugin_host::host_context` and
+/// `hofund_plugin_host::host_context_for`.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct HostContext {
@@ -489,6 +491,8 @@ impl HostContext {
     /// Kernel-only. Plugins do not call this.
     ///
     /// This compatibility constructor scopes `plugin` to the provider kind.
+    /// `plugin` is stored in the handles. Account, secret, directory, and
+    /// observation calls use it. A plugin cannot pass a different id.
     #[cfg(feature = "kernel")]
     #[doc(hidden)]
     #[must_use]
