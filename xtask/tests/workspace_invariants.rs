@@ -504,6 +504,7 @@ fn router_does_not_name_plugin_host_types() {
         "MemberId",
         "PluginError",
         "PluginErrorKind",
+        "QuotaObservation",
         "Request",
     ];
     for path in rust_files(&root.join("crates/router/src")) {
@@ -521,7 +522,7 @@ fn router_does_not_name_plugin_host_types() {
     }
     assert!(
         violations.is_empty(),
-        "the router re-exports only PluginError, Request, Completion, and MemberId, and its other plugin-api imports are PluginErrorKind, CountOutcome, and BodyStream:\n{}",
+        "the router re-exports only PluginError, Request, Completion, and MemberId, and its other plugin-api imports are PluginErrorKind, CountOutcome, BodyStream, and QuotaObservation:\n{}",
         violations.join("\n")
     );
 }
