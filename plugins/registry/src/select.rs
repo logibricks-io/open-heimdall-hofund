@@ -110,7 +110,7 @@ pub fn select(
 ) -> Result<Selection, SelectError> {
     let region = resolve_region(preset, region)?;
     let endpoints = Endpoints::of(preset, region);
-    if !endpoints.any() && !preset.decide.is_empty() {
+    if !endpoints.any() && !preset.decide.is_empty() && selected.is_none() {
         return Err(SelectError::new(format!(
             "preset `{}` only classifies a route. It has no chat, responses, or messages endpoint.",
             preset.id
@@ -136,6 +136,13 @@ pub fn select(
                 preset.id
             ))
         })?;
+        if !endpoints.any() && !preset.decide.is_empty() {
+            return Err(SelectError::new(format!(
+                "preset `{}` has no {} endpoint",
+                preset.id,
+                wire_name(wire)
+            )));
+        }
         if endpoints.any() {
             let base = endpoints
                 .url(wire)

@@ -247,13 +247,19 @@ fn builtin_no_url_presets_match_catalog_endpoint_rules() {
 #[cfg(feature = "test-fixtures")]
 #[test]
 fn decide_only_preset_is_not_callable() {
-    for protocol in [None, Some(ProtocolId::OPENAI_CHAT)] {
+    for (protocol, expected) in [
+        (
+            None,
+            "preset `fixture-decide` only classifies a route. It has no chat, responses, or messages endpoint.",
+        ),
+        (
+            Some(ProtocolId::OPENAI_CHAT),
+            "preset `fixture-decide` has no chat endpoint",
+        ),
+    ] {
         let error =
             select(fixture("fixture-decide"), None, OPENAI, protocol, "").expect_err("decide only");
-        assert_eq!(
-            error.to_string(),
-            "preset `fixture-decide` only classifies a route. It has no chat, responses, or messages endpoint."
-        );
+        assert_eq!(error.to_string(), expected);
     }
 }
 

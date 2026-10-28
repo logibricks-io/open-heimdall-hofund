@@ -970,6 +970,7 @@ fn every_error_kind_has_its_reviewed_http_status() {
         (ControlErrorKind::Unauthorized, 401),
         (ControlErrorKind::Forbidden, 403),
         (ControlErrorKind::NotFound, 404),
+        (ControlErrorKind::MethodNotAllowed, 405),
         (ControlErrorKind::Conflict, 409),
         (ControlErrorKind::BadRequest, 400),
         (ControlErrorKind::UnsupportedVersion, 400),
