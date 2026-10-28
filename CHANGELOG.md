@@ -183,6 +183,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Default control error envelopes now round-trip with a valid request-id
+  placeholder, validation messages use their limit constants, CI workflow
+  parsing covers both cache-step forms and missing per-package test jobs, and
+  accepted L1 fallback decisions are documented (#189, #194, #196, #197).
 - Control response decoding now validates event boot ids and topic membership
   and rejects oversized or invalid error-envelope fields instead of accepting
   unbounded wire content (#184, #190).

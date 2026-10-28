@@ -149,6 +149,24 @@ fn error_envelope_bounds_detail_count_and_text() {
 }
 
 #[test]
+fn default_error_envelope_round_trips() {
+    let envelope = ErrorEnvelope::default();
+    let decoded = decode_error(&envelope).expect("default error envelope is wire-valid");
+    assert_eq!(decoded, envelope);
+}
+
+#[test]
+fn error_message_validation_uses_configured_limit() {
+    let mut envelope = valid_error_envelope();
+    envelope.error.message = "x".repeat(MAX_ERROR_MESSAGE_BYTES + 1);
+    let error = decode_error(&envelope).expect_err("error message over limit");
+    assert_eq!(
+        error.message,
+        format!("decoded error message exceeds the {MAX_ERROR_MESSAGE_BYTES}-byte limit")
+    );
+}
+
+#[test]
 fn valid_error_envelope_decodes() {
     let envelope = valid_error_envelope();
     let decoded = decode_error(&envelope).expect("valid error envelope");
