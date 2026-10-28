@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{API_VERSION, AgentAction, EventCursor, FieldIssue};
+use crate::{
+    API_VERSION, AgentAction, ControlError, ControlErrorKind, EventCursor, FieldIssue,
+    validate_boot_id,
+};
 
 /// Independent event sequence spaces carried by one SSE stream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +64,36 @@ impl Default for EventEnvelope {
             payload: EventPayload::Snapshot(SnapshotEvent::default()),
         }
     }
+}
+
+impl EventEnvelope {
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        if validate_boot_id(&self.boot_id).is_err() {
+            return Err(event_validation_error(
+                "boot_id",
+                "event boot id violates the composite event id grammar",
+            ));
+        }
+        if self
+            .payload
+            .topic()
+            .is_some_and(|topic| topic != self.topic)
+        {
+            return Err(event_validation_error(
+                "topic",
+                "event topic does not match its payload topic",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn event_validation_error(field: &str, message: &'static str) -> ControlError {
+    let mut error = ControlError::new(ControlErrorKind::BadRequest, message, "validate");
+    error
+        .details
+        .push(FieldIssue::new(field, "invalid", message));
+    error
 }
 
 /// Event payload variants and their topic membership. Request events belong to
