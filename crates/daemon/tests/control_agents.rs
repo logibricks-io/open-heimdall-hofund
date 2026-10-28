@@ -75,7 +75,7 @@ impl Daemon {
     }
 
     fn settings(&self) -> PathBuf {
-        self.scratch.0.join("home/.claude/settings.json")
+        self.scratch.0.join("home").join(".claude").join("settings.json")
     }
 
     fn write_settings(&self, text: &str) {
@@ -553,7 +553,7 @@ async fn token_rotate_scrubs_pre_rotation_status_errors() {
     let daemon = Daemon::start("status-error").await;
     let old = daemon.token();
     // A malformed TOML file whose parse error quotes the line holding the token.
-    let codex = daemon.scratch.0.join("home/.codex/config.toml");
+    let codex = daemon.scratch.0.join("home").join(".codex").join("config.toml");
     std::fs::create_dir_all(codex.parent().expect("codex parent")).expect("codex dir");
     std::fs::write(&codex, format!("token = \"{old}\" trailing\n")).expect("codex config");
     let (status, body) = daemon.rotate(&old).await;
