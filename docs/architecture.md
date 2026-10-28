@@ -154,7 +154,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
-| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry`, `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent` (tests) |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent` (tests) |
 | `hofund-cli` | `hofund-daemon`, `hofund-agent` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
