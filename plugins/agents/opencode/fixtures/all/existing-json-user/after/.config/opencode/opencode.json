@@ -1,0 +1,34 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "user-model",
+  "plugin": [
+    "a"
+  ],
+  "provider": {
+    "other": {
+      "name": "Other",
+      "options": {
+        "baseURL": "https://other.example/v1"
+      }
+    },
+    "hofund": {
+      "name": "hofund",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:3425/v1",
+        "apiKey": "old-token"
+      },
+      "models": {
+        "route-a": {
+          "name": "route-a",
+          "variants": {}
+        },
+        "route-b": {
+          "name": "route-b",
+          "variants": {}
+        }
+      }
+    }
+  },
+  "theme": "dark"
+}

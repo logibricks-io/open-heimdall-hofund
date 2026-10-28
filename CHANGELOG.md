@@ -83,6 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feature. Catalog order remains `claude-code`, `codex`, `gemini-cli`,
   `opencode`; `RESERVED_AGENT_IDS` now contains only `gemini-cli` and
   `opencode`, and static `adapters()` and `find()` cover those two agents.
+- OpenCode is now a compiled data-only agent at
+  `plugins/agents/opencode/agent.toml`; its production Rust const is removed
+  and its frozen oracle remains behind `legacy-agent-consts`. Catalog order is
+  unchanged, `RESERVED_AGENT_IDS` now contains only `gemini-cli`, and static
+  `adapters()` and `find()` cover only Gemini CLI.
 - Coding-agent path overrides now treat empty and relative values as unset for
   process environments, explicit environment pairs, and named setters. Const
   and compiled adapters therefore use the same default paths.

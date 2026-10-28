@@ -1,0 +1,5 @@
+{
+  "model": "json-model",
+  "plugin": ["json"],
+  "provider": { "json-only": { "name": "Keep me" } }
+}

@@ -1,0 +1,5 @@
+routes = ["route-a", "route-b"]
+configured_model = "jsonc-model"
+base_url = "http://127.0.0.1:3425/"
+token = "old-token"
+refreshed_token = "refreshed-token"

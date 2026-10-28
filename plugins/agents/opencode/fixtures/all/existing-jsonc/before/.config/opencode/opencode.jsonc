@@ -1,0 +1,9 @@
+{
+  // This comment is restored only by revert or disconnect.
+  "$schema": "https://opencode.ai/config.json",
+  "model": "jsonc-model",
+  "plugin": ["a"],
+  "provider": {
+    "other": { "name": "Other" },
+  },
+}
