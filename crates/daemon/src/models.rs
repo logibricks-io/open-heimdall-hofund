@@ -20,8 +20,8 @@ use hofund_provider::{Credential, Endpoint, ModelPlan, Vertex, Wire};
 use tracing::Instrument;
 
 use super::{
-    DaemonError, Planned, beside, build_raw_plugin, credential_name, endpoint_for,
-    implementation_id, insert_options, option_present, plan, plugin_for, protocol_of, resolve,
+    DaemonError, Planned, PresetLookup, beside, build_raw_plugin, credential_name, endpoint_for,
+    implementation_id, insert_options, option_present, plan_with, plugin_for, protocol_of, resolve,
     show,
 };
 
@@ -1111,13 +1111,7 @@ impl ModelsHost {
             return Ok(Arc::clone(&instance.upstream));
         }
         let plugin_id = plugin_for(provider, planned.wire);
-        let mut raw = if let Some(preset) = &provider.preset
-            && let Some(compiled) = hofund_plugin_registry::preset(preset)
-        {
-            super::raw_from_preset(compiled, provider)?
-        } else {
-            super::raw_from_endpoint(provider, planned, endpoint)?
-        };
+        let mut raw = super::raw_for(provider, planned, endpoint)?;
         raw.insert("base_url", RawValue::String(planned.base_url.clone()));
         build_raw_plugin(
             provider,
@@ -1161,9 +1155,17 @@ impl ModelsHost {
         &self,
         provider: &hofund_config::Provider,
     ) -> Result<Planned, DaemonError> {
-        let mut planned = plan(provider)?;
+        self.planned_with(provider, hofund_plugin_registry::find_preset)
+    }
+
+    fn planned_with(
+        &self,
+        provider: &hofund_config::Provider,
+        lookup: PresetLookup,
+    ) -> Result<Planned, DaemonError> {
+        let mut planned = plan_with(provider, lookup)?;
         if provider.base_url.trim().is_empty()
-            && let Some(model_plan) = self.model_plan(provider)?
+            && let Some(model_plan) = self.model_plan_with(provider, lookup)?
         {
             let base = match planned.wire {
                 Wire::Chat => model_plan.chat,
@@ -1195,12 +1197,30 @@ impl ModelsHost {
         &self,
         provider: &hofund_config::Provider,
     ) -> Result<Option<ModelPlan>, DaemonError> {
+        self.model_plan_with(provider, hofund_plugin_registry::find_preset)
+    }
+
+    fn model_plan_with(
+        &self,
+        provider: &hofund_config::Provider,
+        lookup: PresetLookup,
+    ) -> Result<Option<ModelPlan>, DaemonError> {
         if let Some(plan) = self.plan_overrides.get(&provider.id) {
             return Ok(Some(plan.clone()));
         }
         let Some(preset) = provider.preset.as_deref() else {
             return Ok(None);
         };
+        if let Some((compiled, alias_region)) = lookup(preset) {
+            let region = hofund_plugin_registry::resolve_region(
+                compiled,
+                option_present(provider, "region")?.or(alias_region),
+            )
+            .map_err(show)?;
+            return Ok(Some(hofund_plugin_registry::model_plan_of(
+                compiled, region,
+            )));
+        }
         hofund_provider::model_plan(preset, option_present(provider, "region")?).map_err(show)
     }
 
@@ -1237,9 +1257,22 @@ impl ModelsHost {
         provider: &hofund_config::Provider,
         wire: Wire,
     ) -> Result<Credential, DaemonError> {
+        self.credential_with(provider, wire, hofund_plugin_registry::find_preset)
+    }
+
+    fn credential_with(
+        &self,
+        provider: &hofund_config::Provider,
+        wire: Wire,
+        lookup: PresetLookup,
+    ) -> Result<Credential, DaemonError> {
         let Some(preset) = provider.preset.as_deref() else {
             return Ok(Credential::Default);
         };
+        if let Some((compiled, alias_region)) = lookup(preset) {
+            let region = option_present(provider, "region")?.or(alias_region);
+            return super::compiled_credential(compiled, region, wire);
+        }
         resolve(&hofund_provider::Resolve {
             id: preset,
             region: option_present(provider, "region")?,
@@ -2117,6 +2150,35 @@ mod tests {
     use hofund_provider::{Credential, ModelPlan, Wire};
 
     use super::{Merged, bounded_kind, list_only_raw};
+
+    #[test]
+    fn compiled_models_credential_uses_the_region_resolved_host() {
+        let host = super::ModelsHost::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        let fixture = hofund_config::load(
+            "[[providers]]\nid = \"fixture\"\npreset = \"fixture-anthropic-host\"\nprotocol = \"anthropic-messages\"\n",
+        )
+        .expect("fixture config");
+        let actual = host
+            .credential_with(
+                &fixture.providers[0],
+                Wire::Messages,
+                hofund_plugin_registry::find_fixture_preset,
+            )
+            .expect("fixture credential");
+        assert_eq!(actual, Credential::XApiKey);
+
+        let catalog = hofund_config::load(
+            "[[providers]]\nid = \"catalog\"\npreset = \"anthropic\"\nprotocol = \"anthropic-messages\"\n",
+        )
+        .expect("catalog config");
+        let expected = host
+            .credential(&catalog.providers[0], Wire::Messages)
+            .expect("catalog credential");
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn list_only_raw_has_exact_keys_and_options_never_cross_plugins() {

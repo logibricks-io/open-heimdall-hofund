@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Provider preset fragments now carry the full catalog schema, regions, and
+  aliases, with builtin data-only directories, catalog-equivalent wire and
+  credential selection, and build-time validation for row-E data migrations.
 - Docs: control plane (row L) plan.
 - Public `PluginErrorKind::Interrupted` and `ProviderErrorKind::Interrupted`
   variants classify a 2xx reply whose body failed while being read.
@@ -86,13 +89,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plugins/agents/claude-code/agent.toml`; its production Rust const is removed
   and its frozen oracle uses the renamed test-only `legacy-agent-consts`
   feature. Catalog order remains `claude-code`, `codex`, `gemini-cli`,
-  `opencode`; `RESERVED_AGENT_IDS` now contains only `gemini-cli` and
-  `opencode`, and static `adapters()` and `find()` cover those two agents.
+  `opencode`.
+- Gemini CLI is now a compiled data-only agent at
+  `plugins/agents/gemini-cli/agent.toml`; its production Rust const is removed
+  and its frozen oracle remains behind `legacy-agent-consts`. Catalog order is
+  unchanged. An absolute `GEMINI_CLI_HOME` still places both files under
+  `$GEMINI_CLI_HOME/.gemini`, while empty and relative values still use
+  `$HOME/.gemini`.
 - OpenCode is now a compiled data-only agent at
   `plugins/agents/opencode/agent.toml`; its production Rust const is removed
   and its frozen oracle remains behind `legacy-agent-consts`. Catalog order is
-  unchanged, `RESERVED_AGENT_IDS` now contains only `gemini-cli`, and static
-  `adapters()` and `find()` cover only Gemini CLI.
+  unchanged.
+- No const-backed built-in agent remains. `RESERVED_AGENT_IDS` is empty, and
+  static `adapters()` is empty and `find()` always returns `None`; use
+  `Catalog::find`. The const engine types are compiled only for tests and
+  `legacy-agent-consts`.
 - Coding-agent path overrides now treat empty and relative values as unset for
   process environments, explicit environment pairs, and named setters. Const
   and compiled adapters therefore use the same default paths.
@@ -119,6 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[providers.options]` is forwarded to the plugin factory. Each factory has
   an option schema. An unknown key or a wrong type is a check error that
   names the provider and the key and does not include the value.
+- Relay with no `base_url` now fails at plan time with
+  `preset \`relay\` needs base_url`.
 - Vertex and Bedrock are built through `registry.factory`, like the other
   wires. The daemon no longer constructs those adapters itself.
 - Built-in adapters use the pooled host client, so `connect_timeout_ms` and

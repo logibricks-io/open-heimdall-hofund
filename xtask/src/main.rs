@@ -60,6 +60,7 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<(String, PathBuf)>, String
     if !plugins.is_dir() {
         return Err(format!("{} is not a directory", plugins.display()));
     }
+    let builtin_factory_ids = xtask::registry::builtin_factory_ids(&workspace_root())?;
     let mut names = Vec::new();
     let mut data_only = false;
     let entries = std::fs::read_dir(plugins)
@@ -93,6 +94,20 @@ fn load_plugin_packages(plugins: &Path) -> Result<Vec<(String, PathBuf)>, String
             }
             let id = child.file_name().to_string_lossy().into_owned();
             let manifest_path = child.path().join("Cargo.toml");
+            let plugin_manifest = child.path().join("plugin.toml").is_file();
+            if kind == "providers"
+                && !plugin_manifest
+                && !manifest_path.exists()
+                && child.path().join("presets.toml").is_file()
+            {
+                if !builtin_factory_ids.contains(&id) {
+                    return Err(format!(
+                        "providers/{id} is not a builtin factory data-only directory"
+                    ));
+                }
+                data_only = true;
+                continue;
+            }
             if kind == "agents" {
                 let agent = child.path().join("agent.toml").is_file();
                 let plugin = child.path().join("plugin.toml").is_file();
@@ -450,6 +465,36 @@ mod tests {
         std::fs::create_dir_all(plugins.join("agents/empty")).expect("empty agent");
         let error = load_plugin_packages(&plugins).expect_err("empty agent");
         assert!(error.contains("agent.toml or plugin.toml"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn data_only_builtin_provider_directories_pass() {
+        let root = std::env::temp_dir().join(format!(
+            "hofund-data-only-provider-packages-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let plugins = root.join("plugins");
+        let ids = xtask::registry::builtin_factory_ids(&workspace_root()).expect("builtin ids");
+        assert!(ids.len() >= 3, "{ids:?}");
+        for id in &ids {
+            std::fs::create_dir_all(plugins.join("providers").join(id)).expect("provider");
+            std::fs::write(
+                plugins.join("providers").join(id).join("presets.toml"),
+                "[[preset]]\nid = \"example\"\n",
+            )
+            .expect("presets");
+        }
+        assert!(
+            load_plugin_packages(&plugins)
+                .expect("data-only")
+                .is_empty()
+        );
+        std::fs::create_dir_all(plugins.join("providers/other")).expect("other");
+        std::fs::write(plugins.join("providers/other/presets.toml"), "").expect("presets");
+        let error = load_plugin_packages(&plugins).expect_err("non-builtin directory");
+        assert!(error.contains("not a builtin factory"), "{error}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

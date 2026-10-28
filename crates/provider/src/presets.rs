@@ -167,6 +167,18 @@ pub fn catalog_commit() -> &'static str {
     &catalog().source_commit
 }
 
+/// Every preset and alias id in the built-in catalog.
+#[must_use]
+pub fn catalog_ids() -> Vec<&'static str> {
+    let catalog = catalog();
+    catalog
+        .preset
+        .iter()
+        .map(|preset| preset.id.as_str())
+        .chain(catalog.alias.iter().map(|alias| alias.id.as_str()))
+        .collect()
+}
+
 /// Resolves `request` to one endpoint.
 ///
 /// # Errors
@@ -250,7 +262,7 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
 
 fn finish(preset: &Preset, wire: Wire, base_url: String) -> Resolved {
     Resolved {
-        credential: credential(&preset.id, wire, &base_url),
+        credential: credential_for(&preset.id, wire, &base_url),
         preset_id: preset.id.clone(),
         name: preset.name.clone(),
         wire,
@@ -349,7 +361,9 @@ fn unavailable(preset: &Preset) -> PresetError {
     PresetError::new(format!("preset `{}` has no endpoint", preset.id))
 }
 
-fn credential(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
+/// Derives the credential placement for a preset, wire, and resolved base URL.
+#[must_use]
+pub fn credential_for(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
     if wire == Wire::Vertex || wire == Wire::Converse {
         return Credential::Bearer;
     }

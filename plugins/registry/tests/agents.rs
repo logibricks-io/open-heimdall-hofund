@@ -7,15 +7,20 @@ use hofund_plugin_registry::{agent, agents, fixture_agents};
 
 #[test]
 fn production_agent_list_contains_migrated_agents() {
-    assert_eq!(agents().len(), 3);
+    assert_eq!(agents().len(), 4);
     assert_eq!(agents()[0].id().as_str(), "claude-code");
     assert_eq!(agents()[1].id().as_str(), "codex");
-    assert_eq!(agents()[2].id().as_str(), "opencode");
+    assert_eq!(agents()[2].id().as_str(), "gemini-cli");
+    assert_eq!(agents()[3].id().as_str(), "opencode");
     assert_eq!(
         agent("claude-code").expect("claude-code").id().as_str(),
         "claude-code"
     );
     assert_eq!(agent("codex").expect("codex").id().as_str(), "codex");
+    assert_eq!(
+        agent("gemini-cli").expect("gemini-cli").id().as_str(),
+        "gemini-cli"
+    );
     assert_eq!(
         agent("opencode").expect("opencode").id().as_str(),
         "opencode"
