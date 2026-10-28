@@ -60,7 +60,21 @@ pub trait ModelLimits: Send + Sync {
 }
 
 /// One configured provider's aggregated list.
+///
+/// ```compile_fail
+/// use hofund_daemon::ProviderModels;
+/// use hofund_plugin_api::ListKind;
+///
+/// let _ = ProviderModels {
+///     models: Vec::new(),
+///     kind: ListKind::Live,
+///     corrected_base: None,
+///     base_model_fallback: false,
+///     side_errors: Vec::new(),
+/// };
+/// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ProviderModels {
     /// Merged and planned models.
     pub models: Vec<ModelSpec>,

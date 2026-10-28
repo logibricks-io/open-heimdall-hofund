@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ProviderModels` is now non-exhaustive so future aggregation fields do not
+  break downstream construction at compile time.
 - Body breaks after a 2xx reply are now classified as `Interrupted` instead of
   `Connect` on the provider path and `Transport` on the plugin-host path.
   Plugin-host body breaks now fail over across members before a completion or
