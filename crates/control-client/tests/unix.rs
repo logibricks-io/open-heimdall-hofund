@@ -106,7 +106,14 @@ fn spawn_server_with_health(
 
 fn config_id(path: &Path) -> String {
     let resolved = std::fs::canonicalize(path).expect("canonical config");
-    let digest = Sha256::digest(resolved.to_str().expect("UTF-8 path").as_bytes());
+    let text = resolved.to_str().expect("UTF-8 path");
+    // Discovery lowercases the canonical path on macOS; random scratch names
+    // contain uppercase letters, so mirror that normalization here.
+    #[cfg(target_os = "macos")]
+    let text = text.to_lowercase();
+    #[cfg(not(target_os = "macos"))]
+    let text = text.to_owned();
+    let digest = Sha256::digest(text.as_bytes());
     digest[..8]
         .iter()
         .map(|byte| format!("{byte:02x}"))
