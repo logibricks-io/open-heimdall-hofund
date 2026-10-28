@@ -10,12 +10,14 @@ use hofund_control_proto::{
     HealthResponse, ListenSource, ModelEntry, ModelListResponse, PicksResponse, PicksSetRequest,
     ProviderListResponse, ProviderSummary, ProviderTestRequest, ProviderTestResponse, RouteModel,
     RouteModelListResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
+    TokenRotateRequest, TokenRotateResponse, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
+    UsageTotals,
 };
-use hofund_gateway::control::{ControlFuture, ControlState};
+use hofund_gateway::control::{ControlFailure, ControlFuture, ControlState};
 use hofund_router::Cooldowns;
-use hofund_usage::Ledger;
+use hofund_usage::{Ledger, Window};
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
 use super::{DaemonRegistry, ModelsHost, membership, plugin_for, protocol_of};
 
@@ -29,8 +31,8 @@ pub(crate) struct DaemonControl {
     config: Arc<Config>,
     registry: Arc<dyn DaemonRegistry>,
     cooldowns: Arc<Cooldowns>,
-    #[expect(dead_code, reason = "the usage route is wired in L5d")]
     usage: Arc<Ledger>,
+    shutdown: watch::Sender<bool>,
     #[expect(dead_code, reason = "token rotation is wired in L5c")]
     token_path: PathBuf,
 }
@@ -49,6 +51,7 @@ impl DaemonControl {
         cooldowns: Arc<Cooldowns>,
         usage: Arc<Ledger>,
         token_path: PathBuf,
+        shutdown: watch::Sender<bool>,
     ) -> Self {
         Self {
             config_path: config_path.to_path_buf(),
@@ -62,6 +65,7 @@ impl DaemonControl {
             cooldowns,
             usage,
             token_path,
+            shutdown,
         }
     }
 
@@ -103,7 +107,11 @@ impl ControlState for DaemonControl {
             .unwrap_or_default();
         status.runtime_revision = self.runtime_revision.clone();
         status.in_flight = 0;
-        status.shutdown = ShutdownState::Running;
+        status.shutdown = if self.draining() {
+            ShutdownState::Draining
+        } else {
+            ShutdownState::Running
+        };
         status.model_listener.configured = self.configured.to_string();
         status.model_listener.effective = self.configured.to_string();
         status.model_listener.running = Some(self.running.to_string());
@@ -112,7 +120,7 @@ impl ControlState for DaemonControl {
     }
 
     fn draining(&self) -> bool {
-        false
+        *self.shutdown.borrow()
     }
 
     fn providers(&self) -> ControlFuture<'_, ProviderListResponse> {
@@ -237,8 +245,18 @@ impl ControlState for DaemonControl {
         unavailable()
     }
 
-    fn usage(&self, _query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
-        unavailable()
+    fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
+        let ledger = Arc::clone(&self.usage);
+        Box::pin(async move {
+            let window = window_of(query.period)?;
+            let summary = tokio::task::spawn_blocking(move || {
+                ledger.summary(window.since_now(), USAGE_ROW_LIMIT)
+            })
+            .await
+            .map_err(|error| internal(format!("usage query task failed: {error}")))?
+            .map_err(|error| internal(format!("usage query failed: {error}")))?;
+            Ok::<_, ControlFailure>(usage_response(query.period, summary))
+        })
     }
 
     fn rotate_token(&self, _request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse> {
@@ -246,8 +264,69 @@ impl ControlState for DaemonControl {
     }
 
     fn shutdown(&self, _request: ShutdownRequest) -> ControlFuture<'_, ShutdownResponse> {
-        unavailable()
+        // `send_replace` stores the flag even when the runner has not
+        // subscribed, and a repeat request leaves it set.
+        self.shutdown.send_replace(true);
+        let mut response = ShutdownResponse::default();
+        response.draining = true;
+        Box::pin(async move { Ok(response) })
     }
+}
+
+/// The most rows one usage response carries. Totals still cover the whole
+/// period; `rows_truncated` reports that older rows were left out.
+pub(crate) const USAGE_ROW_LIMIT: usize = 10_000;
+
+fn window_of(period: UsagePeriod) -> Result<Window, ControlError> {
+    match period {
+        UsagePeriod::Day => Ok(Window::Today),
+        UsagePeriod::Week => Ok(Window::Week),
+        UsagePeriod::Month => Ok(Window::Month),
+        UsagePeriod::All => Ok(Window::All),
+        _ => Err(ControlError::new(
+            ControlErrorKind::BadRequest,
+            "unknown usage period; expected day, week, month, or all",
+            "validate",
+        )),
+    }
+}
+
+fn usage_response(
+    period: UsagePeriod,
+    (rows, totals): (Vec<hofund_usage::Row>, hofund_usage::Totals),
+) -> UsageResponse {
+    let mut response = UsageResponse::default();
+    response.period = period;
+    response.rows_truncated = totals.requests > u64::try_from(rows.len()).unwrap_or(u64::MAX);
+    response.rows = rows.into_iter().map(usage_row).collect();
+    let mut summary = UsageTotals::default();
+    summary.requests = totals.requests;
+    summary.input_tokens = totals.input_tokens;
+    summary.output_tokens = totals.output_tokens;
+    response.totals = summary;
+    response
+}
+
+fn usage_row(row: hofund_usage::Row) -> UsageRow {
+    let mut out = UsageRow::default();
+    out.created_at_ms = u64::try_from(row.created_unix)
+        .unwrap_or(0)
+        .saturating_mul(1000);
+    out.model = row.model;
+    out.provider = row.upstream;
+    out.input_tokens = row
+        .input_tokens
+        .map(|tokens| u64::try_from(tokens).unwrap_or(0));
+    out.output_tokens = row
+        .output_tokens
+        .map(|tokens| u64::try_from(tokens).unwrap_or(0));
+    out.duration_ms = u64::try_from(row.latency_ms).unwrap_or(0);
+    out.status = row.status;
+    out
+}
+
+fn internal(message: String) -> ControlError {
+    ControlError::new(ControlErrorKind::Internal, message, "usage")
 }
 
 fn unavailable<T>() -> ControlFuture<'static, T> {

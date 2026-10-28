@@ -387,6 +387,7 @@ UsageQuery::fn validate (& self) -> Result < () , ControlError >
 UsageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 UsageResponse.period
 UsageResponse.rows
+UsageResponse.rows_truncated
 UsageResponse.totals
 UsageResponse.version
 UsageRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)

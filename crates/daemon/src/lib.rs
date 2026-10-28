@@ -338,6 +338,8 @@ async fn start_inner(
     let models_host = Arc::new(models_host);
     let config = Arc::new(config);
     if let Some(session) = control_session.as_mut() {
+        let (shutdown_request, shutdown_requested) = tokio::sync::watch::channel(false);
+        running = running.with_shutdown_request(shutdown_requested);
         let state = Arc::new(control::DaemonControl::new(
             path,
             config.listen,
@@ -350,6 +352,7 @@ async fn start_inner(
             cooldowns,
             Arc::clone(&usage),
             token_path.clone(),
+            shutdown_request,
         ));
         let control = hofund_gateway::control::Control::with_token_file(state, token, token_path);
         let mut tcp_listen = options.control_listen;
@@ -425,9 +428,21 @@ async fn start_inner(
 pub async fn serve(path: &Path) -> Result<(), DaemonError> {
     let running = start(path).await?;
     eprintln!("listening on http://{}", running.local_addr);
-    let _ = tokio::signal::ctrl_c().await;
-    running.shutdown().await;
+    serve_until_shutdown(running).await;
     Ok(())
+}
+
+/// Waits for Ctrl-C or a control `POST /v1/hofund/shutdown`, then drains.
+///
+/// Linked control listeners stop first, the model listener then finishes its
+/// in-flight requests, and daemon resources such as the control lock and
+/// socket are released when the server is dropped.
+pub async fn serve_until_shutdown(mut running: Running) {
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        () = running.shutdown_requested() => {}
+    }
+    running.shutdown().await;
 }
 
 /// Builds a runtime and calls [`serve`].
