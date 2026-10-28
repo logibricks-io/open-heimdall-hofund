@@ -213,6 +213,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Model-list redaction masks only whole secret tokens of at least eight characters,
+  strips URL userinfo, and removes every URL query value through one shared helper.
+  This applies to every URL in an error message, including pagination URLs and
+  URLs quoted in transport errors.
 - Token URLs containing userinfo are rejected.
 
 ### Deprecated
@@ -242,6 +246,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cached for five seconds. Mantle learned-route maps are bounded to 256 entries
   per provider instance with oldest-entry eviction. Invalid local plugin header
   values now report `Config` instead of `Auth` (#65, #137, #118).
+- SigV4 form and STS tests now use the literal AWS suite inputs. Release and
+  desktop-bundle apt installs now have bounded steps, retries, and HTTP timeouts.
 - Control request bodies between 2 MiB and the protocol request limit now reach
   their handler instead of getting the HTTP framework's plain-text 413 without
   an error envelope or `Cache-Control: no-store`. The control pre-route check is
