@@ -7,7 +7,8 @@
 //!
 //! The account backend shipped here is [`AccountStore`]: mode `0600` metadata
 //! with secrets in the OS credential store or an authenticated encrypted file.
-//! The scheduler records jobs and does not spawn tasks. The daemon builds one
+//! The scheduler records periodic jobs and does not run them; it runs
+//! one-shot work on the current Tokio runtime. The daemon builds one
 //! context per provider with [`runtime_host`]. The gateway builds a
 //! [`SurfaceHost`] per inbound request.
 
@@ -702,11 +703,19 @@ struct ScheduledJob {
     every_ms: u64,
 }
 
+/// One-shot work still running, keyed by job id.
+type OnceJobs = Arc<Mutex<BTreeMap<u64, (String, tokio::task::AbortHandle)>>>;
+
 /// Jobs keyed by a stable id. Cancelling one id does not renumber the others.
+///
+/// Periodic jobs are recorded and not run. One-shot work from
+/// [`SchedulerBackend::run_once`] runs on the current Tokio runtime until it
+/// finishes, is cancelled, or [`RecordingScheduler::shutdown`] aborts it.
 #[derive(Default)]
 pub struct RecordingScheduler {
     next: Mutex<u64>,
     jobs: Mutex<BTreeMap<u64, ScheduledJob>>,
+    once: OnceJobs,
 }
 
 impl RecordingScheduler {
@@ -727,22 +736,40 @@ impl RecordingScheduler {
         self.jobs.lock().expect("scheduler lock").contains_key(&id)
     }
 
-    /// Drops every registered job. The kernel calls this on process shutdown.
+    /// One-shot work still running, as `(id, name)`.
+    #[must_use]
+    pub fn running_once(&self) -> Vec<(u64, String)> {
+        self.once
+            .lock()
+            .expect("scheduler lock")
+            .iter()
+            .map(|(id, (name, _))| (*id, name.clone()))
+            .collect()
+    }
+
+    /// Drops every registered job and aborts one-shot work. The kernel calls this on process shutdown.
     pub fn shutdown(&self) {
         self.clear();
     }
 
     fn clear(&self) {
         self.jobs.lock().expect("scheduler lock").clear();
+        let once = std::mem::take(&mut *self.once.lock().expect("scheduler lock"));
+        for (_, (_, handle)) in once {
+            handle.abort();
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        let mut next = self.next.lock().expect("scheduler lock");
+        *next = next.saturating_add(1);
+        *next
     }
 }
 
 impl SchedulerBackend for RecordingScheduler {
     fn register(&self, name: &str, every_ms: u64, _job: Job) -> Result<u64, PluginError> {
-        let mut next = self.next.lock().expect("scheduler lock");
-        *next = next.saturating_add(1);
-        let id = *next;
-        drop(next);
+        let id = self.next_id();
         self.jobs.lock().expect("scheduler lock").insert(
             id,
             ScheduledJob {
@@ -755,10 +782,34 @@ impl SchedulerBackend for RecordingScheduler {
 
     fn cancel(&self, id: u64) {
         self.jobs.lock().expect("scheduler lock").remove(&id);
+        let once = self.once.lock().expect("scheduler lock").remove(&id);
+        if let Some((_, handle)) = once {
+            handle.abort();
+        }
     }
 
     fn shutdown(&self) {
         self.clear();
+    }
+
+    fn run_once(
+        &self,
+        name: &str,
+        work: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<u64, PluginError> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| PluginError::internal("one-shot job needs a Tokio runtime"))?;
+        let id = self.next_id();
+        let once = Arc::clone(&self.once);
+        // The entry is inserted while this lock is held, so the task's own
+        // removal below runs after the insert even when the work is instant.
+        let mut running = self.once.lock().expect("scheduler lock");
+        let task = runtime.spawn(async move {
+            work.await;
+            once.lock().expect("scheduler lock").remove(&id);
+        });
+        running.insert(id, (name.to_owned(), task.abort_handle()));
+        Ok(id)
     }
 }
 

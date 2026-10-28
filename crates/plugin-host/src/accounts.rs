@@ -8,16 +8,24 @@
 //! The cache is an [`Arc`] of parsed metadata rows with a per-row secret cache.
 //! Every write drops it. A read reloads when the metadata file's mtime, length,
 //! or inode changes. Secret reads route through each row's stored reference.
+//!
+//! A lease is a per-account lock file next to the metadata file. It is held
+//! across processes for a read-refresh-write cycle. The lock order is always
+//! lease, then store lock. A lease reads the secret past the cache, because
+//! another process may have written it without changing the metadata file.
+//! [`AccountBackend::upsert`] takes the same lease, waiting a bounded time.
+//! Removing an account does not take the lease; a commit after a removal is
+//! an error and does not bring the account back.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use hofund_plugin_api::kernel::AccountBackend;
+use hofund_plugin_api::kernel::{AccountBackend, AccountLeaseBackend};
 use hofund_plugin_api::{
     Account, AccountId, PluginError, PluginId, PluginKey, PluginKind, SecretString,
 };
@@ -396,6 +404,100 @@ impl AccountStore {
         sibling_path(&self.path, ".lock")
     }
 
+    fn lease_path(&self, kind: &str, plugin: &str, account: &str) -> PathBuf {
+        sibling_path(
+            &self.path,
+            &format!(
+                ".lease.{}.{}.{}",
+                lock_component(kind),
+                lock_component(plugin),
+                lock_component(account)
+            ),
+        )
+    }
+
+    /// Takes the lease file lock for one account, polling until `wait` runs out.
+    ///
+    /// The returned file holds the lock. Dropping it releases the lock.
+    fn acquire_lease(
+        &self,
+        kind: &str,
+        plugin: &str,
+        account: &str,
+        wait: Duration,
+    ) -> Result<File, StoreError> {
+        let lease_path = self.lease_path(kind, plugin, account);
+        let mut options = OpenOptions::new();
+        options.create(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&lease_path)
+            .map_err(|error| StoreError::Io(error.to_string()))?;
+        set_mode(&lease_path)?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    let waited = started.elapsed();
+                    if waited >= wait {
+                        return Err(StoreError::Io(format!(
+                            "account `{plugin}/{account}` lease is held; gave up after {} ms",
+                            wait.as_millis()
+                        )));
+                    }
+                    std::thread::sleep(LEASE_POLL.min(wait - waited));
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(StoreError::Io(error.to_string()));
+                }
+            }
+        }
+    }
+
+    /// Writes one row and its secret. The caller holds the lease and the exclusive store lock.
+    ///
+    /// With `require_existing`, a row that is gone is an error and nothing is written.
+    fn write_row(
+        &self,
+        account: &Account,
+        label: &str,
+        secret: &SecretString,
+        require_existing: bool,
+    ) -> Result<(), StoreError> {
+        let snapshot = self.load()?;
+        let key = account.key();
+        let kind = key.kind().as_str().to_owned();
+        let plugin = key.id().as_str().to_owned();
+        let id = account.id().as_str().to_owned();
+        let matches =
+            |row: &MetadataRow| row.kind == kind && row.plugin == plugin && row.account == id;
+        if require_existing && !snapshot.rows.iter().any(matches) {
+            return Err(StoreError::Format(format!(
+                "account `{plugin}/{id}` was removed while it was leased"
+            )));
+        }
+        self.backend.prepare()?;
+        let secret_ref = self.backend.reference()?.to_owned();
+        self.invalidate()?;
+        self.backend
+            .set(&kind, &plugin, &id, &secret_ref, secret.clone())?;
+        let mut rows = snapshot.rows.clone();
+        rows.retain(|row| !matches(row));
+        rows.push(MetadataRow {
+            kind,
+            plugin,
+            account: id,
+            label: label.to_owned(),
+            secret_ref,
+        });
+        self.store(rows)
+    }
+
     fn with_lock<T>(
         &self,
         shared: bool,
@@ -464,6 +566,67 @@ impl AccountStore {
     fn store(&self, rows: Vec<MetadataRow>) -> Result<(), StoreError> {
         self.invalidate()?;
         write_metadata(&self.path, &rows)
+    }
+}
+
+/// How often a waiting lease retries the lock.
+const LEASE_POLL: Duration = Duration::from_millis(10);
+
+/// How long `upsert` waits for an open lease. Bounded so that a process that
+/// holds a lease and upserts the same account fails instead of hanging.
+const UPSERT_LEASE_WAIT: Duration = Duration::from_secs(30);
+
+/// Maps an id to a file-name-safe component.
+fn lock_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// A held lease. The lock file stays locked until commit or drop.
+struct StoreLease {
+    store: AccountStore,
+    file: File,
+    account: Account,
+    secret: SecretString,
+}
+
+#[async_trait]
+impl AccountLeaseBackend for StoreLease {
+    fn account(&self) -> &Account {
+        &self.account
+    }
+
+    fn secret(&self) -> &SecretString {
+        &self.secret
+    }
+
+    async fn commit(
+        self: Box<Self>,
+        label: Option<String>,
+        secret: SecretString,
+    ) -> Result<(), PluginError> {
+        let Self {
+            store,
+            file,
+            account,
+            secret: _,
+        } = *self;
+        run_blocking(move || {
+            let label = label.unwrap_or_else(|| account.label().to_owned());
+            let result =
+                store.with_lock(false, || store.write_row(&account, &label, &secret, true));
+            drop(file);
+            Ok(result?)
+        })
+        .await
     }
 }
 
@@ -710,30 +873,18 @@ impl AccountBackend for AccountStore {
     async fn upsert(&self, account: Account, secret: SecretString) -> Result<(), PluginError> {
         let store = self.clone();
         run_blocking(move || {
-            store.with_lock(false, || {
-                let snapshot = store.load()?;
-                let key = account.key().clone();
-                let kind = key.kind().as_str().to_owned();
-                let plugin = key.id().as_str().to_owned();
-                let id = account.id().as_str().to_owned();
-                store.backend.prepare()?;
-                let secret_ref = store.backend.reference()?.to_owned();
-                store.invalidate()?;
-                store
-                    .backend
-                    .set(&kind, &plugin, &id, &secret_ref, secret.clone())?;
-                let mut rows = snapshot.rows.clone();
-                rows.retain(|row| !(row.kind == kind && row.plugin == plugin && row.account == id));
-                rows.push(MetadataRow {
-                    kind,
-                    plugin,
-                    account: id,
-                    label: account.label().to_owned(),
-                    secret_ref,
-                });
-                store.store(rows)
-            })?;
-            Ok(())
+            let key = account.key();
+            let lease = store.acquire_lease(
+                key.kind().as_str(),
+                key.id().as_str(),
+                account.id().as_str(),
+                UPSERT_LEASE_WAIT,
+            )?;
+            let result = store.with_lock(false, || {
+                store.write_row(&account, account.label(), &secret, false)
+            });
+            drop(lease);
+            Ok(result?)
         })
         .await
     }
@@ -786,6 +937,50 @@ impl AccountBackend for AccountStore {
                 return Ok(None);
             };
             Ok(snapshot.secret(row, &store.backend).map(Some)?)
+        })
+        .await
+    }
+
+    async fn lease(
+        &self,
+        plugin: &PluginKey,
+        id: &AccountId,
+        wait: Duration,
+    ) -> Result<Box<dyn AccountLeaseBackend>, PluginError> {
+        let store = self.clone();
+        let plugin = plugin.clone();
+        let id = id.clone();
+        run_blocking(move || {
+            let kind = plugin.kind().as_str();
+            let plugin_id = plugin.id().as_str();
+            let file = store.acquire_lease(kind, plugin_id, id.as_str(), wait)?;
+            let (account, secret) = store.with_lock(true, || {
+                // Read past the cache: another process may have refreshed
+                // this secret without changing the metadata file.
+                let rows = read_metadata(&store.path)?;
+                let Some(row) = rows.iter().find(|row| {
+                    row.kind == kind && row.plugin == plugin_id && row.account == id.as_str()
+                }) else {
+                    return Err(StoreError::Format(format!(
+                        "account `{plugin_id}/{}` is not stored",
+                        id.as_str()
+                    )));
+                };
+                validate_ids(&row.kind, &row.plugin, &row.account)?;
+                let secret =
+                    store
+                        .backend
+                        .get(&row.kind, &row.plugin, &row.account, &row.secret_ref)?;
+                let account =
+                    account_from(row).map_err(|error| StoreError::Format(error.to_string()))?;
+                Ok((account, secret))
+            })?;
+            Ok(Box::new(StoreLease {
+                store,
+                file,
+                account,
+                secret,
+            }) as Box<dyn AccountLeaseBackend>)
         })
         .await
     }
@@ -1229,5 +1424,292 @@ mod tests {
             )
             .await
             .expect("remove");
+    }
+
+    const LEASE_CHILD_PATH: &str = "HOFUND_TEST_LEASE_CHILD_PATH";
+    const LEASE_CHILD_WAIT_MS: &str = "HOFUND_TEST_LEASE_CHILD_WAIT_MS";
+
+    fn fake_store(path: PathBuf) -> (AccountStore, Arc<FakeSecrets>) {
+        let backend = Arc::new(FakeSecrets::default());
+        let store = AccountStore::open_with_backend(path, backend.clone()).expect("store");
+        (store, backend)
+    }
+
+    fn work_id() -> AccountId {
+        AccountId::from_static("work")
+    }
+
+    async fn seeded(path: PathBuf, secret: &str) -> (AccountStore, Arc<FakeSecrets>) {
+        let (store, backend) = fake_store(path);
+        store
+            .upsert(account("work"), SecretString::from(secret.to_owned()))
+            .await
+            .expect("seed");
+        (store, backend)
+    }
+
+    async fn stored_secret(store: &AccountStore) -> String {
+        let secret = store
+            .secret(&key(PluginKind::Subscription), &work_id())
+            .await
+            .expect("secret")
+            .expect("present");
+        kernel::expose_secret(&secret).to_owned()
+    }
+
+    async fn lease_work(
+        store: &AccountStore,
+        wait: Duration,
+    ) -> Result<Box<dyn AccountLeaseBackend>, PluginError> {
+        store
+            .lease(&key(PluginKind::Subscription), &work_id(), wait)
+            .await
+    }
+
+    fn lease_error(result: Result<Box<dyn AccountLeaseBackend>, PluginError>) -> PluginError {
+        match result {
+            Ok(_) => panic!("the lease should fail"),
+            Err(error) => error,
+        }
+    }
+
+    /// Runs only as the child of `lease_serializes_two_processes`.
+    #[test]
+    fn lease_child_helper() {
+        let Some(path) = std::env::var_os(LEASE_CHILD_PATH) else {
+            return;
+        };
+        let wait = std::env::var(LEASE_CHILD_WAIT_MS)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let store = AccountStore::open_with_backend(
+            PathBuf::from(path),
+            Arc::new(MemoryAccountSecrets::default()),
+        )
+        .expect("child store");
+        match store.acquire_lease(
+            "subscription",
+            "example-agent",
+            "work",
+            Duration::from_millis(wait),
+        ) {
+            Ok(file) => {
+                println!("lease-child: locked");
+                drop(file);
+            }
+            Err(StoreError::Io(message)) if message.contains("lease is held") => {
+                println!("lease-child: timed-out");
+            }
+            Err(error) => println!("lease-child: error {error:?}"),
+        }
+    }
+
+    fn run_lease_child(path: &Path, wait_ms: u64) -> String {
+        let output = std::process::Command::new(std::env::current_exe().expect("exe"))
+            .args([
+                "--exact",
+                "accounts::tests::lease_child_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(LEASE_CHILD_PATH, path)
+            .env(LEASE_CHILD_WAIT_MS, wait_ms.to_string())
+            .output()
+            .expect("child");
+        assert!(output.status.success(), "child failed: {output:?}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    // A child process, not a thread: the lease is meant for two hofund
+    // processes on one store, so the test crosses a process boundary.
+    #[tokio::test]
+    async fn lease_serializes_two_processes() {
+        let dir = scratch();
+        let path = dir.join("accounts.json");
+        let (store, _) = seeded(path.clone(), "first").await;
+        let lease = lease_work(&store, Duration::from_secs(1))
+            .await
+            .expect("lease");
+        let held = run_lease_child(&path, 50);
+        assert!(held.contains("lease-child: timed-out"), "{held}");
+        drop(lease);
+        let free = run_lease_child(&path, 5_000);
+        assert!(free.contains("lease-child: locked"), "{free}");
+    }
+
+    #[tokio::test]
+    async fn lease_reads_fresh_secret_after_external_write() {
+        let dir = scratch();
+        let (store, backend) = seeded(dir.join("accounts.json"), "old").await;
+        assert_eq!(stored_secret(&store).await, "old");
+        // Another process refreshed the secret without touching metadata.
+        backend
+            .inner
+            .set(
+                "subscription",
+                "example-agent",
+                "work",
+                KEYCHAIN_REFERENCE,
+                SecretString::from("new"),
+            )
+            .expect("external write");
+        assert_eq!(stored_secret(&store).await, "old", "the cache is stale");
+        let lease = lease_work(&store, Duration::from_secs(1))
+            .await
+            .expect("lease");
+        assert_eq!(kernel::expose_secret(lease.secret()), "new");
+        assert_eq!(lease.account().label(), "Work");
+    }
+
+    #[tokio::test]
+    async fn commit_writes_the_secret_and_invalidates_the_cache() {
+        let dir = scratch();
+        let (store, _) = seeded(dir.join("accounts.json"), "old").await;
+        assert_eq!(stored_secret(&store).await, "old");
+        assert!(store.cache.lock().expect("cache").is_some());
+        let lease = lease_work(&store, Duration::from_secs(1))
+            .await
+            .expect("lease");
+        lease
+            .commit(Some("Renamed".to_owned()), SecretString::from("new"))
+            .await
+            .expect("commit");
+        assert!(store.cache.lock().expect("cache").is_none());
+        assert_eq!(stored_secret(&store).await, "new");
+        let listed = store
+            .list(&key(PluginKind::Subscription))
+            .await
+            .expect("list");
+        assert_eq!(listed[0].label(), "Renamed");
+        let again = lease_work(&store, Duration::ZERO)
+            .await
+            .expect("commit released the lease");
+        again
+            .commit(None, SecretString::from("newer"))
+            .await
+            .expect("commit");
+        let listed = store
+            .list(&key(PluginKind::Subscription))
+            .await
+            .expect("list");
+        assert_eq!(listed[0].label(), "Renamed", "None keeps the label");
+        assert_eq!(stored_secret(&store).await, "newer");
+    }
+
+    #[tokio::test]
+    async fn dropped_lease_releases_the_lock() {
+        let dir = scratch();
+        let (store, _) = seeded(dir.join("accounts.json"), "old").await;
+        let lease = lease_work(&store, Duration::ZERO).await.expect("lease");
+        drop(lease);
+        lease_work(&store, Duration::ZERO)
+            .await
+            .expect("lease after drop");
+    }
+
+    #[tokio::test]
+    async fn lease_wait_times_out_as_io() {
+        let dir = scratch();
+        let (store, _) = seeded(dir.join("accounts.json"), MARKER).await;
+        let _held = lease_work(&store, Duration::ZERO).await.expect("lease");
+        let started = Instant::now();
+        let error = lease_error(lease_work(&store, Duration::from_millis(60)).await);
+        assert!(started.elapsed() >= Duration::from_millis(60));
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Io);
+        assert!(error.to_string().contains("lease is held"), "{error}");
+        assert!(!error.to_string().contains(MARKER));
+        let error = lease_error(lease_work(&store, Duration::ZERO).await);
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Io);
+    }
+
+    #[tokio::test]
+    async fn lease_of_a_missing_account_is_a_config_error() {
+        let dir = scratch();
+        let (store, backend) = fake_store(dir.join("accounts.json"));
+        let error = lease_error(lease_work(&store, Duration::ZERO).await);
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Config);
+        assert_eq!(backend.reads.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn commit_after_remove_does_not_resurrect_the_account() {
+        let dir = scratch();
+        let (store, _) = seeded(dir.join("accounts.json"), "old").await;
+        let lease = lease_work(&store, Duration::ZERO).await.expect("lease");
+        store
+            .remove(&key(PluginKind::Subscription), &work_id())
+            .await
+            .expect("remove");
+        let error = lease
+            .commit(None, SecretString::from("new"))
+            .await
+            .expect_err("removed");
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Config);
+        assert!(
+            store
+                .list(&key(PluginKind::Subscription))
+                .await
+                .expect("list")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_waits_for_an_open_lease() {
+        let dir = scratch();
+        let (store, _) = seeded(dir.join("accounts.json"), "old").await;
+        let lease = lease_work(&store, Duration::ZERO).await.expect("lease");
+        let writer = store.clone();
+        let mut upsert = tokio::spawn(async move {
+            writer
+                .upsert(account("work"), SecretString::from("from-upsert"))
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut upsert)
+                .await
+                .is_err(),
+            "upsert must wait for the lease"
+        );
+        lease
+            .commit(None, SecretString::from("from-lease"))
+            .await
+            .expect("commit");
+        upsert.await.expect("join").expect("upsert");
+        assert_eq!(stored_secret(&store).await, "from-upsert");
+    }
+
+    #[test]
+    fn lease_files_are_per_account_and_sanitized() {
+        let dir = scratch();
+        let store = AccountStore::open_with_backend(
+            dir.join("accounts.json"),
+            Arc::new(MemoryAccountSecrets::default()),
+        )
+        .expect("store");
+        let one = store.lease_path("subscription", "example-agent", "work");
+        let two = store.lease_path("subscription", "example-agent", "home");
+        assert_ne!(one, two);
+        let odd = store.lease_path("subscription", "example-agent", "a/../b");
+        assert_eq!(odd.parent(), one.parent());
+        let name = odd
+            .file_name()
+            .expect("name")
+            .to_string_lossy()
+            .into_owned();
+        assert!(!name.contains('/'), "{name}");
+        let _first = store
+            .acquire_lease("subscription", "example-agent", "work", Duration::ZERO)
+            .expect("work");
+        store
+            .acquire_lease("subscription", "example-agent", "home", Duration::ZERO)
+            .expect("another account is independent");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&one).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 }

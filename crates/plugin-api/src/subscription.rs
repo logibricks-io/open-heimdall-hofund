@@ -10,7 +10,7 @@ use crate::error::PluginError;
 use crate::host::HostContext;
 use crate::id::{AccountId, PluginId};
 use crate::records::{
-    ModelList, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof, SubscriptionSpec,
+    AccountStatus, ModelList, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof, SubscriptionSpec,
 };
 use crate::upstream::UpstreamProvider;
 
@@ -117,6 +117,34 @@ pub trait Subscription: Send + Sync + 'static {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError>;
+
+    /// Stops a sign-in started with `ctx`, such as a loopback listener or a
+    /// device-code poll. The default does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the plugin cannot stop the sign-in.
+    async fn cancel_sign_in(&self, ctx: &SignInCtx, host: &HostContext) -> Result<(), PluginError> {
+        let _ = (ctx, host);
+        Ok(())
+    }
+
+    /// Whether `account` can serve calls. The default is [`AccountStatus::Ready`].
+    ///
+    /// A plugin returns [`AccountStatus::NeedsSignIn`] when a refresh found
+    /// the grant revoked, so the UI asks for a new sign-in.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the status cannot be read.
+    async fn account_status(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<AccountStatus, PluginError> {
+        let _ = (account, host);
+        Ok(AccountStatus::Ready)
+    }
 
     /// Rotates the secret through `host.accounts()`.
     ///
