@@ -1618,7 +1618,9 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -1694,6 +1696,8 @@ dependencies = [
  "hofund-plugin-host",
  "hofund-router",
  "hofund-usage",
+ "hyper",
+ "hyper-util",
  "metrics",
  "serde_json",
  "thiserror 2.0.21",

@@ -434,3 +434,62 @@ async fn control_routes_are_not_on_model_listener() {
     assert!(body.get("pid").is_none());
     assert!(body.get("runtime_revision").is_none());
 }
+
+#[cfg(unix)]
+async fn unix_request(socket: &std::path::Path, host: &str) -> String {
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .expect("Unix connection");
+    let request = format!(
+        "GET /v1/hofund/status HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.expect("read");
+    String::from_utf8(response).expect("HTTP response")
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_socket_round_trip_with_permissions_and_safe_peer_cred() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("unix-round-trip");
+    let socket = dir.join("control.sock");
+    let running = control().bind_unix(&socket).await.expect("Unix bind");
+    let mode = std::fs::metadata(&socket)
+        .expect("socket metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let response = unix_request(&socket, "hofund-control").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(response.contains("\"pid\":42"), "{response}");
+    running.shutdown().await;
+    assert!(!socket.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_ipc_host_is_pinned_constant() {
+    let dir = scratch("unix-host");
+    let socket = dir.join("control.sock");
+    let running = control().bind_unix(&socket).await.expect("Unix bind");
+    let response = unix_request(&socket, "127.0.0.1:3426").await;
+    assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+    running.shutdown().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_socket_long_path_is_refused() {
+    let dir = scratch("unix-long-path");
+    let socket = dir.join("x".repeat(200));
+    let Err(error) = control().bind_unix(&socket).await else {
+        panic!("long socket path was accepted");
+    };
+    assert!(matches!(error, GatewayError::SocketPathTooLong { .. }));
+    assert!(!socket.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}

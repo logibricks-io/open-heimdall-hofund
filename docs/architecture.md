@@ -223,7 +223,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `gateway` | axum HTTP server and middleware pipeline. |
 | `agent` | Coding-agent config adapters. A declarative description per agent; plan an edit, then apply it. The daemon passes the gateway URL and token in. |
 | `config` | Typed configuration for listeners, routes, accounts, and agents. |
-| `control-client` | Typed control calls over TCP and, in later pull requests, local IPC. Re-exports the proto for UI callers. |
+| `control-client` | Typed control calls and ordered discovery over TCP and Unix local IPC. Re-exports the proto for UI callers. |
 | `control-proto` | Versioned serde DTOs, events, error envelope, and wire version. No HTTP, Tokio, daemon, router, provider, or plugin-api dependency. |
 | `secrets` | Credential storage and resolution. |
 | `usage` | Request and token usage records. |

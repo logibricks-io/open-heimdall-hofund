@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-config control identities, single-instance locks, atomic token-free discovery,
+  secure runtime-directory fallback, and same-user Unix socket transport with ordered
+  client discovery. Windows keeps authenticated loopback TCP until named-pipe support lands.
 - Opt-in loopback TCP control health and status with strict Bearer, Host, Origin,
   and mutation defenses, live disk/runtime revisions, and a typed TCP control client.
   Model `/health` now identifies the service as hofund.

@@ -5,6 +5,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(unix)]
+use std::path::Path;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
@@ -13,13 +16,22 @@ use hofund_control_proto::{
     ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES,
     StatusResponse,
 };
+#[cfg(unix)]
+use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
+#[cfg(unix)]
+use tower::Service;
 
 use super::{GatewayError, Running, TokenState, tokens_match};
 
 /// Default loopback address for the control listener.
 pub const DEFAULT_CONTROL_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3426);
+
+/// The only Host value accepted over local IPC.
+pub const LOCAL_IPC_HOST: &str = "hofund-control";
 
 /// Daemon operations exposed through the control protocol.
 pub trait ControlState: Send + Sync {
@@ -44,7 +56,7 @@ struct Inner {
 #[derive(Clone)]
 struct HttpState {
     control: Arc<Inner>,
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
 }
 
 impl Control {
@@ -76,6 +88,15 @@ impl Control {
 
     /// Builds only the control router. `listen` supplies the exact Host value.
     pub fn into_router(self, listen: SocketAddr) -> axum::Router {
+        self.router(Some(listen))
+    }
+
+    #[cfg(unix)]
+    fn into_local_router(self) -> axum::Router {
+        self.router(None)
+    }
+
+    fn router(self, listen: Option<SocketAddr>) -> axum::Router {
         axum::Router::new()
             .fallback(axum::routing::any(handle))
             .with_state(HttpState {
@@ -110,6 +131,99 @@ impl Control {
         });
         Ok(Running::new(local_addr, shutdown, task))
     }
+
+    /// Binds a Unix socket and serves control routes to same-user peers.
+    #[cfg(unix)]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GatewayError`] when the path is too long, binding fails, or
+    /// socket ownership cannot be established.
+    pub async fn bind_unix(self, path: &Path) -> Result<Running, GatewayError> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        validate_socket_path(path)?;
+        let listener = UnixListener::bind(path).map_err(|source| GatewayError::BindUnix {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let cleanup = SocketCleanup(path.to_path_buf());
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |source| GatewayError::BindUnix {
+                path: path.to_path_buf(),
+                source,
+            },
+        )?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let expected_uid = std::fs::metadata(parent)
+            .map_err(|source| GatewayError::BindUnix {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .uid();
+        let router = self.into_local_router();
+        let (shutdown, mut signal) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = &mut signal => break,
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted?;
+                        if !same_user_peer(&stream, expected_uid).unwrap_or(false) {
+                            continue;
+                        }
+                        let router = router.clone();
+                        connections.spawn(async move {
+                            let service = hyper::service::service_fn(move |request| {
+                                let mut router = router.clone();
+                                async move { router.call(request.map(Body::new)).await }
+                            });
+                            let result = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(TokioIo::new(stream), service)
+                                .await;
+                            if let Err(error) = result {
+                                tracing::debug!(%error, "local control connection ended");
+                            }
+                        });
+                    }
+                    Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                }
+            }
+            while connections.join_next().await.is_some() {}
+            Ok(())
+        });
+        Ok(Running::new(DEFAULT_CONTROL_ADDR, shutdown, task).with_resource(cleanup))
+    }
+}
+
+#[cfg(unix)]
+struct SocketCleanup(PathBuf);
+
+#[cfg(unix)]
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(unix)]
+fn same_user_peer(stream: &UnixStream, expected_uid: u32) -> std::io::Result<bool> {
+    Ok(stream.peer_cred()?.uid() == expected_uid)
+}
+
+#[cfg(unix)]
+fn validate_socket_path(path: &Path) -> Result<(), GatewayError> {
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    const LIMIT: usize = 104;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+    const LIMIT: usize = 108;
+    if path.as_os_str().as_bytes().len() >= LIMIT {
+        return Err(GatewayError::SocketPathTooLong {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 impl fmt::Debug for Control {
@@ -195,13 +309,18 @@ async fn handle(
     }
 }
 
-fn check_host_and_origin(headers: &HeaderMap, listen: SocketAddr) -> Option<Response> {
-    let expected = listen.to_string();
+fn check_host_and_origin(headers: &HeaderMap, listen: Option<SocketAddr>) -> Option<Response> {
+    let expected = listen.map_or_else(|| LOCAL_IPC_HOST.to_owned(), |addr| addr.to_string());
     if !exact_header(headers, header::HOST, &expected) {
+        let message = if listen.is_some() {
+            "Host must be the numeric loopback control address"
+        } else {
+            "Host must be hofund-control over local IPC"
+        };
         return Some(error_response(
             StatusCode::FORBIDDEN,
             ControlErrorKind::Forbidden,
-            "Host must be the numeric loopback control address",
+            message,
         ));
     }
     if headers.contains_key(header::ORIGIN)

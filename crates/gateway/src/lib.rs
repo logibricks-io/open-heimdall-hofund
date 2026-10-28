@@ -100,6 +100,8 @@ pub struct Running {
     attached: Vec<tokio::task::JoinHandle<()>>,
     linked: Vec<Running>,
     control_addr: Option<SocketAddr>,
+    control_socket_path: Option<PathBuf>,
+    resources: Vec<Box<dyn std::any::Any + Send>>,
 }
 
 /// The listener could not be bound.
@@ -119,6 +121,26 @@ pub enum GatewayError {
         /// The address that was rejected.
         listen: SocketAddr,
     },
+    /// Binding a Unix control socket failed.
+    #[cfg(unix)]
+    #[error("cannot bind control socket {path}: {source}")]
+    BindUnix {
+        /// The socket path that was requested.
+        path: PathBuf,
+        /// The operating-system error.
+        source: std::io::Error,
+    },
+    /// A Unix control socket exceeds the platform path limit.
+    #[cfg(unix)]
+    #[error("control socket path exceeds the platform limit: {path}")]
+    SocketPathTooLong {
+        /// The rejected socket path.
+        path: PathBuf,
+    },
+    /// Local IPC is unavailable on this target.
+    #[cfg(unix)]
+    #[error("local control IPC is unavailable")]
+    UnsupportedLocalControl,
 }
 
 impl Gateway {
@@ -254,6 +276,8 @@ impl Running {
             attached: Vec::new(),
             linked: Vec::new(),
             control_addr: None,
+            control_socket_path: None,
+            resources: Vec::new(),
         }
     }
 
@@ -262,6 +286,14 @@ impl Running {
     #[must_use]
     pub fn with_task(mut self, task: tokio::task::JoinHandle<()>) -> Self {
         self.attached.push(task);
+        self
+    }
+
+    /// Keeps a daemon resource alive for this server's lifetime.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_resource<T: std::any::Any + Send>(mut self, resource: T) -> Self {
+        self.resources.push(Box::new(resource));
         self
     }
 
@@ -274,10 +306,27 @@ impl Running {
         self
     }
 
+    /// Links a Unix control listener to this server's lifetime.
+    #[cfg(unix)]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_unix_control(mut self, control: Running, path: PathBuf) -> Self {
+        self.control_socket_path = Some(path);
+        self.linked.push(control);
+        self
+    }
+
     /// Returns the bound control address when a control listener is linked.
     #[must_use]
     pub fn control_local_addr(&self) -> Option<SocketAddr> {
         self.control_addr
+    }
+
+    /// Returns the bound Unix control socket when one is linked.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn control_socket_path(&self) -> Option<&std::path::Path> {
+        self.control_socket_path.as_deref()
     }
 
     /// Asks the server to stop, aborts attached tasks, and waits for the server.

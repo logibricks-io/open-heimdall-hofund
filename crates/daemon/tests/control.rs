@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use hofund_control_proto::{
     API_VERSION, ListenSource, ShutdownState, StatusResponse, decode_response,
 };
-use hofund_daemon::{StartOptions, start_with_options};
+use hofund_daemon::{ControlRuntime, StartOptions, start_with_options};
 
 #[tokio::test]
 async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() {
@@ -23,6 +23,8 @@ async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() 
         &path,
         StartOptions {
             control_listen: Some("127.0.0.1:0".parse().expect("control address")),
+            control_runtime: Some(ControlRuntime::new(None, dir.clone())),
+            ..StartOptions::default()
         },
     )
     .await
@@ -82,4 +84,38 @@ async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() 
 
     running.shutdown().await;
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_token_uses_profile_acl_until_pipe() {
+    let profile =
+        std::env::temp_dir().join(format!("hofund-windows-profile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&profile);
+    std::fs::create_dir_all(&profile).expect("profile directory");
+    let config = profile.join("hofund.toml");
+    std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
+    let running = start_with_options(
+        &config,
+        StartOptions {
+            control_listen: Some("127.0.0.1:0".parse().expect("control address")),
+            control_runtime: Some(ControlRuntime::new(None, profile.clone())),
+            ..StartOptions::default()
+        },
+    )
+    .await
+    .expect("TCP fallback");
+    let token_path = profile.join("hofund.token");
+    assert!(token_path.starts_with(&profile));
+    let token = std::fs::read_to_string(token_path).expect("profile token");
+    let response = reqwest::get(format!(
+        "http://{}/v1/hofund/health",
+        running.control_local_addr().expect("control TCP")
+    ))
+    .await
+    .expect("control health");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(!token.trim().is_empty());
+    running.shutdown().await;
+    let _ = std::fs::remove_dir_all(profile);
 }
