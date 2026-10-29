@@ -28,8 +28,12 @@ const REDACTED: &str = "[redacted]";
 /// changes this prefix.
 const PLAN_REVISION_DOMAIN: &[u8] = b"hofund-agent-plan-v1\0";
 
+/// Reads the route model names from the published configuration.
+pub(crate) type RouteSource = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 /// Gateway facts an adapter writes, minus the token, which is read from the
-/// running token file on each call.
+/// running token file on each call. `models` is filled from the published
+/// configuration on each call, so a reload is visible to the next plan.
 #[derive(Clone)]
 struct TargetParts {
     base_url: String,
@@ -56,6 +60,7 @@ pub(crate) struct AgentOps {
     token_generation: watch::Sender<u64>,
     session: Option<Session>,
     parts: TargetParts,
+    routes: RouteSource,
 }
 
 impl AgentOps {
@@ -63,7 +68,7 @@ impl AgentOps {
         descriptions: &'static [&'static AgentDescription],
         config_path: &Path,
         base_url: String,
-        models: Vec<String>,
+        routes: RouteSource,
         token_path: PathBuf,
     ) -> Self {
         Self {
@@ -73,11 +78,19 @@ impl AgentOps {
             session: None,
             parts: TargetParts {
                 base_url,
-                models,
+                models: Vec::new(),
                 token_path,
                 config_path: config_path.to_path_buf(),
             },
+            routes,
         }
+    }
+
+    /// The gateway facts for one call, with the routes published now.
+    fn parts(&self) -> TargetParts {
+        let mut parts = self.parts.clone();
+        parts.models = (self.routes)();
+        parts
     }
 
     /// Uses `session` for every adapter call instead of the process
@@ -151,7 +164,7 @@ impl AgentOps {
     }
 
     pub(crate) async fn status(&self) -> Result<AgentStatusResponse, ControlError> {
-        let parts = self.parts.clone();
+        let parts = self.parts();
         self.blocking(move |catalog, session| {
             let token = parts.token()?;
             let target = parts.target(token.clone());
@@ -190,7 +203,7 @@ impl AgentOps {
         request: AgentPlanRequest,
     ) -> Result<AgentPlanResponse, ControlError> {
         let force = known_action(request.action)? == AgentAction::Disconnect && request.force;
-        let parts = self.parts.clone();
+        let parts = self.parts();
         self.blocking(move |catalog, session| {
             let adapter = find(catalog, &id)?;
             let token = parts.token()?;
@@ -224,7 +237,7 @@ impl AgentOps {
         id: String,
         request: AgentConnectRequest,
     ) -> Result<AgentChangeResponse, ControlError> {
-        let parts = self.parts.clone();
+        let parts = self.parts();
         self.gated(move |catalog, session| {
             let adapter = find(catalog, &id)?;
             let token = parts.token()?;
@@ -262,7 +275,7 @@ impl AgentOps {
         id: String,
         request: AgentDisconnectRequest,
     ) -> Result<AgentChangeResponse, ControlError> {
-        let parts = self.parts.clone();
+        let parts = self.parts();
         self.gated(move |catalog, session| {
             let adapter = find(catalog, &id)?;
             let token = parts.token()?;
@@ -295,7 +308,7 @@ impl AgentOps {
     }
 
     pub(crate) async fn rotate_token(&self) -> Result<TokenRotateResponse, ControlError> {
-        let parts = self.parts.clone();
+        let parts = self.parts();
         let generation = self.token_generation.clone();
         self.gated(move |catalog, session| {
             let file = TokenFile::new(&parts.token_path);
@@ -637,7 +650,7 @@ mod tests {
             hofund_plugin_registry::agents(),
             std::path::Path::new("unused.toml"),
             "http://127.0.0.1:3425".to_owned(),
-            Vec::new(),
+            Arc::new(Vec::new),
             PathBuf::from("unused-token"),
         ));
         let finished = Arc::new(AtomicBool::new(false));

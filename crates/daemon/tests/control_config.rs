@@ -540,3 +540,115 @@ async fn read_only_config_dir_write_fails_clearly() {
     assert_eq!(client.status().await.generation, 1);
     running.shutdown().await;
 }
+
+#[tokio::test]
+async fn config_text_never_in_events_status_or_errors() {
+    let scratch = Scratch::new("secret-free");
+    let original = config("");
+    let running = start_at(&scratch, &scratch.path(), &original).await;
+    let client = Client::new(&running, &scratch);
+    let mut stream = client.events().await;
+
+    // A successful apply that adds a provider with a new secret.
+    let rotated = format!(
+        "{original}[[providers]]\nid = \"second\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}-second\"\n"
+    );
+    let (status, body) = client.apply(&revision(&original), &rotated).await;
+    let applied = ok(status, &body);
+    assert_eq!(
+        applied.text, rotated,
+        "only the config read echoes the text"
+    );
+
+    // A build failure whose message would quote a document value.
+    let broken = rotated.replace(
+        "upstreams = [\"chat\"]",
+        &format!("upstreams = [\"{SECRET}-route\"]"),
+    );
+    let (status, body) = client.apply(&applied.disk_revision, &broken).await;
+    assert_eq!(failure(status, &body, 422), ControlErrorKind::InvalidConfig);
+    assert!(
+        !String::from_utf8_lossy(&body).contains(SECRET),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // A failed reload of the same text on disk.
+    std::fs::write(scratch.path(), &broken).expect("hand edit");
+    let (status, body) = client.reload(&revision(&broken)).await;
+    assert_eq!(failure(status, &body, 422), ControlErrorKind::InvalidConfig);
+    assert!(
+        !String::from_utf8_lossy(&body).contains(SECRET),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // `next_events` fails on any frame that contains the secret.
+    let events = next_events(&mut stream, 3).await;
+    let names: Vec<_> = events.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["config_reloaded", "config_rejected", "config_rejected"]
+    );
+    let status = client.status().await;
+    assert_eq!(status.generation, 2);
+    let rendered = format!("{status:?}");
+    assert!(!rendered.contains(SECRET), "{rendered}");
+    drop(stream);
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn rotated_key_reaches_the_model_host_after_apply() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer rotated-key"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "fresh"}]})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let scratch = Scratch::new("rotated");
+    let original = config("").replace("http://127.0.0.1:9", &server.uri());
+    let running = start_at(&scratch, &scratch.path(), &original).await;
+    let client = Client::new(&running, &scratch);
+
+    let rotated = original.replace(SECRET, "rotated-key");
+    let (status, body) = client.apply(&revision(&original), &rotated).await;
+    ok(status, &body);
+    let (status, body) = client
+        .send(
+            client
+                .http
+                .post(format!(
+                    "{}/v1/hofund/providers/chat/models/refresh",
+                    client.base
+                ))
+                .header("content-type", "application/json"),
+        )
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let listed: hofund_control_proto::ModelListResponse =
+        decode_response(API_VERSION, &body).expect("model list");
+    let ids: Vec<_> = listed
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+    assert_eq!(ids, ["fresh"]);
+    running.shutdown().await;
+}

@@ -112,6 +112,45 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WriteFailure
     Ok(())
 }
 
+/// Why a locked one-shot write did not replace the file.
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "the one-shot hofundd (L8) is the first caller; until then the fields are read through Debug"
+)]
+pub(crate) enum LockedWriteError {
+    /// The sidecar lock could not be taken.
+    Lock(io::Error),
+    /// The file could not be read for the revision check.
+    Read(io::Error),
+    /// The bytes on disk no longer have the expected revision.
+    Stale { disk_revision: String },
+    /// The atomic write failed; the old file is intact.
+    Write(WriteFailure),
+}
+
+/// The write a one-shot `hofundd` config operation performs: take the
+/// sidecar lock, recheck the expected revision of the bytes on disk, and
+/// write atomically, all while the lock is held so no other writer (the
+/// daemon or another one-shot) can interleave. Returns the new revision.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn locked_write(
+    path: &Path,
+    fallback: Option<&Path>,
+    expected_revision: &str,
+    bytes: &[u8],
+) -> Result<String, LockedWriteError> {
+    let _lock =
+        SidecarLock::acquire(&primary_lock_path(path), fallback).map_err(LockedWriteError::Lock)?;
+    let disk = fs::read(path).map_err(LockedWriteError::Read)?;
+    let disk_revision = crate::control::revision(&disk);
+    if disk_revision != expected_revision {
+        return Err(LockedWriteError::Stale { disk_revision });
+    }
+    atomic_write(path, bytes).map_err(LockedWriteError::Write)?;
+    Ok(crate::control::revision(bytes))
+}
+
 fn create_temporary(directory: &Path, target: &Path) -> io::Result<(PathBuf, File)> {
     let stem = target.file_name().unwrap_or_default().to_string_lossy();
     let nanos = std::time::SystemTime::now()
@@ -174,6 +213,111 @@ fn sync_directory(_directory: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::revision;
+
+    const HOLD_LOCK: &str = "HOFUND_TEST_HOLD_CONFIG_LOCK";
+
+    /// Re-exec helper: run in a child process, it holds the sidecar lock for
+    /// the config named in `HOLD_LOCK` until `<config>.release` appears.
+    #[test]
+    #[ignore = "child process helper for one_shot_config_write_uses_sidecar_lock"]
+    fn sidecar_lock_holder_child() {
+        let Some(config) = std::env::var_os(HOLD_LOCK).map(PathBuf::from) else {
+            return;
+        };
+        let _lock = SidecarLock::acquire(&primary_lock_path(&config), None).expect("child lock");
+        fs::write(config.with_extension("held"), b"").expect("ready marker");
+        let release = config.with_extension("release");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !release.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !path.exists() {
+            assert!(std::time::Instant::now() < deadline, "{}", path.display());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn one_shot_config_write_uses_sidecar_lock() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("hofund.toml");
+        fs::write(&path, "original\n").expect("seed");
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "config_write::tests::sidecar_lock_holder_child",
+                "--include-ignored",
+                "--test-threads=1",
+            ])
+            .env(HOLD_LOCK, &path)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("lock holder");
+        wait_for(&path.with_extension("held"));
+
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                locked_write(&path, None, &revision(b"original\n"), b"one-shot\n")
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!writer.is_finished(), "the write must wait for the lock");
+        assert_eq!(fs::read(&path).expect("read"), b"original\n");
+        // The holder edits the file before it releases the lock.
+        fs::write(&path, "hand edit\n").expect("hand edit");
+        fs::write(path.with_extension("release"), b"").expect("release");
+        let outcome = writer.join().expect("writer");
+        assert!(
+            matches!(&outcome, Err(LockedWriteError::Stale { disk_revision }) if *disk_revision == revision(b"hand edit\n")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&path).expect("read"), b"hand edit\n");
+        assert!(child.wait().expect("child exit").success());
+
+        let written = locked_write(&path, None, &revision(b"hand edit\n"), b"one-shot\n")
+            .expect("write after release");
+        assert_eq!(written, revision(b"one-shot\n"));
+        assert_eq!(fs::read(&path).expect("read"), b"one-shot\n");
+    }
+
+    #[test]
+    fn concurrent_one_shot_edits_serialize_on_sidecar_lock() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("hofund.toml");
+        fs::write(&path, "").expect("seed");
+        let writers: Vec<_> = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut stale = 0_u32;
+                    loop {
+                        let current = fs::read(&path).expect("read");
+                        let mut next = current.clone();
+                        next.extend_from_slice(format!("edit {index}\n").as_bytes());
+                        match locked_write(&path, None, &revision(&current), &next) {
+                            Ok(_) => return stale,
+                            Err(LockedWriteError::Stale { .. }) => stale += 1,
+                            Err(error) => panic!("{error:?}"),
+                        }
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        let text = fs::read_to_string(&path).expect("read");
+        let mut lines: Vec<_> = text.lines().collect();
+        lines.sort_unstable();
+        let expected: Vec<String> = (0..8).map(|index| format!("edit {index}")).collect();
+        assert_eq!(lines, expected, "an edit was lost: {text}");
+    }
 
     #[test]
     fn atomic_write_replaces_bytes_exactly_and_leaves_no_temporary() {

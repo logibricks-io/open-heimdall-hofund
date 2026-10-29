@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use futures_util::StreamExt;
 use hofund_config::Config;
@@ -331,7 +331,7 @@ pub struct ModelsHost {
     public_drawers_override: bool,
     plan_overrides: HashMap<String, ModelPlan>,
     host_overrides: HashMap<String, String>,
-    instances: HashMap<String, RegisteredInstance>,
+    instances: RwLock<HashMap<String, RegisteredInstance>>,
     registry: Arc<dyn DaemonRegistry>,
     state: Mutex<super::models_state::StateStore>,
 }
@@ -347,7 +347,7 @@ impl ModelsHost {
             public_drawers_override: false,
             plan_overrides: HashMap::new(),
             host_overrides: HashMap::new(),
-            instances: HashMap::new(),
+            instances: RwLock::new(HashMap::new()),
             registry: Arc::new(RegistryAdapter),
             state: Mutex::new(super::models_state::StateStore::new(None)),
         }
@@ -377,13 +377,52 @@ impl ModelsHost {
         upstream: Arc<dyn UpstreamProvider>,
         built_base: impl Into<String>,
     ) {
-        self.instances.insert(
-            id.into(),
-            RegisteredInstance {
-                upstream,
-                built_base: built_base.into(),
-            },
-        );
+        self.instances
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(
+                id.into(),
+                RegisteredInstance {
+                    upstream,
+                    built_base: built_base.into(),
+                },
+            );
+    }
+
+    /// Replaces every registered instance with the ones a reload published.
+    ///
+    /// Each entry is `(provider id, upstream, built base)`. List and probe
+    /// calls that start afterwards use these instances; calls already running
+    /// keep the instance they cloned.
+    pub(crate) fn replace_instances(
+        &self,
+        instances: impl IntoIterator<Item = (String, Arc<dyn UpstreamProvider>, String)>,
+    ) {
+        let next = instances
+            .into_iter()
+            .map(|(id, upstream, built_base)| {
+                (
+                    id,
+                    RegisteredInstance {
+                        upstream,
+                        built_base,
+                    },
+                )
+            })
+            .collect();
+        *self
+            .instances
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = next;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn instance(&self, id: &str) -> Option<Arc<dyn UpstreamProvider>> {
+        self.instances
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .map(|instance| Arc::clone(&instance.upstream))
     }
 
     /// Reads a provider's picks, source-list ids, and delisted ids.
@@ -512,9 +551,12 @@ impl ModelsHost {
             .await
     }
 
+    /// Refreshes due model lists on every tick, reading the published
+    /// configuration from `config` each time so a reload takes effect on the
+    /// next tick.
     pub(super) fn spawn_refresh(
         self: &Arc<Self>,
-        config: Config,
+        config: tokio::sync::watch::Receiver<Arc<Config>>,
         config_path: std::path::PathBuf,
         timing: RefreshTiming,
     ) -> tokio::task::JoinHandle<()> {
@@ -523,7 +565,8 @@ impl ModelsHost {
             tokio::time::sleep(timing.start_delay).await;
             loop {
                 let now = std::time::SystemTime::now();
-                host.refresh_due_with_timing(&config, &config_path, now, timing)
+                let current = Arc::clone(&config.borrow());
+                host.refresh_due_with_timing(&current, &config_path, now, timing)
                     .await;
                 tokio::time::sleep(timing.tick).await;
             }
@@ -1405,12 +1448,15 @@ impl ModelsHost {
         endpoint: &Endpoint,
         path: &Path,
     ) -> Result<Arc<dyn UpstreamProvider>, DaemonError> {
-        if let Some(instance) = self
+        if let Some(upstream) = self
             .instances
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
             .get(&provider.id)
             .filter(|instance| instance.built_base == planned.base_url)
+            .map(|instance| Arc::clone(&instance.upstream))
         {
-            return Ok(Arc::clone(&instance.upstream));
+            return Ok(upstream);
         }
         let plugin_id = plugin_for(provider, planned.wire, &self.registry);
         let mut raw = super::raw_for(provider, planned, endpoint, &self.registry)?;

@@ -123,7 +123,16 @@ pub fn check(path: &Path) -> Result<(), DaemonError> {
     let config = load_path(path).map_err(show)?;
     warn(&config);
     let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
-    let _ = providers(&config, path, None, Mode::Check, None, None, &registry)?;
+    let _ = providers(
+        &config,
+        path,
+        None,
+        Mode::Check,
+        None,
+        None,
+        None,
+        &registry,
+    )?;
     Ok(())
 }
 
@@ -378,6 +387,7 @@ async fn start_inner(
         .await
         .map_err(|error| DaemonError::new(error.to_string()))?;
     let models_host = Arc::new(models_host);
+    runtime.attach_models(Arc::clone(&models_host));
     let config = Arc::new(config);
     if let Some(session) = control_session.as_mut() {
         let (shutdown_request, shutdown_requested) = tokio::sync::watch::channel(false);
@@ -474,7 +484,7 @@ async fn start_inner(
         running = running.with_resource(session);
     }
     let refresh = models_host.spawn_refresh(
-        config.as_ref().clone(),
+        runtime.config_updates(),
         path.to_path_buf(),
         refresh_timing.unwrap_or_default(),
     );
@@ -529,7 +539,32 @@ type RouterParts = (
     Snapshot,
     Arc<membership::Table>,
     HashMap<hofund_plugin_api::MemberId, String>,
+    HashMap<String, Instance>,
 );
+
+/// One built provider, kept so a reload can reuse it.
+///
+/// A reload reuses the instance only when the provider's configuration, the
+/// global timeouts, the plugin, the planned base URL and the credential
+/// fingerprint are all unchanged. Anything else builds a new instance; the
+/// retired one is dropped when the last request or snapshot holding it ends.
+#[derive(Clone)]
+pub(crate) struct Instance {
+    provider: hofund_config::Provider,
+    timeouts: (std::time::Duration, std::time::Duration),
+    plugin_id: String,
+    fingerprint: String,
+    pub(crate) adapter: Arc<dyn Provider>,
+    pub(crate) upstream: Arc<dyn UpstreamProvider>,
+    pub(crate) base_url: String,
+}
+
+/// Providers built from one configuration.
+pub(crate) struct Built {
+    pub(crate) built: BTreeMap<String, membership::BuiltProvider>,
+    /// Keyed by provider id.
+    pub(crate) instances: HashMap<String, Instance>,
+}
 
 fn router(
     config: &Config,
@@ -539,22 +574,32 @@ fn router(
     cooldowns: Arc<Cooldowns>,
     registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<RouterParts, DaemonError> {
-    let built = providers(
+    let Built { built, instances } = providers(
         config,
         path,
         max_idle_per_host,
         Mode::Serve,
-        models_host,
+        models_host.as_deref(),
+        None,
         Some(Arc::clone(&cooldowns)),
         registry,
     )?;
+    if let Some(host) = models_host {
+        for (id, instance) in &instances {
+            host.register_instance(
+                id.clone(),
+                Arc::clone(&instance.upstream),
+                instance.base_url.clone(),
+            );
+        }
+    }
     let fingerprints = built
         .iter()
         .map(|(id, provider)| (membership::member_id(id), provider.fingerprint.clone()))
         .collect();
     let (routes, policy) = route_plan(config);
     let (snapshot, table) = membership::open_with_table(&built, routes, policy, cooldowns)?;
-    Ok((snapshot, table, fingerprints))
+    Ok((snapshot, table, fingerprints, instances))
 }
 
 fn route_plan(
@@ -599,22 +644,26 @@ enum Mode {
     Serve,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn providers(
     config: &Config,
     path: &Path,
     max_idle_per_host: Option<usize>,
     mode: Mode,
-    mut models_host: Option<&mut ModelsHost>,
+    models_host: Option<&ModelsHost>,
+    reuse: Option<&HashMap<String, Instance>>,
     cooldowns: Option<Arc<Cooldowns>>,
     registry: &Arc<dyn DaemonRegistry>,
-) -> Result<BTreeMap<String, membership::BuiltProvider>, DaemonError> {
+) -> Result<Built, DaemonError> {
     let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
     if let Some(max_idle_per_host) = max_idle_per_host {
         limits = limits.with_max_idle_per_host(max_idle_per_host);
     }
+    let timeouts = (config.connect_timeout, config.read_timeout);
     let mut built = BTreeMap::new();
+    let mut instances = HashMap::new();
     for provider in &config.providers {
-        let planned = match models_host.as_deref() {
+        let planned = match models_host {
             Some(host) => host.planned(provider)?,
             None => plan_using(provider, |id| registry.find_preset(id), registry)?,
         };
@@ -622,37 +671,56 @@ fn providers(
         let timeout = endpoint.timeout;
         let protocol = protocol_of(planned.wire);
         let plugin_id = plugin_for(provider, planned.wire, registry);
-        let adapter = build_plugin(
-            provider,
-            &planned,
-            &endpoint,
-            path,
-            limits,
-            mode,
-            cooldowns.clone(),
-            registry,
-        )?;
-        if let Some(host) = models_host.as_deref_mut() {
-            host.register_instance(
-                provider.id.clone(),
-                adapter.upstream(),
-                planned.base_url.clone(),
-            );
-        }
-        let adapter: Arc<dyn Provider> = Arc::new(adapter);
+        let fingerprint = provider_fingerprint(provider, &endpoint)?;
+        let reused = reuse
+            .and_then(|previous| previous.get(&provider.id))
+            .filter(|previous| {
+                previous.fingerprint == fingerprint
+                    && previous.base_url == planned.base_url
+                    && previous.plugin_id == plugin_id
+                    && previous.timeouts == timeouts
+                    && previous.provider == *provider
+            })
+            .cloned();
+        let instance = match reused {
+            Some(instance) => instance,
+            None => {
+                let adapter = build_plugin(
+                    provider,
+                    &planned,
+                    &endpoint,
+                    path,
+                    limits,
+                    mode,
+                    cooldowns.clone(),
+                    registry,
+                )?;
+                let upstream = adapter.upstream();
+                Instance {
+                    provider: provider.clone(),
+                    timeouts,
+                    plugin_id: plugin_id.clone(),
+                    fingerprint: fingerprint.clone(),
+                    adapter: Arc::new(adapter),
+                    upstream,
+                    base_url: planned.base_url.clone(),
+                }
+            }
+        };
         built.insert(
             provider.id.clone(),
             membership::BuiltProvider {
-                adapter,
+                adapter: Arc::clone(&instance.adapter),
                 protocol,
                 timeout,
                 plugin_id,
                 preset_id: provider.preset.clone().unwrap_or_default(),
-                fingerprint: provider_fingerprint(provider, &endpoint)?,
+                fingerprint,
             },
         );
+        instances.insert(provider.id.clone(), instance);
     }
-    Ok(built)
+    Ok(Built { built, instances })
 }
 
 fn provider_fingerprint(

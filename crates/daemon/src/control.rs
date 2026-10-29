@@ -67,7 +67,7 @@ impl DaemonControl {
         shutdown: watch::Sender<bool>,
     ) -> Self {
         let registry_agents = registry.agents();
-        let config = ops.live().config.clone();
+        let routes_from = Arc::clone(&ops);
         Self {
             config_path: config_path.to_path_buf(),
             configured,
@@ -79,12 +79,18 @@ impl DaemonControl {
             agents: AgentOps::new(
                 registry_agents,
                 config_path,
-                format!("http://{}", config.listen),
-                config
-                    .routes
-                    .iter()
-                    .map(|route| route.model.clone())
-                    .collect(),
+                // The bound address, so a `listen` port of 0 still names the
+                // port agents can reach.
+                format!("http://{running}"),
+                Arc::new(move || {
+                    routes_from
+                        .live()
+                        .config
+                        .routes
+                        .iter()
+                        .map(|route| route.model.clone())
+                        .collect()
+                }),
                 token_path,
             ),
             usage,
