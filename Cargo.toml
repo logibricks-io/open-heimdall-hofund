@@ -18,6 +18,7 @@ members = [
     "plugins/providers/fixture",
     "plugins/providers/relay",
     "plugins/registry",
+    "plugins/subscriptions/claude",
     "plugins/subscriptions/codex",
     "crates/provider",
     "kits/agent",
@@ -60,6 +61,7 @@ hofund-plugin-host = { version = "0.1.0", path = "crates/plugin-host" }
 hofund-plugin-echo = { version = "0.1.0", path = "plugins/inbound/echo" }
 hofund-plugin-registry = { version = "0.1.0", path = "plugins/registry" }
 hofund-plugin-relay = { version = "0.1.0", path = "plugins/providers/relay" }
+hofund-plugin-subscription-claude = { version = "0.1.0", path = "plugins/subscriptions/claude" }
 hofund-plugin-subscription-codex = { version = "0.1.0", path = "plugins/subscriptions/codex" }
 hofund-plugin-sdk = { version = "0.1.0", path = "crates/plugin-sdk" }
 hofund-provider = { version = "0.1.0", path = "crates/provider" }

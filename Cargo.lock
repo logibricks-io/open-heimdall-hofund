@@ -1909,6 +1909,7 @@ dependencies = [
  "hofund-plugin-registry",
  "hofund-plugin-relay",
  "hofund-plugin-sdk",
+ "hofund-plugin-subscription-claude",
  "hofund-plugin-subscription-codex",
  "hofund-provider",
  "hofund-quirks",
@@ -1947,9 +1948,20 @@ dependencies = [
  "secrecy",
  "serde_json",
  "syn 3.0.9",
+ "tempfile",
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-claude"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
 ]
 
 [[package]]

@@ -29,10 +29,12 @@ cursor_pages
 form_body
 gemini_models
 gemini_models_with_dropped
+json
 json_error_message
 mod classify
 mod oauth
 mod page
+mod process
 mod register
 mod sigv4
 mod transport
@@ -54,6 +56,7 @@ oauth::TokenError::const fn message (self) -> & 'static str
 oauth::TokenSet
 oauth::account_id_from
 oauth::authorize_url
+oauth::client_code_exchange_form
 oauth::code_exchange_form
 oauth::constant_time_eq
 oauth::detached
@@ -61,9 +64,11 @@ oauth::fn form_body (pairs : & [(& str , & str)]) -> String
 oauth::fn parse_access_token (body : & [u8]) -> Result < AccessToken , TokenError >
 oauth::fn parse_iam_access_token (body : & [u8]) -> Result < IamAccessToken , TokenError >
 oauth::fn refresh_form (client_id : & str , client_secret : & str , refresh_token : & str) -> String
+oauth::fn refresh_secret_form (client_id : & str , client_secret : & str , refresh_token : & SecretString ,) -> String
 oauth::new_state
 oauth::parse_token_set
 oauth::same_secret
+oauth::secret_text
 oauth::token_error
 oauth::unverified_claims
 page::PageError derives(Clone, Copy, Debug, PartialEq, Eq)
@@ -85,6 +90,8 @@ page::fn json_error_message (body : & [u8]) -> String
 page::fn next_cursor (page : & [u8]) -> Result < Option < String > , PageError >
 page::fn string_items (page : & [u8] , key : & str) -> Result < Vec < String > , PageError >
 parse_access_token
+process::fn find_in (name : BinaryName , path : Option < & OsStr > , pathext : Option < & OsStr >) -> Option < PathBuf >
+process::fn find_program (name : BinaryName) -> Option < PathBuf >
 refresh_form
 register::Contribution derives(Default)
 register::Contribution::fn new () -> Self

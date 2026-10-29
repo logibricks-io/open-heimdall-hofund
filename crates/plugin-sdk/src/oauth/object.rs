@@ -122,6 +122,13 @@ impl fmt::Debug for SecretObject {
     }
 }
 
+/// The text of `secret`, for a plugin that hands it to a vendor tool, such
+/// as a code the user pasted. Do not log, format, or store the result.
+#[must_use]
+pub fn secret_text(secret: &SecretString) -> &str {
+    secret.expose_secret()
+}
+
 /// Whether `a` and `b` hold the same text, in time that depends only on
 /// their lengths.
 #[must_use]
@@ -148,10 +155,15 @@ mod tests {
     use hofund_plugin_api::{PluginErrorKind, SecretString};
     use secrecy::ExposeSecret;
 
-    use super::{SecretObject, constant_time_eq, same_secret};
+    use super::{SecretObject, constant_time_eq, same_secret, secret_text};
 
     fn secret(text: &str) -> SecretString {
         SecretString::from(text.to_owned())
+    }
+
+    #[test]
+    fn secret_text_is_the_whole_secret() {
+        assert_eq!(secret_text(&secret("code#state")), "code#state");
     }
 
     #[test]

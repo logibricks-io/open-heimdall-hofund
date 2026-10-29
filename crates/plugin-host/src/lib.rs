@@ -19,6 +19,7 @@ mod accounts;
 mod loopback;
 mod piped;
 mod pool;
+mod scripted;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
@@ -41,6 +42,7 @@ pub use accounts::{AccountStorageKind, AccountStore, StoreError};
 pub use hofund_plugin_api::kernel::ObserveBackend;
 pub use loopback::LoopbackRegistry;
 pub use pool::{HttpLimits, HttpProfile, PooledHttp};
+pub use scripted::{PipedScript, PipedSpawn};
 
 /// The kernel side of a browser sign-in: the loopback listeners and the
 /// pasted-address check.
@@ -909,10 +911,14 @@ impl SchedulerBackend for RecordingScheduler {
 }
 
 /// Spawn requests the recording backend accepted. Nothing is executed.
+///
+/// A piped spawn plays the next [`PipedScript`] queued with
+/// [`RecordingProcess::script_piped`], and is refused when none is queued.
 #[derive(Default)]
 pub struct RecordingProcess {
     programs: Mutex<Vec<PathBuf>>,
     next: Mutex<u32>,
+    piped: scripted::Piped,
 }
 
 impl RecordingProcess {
@@ -920,6 +926,42 @@ impl RecordingProcess {
     #[must_use]
     pub fn programs(&self) -> Vec<PathBuf> {
         self.programs.lock().expect("process lock").clone()
+    }
+
+    /// Queues what the next piped child does.
+    pub fn script_piped(&self, script: PipedScript) {
+        self.piped
+            .scripts
+            .lock()
+            .expect("process lock")
+            .push_back(script);
+    }
+
+    /// Piped spawns in order.
+    #[must_use]
+    pub fn piped_spawns(&self) -> Vec<PipedSpawn> {
+        self.piped.spawns.lock().expect("process lock").clone()
+    }
+
+    /// Every write to a piped child's input, in order.
+    #[must_use]
+    pub fn stdin_writes(&self) -> Vec<Vec<u8>> {
+        self.piped.shared.stdin.lock().expect("stdin lock").clone()
+    }
+
+    /// How many piped children were dropped, which kills a real child.
+    #[must_use]
+    pub fn piped_dropped(&self) -> usize {
+        self.piped
+            .shared
+            .dropped
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn next_id(&self) -> u32 {
+        let mut next = self.next.lock().expect("process lock");
+        *next = next.saturating_add(1);
+        *next
     }
 }
 
@@ -933,9 +975,7 @@ impl ProcessBackend for RecordingProcess {
         _cwd: PathBuf,
     ) -> Result<u32, PluginError> {
         self.programs.lock().expect("process lock").push(program);
-        let mut next = self.next.lock().expect("process lock");
-        *next = next.saturating_add(1);
-        Ok(*next)
+        Ok(self.next_id())
     }
 
     async fn wait(&self, id: u32) -> Result<i32, PluginError> {
@@ -952,6 +992,35 @@ impl ProcessBackend for RecordingProcess {
             return Err(PluginError::io("process id is not a child of this host"));
         }
         Ok(())
+    }
+
+    async fn spawn_piped(
+        &self,
+        program: PathBuf,
+        args: Vec<OsString>,
+        env: Vec<(OsString, OsString)>,
+        cwd: PathBuf,
+    ) -> Result<Box<dyn PipedChildBackend>, PluginError> {
+        let Some(script) = self.piped.scripts.lock().expect("process lock").pop_front() else {
+            return Err(PluginError::unsupported("no piped child is scripted"));
+        };
+        let spawn = PipedSpawn {
+            program,
+            args,
+            env,
+            cwd,
+        };
+        self.piped
+            .spawns
+            .lock()
+            .expect("process lock")
+            .push(spawn.clone());
+        Ok(Box::new(scripted::ScriptedChild::start(
+            self.next_id(),
+            spawn,
+            script,
+            Arc::clone(&self.piped.shared),
+        )))
     }
 }
 

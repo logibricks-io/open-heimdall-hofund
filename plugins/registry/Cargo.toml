@@ -11,7 +11,8 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["codex", "echo", "relay"]
+default = ["claude", "codex", "echo", "relay"]
+claude = ["dep:hofund-plugin-subscription-claude"]
 codex = ["dep:hofund-plugin-subscription-codex"]
 echo = ["dep:hofund-plugin-echo"]
 relay = ["dep:hofund-plugin-relay"]
@@ -23,6 +24,7 @@ hofund-plugin-api = { workspace = true, features = ["kernel-internal"] }
 hofund-plugin-sdk = { workspace = true }
 hofund-plugin-echo = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }
+hofund-plugin-subscription-claude = { workspace = true, optional = true }
 hofund-plugin-subscription-codex = { workspace = true, optional = true }
 hofund-provider = { workspace = true }
 hofund-quirks = { workspace = true }
