@@ -76,6 +76,12 @@ pub type Rewrite = Arc<
     dyn Fn(&mut serde_json::Map<String, serde_json::Value>) -> Vec<(String, String)> + Send + Sync,
 >;
 
+/// A rewrite of each JSON value a 2xx response carries, run by
+/// [`Sent::complete`] before the body is decoded or passed on: the whole
+/// body of a unary call, and the payload of each `data:` line of a stream.
+/// A body or line that is not JSON is passed on as it is.
+pub type Unwrap = Arc<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>;
+
 /// Where a protocol's calls go under the base URL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Path {
@@ -106,6 +112,8 @@ pub struct Target {
     model_root: &'static str,
     signer: Option<AwsSigner>,
     rewrite: Option<Rewrite>,
+    method_root: Option<&'static str>,
+    unwrap: Option<Unwrap>,
 }
 
 impl Target {
@@ -122,6 +130,8 @@ impl Target {
             model_root: "models",
             signer: None,
             rewrite: None,
+            method_root: None,
+            unwrap: None,
         }
     }
 
@@ -173,6 +183,25 @@ impl Target {
         self.rewrite = Some(rewrite);
         self
     }
+
+    /// Posts Generative Language calls to `{base}/{root}:{method}`, with no
+    /// model in the path, as Code Assist's `v1internal` takes them; the model
+    /// then rides in the body, set by a [`Target::rewrite`]. Slashes around
+    /// `root` are dropped. [`count_input`] on such a target is
+    /// [`CountOutcome::Unsupported`]. Other protocols ignore it.
+    #[must_use]
+    pub fn method_root(mut self, root: &'static str) -> Self {
+        self.method_root = Some(root.trim_matches('/'));
+        self
+    }
+
+    /// The rewrite [`Sent::complete`] applies to each JSON value of a 2xx
+    /// response, such as lifting the reply out of an envelope.
+    #[must_use]
+    pub fn unwrap(mut self, unwrap: Unwrap) -> Self {
+        self.unwrap = Some(unwrap);
+        self
+    }
 }
 
 impl fmt::Debug for Target {
@@ -188,6 +217,8 @@ impl fmt::Debug for Target {
             .field("model_root", &self.model_root)
             .field("signer", &self.signer)
             .field("rewrite", &self.rewrite.is_some())
+            .field("method_root", &self.method_root)
+            .field("unwrap", &self.unwrap.is_some())
             .finish()
     }
 }
@@ -221,6 +252,7 @@ pub struct Sent {
     codec: &'static dyn Codec,
     cross_protocol: bool,
     streaming: bool,
+    unwrap: Option<Unwrap>,
 }
 
 impl fmt::Debug for Sent {
@@ -231,6 +263,7 @@ impl fmt::Debug for Sent {
             .field("codec", &self.codec.id())
             .field("cross_protocol", &self.cross_protocol)
             .field("streaming", &self.streaming)
+            .field("unwrap", &self.unwrap.is_some())
             .finish()
     }
 }
@@ -243,7 +276,10 @@ impl Sent {
     /// Returns [`PluginError`] when the body cannot be read or decoded, or a
     /// stream's first event is an upstream failure.
     pub async fn complete(self) -> Result<Completion, PluginError> {
-        let body = self.response.into_body();
+        let mut body = self.response.into_body();
+        if let Some(unwrap) = self.unwrap {
+            body = unwrapped(body, unwrap, self.streaming);
+        }
         if self.cross_protocol {
             decoded(body, self.codec, self.streaming).await
         } else {
@@ -291,13 +327,16 @@ pub async fn send(
         let body = prepare_body(target, codec, request, prepare, inbound)?;
         converse_call(target, &model, streaming, body)?.1
     } else {
-        let url = url_for(
-            &target.base_url,
-            target.model_root,
-            path,
-            &request.model,
-            method,
-        )?;
+        let url = match target.method_root {
+            Some(root) if path == Path::Model => method_url(&target.base_url, root, method),
+            _ => url_for(
+                &target.base_url,
+                target.model_root,
+                path,
+                &request.model,
+                method,
+            )?,
+        };
         let body = prepare_body(target, codec, request, prepare, inbound)?;
         let (body, added) = rewritten(target.rewrite.as_ref(), body);
         let mut call = call(target, codec, secret, url)?;
@@ -315,6 +354,7 @@ pub async fn send(
         codec,
         cross_protocol,
         streaming,
+        unwrap: target.unwrap.clone(),
     })
 }
 
@@ -343,6 +383,9 @@ pub async fn count_input(
 ) -> Result<CountOutcome, PluginError> {
     let field = match target.protocol {
         ProtocolId::ANTHROPIC_MESSAGES => "input_tokens",
+        ProtocolId::GENERATIVE_LANGUAGE if target.method_root.is_some() => {
+            return Ok(CountOutcome::Unsupported);
+        }
         ProtocolId::GENERATIVE_LANGUAGE => "totalTokens",
         other => {
             return Err(PluginError::unsupported(format!(
@@ -445,6 +488,16 @@ fn url_for(
             "{base}{}",
             sigv4::model_wire_uri(model, matches!(method, Method::Stream))
         )),
+    }
+}
+
+/// The URL of a Generative Language call on a [`Target::method_root`].
+fn method_url(base: &str, root: &str, method: Method) -> String {
+    let base = base.trim_end_matches('/');
+    match method {
+        Method::Generate => format!("{base}/{root}:generateContent"),
+        Method::Stream => format!("{base}/{root}:streamGenerateContent?alt=sse"),
+        Method::Count => format!("{base}/{root}:countTokens"),
     }
 }
 
@@ -722,9 +775,131 @@ fn status_failure(
     } else {
         PluginError::status_error(status, message)
     };
-    match retry_after {
+    match retry_after.or_else(|| retry_delay(body)) {
         Some(after) => error.with_retry_after(after),
         None => error,
+    }
+}
+
+/// The wait a Google error body names in its `google.rpc.RetryInfo`
+/// detail, such as `"retryDelay": "3.5s"`. The error may come alone or as
+/// the first entry of an array.
+fn retry_delay(body: &[u8]) -> Option<std::time::Duration> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let error = match &value {
+        serde_json::Value::Array(items) => items.first()?.get("error")?,
+        other => other.get("error")?,
+    };
+    let delay = error
+        .get("details")?
+        .as_array()?
+        .iter()
+        .filter(|detail| {
+            detail.get("@type").and_then(serde_json::Value::as_str)
+                == Some("type.googleapis.com/google.rpc.RetryInfo")
+        })
+        .find_map(|detail| detail.get("retryDelay")?.as_str())?;
+    let seconds: f64 = delay.strip_suffix('s')?.parse().ok()?;
+    (seconds.is_finite() && seconds >= 0.0).then(|| std::time::Duration::from_secs_f64(seconds))
+}
+
+/// `body` with `unwrap` applied to its JSON: the whole body when unary,
+/// each `data:` line's payload when streaming.
+fn unwrapped(body: BodyStream, unwrap: Unwrap, streaming: bool) -> BodyStream {
+    if !streaming {
+        return BodyStream::from_stream(futures_util::stream::once(async move {
+            let bytes = collect(body).await?;
+            Ok(Bytes::from(unwrap_json(&unwrap, bytes)))
+        }));
+    }
+    let lines = Lines {
+        body,
+        unwrap,
+        pending: Vec::new(),
+        finished: false,
+    };
+    BodyStream::from_stream(futures_util::stream::unfold(
+        lines,
+        |mut lines| async move { lines.next().await.map(|item| (item, lines)) },
+    ))
+}
+
+/// `bytes` after `unwrap` when they are JSON, else as they are.
+fn unwrap_json(unwrap: &Unwrap, bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(value) = serde_json::from_slice(&bytes) else {
+        return bytes;
+    };
+    serde_json::to_vec(&unwrap(value)).unwrap_or(bytes)
+}
+
+/// The event-stream rewrite behind [`unwrapped`]: whole lines out, the
+/// payload of each `data:` line unwrapped.
+struct Lines {
+    body: BodyStream,
+    unwrap: Unwrap,
+    /// Bytes after the last line end read so far.
+    pending: Vec<u8>,
+    finished: bool,
+}
+
+impl Lines {
+    async fn next(&mut self) -> Option<Result<Bytes, PluginError>> {
+        loop {
+            if self.finished {
+                return None;
+            }
+            match self.body.next_chunk().await {
+                None => {
+                    self.finished = true;
+                    let rest = std::mem::take(&mut self.pending);
+                    if rest.is_empty() {
+                        return None;
+                    }
+                    return Some(Ok(Bytes::from(self.line(&rest))));
+                }
+                Some(Err(error)) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                Some(Ok(chunk)) => {
+                    self.pending.extend_from_slice(&chunk);
+                    let Some(end) = self.pending.iter().rposition(|byte| *byte == b'\n') else {
+                        continue;
+                    };
+                    let rest = self.pending.split_off(end + 1);
+                    let whole = std::mem::replace(&mut self.pending, rest);
+                    let mut out = Vec::with_capacity(whole.len());
+                    for line in whole.split_inclusive(|byte| *byte == b'\n') {
+                        out.extend(self.line(line));
+                    }
+                    return Some(Ok(Bytes::from(out)));
+                }
+            }
+        }
+    }
+
+    /// One line, with its line end, unwrapped when it is a JSON `data:` line.
+    fn line(&self, line: &[u8]) -> Vec<u8> {
+        let body_end = line
+            .iter()
+            .rposition(|byte| !matches!(byte, b'\r' | b'\n'))
+            .map_or(0, |last| last + 1);
+        let (text, end) = line.split_at(body_end);
+        let Some(payload) = text.strip_prefix(b"data:") else {
+            return line.to_vec();
+        };
+        let payload = payload.strip_prefix(b" ").unwrap_or(payload);
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
+            return line.to_vec();
+        };
+        let Ok(json) = serde_json::to_vec(&(self.unwrap)(value)) else {
+            return line.to_vec();
+        };
+        let mut out = Vec::with_capacity(json.len() + 8);
+        out.extend_from_slice(b"data: ");
+        out.extend(json);
+        out.extend_from_slice(end);
+        out
     }
 }
 
@@ -1506,5 +1681,141 @@ mod tests {
             let body = serde_json::json!({"error": {"message": message}}).to_string();
             assert!(!endpoint_unsupported(body.as_bytes()), "{message}");
         }
+    }
+
+    fn lift() -> super::Unwrap {
+        std::sync::Arc::new(|value: serde_json::Value| match value {
+            serde_json::Value::Object(mut map) if map.contains_key("response") => {
+                map.remove("response").unwrap_or_default()
+            }
+            other => other,
+        })
+    }
+
+    fn chunked(chunks: &[&str]) -> hofund_plugin_api::BodyStream {
+        let items: Vec<Result<bytes::Bytes, hofund_plugin_api::PluginError>> = chunks
+            .iter()
+            .map(|chunk| Ok(bytes::Bytes::from(chunk.as_bytes().to_vec())))
+            .collect();
+        hofund_plugin_api::BodyStream::from_stream(futures_util::stream::iter(items))
+    }
+
+    fn drained(body: hofund_plugin_api::BodyStream) -> (Vec<String>, String) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let mut body = body;
+            let mut pieces = Vec::new();
+            while let Some(chunk) = body.next_chunk().await {
+                pieces.push(String::from_utf8(chunk.expect("chunk").to_vec()).expect("utf8"));
+            }
+            let all = pieces.concat();
+            (pieces, all)
+        })
+    }
+
+    #[test]
+    fn method_root_urls_carry_no_model() {
+        let base = "https://ca.example/";
+        assert_eq!(
+            super::method_url(base, "v1internal", Method::Generate),
+            "https://ca.example/v1internal:generateContent"
+        );
+        assert_eq!(
+            super::method_url(base, "v1internal", Method::Stream),
+            "https://ca.example/v1internal:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            super::method_url(base, "v1internal", Method::Count),
+            "https://ca.example/v1internal:countTokens"
+        );
+        let target = Target::new(ProtocolId::GENERATIVE_LANGUAGE, base).method_root("/v1internal/");
+        assert_eq!(target.method_root, Some("v1internal"));
+        let shown = format!("{:?}", target.unwrap(lift()));
+        assert!(
+            shown.contains("method_root: Some(\"v1internal\")"),
+            "{shown}"
+        );
+        assert!(shown.contains("unwrap: true"), "{shown}");
+        let plain = format!("{:?}", Target::new(ProtocolId::GENERATIVE_LANGUAGE, base));
+        assert!(plain.contains("unwrap: false"), "{plain}");
+    }
+
+    #[test]
+    fn a_stream_is_unwrapped_line_by_line_across_chunks() {
+        let body = chunked(&[
+            "event: x\r\ndata: {\"respo",
+            "nse\":{\"a\":1}}\r\n\r\ndata: [DONE]\n",
+            ": note\ndata:{\"b\":2}\n",
+            "data: {\"response\":{\"c\":3}}",
+        ]);
+        let (pieces, all) = drained(super::unwrapped(body, lift(), true));
+        assert_eq!(
+            all,
+            "event: x\r\ndata: {\"a\":1}\r\n\r\ndata: [DONE]\n: note\ndata: {\"b\":2}\ndata: {\"c\":3}"
+        );
+        assert_eq!(pieces[0], "event: x\r\n", "a partial line waits");
+        assert_eq!(pieces.len(), 4, "{pieces:?}");
+    }
+
+    #[test]
+    fn a_stream_without_a_trailing_remainder_ends_cleanly() {
+        let (pieces, all) = drained(super::unwrapped(
+            chunked(&["data: {\"response\":1}\n", ""]),
+            lift(),
+            true,
+        ));
+        assert_eq!(all, "data: 1\n");
+        assert_eq!(pieces, vec!["data: 1\n".to_owned()]);
+    }
+
+    #[test]
+    fn a_unary_body_is_unwrapped_whole_and_non_json_passes() {
+        let (_, all) = drained(super::unwrapped(
+            chunked(&["{\"response\":", "{\"x\":true}}"]),
+            lift(),
+            false,
+        ));
+        assert_eq!(all, "{\"x\":true}");
+        let (_, all) = drained(super::unwrapped(chunked(&["not json"]), lift(), false));
+        assert_eq!(all, "not json");
+    }
+
+    #[test]
+    fn google_retry_info_sets_the_retry_after() {
+        let detail = |delay: &str| {
+            serde_json::json!({"error": {"code": 429, "message": "slow down", "details": [
+                {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "retryDelay": "99s"},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": delay},
+            ]}})
+        };
+        let one = detail("3.5s").to_string();
+        assert_eq!(
+            super::retry_delay(one.as_bytes()),
+            Some(std::time::Duration::from_millis(3500))
+        );
+        let listed = serde_json::json!([detail("2s")]).to_string();
+        assert_eq!(
+            super::retry_delay(listed.as_bytes()),
+            Some(std::time::Duration::from_secs(2))
+        );
+        for bad in ["-1s", "2", "xs", "NaNs", "infs"] {
+            let body = detail(bad).to_string();
+            assert_eq!(super::retry_delay(body.as_bytes()), None, "{bad}");
+        }
+        assert_eq!(super::retry_delay(b"[]"), None);
+        assert_eq!(super::retry_delay(b"{}"), None);
+        let error = super::status_failure(429, None, one.as_bytes());
+        assert_eq!(
+            error.retry_after(),
+            Some(std::time::Duration::from_millis(3500))
+        );
+        let header =
+            super::status_failure(429, Some(std::time::Duration::from_secs(7)), one.as_bytes());
+        assert_eq!(
+            header.retry_after(),
+            Some(std::time::Duration::from_secs(7))
+        );
     }
 }

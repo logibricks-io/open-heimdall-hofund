@@ -53,6 +53,7 @@ mod probe
 mod process
 mod register
 mod sigv4
+mod time
 mod transport
 mod wire
 next_cursor
@@ -159,6 +160,7 @@ sigv4::fn payload_hash (payload : & [u8]) -> String
 sigv4::fn sign (input : & SignInput < '_ >) -> Result < Signature , SignError >
 string_items
 text_response
+time::fn parse_rfc3339 (text : & str) -> Option < SystemTime >
 tracing
 transport::Call derives(Clone)
 transport::Call::async fn fetch (self , http : & HttpHandle) -> Result < Reply , PluginError >
@@ -192,11 +194,14 @@ wire::Sent::async fn complete (self) -> Result < Completion , PluginError >
 wire::Target derives(Clone)
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
+wire::Target::fn method_root (mut self , root : & 'static str) -> Self
 wire::Target::fn model_root (mut self , root : & 'static str) -> Self
 wire::Target::fn new (protocol : ProtocolId , base_url : impl Into < String >) -> Self
 wire::Target::fn quirks (mut self , quirks : Option < & 'static hofund_quirks :: Profile >) -> Self
 wire::Target::fn rewrite (mut self , rewrite : Rewrite) -> Self
 wire::Target::fn signer (mut self , signer : AwsSigner) -> Self
+wire::Target::fn unwrap (mut self , unwrap : Unwrap) -> Self
+wire::Unwrap
 wire::async fn count_input (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , mut request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
 wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
 wire::async fn send (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Sent , PluginError >

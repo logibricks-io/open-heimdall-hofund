@@ -5,13 +5,14 @@ use std::time::Duration;
 
 use hofund_kit_subscription::{TestHost, block_on, join_all};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, RawTable, RawValue,
-    SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription, SubscriptionFactory,
+    AccountId, AccountStatus, Completion, PluginErrorKind, PluginId, PluginKind, ProtocolId,
+    RawTable, RawValue, SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription,
+    SubscriptionFactory,
 };
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache, account_id_from};
 
 use crate::project::{self, Setup};
-use crate::{CLIENT_SECRET, Endpoints, factory_with_endpoints, sign_in, tokens};
+use crate::{CLIENT_SECRET, Endpoints, factory_with_endpoints, sign_in, tokens, upstream};
 
 const SESSION: &str = "0123456789abcdef0123456789abcdef";
 const TOKEN_URL: &str = "https://oauth.test/token";
@@ -850,4 +851,249 @@ fn exchange_form_carries_the_client_secret() {
         Some(CLIENT_SECRET)
     );
     assert_eq!(param(&pairs, "code_verifier").as_deref(), Some("v"));
+}
+
+fn gl_request(model: &str, stream: bool) -> hofund_plugin_api::Request {
+    let mut request = hofund_plugin_api::ProbeQuery::new(ProtocolId::GENERATIVE_LANGUAGE, model)
+        .expect("query")
+        .minimal_request();
+    request.stream = stream;
+    request
+}
+
+fn raw_text(completion: Completion) -> String {
+    let Completion::Raw(mut body) = completion else {
+        panic!("a same-protocol reply is passed on raw");
+    };
+    block_on(async move {
+        let mut out = Vec::new();
+        while let Some(chunk) = body.next_chunk().await {
+            out.extend_from_slice(&chunk.expect("chunk"));
+        }
+        String::from_utf8(out).expect("utf8")
+    })
+}
+
+fn ready(host: &TestHost, project: Option<&str>) -> (Arc<dyn Subscription>, AccountId) {
+    let id = seed(host, &signed_in_blob(project));
+    host.http().enqueue(token_reply("acc-1", None, 3600));
+    (subscription(host), id)
+}
+
+const UNARY_REPLY: &str = r#"{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4}},"traceId":"t-1"}"#;
+
+#[test]
+fn envelope_adds_project_and_prompt_id() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let (sub, id) = ready(&host, Some("proj-9"));
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    block_on(upstream.execute(
+        gl_request("models/gemini-2.5-pro", false),
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ))
+    .expect("execute");
+    let call = &host.http().calls()[1];
+    assert_eq!(call.uri(), method_url("generateContent"));
+    let sent: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(call.body()).expect("json body");
+    assert_eq!(sent["model"], "gemini-2.5-pro");
+    assert_eq!(sent["project"], "proj-9");
+    let prompt = sent["user_prompt_id"].as_str().expect("prompt id");
+    assert!(prompt.len() >= 12, "{prompt}");
+    assert!(sent["request"]["contents"].is_array(), "{sent}");
+    assert!(sent["request"].get("model").is_none(), "{sent}");
+    let sensitive = call.sensitive_headers();
+    assert!(
+        sensitive.iter().any(|name| name == "authorization"),
+        "{sensitive:?}"
+    );
+    assert!(
+        sensitive.iter().any(|name| name == "user-agent"),
+        "{sensitive:?}"
+    );
+    assert_eq!(
+        upstream::headers("models/gemini-2.5-pro"),
+        vec![(
+            "user-agent".to_owned(),
+            project::user_agent(Some("gemini-2.5-pro"))
+        )]
+    );
+}
+
+#[test]
+fn the_configured_project_is_used_when_none_is_stored() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &signed_in_blob(None));
+    host.http().enqueue(token_reply("acc-1", None, 3600));
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    let sub = subscription_with(&host, Some("from-config"));
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    block_on(upstream.execute(
+        gl_request("gemini-2.5-pro", false),
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ))
+    .expect("execute");
+    let sent = posts_to(&host, &method_url("generateContent"));
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0].contains(r#""project":"from-config""#),
+        "{}",
+        sent[0]
+    );
+}
+
+#[test]
+fn sse_response_unwrapped() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let (sub, id) = ready(&host, Some("proj-9"));
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "text/event-stream")],
+        "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"a\"}]}}]}}\r\n\r\n"
+            .as_bytes()
+            .to_vec(),
+    );
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let completion = block_on(upstream.execute(
+        gl_request("gemini-2.5-pro", true),
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ))
+    .expect("execute");
+    assert_eq!(
+        raw_text(completion),
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"a\"}]}}]}\r\n\r\n"
+    );
+    assert_eq!(
+        host.http().calls()[1].uri(),
+        format!("{CODE_ASSIST}/v1internal:streamGenerateContent?alt=sse")
+    );
+}
+
+#[test]
+fn a_unary_reply_is_unwrapped_before_decoding() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let (sub, id) = ready(&host, Some("proj-9"));
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let mut request = gl_request("gemini-2.5-pro", false);
+    request.stream = false;
+    let completion = block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("execute");
+    let Completion::Unary(response) = completion else {
+        panic!("a unary reply decodes");
+    };
+    let usage = response.usage.expect("usage from the lifted reply");
+    assert_eq!(usage.input_tokens, Some(3));
+}
+
+#[test]
+fn a_401_refreshes_once_and_resends() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let (sub, id) = ready(&host, Some("proj-9"));
+    host.http().enqueue_response(401, &[], b"{}".to_vec());
+    host.http().enqueue(token_reply("acc-2", None, 3600));
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    block_on(upstream.execute(
+        gl_request("gemini-2.5-pro", false),
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ))
+    .expect("execute");
+    let calls = host.http().calls();
+    let uris: Vec<&str> = calls.iter().map(|call| call.uri()).collect();
+    let generate = method_url("generateContent");
+    assert_eq!(uris, vec![TOKEN_URL, &generate, TOKEN_URL, &generate]);
+}
+
+#[test]
+fn resource_exhausted_429_maps_retry_after() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let (sub, id) = ready(&host, Some("proj-9"));
+    host.http().enqueue_response(
+        429,
+        &[("content-type", "application/json")],
+        br#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"12s"}]}}"#.to_vec(),
+    );
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let error = block_on(upstream.execute(
+        gl_request("gemini-2.5-pro", false),
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ))
+    .err()
+    .expect("429");
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(12)));
+    assert_eq!(host.http().calls().len(), 2, "a 429 is not retried here");
+}
+
+const QUOTA_REPLY: &str = r#"{"buckets":[
+    {"modelId":"gemini-2.5-pro","remainingFraction":0.25,"resetTime":"2026-11-01T00:00:00Z","tokenType":"REQUESTS"},
+    {"modelId":"gemini-2.5-pro_vertex","remainingFraction":0.5},
+    {"modelId":"gemini-2.5-flash","remainingFraction":1}
+]}"#;
+
+#[test]
+fn quota_windows_are_model_scoped() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let (sub, id) = ready(&host, Some("proj-9"));
+    host.http().enqueue(QUOTA_REPLY.as_bytes().to_vec());
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(
+        posts_to(&host, &method_url("retrieveUserQuota")),
+        vec![r#"{"project":"proj-9"}"#.to_owned()]
+    );
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].name(), "gemini-2.5-pro");
+    assert_eq!(windows[0].scope_model(), Some("gemini-2.5-pro"));
+    assert_eq!(windows[0].used(), 7_500);
+    assert_eq!(windows[0].limit(), Some(10_000));
+    assert_eq!(
+        windows[0].resets_at(),
+        Some(std::time::UNIX_EPOCH + Duration::from_secs(1_793_491_200))
+    );
+    assert_eq!(windows[1].scope_model(), Some("gemini-2.5-flash"));
+    assert_eq!(windows[1].used(), 0);
+    assert_eq!(windows[1].resets_at(), None);
+}
+
+#[test]
+fn models_come_from_the_quota_buckets() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let (sub, id) = ready(&host, Some("proj-9"));
+    host.http().enqueue(QUOTA_REPLY.as_bytes().to_vec());
+    let list = block_on(sub.list_models(&id, host.context())).expect("models");
+    let ids: Vec<&str> = list.models().iter().map(|model| model.id()).collect();
+    assert_eq!(ids, vec!["gemini-2.5-pro", "gemini-2.5-flash"]);
+}
+
+#[test]
+fn envelope_and_lift_shapes() {
+    let mut body = hofund_plugin_sdk::json::Map::new();
+    body.insert("contents".to_owned(), hofund_plugin_sdk::json::json!([]));
+    body.insert("model".to_owned(), hofund_plugin_sdk::json::json!("x"));
+    upstream::envelope(&mut body, "m", "p", "id-1");
+    assert_eq!(
+        hofund_plugin_sdk::json::Value::Object(body),
+        hofund_plugin_sdk::json::json!({
+            "model": "m", "project": "p", "user_prompt_id": "id-1",
+            "request": {"contents": []},
+        })
+    );
+    assert_eq!(
+        upstream::lift(hofund_plugin_sdk::json::json!({"response": {"a": 1}, "traceId": "t"})),
+        hofund_plugin_sdk::json::json!({"a": 1})
+    );
+    assert_eq!(
+        upstream::lift(hofund_plugin_sdk::json::json!({"a": 1})),
+        hofund_plugin_sdk::json::json!({"a": 1})
+    );
+    assert_eq!(upstream::bare(" models/gemini-x "), "gemini-x");
+    assert_eq!(upstream::bare("gemini-x"), "gemini-x");
 }

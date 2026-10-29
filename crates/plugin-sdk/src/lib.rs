@@ -48,6 +48,7 @@ pub mod probe;
 pub mod process;
 pub mod register;
 pub mod sigv4;
+pub mod time;
 pub mod transport;
 pub mod wire;
 

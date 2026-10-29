@@ -4,7 +4,8 @@
 //! port the system picks, sets the account up for Code Assist and keeps its
 //! project, and holds the access token in memory only: Google does not
 //! rotate the refresh token, so the stored secret never changes on refresh.
-//! Code Assist requests are not served yet.
+//! Requests go to Code Assist's `v1internal` as Gemini CLI sends them, and
+//! usage limits and models come from its `retrieveUserQuota`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,8 +21,10 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, TokenCache, constant_time_eq, new_state};
 
 mod project;
+mod quota;
 mod sign_in;
 mod tokens;
+mod upstream;
 
 /// The OAuth client Gemini CLI signs in as.
 pub(crate) const CLIENT_ID: &str =
@@ -150,7 +153,7 @@ impl SubscriptionFactory for GeminiFactory {
             project: cfg.project.clone(),
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
-            tokens: TokenCache::new(tokens::REFRESH_MARGIN),
+            tokens: Arc::new(TokenCache::new(tokens::REFRESH_MARGIN)),
         }))
     }
 }
@@ -169,8 +172,8 @@ struct Gemini {
     flow: SignInFlow,
     /// Sign-ins in progress, by session id.
     pending: Mutex<HashMap<String, Pending>>,
-    /// Access tokens, in memory only.
-    tokens: TokenCache<SecretString>,
+    /// Access tokens, in memory only, shared with the upstreams.
+    tokens: Arc<TokenCache<SecretString>>,
 }
 
 impl Gemini {
@@ -187,6 +190,25 @@ impl Gemini {
         host: &'a HostContext,
     ) -> impl Future<Output = Result<SecretString, PluginError>> + 'a {
         tokens::access(host, &self.endpoints, &self.tokens, account)
+    }
+
+    /// The account's `retrieveUserQuota` reply.
+    async fn user_quota(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<hofund_plugin_sdk::json::Value, PluginError> {
+        let token = self.access(account, host).await?;
+        let project = project::resolve(
+            host,
+            &self.endpoints,
+            account,
+            &token,
+            self.project.as_deref(),
+        )
+        .await?;
+        let body = hofund_plugin_sdk::json::json!({ "project": project });
+        project::call(host, &self.endpoints, &token, "retrieveUserQuota", &body).await
     }
 }
 
@@ -327,32 +349,33 @@ impl Subscription for Gemini {
 
     async fn quota(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        Err(PluginError::unsupported(
-            "Gemini Code Assist usage limits are not read yet",
-        ))
+        quota::windows(&self.user_quota(account, host).await?)
     }
 
     async fn list_models(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        Err(PluginError::unsupported(
-            "the Gemini Code Assist model list is not read yet",
-        ))
+        let models = quota::models(&self.user_quota(account, host).await?)?;
+        Ok(ModelList::new(models, None))
     }
 
     fn upstream(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, PluginError> {
-        Err(PluginError::unsupported(
-            "Gemini Code Assist requests are not served yet",
-        ))
+        Ok(Arc::new(upstream::GeminiUpstream {
+            account: account.clone(),
+            host: host.clone(),
+            endpoints: Arc::clone(&self.endpoints),
+            tokens: Arc::clone(&self.tokens),
+            project: self.project.clone(),
+        }))
     }
 }
 
