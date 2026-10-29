@@ -6,11 +6,13 @@ use hofund_plugin_api::{
     AccountId, Completion, CredentialStyle, HostContext, PluginError, ProbeQuery, ProbeReport,
     ProtocolId, Request, UpstreamProvider,
 };
+use hofund_plugin_sdk::Call;
+use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::models::{self, Prompts};
 use crate::tokens::{self, Access, Need};
-use crate::{CODEX_VERSION, Endpoints, shape};
+use crate::{CODEX_VERSION, Endpoints, limits, shape};
 
 /// Body fields the Codex backend refuses or ignores, dropped before
 /// encoding; [`shape::body`] reshapes what the codec then writes.
@@ -66,10 +68,13 @@ impl CodexUpstream {
         self.prompts.get(&self.host, model)
     }
 
+    /// Sends `request` as a stream and records the usage limits the reply
+    /// tells. A client that asked for one reply gets the stream folded
+    /// into one.
     async fn send(
         &self,
         access: &Access,
-        request: Request,
+        mut request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let codex = self.instructions(access, &request.model).await;
@@ -77,14 +82,32 @@ impl CodexUpstream {
             .credential(CredentialStyle::Bearer)
             .headers(headers(access.account.as_deref()))
             .rewrite(Arc::new(move |body| shape::body(body, codex.as_deref())));
-        wire::execute(
+        let unary = !request.stream;
+        request.stream = true;
+        let sent = wire::send(
             self.host.http(),
             &target,
             Some(&access.token),
             request,
             inbound,
         )
-        .await
+        .await?;
+        let credits = limits::header_credits(sent.headers());
+        limits::observe(
+            &self.host,
+            &limits::header_limits(sent.headers(), self.host.clock().now()),
+            credits,
+        );
+        let host = self.host.clone();
+        let sent = sent.watch(
+            limits::SCAN,
+            Arc::new(move |data| limits::watch(&host, data, credits)),
+        );
+        if unary {
+            sent.fold().await
+        } else {
+            sent.complete().await
+        }
     }
 }
 
@@ -95,11 +118,6 @@ impl UpstreamProvider for CodexUpstream {
         mut request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        if !request.stream {
-            return Err(PluginError::unsupported(
-                "the ChatGPT Codex backend only streams; send a streaming request",
-            ));
-        }
         shape(&mut request);
         let access =
             tokens::access(&self.host, &self.endpoints, &self.account, Need::IfExpiring).await?;
@@ -159,6 +177,22 @@ pub(crate) fn headers(account: Option<&str>) -> Vec<(String, String)> {
         .map(|(name, value)| (name.to_owned(), value)),
     );
     headers
+}
+
+/// A `GET` of `url` as Codex CLI sends one for the account: the bearer
+/// token and [`headers`], asking for JSON.
+pub(crate) fn account_call(url: String, access: &Access) -> Call {
+    headers(access.account.as_deref())
+        .into_iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("accept"))
+        .fold(
+            Call::get(url).sensitive_header(
+                "authorization",
+                format!("Bearer {}", secret_text(&access.token)),
+            ),
+            |call, (name, value)| call.sensitive_header(name, value),
+        )
+        .header("accept", "application/json")
 }
 
 /// The Codex CLI User-Agent for `os` on `arch`.

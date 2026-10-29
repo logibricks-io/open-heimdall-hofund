@@ -12,6 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 hofund-codec = { workspace = true }
+hofund-ir = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-quirks = { workspace = true }
 async-trait = "0.1.89"

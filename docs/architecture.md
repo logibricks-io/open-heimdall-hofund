@@ -74,6 +74,7 @@ flowchart BT
   provider --> pluginSdk
   pluginApi --> ir
   pluginSdk --> codec
+  pluginSdk --> ir
   pluginSdk --> pluginApi
   pluginSdk --> quirks
   pluginHost --> pluginApi
@@ -134,8 +135,9 @@ as "depends on". `gateway` depends on `plugin-api` for the raw body and
 `PluginError`. `agent` depends on `config` and `plugin-api`. `daemon`
 depends on `plugin-api` so it can adapt a provider into a router member.
 `desktop` sits beside `cli` and depends on the same two crates as `cli`.
-`plugin-api` depends on `ir`. `plugin-sdk` depends on `codec`, `plugin-api`,
-and `quirks`. It uses `codec` for the Chat and Responses transport.
+`plugin-api` depends on `ir`. `plugin-sdk` depends on `codec`, `ir`,
+`plugin-api`, and `quirks`. It uses `codec` for the Chat and Responses
+transport and `ir` to fold a stream into one response.
 `plugin-host` depends on `plugin-api`. Its tests also depend on
 `plugin-sdk` so the retry contract runs against the pooled client. The pooled
 HTTP client lives in `plugin-host`. `plugin-registry` depends on `plugin-api`,
@@ -166,7 +168,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-codec` | `hofund-ir` |
 | `hofund-quirks` | `hofund-ir` |
 | `hofund-plugin-api` | `hofund-ir` |
-| `hofund-plugin-sdk` | `hofund-codec`, `hofund-plugin-api`, `hofund-quirks` |
+| `hofund-plugin-sdk` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |

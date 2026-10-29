@@ -3,7 +3,8 @@
 //! Signs in through the browser with PKCE on the loopback port Codex CLI
 //! registers, keeps the token set as one account secret, refreshes the
 //! access token under the account lease, and serves the ChatGPT Codex
-//! backend as an OpenAI Responses upstream.
+//! backend as an OpenAI Responses upstream. The usage windows each reply
+//! reports become quota observations, and `quota` reads `/wham/usage`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -17,11 +18,13 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, constant_time_eq, new_state};
 
+mod limits;
 mod models;
 mod shape;
 mod sign_in;
 mod tokens;
 mod upstream;
+mod usage;
 
 /// The OAuth client Codex CLI signs in as.
 pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -283,12 +286,12 @@ impl Subscription for Codex {
 
     async fn quota(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        Err(PluginError::unsupported(
-            "ChatGPT usage limits are not read yet",
-        ))
+        let access =
+            tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
+        usage::read(host, &self.endpoints, &access).await
     }
 
     async fn list_models(

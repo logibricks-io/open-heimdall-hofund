@@ -7,12 +7,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use hofund_plugin_api::{AccountId, HostContext, ModelList, ModelSpec, PluginError};
-use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
-use hofund_plugin_sdk::oauth::{new_state, secret_text};
+use hofund_plugin_sdk::oauth::new_state;
 
 use crate::tokens::Access;
-use crate::upstream::headers;
+use crate::upstream::account_call;
 use crate::{CODEX_VERSION, Endpoints};
 
 /// The file in the plugin's cache directory that keeps instructions by model.
@@ -162,17 +161,7 @@ pub(crate) async fn list(
     prompts: &Prompts,
 ) -> Result<ModelList, PluginError> {
     let url = list_url(endpoints);
-    let call = headers(access.account.as_deref())
-        .into_iter()
-        .filter(|(name, _)| !name.eq_ignore_ascii_case("accept"))
-        .fold(
-            Call::get(url.clone()).sensitive_header(
-                "authorization",
-                format!("Bearer {}", secret_text(&access.token)),
-            ),
-            |call, (name, value)| call.sensitive_header(name, value),
-        )
-        .header("accept", "application/json");
+    let call = account_call(url.clone(), access);
     let reply = call.fetch(host.http()).await?;
     match reply.status() {
         200 => {}

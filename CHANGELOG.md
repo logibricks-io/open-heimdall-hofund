@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cached in `codex-prompts.json` and fetched at most every 10 minutes per
   account; the client's instructions ride first as a developer message.
   `list_models` reads `/codex/models`.
+- Codex subscription: usage limits. Each reply's `x-codex-primary-*`,
+  `x-codex-secondary-*`, and `x-codex-credits-*` headers, and a
+  `codex.rate_limits` event in its first 64 KiB, become quota observations
+  in basis points, so a spent window rests the account until it resets
+  unless the account runs on credits. `quota` reads `/wham/usage`: the
+  primary and secondary windows, named by length (`5 hours`, `7 days`),
+  and non-blocking while the account has credits or unlimited use. A
+  request for one reply is sent as a stream and folded into one response
+  (#297).
+- SDK: `wire::Sent::headers`, `wire::Sent::watch` (`wire::Watch`), and
+  `wire::Sent::fold`; `HeaderMap` is re-exported.
 - SDK: `wire::Target::rewrite` (`wire::Rewrite`), a hook that edits a JSON
   request body after encoding and adds headers to the call.
 - Gemini subscription: requests go to Code Assist `v1internal` as Gemini CLI

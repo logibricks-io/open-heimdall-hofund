@@ -3,6 +3,7 @@ BODY_CAP
 Call
 Contribution
 ERROR_RUNES
+HeaderMap
 HttpRequest
 HttpResponse
 LIST_BUDGET
@@ -191,6 +192,9 @@ url
 wire::Rewrite
 wire::Sent
 wire::Sent::async fn complete (self) -> Result < Completion , PluginError >
+wire::Sent::async fn fold (self) -> Result < Completion , PluginError >
+wire::Sent::fn headers (& self) -> & http :: HeaderMap
+wire::Sent::fn watch (mut self , limit : usize , watch : Watch) -> Self
 wire::Target derives(Clone)
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
@@ -202,6 +206,7 @@ wire::Target::fn rewrite (mut self , rewrite : Rewrite) -> Self
 wire::Target::fn signer (mut self , signer : AwsSigner) -> Self
 wire::Target::fn unwrap (mut self , unwrap : Unwrap) -> Self
 wire::Unwrap
+wire::Watch
 wire::async fn count_input (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , mut request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
 wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
 wire::async fn send (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Sent , PluginError >

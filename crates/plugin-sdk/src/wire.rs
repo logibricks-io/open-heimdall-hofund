@@ -38,6 +38,11 @@
 //!   upstream failure becomes status 502.
 //! - On the same protocol the body is relayed as raw bytes. A stream is read
 //!   until its first event so an in-band failure is still an error.
+//! - [`send`] stops before the body: [`Sent::headers`] reads the reply
+//!   headers, [`Sent::watch`] shows the stream's `data:` lines within a byte
+//!   limit to a callback while passing the bytes through unchanged, and
+//!   [`Sent::fold`] assembles a stream into one response for a client that
+//!   asked for one when the upstream only streams.
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
@@ -81,6 +86,11 @@ pub type Rewrite = Arc<
 /// body of a unary call, and the payload of each `data:` line of a stream.
 /// A body or line that is not JSON is passed on as it is.
 pub type Unwrap = Arc<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>;
+
+/// A look at the payload of each `data:` line of a 2xx stream, set by
+/// [`Sent::watch`]. The bytes pass on unchanged. Returning `true` stops the
+/// look; the rest of the stream is not shown to it.
+pub type Watch = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 
 /// Where a protocol's calls go under the base URL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +263,7 @@ pub struct Sent {
     cross_protocol: bool,
     streaming: bool,
     unwrap: Option<Unwrap>,
+    watch: Option<(usize, Watch)>,
 }
 
 impl fmt::Debug for Sent {
@@ -264,6 +275,7 @@ impl fmt::Debug for Sent {
             .field("cross_protocol", &self.cross_protocol)
             .field("streaming", &self.streaming)
             .field("unwrap", &self.unwrap.is_some())
+            .field("watch", &self.watch.as_ref().map(|(limit, _)| *limit))
             .finish()
     }
 }
@@ -276,15 +288,158 @@ impl Sent {
     /// Returns [`PluginError`] when the body cannot be read or decoded, or a
     /// stream's first event is an upstream failure.
     pub async fn complete(self) -> Result<Completion, PluginError> {
+        let (codec, cross_protocol, streaming) = (self.codec, self.cross_protocol, self.streaming);
+        let body = self.into_body();
+        if cross_protocol {
+            decoded(body, codec, streaming).await
+        } else {
+            raw(body, codec, streaming).await
+        }
+    }
+
+    /// The response headers.
+    #[must_use]
+    pub fn headers(&self) -> &http::HeaderMap {
+        self.response.headers()
+    }
+
+    /// Shows `watch` the payload of each `data:` line in the first `limit`
+    /// bytes of a stream, before [`Unwrap`] runs. A unary body is not shown.
+    #[must_use]
+    pub fn watch(mut self, limit: usize, watch: Watch) -> Self {
+        self.watch = Some((limit, watch));
+        self
+    }
+
+    /// Reads a stream to its end and folds its events into one response,
+    /// whatever protocol the client spoke: for a client that asked for one
+    /// reply from an upstream that only streams. An upstream failure
+    /// anywhere in the stream is status 502. A unary body is read as
+    /// [`Sent::complete`] reads it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the body cannot be read or decoded,
+    /// carries no event, or reports an upstream failure.
+    pub async fn fold(self) -> Result<Completion, PluginError> {
+        if !self.streaming {
+            return self.complete().await;
+        }
+        let mut decoder = self.codec.stream_decoder();
+        let mut body = self.into_body();
+        let mut events = Vec::new();
+        while let Some(chunk) = body.next_chunk().await {
+            keep_events(decoder.push(&chunk?), &mut events)?;
+        }
+        keep_events(decoder.finish(), &mut events)?;
+        if events.is_empty() {
+            return Err(PluginError::decode("the upstream stream carried no events"));
+        }
+        Ok(Completion::Unary(Box::new(hofund_ir::assemble(&events))))
+    }
+
+    /// The body with the watch and the unwrap applied, in that order.
+    fn into_body(self) -> BodyStream {
         let mut body = self.response.into_body();
+        if self.streaming
+            && let Some((limit, watch)) = self.watch
+        {
+            body = watched(body, limit, watch);
+        }
         if let Some(unwrap) = self.unwrap {
             body = unwrapped(body, unwrap, self.streaming);
         }
-        if self.cross_protocol {
-            decoded(body, self.codec, self.streaming).await
-        } else {
-            raw(body, self.codec, self.streaming).await
+        body
+    }
+}
+
+/// Adds decoded `events` to `into` without extensions, skipping unknown
+/// events; an upstream failure among them is the error.
+fn keep_events(
+    events: Result<Vec<StreamEvent>, CodecError>,
+    into: &mut Vec<StreamEvent>,
+) -> Result<(), PluginError> {
+    let events = events.map_err(|error| PluginError::decode(error.to_string()))?;
+    for mut event in events {
+        if let Some(error) = failure_of(&event) {
+            return Err(error);
         }
+        if matches!(event, StreamEvent::Unknown(_)) {
+            continue;
+        }
+        event.strip_extensions();
+        into.push(event);
+    }
+    Ok(())
+}
+
+/// `body` passed on unchanged while [`Watcher`] looks at its first `limit`
+/// bytes.
+fn watched(body: BodyStream, limit: usize, watch: Watch) -> BodyStream {
+    let watcher = Watcher {
+        body,
+        watch: Some(watch),
+        limit,
+        seen: 0,
+        pending: Vec::new(),
+    };
+    BodyStream::from_stream(futures_util::stream::unfold(
+        watcher,
+        |mut watcher| async move {
+            let item = watcher.body.next_chunk().await?;
+            if let Ok(chunk) = &item {
+                watcher.look(chunk);
+            }
+            Some((item, watcher))
+        },
+    ))
+}
+
+/// The look behind [`Sent::watch`].
+struct Watcher {
+    body: BodyStream,
+    /// `None` once the look is over.
+    watch: Option<Watch>,
+    limit: usize,
+    /// Bytes read so far.
+    seen: usize,
+    /// Bytes after the last line end read so far.
+    pending: Vec<u8>,
+}
+
+impl Watcher {
+    fn look(&mut self, chunk: &[u8]) {
+        let Some(watch) = self.watch.clone() else {
+            return;
+        };
+        let room = self.limit.saturating_sub(self.seen);
+        let take = chunk.len().min(room);
+        self.seen += take;
+        self.pending.extend_from_slice(&chunk[..take]);
+        let end = self
+            .pending
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |last| last + 1);
+        let whole: Vec<u8> = self.pending.drain(..end).collect();
+        for line in whole.split(|byte| *byte == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let Some(payload) = line.strip_prefix(b"data:") else {
+                continue;
+            };
+            if watch(payload.trim_ascii()) {
+                self.stop();
+                return;
+            }
+        }
+        if self.seen >= self.limit {
+            self.stop();
+        }
+    }
+
+    fn stop(&mut self) {
+        self.watch = None;
+        self.pending = Vec::new();
     }
 }
 
@@ -355,6 +510,7 @@ pub async fn send(
         cross_protocol,
         streaming,
         unwrap: target.unwrap.clone(),
+        watch: None,
     })
 }
 
@@ -1817,5 +1973,181 @@ mod tests {
             header.retry_after(),
             Some(std::time::Duration::from_secs(7))
         );
+    }
+
+    mod sent {
+        use std::sync::{Arc, Mutex};
+
+        use bytes::Bytes;
+        use hofund_codec::OpenAiResponses;
+        use hofund_plugin_api::{BodyStream, Completion, ContentPart, PluginErrorKind};
+
+        use super::super::Sent;
+
+        const STREAM: &str = concat!(
+            "event: codex.rate_limits\n",
+            "data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{}}\n\n",
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hel\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"lo\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+        );
+
+        fn sent(chunks: &[&str], cross_protocol: bool) -> Sent {
+            let mut body = BodyStream::from_bytes(Bytes::new());
+            for chunk in chunks.iter().rev() {
+                body = BodyStream::resume(Bytes::from(chunk.to_string()), body);
+            }
+            let response = http::Response::builder()
+                .header("x-test", "yes")
+                .body(body)
+                .expect("response");
+            Sent {
+                response,
+                codec: &OpenAiResponses,
+                cross_protocol,
+                streaming: true,
+                unwrap: None,
+                watch: None,
+            }
+        }
+
+        fn split(text: &str, size: usize) -> Vec<&str> {
+            let mut out = Vec::new();
+            let mut rest = text;
+            while !rest.is_empty() {
+                let at = rest.len().min(size);
+                let (head, tail) = rest.split_at(at);
+                out.push(head);
+                rest = tail;
+            }
+            out
+        }
+
+        async fn read(completion: Completion) -> Vec<u8> {
+            let Completion::Raw(mut body) = completion else {
+                panic!("raw expected");
+            };
+            let mut out = Vec::new();
+            while let Some(chunk) = body.next_chunk().await {
+                out.extend_from_slice(&chunk.expect("chunk"));
+            }
+            out
+        }
+
+        #[tokio::test]
+        async fn fold_assembles_a_same_protocol_stream_into_one_reply() {
+            let sent = sent(&split(STREAM, 7), false);
+            assert_eq!(
+                sent.headers()
+                    .get("x-test")
+                    .map(http::HeaderValue::as_bytes),
+                Some(&b"yes"[..])
+            );
+            let Completion::Unary(response) = sent.fold().await.expect("fold") else {
+                panic!("unary expected");
+            };
+            let text: String = response
+                .message
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(text, "Hello");
+            assert_eq!(response.id.as_deref(), Some("resp_1"));
+            let usage = response.usage.expect("usage");
+            assert_eq!(usage.input_tokens, Some(3));
+            assert_eq!(usage.output_tokens, Some(2));
+        }
+
+        #[tokio::test]
+        async fn fold_fails_on_an_upstream_failure_and_on_an_empty_stream() {
+            let late = format!(
+                "{}event: error\ndata: {{\"type\":\"error\",\"message\":\"boom\"}}\n\n",
+                &STREAM[..STREAM.find("event: response.completed").expect("completed")]
+            );
+            let error = sent(&[&late], true)
+                .fold()
+                .await
+                .err()
+                .expect("late failure");
+            assert_eq!(error.status(), Some(502));
+            assert!(error.message().contains("boom"), "{}", error.message());
+
+            let failed = concat!(
+                "event: response.failed\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"output\":[],\"error\":{\"message\":\"over\"}}}\n\n",
+            );
+            let error = sent(&[failed], false).fold().await.err().expect("failure");
+            assert_eq!(error.status(), Some(502));
+            assert!(error.message().contains("over"), "{}", error.message());
+
+            let error = sent(&[": keep-alive\n\n"], true)
+                .fold()
+                .await
+                .err()
+                .expect("empty");
+            assert_eq!(error.kind(), PluginErrorKind::Decode);
+        }
+
+        #[tokio::test]
+        async fn watch_sees_data_lines_until_it_stops_and_passes_bytes_unchanged() {
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let into = Arc::clone(&seen);
+            let completion = sent(&split(STREAM, 5), false)
+                .watch(
+                    1 << 16,
+                    Arc::new(move |payload: &[u8]| {
+                        let text = String::from_utf8_lossy(payload).into_owned();
+                        let stop = text.contains("response.created");
+                        into.lock().expect("lock").push(text);
+                        stop
+                    }),
+                )
+                .complete()
+                .await
+                .expect("complete");
+            assert_eq!(read(completion).await, STREAM.as_bytes());
+            let seen = seen.lock().expect("lock").clone();
+            assert_eq!(seen.len(), 2, "{seen:?}");
+            assert!(
+                seen[0].starts_with("{\"type\":\"codex.rate_limits\""),
+                "{seen:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn watch_stops_at_its_limit() {
+            let limit = STREAM
+                .find("event: response.output_item.added")
+                .expect("item");
+            // Small pieces, and one piece that runs past the limit.
+            for size in [3, STREAM.len()] {
+                let seen = Arc::new(Mutex::new(0_usize));
+                let into = Arc::clone(&seen);
+                let completion = sent(&split(STREAM, size), false)
+                    .watch(
+                        limit,
+                        Arc::new(move |_: &[u8]| {
+                            *into.lock().expect("lock") += 1;
+                            false
+                        }),
+                    )
+                    .complete()
+                    .await
+                    .expect("complete");
+                assert_eq!(read(completion).await, STREAM.as_bytes());
+                assert_eq!(*seen.lock().expect("lock"), 2, "{size}");
+            }
+        }
     }
 }
