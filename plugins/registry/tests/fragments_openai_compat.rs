@@ -1477,7 +1477,6 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
             ..NO_DETAILS
         },
     ),
-
     (
         "ollama",
         Details {
