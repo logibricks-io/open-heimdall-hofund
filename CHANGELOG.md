@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Control-plane request topic and remaining live emissions: the gateway reports
+  `request_started` / `request_finished` (ids, route, member, status class,
+  latency, usage tokens only) and shares an `in_flight` counter with status and
+  the event snapshot; config publication emits `snapshot_published`, model
+  refresh emits `models_refreshed`, cooldown maintenance emits `member_cooled`
+  and `member_recovered`, and agent connect/disconnect emit `agent_changed`.
+
 - Live configuration apply and reload on the control plane: `GET /config`,
   `POST /config/validate`, `/config/apply`, and `/config/reload` run under a
   sidecar lock with revision checks, atomic byte-exact writes that keep

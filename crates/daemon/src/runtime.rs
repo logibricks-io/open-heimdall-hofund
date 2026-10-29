@@ -4,16 +4,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use hofund_config::Config;
+use hofund_control_proto::{EventPayload, MemberCooledEvent, MemberRecoveredEvent};
 use hofund_plugin_api::MemberId;
 use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
 use tokio::sync::watch;
 
+use crate::control_map;
+use crate::events::EventBus;
 use crate::membership::{self, Table};
 use crate::{
     Built, DaemonError, DaemonRegistry, Instance, ModelsHost, providers, route_plan, router,
 };
 
-const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+/// Cooldown observer tick. One second keeps cooled/recovered events prompt
+/// without busy-waiting on the book.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Providers and routes built from a candidate configuration, not yet live.
 pub(crate) struct Candidate {
@@ -38,6 +43,8 @@ pub(crate) struct Runtime {
     models: OnceLock<Arc<ModelsHost>>,
     /// The published configuration, for tasks that follow reloads.
     config: OnceLock<watch::Sender<Arc<Config>>>,
+    /// Optional control bus for cooldown membership events.
+    events: OnceLock<Arc<EventBus>>,
 }
 
 impl Candidate {
@@ -65,6 +72,7 @@ impl Runtime {
             instances: Mutex::new(HashMap::new()),
             models: OnceLock::new(),
             config: OnceLock::new(),
+            events: OnceLock::new(),
         })
     }
 
@@ -97,6 +105,11 @@ impl Runtime {
     /// replace its instances.
     pub(crate) fn attach_models(&self, host: Arc<ModelsHost>) {
         let _ = self.models.set(host);
+    }
+
+    /// Emits member cooldown events on the shared control bus when set.
+    pub(crate) fn attach_events(&self, bus: Arc<EventBus>) {
+        let _ = self.events.set(bus);
     }
 
     /// Follows the published configuration.
@@ -223,12 +236,44 @@ impl Runtime {
 
     pub(crate) fn spawn_maintenance(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let cooldowns = Arc::clone(&self.cooldowns);
+        let events = self.events.get().cloned();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(MAINTENANCE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Last observed cooling revision per member; a rise means cooled.
+            let mut last_revisions: HashMap<MemberId, u64> = HashMap::new();
             loop {
                 interval.tick().await;
                 cooldowns.maintain();
+                let recoveries = cooldowns.drain_recoveries();
+                if let Some(bus) = &events {
+                    for (id, _cause) in &recoveries {
+                        let mut event = MemberRecoveredEvent::default();
+                        event.member_id = id.to_string();
+                        event.ready = true;
+                        bus.emit(EventPayload::MemberRecovered(event));
+                        last_revisions.remove(id);
+                    }
+                    let now = std::time::Instant::now();
+                    for (id, cooling) in cooldowns.entries() {
+                        let revision = cooldowns.revision(&id);
+                        let previous = last_revisions.insert(id.clone(), revision);
+                        if previous == Some(revision) {
+                            continue;
+                        }
+                        let remaining =
+                            cooling.until().checked_duration_since(now).map(|duration| {
+                                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+                            });
+                        let mut event = MemberCooledEvent::default();
+                        event.member_id = id.to_string();
+                        event.cause = control_map::cooldown_reason(cooling.cause());
+                        event.remaining_ms = remaining;
+                        event.retry_after_ms = remaining;
+                        event.failures = cooling.failures();
+                        bus.emit(EventPayload::MemberCooled(event));
+                    }
+                }
             }
         })
     }
@@ -568,9 +613,63 @@ mod tests {
         let task = runtime.spawn_maintenance();
         tokio::time::advance(std::time::Duration::from_secs(61)).await;
         tokio::task::yield_now().await;
-        let recoveries = runtime.cooldowns.drain_recoveries();
-        assert_eq!(recoveries.len(), 1);
-        assert_eq!(recoveries[0].0, member_id("member"));
+        // The maintenance task drains recoveries itself so the book is clear.
+        assert_eq!(runtime.cooldowns.cooling(&member_id("member")), None);
+        assert!(runtime.cooldowns.drain_recoveries().is_empty());
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn maintenance_emits_member_cooled_and_recovered() {
+        use crate::events::EventBus;
+        use hofund_control_proto::{EventEnvelope, EventPayload, decode_response};
+
+        let config = config(&["member"]);
+        let (runtime, _root) = runtime(&config);
+        let bus = Arc::new(EventBus::with_boot_id(
+            "aabbccddeeff00112233445566778899".into(),
+        ));
+        runtime.attach_events(Arc::clone(&bus));
+        cool(&runtime, "member");
+        let task = runtime.spawn_maintenance();
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let cooled = bus
+            .control_frames()
+            .into_iter()
+            .map(|frame| {
+                decode_response::<EventEnvelope>(
+                    hofund_control_proto::API_VERSION,
+                    frame.as_bytes(),
+                )
+                .expect("env")
+                .payload
+            })
+            .find(|payload| matches!(payload, EventPayload::MemberCooled(_)))
+            .expect("member_cooled");
+        match cooled {
+            EventPayload::MemberCooled(event) => {
+                assert_eq!(event.member_id, member_id("member").to_string());
+                assert!(event.failures >= 1);
+            }
+            _ => unreachable!(),
+        }
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        let recovered = bus
+            .control_frames()
+            .into_iter()
+            .map(|frame| {
+                decode_response::<EventEnvelope>(
+                    hofund_control_proto::API_VERSION,
+                    frame.as_bytes(),
+                )
+                .expect("env")
+                .payload
+            })
+            .any(|payload| matches!(payload, EventPayload::MemberRecovered(_)));
+        assert!(recovered, "expected member_recovered after expiry");
+        assert_eq!(runtime.cooldowns.cooling(&member_id("member")), None);
         task.abort();
     }
 

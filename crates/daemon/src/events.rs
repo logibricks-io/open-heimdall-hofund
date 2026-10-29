@@ -14,10 +14,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use futures_util::StreamExt;
 use hofund_control_proto::{
-    EventCursor, EventEnvelope, EventId, EventPayload, Resume, ResyncReason, ResyncRequiredEvent,
-    ShutdownStartedEvent, ShutdownState, SnapshotEvent, TokenRotatedEvent, Topic, resume_plan,
+    EventCursor, EventEnvelope, EventId, EventPayload, RequestFinishedEvent, RequestStartedEvent,
+    Resume, ResyncReason, ResyncRequiredEvent, ShutdownStartedEvent, ShutdownState, SnapshotEvent,
+    StatusClass, TokenRotatedEvent, Topic, resume_plan,
 };
 use hofund_gateway::control::{EventSubscription, EventsQuery, SseFrame};
+use hofund_gateway::{RequestEnd, RequestEvents, RequestStart};
 use tokio::sync::{broadcast, watch};
 
 /// Broadcast capacity per topic. A subscriber that falls further behind than
@@ -479,11 +481,57 @@ fn new_boot_id() -> String {
     format!("{:016x}{:016x}", seed(1), seed(2))
 }
 
+/// Adapts gateway request summaries onto the control `requests` topic.
+#[derive(Debug)]
+pub(crate) struct RequestBridge {
+    bus: Arc<EventBus>,
+}
+
+impl RequestBridge {
+    pub(crate) fn new(bus: Arc<EventBus>) -> Self {
+        Self { bus }
+    }
+}
+
+impl RequestEvents for RequestBridge {
+    fn started(&self, start: &RequestStart) {
+        let mut event = RequestStartedEvent::default();
+        event.request_id.clone_from(&start.request_id);
+        event.route.clone_from(&start.route);
+        event.inbound_protocol.clone_from(&start.inbound_protocol);
+        event.started_at_ms = start.started_at_ms;
+        self.bus.emit(EventPayload::RequestStarted(event));
+    }
+
+    fn finished(&self, end: &RequestEnd) {
+        let mut event = RequestFinishedEvent::default();
+        event.request_id.clone_from(&end.request_id);
+        event.member.clone_from(&end.member);
+        event.status_class = status_class(end.status);
+        event.duration_ms = end.duration_ms;
+        event.input_tokens = end.input_tokens;
+        event.output_tokens = end.output_tokens;
+        self.bus.emit(EventPayload::RequestFinished(event));
+    }
+}
+
+fn status_class(status: u16) -> StatusClass {
+    match status {
+        100..=199 => StatusClass::Informational,
+        200..=299 => StatusClass::Success,
+        300..=399 => StatusClass::Redirection,
+        400..=499 => StatusClass::ClientError,
+        500..=599 => StatusClass::ServerError,
+        _ => StatusClass::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use futures_util::FutureExt;
     use hofund_control_proto::{
-        EventEnvelope, MemberCooledEvent, RequestStartedEvent, ShutdownState, decode_response,
+        EventEnvelope, MemberCooledEvent, RequestFinishedEvent, RequestStartedEvent, ShutdownState,
+        StatusClass, decode_response,
     };
 
     use super::*;
@@ -898,5 +946,123 @@ mod tests {
         assert_ne!(first.boot_id(), second.boot_id());
         EventId::new(first.boot_id(), vec![EventCursor::new(Topic::Control, 0)])
             .expect("boot id fits the event id grammar");
+    }
+
+    #[test]
+    fn request_events_carry_no_headers_or_tokens() {
+        let bus = bus();
+        let bridge = RequestBridge::new(Arc::clone(&bus));
+        bridge.started(&RequestStart {
+            request_id: "r1".into(),
+            route: "demo".into(),
+            inbound_protocol: "openai-chat".into(),
+            started_at_ms: 1,
+        });
+        bridge.finished(&RequestEnd {
+            request_id: "r1".into(),
+            member: Some("preset:openai:key".into()),
+            status: 200,
+            duration_ms: 12,
+            input_tokens: Some(3),
+            output_tokens: Some(5),
+        });
+        let frames = bus.requests.ring().after(0).expect("frames");
+        assert_eq!(frames.len(), 2);
+        let joined = frames
+            .iter()
+            .map(|frame| frame.json.as_ref())
+            .collect::<String>();
+        for forbidden in [
+            "authorization",
+            "Authorization",
+            "Bearer",
+            "api_key",
+            "api-key",
+            "cookie",
+            "Cookie",
+            "set-cookie",
+            "x-api-key",
+            "sk-",
+            "password",
+        ] {
+            assert!(
+                !joined.contains(forbidden),
+                "request event json must not contain {forbidden}: {joined}"
+            );
+        }
+        assert!(joined.contains("request_id"));
+        assert!(joined.contains("demo"));
+        assert_eq!(frames[0].topic, Topic::Requests);
+        assert_eq!(frames[1].topic, Topic::Requests);
+        // Must not land on the control topic.
+        assert!(bus.control_frames().is_empty());
+    }
+
+    #[test]
+    fn request_bridge_maps_status_class_and_emits_finished() {
+        let bus = bus();
+        let bridge = RequestBridge::new(Arc::clone(&bus));
+        bridge.finished(&RequestEnd {
+            request_id: "r2".into(),
+            member: None,
+            status: 429,
+            duration_ms: 1,
+            input_tokens: None,
+            output_tokens: None,
+        });
+        let frames = bus.requests.ring().after(0).expect("frames");
+        let envelope = decode_response::<EventEnvelope>(
+            hofund_control_proto::API_VERSION,
+            frames[0].json.as_bytes(),
+        )
+        .expect("env");
+        match envelope.payload {
+            EventPayload::RequestFinished(event) => {
+                assert_eq!(event.request_id, "r2");
+                assert_eq!(event.status_class, StatusClass::ClientError);
+            }
+            other => panic!("expected request_finished, got {other:?}"),
+        }
+        let _ = RequestFinishedEvent::default();
+    }
+
+    #[test]
+    fn emission_kinds_land_on_expected_topics() {
+        let bus = bus();
+        bus.emit(EventPayload::SnapshotPublished(Default::default()));
+        bus.emit(EventPayload::ModelsRefreshed(Default::default()));
+        bus.emit(EventPayload::MemberCooled(Default::default()));
+        bus.emit(EventPayload::MemberRecovered(Default::default()));
+        bus.emit(EventPayload::AgentChanged(Default::default()));
+        bus.emit(EventPayload::RequestStarted(Default::default()));
+        bus.emit(EventPayload::RequestFinished(Default::default()));
+        let control = bus
+            .control_frames()
+            .into_iter()
+            .map(|frame| {
+                decode_response::<EventEnvelope>(
+                    hofund_control_proto::API_VERSION,
+                    frame.as_bytes(),
+                )
+                .expect("env")
+                .payload
+                .name()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            control,
+            [
+                "snapshot_published",
+                "models_refreshed",
+                "member_cooled",
+                "member_recovered",
+                "agent_changed",
+            ]
+        );
+        let requests = bus.requests.ring().after(0).expect("req");
+        assert_eq!(
+            requests.iter().map(|frame| frame.event).collect::<Vec<_>>(),
+            ["request_started", "request_finished"]
+        );
     }
 }

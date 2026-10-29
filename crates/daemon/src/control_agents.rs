@@ -11,15 +11,17 @@ use std::sync::Arc;
 
 use hofund_agent::{AgentAdapter, Catalog, ConfigFile, GatewayTarget, Session};
 use hofund_control_proto::{
-    AgentAction, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
-    AgentListResponse, AgentPlanRequest, AgentPlanResponse, AgentRefreshResult, AgentState,
-    AgentStatusEntry, AgentStatusResponse, AgentSummary, ControlError, ControlErrorKind,
-    FieldIssue, PlannedChange, TokenRotateResponse,
+    AgentAction, AgentChangeResponse, AgentChangedEvent, AgentConnectRequest,
+    AgentDisconnectRequest, AgentListResponse, AgentPlanRequest, AgentPlanResponse,
+    AgentRefreshResult, AgentState, AgentStatusEntry, AgentStatusResponse, AgentSummary,
+    ControlError, ControlErrorKind, EventPayload, FieldIssue, PlannedChange, TokenRotateResponse,
 };
 use hofund_plugin_api::AgentDescription;
 use hofund_secrets::TokenFile;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, watch};
+
+use super::events::EventBus;
 
 /// Replaces bearer tokens in text bound for the wire or the logs.
 const REDACTED: &str = "[redacted]";
@@ -66,6 +68,7 @@ pub(crate) struct AgentOps {
     parts: TargetParts,
     routes: RouteSource,
     base_url: BaseUrlSource,
+    events: Option<Arc<EventBus>>,
 }
 
 impl AgentOps {
@@ -89,7 +92,26 @@ impl AgentOps {
             },
             routes,
             base_url,
+            events: None,
         }
+    }
+
+    /// Emits `agent_changed` on the shared control bus when set.
+    pub(crate) fn with_events(mut self, bus: Arc<EventBus>) -> Self {
+        self.events = Some(bus);
+        self
+    }
+
+    fn emit_changed(&self, response: &AgentChangeResponse) {
+        let Some(bus) = &self.events else {
+            return;
+        };
+        let mut event = AgentChangedEvent::default();
+        event.agent.clone_from(&response.agent);
+        event.action = response.action;
+        event.changed_paths.clone_from(&response.changed_paths);
+        event.warnings.clone_from(&response.warnings);
+        bus.emit(EventPayload::AgentChanged(event));
     }
 
     /// The gateway facts for one call, with the routes published and the
@@ -246,36 +268,39 @@ impl AgentOps {
         request: AgentConnectRequest,
     ) -> Result<AgentChangeResponse, ControlError> {
         let parts = self.parts();
-        self.gated(move |catalog, session| {
-            let adapter = find(catalog, &id)?;
-            let token = parts.token()?;
-            let target = parts.target(token.clone());
-            check_revision(
-                adapter,
-                session,
-                &target,
-                AgentAction::Connect,
-                false,
-                request.expected_plan_revision.as_deref(),
-            )?;
-            let plan = adapter
-                .apply(session, &target)
-                .map_err(|error| agent_failure(adapter, &error, &[&token]))?;
-            let mut response = AgentChangeResponse::default();
-            response.agent = id;
-            response.action = AgentAction::Connect;
-            response.changed_paths = plan
-                .changes()
-                .iter()
-                .map(|change| change.path().display().to_string())
-                .collect();
-            response.warnings = unrouted_warning(adapter, session, &parts)
-                .map(|warning| scrub(&warning, &[&token]))
-                .into_iter()
-                .collect();
-            Ok(response)
-        })
-        .await
+        let response = self
+            .gated(move |catalog, session| {
+                let adapter = find(catalog, &id)?;
+                let token = parts.token()?;
+                let target = parts.target(token.clone());
+                check_revision(
+                    adapter,
+                    session,
+                    &target,
+                    AgentAction::Connect,
+                    false,
+                    request.expected_plan_revision.as_deref(),
+                )?;
+                let plan = adapter
+                    .apply(session, &target)
+                    .map_err(|error| agent_failure(adapter, &error, &[&token]))?;
+                let mut response = AgentChangeResponse::default();
+                response.agent = id;
+                response.action = AgentAction::Connect;
+                response.changed_paths = plan
+                    .changes()
+                    .iter()
+                    .map(|change| change.path().display().to_string())
+                    .collect();
+                response.warnings = unrouted_warning(adapter, session, &parts)
+                    .map(|warning| scrub(&warning, &[&token]))
+                    .into_iter()
+                    .collect();
+                Ok(response)
+            })
+            .await?;
+        self.emit_changed(&response);
+        Ok(response)
     }
 
     pub(crate) async fn disconnect(
@@ -284,35 +309,38 @@ impl AgentOps {
         request: AgentDisconnectRequest,
     ) -> Result<AgentChangeResponse, ControlError> {
         let parts = self.parts();
-        self.gated(move |catalog, session| {
-            let adapter = find(catalog, &id)?;
-            let token = parts.token()?;
-            let target = parts.target(token.clone());
-            check_revision(
-                adapter,
-                session,
-                &target,
-                AgentAction::Disconnect,
-                request.force,
-                request.expected_plan_revision.as_deref(),
-            )?;
-            let before = read_files(adapter, &token, session)?;
-            let outcome = adapter
-                .disconnect(session, request.force)
-                .map_err(|error| agent_failure(adapter, &error, &[&token]))?;
-            let after = read_files(adapter, &token, session)?;
-            let mut response = AgentChangeResponse::default();
-            response.agent = id;
-            response.action = AgentAction::Disconnect;
-            response.changed_paths = changed_paths(&before, &after);
-            response.warnings = outcome
-                .warnings()
-                .iter()
-                .map(|warning| scrub(warning, &[&token]))
-                .collect();
-            Ok(response)
-        })
-        .await
+        let response = self
+            .gated(move |catalog, session| {
+                let adapter = find(catalog, &id)?;
+                let token = parts.token()?;
+                let target = parts.target(token.clone());
+                check_revision(
+                    adapter,
+                    session,
+                    &target,
+                    AgentAction::Disconnect,
+                    request.force,
+                    request.expected_plan_revision.as_deref(),
+                )?;
+                let before = read_files(adapter, &token, session)?;
+                let outcome = adapter
+                    .disconnect(session, request.force)
+                    .map_err(|error| agent_failure(adapter, &error, &[&token]))?;
+                let after = read_files(adapter, &token, session)?;
+                let mut response = AgentChangeResponse::default();
+                response.agent = id;
+                response.action = AgentAction::Disconnect;
+                response.changed_paths = changed_paths(&before, &after);
+                response.warnings = outcome
+                    .warnings()
+                    .iter()
+                    .map(|warning| scrub(warning, &[&token]))
+                    .collect();
+                Ok(response)
+            })
+            .await?;
+        self.emit_changed(&response);
+        Ok(response)
     }
 
     pub(crate) async fn rotate_token(&self) -> Result<TokenRotateResponse, ControlError> {

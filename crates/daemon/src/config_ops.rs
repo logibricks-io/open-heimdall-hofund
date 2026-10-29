@@ -18,7 +18,7 @@ use hofund_config::{Config, ConfigError};
 use hofund_control_proto::{
     ConfigRejectedEvent, ConfigReloadedEvent, ConfigResponse, ConfigValidationResponse,
     ControlError, ControlErrorKind, EventPayload, FieldIssue, ListenSource,
-    ListenerRelistenFailedEvent,
+    ListenerRelistenFailedEvent, SnapshotPublishedEvent,
 };
 use hofund_gateway::control::ControlFailure;
 use hofund_gateway::{Relisten, RelistenError};
@@ -392,6 +392,11 @@ impl ConfigOps {
         event.pending_restart.clone_from(&next.pending_restart);
         event.not_applied.clone_from(&next.not_applied);
         self.bus.emit(EventPayload::ConfigReloaded(event));
+        let mut published = SnapshotPublishedEvent::default();
+        published.generation = next.generation;
+        published.routes = u32::try_from(next.config.routes.len()).unwrap_or(u32::MAX);
+        published.members = u32::try_from(next.config.providers.len()).unwrap_or(u32::MAX);
+        self.bus.emit(EventPayload::SnapshotPublished(published));
         if let Some((issue, true)) = listen {
             let mut event = ListenerRelistenFailedEvent::default();
             event.issue = issue;
@@ -756,12 +761,18 @@ mod tests {
         assert!(book.cooling(&member_id("first")).is_some());
         assert!(book.cooling(&member_id("second")).is_none());
         match events(&fixture.bus).as_slice() {
-            [EventPayload::ConfigReloaded(event)] => {
+            [
+                EventPayload::ConfigReloaded(event),
+                EventPayload::SnapshotPublished(published),
+            ] => {
                 assert_eq!(event.generation, 2);
                 assert_eq!(event.changed_members, [member_id("second").to_string()]);
                 assert_eq!(event.runtime_revision, response.runtime_revision);
+                assert_eq!(published.generation, 2);
+                assert_eq!(published.routes, 1);
+                assert_eq!(published.members, 2);
             }
-            other => panic!("expected config_reloaded, got {other:?}"),
+            other => panic!("expected config_reloaded then snapshot_published, got {other:?}"),
         }
         assert!(!format!("{:?}", fixture.bus.control_frames()).contains(SECRET));
     }
