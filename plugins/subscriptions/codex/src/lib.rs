@@ -316,4 +316,6 @@ fn needs_sign_in(reason: &str) -> AccountStatus {
 }
 
 #[cfg(test)]
+mod conformance;
+#[cfg(test)]
 mod tests;
