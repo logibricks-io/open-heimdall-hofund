@@ -8,12 +8,12 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::wire::{self, Target};
 
+use crate::models::{self, Prompts};
 use crate::tokens::{self, Access, Need};
-use crate::{CODEX_VERSION, Endpoints};
+use crate::{CODEX_VERSION, Endpoints, shape};
 
-/// Body fields the Codex backend refuses or ignores, as the reference drops
-/// them. `store` is dropped too: the Responses codec then writes
-/// `"store": false`, which the backend requires.
+/// Body fields the Codex backend refuses or ignores, dropped before
+/// encoding; [`shape::body`] reshapes what the codec then writes.
 const DROPPED_FIELDS: [&str; 9] = [
     "max_output_tokens",
     "max_completion_tokens",
@@ -30,6 +30,7 @@ pub(crate) struct CodexUpstream {
     account: AccountId,
     host: HostContext,
     endpoints: Arc<Endpoints>,
+    prompts: Arc<Prompts>,
 }
 
 impl CodexUpstream {
@@ -37,12 +38,32 @@ impl CodexUpstream {
         account: AccountId,
         host: HostContext,
         endpoints: Arc<Endpoints>,
+        prompts: Arc<Prompts>,
     ) -> Self {
         Self {
             account,
             host,
             endpoints,
+            prompts,
         }
+    }
+
+    /// The instructions Codex CLI sends `model` with: kept from a model
+    /// list, else from the account's list asked for now, at most once per
+    /// [`models::ASK_AGAIN`].
+    async fn instructions(&self, access: &Access, model: &str) -> Option<String> {
+        if let Some(text) = self.prompts.get(&self.host, model) {
+            return Some(text);
+        }
+        if !self
+            .prompts
+            .may_ask(&self.account, self.host.clock().monotonic())
+        {
+            return None;
+        }
+        // A list that fails leaves the client's instructions in place.
+        let _ = models::list(&self.host, &self.endpoints, access, &self.prompts).await;
+        self.prompts.get(&self.host, model)
     }
 
     async fn send(
@@ -51,9 +72,11 @@ impl CodexUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        let codex = self.instructions(access, &request.model).await;
         let target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.base.clone())
             .credential(CredentialStyle::Bearer)
-            .headers(headers(access.account.as_deref()));
+            .headers(headers(access.account.as_deref()))
+            .rewrite(Arc::new(move |body| shape::body(body, codex.as_deref())));
         wire::execute(
             self.host.http(),
             &target,

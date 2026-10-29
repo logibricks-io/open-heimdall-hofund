@@ -41,7 +41,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use hofund_codec::{
@@ -67,6 +67,14 @@ const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
 const VERSION_HEADER: (&str, &str) = ("anthropic-version", "2023-06-01");
 
 type Prepare = fn(&[u8]) -> Result<Vec<u8>, CodecError>;
+
+/// A rewrite of an encoded JSON request body, run by [`send`] after quirks,
+/// encoding, and the protocol's body finisher. It edits the top-level object
+/// in place and returns headers to add to the call; those are sensitive and
+/// replace a header of the same name, as [`Target::headers`] do.
+pub type Rewrite = Arc<
+    dyn Fn(&mut serde_json::Map<String, serde_json::Value>) -> Vec<(String, String)> + Send + Sync,
+>;
 
 /// Where a protocol's calls go under the base URL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +105,7 @@ pub struct Target {
     quirks: Option<&'static hofund_quirks::Profile>,
     model_root: &'static str,
     signer: Option<AwsSigner>,
+    rewrite: Option<Rewrite>,
 }
 
 impl Target {
@@ -112,6 +121,7 @@ impl Target {
             quirks: None,
             model_root: "models",
             signer: None,
+            rewrite: None,
         }
     }
 
@@ -153,6 +163,16 @@ impl Target {
         self.signer = Some(signer);
         self
     }
+
+    /// The rewrite [`send`] applies to the encoded body of a Chat
+    /// Completions, Responses, Messages, or Generative Language call. A body
+    /// that is not a JSON object is sent as encoded, with no added headers.
+    /// Bedrock Converse calls and [`count_input`] ignore it.
+    #[must_use]
+    pub fn rewrite(mut self, rewrite: Rewrite) -> Self {
+        self.rewrite = Some(rewrite);
+        self
+    }
 }
 
 impl fmt::Debug for Target {
@@ -167,6 +187,7 @@ impl fmt::Debug for Target {
             .field("quirks", &self.quirks.is_some())
             .field("model_root", &self.model_root)
             .field("signer", &self.signer)
+            .field("rewrite", &self.rewrite.is_some())
             .finish()
     }
 }
@@ -278,9 +299,12 @@ pub async fn send(
             method,
         )?;
         let body = prepare_body(target, codec, request, prepare, inbound)?;
-        call(target, codec, secret, url)?
-            .header("content-type", "application/json")
-            .bytes(body)
+        let (body, added) = rewritten(target.rewrite.as_ref(), body);
+        let mut call = call(target, codec, secret, url)?;
+        for (name, value) in added {
+            call = call.replace_header(&name, value, true);
+        }
+        call.header("content-type", "application/json").bytes(body)
     };
     let response = call.open_raw(http, ATTEMPTS).await?;
     if !response.status().is_success() {
@@ -609,6 +633,22 @@ fn prepare_body(
     match prepare {
         Some(prepare) => prepare(&body).map_err(|error| PluginError::decode(error.to_string())),
         None => Ok(body),
+    }
+}
+
+/// `body` after `rewrite`, and the headers the rewrite adds. A body that is
+/// not a JSON object is left as it is.
+fn rewritten(rewrite: Option<&Rewrite>, body: Vec<u8>) -> (Vec<u8>, Vec<(String, String)>) {
+    let Some(rewrite) = rewrite else {
+        return (body, Vec::new());
+    };
+    let Ok(serde_json::Value::Object(mut object)) = serde_json::from_slice(&body) else {
+        return (body, Vec::new());
+    };
+    let added = rewrite(&mut object);
+    match serde_json::to_vec(&object) {
+        Ok(out) => (out, added),
+        Err(_) => (body, Vec::new()),
     }
 }
 
@@ -982,7 +1022,7 @@ mod tests {
     use super::{
         AwsSigner, Method, Path, Target, classify_count, consume_fields, converse_call,
         endpoint_unsupported, failure_of, host_header, message_from, omit_max_tokens, path_segment,
-        route, sigv4, strip_billing_header, url_for,
+        rewritten, route, sigv4, strip_billing_header, url_for,
     };
     use hofund_plugin_api::CountOutcome;
 
@@ -1095,6 +1135,27 @@ mod tests {
         let shown = format!("{target:?}");
         assert!(shown.contains("x-tenant"), "{shown}");
         assert!(!shown.contains("tenant-secret"), "{shown}");
+    }
+
+    #[test]
+    fn a_rewrite_edits_object_bodies_and_adds_headers() {
+        let rewrite: super::Rewrite = std::sync::Arc::new(|body| {
+            body.insert("store".to_owned(), false.into());
+            body.remove("user");
+            vec![("session-id".to_owned(), "s-1".to_owned())]
+        });
+        let target = Target::new(ProtocolId::OPENAI_RESPONSES, "http://127.0.0.1:1")
+            .rewrite(rewrite.clone());
+        assert!(format!("{target:?}").contains("rewrite: true"));
+        let (body, added) = rewritten(Some(&rewrite), br#"{"model":"m","user":"u"}"#.to_vec());
+        assert_eq!(body, br#"{"model":"m","store":false}"#);
+        assert_eq!(added, vec![("session-id".to_owned(), "s-1".to_owned())]);
+        let (body, added) = rewritten(Some(&rewrite), b"[1]".to_vec());
+        assert_eq!(body, b"[1]");
+        assert_eq!(added, Vec::<(String, String)>::new());
+        let (body, added) = rewritten(None, br#"{"user":"u"}"#.to_vec());
+        assert_eq!(body, br#"{"user":"u"}"#);
+        assert_eq!(added, Vec::<(String, String)>::new());
     }
 
     #[test]
