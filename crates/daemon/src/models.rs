@@ -24,7 +24,7 @@ use super::events::EventBus;
 use super::{
     DaemonError, DaemonRegistry, ErrorKind, Planned, RegistryAdapter, beside, build_raw_plugin,
     credential_name, endpoint_for, implementation_id, insert_options, option_present, plan_using,
-    plugin_for, protocol_of, resolve, show,
+    protocol_of, resolve, show,
 };
 
 const NO_MODEL: &str = "no model to try: expose one, or refresh the model list";
@@ -627,7 +627,7 @@ impl ModelsHost {
             let refreshable = (|| {
                 let planned = self.planned(provider)?;
                 let model_plan = self.model_plan(provider)?;
-                let configured_plugin = plugin_for(provider, planned.wire, &self.registry);
+                let configured_plugin = self.plugin_for(provider, &planned);
                 self.kind(provider, &planned, model_plan.as_ref(), &configured_plugin)
             })();
             let Ok(kind) = refreshable else {
@@ -1134,7 +1134,7 @@ impl ModelsHost {
         endpoint: &Endpoint,
     ) -> Result<Fetched, DaemonError> {
         let model_plan = self.model_plan(provider)?;
-        let configured_plugin = plugin_for(provider, planned.wire, &self.registry);
+        let configured_plugin = self.plugin_for(provider, planned);
         let kind = self.kind(provider, planned, model_plan.as_ref(), &configured_plugin)?;
         tracing::Span::current().record("kind", format_args!("{kind:?}"));
         let configured = self.configured(provider, planned, endpoint, path)?;
@@ -1517,8 +1517,9 @@ impl ModelsHost {
         {
             return Ok(upstream);
         }
-        let plugin_id = plugin_for(provider, planned.wire, &self.registry);
-        let mut raw = super::raw_for(provider, planned, endpoint, &self.registry)?;
+        let plugin_id = self.plugin_for(provider, planned);
+        let host = self.host(&planned.base_url).unwrap_or_default();
+        let mut raw = super::raw_for_host(provider, planned, endpoint, &host, &self.registry)?;
         raw.insert("base_url", RawValue::String(planned.base_url.clone()));
         build_raw_plugin(
             provider,
@@ -1551,6 +1552,12 @@ impl ModelsHost {
         )
         .map_err(show)
         .map_err(|error| DaemonError::new(format!("provider `{}`: {error}", provider.id)))
+    }
+
+    /// The plugin for `provider`, its base's host read with the overrides.
+    fn plugin_for(&self, provider: &hofund_config::Provider, planned: &Planned) -> String {
+        let host = self.host(&planned.base_url).unwrap_or_default();
+        super::plugin_for_host(provider, planned, &host, &self.registry)
     }
 
     fn host(&self, base: &str) -> Option<String> {
@@ -1648,9 +1655,9 @@ impl ModelsHost {
         model_plan: Option<&ModelPlan>,
         plugin_id: &str,
     ) -> Result<ListKind, DaemonError> {
-        let azure = matches!(planned.wire, Wire::Chat | Wire::Responses)
-            && (provider.preset.as_deref() == Some("azure")
-                || hofund_provider::azure_host(&self.host(&planned.base_url).unwrap_or_default()));
+        // The azure plugin, by its preset or a custom base on an Azure
+        // host, lists the resource's deployments on Chat and Responses.
+        let azure = plugin_id == "azure" && matches!(planned.wire, Wire::Chat | Wire::Responses);
         let catalog = model_plan.is_some_and(|plan| {
             plan.no_list && !plan.lists && provider.model_list.url.trim().is_empty()
         });
@@ -2558,7 +2565,7 @@ fn safe_urls_in(text: &str) -> String {
     clean
 }
 
-fn url_host(url: &str) -> Option<String> {
+pub(super) fn url_host(url: &str) -> Option<String> {
     url::Url::parse(url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase))

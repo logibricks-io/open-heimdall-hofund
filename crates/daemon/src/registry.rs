@@ -44,6 +44,13 @@ pub trait DaemonRegistry: Send + Sync {
         let _ = id;
         None
     }
+
+    /// The linked plugin that serves a kernel-built base on `host` for
+    /// `protocol`. The default claims none.
+    fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
+        let _ = (protocol, host);
+        None
+    }
 }
 
 /// Compatibility adapter backed by the compile-time plugin registry.
@@ -81,6 +88,10 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn subscription(&self, id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
         hofund_plugin_registry::subscription(id)
+    }
+
+    fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
+        hofund_plugin_registry::host_plugin(protocol, host)
     }
 }
 

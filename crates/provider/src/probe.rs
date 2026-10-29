@@ -44,7 +44,7 @@ impl ModelClient {
             }),
         };
         if protocol == OpenAiProtocol::Chat {
-            body[if self.is_azure() || self.is_bedrock() {
+            body[if self.is_bedrock() {
                 "max_completion_tokens"
             } else {
                 "max_tokens"
@@ -54,11 +54,7 @@ impl ModelClient {
         let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         let bytes = serde_json::to_vec(&body)
             .map_err(|_| PluginError::decode("could not encode probe body"))?;
-        let headers = if self.is_azure() {
-            self.azure_headers()?
-        } else {
-            self.bearer_headers()?
-        };
+        let headers = self.bearer_headers()?;
         let base = if self.is_mantle() {
             crate::mantle::mantle_base(&self.endpoint.base_url, model, false)
         } else {
@@ -99,7 +95,7 @@ impl ModelClient {
         let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         let bytes = serde_json::to_vec(&body)
             .map_err(|_| PluginError::decode("could not encode probe body"))?;
-        let initial = if self.is_azure() || self.is_bedrock() || self.is_official_anthropic() {
+        let initial = if self.is_azure_host() || self.is_bedrock() || self.is_official_anthropic() {
             AuthChoice::XApiKey
         } else {
             query.auth_choice().unwrap_or(AuthChoice::Both)

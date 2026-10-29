@@ -241,7 +241,7 @@ impl ControlState for DaemonControl {
                 summary.ready = planned.is_ok() && !resting;
                 summary.model_count = u64::try_from(cached.models.len()).unwrap_or(u64::MAX);
                 if let Ok(planned) = planned {
-                    summary.kind = plugin_for(provider, planned.wire, &self.registry);
+                    summary.kind = plugin_for(provider, &planned, &self.registry);
                     summary.protocol = protocol_of(planned.wire).to_owned();
                 }
                 summary

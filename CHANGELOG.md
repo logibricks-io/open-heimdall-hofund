@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`/models`); when both fail the error says to type deployment names in as
   model ids. Messages sends `x-api-key` and lists live models. A user header
   named like the key header replaces the stored key.
+- A custom Chat or Responses provider whose base is on an Azure resource host
+  (`*.openai.azure.com`, `*.cognitiveservices.azure.com`,
+  `*.services.ai.azure.com`) now builds the `azure` plugin too, so it lists
+  deployments, falls back to base models, and sends `api-key` the same way as
+  preset `azure`. Messages on an Azure host stays on the Anthropic adapter
+  with `x-api-key`.
 - `hofund_kit_upstream::check_deployments`, and a `Deployments` case in
   `check_list_and_probe`: deployment pages, the base-model fallback, both
   lists empty, and the minimal probe.
@@ -659,6 +665,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2.12.4. That package has no 2.12.5; the `tauri` crate is 2.12.5 and the CLI
   published with it is 2.12.4. Every pull request runs `dist plan` and
   installs that CLI.
+
+### Removed
+
+- The kernel Azure adapter (`hofund_provider::list_deployments`,
+  `AzureDeployment`, `azure_host`, and the Azure branches of the Chat list and
+  probe). The `azure` plugin owns that path.
 
 ## [0.1.0] - 2026-10-25
 
