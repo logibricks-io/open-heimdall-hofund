@@ -378,6 +378,49 @@ pub fn user_config_path() -> PathBuf {
     resolve_config_path(std::env::var_os("HOFUND_CONFIG"), config_home())
 }
 
+/// The environment variable that overrides the configured model `listen`.
+pub const ADDR_ENV: &str = "HOFUND_ADDR";
+
+/// Where the effective model listen address came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListenSource {
+    /// `HOFUND_ADDR` was set.
+    Environment,
+    /// The config file's `listen`.
+    Config,
+}
+
+/// The value of `HOFUND_ADDR` in this process, if any. A value that is not
+/// UTF-8 is returned lossily, so [`effective_listen`] rejects it.
+#[must_use]
+pub fn addr_env() -> Option<String> {
+    std::env::var_os(ADDR_ENV).map(|value| value.to_string_lossy().into_owned())
+}
+
+/// The model listen address: `env` (the `HOFUND_ADDR` value) when it is set
+/// and not empty, otherwise the config's `listen`.
+///
+/// The daemon and the healthcheck both resolve the address this way.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Invalid`] when `env` is set but is not a socket
+/// address.
+pub fn effective_listen(
+    config: &Config,
+    env: Option<&str>,
+) -> Result<(SocketAddr, ListenSource), ConfigError> {
+    match env.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value
+            .parse()
+            .map(|addr| (addr, ListenSource::Environment))
+            .map_err(|_| {
+                ConfigError::Invalid(format!("{ADDR_ENV} must be host:port, got {value:?}"))
+            }),
+        None => Ok((config.listen, ListenSource::Config)),
+    }
+}
+
 /// Creates `path` and its parent directories when the file is absent.
 ///
 /// An existing file is left unchanged. Returns whether a new file was written.
@@ -1100,7 +1143,41 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{Accounts, load};
+    use super::{Accounts, ConfigError, ListenSource, effective_listen, load};
+
+    #[test]
+    fn effective_listen_prefers_hofund_addr() {
+        let config = load("listen = \"127.0.0.1:3425\"\n").expect("config");
+        let configured = "127.0.0.1:3425".parse().expect("addr");
+
+        assert_eq!(
+            effective_listen(&config, Some("0.0.0.0:4000")).expect("env"),
+            (
+                "0.0.0.0:4000".parse().expect("addr"),
+                ListenSource::Environment
+            )
+        );
+        assert_eq!(
+            effective_listen(&config, Some(" [::1]:4001 ")).expect("trimmed env"),
+            (
+                "[::1]:4001".parse().expect("addr"),
+                ListenSource::Environment
+            )
+        );
+        assert_eq!(
+            effective_listen(&config, None).expect("config"),
+            (configured, ListenSource::Config)
+        );
+        assert_eq!(
+            effective_listen(&config, Some("  ")).expect("empty env is unset"),
+            (configured, ListenSource::Config)
+        );
+        let error = effective_listen(&config, Some("localhost")).expect_err("not an address");
+        assert!(
+            matches!(&error, ConfigError::Invalid(message) if message.contains("HOFUND_ADDR")),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn model_listing_settings_parse_refresh_and_clean_rules() {
