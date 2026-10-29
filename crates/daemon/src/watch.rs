@@ -311,6 +311,43 @@ mod tests {
         Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path.to_path_buf()))
     }
 
+    /// Writes files and directories next to the configuration that must not
+    /// count as configuration changes.
+    fn write_siblings(dir: &Path) {
+        for name in [
+            "hofund.usage.jsonl",
+            "usage.sqlite",
+            "usage.sqlite-wal",
+            "usage.sqlite-journal",
+            "hofund.token",
+            "hofund.toml.lock",
+            "hofund.toml.tmp",
+            ".hofund.toml.swp",
+        ] {
+            fs::write(dir.join(name), "x").expect("sibling");
+        }
+        fs::create_dir(dir.join(".hofund")).expect("discovery dir");
+        fs::write(dir.join(".hofund").join("daemon.json"), "{}").expect("discovery");
+        fs::create_dir(dir.join("sub")).expect("subdir");
+        fs::write(dir.join("sub").join("hofund.toml"), "x").expect("nested");
+    }
+
+    /// Waits until `count` holds still for 500 ms and returns it. macOS
+    /// FSEvents can deliver the config file's own creation late, so a test
+    /// that asserts "no new check" compares against this baseline (#281).
+    async fn settled(count: &AtomicUsize) -> usize {
+        let mut last = count.load(Ordering::SeqCst);
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let now = count.load(Ordering::SeqCst);
+            if now == last {
+                return now;
+            }
+            last = now;
+        }
+        last
+    }
+
     /// Waits up to `limit` for `count` to reach `want`.
     async fn reaches(count: &AtomicUsize, want: usize, limit: Duration) -> bool {
         let until = Instant::now() + limit;
@@ -340,6 +377,16 @@ mod tests {
                 poll: Duration::from_secs(2),
             }
         );
+    }
+
+    #[test]
+    fn same_name_in_another_directory_is_not_the_configuration() {
+        let (dir, path) = scratch();
+        let targets = Targets::resolve(&path).expect("targets");
+        fs::create_dir(dir.path().join("sub")).expect("subdir");
+        assert!(targets.matches(&path));
+        assert!(!targets.matches(&dir.path().join("sub").join("hofund.toml")));
+        assert!(!targets.matches(&dir.path().join("hofund.toml.tmp")));
     }
 
     #[tokio::test(start_paused = true)]
@@ -394,31 +441,48 @@ mod tests {
         let (dir, path) = scratch();
         let (count, check) = counter();
         let task = spawn_with(path.clone(), fast(), check);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        for name in [
-            "hofund.usage.jsonl",
-            "usage.sqlite",
-            "usage.sqlite-wal",
-            "usage.sqlite-journal",
-            "hofund.token",
-            "hofund.toml.lock",
-            "hofund.toml.tmp",
-            ".hofund.toml.swp",
-        ] {
-            fs::write(dir.path().join(name), "x").expect("sibling");
-        }
-        fs::create_dir(dir.path().join(".hofund")).expect("discovery dir");
-        fs::write(dir.path().join(".hofund").join("daemon.json"), "{}").expect("discovery");
-        fs::create_dir(dir.path().join("sub")).expect("subdir");
-        fs::write(dir.path().join("sub").join("hofund.toml"), "x").expect("nested");
+        let baseline = settled(&count).await;
+        write_siblings(dir.path());
         tokio::time::sleep(Duration::from_millis(900)).await;
-        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            baseline,
+            "a sibling write triggered a check"
+        );
         fs::write(&path, "listen = \"127.0.0.1:2\"\n").expect("edit");
         assert!(
-            reaches(&count, 1, Duration::from_secs(2)).await,
+            reaches(&count, baseline + 1, Duration::from_secs(2)).await,
             "edit missed"
         );
         task.abort();
+    }
+
+    /// The backend-level half of the sibling test: no event the real watcher
+    /// reports for sibling writes leads to a check. Events that arrive
+    /// before the writes, such as a late report of the file's own creation on
+    /// macOS, are drained first (#281).
+    #[tokio::test]
+    async fn sibling_writes_report_no_configuration_path() {
+        let (dir, path) = scratch();
+        let (_watcher, targets, mut events) = setup(&path).expect("watcher");
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if events.try_recv().is_err() {
+                break;
+            }
+            while events.try_recv().is_ok() {}
+        }
+        write_siblings(dir.path());
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(event);
+        }
+        let acted = seen
+            .iter()
+            .filter(|event| !matches!(classify(&targets, event), Step::Ignore))
+            .count();
+        assert_eq!(acted, 0, "events: {seen:?}");
     }
 
     #[cfg(unix)]
