@@ -57,6 +57,7 @@ flowchart BT
   pluginRelay["plugin-relay<br/>provider"]
   pluginEcho["plugin-echo<br/>inbound"]
   pluginCodex["plugin-subscription-codex<br/>subscription"]
+  pluginGemini["plugin-subscription-gemini<br/>subscription"]
   gateway["gateway<br/>HTTP server"]
   daemon["daemon<br/>composition root"]
   cli["cli<br/>hofund binary"]
@@ -79,6 +80,7 @@ flowchart BT
   pluginRegistry --> pluginRelay
   pluginRegistry --> pluginEcho
   pluginRegistry --> pluginCodex
+  pluginRegistry --> pluginGemini
   pluginRegistry --> provider
   pluginRegistry --> quirks
   pluginRelay --> pluginApi
@@ -87,6 +89,8 @@ flowchart BT
   pluginEcho --> pluginSdk
   pluginCodex --> pluginApi
   pluginCodex --> pluginSdk
+  pluginGemini --> pluginApi
+  pluginGemini --> pluginSdk
   router --> pluginApi
   router --> ir
   gateway --> router
@@ -140,7 +144,7 @@ The subscription kit depends only on `plugin-host`. The agent kit also depends
 on `agent` for the shared engine and `plugin-api` for descriptions. The upstream
 kit depends on `plugin-api` for the factory contract. The kits are not on the
 diagram. `plugin-relay` and `plugin-registry` dev-depend on `kit-upstream` for
-conformance tests, and `plugin-subscription-codex` dev-depends on
+conformance tests, and the subscription plugins dev-depend on
 `kit-subscription`; the registry also dev-depends on `kit-agent` and on `agent`
 for the frozen Codex, Claude Code, Gemini CLI, and OpenCode equivalence oracles.
 All four agents ship as `plugins/agents/<id>/agent.toml`; no const-backed agent
@@ -158,8 +162,9 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-plugin-subscription-codex`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-gemini`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-gemini` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
 | `hofund-kit-upstream` | `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-kit-subscription` | `hofund-plugin-host` |
@@ -227,6 +232,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-relay` | Sample upstream plugin. The kit dependency is tests only. |
 | `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
 | `plugin-subscription-codex` | ChatGPT (Codex) subscription: browser sign-in, token refresh, and the Responses upstream. |
+| `plugin-subscription-gemini` | Gemini CLI (Code Assist) subscription: browser sign-in, Code Assist project setup, and token refresh. |
 | `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |
 | `codec` | Per-protocol encode and decode to and from the IR. Hub-and-spoke, so N protocols do not become an N-by-M matrix. |
 | `quirks` | Data-driven vendor capability and quirk descriptions. |
