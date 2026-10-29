@@ -946,6 +946,25 @@ fn the_configured_project_is_used_when_none_is_stored() {
 }
 
 #[test]
+fn a_stored_project_wins_over_the_configured_one() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &signed_in_blob(Some("from-store")));
+    host.http().enqueue(token_reply("acc-1", None, 3600));
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    let sub = subscription_with(&host, Some("from-config"));
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    block_on(upstream.execute(
+        gl_request("gemini-2.5-pro", false),
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ))
+    .expect("execute");
+    let sent = posts_to(&host, &method_url("generateContent"));
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains(r#""project":"from-store""#), "{}", sent[0]);
+}
+
+#[test]
 fn sse_response_unwrapped() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
