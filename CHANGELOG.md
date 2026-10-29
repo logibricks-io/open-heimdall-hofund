@@ -296,6 +296,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The local presets `ollama`, `lmstudio`, `omlx` and `mlx-serve` moved from
+  the built-in catalog into the `openai-compat` preset fragment, unchanged:
+  same localhost endpoints, Decide URLs and no key. A Messages call on
+  localhost still sends both `x-api-key` and Bearer. The built-in catalog now
+  holds `google-vertex`, `bedrock`, `bedrock-mantle` and `remote-gateway`.
+
 - A listed provider plugin (one compiled from a preset fragment) now receives
   the provider's `headers`; a plugin whose config takes no `headers` rejects
   them as an unknown key.
