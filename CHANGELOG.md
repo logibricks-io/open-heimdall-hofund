@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Azure OpenAI plugin `azure` (`plugins/providers/azure`): preset `azure` now
+  builds this plugin instead of the kernel adapter. Chat and Responses send
+  `api-key` and list the resource's deployments, then fall back to base models
+  (`/models`); when both fail the error says to type deployment names in as
+  model ids. Messages sends `x-api-key` and lists live models. A user header
+  named like the key header replaces the stored key.
+- `hofund_kit_upstream::check_deployments`, and a `Deployments` case in
+  `check_list_and_probe`: deployment pages, the base-model fallback, both
+  lists empty, and the minimal probe.
+
 - Copilot model list and per-model routing: `list_models` reads the account's
   `/models` list (chat models only; internal ids, vendor-experimental models
   and models without a picker or category are dropped; a model needing terms
@@ -279,6 +289,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response body. Token `Debug` is redacted.
 
 ### Changed
+
+- A listed provider plugin (one compiled from a preset fragment) now receives
+  the provider's `headers`; a plugin whose config takes no `headers` rejects
+  them as an unknown key.
 
 - Breaking (plugin API, N9): `SignInFlow::Device` now carries a `DeviceFlow`
   built from validated options instead of a static URL, so a device-code

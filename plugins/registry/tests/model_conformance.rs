@@ -1,6 +1,6 @@
 //! Built-in factory conformance against the shared local-mock kit.
 
-use hofund_kit_upstream::check_list_and_probe;
+use hofund_kit_upstream::{check_deployments, check_list_and_probe};
 use hofund_plugin_api::{ProtocolId, RawTable, RawValue};
 
 fn raw(base_url: &str) -> RawTable {
@@ -110,6 +110,24 @@ async fn bedrock_factory_passes_static_catalog_conformance() {
         },
         ProtocolId::BEDROCK_CONVERSE,
         "",
+        scratch.path(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn azure_factory_passes_deployment_and_probe_conformance() {
+    let scratch = tempfile::tempdir().expect("temp dir");
+    let factory = hofund_plugin_registry::upstream("azure").expect("azure plugin");
+    check_deployments(
+        factory.as_ref(),
+        |base| {
+            let mut raw = RawTable::new();
+            raw.insert("base_url", RawValue::String(base.to_owned()));
+            raw
+        },
+        ProtocolId::OPENAI_CHAT,
+        "conformance-key",
         scratch.path(),
     )
     .await;

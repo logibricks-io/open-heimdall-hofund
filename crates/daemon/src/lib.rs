@@ -1088,15 +1088,19 @@ fn raw_for_using(
         && let Some((compiled, _)) = lookup(preset)
         && !registry.builtin_factory_ids().contains(&compiled.plugin)
     {
-        return raw_from_preset(compiled, provider, &planned.base_url);
+        return raw_from_preset(compiled, provider, &planned.base_url, endpoint);
     }
     raw_from_endpoint(provider, planned, endpoint)
 }
 
+/// A listed plugin's preset options: the preset's config, the base URL, the
+/// provider's `headers` as a table (a plugin that takes none rejects them as
+/// an unknown key rather than dropping them), and the provider's options.
 fn raw_from_preset(
     preset: &registry::CompiledPreset,
     provider: &hofund_config::Provider,
     base_url: &str,
+    endpoint: &Endpoint,
 ) -> Result<RawTable, DaemonError> {
     let mut raw = RawTable::new();
     for (key, value) in preset.config {
@@ -1105,6 +1109,7 @@ fn raw_from_preset(
     if !base_url.is_empty() {
         raw.insert("base_url", RawValue::String(base_url.to_owned()));
     }
+    insert_headers(&mut raw, endpoint);
     insert_options(&mut raw, provider)?;
     Ok(raw)
 }
@@ -1128,13 +1133,7 @@ fn raw_from_endpoint(
     if let Some(profile) = &provider.quirks {
         raw.insert("quirks", RawValue::String(profile.clone()));
     }
-    if !endpoint.headers.is_empty() {
-        let mut headers = RawTable::new();
-        for (name, value) in &endpoint.headers {
-            headers.insert(name.clone(), RawValue::String(value.clone()));
-        }
-        raw.insert("headers", RawValue::Table(headers));
-    }
+    insert_headers(&mut raw, endpoint);
     match planned.wire {
         Wire::Chat => raw.insert("protocol", RawValue::String("chat".to_owned())),
         Wire::Responses => raw.insert("protocol", RawValue::String("responses".to_owned())),
@@ -1142,6 +1141,16 @@ fn raw_from_endpoint(
     }
     insert_options(&mut raw, provider)?;
     Ok(raw)
+}
+
+fn insert_headers(raw: &mut RawTable, endpoint: &Endpoint) {
+    if !endpoint.headers.is_empty() {
+        let mut headers = RawTable::new();
+        for (name, value) in &endpoint.headers {
+            headers.insert(name.clone(), RawValue::String(value.clone()));
+        }
+        raw.insert("headers", RawValue::Table(headers));
+    }
 }
 
 const RESERVED_OPTIONS: &[&str] = &[
@@ -1793,6 +1802,38 @@ mod tests {
         let chunk = body.next_chunk().await.expect("chunk").expect("bytes");
         assert_eq!(&chunk[..], b"openai-responses");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_listed_preset_receives_the_provider_headers() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"az\"\npreset = \"azure\"\nbase_url = \"my-resource\"\napi_key = \"test-key\"\n[providers.headers]\nx-ms-client = \"hofund\"\n",
+        )
+        .expect("config");
+        let provider = &config.providers[0];
+        let planned =
+            super::plan_with(provider, hofund_plugin_registry::find_preset).expect("plan");
+        let endpoint = super::endpoint_for(provider, &planned).expect("endpoint");
+        let raw = super::raw_for_with(
+            provider,
+            &planned,
+            &endpoint,
+            hofund_plugin_registry::find_preset,
+        )
+        .expect("raw");
+        assert_eq!(
+            raw.get("base_url"),
+            Some(&super::RawValue::String("my-resource".to_owned()))
+        );
+        let Some(super::RawValue::Table(headers)) = raw.get("headers") else {
+            panic!("headers were dropped: {raw:?}");
+        };
+        assert_eq!(
+            headers.get("x-ms-client"),
+            Some(&super::RawValue::String("hofund".to_owned()))
+        );
+        assert!(raw.get("api_key").is_none());
+        assert!(raw.get("quirks").is_none());
     }
 
     #[test]
