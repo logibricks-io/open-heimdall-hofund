@@ -70,9 +70,9 @@ pub use id::{
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use records::{
     Account, AccountStatus, AgentDescription, AgentFile, AgentRoute, AgentSet, AuthChoice,
-    BinaryName, FileKind, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
-    QuotaObservation, QuotaQuery, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof,
-    Slot, StaticUrl, SubscriptionSpec, Visible,
+    BinaryName, DeviceFlow, FileKind, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
+    QuotaObservation, QuotaQuery, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow,
+    SignInFlowKind, SignInProof, Slot, SubscriptionSpec, Visible,
 };
 pub use redaction::{redact_token, safe_url};
 pub use secrecy::SecretString;
