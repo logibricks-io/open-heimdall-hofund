@@ -11,7 +11,9 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+futures-util = "0.3.32"
 hofund-plugin-host = { workspace = true }
+tokio = { version = "1.52.2", features = ["rt", "time"] }
 
 [lints]
 workspace = true

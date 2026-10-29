@@ -5,7 +5,7 @@
 use hofund_plugin_api::PluginError;
 use ring::digest::{SHA256, digest};
 use ring::rand::{SecureRandom, SystemRandom};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 /// Random bytes in a verifier or state: 256 bits, 43 characters encoded.
 const RANDOM_BYTES: usize = 32;
@@ -89,6 +89,26 @@ pub fn authorize_url(base: &str, pairs: &[(&str, &str)]) -> Result<String, Plugi
     Ok(url.into())
 }
 
+/// The authorization-code grant form (RFC 6749 section 4.1.3) with the PKCE
+/// verifier (RFC 7636 section 4.5).
+///
+/// It contains the code and the verifier. Do not log it.
+#[must_use]
+pub fn code_exchange_form(
+    client_id: &str,
+    redirect_uri: &str,
+    code: &SecretString,
+    verifier: &SecretString,
+) -> String {
+    super::form_body(&[
+        ("grant_type", "authorization_code"),
+        ("code", code.expose_secret()),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
+        ("code_verifier", verifier.expose_secret()),
+    ])
+}
+
 fn random_token() -> Result<String, PluginError> {
     let mut bytes = [0_u8; RANDOM_BYTES];
     SystemRandom::new()
@@ -117,9 +137,25 @@ fn base64url(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use secrecy::ExposeSecret;
+    use secrecy::{ExposeSecret, SecretString};
 
-    use super::{Pkce, authorize_url, base64url, new_state};
+    use super::{Pkce, authorize_url, base64url, code_exchange_form, new_state};
+
+    #[test]
+    fn code_exchange_form_carries_the_grant_and_verifier() {
+        let form = code_exchange_form(
+            "app_1",
+            "http://localhost:1455/auth/callback",
+            &SecretString::from("c/1".to_owned()),
+            &SecretString::from("v-1".to_owned()),
+        );
+        assert_eq!(
+            form,
+            "grant_type=authorization_code&code=c%2F1\
+             &redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback\
+             &client_id=app_1&code_verifier=v-1"
+        );
+    }
 
     #[test]
     fn pkce_matches_rfc7636_appendix_b() {
