@@ -1956,6 +1956,7 @@ dependencies = [
  "hofund-plugin-subscription-claude",
  "hofund-plugin-subscription-codex",
  "hofund-plugin-subscription-copilot",
+ "hofund-plugin-subscription-gemini",
  "hofund-provider",
  "hofund-quirks",
  "serde",
@@ -2022,6 +2023,16 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-copilot"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-gemini"
 version = "0.1.0"
 dependencies = [
  "hofund-kit-subscription",

@@ -25,6 +25,7 @@ members = [
     "plugins/subscriptions/claude",
     "plugins/subscriptions/codex",
     "plugins/subscriptions/copilot",
+    "plugins/subscriptions/gemini",
     "crates/provider",
     "kits/agent",
     "kits/subscription",
@@ -73,6 +74,7 @@ hofund-plugin-relay = { version = "0.1.0", path = "plugins/providers/relay" }
 hofund-plugin-subscription-claude = { version = "0.1.0", path = "plugins/subscriptions/claude" }
 hofund-plugin-subscription-codex = { version = "0.1.0", path = "plugins/subscriptions/codex" }
 hofund-plugin-subscription-copilot = { version = "0.1.0", path = "plugins/subscriptions/copilot" }
+hofund-plugin-subscription-gemini = { version = "0.1.0", path = "plugins/subscriptions/gemini" }
 hofund-plugin-sdk = { version = "0.1.0", path = "crates/plugin-sdk" }
 hofund-provider = { version = "0.1.0", path = "crates/provider" }
 hofund-quirks = { version = "0.1.0", path = "crates/quirks" }
