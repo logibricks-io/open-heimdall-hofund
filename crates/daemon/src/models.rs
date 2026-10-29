@@ -5,11 +5,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use futures_util::StreamExt;
 use hofund_config::Config;
-use hofund_control_proto::{FieldIssue, PickEdit, PicksForm};
+use hofund_control_proto::{EventPayload, FieldIssue, ModelsRefreshedEvent, PickEdit, PicksForm};
 use hofund_plugin_api::{
     AuthChoice, CredentialStyle, DynUpstreamFactory, HostContext, ListKind, ListQuery, ModelSpec,
     PluginError, ProbeQuery, ProbeReport, ProtocolId, RawTable, RawValue, SecretString,
@@ -20,6 +20,7 @@ use hofund_plugin_sdk::{Call, PageError, PageErrorKind, after_id};
 use hofund_provider::{Credential, Endpoint, ModelPlan, Vertex, Wire};
 use tracing::Instrument;
 
+use super::events::EventBus;
 use super::{
     DaemonError, DaemonRegistry, ErrorKind, Planned, RegistryAdapter, beside, build_raw_plugin,
     credential_name, endpoint_for, implementation_id, insert_options, option_present, plan_using,
@@ -334,6 +335,17 @@ pub struct ModelsHost {
     instances: RwLock<HashMap<String, RegisteredInstance>>,
     registry: Arc<dyn DaemonRegistry>,
     state: Mutex<super::models_state::StateStore>,
+    events: OnceLock<Arc<EventBus>>,
+}
+
+fn list_kind_label(kind: ListKind) -> &'static str {
+    match kind {
+        ListKind::Live => "live",
+        ListKind::Catalog => "catalog",
+        ListKind::Deployments => "deployments",
+        ListKind::Unsupported => "unsupported",
+        _ => "unknown",
+    }
 }
 
 impl ModelsHost {
@@ -350,7 +362,33 @@ impl ModelsHost {
             instances: RwLock::new(HashMap::new()),
             registry: Arc::new(RegistryAdapter),
             state: Mutex::new(super::models_state::StateStore::new(None)),
+            events: OnceLock::new(),
         }
+    }
+
+    /// Emits `models_refreshed` on the shared control bus when set.
+    pub(crate) fn attach_events(&self, bus: Arc<EventBus>) {
+        let _ = self.events.set(bus);
+    }
+
+    fn emit_refreshed(
+        &self,
+        provider: &str,
+        list_kind: ListKind,
+        model_count: u64,
+        ok: bool,
+        error: Option<String>,
+    ) {
+        let Some(bus) = self.events.get() else {
+            return;
+        };
+        let mut event = ModelsRefreshedEvent::default();
+        event.provider = provider.to_owned();
+        event.list_kind = list_kind_label(list_kind).to_owned();
+        event.model_count = model_count;
+        event.ok = ok;
+        event.error = error;
+        bus.emit(EventPayload::ModelsRefreshed(event));
     }
 
     pub(super) fn with_registry(mut self, registry: Arc<dyn DaemonRegistry>) -> Self {
@@ -644,12 +682,28 @@ impl ModelsHost {
                         dropped = ?applied.dropped,
                         outcome = "success"
                     );
+                    self.emit_refreshed(
+                        &provider.id,
+                        applied.models.kind,
+                        applied.models.models.len() as u64,
+                        true,
+                        None,
+                    );
                 }
                 Ok(Err(error)) => {
+                    let message = error.to_string();
                     self.record_refresh_retry(&provider.id, now, interval, error.retry_after());
+                    self.emit_refreshed(&provider.id, kind, 0, false, Some(message));
                 }
                 Err(_) => {
                     self.record_refresh_retry(&provider.id, now, interval, None);
+                    self.emit_refreshed(
+                        &provider.id,
+                        kind,
+                        0,
+                        false,
+                        Some("model refresh timed out".to_owned()),
+                    );
                 }
             }
         }
@@ -789,13 +843,18 @@ impl ModelsHost {
         }
         let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let state = store.get(provider_id);
-        Ok(Refreshed {
+        let kind = applied.models.kind;
+        let count = applied.models.models.len() as u64;
+        let refreshed = Refreshed {
             models: applied.models.models,
             added: applied.taken,
             removed: applied.dropped,
             delisted: state.delisted.clone(),
             fetched_at: state.fetched_at,
-        })
+        };
+        drop(store);
+        self.emit_refreshed(provider_id, kind, count, true, None);
+        Ok(refreshed)
     }
 
     /// Probes models and times each probe, keeping input order.
@@ -2741,5 +2800,59 @@ mod tests {
             std::time::Duration::from_secs(90)
         );
         assert_eq!(super::REFRESH_TIMEOUT, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn models_refreshed_emission_carries_kind_label_and_counts() {
+        use std::sync::Arc;
+
+        use hofund_control_proto::{EventEnvelope, EventPayload, decode_response};
+
+        use crate::events::EventBus;
+
+        let host = super::ModelsHost::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        let bus = Arc::new(EventBus::with_boot_id(
+            "00112233445566778899aabbccddeeff".into(),
+        ));
+        host.attach_events(Arc::clone(&bus));
+        host.emit_refreshed("openai", ListKind::Live, 3, true, None);
+        host.emit_refreshed(
+            "openai",
+            ListKind::Catalog,
+            0,
+            false,
+            Some("upstream failed".into()),
+        );
+        let payloads = bus
+            .control_frames()
+            .into_iter()
+            .map(|frame| {
+                decode_response::<EventEnvelope>(
+                    hofund_control_proto::API_VERSION,
+                    frame.as_bytes(),
+                )
+                .expect("env")
+                .payload
+            })
+            .collect::<Vec<_>>();
+        match payloads.as_slice() {
+            [
+                EventPayload::ModelsRefreshed(ok),
+                EventPayload::ModelsRefreshed(err),
+            ] => {
+                assert_eq!(ok.provider, "openai");
+                assert_eq!(ok.list_kind, "live");
+                assert_eq!(ok.model_count, 3);
+                assert!(ok.ok);
+                assert!(ok.error.is_none());
+                assert_eq!(err.list_kind, "catalog");
+                assert!(!err.ok);
+                assert_eq!(err.error.as_deref(), Some("upstream failed"));
+            }
+            other => panic!("expected two models_refreshed, got {other:?}"),
+        }
     }
 }

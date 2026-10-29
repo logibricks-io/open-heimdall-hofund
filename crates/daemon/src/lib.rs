@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
 use hofund_config::{Config, ConfigError, Value, load_path};
@@ -33,13 +34,6 @@ mod config_write;
 mod control;
 mod control_agents;
 mod control_local;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "cooldown and provider-error mapping is wired by the control endpoints in a later L stage"
-    )
-)]
 pub(crate) mod control_map;
 mod events;
 mod membership;
@@ -396,7 +390,13 @@ async fn start_inner(
         .cooldowns()
         .cloned()
         .expect("daemon router has shared cooldowns");
-    let gateway = Gateway::with_token_file(
+    // Create the event bus and in-flight counter before bind so the gateway
+    // can emit request summaries for the entire listen lifetime.
+    let control_bus = control_session
+        .as_ref()
+        .map(|_| Arc::new(events::EventBus::new()));
+    let in_flight = Arc::new(AtomicU64::new(0));
+    let mut gateway = Gateway::with_token_file(
         snapshot,
         token.clone(),
         token_path.clone(),
@@ -404,6 +404,12 @@ async fn start_inner(
         Arc::clone(&usage),
     )
     .with_surfaces(registry.surfaces());
+    if let Some(bus) = &control_bus {
+        gateway = gateway.with_request_events(
+            Arc::new(events::RequestBridge::new(Arc::clone(bus))),
+            Arc::clone(&in_flight),
+        );
+    }
     let env = match options.hofund_addr {
         Some(value) => Some(value),
         None => hofund_config::addr_env(),
@@ -417,8 +423,14 @@ async fn start_inner(
     if let Some(hook) = options.relisten_hook {
         running = running.with_bind_hook(hook);
     }
+    if let Some(bus) = &control_bus {
+        models_host.attach_events(Arc::clone(bus));
+    }
     let models_host = Arc::new(models_host);
     runtime.attach_models(Arc::clone(&models_host));
+    if let Some(bus) = &control_bus {
+        runtime.attach_events(Arc::clone(bus));
+    }
     let config = Arc::new(config);
     if let Some(session) = control_session.as_mut() {
         let (shutdown_request, shutdown_requested) = tokio::sync::watch::channel(false);
@@ -426,7 +438,7 @@ async fn start_inner(
         let token_generation = options
             .token_generation
             .unwrap_or_else(|| tokio::sync::watch::channel(0).0);
-        let events = Arc::new(events::EventBus::new());
+        let events = control_bus.expect("control bus created with control session");
         events::spawn_lifecycle(
             Arc::clone(&events),
             token_generation.subscribe(),
@@ -464,7 +476,8 @@ async fn start_inner(
                 shutdown_request,
             )
             .with_agent_hooks(options.agent_session, Some(token_generation))
-            .with_events(events),
+            .with_events(Arc::clone(&events))
+            .with_in_flight(Arc::clone(&in_flight)),
         );
         let control = hofund_gateway::control::Control::with_token_file(state, token, token_path);
         let mut tcp_listen = options.control_listen;

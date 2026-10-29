@@ -392,18 +392,21 @@ async fn pending_restart_fields_agree_across_response_status_and_events() {
     assert!(reverted.not_applied.is_empty());
     assert!(client.status().await.pending_restart.is_empty());
 
-    let events = next_events(&mut stream, 2).await;
+    // Each successful publish emits config_reloaded then snapshot_published (L6f).
+    let events = next_events(&mut stream, 4).await;
     match events.as_slice() {
         [
             (_, EventPayload::ConfigReloaded(first)),
+            (_, EventPayload::SnapshotPublished(_)),
             (_, EventPayload::ConfigReloaded(second)),
+            (_, EventPayload::SnapshotPublished(_)),
         ] => {
             assert_eq!(first.pending_restart, applied.pending_restart);
             assert_eq!(first.not_applied, applied.not_applied);
             assert!(second.pending_restart.is_empty());
             assert!(second.not_applied.is_empty());
         }
-        other => panic!("expected two config_reloaded events, got {other:?}"),
+        other => panic!("expected config_reloaded/snapshot_published pairs, got {other:?}"),
     }
     // An open stream would hold the graceful drain of the control listener.
     drop(stream);
@@ -594,11 +597,17 @@ async fn config_text_never_in_events_status_or_errors() {
     );
 
     // `next_events` fails on any frame that contains the secret.
-    let events = next_events(&mut stream, 3).await;
+    // Successful apply also emits snapshot_published (L6f).
+    let events = next_events(&mut stream, 4).await;
     let names: Vec<_> = events.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
         names,
-        ["config_reloaded", "config_rejected", "config_rejected"]
+        [
+            "config_reloaded",
+            "snapshot_published",
+            "config_rejected",
+            "config_rejected"
+        ]
     );
     let status = client.status().await;
     assert_eq!(status.generation, 2);
@@ -753,14 +762,15 @@ async fn relisten_failure_publishes_rest_and_reports_not_applied() {
         reqwest::StatusCode::OK
     );
 
-    let events = next_events(&mut stream, 2).await;
+    let events = next_events(&mut stream, 3).await;
     match events.as_slice() {
         [
             (first, EventPayload::ConfigReloaded(reloaded)),
-            (second, EventPayload::ListenerRelistenFailed(failed)),
+            (_, EventPayload::SnapshotPublished(_)),
+            (third, EventPayload::ListenerRelistenFailed(failed)),
         ] => {
             assert_eq!(first, "config_reloaded");
-            assert_eq!(second, "listener_relisten_failed");
+            assert_eq!(third, "listener_relisten_failed");
             assert_eq!(reloaded.not_applied, applied.not_applied);
             assert_eq!(failed.issue, applied.not_applied[0]);
             assert_eq!(failed.running, old.to_string());
@@ -768,7 +778,9 @@ async fn relisten_failure_publishes_rest_and_reports_not_applied() {
             assert_eq!(failed.runtime_revision, applied.runtime_revision);
             assert_eq!(failed.disk_revision, applied.disk_revision);
         }
-        other => panic!("expected config_reloaded then listener_relisten_failed, got {other:?}"),
+        other => panic!(
+            "expected config_reloaded, snapshot_published, listener_relisten_failed; got {other:?}"
+        ),
     }
 
     // Once the port frees up, an explicit reload of the same revision retries.
@@ -864,16 +876,18 @@ async fn reload_listen_with_hofund_addr_reports_not_applied_env_override() {
         "HOFUND_ADDR never relistens"
     );
 
-    // Only config_reloaded: an override is not a relisten failure.
+    // Override is not a relisten failure; each apply emits snapshot_published (L6f).
     let (status, body) = client.apply(&revision(&edited), &original).await;
     ok(status, &body);
-    let events = next_events(&mut stream, 2).await;
+    let events = next_events(&mut stream, 4).await;
     match events.as_slice() {
         [
             (_, EventPayload::ConfigReloaded(first)),
+            (_, EventPayload::SnapshotPublished(_)),
             (_, EventPayload::ConfigReloaded(_)),
+            (_, EventPayload::SnapshotPublished(_)),
         ] => assert_eq!(first.not_applied, applied.not_applied),
-        other => panic!("expected two config_reloaded events, got {other:?}"),
+        other => panic!("expected config_reloaded/snapshot_published pairs, got {other:?}"),
     }
     drop(stream);
     running.shutdown().await;

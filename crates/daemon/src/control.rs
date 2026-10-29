@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hofund_agent::Session;
@@ -46,6 +47,7 @@ pub(crate) struct DaemonControl {
     agents: AgentOps,
     shutdown: watch::Sender<bool>,
     events: Arc<EventBus>,
+    in_flight: Arc<AtomicU64>,
 }
 
 impl DaemonControl {
@@ -94,12 +96,20 @@ impl DaemonControl {
             ops,
             shutdown,
             events: Arc::new(EventBus::new()),
+            in_flight: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Serves `/v1/hofund/events` from `bus`.
     pub(crate) fn with_events(mut self, bus: Arc<EventBus>) -> Self {
+        self.agents = self.agents.with_events(Arc::clone(&bus));
         self.events = bus;
+        self
+    }
+
+    /// Shares the gateway in-flight counter with status and snapshots.
+    pub(crate) fn with_in_flight(mut self, in_flight: Arc<AtomicU64>) -> Self {
+        self.in_flight = in_flight;
         self
     }
 
@@ -108,6 +118,7 @@ impl DaemonControl {
         let ops = Arc::clone(&self.ops);
         let cooldowns = Arc::clone(&self.cooldowns);
         let shutdown = self.shutdown.subscribe();
+        let in_flight = Arc::clone(&self.in_flight);
         Arc::new(move || {
             let mut snapshot = SnapshotEvent::default();
             let live = ops.live();
@@ -136,7 +147,7 @@ impl DaemonControl {
             } else {
                 ShutdownState::Running
             };
-            snapshot.in_flight = 0;
+            snapshot.in_flight = in_flight.load(Ordering::SeqCst);
             snapshot
         })
     }
@@ -194,7 +205,7 @@ impl ControlState for DaemonControl {
         status.runtime_revision.clone_from(&live.runtime_revision);
         status.pending_restart.clone_from(&live.pending_restart);
         status.not_applied.clone_from(&live.not_applied);
-        status.in_flight = 0;
+        status.in_flight = self.in_flight.load(Ordering::SeqCst);
         status.shutdown = if self.draining() {
             ShutdownState::Draining
         } else {
