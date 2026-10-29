@@ -712,6 +712,58 @@ const ROWS: &[Row] = &[
         website: "https://openrouter.ai",
         keys_url: "https://openrouter.ai/keys",
     },
+    // reference: internal/provider/presets.go:580
+    Row {
+        id: "ollama",
+        name: "Ollama",
+        kind: "local",
+        catalog: "",
+        note: "your local models",
+        chat: "http://localhost:11434/v1",
+        responses: "",
+        anthropic: "http://localhost:11434",
+        website: "https://ollama.com",
+        keys_url: "",
+    },
+    // reference: internal/provider/presets.go:584
+    Row {
+        id: "lmstudio",
+        name: "LM Studio",
+        kind: "local",
+        catalog: "",
+        note: "local server, port 1234 by default",
+        chat: "http://localhost:1234/v1",
+        responses: "",
+        anthropic: "",
+        website: "https://lmstudio.ai",
+        keys_url: "",
+    },
+    // reference: internal/provider/presets.go:589
+    Row {
+        id: "omlx",
+        name: "oMLX",
+        kind: "local",
+        catalog: "",
+        note: "local server, port 8000 by default",
+        chat: "http://localhost:8000/v1",
+        responses: "http://localhost:8000/v1",
+        anthropic: "http://localhost:8000",
+        website: "https://omlx.ai",
+        keys_url: "",
+    },
+    // reference: internal/provider/presets.go:595
+    Row {
+        id: "mlx-serve",
+        name: "MLX-Serve",
+        kind: "local",
+        catalog: "",
+        note: "local server, port 11234 by default",
+        chat: "http://localhost:11234/v1",
+        responses: "http://localhost:11234/v1",
+        anthropic: "http://localhost:11234",
+        website: "https://github.com/ddalcu/mlx-serve",
+        keys_url: "",
+    },
 ];
 
 const ALIASES: &[Alias] = &[
@@ -1422,6 +1474,38 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
         Details {
             decide: "https://openrouter.ai/api/v1",
             header_hints: &["HTTP-Referer", "X-OpenRouter-Title"],
+            ..NO_DETAILS
+        },
+    ),
+
+    (
+        "ollama",
+        Details {
+            no_key: true,
+            decide: "http://localhost:11434/v1",
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "lmstudio",
+        Details {
+            no_key: true,
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "omlx",
+        Details {
+            no_key: true,
+            decide: "http://localhost:8000/v1",
+            ..NO_DETAILS
+        },
+    ),
+    (
+        "mlx-serve",
+        Details {
+            no_key: true,
+            decide: "http://localhost:11234/v1",
             ..NO_DETAILS
         },
     ),
