@@ -18,6 +18,7 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::TokenCache;
 use hofund_plugin_sdk::oauth::device::DeviceStart;
 
+mod models;
 mod quota;
 mod session;
 mod sign_in;
@@ -94,6 +95,7 @@ impl SubscriptionFactory for CopilotFactory {
             flow: SignInFlow::Device(flow),
             pending: Mutex::new(HashMap::new()),
             sessions: Arc::new(TokenCache::new(session::MARGIN)),
+            book: Arc::new(models::Book::default()),
         }))
     }
 }
@@ -111,6 +113,7 @@ struct Copilot {
     /// Sign-ins in progress, by session id.
     pending: Mutex<HashMap<String, Pending>>,
     sessions: Arc<TokenCache<Session>>,
+    book: Arc<models::Book>,
 }
 
 impl Copilot {
@@ -232,12 +235,11 @@ impl Subscription for Copilot {
 
     async fn list_models(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        Err(PluginError::unsupported(
-            "the Copilot model list is not read yet",
-        ))
+        let session = session::session(&self.sessions, host, account).await?;
+        models::list(host, &session, account, &self.book).await
     }
 
     fn upstream(
@@ -249,6 +251,7 @@ impl Subscription for Copilot {
             account.clone(),
             host.clone(),
             Arc::clone(&self.sessions),
+            Arc::clone(&self.book),
         )))
     }
 }

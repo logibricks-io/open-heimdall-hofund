@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Copilot model list and per-model routing: `list_models` reads the account's
+  `/models` list (chat models only; internal ids, vendor-experimental models
+  and models without a picker or category are dropped; a model needing terms
+  is listed). Each request goes to the protocol the model supports: the
+  inbound protocol when listed, otherwise the first of the model's endpoints;
+  a model with no endpoints, or an unlisted model, uses Chat Completions.
+  Responses and Messages go to `/responses` and `/v1/messages`. A model that
+  needs terms has its policy enabled once before the first request; only a
+  2xx counts as accepted.
 - SDK Messages transport: `hofund_plugin_sdk::wire::execute` posts a Messages
   target to `{base}/v1/messages` with the `anthropic-version` header (a
   configured header of that name replaces it), and `wire::count_input` posts
@@ -32,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaced the token. Requests go to Chat Completions with the editor headers,
   `X-Initiator`, and `Copilot-Vision-Request` for images; a 401 trades a new
   session and retries once. Quota reads chat, completions and premium request
-  snapshots from `copilot_internal/user`. Models are not listed yet.
+  snapshots from `copilot_internal/user`.
 - Claude Code subscription plugin `claude`
   (`hofund-plugin-subscription-claude`, registry feature `claude`, on by
   default): sign-in runs Claude Code's own `claude auth login --claudeai`
