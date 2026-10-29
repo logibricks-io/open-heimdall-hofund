@@ -26,6 +26,9 @@ use hofund_provider::{Credential, Endpoint, Wire, credential_for};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// Builds one canned upstream reply.
+type Reply = Box<dyn Fn() -> ResponseTemplate>;
+
 const KEY: &str = "parity-key";
 const BILLING: &str = "x-anthropic-billing-header: cc_version=2.1.197; cc_entrypoint=cli; cch=abc;";
 
@@ -500,7 +503,7 @@ fn an_in_band_error_as_the_first_event_matches() {
 #[test]
 fn counts_match_for_every_reply() {
     run(async {
-        let replies: Vec<(&str, Box<dyn Fn() -> ResponseTemplate>)> = vec![
+        let replies: Vec<(&str, Reply)> = vec![
             (
                 "counted",
                 Box::new(|| ResponseTemplate::new(200).set_body_string(r#"{"input_tokens":42}"#)),
@@ -551,8 +554,7 @@ fn counts_match_for_every_reply() {
         ];
         for (name, reply) in &replies {
             for inbound in [ProtocolId::ANTHROPIC_MESSAGES, ProtocolId::OPENAI_CHAT] {
-                let (sent, result) =
-                    compare(Case::count(inbound), || request(true), || reply()).await;
+                let (sent, result) = compare(Case::count(inbound), || request(true), reply).await;
                 assert_eq!(sent.len(), 1, "{name}");
                 assert_eq!(sent[0].path, "/gateway/v1/messages/count_tokens", "{name}");
                 let body: serde_json::Value =
