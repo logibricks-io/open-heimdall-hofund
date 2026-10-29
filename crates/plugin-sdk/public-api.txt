@@ -15,6 +15,8 @@ TokenError
 after_id
 apply_quirks
 async_trait
+bedrock::fn fit_headers (headers : & [(String , String)]) -> Vec < (String , String) >
+bedrock::fn fit_request (request : & mut Request)
 classify::ModelTags #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
 classify::ModelTags::const fn decides (self) -> bool
 classify::ModelTags::const fn draws (self) -> bool
@@ -42,6 +44,7 @@ jwt::KeyError::Sign
 jwt::RsaSigner
 jwt::RsaSigner::fn from_pem (text : & str) -> Result < Self , KeyError >
 jwt::RsaSigner::fn sign (& self , header : & Value , claims : & Value) -> Result < String , KeyError >
+mod bedrock
 mod classify
 mod jwt
 mod oauth
@@ -183,6 +186,8 @@ transport::fn parse_retry_after (value : & str , now : std :: time :: SystemTime
 transport::fn parse_retry_after_headers (headers : & http :: HeaderMap , now : std :: time :: SystemTime ,) -> Option < Duration >
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse
 url
+wire::Sent
+wire::Sent::async fn complete (self) -> Result < Completion , PluginError >
 wire::Target derives(Clone)
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
@@ -192,6 +197,7 @@ wire::Target::fn quirks (mut self , quirks : Option < & 'static hofund_quirks ::
 wire::Target::fn signer (mut self , signer : AwsSigner) -> Self
 wire::async fn count_input (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , mut request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
 wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
+wire::async fn send (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Sent , PluginError >
 wire::fn converse_call (target : & Target , model : & str , stream : bool , body : Vec < u8 > ,) -> Result < (String , Call) , PluginError >
 wire::fn model_segment (model : & str) -> Result < String , PluginError >
 wire::fn path_segment (text : & str) -> String

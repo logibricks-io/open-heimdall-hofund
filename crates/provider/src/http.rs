@@ -300,10 +300,6 @@ pub(crate) fn messages_url(upstream: &Upstream) -> &str {
     &upstream.url
 }
 
-pub(crate) fn request_url(upstream: &Upstream) -> &str {
-    &upstream.url
-}
-
 pub(crate) fn prepare_body(
     upstream: &Upstream,
     codec: &dyn Codec,
@@ -390,8 +386,7 @@ pub(crate) async fn execute(
 
 /// Posts `request` to `url` with the upstream's headers.
 ///
-/// The Generative Language adapter builds a URL per model. A Mantle chat or
-/// Responses call may also replace the `/v1` prefix. Every other Chat,
+/// The Generative Language adapter builds a URL per model. Every Chat,
 /// Responses, and Messages call keeps the URL fixed at [`Upstream::open`].
 pub(crate) async fn execute_at(
     upstream: &Upstream,
@@ -450,18 +445,6 @@ async fn finish(
         .await?
         .complete()
         .await
-}
-
-/// Prepares and sends a request, returning only after its status is known.
-pub(crate) async fn send_at<'a>(
-    upstream: &Upstream,
-    url: &str,
-    codec: &'a dyn Codec,
-    request: Request,
-    prepare: Option<Prepare>,
-    inbound_protocol: &str,
-) -> Result<Sent<'a>, ProviderError> {
-    send(upstream, url, codec, request, prepare, inbound_protocol).await
 }
 
 async fn send<'a>(

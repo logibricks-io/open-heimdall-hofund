@@ -1,5 +1,5 @@
 use hofund_plugin_api::Request;
-use hofund_plugin_sdk::json::{Value, json};
+use serde_json::{Value, json};
 
 use super::{beta_text, fit_betas, fit_headers, fit_request};
 
@@ -24,7 +24,7 @@ fn betas_are_split_trimmed_renamed_and_deduplicated() {
         ]),
         ["a", "tool-search-tool-2025-10-19"]
     );
-    assert!(fit_betas(["", " , "]).is_empty());
+    assert_eq!(fit_betas(["", " , "]), Vec::<String>::new());
 }
 
 #[test]

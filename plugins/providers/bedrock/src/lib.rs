@@ -27,7 +27,6 @@
 
 #![deny(missing_docs)]
 
-mod betas;
 mod converse;
 
 use std::sync::Arc;
@@ -38,6 +37,7 @@ use hofund_plugin_api::{
     ProtocolId, RawTable, RawValue, Request, Schema, SecretString, UpstreamFactory,
     UpstreamProvider, UpstreamSpec, ValidConfig,
 };
+use hofund_plugin_sdk::bedrock;
 use hofund_plugin_sdk::json::{Value, json};
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::probe::{PROBE_WAIT, merge_extra, probe_report, read_probe};
@@ -195,7 +195,7 @@ impl UpstreamFactory for BedrockFactory {
             }
             ProtocolId::ANTHROPIC_MESSAGES => {
                 let base = api_base(&cfg.base_url)?;
-                let headers = betas::fit_headers(&cfg.headers);
+                let headers = bedrock::fit_headers(&cfg.headers);
                 let target = Target::new(protocol, base.clone())
                     .credential(CredentialStyle::XApiKey)
                     .headers(headers.clone());
@@ -228,6 +228,19 @@ impl UpstreamFactory for BedrockFactory {
             host: host.clone(),
         }))
     }
+}
+
+/// Whether `host` is a Bedrock Runtime host,
+/// `bedrock-runtime.<region>.amazonaws.com`. A port is ignored and case does
+/// not matter.
+#[must_use]
+pub fn runtime_host(host: &str) -> bool {
+    let host = host
+        .rsplit_once(':')
+        .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+        .map_or(host, |(name, _)| name)
+        .to_ascii_lowercase();
+    host.starts_with("bedrock-runtime.") && host.ends_with(".amazonaws.com")
 }
 
 /// The configured base for the API-key wires. The preset always supplies one.
@@ -349,7 +362,7 @@ impl UpstreamProvider for Bedrock {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         if self.protocol == ProtocolId::ANTHROPIC_MESSAGES {
-            betas::fit_request(&mut request);
+            bedrock::fit_request(&mut request);
         }
         let secret = self.secret().await?;
         wire::execute(
@@ -370,7 +383,7 @@ impl UpstreamProvider for Bedrock {
         if self.protocol != ProtocolId::ANTHROPIC_MESSAGES {
             return Ok(CountOutcome::Unsupported);
         }
-        betas::fit_request(&mut request);
+        bedrock::fit_request(&mut request);
         let secret = self.secret().await?;
         wire::count_input(
             self.host.http(),
