@@ -2,7 +2,8 @@
 //!
 //! The daemon looks every wire up here. Chat, Responses, Messages, Generative,
 //! Vertex, and Bedrock each validate their own option schema and then call the
-//! adapter. A later pull request can move one adapter into its own plugin crate.
+//! adapter. Chat, Responses, Messages, and Generative calls go through the SDK
+//! transport. A later pull request can move one adapter into its own plugin crate.
 
 use std::sync::Arc;
 
@@ -380,12 +381,72 @@ impl UpstreamFactory for GenerativeFactory {
         cfg: &Self::Config,
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
-        let mut endpoint = cfg.endpoint.clone();
-        attach_client(&mut endpoint, host);
-        let adapter = Generative::new(endpoint).map_err(build_error)?;
-        Ok(Arc::new(Bridged {
-            inner: Arc::new(adapter),
-        }))
+        generative(cfg.endpoint.clone(), host)
+    }
+}
+
+/// Builds the `generative` provider.
+///
+/// `execute` and `count_input` go through the SDK transport on the host
+/// client, at the base the adapter normalized. Listing and probing stay on the
+/// adapter.
+///
+/// # Errors
+///
+/// Returns [`BuildError`] when the adapter rejects the endpoint.
+#[doc(hidden)]
+pub fn generative(
+    mut endpoint: Endpoint,
+    host: &HostContext,
+) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+    attach_client(&mut endpoint, host);
+    let style = generative_credential_style(endpoint.credential);
+    let headers = endpoint.headers.clone();
+    let quirks = endpoint.quirks;
+    let secret =
+        (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
+    let adapter = Arc::new(Generative::new(endpoint).map_err(build_error)?);
+    let target = Target::new(ProtocolId::GENERATIVE_LANGUAGE, adapter.base())
+        .credential(style)
+        .headers(headers)
+        .quirks(quirks);
+    Ok(Arc::new(Direct {
+        http: host.http().clone(),
+        target,
+        secret,
+        counts: true,
+        bridged: Bridged { inner: adapter },
+    }))
+}
+
+/// The `generative` provider with every call on the adapter's own transport.
+///
+/// Parity tests compare it with [`generative`].
+///
+/// # Errors
+///
+/// Returns [`BuildError`] when the adapter rejects the endpoint.
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub fn generative_adapter(
+    mut endpoint: Endpoint,
+    host: &HostContext,
+) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+    attach_client(&mut endpoint, host);
+    let adapter = Generative::new(endpoint).map_err(build_error)?;
+    Ok(Arc::new(Bridged {
+        inner: Arc::new(adapter),
+    }))
+}
+
+/// The SDK header for a provider credential on Generative Language.
+///
+/// `Default` is the adapter's `x-goog-api-key`. Every other value names the
+/// same header the adapter writes.
+fn generative_credential_style(credential: Credential) -> CredentialStyle {
+    match credential {
+        Credential::Default => credential_style(Credential::GoogApiKey),
+        other => credential_style(other),
     }
 }
 
