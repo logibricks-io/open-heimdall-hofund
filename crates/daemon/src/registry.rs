@@ -1,7 +1,9 @@
 //! Registry instance lookups used by the daemon.
 //!
-//! The compatibility adapter temporarily keeps the daemon's direct registry
-//! dependency in this one module. Registry-owned plain data and pure selection
+//! `hofundd` links the registry itself and passes its own [`DaemonRegistry`]
+//! to [`crate::start_linked`]. The compatibility adapter here serves the
+//! in-process CLI and desktop paths until the CLI switch, and keeps the
+//! daemon's remaining direct registry dependency in this one module. Registry-owned plain data and pure selection
 //! functions are also re-exported here so the later registry switch has one
 //! edge to replace.
 
@@ -54,6 +56,9 @@ pub trait DaemonRegistry: Send + Sync {
 }
 
 /// Compatibility adapter backed by the compile-time plugin registry.
+///
+/// The in-process CLI and desktop paths use it until the CLI switch.
+/// `hofundd` constructs its own adapter instead.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RegistryAdapter;
 

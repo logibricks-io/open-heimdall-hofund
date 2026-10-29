@@ -19,6 +19,12 @@ path = "src/main.rs"
 hofund-agent = { workspace = true }
 hofund-daemon = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "1.54.1", features = ["rt", "signal"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [package.metadata.dist]
 dist = true
 

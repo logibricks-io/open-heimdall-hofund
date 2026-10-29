@@ -308,6 +308,23 @@ pub async fn start_with_options(
     start_inner(path, None, None, Arc::new(RegistryAdapter), options).await
 }
 
+/// Starts a daemon with the caller's registry and listeners.
+///
+/// `hofundd` uses this entry point with the registry it links, so the
+/// production registry link lives in that binary. The other start functions
+/// use the compatibility [`RegistryAdapter`] until the CLI switch.
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] when startup, locking, or a listener bind fails.
+pub async fn start_linked(
+    path: &Path,
+    registry: Arc<dyn DaemonRegistry>,
+    options: StartOptions,
+) -> Result<Running, DaemonError> {
+    start_inner(path, None, None, registry, options).await
+}
+
 /// Starts a daemon with an injected registry.
 ///
 /// # Errors

@@ -1,5 +1,6 @@
 #!/bin/bash
-# Sign the macOS CLI binaries cargo-dist just archived, then rebuild those
+# Sign the macOS binaries cargo-dist just archived (hofund from the CLI
+# package and hofundd from the daemon package), then rebuild those
 # archives and their checksums. Installers are generated from the manifest
 # in a later job, so the hash written here is the one they publish.
 #
@@ -19,9 +20,9 @@ if ! signing_secrets_present; then
 fi
 
 shopt -s nullglob
-bins=(target/distrib/*-apple-darwin/hofund)
+bins=(target/distrib/*-apple-darwin/hofund target/distrib/*-apple-darwin/hofundd)
 if [ "${#bins[@]}" -eq 0 ]; then
-  echo "No macOS CLI binary was built in this job; signing is skipped."
+  echo "No macOS binary was built in this job; signing is skipped."
   exit 0
 fi
 

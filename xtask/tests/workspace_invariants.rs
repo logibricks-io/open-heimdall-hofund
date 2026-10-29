@@ -15,6 +15,7 @@ mod plugin_rules;
 /// root `[workspace] members` list is asserted below.
 const MEMBERS: &[&str] = &[
     "apps/desktop/src-tauri",
+    "apps/hofundd",
     "crates/agent",
     "crates/cli",
     "crates/codec",
@@ -60,6 +61,11 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-config" => &[],
         "hofund-control-client" => &["hofund-control-proto"],
         "hofund-control-proto" => &[],
+        "hofund-daemon-bin" => &[
+            "hofund-daemon",
+            "hofund-plugin-api",
+            "hofund-plugin-registry",
+        ],
         "hofund-desktop" => &["hofund-agent", "hofund-daemon"],
         "hofund-daemon" => &[
             "hofund-agent",
@@ -152,6 +158,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-control-proto" => &[],
         "hofund-desktop" => &[],
         "hofund-daemon" => &["hofund-daemon", "hofund-plugin-registry"],
+        "hofund-daemon-bin" => &[],
         "hofund-gateway" => &[
             "hofund-codec",
             "hofund-ir",
@@ -331,6 +338,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-config",
         "hofund-control-proto",
         "hofund-daemon",
+        "hofund-daemon-bin",
         "hofund-desktop",
         "hofund-gateway",
         "hofund-ir",

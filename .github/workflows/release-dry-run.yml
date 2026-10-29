@@ -1,8 +1,10 @@
 # Proves the release build without publishing.
 #
 # A pull request that touches the release config builds the Linux x86_64 CLI
-# with `dist build` and the desktop bundles on all three runners. A manual
-# run builds every local cargo-dist target as well. Nothing here calls
+# and daemon archives with `dist build` and the desktop bundles on all three
+# runners. A manual run builds every local cargo-dist target as well. Each
+# build unpacks the CLI and daemon archives into one directory and checks
+# that `hofund serve` starts the `hofundd` beside it. Nothing here calls
 # `dist host` or `gh release`.
 
 name: Release dry-run
@@ -18,6 +20,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "apps/desktop/**"
+      - "apps/hofundd/**"
       - "rust-toolchain.toml"
   workflow_dispatch:
 
@@ -110,6 +113,9 @@ jobs:
           echo "paths<<EOF" >> "$GITHUB_OUTPUT"
           dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+      - name: Check the two-binary install
+        shell: bash
+        run: .github/scripts/check-two-binary-archives.sh target/distrib
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:

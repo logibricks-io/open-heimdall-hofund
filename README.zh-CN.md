@@ -38,6 +38,7 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 
 ```sh
 cargo install --path crates/cli --locked
+cargo install --path apps/hofundd --locked
 ```
 
 这些 crate 的 `publish` 仍为 `false`，因此没有 crates.io 包。
