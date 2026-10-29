@@ -15,6 +15,7 @@ members = [
     "crates/plugin-host",
     "crates/plugin-sdk",
     "plugins/inbound/echo",
+    "plugins/providers/azure",
     "plugins/providers/fixture",
     "plugins/providers/relay",
     "plugins/registry",
@@ -58,6 +59,7 @@ hofund-kit-agent = { version = "0.1.0", path = "kits/agent" }
 hofund-kit-subscription = { version = "0.1.0", path = "kits/subscription" }
 hofund-kit-upstream = { version = "0.1.0", path = "kits/upstream" }
 hofund-plugin-api = { version = "0.1.0", path = "crates/plugin-api" }
+hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-host = { version = "0.1.0", path = "crates/plugin-host" }
 hofund-plugin-echo = { version = "0.1.0", path = "plugins/inbound/echo" }
 hofund-plugin-registry = { version = "0.1.0", path = "plugins/registry" }

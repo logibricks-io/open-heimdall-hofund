@@ -1,0 +1,15 @@
+# Row moved from the kernel catalog (`crates/provider/presets.toml`), recorded
+# from the reference preset list (`internal/provider/presets.go`) at commit
+# cbbf3163cb3c87ee0c327a56bc5689ddc5eda947. The preset id is the plugin id.
+
+[[preset]]
+id = "azure"
+name = "Azure OpenAI"
+kind = "vendor"
+catalog = "azure, openai"
+note = "your resource's endpoint and key"
+website = "https://ai.azure.com"
+keys_url = "https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/OpenAI"
+hosts = true
+endpoint = "https://<resource>.openai.azure.com"
+endpoint_hint = "Your resource's endpoint, from Keys and Endpoint in the Azure portal. Once added, the gateway asks the resource for its deployments with this key, over its v1 API; the deployments' names are the model ids."
