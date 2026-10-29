@@ -40,7 +40,6 @@ pub(crate) enum ReloadOrigin {
     /// `POST /config/reload`: always re-publishes, even at an equal revision.
     Explicit,
     /// The file watcher (L6c): skips a revision that is already published.
-    #[cfg_attr(not(test), allow(dead_code))]
     Watcher,
 }
 

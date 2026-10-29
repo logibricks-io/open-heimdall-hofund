@@ -59,6 +59,11 @@ impl Scratch {
 }
 
 async fn start_at(scratch: &Scratch, config_path: &Path, text: &str) -> Running {
+    start_watching(scratch, config_path, text, true).await
+}
+
+/// Starts a daemon; `watch = false` leaves hand edits unpublished.
+async fn start_watching(scratch: &Scratch, config_path: &Path, text: &str, watch: bool) -> Running {
     std::fs::write(config_path, text).expect("config");
     start_with_options(
         config_path,
@@ -66,6 +71,7 @@ async fn start_at(scratch: &Scratch, config_path: &Path, text: &str) -> Running 
             control_listen: Some("127.0.0.1:0".parse().expect("control address")),
             control_runtime: Some(ControlRuntime::new(None, scratch.runtime_dir.clone())),
             agent_session: Some(Session::new(scratch.runtime_dir.join("home")).with_path("")),
+            skip_config_watch: !watch,
             ..StartOptions::default()
         },
     )
@@ -268,7 +274,7 @@ async fn apply_writes_exact_bytes_publishes_and_reports_one_generation_everywher
 async fn apply_stale_disk_revision_returns_409_without_overwriting_hand_edit() {
     let scratch = Scratch::new("stale");
     let original = config("");
-    let running = start_at(&scratch, &scratch.path(), &original).await;
+    let running = start_watching(&scratch, &scratch.path(), &original, false).await;
     let client = Client::new(&running, &scratch);
     let hand_edit = format!("{original}# edited by hand\n");
     std::fs::write(scratch.path(), &hand_edit).expect("hand edit");
