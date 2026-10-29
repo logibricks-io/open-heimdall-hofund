@@ -559,7 +559,7 @@ mod tests {
         // On macOS the temporary directory lives under `/var`, a symlink to
         // `/private/var`, and FSEvents reports the canonical path. A
         // symlinked parent reproduces that on every Unix.
-        let root = tempfile::tempdir_in(std::env::temp_dir()).expect("root");
+        let root = tempfile::tempdir().expect("root");
         let real = root.path().join("private");
         fs::create_dir(&real).expect("real dir");
         let alias = root.path().join("var");
