@@ -10,6 +10,9 @@ use hofund_plugin_sdk::json::{Value, json};
 
 use super::{VertexFactory, generation, probe_thinking};
 
+/// The test service-account key (fake; shared with `auth::tests`).
+pub(crate) const PKCS8: &str = include_str!("fixtures/vertex-sa-pkcs8.pem");
+
 const ROOT: &str = "http://127.0.0.1:9/v1/projects/my-proj/locations/us";
 const TOKEN: &str = "http://127.0.0.1:9/token";
 const IAM: &str = "http://127.0.0.1:9/iam/v1";
@@ -146,7 +149,7 @@ fn a_service_account_signs_a_jwt_and_streams() {
             &json!({
                 "type": "service_account",
                 "client_email": "worker@p.iam.gserviceaccount.com",
-                "private_key": include_str!("fixtures/vertex-sa-pkcs8.pem"),
+                "private_key": PKCS8,
                 "private_key_id": "key-1",
             }),
         );

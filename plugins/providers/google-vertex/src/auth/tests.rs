@@ -12,7 +12,7 @@ use super::{
     service_assertion, sign_in_again, token_error_code,
 };
 
-const PKCS8: &str = include_str!("../fixtures/vertex-sa-pkcs8.pem");
+use crate::tests::PKCS8;
 
 /// Decodes unpadded base64url, the JWT encoding.
 fn base64url(text: &str) -> Vec<u8> {
