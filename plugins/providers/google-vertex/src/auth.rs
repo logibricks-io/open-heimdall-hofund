@@ -113,10 +113,10 @@ impl Minter {
     /// one token.
     fn forget_others(&self, account: &AccountId) {
         let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
-        if last.as_ref() != Some(account) {
-            if let Some(old) = last.replace(account.clone()) {
-                self.cache.remove(&old);
-            }
+        if last.as_ref() != Some(account)
+            && let Some(old) = last.replace(account.clone())
+        {
+            self.cache.remove(&old);
         }
     }
 }

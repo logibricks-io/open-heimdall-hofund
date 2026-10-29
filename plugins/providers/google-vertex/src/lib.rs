@@ -242,7 +242,7 @@ impl Vertex {
         let page = read_probe(response, stream).await?;
         let mut secrets: Vec<&str> = vec![secret_text(&token)];
         secrets.extend(self.headers.iter().map(|(_, value)| value.as_str()));
-        probe_report(&url, page, stream, &secrets)
+        probe_report(&url, &page, stream, &secrets)
     }
 }
 

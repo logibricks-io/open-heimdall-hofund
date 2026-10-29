@@ -111,7 +111,7 @@ probe::async fn read_probe (mut response : HttpResponse , stream : bool ,) -> Re
 probe::fn merge_extra (body : & mut Value , query : & ProbeQuery) -> Result < () , PluginError >
 probe::fn probe_error_message (body : & [u8]) -> String
 probe::fn probe_failure (url : & str , page : & ProbePage , secrets : & [& str]) -> PluginError
-probe::fn probe_report (url : & str , page : ProbePage , stream : bool , secrets : & [& str] ,) -> Result < ProbeReport , PluginError >
+probe::fn probe_report (url : & str , page : & ProbePage , stream : bool , secrets : & [& str] ,) -> Result < ProbeReport , PluginError >
 probe::fn status_hint (body : & [u8]) -> String
 probe::fn stream_report (body : & [u8]) -> Result < ProbeReport , PluginError >
 process::fn find_in (name : BinaryName , path : Option < & OsStr > , pathext : Option < & OsStr >) -> Option < PathBuf >

@@ -5,6 +5,7 @@
 //! bytes of a stream. [`probe_failure`] turns a refusal into the status error
 //! the builtin adapters report, with [`status_hint`] advice.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use hofund_plugin_api::{PluginError, ProbeQuery, ProbeReport, redact_token, safe_url};
@@ -80,12 +81,12 @@ pub async fn read_probe(
 /// [`stream_report`] error.
 pub fn probe_report(
     url: &str,
-    page: ProbePage,
+    page: &ProbePage,
     stream: bool,
     secrets: &[&str],
 ) -> Result<ProbeReport, PluginError> {
     if !(200..300).contains(&page.status) {
-        return Err(probe_failure(url, &page, secrets));
+        return Err(probe_failure(url, page, secrets));
     }
     if stream {
         // `stream_report` fails only with a decode error.
@@ -104,7 +105,7 @@ pub fn probe_failure(url: &str, page: &ProbePage, secrets: &[&str]) -> PluginErr
     let detail = probe_error_message(&page.body);
     let mut message = format!("{}: HTTP {}", safe_url(url), page.status);
     if !detail.is_empty() {
-        message.push_str(&format!(" ({detail})"));
+        let _ = write!(message, " ({detail})");
     }
     message.push_str(&status_hint(&page.body));
     let error = PluginError::status_error(page.status, redact(&message, secrets));
@@ -175,15 +176,16 @@ pub fn status_hint(body: &[u8]) -> String {
         return format!(" — {BLOCK_ADVICE}");
     }
     // reference: internal/provider/test.go:690-727
-    if let Some(link) = verification(body, &text, &lower) {
-        return link.map_or_else(
-            || format!(" — {VERIFY_ADVICE} before API access can work"),
-            |link| {
-                format!(
-                    " — {VERIFY_ADVICE}: open {link} in a browser, verify the account, then try again"
-                )
-            },
-        );
+    match verification(body, &text, &lower) {
+        Verification::Unasked => {}
+        Verification::Unlinked => {
+            return format!(" — {VERIFY_ADVICE} before API access can work");
+        }
+        Verification::Link(link) => {
+            return format!(
+                " — {VERIFY_ADVICE}: open {link} in a browser, verify the account, then try again"
+            );
+        }
     }
     if lower.contains("go plan doesn") && lower.contains("include api access") {
         return " — this Go plan does not include Provider API access; use an API-enabled plan or a provider API key".to_owned();
@@ -191,7 +193,17 @@ pub fn status_hint(body: &[u8]) -> String {
     String::new()
 }
 
-fn verification(body: &[u8], text: &str, lower: &str) -> Option<Option<String>> {
+/// Whether a refusal asks the account to be verified, and where.
+enum Verification {
+    /// The refusal does not ask for verification.
+    Unasked,
+    /// Verification is asked, with no usable https link.
+    Unlinked,
+    /// Verification is asked at this https link.
+    Link(String),
+}
+
+fn verification(body: &[u8], text: &str, lower: &str) -> Verification {
     let value: Option<Value> = serde_json::from_slice(body).ok();
     let details = value
         .as_ref()
@@ -231,7 +243,7 @@ fn verification(body: &[u8], text: &str, lower: &str) -> Option<Option<String>> 
         || lower.contains("account verification required")
         || lower.contains(&VERIFY_ADVICE.to_ascii_lowercase());
     if !required && !words {
-        return None;
+        return Verification::Unasked;
     }
     let link = if required { validation.or(help) } else { None }
         .or_else(|| own_advice_link(text))
@@ -239,7 +251,7 @@ fn verification(body: &[u8], text: &str, lower: &str) -> Option<Option<String>> 
             let url = url::Url::parse(&link).ok()?;
             (url.scheme() == "https" && url.host_str().is_some()).then_some(link)
         });
-    Some(link)
+    link.map_or(Verification::Unlinked, Verification::Link)
 }
 
 fn own_advice_link(text: &str) -> Option<String> {
@@ -319,7 +331,7 @@ pub fn stream_report(body: &[u8]) -> Result<ProbeReport, PluginError> {
         if matches!(
             kind,
             "content_block_start" | "content_block_delta" | "response.output_item.added"
-        ) || (kind.starts_with("response.") && kind.ends_with(".delta"))
+        ) || (kind.starts_with("response.") && kind.strip_suffix(".delta").is_some())
         {
             return Ok(ProbeReport::new(data));
         }

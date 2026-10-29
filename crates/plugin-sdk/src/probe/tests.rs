@@ -78,20 +78,20 @@ fn secrets_are_redacted_from_a_refusal_and_its_hint() {
 
 #[test]
 fn a_report_reads_2xx_bodies_and_streams() {
-    let report = probe_report("https://v.example", page(204, b"ok"), false, &[]).expect("ok");
+    let report = probe_report("https://v.example", &page(204, b"ok"), false, &[]).expect("ok");
     assert_eq!(report.snippet(), "ok");
-    let refused = probe_report("https://v.example", page(300, b""), false, &[]).expect_err("300");
+    let refused = probe_report("https://v.example", &page(300, b""), false, &[]).expect_err("300");
     assert_eq!(refused.status(), Some(300));
-    let failed = probe_report("https://v.example", page(199, b""), false, &[]).expect_err("199");
+    let failed = probe_report("https://v.example", &page(199, b""), false, &[]).expect_err("199");
     assert_eq!(failed.status(), Some(199));
     let stream = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
-    let report = probe_report("https://v.example", page(200, stream), true, &[]).expect("stream");
+    let report = probe_report("https://v.example", &page(200, stream), true, &[]).expect("stream");
     assert!(report.snippet().contains("hi"), "{}", report.snippet());
     let secret = "sk-stream-secret-value-1234";
     let bad = format!("data: {{\"error\":{{\"message\":\"no {secret}\"}}}}\n\n");
     let error = probe_report(
         "https://v.example",
-        page(200, bad.as_bytes()),
+        &page(200, bad.as_bytes()),
         true,
         &[secret],
     )

@@ -95,6 +95,7 @@ fn der_lengths_use_the_shortest_form() {
     assert_eq!(super::der_tlv(4, &[0; 128])[..3], [4, 0x81, 128]);
     assert_eq!(super::der_tlv(4, &[0; 255])[..3], [4, 0x81, 255]);
     assert_eq!(super::der_tlv(4, &[0; 256])[..4], [4, 0x82, 1, 0]);
-    assert_eq!(super::der_tlv(4, &[0; 0x1_0000])[..5], [4, 0x83, 1, 0, 0]);
-    assert_eq!(super::der_tlv(4, &[0; 0x1_0000]).len(), 0x1_0000 + 5);
+    let big = vec![0; 0x1_0000];
+    assert_eq!(super::der_tlv(4, &big)[..5], [4, 0x83, 1, 0, 0]);
+    assert_eq!(super::der_tlv(4, &big).len(), 0x1_0000 + 5);
 }

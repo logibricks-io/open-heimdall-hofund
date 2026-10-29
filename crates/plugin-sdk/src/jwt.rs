@@ -149,20 +149,17 @@ fn der_tlv(tag: u8, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + 4);
     out.push(tag);
     let len = body.len();
-    if len < 128 {
-        out.push(len as u8);
-    } else if len <= 0xff {
-        out.push(0x81);
-        out.push(len as u8);
-    } else if len <= 0xffff {
-        out.push(0x82);
-        out.push((len >> 8) as u8);
-        out.push((len & 0xff) as u8);
+    if let Ok(short) = u8::try_from(len)
+        && short < 0x80
+    {
+        out.push(short);
     } else {
-        out.push(0x83);
-        out.push((len >> 16) as u8);
-        out.push((len >> 8) as u8);
-        out.push((len & 0xff) as u8);
+        // Long form: 0x80 | the count of big-endian length bytes, then them.
+        let bytes = len.to_be_bytes();
+        let skip = bytes.iter().take_while(|byte| **byte == 0).count();
+        let count = u8::try_from(bytes.len() - skip).unwrap_or(u8::MAX);
+        out.push(0x80 | count);
+        out.extend_from_slice(&bytes[skip..]);
     }
     out.extend_from_slice(body);
     out
