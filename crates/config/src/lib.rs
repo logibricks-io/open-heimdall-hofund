@@ -257,20 +257,50 @@ pub struct Route {
     pub upstreams: Vec<Upstream>,
 }
 
-/// One provider on a route.
+/// Which kind of upstream a route hop names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpstreamTarget {
+    /// A configured provider id.
+    Provider(String),
+    /// A configured subscription id. Membership expands this to account members.
+    Subscription(String),
+}
+
+/// One hop on a route: a provider or a subscription, plus an optional model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Upstream {
-    /// Provider id.
-    pub provider: String,
-    /// Model name sent to this provider.
+    /// Provider or subscription id.
+    pub target: UpstreamTarget,
+    /// Model name sent to this upstream.
     ///
     /// Absent means the name the client used, after `provider/model` is
     /// reduced to the model portion.
     pub model: Option<String>,
     /// Output cap for this hop when the client omits `max_tokens`.
     ///
-    /// Absent uses the provider's `max_output_tokens`.
+    /// Absent uses the provider's `max_output_tokens` when the target is a
+    /// provider.
     pub max_output_tokens: Option<u64>,
+}
+
+impl Upstream {
+    /// The provider id when this hop names a provider.
+    #[must_use]
+    pub fn provider(&self) -> Option<&str> {
+        match &self.target {
+            UpstreamTarget::Provider(id) => Some(id.as_str()),
+            UpstreamTarget::Subscription(_) => None,
+        }
+    }
+
+    /// The subscription id when this hop names a subscription.
+    #[must_use]
+    pub fn subscription(&self) -> Option<&str> {
+        match &self.target {
+            UpstreamTarget::Subscription(id) => Some(id.as_str()),
+            UpstreamTarget::Provider(_) => None,
+        }
+    }
 }
 
 impl fmt::Debug for Config {
@@ -553,34 +583,6 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             model_list,
         });
     }
-    let mut models = BTreeSet::new();
-    let mut routes = Vec::new();
-    for route in raw.routes {
-        if route.model.is_empty() {
-            return Err(ConfigError::Invalid("a route model is empty".to_owned()));
-        }
-        if !models.insert(route.model.clone()) {
-            return Err(ConfigError::Invalid(format!(
-                "route model `{}` is repeated",
-                route.model
-            )));
-        }
-        if route.upstreams.is_empty() {
-            return Err(ConfigError::Invalid(format!(
-                "route `{}` has no upstream",
-                route.model
-            )));
-        }
-        let mut upstreams = Vec::new();
-        for upstream in route.upstreams {
-            let upstream = upstream_of(&route.model, upstream, &seen)?;
-            upstreams.push(upstream);
-        }
-        routes.push(Route {
-            model: route.model,
-            upstreams,
-        });
-    }
     let mut subscriptions = Vec::new();
     let mut subscription_ids = BTreeSet::new();
     for subscription in raw.subscriptions {
@@ -618,6 +620,50 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             id: subscription.id,
             accounts,
             options: prune_table(subscription.options),
+        });
+    }
+    let mut models = BTreeSet::new();
+    let mut routes = Vec::new();
+    for route in raw.routes {
+        if route.model.is_empty() {
+            return Err(ConfigError::Invalid("a route model is empty".to_owned()));
+        }
+        if !models.insert(route.model.clone()) {
+            return Err(ConfigError::Invalid(format!(
+                "route model `{}` is repeated",
+                route.model
+            )));
+        }
+        if route.upstreams.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "route `{}` has no upstream",
+                route.model
+            )));
+        }
+        let mut upstreams = Vec::new();
+        for upstream in route.upstreams {
+            let upstream = upstream_of(&route.model, upstream, &seen, &subscription_ids)?;
+            upstreams.push(upstream);
+        }
+        // Q1: one id as both a provider and a subscription in one route is
+        // ambiguous to read, so it is a config error.
+        let named_providers = upstreams
+            .iter()
+            .filter_map(Upstream::provider)
+            .collect::<BTreeSet<_>>();
+        if let Some(shared) = upstreams
+            .iter()
+            .filter_map(Upstream::subscription)
+            .find(|id| named_providers.contains(id))
+        {
+            return Err(ConfigError::Invalid(format!(
+                "route `{}` names `{shared}` as both a provider and a subscription",
+                route.model
+            )));
+        }
+        routes.push(Route {
+            model: route.model,
+            upstreams,
         });
     }
     Ok(Config {
@@ -813,33 +859,81 @@ fn upstream_of(
     route: &str,
     upstream: RawUpstream,
     providers: &BTreeSet<String>,
+    subscriptions: &BTreeSet<String>,
 ) -> Result<Upstream, ConfigError> {
-    let (provider, model, max_output_tokens) = match upstream {
-        RawUpstream::Id(provider) => (provider, None, None),
-        RawUpstream::Mapped(mapped) => (mapped.provider, mapped.model, mapped.max_output_tokens),
+    let (target, model, max_output_tokens) = match upstream {
+        RawUpstream::Id(provider) => (UpstreamTarget::Provider(provider), None, None),
+        RawUpstream::Mapped(mapped) => match (mapped.provider, mapped.subscription) {
+            (Some(_), Some(_)) => {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` names both provider and subscription"
+                )));
+            }
+            (None, None) => {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` upstream needs provider or subscription"
+                )));
+            }
+            (Some(provider), None) => (
+                UpstreamTarget::Provider(provider),
+                mapped.model,
+                mapped.max_output_tokens,
+            ),
+            (None, Some(subscription)) => (
+                UpstreamTarget::Subscription(subscription),
+                mapped.model,
+                mapped.max_output_tokens,
+            ),
+        },
     };
-    if provider.is_empty() {
-        return Err(ConfigError::Invalid(format!(
-            "route `{route}` names an empty provider"
-        )));
-    }
-    if !providers.contains(&provider) {
-        return Err(ConfigError::Invalid(format!(
-            "route `{route}` names unknown provider `{provider}`"
-        )));
-    }
-    if model.as_ref().is_some_and(|model| model.is_empty()) {
-        return Err(ConfigError::Invalid(format!(
-            "route `{route}` has an empty model for provider `{provider}`"
-        )));
-    }
-    if max_output_tokens == Some(0) {
-        return Err(ConfigError::Invalid(format!(
-            "route `{route}` has max_output_tokens 0 for provider `{provider}`"
-        )));
+    match &target {
+        UpstreamTarget::Provider(provider) => {
+            if provider.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` names an empty provider"
+                )));
+            }
+            if !providers.contains(provider) {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` names unknown provider `{provider}`"
+                )));
+            }
+            if model.as_ref().is_some_and(String::is_empty) {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` has an empty model for provider `{provider}`"
+                )));
+            }
+            if max_output_tokens == Some(0) {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` has max_output_tokens 0 for provider `{provider}`"
+                )));
+            }
+        }
+        UpstreamTarget::Subscription(subscription) => {
+            if subscription.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` names an empty subscription"
+                )));
+            }
+            if !subscriptions.contains(subscription) {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` names unknown subscription `{subscription}`"
+                )));
+            }
+            if model.as_ref().is_some_and(String::is_empty) {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` has an empty model for subscription `{subscription}`"
+                )));
+            }
+            if max_output_tokens == Some(0) {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` has max_output_tokens 0 for subscription `{subscription}`"
+                )));
+            }
+        }
     }
     Ok(Upstream {
-        provider,
+        target,
         model,
         max_output_tokens,
     })
@@ -1131,7 +1225,10 @@ enum RawUpstream {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMappedUpstream {
-    provider: String,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    subscription: Option<String>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -1275,7 +1372,7 @@ mod tests {
         assert!(config.providers[0].preset.is_none());
         assert!(config.warnings.is_empty());
         assert!(config.subscriptions.is_empty());
-        assert_eq!(config.routes[0].upstreams[0].provider, "primary");
+        assert_eq!(config.routes[0].upstreams[0].provider(), Some("primary"));
         assert_eq!(config.routes[0].upstreams[0].model, None);
         assert_eq!(config.providers[0].max_output_tokens, None);
         assert_eq!(config.routes[0].upstreams[0].max_output_tokens, None);
@@ -1584,6 +1681,124 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("project"))
         );
+    }
+
+    #[test]
+    fn route_may_name_a_subscription() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            preset = "openai"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [[routes]]
+            model = "demo"
+            upstreams = [{ subscription = "codex", model = "gpt" }]
+            "#,
+        )
+        .expect("subscription route");
+        assert_eq!(config.routes[0].upstreams[0].subscription(), Some("codex"));
+        assert_eq!(config.routes[0].upstreams[0].provider(), None);
+        assert_eq!(config.routes[0].upstreams[0].model.as_deref(), Some("gpt"));
+    }
+
+    #[test]
+    fn route_rejects_provider_and_subscription_together() {
+        let error = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            preset = "openai"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [[routes]]
+            model = "demo"
+            upstreams = [{ provider = "primary", subscription = "codex" }]
+            "#,
+        )
+        .expect_err("both keys");
+        assert!(
+            error.to_string().contains("both provider and subscription"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn same_id_provider_and_subscription_in_route_is_config_error() {
+        let error = load(
+            r#"
+            [[providers]]
+            id = "codex"
+            preset = "openai"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [[routes]]
+            model = "demo"
+            upstreams = ["codex", { subscription = "codex" }]
+            "#,
+        )
+        .expect_err("same id twice");
+        assert!(
+            error
+                .to_string()
+                .contains("names `codex` as both a provider and a subscription"),
+            "{error}"
+        );
+        load(
+            r#"
+            [[providers]]
+            id = "codex"
+            preset = "openai"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [[routes]]
+            model = "one"
+            upstreams = ["codex"]
+            [[routes]]
+            model = "two"
+            upstreams = [{ subscription = "codex" }]
+            "#,
+        )
+        .expect("separate routes may reuse the id");
+    }
+
+    #[test]
+    fn route_rejects_unknown_or_empty_subscription() {
+        for (upstream, message) in [
+            (
+                r#"{ subscription = "other" }"#,
+                "unknown subscription `other`",
+            ),
+            (r#"{ subscription = "" }"#, "names an empty subscription"),
+            (r#"{ provider = "" }"#, "names an empty provider"),
+            (r#"{ model = "x" }"#, "needs provider or subscription"),
+            (
+                r#"{ subscription = "codex", model = "" }"#,
+                "empty model for subscription `codex`",
+            ),
+            (
+                r#"{ subscription = "codex", max_output_tokens = 0 }"#,
+                "max_output_tokens 0 for subscription `codex`",
+            ),
+        ] {
+            let error = load(&format!(
+                r#"
+                [[subscriptions]]
+                id = "codex"
+                accounts = "*"
+                [[routes]]
+                model = "demo"
+                upstreams = [{upstream}]
+                "#
+            ))
+            .expect_err(upstream);
+            assert!(error.to_string().contains(message), "{upstream}: {error}");
+        }
     }
 
     #[test]

@@ -2305,7 +2305,7 @@ fn exposed(config: &Config, provider: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for route in &config.routes {
         for upstream in &route.upstreams {
-            if upstream.provider == provider {
+            if upstream.provider() == Some(provider) {
                 out.push((
                     route.model.clone(),
                     upstream
