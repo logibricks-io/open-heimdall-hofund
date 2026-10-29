@@ -151,6 +151,12 @@ CredentialStyle::MessagesBoth
 CredentialStyle::NamedHeader
 CredentialStyle::SigV4
 CredentialStyle::XApiKey
+DeviceFlow
+DeviceFlow #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+DeviceFlow::fn host (& self) -> & str
+DeviceFlow::fn new (host : & str) -> Result < Self , PluginError >
+DeviceFlow::fn verification_url (& self) -> String
+DeviceFlow::fn with_path (mut self , path : & 'static str) -> Result < Self , PluginError >
 DirHandle
 DirHandle #[non_exhaustive] derives(Clone)
 DirHandle::fn cache_dir (& self) -> Result < PathBuf , PluginError >
@@ -560,11 +566,18 @@ SignInCtx::fn session (& self) -> & str
 SignInCtx::fn with_option (mut self , key : impl Into < String > , value : impl Into < String > ,) -> Result < Self , PluginError >
 SignInCtx::fn with_session (mut self , session : impl Into < String >) -> Result < Self , PluginError >
 SignInFlow
-SignInFlow #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+SignInFlow #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SignInFlow::Bridge
 SignInFlow::Device
 SignInFlow::Pkce
 SignInFlow::TokenFile
+SignInFlow::const fn kind (& self) -> SignInFlowKind
+SignInFlowKind
+SignInFlowKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Hash)
+SignInFlowKind::Bridge
+SignInFlowKind::Device
+SignInFlowKind::Pkce
+SignInFlowKind::TokenFile
 SignInProof
 SignInProof #[non_exhaustive] derives(Clone)
 SignInProof::Await
@@ -594,10 +607,6 @@ SpawnRequest::fn program (& self) -> & Path
 Spawned
 Spawned #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Spawned::const fn id (self) -> u32
-StaticUrl
-StaticUrl #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
-StaticUrl::const fn as_str (self) -> & 'static str
-StaticUrl::const fn new (value : & 'static str) -> Self
 StreamEvent
 Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
@@ -621,8 +630,8 @@ SubscriptionFactory::fn validate (& self , raw : & RawTable) -> Result < Self ::
 SubscriptionSpec
 SubscriptionSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SubscriptionSpec::const fn display_name (& self) -> & 'static str
-SubscriptionSpec::const fn flow (& self) -> SignInFlow
-SubscriptionSpec::const fn from_static (plugin : PluginId , display_name : & 'static str , flow : SignInFlow ,) -> Self
+SubscriptionSpec::const fn flow (& self) -> SignInFlowKind
+SubscriptionSpec::const fn from_static (plugin : PluginId , display_name : & 'static str , flow : SignInFlowKind ,) -> Self
 SubscriptionSpec::const fn plugin (& self) -> & PluginId
 SurfaceHost
 SurfaceHost #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)

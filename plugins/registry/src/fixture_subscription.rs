@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, BuildError, Completion, ConfigError, HostContext, ModelList,
-    PluginError, PluginId, ProtocolId, QuotaWindow, RawTable, RawValue, Request, Schema,
-    SignInChallenge, SignInCtx, SignInFlow, SignInProof, StaticUrl, Subscription,
+    AccountId, AccountStatus, BuildError, Completion, ConfigError, DeviceFlow, HostContext,
+    ModelList, PluginError, PluginId, ProtocolId, QuotaWindow, RawTable, RawValue, Request, Schema,
+    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
     SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
@@ -19,14 +19,13 @@ pub(crate) fn contribute() -> Contribution {
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("fixture-sub"),
     "Fixture Subscription",
-    SignInFlow::Device {
-        verification_url: StaticUrl::new("https://example.test/device"),
-    },
+    SignInFlowKind::Device,
 );
 
 struct FixtureFactory;
 
 struct FixtureConfig {
+    flow: SignInFlow,
     needs_sign_in: BTreeSet<String>,
     quota: QuotaMode,
 }
@@ -54,6 +53,8 @@ impl SubscriptionFactory for FixtureFactory {
             vec![
                 ("needs_sign_in".to_owned(), Schema::string()),
                 ("quota".to_owned(), Schema::string()),
+                ("host".to_owned(), Schema::string()),
+                ("flow".to_owned(), Schema::string()),
             ],
             &[],
         )
@@ -62,7 +63,7 @@ impl SubscriptionFactory for FixtureFactory {
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
         for key in raw.keys() {
-            if key != "needs_sign_in" && key != "quota" {
+            if !matches!(key, "needs_sign_in" | "quota" | "host" | "flow") {
                 return Err(ConfigError::new("unknown key").with_path(key));
             }
         }
@@ -94,7 +95,23 @@ impl SubscriptionFactory for FixtureFactory {
             },
             Some(_) => return Err(ConfigError::new("quota must be a string").with_path("quota")),
         };
+        let host = match raw.get("host") {
+            None => "example.test",
+            Some(RawValue::String(value)) => value.as_str(),
+            Some(_) => return Err(ConfigError::new("host must be a string").with_path("host")),
+        };
+        let device = DeviceFlow::new(host)
+            .and_then(|flow| flow.with_path("/device"))
+            .map_err(|error| ConfigError::new(error.to_string()).with_path("host"))?;
+        // `flow = "token-file"` builds an instance whose flow disagrees with the
+        // spec, so tests can exercise the factory's kind check.
+        let flow = match raw.get("flow") {
+            None => SignInFlow::Device(device),
+            Some(RawValue::String(value)) if value == "token-file" => SignInFlow::TokenFile,
+            Some(_) => return Err(ConfigError::new("unknown flow").with_path("flow")),
+        };
         Ok(FixtureConfig {
+            flow,
             needs_sign_in,
             quota,
         })
@@ -106,6 +123,7 @@ impl SubscriptionFactory for FixtureFactory {
         _host: &HostContext,
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         Ok(Arc::new(FixtureSubscription {
+            flow: cfg.flow.clone(),
             needs_sign_in: cfg.needs_sign_in.clone(),
             quota: cfg.quota,
         }))
@@ -113,6 +131,7 @@ impl SubscriptionFactory for FixtureFactory {
 }
 
 struct FixtureSubscription {
+    flow: SignInFlow,
     needs_sign_in: BTreeSet<String>,
     quota: QuotaMode,
 }
@@ -124,10 +143,7 @@ impl Subscription for FixtureSubscription {
     }
 
     fn flow(&self) -> &SignInFlow {
-        const FLOW: SignInFlow = SignInFlow::Device {
-            verification_url: StaticUrl::new("https://example.test/device"),
-        };
-        &FLOW
+        &self.flow
     }
 
     async fn start_sign_in(

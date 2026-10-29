@@ -862,35 +862,6 @@ impl Default for QuotaQuery {
     }
 }
 
-/// An `https` URL stored in a static sign-in flow.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct StaticUrl {
-    value: &'static str,
-}
-
-impl StaticUrl {
-    /// An absolute `http` or `https` URL with no whitespace.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `value` is not an absolute `http` or `https` URL.
-    #[must_use]
-    pub const fn new(value: &'static str) -> Self {
-        assert!(
-            is_http_url(value),
-            "sign-in URL must be absolute http or https"
-        );
-        Self { value }
-    }
-
-    /// The URL text.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        self.value
-    }
-}
-
 /// A binary name the process spawner resolves. Not a shell command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -974,17 +945,31 @@ const fn is_binary_name(value: &str) -> bool {
     true
 }
 
-/// How a subscription signs in. `Device` carries a static URL until follow-up N9.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The kind of sign-in a subscription plugin uses, without per-instance data.
+///
+/// [`SubscriptionSpec::flow`] reports it statically; the built instance's
+/// [`SignInFlow`] must have the same kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SignInFlowKind {
+    /// Loopback PKCE.
+    Pkce,
+    /// A device code.
+    Device,
+    /// A token the user pastes from a file or a command.
+    TokenFile,
+    /// A vendor binary the spawner resolves.
+    Bridge,
+}
+
+/// How a subscription instance signs in. Built from validated options.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SignInFlow {
     /// Loopback PKCE.
     Pkce,
-    /// A device code against a static verification URL.
-    Device {
-        /// Where the user opens the code.
-        verification_url: StaticUrl,
-    },
+    /// A device code against a host taken from validated options.
+    Device(DeviceFlow),
     /// A token the user pastes from a file or a command.
     TokenFile,
     /// A vendor binary the spawner resolves. Not a shell string.
@@ -992,6 +977,119 @@ pub enum SignInFlow {
         /// The binary name, such as `example-agent`.
         command: BinaryName,
     },
+}
+
+impl SignInFlow {
+    /// The kind of this flow.
+    #[must_use]
+    pub const fn kind(&self) -> SignInFlowKind {
+        match self {
+            Self::Pkce => SignInFlowKind::Pkce,
+            Self::Device(_) => SignInFlowKind::Device,
+            Self::TokenFile => SignInFlowKind::TokenFile,
+            Self::Bridge { .. } => SignInFlowKind::Bridge,
+        }
+    }
+}
+
+/// A device-code flow on one `https` host, such as an enterprise tenant.
+///
+/// The host is validated and lowercased: `https` only, with no userinfo, port,
+/// path, query or fragment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeviceFlow {
+    host: String,
+    path: &'static str,
+}
+
+impl DeviceFlow {
+    /// A device flow on `host`. `host` is a bare DNS name such as
+    /// `tenant.example.com`, or `https://` followed by one, with at most a
+    /// trailing `/`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the scheme is not `https`, or the text has
+    /// userinfo, a port, a path, a query, a fragment, or is not a DNS name.
+    pub fn new(host: &str) -> Result<Self, PluginError> {
+        let rest = match host.split_once("://") {
+            Some((scheme, rest)) => {
+                if !scheme.eq_ignore_ascii_case("https") {
+                    return Err(PluginError::config("device flow host must use https"));
+                }
+                rest.strip_suffix('/').unwrap_or(rest)
+            }
+            None => host,
+        };
+        if rest.contains('@') {
+            return Err(PluginError::config(
+                "device flow host must not have userinfo",
+            ));
+        }
+        if rest.contains(':') {
+            return Err(PluginError::config("device flow host must not have a port"));
+        }
+        if rest.contains(['/', '?', '#']) {
+            return Err(PluginError::config(
+                "device flow host must not have a path, query or fragment",
+            ));
+        }
+        let host = rest.to_ascii_lowercase();
+        if !is_dns_name(&host) {
+            return Err(PluginError::config("device flow host is not a DNS name"));
+        }
+        Ok(Self { host, path: "/" })
+    }
+
+    /// The same host with a fixed verification path such as `/login/device`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `path` does not start with `/`, or has a
+    /// query, fragment, whitespace, backslash or `..` segment.
+    pub fn with_path(mut self, path: &'static str) -> Result<Self, PluginError> {
+        let bad = !path.starts_with('/')
+            || path.starts_with("//")
+            || path.bytes().any(|byte| {
+                byte.is_ascii_whitespace()
+                    || byte.is_ascii_control()
+                    || matches!(byte, b'?' | b'#' | b'\\' | b'@')
+            })
+            || path.split('/').any(|segment| segment == "..");
+        if bad {
+            return Err(PluginError::config("device flow path is not a plain path"));
+        }
+        self.path = path;
+        Ok(self)
+    }
+
+    /// The validated, lowercased host.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// `https://<host><path>`.
+    #[must_use]
+    pub fn verification_url(&self) -> String {
+        format!("https://{}{}", self.host, self.path)
+    }
+}
+
+fn is_dns_name(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
 }
 
 /// What the UI shows while sign-in is in progress.
@@ -1240,7 +1338,7 @@ impl std::fmt::Debug for SignInProof {
 pub struct SubscriptionSpec {
     plugin: PluginId,
     display_name: &'static str,
-    flow: SignInFlow,
+    flow: SignInFlowKind,
 }
 
 impl SubscriptionSpec {
@@ -1254,7 +1352,7 @@ impl SubscriptionSpec {
     pub const fn from_static(
         plugin: PluginId,
         display_name: &'static str,
-        flow: SignInFlow,
+        flow: SignInFlowKind,
     ) -> Self {
         assert!(
             !display_name.is_empty(),
@@ -1279,9 +1377,10 @@ impl SubscriptionSpec {
         self.display_name
     }
 
-    /// How sign-in works.
+    /// The kind of sign-in every instance uses. The instance's
+    /// [`SignInFlow`] carries the per-instance data, such as a device host.
     #[must_use]
-    pub const fn flow(&self) -> SignInFlow {
+    pub const fn flow(&self) -> SignInFlowKind {
         self.flow
     }
 }
@@ -1763,9 +1862,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        Account, AccountStatus, AuthChoice, BinaryName, ListQuery, MatchNeedle, ModelList,
-        ModelSpec, ProbeQuery, QuotaObservation, QuotaWindow, SignInChallenge, SignInCtx,
-        SignInProof, StaticUrl,
+        Account, AccountStatus, AuthChoice, BinaryName, DeviceFlow, ListQuery, MatchNeedle,
+        ModelList, ModelSpec, ProbeQuery, QuotaObservation, QuotaWindow, SignInChallenge,
+        SignInCtx, SignInFlow, SignInFlowKind, SignInProof,
     };
     use crate::ListKind;
     use crate::id::{AccountId, PluginId, ProtocolId};
@@ -1897,8 +1996,91 @@ mod tests {
     fn sign_in_urls_and_bridge_names_reject_shell_text() {
         assert!(SignInChallenge::open_url("javascript:alert(1)").is_err());
         assert!(SignInChallenge::device_code("", "https://example.com").is_err());
-        let _url = StaticUrl::new("https://auth.example.com/device");
         let _binary = BinaryName::new("example-agent");
+    }
+
+    #[test]
+    fn device_flow_rejects_http_userinfo_port_path_query() {
+        for (bad, reason) in [
+            ("http://tenant.example.com", "https"),
+            ("ftp://tenant.example.com", "https"),
+            ("https://user@tenant.example.com", "userinfo"),
+            ("user:pass@tenant.example.com", "userinfo"),
+            ("https://tenant.example.com:8443", "port"),
+            ("tenant.example.com:443", "port"),
+            ("https://[::1]", "port"),
+            ("https://tenant.example.com/login", "path"),
+            ("tenant.example.com/", "path"),
+            ("https://tenant.example.com?x=1", "query"),
+            ("https://tenant.example.com#frag", "fragment"),
+            ("", "DNS name"),
+            ("https://", "DNS name"),
+            ("tenant..example.com", "DNS name"),
+            ("-tenant.example.com", "DNS name"),
+            ("tenant-.example.com", "DNS name"),
+            ("tenant example.com", "DNS name"),
+            ("tenant_example.com", "DNS name"),
+        ] {
+            let error = DeviceFlow::new(bad).expect_err(bad);
+            assert!(
+                error.to_string().contains(reason),
+                "{bad:?}: {error} lacks {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enterprise_host_round_trips() {
+        for text in [
+            "Tenant.Example.COM",
+            "https://Tenant.Example.COM",
+            "HTTPS://tenant.example.com/",
+        ] {
+            let flow = DeviceFlow::new(text).expect(text);
+            assert_eq!(flow.host(), "tenant.example.com");
+            assert_eq!(flow.verification_url(), "https://tenant.example.com/");
+            let again = DeviceFlow::new(flow.host()).expect("round trip");
+            assert_eq!(again, flow);
+        }
+        let flow = DeviceFlow::new("tenant.example.com")
+            .and_then(|flow| flow.with_path("/login/device"))
+            .expect("path");
+        assert_eq!(
+            flow.verification_url(),
+            "https://tenant.example.com/login/device"
+        );
+        let long_label = "a".repeat(64);
+        assert!(DeviceFlow::new(&format!("{long_label}.example.com")).is_err());
+        assert!(DeviceFlow::new(&"a.".repeat(127)).is_err());
+    }
+
+    #[test]
+    fn device_flow_path_is_plain() {
+        let flow = DeviceFlow::new("tenant.example.com").expect("host");
+        for bad in [
+            "login",
+            "//evil.example.com/x",
+            "/a?b",
+            "/a#b",
+            "/a b",
+            "/a\\b",
+            "/a/../b",
+            "/@evil",
+        ] {
+            assert!(flow.clone().with_path(bad).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn sign_in_flow_kind_follows_the_variant() {
+        let device = SignInFlow::Device(DeviceFlow::new("example.com").expect("host"));
+        assert_eq!(device.kind(), SignInFlowKind::Device);
+        assert_eq!(SignInFlow::Pkce.kind(), SignInFlowKind::Pkce);
+        assert_eq!(SignInFlow::TokenFile.kind(), SignInFlowKind::TokenFile);
+        let bridge = SignInFlow::Bridge {
+            command: BinaryName::new("example-agent"),
+        };
+        assert_eq!(bridge.kind(), SignInFlowKind::Bridge);
     }
 
     #[test]
