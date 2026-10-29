@@ -1,0 +1,89 @@
+# Row moved from the kernel catalog (`crates/provider/presets.toml`), recorded
+# from the reference preset list (`internal/provider/presets.go`) at commit
+# cbbf3163cb3c87ee0c327a56bc5689ddc5eda947. The preset id is the plugin id.
+# Chat, Responses, and Messages take the region's URLs here; Converse takes
+# the chat URL and the plugin strips `/openai/v1` to reach the runtime root.
+# `src/lib.rs` keeps the same model ids and a test holds them equal.
+
+[[preset]]
+id = "bedrock"
+name = "Amazon Bedrock"
+kind = "vendor"
+note = "Bedrock API key"
+chat = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic"
+website = "https://aws.amazon.com/bedrock/"
+keys_url = "https://console.aws.amazon.com/bedrock/home#/api-keys"
+no_list = true
+models = ["global.anthropic.claude-opus-5-5", "global.anthropic.claude-sonnet-5-5", "global.anthropic.claude-sonnet-5", "global.anthropic.claude-opus-5", "global.anthropic.claude-fable-5-1", "global.anthropic.claude-opus-4-8", "global.anthropic.claude-opus-4-7", "global.anthropic.claude-haiku-4-5-20251001-v1:0", "global.openai.gpt-6-astra", "global.openai.gpt-6-sol", "global.openai.gpt-6-luna", "openai.gpt-oss-120b-1:0", "openai.gpt-oss-20b-1:0", "qwen.qwen3-coder-480b-a35b-v1:0", "deepseek.v3.2", "moonshotai.kimi-k2.5", "zai.glm-5", "minimax.minimax-m2.5"]
+
+[[preset.region]]
+id = "us-east-1"
+name = "us-east-1"
+chat = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "us-east-2"
+name = "us-east-2"
+chat = "https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.us-east-2.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "us-west-2"
+name = "us-west-2"
+chat = "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.us-west-2.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "eu-central-1"
+name = "eu-central-1"
+chat = "https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.eu-central-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "eu-west-1"
+name = "eu-west-1"
+chat = "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.eu-west-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "eu-west-3"
+name = "eu-west-3"
+chat = "https://bedrock-runtime.eu-west-3.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.eu-west-3.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.eu-west-3.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "ap-northeast-1"
+name = "ap-northeast-1"
+chat = "https://bedrock-runtime.ap-northeast-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.ap-northeast-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.ap-northeast-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "ap-southeast-1"
+name = "ap-southeast-1"
+chat = "https://bedrock-runtime.ap-southeast-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.ap-southeast-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.ap-southeast-1.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "ap-southeast-2"
+name = "ap-southeast-2"
+chat = "https://bedrock-runtime.ap-southeast-2.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.ap-southeast-2.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.ap-southeast-2.amazonaws.com/anthropic"
+
+[[preset.region]]
+id = "ap-south-1"
+name = "ap-south-1"
+chat = "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1"
+responses = "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1"
+anthropic = "https://bedrock-runtime.ap-south-1.amazonaws.com/anthropic"

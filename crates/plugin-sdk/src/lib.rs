@@ -24,6 +24,19 @@ pub use async_trait::async_trait;
 pub use hofund_quirks::apply as apply_quirks;
 pub use serde_json as json;
 pub use tracing;
+/// The URL parser, so a plugin checks a URL the way the host does.
+pub use url;
+
+/// Waits `duration` on the host runtime, for a plugin that polls.
+pub async fn sleep(duration: std::time::Duration) {
+    tokio::time::sleep(duration).await;
+}
+
+/// Runs `future` for at most `duration` on the host runtime. `None` means
+/// the time ran out and `future` was dropped.
+pub async fn timeout<F: Future>(duration: std::time::Duration, future: F) -> Option<F::Output> {
+    tokio::time::timeout(duration, future).await.ok()
+}
 
 /// Waits `duration` on the host runtime, for a plugin that polls.
 pub async fn sleep(duration: std::time::Duration) {
@@ -31,8 +44,11 @@ pub async fn sleep(duration: std::time::Duration) {
 }
 
 pub mod classify;
+pub mod jwt;
 pub mod oauth;
 pub mod page;
+pub mod probe;
+pub mod process;
 pub mod register;
 pub mod sigv4;
 pub mod transport;
@@ -52,5 +68,15 @@ mod tests {
     #[test]
     fn tracing_re_export_is_the_facade() {
         let _ = tracing::Level::INFO;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_gives_up_only_when_time_runs_out() {
+        let short = std::time::Duration::from_millis(5);
+        assert_eq!(
+            super::timeout(short, std::future::pending::<u8>()).await,
+            None
+        );
+        assert_eq!(super::timeout(short, async { 7_u8 }).await, Some(7));
     }
 }

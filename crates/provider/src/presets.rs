@@ -189,9 +189,6 @@ pub fn catalog_ids() -> Vec<&'static str> {
 pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
     let catalog = catalog();
     let (preset, alias_region) = find(catalog, request.id)?;
-    if preset.id == "google-vertex" {
-        return resolve_vertex(preset, request);
-    }
     if preset.id == "remote-gateway" {
         return Err(unavailable(preset));
     }
@@ -202,7 +199,7 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
     };
     let endpoints = Endpoints::of(preset, region);
     if request.wire == Some(Wire::Converse) {
-        return resolve_converse(preset, request, &endpoints);
+        return Err(resolve_converse(preset));
     }
     if let Some(wire) = request.wire {
         let base = endpoints
@@ -211,9 +208,6 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
             .map(str::to_owned);
         let base = match base {
             Some(base) => prefer_override(&base, request.base_url),
-            None if preset.id == "azure" && !request.base_url.is_empty() => {
-                azure_base(request.base_url)?
-            }
             None => {
                 return Err(PresetError::new(format!(
                     "preset `{}` has no {} endpoint",
@@ -243,19 +237,14 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
             ));
         }
     }
-    if preset.id == "azure" || !preset.endpoint.is_empty() {
+    if !preset.endpoint.is_empty() {
         if request.base_url.is_empty() {
             return Err(PresetError::new(format!(
                 "preset `{}` needs base_url",
                 preset.id
             )));
         }
-        let base = if preset.id == "azure" {
-            azure_base(request.base_url)?
-        } else {
-            request.base_url.to_owned()
-        };
-        return Ok(finish(preset, Wire::Chat, base));
+        return Ok(finish(preset, Wire::Chat, request.base_url.to_owned()));
     }
     Err(unavailable(preset))
 }
@@ -278,75 +267,12 @@ fn prefer_override(catalog_url: &str, override_url: &str) -> String {
     }
 }
 
-fn resolve_vertex(preset: &Preset, request: &Resolve<'_>) -> Result<Resolved, PresetError> {
-    if let Some(region) = request.region {
-        return Err(PresetError::new(format!(
-            "preset `google-vertex` has no region `{region}`"
-        )));
-    }
-    if let Some(wire) = request.wire
-        && wire != Wire::Vertex
-    {
-        return Err(PresetError::new(format!(
-            "preset `google-vertex` has no {} endpoint",
-            wire_name(wire)
-        )));
-    }
-    let base = crate::vertex::base_url(request.project, request.location, request.base_url)
-        .map_err(|error| PresetError::new(error.to_string()))?;
-    Ok(Resolved {
-        credential: Credential::Bearer,
-        preset_id: preset.id.clone(),
-        name: preset.name.clone(),
-        wire: Wire::Vertex,
-        base_url: base,
-    })
-}
-
-/// Model ids recorded for one preset. `None` when the id is not in the catalog.
-pub(crate) fn preset_models(id: &str) -> Option<&[String]> {
-    catalog()
-        .preset
-        .iter()
-        .find(|preset| preset.id == id)
-        .map(|preset| preset.models.as_slice())
-}
-
-fn resolve_converse(
-    preset: &Preset,
-    request: &Resolve<'_>,
-    endpoints: &Endpoints<'_>,
-) -> Result<Resolved, PresetError> {
-    if preset.id != "bedrock" {
-        return Err(PresetError::new(format!(
-            "preset `{}` has no converse endpoint",
-            preset.id
-        )));
-    }
-    let chat = endpoints.url(Wire::Chat).unwrap_or("");
-    if chat.is_empty() && request.base_url.is_empty() {
-        return Err(PresetError::new(
-            "preset `bedrock` has no converse endpoint",
-        ));
-    }
-    let base = if request.base_url.is_empty() {
-        chat.to_owned()
-    } else {
-        request.base_url.to_owned()
-    };
-    Ok(finish(
-        preset,
-        Wire::Converse,
-        crate::bedrock::runtime_root(&base),
-    ))
+/// No kernel preset serves Converse. The Bedrock plugin owns that wire.
+fn resolve_converse(preset: &Preset) -> PresetError {
+    PresetError::new(format!("preset `{}` has no converse endpoint", preset.id))
 }
 
 fn unavailable(preset: &Preset) -> PresetError {
-    if preset.id == "google-vertex" {
-        return PresetError::new(
-            "preset `google-vertex` signs with Google credentials. That adapter is not in this build.",
-        );
-    }
     if preset.id == "remote-gateway" {
         return PresetError::new(
             "preset `remote-gateway` forwards the client's own protocol. That adapter is not in this build.",
@@ -371,15 +297,9 @@ pub fn credential_for(preset_id: &str, wire: Wire, base_url: &str) -> Credential
         return Credential::GoogApiKey;
     }
     let host = host_of(base_url);
-    if preset_id == "azure" || crate::models::azure_host(&host) {
-        return match wire {
-            Wire::Messages => Credential::XApiKey,
-            Wire::Chat | Wire::Responses | Wire::Vertex | Wire::Converse => Credential::ApiKey,
-            Wire::Generative => Credential::GoogApiKey,
-        };
-    }
     if wire == Wire::Messages {
         if crate::models::anthropic_host(&host)
+            || crate::models::azure_host(&host)
             || matches!(preset_id, "bedrock" | "bedrock-mantle")
             || is_bedrock(&host)
         {
@@ -388,47 +308,6 @@ pub fn credential_for(preset_id: &str, wire: Wire, base_url: &str) -> Credential
         return Credential::MessagesBoth;
     }
     Credential::Bearer
-}
-
-/// The v1 API root of an Azure OpenAI resource.
-///
-/// A pasted resource, `https://<resource>.openai.azure.com`, a host of
-/// `cognitiveservices.azure.com` or `services.ai.azure.com`, or the resource
-/// name alone, becomes `https://<host>/openai/v1`. A localhost URL is kept, so
-/// a test server is not rewritten. Checked against the v1 API
-/// (<https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle>,
-/// 2026-10-25): chat, responses, and the model list sit on that prefix, and
-/// the key is the `api-key` header.
-///
-/// # Errors
-///
-/// Returns [`PresetError`] when the value is not an Azure OpenAI host.
-pub fn azure_base(raw: &str) -> Result<String, PresetError> {
-    let mut raw = raw.trim().to_owned();
-    if raw.is_empty() {
-        return Err(PresetError::new("preset `azure` needs base_url"));
-    }
-    if !raw.contains("://") {
-        raw = format!("https://{raw}");
-    }
-    let url = reqwest::Url::parse(&raw).map_err(|error| {
-        PresetError::new(format!("preset `azure` base URL is invalid: {error}"))
-    })?;
-    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-        return Ok(raw.trim_end_matches('/').to_owned());
-    }
-    let host = if host.contains('.') {
-        host
-    } else {
-        format!("{host}.openai.azure.com")
-    };
-    if !crate::models::azure_host(&host) {
-        return Err(PresetError::new(format!(
-            "preset `azure` base URL `{raw}` is not an Azure OpenAI host"
-        )));
-    }
-    Ok(format!("https://{host}/openai/v1"))
 }
 
 fn is_bedrock(host: &str) -> bool {
@@ -689,7 +568,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 9);
+        assert_eq!(catalog.preset.len(), 2);
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
@@ -741,48 +620,6 @@ mod tests {
 
     #[test]
     fn known_presets_resolve_to_the_recorded_endpoint_and_header() {
-        let bedrock = resolve(&Resolve {
-            id: "bedrock",
-            region: Some("eu-west-1"),
-            wire: Some(Wire::Messages),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("bedrock");
-        assert_eq!(
-            bedrock.base_url,
-            "https://bedrock-runtime.eu-west-1.amazonaws.com/anthropic"
-        );
-        assert_eq!(bedrock.credential, crate::Credential::XApiKey);
-        let bedrock_chat = resolve(&Resolve {
-            id: "bedrock",
-            region: Some("eu-west-1"),
-            wire: Some(Wire::Chat),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("bedrock chat");
-        assert_eq!(
-            bedrock_chat.base_url,
-            "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1"
-        );
-        assert_eq!(bedrock_chat.credential, crate::Credential::Bearer);
-        let converse = resolve(&Resolve {
-            id: "bedrock",
-            region: Some("eu-west-1"),
-            wire: Some(Wire::Converse),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("converse");
-        assert_eq!(converse.wire, Wire::Converse);
-        assert_eq!(
-            converse.base_url,
-            "https://bedrock-runtime.eu-west-1.amazonaws.com"
-        );
         let error = resolve(&Resolve {
             id: "bedrock-mantle",
             region: None,
@@ -792,7 +629,10 @@ mod tests {
             location: "",
         })
         .expect_err("mantle converse");
-        assert!(error.to_string().contains("no converse endpoint"));
+        assert_eq!(
+            error.to_string(),
+            "preset `bedrock-mantle` has no converse endpoint"
+        );
 
         let mantle = resolve(&Resolve {
             id: "bedrock-mantle",
@@ -808,70 +648,6 @@ mod tests {
             "https://bedrock-mantle.ap-southeast-2.api.aws/v1"
         );
 
-        let azure = resolve(&Resolve {
-            id: "azure",
-            region: None,
-            wire: None,
-            base_url: "my-resource",
-            project: "",
-            location: "",
-        })
-        .expect("azure");
-        assert_eq!(
-            azure.base_url,
-            "https://my-resource.openai.azure.com/openai/v1"
-        );
-        assert_eq!(azure.credential, crate::Credential::ApiKey);
-        let pasted = resolve(&Resolve {
-            id: "azure",
-            region: None,
-            wire: Some(Wire::Responses),
-            base_url: "https://mine.openai.azure.com/openai/deployments/demo?api-version=2024-10-21",
-            project: "",
-            location: "",
-        })
-        .expect("pasted");
-        assert_eq!(pasted.base_url, "https://mine.openai.azure.com/openai/v1");
-        assert_eq!(pasted.wire, Wire::Responses);
-
-        let vertex = resolve(&Resolve {
-            id: "google-vertex",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "My-Project",
-            location: "",
-        })
-        .expect("vertex");
-        assert_eq!(vertex.wire, Wire::Vertex);
-        assert_eq!(
-            vertex.base_url,
-            "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global"
-        );
-        assert_eq!(vertex.credential, crate::Credential::Bearer);
-        let regional = resolve(&Resolve {
-            id: "google-vertex",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "my-project",
-            location: "us-central1",
-        })
-        .expect("region");
-        assert_eq!(
-            regional.base_url,
-            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1"
-        );
-        let error = resolve(&Resolve {
-            id: "google-vertex",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect_err("vertex project");
-        assert!(error.to_string().contains("Google Cloud project"));
         let error = resolve(&Resolve {
             id: "nope",
             region: None,

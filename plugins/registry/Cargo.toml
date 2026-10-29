@@ -11,10 +11,15 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["codex", "echo", "gemini", "relay"]
+default = ["azure", "bedrock", "claude", "codex", "copilot", "echo", "gemini", "google-vertex", "relay"]
+azure = ["dep:hofund-plugin-azure"]
+bedrock = ["dep:hofund-plugin-bedrock"]
+claude = ["dep:hofund-plugin-subscription-claude"]
 codex = ["dep:hofund-plugin-subscription-codex"]
+copilot = ["dep:hofund-plugin-subscription-copilot"]
 echo = ["dep:hofund-plugin-echo"]
 gemini = ["dep:hofund-plugin-subscription-gemini"]
+google-vertex = ["dep:hofund-plugin-google-vertex"]
 relay = ["dep:hofund-plugin-relay"]
 test-fixtures = []
 
@@ -22,9 +27,14 @@ test-fixtures = []
 futures-util = "0.3.32"
 hofund-plugin-api = { workspace = true, features = ["kernel-internal"] }
 hofund-plugin-sdk = { workspace = true }
+hofund-plugin-azure = { workspace = true, optional = true }
+hofund-plugin-bedrock = { workspace = true, optional = true }
 hofund-plugin-echo = { workspace = true, optional = true }
+hofund-plugin-google-vertex = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }
+hofund-plugin-subscription-claude = { workspace = true, optional = true }
 hofund-plugin-subscription-codex = { workspace = true, optional = true }
+hofund-plugin-subscription-copilot = { workspace = true, optional = true }
 hofund-plugin-subscription-gemini = { workspace = true, optional = true }
 hofund-provider = { workspace = true }
 hofund-quirks = { workspace = true }

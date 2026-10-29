@@ -57,6 +57,8 @@ flowchart BT
   pluginRelay["plugin-relay<br/>provider"]
   pluginEcho["plugin-echo<br/>inbound"]
   pluginCodex["plugin-subscription-codex<br/>subscription"]
+  pluginClaude["plugin-subscription-claude<br/>subscription"]
+  pluginCopilot["plugin-subscription-copilot<br/>subscription"]
   pluginGemini["plugin-subscription-gemini<br/>subscription"]
   gateway["gateway<br/>HTTP server"]
   daemon["daemon<br/>composition root"]
@@ -80,6 +82,8 @@ flowchart BT
   pluginRegistry --> pluginRelay
   pluginRegistry --> pluginEcho
   pluginRegistry --> pluginCodex
+  pluginRegistry --> pluginClaude
+  pluginRegistry --> pluginCopilot
   pluginRegistry --> pluginGemini
   pluginRegistry --> provider
   pluginRegistry --> quirks
@@ -89,6 +93,10 @@ flowchart BT
   pluginEcho --> pluginSdk
   pluginCodex --> pluginApi
   pluginCodex --> pluginSdk
+  pluginClaude --> pluginApi
+  pluginClaude --> pluginSdk
+  pluginCopilot --> pluginApi
+  pluginCopilot --> pluginSdk
   pluginGemini --> pluginApi
   pluginGemini --> pluginSdk
   router --> pluginApi
@@ -162,8 +170,10 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-gemini`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-gemini`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-gemini` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
 | `hofund-kit-upstream` | `hofund-plugin-api`, `hofund-plugin-host` |
@@ -228,10 +238,12 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-api` | Plugin traits, `PluginError`, newtypes, and `HostContext` handles. |
 | `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. SigV4, OAuth token parsing, form bodies, and JSON page cursors live here. Re-exports `tracing` and `async_trait`. |
 | `plugin-host` | The `HostContext` constructor, the pooled HTTP client, and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
-| `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` serves the built-in Chat, Responses, Messages, Generative, Vertex, and Bedrock adapters. |
+| `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` serves the built-in Chat, Responses, Messages, and Generative adapters. |
 | `plugin-relay` | Sample upstream plugin. The kit dependency is tests only. |
 | `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
 | `plugin-subscription-codex` | ChatGPT (Codex) subscription: browser sign-in, token refresh, and the Responses upstream. |
+| `plugin-subscription-claude` | Claude Code subscription: sign-in and refresh by running the `claude` command line in a private config directory. |
+| `plugin-subscription-copilot` | GitHub Copilot subscription, on github.com or a `<name>.ghe.com` enterprise host: device sign-in, session tokens, quota, the account model list, and per-model Chat Completions, Responses and Messages routing. |
 | `plugin-subscription-gemini` | Gemini CLI (Code Assist) subscription: browser sign-in, Code Assist project setup, and token refresh. |
 | `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |
 | `codec` | Per-protocol encode and decode to and from the IR. Hub-and-spoke, so N protocols do not become an N-by-M matrix. |

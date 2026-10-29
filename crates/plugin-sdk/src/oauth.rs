@@ -32,7 +32,7 @@ pub use account::account_id_from;
 pub use cache::{NEGATIVE_TTL, TokenCache};
 pub use clock::Clock;
 pub use detached::detached;
-pub use object::{SecretObject, constant_time_eq, same_secret};
+pub use object::{SecretObject, constant_time_eq, same_secret, secret_text};
 pub use pkce::{Pkce, authorize_url, client_code_exchange_form, code_exchange_form, new_state};
 pub use token::{TokenSet, parse_token_set, token_error, unverified_claims};
 

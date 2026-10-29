@@ -17,14 +17,14 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_host::HttpLimits;
 use hofund_plugin_sdk::{Call, PageError, PageErrorKind, after_id};
-use hofund_provider::{Credential, Endpoint, ModelPlan, Vertex, Wire};
+use hofund_provider::{Credential, Endpoint, ModelPlan, Wire};
 use tracing::Instrument;
 
 use super::events::EventBus;
 use super::{
     DaemonError, DaemonRegistry, ErrorKind, Planned, RegistryAdapter, beside, build_raw_plugin,
     credential_name, endpoint_for, implementation_id, insert_options, option_present, plan_using,
-    plugin_for, protocol_of, resolve, show,
+    protocol_of, resolve, show,
 };
 
 const NO_MODEL: &str = "no model to try: expose one, or refresh the model list";
@@ -627,7 +627,7 @@ impl ModelsHost {
             let refreshable = (|| {
                 let planned = self.planned(provider)?;
                 let model_plan = self.model_plan(provider)?;
-                let configured_plugin = plugin_for(provider, planned.wire, &self.registry);
+                let configured_plugin = self.plugin_for(provider, &planned);
                 self.kind(provider, &planned, model_plan.as_ref(), &configured_plugin)
             })();
             let Ok(kind) = refreshable else {
@@ -1134,7 +1134,7 @@ impl ModelsHost {
         endpoint: &Endpoint,
     ) -> Result<Fetched, DaemonError> {
         let model_plan = self.model_plan(provider)?;
-        let configured_plugin = plugin_for(provider, planned.wire, &self.registry);
+        let configured_plugin = self.plugin_for(provider, planned);
         let kind = self.kind(provider, planned, model_plan.as_ref(), &configured_plugin)?;
         tracing::Span::current().record("kind", format_args!("{kind:?}"));
         let configured = self.configured(provider, planned, endpoint, path)?;
@@ -1176,11 +1176,7 @@ impl ModelsHost {
         };
         let (mut merged, winning_base, sides) =
             result.map_err(|error| redactor.clean_error(error))?;
-        let models = self.plan_models(
-            provider,
-            model_plan.as_ref(),
-            std::mem::take(&mut merged.models),
-        )?;
+        let models = self.plan_models(model_plan.as_ref(), std::mem::take(&mut merged.models))?;
         merged.models = models;
         self.append_public_drawers(&host, &winning_base, &mut merged.models)
             .await;
@@ -1212,7 +1208,11 @@ impl ModelsHost {
         DaemonError,
     > {
         if kind == ListKind::Catalog {
-            let models = if matches!(planned.wire, Wire::Vertex | Wire::Converse) {
+            // Bedrock Converse and a linked plugin (Vertex AI's per-location
+            // ids) own their catalog list; other kernel wires read the plan.
+            let models = if planned.wire == Wire::Converse
+                || !self.registry.is_kernel_factory(configured_plugin)
+            {
                 configured
                     .list_models(&ListQuery::new())
                     .await
@@ -1517,8 +1517,9 @@ impl ModelsHost {
         {
             return Ok(upstream);
         }
-        let plugin_id = plugin_for(provider, planned.wire, &self.registry);
-        let mut raw = super::raw_for(provider, planned, endpoint, &self.registry)?;
+        let plugin_id = self.plugin_for(provider, planned);
+        let host = self.host(&planned.base_url).unwrap_or_default();
+        let mut raw = super::raw_for_host(provider, planned, endpoint, &host, &self.registry)?;
         raw.insert("base_url", RawValue::String(planned.base_url.clone()));
         build_raw_plugin(
             provider,
@@ -1551,6 +1552,12 @@ impl ModelsHost {
         )
         .map_err(show)
         .map_err(|error| DaemonError::new(format!("provider `{}`: {error}", provider.id)))
+    }
+
+    /// The plugin for `provider`, its base's host read with the overrides.
+    fn plugin_for(&self, provider: &hofund_config::Provider, planned: &Planned) -> String {
+        let host = self.host(&planned.base_url).unwrap_or_default();
+        super::plugin_for_host(provider, planned, &host, &self.registry)
     }
 
     fn host(&self, base: &str) -> Option<String> {
@@ -1648,9 +1655,9 @@ impl ModelsHost {
         model_plan: Option<&ModelPlan>,
         plugin_id: &str,
     ) -> Result<ListKind, DaemonError> {
-        let azure = matches!(planned.wire, Wire::Chat | Wire::Responses)
-            && (provider.preset.as_deref() == Some("azure")
-                || hofund_provider::azure_host(&self.host(&planned.base_url).unwrap_or_default()));
+        // The azure plugin, by its preset or a custom base on an Azure
+        // host, lists the resource's deployments on Chat and Responses.
+        let azure = plugin_id == "azure" && matches!(planned.wire, Wire::Chat | Wire::Responses);
         let catalog = model_plan.is_some_and(|plan| {
             plan.no_list && !plan.lists && provider.model_list.url.trim().is_empty()
         });
@@ -1850,17 +1857,13 @@ impl ModelsHost {
 
     fn plan_models(
         &self,
-        provider: &hofund_config::Provider,
         model_plan: Option<&ModelPlan>,
         live: Vec<ModelSpec>,
     ) -> Result<Vec<ModelSpec>, DaemonError> {
         let Some(model_plan) = model_plan else {
             return Ok(live);
         };
-        let mut static_ids = model_plan.models.clone();
-        if provider.preset.as_deref() == Some("google-vertex") {
-            static_ids = Vertex::models_for(super::option(provider, "location")?);
-        }
+        let static_ids = &model_plan.models;
         if model_plan.only.is_empty() && (static_ids.is_empty() || !live.is_empty()) {
             return Ok(live);
         }
@@ -1869,7 +1872,7 @@ impl ModelsHost {
             .filter(|model| model.id().starts_with(&model_plan.only))
             .collect::<Vec<_>>();
         if planned.is_empty() {
-            planned = static_models(&static_ids)?;
+            planned = static_models(static_ids)?;
         }
         if let Some(limits) = &self.catalog_limits {
             planned = planned
@@ -2558,7 +2561,7 @@ fn safe_urls_in(text: &str) -> String {
     clean
 }
 
-fn url_host(url: &str) -> Option<String> {
+pub(super) fn url_host(url: &str) -> Option<String> {
     url::Url::parse(url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase))

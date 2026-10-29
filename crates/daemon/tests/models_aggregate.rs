@@ -362,7 +362,7 @@ async fn static_region_live_and_only_fallback_follow_preset_policy() {
         .await;
     let base = server.uri();
     let config = load_config(
-        "[[providers]]\nid = \"static\"\npreset = \"baidu-qianfan\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"live\"\npreset = \"baidu-qianfan\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"bedrock\"\npreset = \"bedrock\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"mantle\"\npreset = \"bedrock-mantle\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n[providers.options]\nproject = \"my-project\"\n",
+        "[[providers]]\nid = \"static\"\npreset = \"baidu-qianfan\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"live\"\npreset = \"baidu-qianfan\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"bedrock\"\npreset = \"bedrock\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"mantle\"\npreset = \"bedrock-mantle\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n[providers.options]\nproject = \"my-project\"\n[[providers]]\nid = \"vertex-region\"\npreset = \"google-vertex\"\n[providers.options]\nproject = \"my-project\"\nlocation = \"us-central1\"\n",
     );
     let static_plan = ModelPlan {
         no_list: true,
@@ -375,8 +375,7 @@ async fn static_region_live_and_only_fallback_follow_preset_policy() {
         ..plan(&format!("{base}/live"), "", "", "")
     };
     let host = make_host()
-        .with_model_plan("static", static_plan.clone())
-        .with_model_plan("bedrock", static_plan)
+        .with_model_plan("static", static_plan)
         .with_model_plan("live", live_plan)
         .with_model_plan("mantle", plan(&format!("{base}/mantle"), "", "", ""));
     let new_config_path = make_config_path("kinds");
@@ -390,13 +389,29 @@ async fn static_region_live_and_only_fallback_follow_preset_policy() {
         .list_models(&config, &new_config_path, "bedrock")
         .await
         .expect("bedrock static");
-    assert_eq!(ids(&bedrock), ["static-model"]);
+    // The Bedrock plugin answers from its own catalog without a network call.
+    assert_eq!(bedrock.kind, ListKind::Catalog);
+    assert!(ids(&bedrock).contains(&"openai.gpt-oss-120b-1:0"));
     let vertex = host
         .list_models(&config, &new_config_path, "vertex")
         .await
         .expect("vertex static");
     assert_eq!(vertex.kind, ListKind::Catalog);
     assert!(!vertex.models.is_empty());
+    // A region serves only the Gemini 2.5 ids, from the plugin's own catalog.
+    let vertex_region = host
+        .list_models(&config, &new_config_path, "vertex-region")
+        .await
+        .expect("vertex region");
+    assert_eq!(vertex_region.kind, ListKind::Catalog);
+    assert_eq!(
+        ids(&vertex_region),
+        [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite"
+        ]
+    );
     let live = host
         .list_models(&config, &new_config_path, "live")
         .await
@@ -667,4 +682,28 @@ async fn custom_azure_resource_host_resolves_to_deployments() {
         .expect("custom Azure host");
     assert_eq!(models.kind, ListKind::Deployments);
     assert_eq!(ids(&models), ["deployment"]);
+}
+
+#[tokio::test]
+async fn azure_messages_lists_live_models_not_deployments() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "claude-sonnet"}]
+        })))
+        .mount(&server)
+        .await;
+    let base = server.uri();
+    let host = make_host().with_base_host(&base, "resource.services.ai.azure.com");
+    let config = load_config(&format!(
+        "[[providers]]\nid = \"azure-messages\"\npreset = \"azure\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{base}\"\napi_key = \"test\"\n"
+    ));
+    let new_config_path = make_config_path("azure-messages");
+    let models = host
+        .list_models(&config, &new_config_path, "azure-messages")
+        .await
+        .expect("azure messages");
+    assert_eq!(models.kind, ListKind::Live);
+    assert_eq!(ids(&models), ["claude-sonnet"]);
 }

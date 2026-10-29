@@ -27,6 +27,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `oauth::client_code_exchange_form`, and `oauth::refresh_secret_form`, so a
   plugin with a client secret needs no other crate.
 
+- Amazon Bedrock plugin `bedrock` (`plugins/providers/bedrock`): preset
+  `bedrock` and every `bedrock-converse` provider now build this plugin
+  instead of the kernel adapter. Converse is signed with SigV4 through the SDK
+  (`hofund_plugin_sdk::sigv4::AwsSigner`, `wire::Target::signer`,
+  `wire::converse_call`); Chat, Responses, and Messages go through the SDK
+  `wire` module with the stored API key. `list_models` returns the static
+  catalog with no network call. A stored API key on Converse is now refused
+  when a request or probe is sent, not when the provider is built.
+
+- Google Vertex AI plugin `google-vertex` (`plugins/providers/google-vertex`):
+  preset `google-vertex` now builds this plugin instead of the kernel adapter.
+  The base URL comes from `project` and `location`, so the preset needs no
+  `base_url` (new preset field `options_base`). OAuth tokens are minted from an
+  ADC file (`authorized_user`, `service_account` as an RS256 JWT,
+  `impersonated_service_account`) or an impersonation email and cached until
+  shortly before expiry. Generate, stream, and count go through the SDK
+  Generative Language transport; `list_models` returns the static ids the
+  location serves; `probe` sends one unary request.
+- SDK helpers: `hofund_plugin_sdk::jwt` (RS256 compact JWT signing),
+  `hofund_plugin_sdk::probe` (probe bodies and outcome classification, moved
+  from the kernel), `wire::Target::model_root` (the Generative Language model
+  path root, `publishers/google/models` on Vertex), and a public
+  `transport::Call::open_raw`.
+
+- SDK Generative Language transport: `hofund_plugin_sdk::wire::execute`
+  posts a Generative Language target to `{base}/models/{model}:generateContent`,
+  or `:streamGenerateContent?alt=sse` for a stream, with a leading `models/`
+  dropped and the model escaped as one path segment; an empty model is status
+  400 and sends nothing. `wire::count_input` posts to
+  `{base}/models/{model}:countTokens` and reads `totalTokens`. The builtin
+  `generative` factory now sends `execute` and `count_input` through the SDK
+  on the host HTTP client, at the base the adapter normalized. Requests,
+  credentials (`x-goog-api-key` by default), and outcomes match the adapter,
+  checked by a differential test.
+- Azure OpenAI plugin `azure` (`plugins/providers/azure`): preset `azure` now
+  builds this plugin instead of the kernel adapter. Chat and Responses send
+  `api-key` and list the resource's deployments, then fall back to base models
+  (`/models`); when both fail the error says to type deployment names in as
+  model ids. Messages sends `x-api-key` and lists live models. A user header
+  named like the key header replaces the stored key.
+- A custom Chat or Responses provider whose base is on an Azure resource host
+  (`*.openai.azure.com`, `*.cognitiveservices.azure.com`,
+  `*.services.ai.azure.com`) now builds the `azure` plugin too, so it lists
+  deployments, falls back to base models, and sends `api-key` the same way as
+  preset `azure`. Messages on an Azure host stays on the Anthropic adapter
+  with `x-api-key`.
+- `hofund_kit_upstream::check_deployments`, and a `Deployments` case in
+  `check_list_and_probe`: deployment pages, the base-model fallback, both
+  lists empty, and the minimal probe.
+
+- Copilot model list and per-model routing: `list_models` reads the account's
+  `/models` list (chat models only; internal ids, vendor-experimental models
+  and models without a picker or category are dropped; a model needing terms
+  is listed). Each request goes to the protocol the model supports: the
+  inbound protocol when listed, otherwise the first of the model's endpoints;
+  a model with no endpoints, or an unlisted model, uses Chat Completions.
+  Responses and Messages go to `/responses` and `/v1/messages`. A model that
+  needs terms has its policy enabled once before the first request; only a
+  2xx counts as accepted.
+- SDK Messages transport: `hofund_plugin_sdk::wire::execute` posts a Messages
+  target to `{base}/v1/messages` with the `anthropic-version` header (a
+  configured header of that name replaces it), and `wire::count_input` posts
+  to `{base}/v1/messages/count_tokens`, treating 404, 405, 501, or a 400 that
+  says the endpoint is not supported as unsupported. The builtin `anthropic`
+  factory now sends `execute` and `count_input` through the SDK on the host
+  HTTP client for every endpoint that is not Bedrock or Mantle. Requests,
+  credentials (`x-api-key`, or both headers for a third-party host), and
+  outcomes match the adapter, checked by a differential test.
+- GitHub Copilot subscription plugin `copilot`
+  (`hofund-plugin-subscription-copilot`, registry feature `copilot`, on by
+  default): GitHub device sign-in with the Copilot editors' OAuth app on
+  github.com or an enterprise `<name>.ghe.com` host (the `host` config key or
+  sign-in option). The device page shown is derived from the host, never from
+  the reply. Sign-in checks the user has a Copilot seat and stores the GitHub
+  token, host and login; the account is keyed by host and user id. Short-lived
+  Copilot session tokens are traded single-flight and again within two minutes
+  of expiry; the session's `endpoints.api` is used only when it is an https
+  `githubcopilot.com` origin (or `copilot-api.<name>.ghe.com`). A refused trade
+  (401/403) marks the account as needing a new sign-in unless a newer sign-in
+  replaced the token. Requests go to Chat Completions with the editor headers,
+  `X-Initiator`, and `Copilot-Vision-Request` for images; a 401 trades a new
+  session and retries once. Quota reads chat, completions and premium request
+  snapshots from `copilot_internal/user`.
+- Claude Code subscription plugin `claude`
+  (`hofund-plugin-subscription-claude`, registry feature `claude`, on by
+  default): sign-in runs Claude Code's own `claude auth login --claudeai`
+  with no shell, an environment cleared to the host allowlist plus
+  `CLAUDE_CONFIG_DIR`, and a private per-session config directory. The
+  printed sign-in link is shown to the user, and the pasted `code#state` is
+  checked and written to the CLI's standard input; waiting for the CLI's
+  own browser callback also works. The `.credentials.json` and the
+  `oauthAccount` profile are stored in the account store, keyed by the
+  account UUID (or the email when Claude Code gives none) and labelled with
+  the email. Refresh lays the credentials out in a private account
+  directory, runs `claude auth status --json`, stores rotated credentials
+  once, removes the file again, and marks the account as needing a new
+  sign-in when Claude Code says it is signed out. The optional `command`
+  option names the binary by absolute path; otherwise it is found on
+  `PATH`. Requests through Claude Code, quota, and models land with H8;
+  the macOS Keychain is not read.
+- SDK: `json` (re-exported `serde_json`), `sleep`, `timeout`,
+  `process::find_program` (a `PATH`/`PATHEXT` lookup that never runs
+  anything), `oauth::secret_text`, `oauth::client_code_exchange_form`, and
+  `oauth::refresh_secret_form`, so a subscription plugin with a client
+  secret needs no other crate.
+- Host test backend: scripted piped children (`PipedScript`,
+  `PipedSpawn`) on `RecordingProcess`, re-exported by the subscription kit.
+
 - ChatGPT (Codex) subscription plugin `codex`
   (`hofund-plugin-subscription-codex`, registry feature `codex`, on by
   default): browser sign-in with PKCE on the loopback port 1455 Codex CLI is
@@ -239,6 +347,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response body. Token `Debug` is redacted.
 
 ### Changed
+
+- The local presets `ollama`, `lmstudio`, `omlx` and `mlx-serve` moved from
+  the built-in catalog into the `openai-compat` preset fragment, unchanged:
+  same localhost endpoints, Decide URLs and no key. A Messages call on
+  localhost still sends both `x-api-key` and Bearer. The built-in catalog now
+  holds `google-vertex`, `bedrock`, `bedrock-mantle` and `remote-gateway`.
+
+- A listed provider plugin (one compiled from a preset fragment) now receives
+  the provider's `headers`; a plugin whose config takes no `headers` rejects
+  them as an unknown key.
 
 - Breaking (plugin API, N9): `SignInFlow::Device` now carries a `DeviceFlow`
   built from validated options instead of a static URL, so a device-code
@@ -589,6 +707,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2.12.4. That package has no 2.12.5; the `tauri` crate is 2.12.5 and the CLI
   published with it is 2.12.4. Every pull request runs `dist plan` and
   installs that CLI.
+
+### Removed
+
+- The kernel Azure adapter (`hofund_provider::list_deployments`,
+  `AzureDeployment`, `azure_host`, and the Azure branches of the Chat list and
+  probe). The `azure` plugin owns that path.
 
 ## [0.1.0] - 2026-10-25
 

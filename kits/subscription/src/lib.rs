@@ -10,8 +10,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
 pub use hofund_plugin_host::{
-    RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler, RecordingSecrets,
-    TestHost, test_host,
+    PipedScript, PipedSpawn, RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler,
+    RecordingSecrets, TestHost, test_host,
 };
 
 /// Drives `future` on a current-thread runtime.

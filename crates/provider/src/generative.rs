@@ -66,6 +66,12 @@ impl Generative {
         })
     }
 
+    /// The normalized root under which `models/{model}:…` sits.
+    #[must_use]
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     fn url_for(&self, model: &str, stream: bool) -> Result<String, ProviderError> {
         let path = method_path(model, stream)?;
         join_url(&self.base, &path)

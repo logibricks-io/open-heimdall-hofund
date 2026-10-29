@@ -3,9 +3,11 @@
 use std::time::Duration;
 
 use hofund_plugin_api::{AuthChoice, PluginError, ProbeQuery, ProbeReport};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-use crate::models::{ModelClient, Page, both_auth_refused, probe_error_message};
+use hofund_plugin_sdk::probe::{merge_extra, stream_report};
+
+use crate::models::{ModelClient, Page, both_auth_refused};
 use crate::openai_compat::OpenAiProtocol;
 
 pub(crate) const PROBE_WAIT: Duration = Duration::from_secs(20);
@@ -44,7 +46,7 @@ impl ModelClient {
             }),
         };
         if protocol == OpenAiProtocol::Chat {
-            body[if self.is_azure() || self.is_bedrock() {
+            body[if self.is_bedrock() {
                 "max_completion_tokens"
             } else {
                 "max_tokens"
@@ -54,11 +56,7 @@ impl ModelClient {
         let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         let bytes = serde_json::to_vec(&body)
             .map_err(|_| PluginError::decode("could not encode probe body"))?;
-        let headers = if self.is_azure() {
-            self.azure_headers()?
-        } else {
-            self.bearer_headers()?
-        };
+        let headers = self.bearer_headers()?;
         let base = if self.is_mantle() {
             crate::mantle::mantle_base(&self.endpoint.base_url, model, false)
         } else {
@@ -99,7 +97,7 @@ impl ModelClient {
         let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         let bytes = serde_json::to_vec(&body)
             .map_err(|_| PluginError::decode("could not encode probe body"))?;
-        let initial = if self.is_azure() || self.is_bedrock() || self.is_official_anthropic() {
+        let initial = if self.is_azure_host() || self.is_bedrock() || self.is_official_anthropic() {
             AuthChoice::XApiKey
         } else {
             query.auth_choice().unwrap_or(AuthChoice::Both)
@@ -163,59 +161,6 @@ impl ModelClient {
         .await
     }
 
-    pub async fn vertex_probe(
-        &self,
-        query: &ProbeQuery,
-        token: &str,
-    ) -> Result<ProbeReport, PluginError> {
-        tokio::time::timeout(PROBE_WAIT, self.vertex_probe_inner(query, token))
-            .await
-            .map_err(|_| PluginError::timeout("provider probe exceeded 20 seconds"))?
-    }
-
-    async fn vertex_probe_inner(
-        &self,
-        query: &ProbeQuery,
-        token: &str,
-    ) -> Result<ProbeReport, PluginError> {
-        let model = crate::generative::escape_model(query.model())
-            .map_err(|error| PluginError::decode(error.message))?;
-        let url = format!(
-            "{}/publishers/google/models/{model}:generateContent",
-            self.endpoint.base_url.trim_end_matches('/')
-        );
-        let mut generation = Map::new();
-        generation.insert("maxOutputTokens".to_owned(), Value::from(16));
-        let lower = query.model().to_ascii_lowercase();
-        if lower.starts_with("gemini-2.5-pro") {
-            generation.insert(
-                "thinkingConfig".to_owned(),
-                serde_json::json!({"thinkingBudget": 128}),
-            );
-        } else if lower.starts_with("gemini-2.5") {
-            generation.insert(
-                "thinkingConfig".to_owned(),
-                serde_json::json!({"thinkingBudget": 0}),
-            );
-        } else if vertex_generation(&lower) >= 3 {
-            generation.insert(
-                "thinkingConfig".to_owned(),
-                serde_json::json!({"thinkingLevel": "low"}),
-            );
-        }
-        let mut body = serde_json::json!({
-            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-            "generationConfig": generation,
-        });
-        merge_extra(&mut body, query)?;
-        let mut headers = self.user_headers(reqwest::header::HeaderMap::new())?;
-        let mut bearer = reqwest::header::HeaderValue::try_from(format!("Bearer {token}"))
-            .map_err(|_| PluginError::config("access token is not valid header text"))?;
-        bearer.set_sensitive(true);
-        headers.insert(reqwest::header::AUTHORIZATION, bearer);
-        self.post_and_report(&url, headers, body).await
-    }
-
     pub async fn post_and_report(
         &self,
         url: &str,
@@ -276,116 +221,6 @@ impl ModelClient {
     }
 }
 
-fn merge_extra(body: &mut Value, query: &ProbeQuery) -> Result<(), PluginError> {
-    let Some(extra) = query.extra_body() else {
-        return Ok(());
-    };
-    let extra: Value = serde_json::from_slice(extra)
-        .map_err(|_| PluginError::decode("probe extra body is not JSON"))?;
-    let Some(extra) = extra.as_object() else {
-        return Err(PluginError::decode("probe extra body is not a JSON object"));
-    };
-    let Some(object) = body.as_object_mut() else {
-        return Err(PluginError::decode("probe body is not a JSON object"));
-    };
-    for (key, value) in extra {
-        object.insert(key.clone(), value.clone());
-    }
-    Ok(())
-}
-
-// reference: internal/provider/test.go:580-631
-fn stream_report(body: &[u8]) -> Result<ProbeReport, PluginError> {
-    for line in String::from_utf8_lossy(body).lines() {
-        let Some(data) = line.trim().strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
-        if kind == "error" || event.get("error").is_some_and(|error| !error.is_null()) {
-            return Err(PluginError::decode(format!(
-                "error in the stream: {}",
-                probe_error_message(data.as_bytes())
-            )));
-        }
-        if kind == "response.failed" {
-            let detail = event.pointer("/response/error").map_or_else(
-                || "response failed".to_owned(),
-                |error| probe_error_message(error.to_string().as_bytes()),
-            );
-            return Err(PluginError::decode(detail));
-        }
-        if matches!(
-            kind,
-            "content_block_start" | "content_block_delta" | "response.output_item.added"
-        ) || (kind.starts_with("response.") && kind.ends_with(".delta"))
-        {
-            return Ok(ProbeReport::new(data));
-        }
-        if event
-            .get("choices")
-            .and_then(Value::as_array)
-            .is_some_and(|choices| {
-                choices.iter().any(|choice| {
-                    choice
-                        .get("delta")
-                        .and_then(Value::as_object)
-                        .is_some_and(|delta| {
-                            ["content", "reasoning", "reasoning_content", "tool_calls"]
-                                .iter()
-                                .any(|key| {
-                                    delta.get(*key).is_some_and(|value| {
-                                        !value.is_null() && value.as_str() != Some("")
-                                    })
-                                })
-                        })
-                })
-            })
-            || event
-                .pointer("/candidates/0/content/parts")
-                .and_then(Value::as_array)
-                .is_some_and(|parts| {
-                    parts.iter().any(|part| {
-                        ["text", "thought", "functionCall"]
-                            .iter()
-                            .any(|key| part.get(*key).is_some_and(|value| !value.is_null()))
-                    })
-                })
-        {
-            return Ok(ProbeReport::new(data));
-        }
-    }
-    Ok(ProbeReport::new(""))
-}
-
 fn probe_error(page: &Page) -> String {
     String::from_utf8_lossy(&page.body).into_owned()
-}
-
-fn vertex_generation(model: &str) -> u32 {
-    let Some(rest) = model.strip_prefix("gemini-") else {
-        return 0;
-    };
-    rest.split(['-', '.'])
-        .next()
-        .and_then(|generation| generation.parse().ok())
-        .unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::vertex_generation;
-
-    #[test]
-    fn vertex_generation_requires_a_number() {
-        assert_eq!(vertex_generation("gemini-3-flash"), 3);
-        assert_eq!(vertex_generation("gemini-2.5-pro"), 2);
-        assert_eq!(vertex_generation("gemini-flash-latest"), 0);
-    }
 }

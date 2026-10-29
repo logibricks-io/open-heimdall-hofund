@@ -1,9 +1,37 @@
 [[plugin]]
+id = "azure"
+kind = "provider"
+path = "plugins/providers/azure"
+package = "hofund-plugin-azure"
+feature = "azure"
+
+[[plugin]]
+id = "bedrock"
+kind = "provider"
+path = "plugins/providers/bedrock"
+package = "hofund-plugin-bedrock"
+feature = "bedrock"
+
+[[plugin]]
+id = "claude"
+kind = "subscription"
+path = "plugins/subscriptions/claude"
+package = "hofund-plugin-subscription-claude"
+feature = "claude"
+
+[[plugin]]
 id = "codex"
 kind = "subscription"
 path = "plugins/subscriptions/codex"
 package = "hofund-plugin-subscription-codex"
 feature = "codex"
+
+[[plugin]]
+id = "copilot"
+kind = "subscription"
+path = "plugins/subscriptions/copilot"
+package = "hofund-plugin-subscription-copilot"
+feature = "copilot"
 
 [[plugin]]
 id = "echo"
@@ -18,6 +46,13 @@ kind = "subscription"
 path = "plugins/subscriptions/gemini"
 package = "hofund-plugin-subscription-gemini"
 feature = "gemini"
+
+[[plugin]]
+id = "google-vertex"
+kind = "provider"
+path = "plugins/providers/google-vertex"
+package = "hofund-plugin-google-vertex"
+feature = "google-vertex"
 
 [[plugin]]
 id = "relay"

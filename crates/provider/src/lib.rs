@@ -7,8 +7,6 @@
 //! polls, which is the backpressure.
 
 mod anthropic;
-mod azure;
-mod bedrock;
 mod billing;
 mod error;
 mod generative;
@@ -19,21 +17,17 @@ mod openai_compat;
 mod presets;
 mod probe;
 mod stream;
-mod vertex;
 
 pub use anthropic::Anthropic;
-pub use azure::{AzureDeployment, list_deployments};
-pub use bedrock::Bedrock;
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;
 pub use http::{Credential, Endpoint, pooled_reqwest};
-pub use models::{azure_host, both_auth_applies, both_auth_refused, parse_model_rows};
+pub use models::{both_auth_applies, both_auth_refused, parse_model_rows};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
 pub use presets::{
     ModelPlan, PresetError, Resolve, Resolved, Wire, catalog_commit, catalog_ids, credential_for,
     model_plan, resolve,
 };
-pub use vertex::{Vertex, check_credentials_file as check_vertex_credentials_file};
 
 pub use hofund_plugin_api::{
     DynSubscriptionFactory, DynUpstreamFactory, InboundSurface, Subscription, SubscriptionFactory,

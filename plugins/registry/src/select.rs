@@ -163,7 +163,7 @@ pub fn select(
                 wire_name(wire)
             )));
         }
-        if base_url.is_empty() {
+        if base_url.is_empty() && !preset.options_base {
             return Err(SelectError::new(format!(
                 "preset `{}` needs base_url",
                 preset.id
@@ -212,7 +212,9 @@ pub fn select(
             preset.plugin
         ))
     })?;
-    if base_url.is_empty() {
+    // A plugin that builds its base from its own options (Vertex AI's
+    // project and location) takes an empty base URL here.
+    if base_url.is_empty() && !preset.options_base {
         return Err(SelectError::new(format!(
             "preset `{}` needs base_url",
             preset.id
@@ -335,13 +337,15 @@ impl<'a> Endpoints<'a> {
             .any(|url| !url.is_empty())
     }
 
+    /// Converse takes the chat URL: a plugin serving it (Bedrock) derives the
+    /// runtime root from that base.
     fn url(&self, wire: Wire) -> Option<&'a str> {
         match wire {
-            Wire::Chat => Some(self.chat),
+            Wire::Chat | Wire::Converse => Some(self.chat),
             Wire::Responses => Some(self.responses),
             Wire::Messages => Some(self.anthropic),
             Wire::Generative => Some(self.generative),
-            Wire::Vertex | Wire::Converse => None,
+            Wire::Vertex => None,
         }
     }
 }

@@ -5,9 +5,9 @@
 //! A status of 400 or higher becomes [`PluginErrorKind::Status`].
 //!
 //! `HttpHandle::send` streams a 2xx body. [`Call::send`] reads the whole body,
-//! and [`Call::open`] returns a 2xx body unread. The Chat and Responses
-//! transport is [`crate::wire`]. Messages, Generative, and Converse move into
-//! the SDK later.
+//! and [`Call::open`] returns a 2xx body unread. The Chat, Responses,
+//! Messages, and Generative Language transport is [`crate::wire`]. Converse
+//! moves into the SDK later.
 //!
 //! [`Call::send_with_retry`] retries at most three times. [`PluginErrorKind::Connect`]
 //! (the request was not sent) is retried for every method. [`PluginErrorKind::Timeout`]
@@ -296,7 +296,14 @@ impl Call {
     }
 
     /// Like [`Call::open`], but every status comes back unread.
-    pub(crate) async fn open_raw(
+    ///
+    /// For a caller that reads a refusal itself, under its own size cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last [`PluginError`] when every attempt fails, or the
+    /// first error that this call must not retry.
+    pub async fn open_raw(
         self,
         http: &HttpHandle,
         attempts: u8,
@@ -334,6 +341,27 @@ impl Call {
             sensitive,
         });
         self
+    }
+
+    /// Headers in order as `(name, value, sensitive)`, for unit tests.
+    #[cfg(test)]
+    pub(crate) fn header_triples(&self) -> Vec<(&str, &str, bool)> {
+        self.headers
+            .iter()
+            .map(|header| {
+                (
+                    header.name.as_str(),
+                    header.value.as_str(),
+                    header.sensitive,
+                )
+            })
+            .collect()
+    }
+
+    /// The URI and body, for unit tests.
+    #[cfg(test)]
+    pub(crate) fn uri_and_body(&self) -> (&str, &[u8]) {
+        (&self.uri, &self.body)
     }
 
     fn request(self) -> Result<HttpRequest, PluginError> {

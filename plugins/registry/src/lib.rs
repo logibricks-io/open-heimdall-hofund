@@ -56,7 +56,10 @@ use check::path_matches;
 pub use agent_descriptions::{agent, agents};
 #[cfg(feature = "test-fixtures")]
 #[doc(hidden)]
-pub use builtin::{openai_compat, openai_compat_adapter};
+pub use builtin::{
+    anthropic, anthropic_adapter, generative, generative_adapter, openai_compat,
+    openai_compat_adapter,
+};
 pub use check::builtin_factory_ids;
 #[cfg(feature = "test-fixtures")]
 pub use fixture_agent_descriptions::fixture_agents;
@@ -106,8 +109,8 @@ pub fn factory(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
 /// Whether `id` names a kernel-owned factory rather than a linked plugin.
 ///
 /// Unlike [`builtin_factory_ids`], which lists only factories eligible for
-/// data-only preset fragments, this includes the catalog-only Vertex and
-/// Bedrock factories and any future factory added to the builtin module.
+/// data-only preset fragments, this includes any future factory added to the
+/// builtin module that is not eligible for one.
 #[must_use]
 pub fn is_kernel_factory(id: &str) -> bool {
     builtin::factory(id).is_some()
@@ -138,6 +141,33 @@ pub fn builtin_protocols() -> Vec<ProtocolId> {
     .into_iter()
     .filter(|protocol| served.contains(protocol))
     .collect()
+}
+
+/// The linked plugin that serves a custom base on `host` for `protocol`.
+///
+/// A provider with no preset, a catalog row, or a builtin-owned preset is
+/// otherwise built by a kernel factory. An Azure OpenAI resource host on Chat
+/// or Responses is served by the `azure` plugin instead: its deployment list,
+/// `api-key` header, and v1 root. Messages keeps the kernel's Anthropic
+/// adapter, whose base an Azure resource serves under `/anthropic`. Converse
+/// on any host is served by the `bedrock` plugin, the only one that signs it.
+#[must_use]
+pub fn host_plugin(protocol: ProtocolId, host: &str) -> Option<&'static str> {
+    #[cfg(feature = "bedrock")]
+    if protocol == ProtocolId::BEDROCK_CONVERSE {
+        return Some("bedrock");
+    }
+    #[cfg(feature = "azure")]
+    if matches!(
+        protocol,
+        ProtocolId::OPENAI_CHAT | ProtocolId::OPENAI_RESPONSES
+    ) && hofund_plugin_azure::azure_host(host)
+    {
+        return Some("azure");
+    }
+    #[cfg(not(feature = "azure"))]
+    let _ = (protocol, host);
+    None
 }
 
 /// The preset record for `id`, when a linked plugin declares it.
@@ -348,7 +378,7 @@ mod tests {
         let record = super::preset("relay").expect("relay preset");
         assert_eq!(record.plugin, "relay");
         assert!(record.config.is_empty());
-        assert!(super::preset("ollama").is_none());
+        assert!(super::preset("missing").is_none());
         assert_eq!(
             super::preset("openai").map(|preset| preset.plugin),
             Some("openai-compat")
@@ -365,6 +395,30 @@ mod tests {
         assert!(super::factory("generative").is_some());
         assert!(super::factory("missing").is_none());
         assert!(super::factory("relay").is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "azure")]
+    fn an_azure_host_on_chat_or_responses_names_the_azure_plugin() {
+        for protocol in [ProtocolId::OPENAI_CHAT, ProtocolId::OPENAI_RESPONSES] {
+            assert_eq!(
+                super::host_plugin(protocol, "mine.openai.azure.com"),
+                Some("azure")
+            );
+            assert_eq!(
+                super::host_plugin(protocol, "mine.cognitiveservices.azure.com:443"),
+                Some("azure")
+            );
+            assert_eq!(super::host_plugin(protocol, "openai.azure.com"), None);
+            assert_eq!(super::host_plugin(protocol, "api.openai.com"), None);
+        }
+        for protocol in [
+            ProtocolId::ANTHROPIC_MESSAGES,
+            ProtocolId::GENERATIVE_LANGUAGE,
+        ] {
+            assert_eq!(super::host_plugin(protocol, "mine.openai.azure.com"), None);
+        }
+        assert!(super::factory("azure").is_some());
     }
 
     #[test]
@@ -389,17 +443,11 @@ mod tests {
 
     #[test]
     fn kernel_factory_predicate_covers_builtins_and_excludes_linked_plugins() {
-        for id in [
-            "openai-compat",
-            "anthropic",
-            "generative",
-            "google-vertex",
-            "bedrock",
-        ] {
+        for id in ["openai-compat", "anthropic", "generative"] {
             assert!(super::builtin::factory(id).is_some(), "{id}");
             assert!(super::is_kernel_factory(id), "{id}");
         }
-        for id in ["azure", "missing"] {
+        for id in ["azure", "bedrock", "google-vertex", "missing"] {
             assert!(super::builtin::factory(id).is_none(), "{id}");
             assert!(!super::is_kernel_factory(id), "{id}");
         }
@@ -408,9 +456,33 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bedrock")]
     #[test]
-    fn bedrock_spec_declares_sigv4() {
+    fn converse_on_any_host_goes_to_the_bedrock_plugin() {
+        for host in [
+            "bedrock-runtime.us-east-1.amazonaws.com",
+            "proxy.example.test",
+            "",
+        ] {
+            assert_eq!(
+                super::host_plugin(ProtocolId::BEDROCK_CONVERSE, host),
+                Some("bedrock"),
+                "{host}"
+            );
+        }
+        assert_eq!(
+            super::host_plugin(
+                ProtocolId::OPENAI_CHAT,
+                "bedrock-runtime.us-east-1.amazonaws.com"
+            ),
+            None
+        );
         let factory = super::factory("bedrock").expect("bedrock");
-        assert_eq!(factory.spec().credential(), CredentialStyle::SigV4);
+        assert!(
+            factory
+                .spec()
+                .protocols()
+                .contains(&ProtocolId::BEDROCK_CONVERSE)
+        );
     }
 }

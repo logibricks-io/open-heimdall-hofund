@@ -1,4 +1,4 @@
-//! Resolved Vertex option validation through `hofund config check`'s daemon path.
+//! Resolved `google-vertex` plugin option validation through `hofund config check`'s daemon path.
 
 use hofund_daemon::check;
 use std::fs;
@@ -48,9 +48,10 @@ fn vertex_urls_and_credentials_are_checked() {
             let path = config(&dir, &format!("{key} = {value:?}"));
             let error = check(&path).expect_err("invalid URL");
             let text = error.to_string();
-            assert!(text.contains("provider `vertex-check`"), "{text}");
-            assert!(text.contains(&format!("option `{key}`")), "{text}");
-            assert!(text.contains("https URL"), "{text}");
+            assert!(
+                text.starts_with(&format!("{key}: must be an https URL")),
+                "{text}"
+            );
         }
         for value in ["https://example.com/token", "http://127.0.0.1:9/token"] {
             let path = config(&dir, &format!("{key} = {value:?}"));
@@ -65,9 +66,7 @@ fn vertex_urls_and_credentials_are_checked() {
     );
     let error = check(&path).expect_err("missing credentials");
     let text = error.to_string();
-    assert!(text.contains("provider `vertex-check`"), "{text}");
-    assert!(text.contains("option `credentials`"), "{text}");
-    assert!(text.contains("names no file"), "{text}");
+    assert!(text.starts_with("credentials: names no file"), "{text}");
     assert!(
         text.contains(
             "create it, correct the path, or clear it to use Application Default Credentials"
@@ -91,7 +90,7 @@ fn credentials_preflight_error_keeps_its_config_key_path() {
     let error = check(&path).expect_err("missing credentials");
     let text = error.to_string();
     assert!(text.starts_with("credentials: "), "{text}");
-    assert!(text.contains("option `credentials`"), "{text}");
+    assert_eq!(text.matches("credentials").count(), 1, "{text}");
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -119,9 +118,10 @@ fn a_resolved_environment_url_is_checked() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = fs::read_to_string(output_path).expect("child error");
-    assert!(text.contains("provider `vertex-check`"), "{text}");
-    assert!(text.contains("option `token_url`"), "{text}");
-    assert!(text.contains("https URL"), "{text}");
+    assert!(
+        text.starts_with("token_url: must be an https URL"),
+        "{text}"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 

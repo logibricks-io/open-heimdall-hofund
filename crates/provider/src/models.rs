@@ -7,6 +7,7 @@ use hofund_plugin_api::{
     AuthChoice, ListKind, ListQuery, ModelList, ModelSpec, PluginError, PluginErrorKind,
     redact_token, safe_url,
 };
+use hofund_plugin_sdk::probe::{probe_error_message, status_hint};
 use hofund_plugin_sdk::{
     PageError, PageErrorKind, after_id, gemini_models_with_dropped, json_error_message,
 };
@@ -91,7 +92,7 @@ impl ModelClient {
         query: &ListQuery,
         anthropic: bool,
     ) -> Result<ModelList, PluginError> {
-        let azure = self.is_azure();
+        let azure = self.is_azure_host();
         let learning = anthropic && self.can_learn_auth();
         let mut errors = Vec::new();
         for candidate in list_urls(&self.endpoint.base_url, anthropic) {
@@ -285,18 +286,6 @@ impl ModelClient {
         self.user_headers(headers)
     }
 
-    pub fn azure_headers(&self) -> Result<HeaderMap, PluginError> {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            reqwest::header::ACCEPT,
-            HeaderValue::from_static("application/json"),
-        );
-        if !self.endpoint.api_key.is_empty() {
-            insert_secret(&mut headers, "api-key", &self.endpoint.api_key)?;
-        }
-        self.user_headers(headers)
-    }
-
     pub fn bearer_headers(&self) -> Result<HeaderMap, PluginError> {
         self.auth_headers(AuthChoice::Bearer, false, false)
     }
@@ -329,8 +318,10 @@ impl ModelClient {
         )
     }
 
-    pub fn is_azure(&self) -> bool {
-        self.endpoint.credential == Credential::ApiKey || azure_url(&self.endpoint.base_url)
+    /// Whether the base is on an Azure resource host. Only the Messages
+    /// adapter reaches one: Chat and Responses there go to the azure plugin.
+    pub fn is_azure_host(&self) -> bool {
+        azure_host(&url_host(&self.endpoint.base_url))
     }
 
     pub fn is_bedrock(&self) -> bool {
@@ -460,10 +451,6 @@ pub fn both_auth_applies(
         && !pinned_auth
 }
 
-pub(crate) fn azure_url(base: &str) -> bool {
-    azure_host(&url_host(base))
-}
-
 /// Whether `host` is `anthropic.com` or one of its subdomains.
 ///
 /// Lookalike hosts such as `evilanthropic.com` do not match.
@@ -473,11 +460,14 @@ pub(crate) fn anthropic_host(host: &str) -> bool {
     host == "anthropic.com" || host.ends_with(".anthropic.com")
 }
 
-/// Whether `host` is an Azure OpenAI resource host, with an optional port.
+/// Whether `host` is an Azure resource host, with an optional port.
 ///
+/// Kept for the Messages adapter's `x-api-key` and BothAuth rules: an Azure
+/// resource serves Anthropic Messages under `/anthropic`, which the azure
+/// plugin's v1 root does not.
 // reference: internal/provider/azure.go:27-53
 #[must_use]
-pub fn azure_host(host: &str) -> bool {
+pub(crate) fn azure_host(host: &str) -> bool {
     const SUFFIXES: &[&str] = &[
         ".openai.azure.com",
         ".cognitiveservices.azure.com",
@@ -711,133 +701,6 @@ pub(crate) async fn read_page(
     })
 }
 
-pub(crate) fn probe_error_message(body: &[u8]) -> String {
-    if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        for pointer in [
-            "/error/message",
-            "/message",
-            "/msg",
-            "/detail",
-            "/errors/0/message",
-        ] {
-            if let Some(message) = value.pointer(pointer).and_then(Value::as_str)
-                && !message.trim().is_empty()
-            {
-                return cut_runes(message.trim(), 300);
-            }
-        }
-        if let Some(message) = value.get("error").and_then(Value::as_str) {
-            return cut_runes(message.trim(), 300);
-        }
-    }
-    let text = String::from_utf8_lossy(body);
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() || compact.starts_with('<') {
-        String::new()
-    } else {
-        cut_runes(&compact, 300)
-    }
-}
-
-fn cut_runes(text: &str, cap: usize) -> String {
-    if text.chars().count() <= cap {
-        return text.to_owned();
-    }
-    let mut cut = text.chars().take(cap).collect::<String>();
-    cut.push('…');
-    cut
-}
-
-const BLOCK_ADVICE: &str =
-    "the provider's network edge blocked this address; wait, or try another network or proxy";
-const VERIFY_ADVICE: &str = "this Google account needs verification";
-
-fn status_hint(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("request has been blocked")
-        || lower.contains("errors.aliyun.com")
-        || lower.contains(&BLOCK_ADVICE.to_ascii_lowercase())
-    {
-        return format!(" — {BLOCK_ADVICE}");
-    }
-    // reference: internal/provider/test.go:690-727
-    if let Some(link) = verification(body, &text, &lower) {
-        return link.map_or_else(
-            || format!(" — {VERIFY_ADVICE} before API access can work"),
-            |link| {
-                format!(
-                    " — {VERIFY_ADVICE}: open {link} in a browser, verify the account, then try again"
-                )
-            },
-        );
-    }
-    if lower.contains("go plan doesn") && lower.contains("include api access") {
-        return " — this Go plan does not include Provider API access; use an API-enabled plan or a provider API key".to_owned();
-    }
-    String::new()
-}
-
-fn verification(body: &[u8], text: &str, lower: &str) -> Option<Option<String>> {
-    let value: Option<Value> = serde_json::from_slice(body).ok();
-    let details = value
-        .as_ref()
-        .and_then(|value| value.pointer("/error/details"))
-        .and_then(Value::as_array);
-    let mut required = false;
-    let mut help = None;
-    let mut validation = None;
-    for detail in details.into_iter().flatten() {
-        for link in detail
-            .get("links")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if help.is_none() {
-                help = link.get("url").and_then(Value::as_str).map(str::to_owned);
-            }
-        }
-        if detail.get("reason").and_then(Value::as_str) == Some("VALIDATION_REQUIRED") {
-            required = true;
-            if validation.is_none() {
-                validation = detail
-                    .get("metadata")
-                    .and_then(Value::as_object)
-                    .and_then(|metadata| {
-                        metadata
-                            .get("validation_url")
-                            .or_else(|| metadata.get("validationUrl"))
-                    })
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-            }
-        }
-    }
-    let words = lower.contains("verify your account")
-        || lower.contains("account verification required")
-        || lower.contains(&VERIFY_ADVICE.to_ascii_lowercase());
-    if !required && !words {
-        return None;
-    }
-    let link = if required { validation.or(help) } else { None }
-        .or_else(|| own_advice_link(text))
-        .and_then(|link| {
-            let url = reqwest::Url::parse(&link).ok()?;
-            (url.scheme() == "https" && url.host_str().is_some()).then_some(link)
-        });
-    Some(link)
-}
-
-fn own_advice_link(text: &str) -> Option<String> {
-    let start = text.find(VERIFY_ADVICE)? + VERIFY_ADVICE.len();
-    let rest = text.get(start..)?.strip_prefix(": open ")?;
-    let end = rest
-        .find(|character: char| character.is_whitespace() || character == '"' || character == '\\')
-        .unwrap_or(rest.len());
-    Some(rest[..end].to_owned())
-}
-
 /// Joins error messages, preserving their shared kind. For mixed kinds, the
 /// last error supplies the kind, status, and retry hint.
 pub(crate) fn join_errors(errors: Vec<PluginError>, fallback: &str, suffix: &str) -> PluginError {
@@ -882,14 +745,6 @@ fn insert_secret(
     value.set_sensitive(true);
     headers.insert(HeaderName::from_static(name), value);
     Ok(())
-}
-
-pub(crate) fn static_models(ids: Vec<String>) -> Result<ModelList, PluginError> {
-    let models = ids
-        .into_iter()
-        .map(|id| ModelSpec::new(id, None))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ModelList::new(models, None).with_kind(ListKind::Catalog))
 }
 
 #[cfg(test)]
@@ -1038,6 +893,40 @@ mod tests {
             hofund_plugin_api::PluginErrorKind::Interrupted
         );
         server.await.expect("server");
+    }
+
+    // reference: internal/provider/azure.go:27-53
+    #[test]
+    fn azure_hosts_keep_messages_on_x_api_key_and_chat_off_api_key() {
+        assert!(super::azure_host("resource.openai.azure.com:443"));
+        assert!(super::azure_host("Resource.Services.AI.Azure.com"));
+        assert!(!super::azure_host("openai.azure.com"));
+        assert!(!super::azure_host("evil-openai.azure.com.example"));
+        let base = "https://resource.services.ai.azure.com/anthropic";
+        assert_eq!(
+            crate::credential_for("", crate::Wire::Messages, base),
+            crate::Credential::XApiKey
+        );
+        for wire in [crate::Wire::Chat, crate::Wire::Responses] {
+            assert_eq!(
+                crate::credential_for("", wire, base),
+                crate::Credential::Bearer
+            );
+        }
+        assert!(!super::both_auth_applies(
+            "resource.services.ai.azure.com",
+            true,
+            true,
+            crate::Credential::MessagesBoth,
+            false,
+        ));
+        let mut endpoint = crate::http::Endpoint::new("azure", base);
+        endpoint.credential = crate::Credential::ApiKey;
+        let client = super::ModelClient::new(&endpoint).expect("client");
+        assert!(client.is_azure_host());
+        endpoint.base_url = "https://api.example.test/v1".to_owned();
+        let client = super::ModelClient::new(&endpoint).expect("client");
+        assert!(!client.is_azure_host());
     }
 
     #[test]

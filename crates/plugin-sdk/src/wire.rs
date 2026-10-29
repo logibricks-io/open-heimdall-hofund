@@ -1,14 +1,33 @@
-//! Chat Completions and Responses calls on the host's HTTP handle.
+//! Chat Completions, Responses, Messages, Generative Language, and Bedrock
+//! Converse calls on the host's HTTP handle.
 //!
 //! [`execute`] encodes a [`Request`] for the target protocol, posts it with
-//! [`Call`], and returns a [`Completion`]. It mirrors the builtin adapter's
-//! transport step for step:
+//! [`Call`], and returns a [`Completion`]. [`count_input`] asks a Messages or
+//! Generative Language upstream to count the input tokens of a request. Both
+//! mirror the builtin adapters' transport step for step:
 //!
 //! - Quirks are applied first. When the inbound protocol differs from the
 //!   target, unmapped tools are logged once per name, the billing line is
 //!   removed from system text, and extension bags are dropped.
 //! - An encode failure is status 400: the client sent something the target
 //!   protocol cannot carry.
+//! - A Messages call carries the protocol version header, which a configured
+//!   header of the same name replaces.
+//! - A Generative Language call names the model in the path:
+//!   `{base}/models/{model}:generateContent`, or
+//!   `{base}/models/{model}:streamGenerateContent?alt=sse` for a stream. A
+//!   leading `models/` is dropped and the rest is one escaped path segment. An
+//!   empty model is status 400 before anything is sent. [`Target::model_root`]
+//!   replaces `models` for an upstream such as Vertex AI, whose models sit at
+//!   `{base}/publishers/google/models/{model}`.
+//! - A Bedrock Converse call names the model in the path:
+//!   `{base}/model/{model}/converse`, or `/converse-stream` for a stream, with
+//!   `SigV4` percent-encoding. It is signed with the target's [`AwsSigner`]
+//!   (service `bedrock`), never an API key. The signed headers are the
+//!   configured headers, lowercased, then `content-type`, `host`,
+//!   `x-amz-content-sha256`, `x-amz-date`, `accept` for a stream, and
+//!   `x-amz-security-token` for temporary credentials; a signed header
+//!   replaces a configured one of the same name. An empty model is status 400.
 //! - The call is a JSON `POST`. Only a connect failure is retried, once, so a
 //!   body that may have been written is never replayed.
 //! - A status outside 2xx keeps its status and `Retry-After`. Its message is the
@@ -25,14 +44,18 @@ use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
 use bytes::Bytes;
-use hofund_codec::{Codec, CodecError, OpenAiChat, OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS};
+use hofund_codec::{
+    AnthropicMessages, Codec, CodecError, Converse, GenerativeLanguage, OpenAiChat,
+    OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS,
+};
 use hofund_plugin_api::{
-    BodyStream, Completion, ContentPart, CredentialStyle, HttpHandle, PluginError, ProtocolId,
-    Request, Role, SecretString, StreamEvent,
+    BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle, PluginError,
+    ProtocolId, Request, Role, SecretString, StreamEvent,
 };
 use secrecy::ExposeSecret;
 
-use crate::transport::{Call, HttpResponse, is_quota_error, read_body};
+use crate::sigv4::{self, AwsSigner};
+use crate::transport::{Call, HttpResponse, is_quota_error, parse_retry_after_headers, read_body};
 
 /// Attempts per call. Only a connect failure is retried.
 const ATTEMPTS: u8 = 2;
@@ -40,8 +63,29 @@ const ATTEMPTS: u8 = 2;
 const MESSAGE_LIMIT: usize = 512;
 /// Prefix of the billing line some clients put in system text.
 const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
+/// Messages protocol version header and the value sent by default.
+const VERSION_HEADER: (&str, &str) = ("anthropic-version", "2023-06-01");
 
 type Prepare = fn(&[u8]) -> Result<Vec<u8>, CodecError>;
+
+/// Where a protocol's calls go under the base URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Path {
+    /// One path for every call.
+    Fixed(&'static str),
+    /// `models/{model}:{method}`, the Generative Language form.
+    Model,
+    /// `/model/{model}/converse`, signed with `SigV4`.
+    Converse,
+}
+
+/// The Generative Language method a call names.
+#[derive(Clone, Copy, Debug)]
+enum Method {
+    Generate,
+    Stream,
+    Count,
+}
 
 /// Where and how [`execute`] sends a call. [`Debug`] omits header values.
 #[derive(Clone)]
@@ -51,6 +95,8 @@ pub struct Target {
     credential: CredentialStyle,
     headers: Vec<(String, String)>,
     quirks: Option<&'static hofund_quirks::Profile>,
+    model_root: &'static str,
+    signer: Option<AwsSigner>,
 }
 
 impl Target {
@@ -64,6 +110,8 @@ impl Target {
             credential: CredentialStyle::Bearer,
             headers: Vec::new(),
             quirks: None,
+            model_root: "models",
+            signer: None,
         }
     }
 
@@ -88,6 +136,23 @@ impl Target {
         self.quirks = quirks;
         self
     }
+
+    /// The path under the base URL that a Generative Language model id
+    /// follows: `models` by default, `publishers/google/models` on Vertex AI.
+    /// Slashes around it are dropped. Other protocols ignore it.
+    #[must_use]
+    pub fn model_root(mut self, root: &'static str) -> Self {
+        self.model_root = root.trim_matches('/');
+        self
+    }
+
+    /// The AWS credentials a Bedrock Converse call is signed with. Other
+    /// protocols ignore them.
+    #[must_use]
+    pub fn signer(mut self, signer: AwsSigner) -> Self {
+        self.signer = Some(signer);
+        self
+    }
 }
 
 impl fmt::Debug for Target {
@@ -100,6 +165,8 @@ impl fmt::Debug for Target {
             .field("credential", &self.credential)
             .field("header_names", &names)
             .field("quirks", &self.quirks.is_some())
+            .field("model_root", &self.model_root)
+            .field("signer", &self.signer)
             .finish()
     }
 }
@@ -111,9 +178,9 @@ impl fmt::Debug for Target {
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] when the protocol is not Chat Completions or
-/// Responses, the request cannot be encoded, the call fails, the upstream
-/// answers outside 2xx, or the body cannot be decoded.
+/// Returns [`PluginError`] when the protocol has no SDK transport, the model
+/// or request cannot be encoded, the call fails, the upstream answers outside
+/// 2xx, or the body cannot be decoded.
 pub async fn execute(
     http: &HttpHandle,
     target: &Target,
@@ -121,33 +188,40 @@ pub async fn execute(
     request: Request,
     inbound: ProtocolId,
 ) -> Result<Completion, PluginError> {
-    let (codec, prepare, path): (&'static dyn Codec, Prepare, &str) = match target.protocol {
-        ProtocolId::OPENAI_CHAT => (
-            &OpenAiChat,
-            OpenAiChat::prepare_upstream_body,
-            "chat/completions",
-        ),
-        ProtocolId::OPENAI_RESPONSES => (
-            &OpenAiResponses,
-            OpenAiResponses::prepare_upstream_body,
-            "responses",
-        ),
-        other => {
-            return Err(PluginError::unsupported(format!(
-                "protocol `{}` has no SDK transport",
-                other.as_str()
-            )));
-        }
-    };
+    let (codec, prepare, path) = route(target.protocol)?;
     let cross_protocol = codec.id() != inbound.as_str();
     let streaming = request.stream;
-    let body = prepare_body(target, codec, request, prepare, inbound)?;
-    let url = format!("{}/{path}", target.base_url.trim_end_matches('/'));
-    let response = call(target, secret, url)?
-        .header("content-type", "application/json")
-        .bytes(body)
-        .open_raw(http, ATTEMPTS)
-        .await?;
+    let method = if streaming {
+        Method::Stream
+    } else {
+        Method::Generate
+    };
+    let call = if path == Path::Converse {
+        if secret.is_some_and(|secret| !secret.expose_secret().is_empty()) {
+            return Err(PluginError::config(
+                "Converse uses AWS credentials, not an API key",
+            ));
+        }
+        if request.model.is_empty() {
+            return Err(PluginError::status_error(400, "model is empty"));
+        }
+        let model = request.model.clone();
+        let body = prepare_body(target, codec, request, prepare, inbound)?;
+        converse_call(target, &model, streaming, body)?.1
+    } else {
+        let url = url_for(
+            &target.base_url,
+            target.model_root,
+            path,
+            &request.model,
+            method,
+        )?;
+        let body = prepare_body(target, codec, request, prepare, inbound)?;
+        call(target, codec, secret, url)?
+            .header("content-type", "application/json")
+            .bytes(body)
+    };
+    let response = call.open_raw(http, ATTEMPTS).await?;
     if !response.status().is_success() {
         return Err(status_error(response).await);
     }
@@ -159,8 +233,290 @@ pub async fn execute(
     }
 }
 
-fn call(target: &Target, secret: Option<&SecretString>, url: String) -> Result<Call, PluginError> {
+/// Counts the input tokens of `request` on a Messages or Generative Language
+/// target.
+///
+/// The request is encoded as for [`execute`] without streaming. On Messages,
+/// `max_tokens` is removed and the body is posted to
+/// `{base}/v1/messages/count_tokens`, which answers `input_tokens`. On
+/// Generative Language it is posted to `{base}/models/{model}:countTokens`
+/// (under [`Target::model_root`]),
+/// which answers `totalTokens`. Status 404, 405, or 501, or a 400 that says the
+/// endpoint is not supported, is [`CountOutcome::Unsupported`].
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the target is neither protocol, the model or
+/// request cannot be encoded, the call fails, the upstream answers with another
+/// status outside 2xx, or a 2xx body has no token count.
+pub async fn count_input(
+    http: &HttpHandle,
+    target: &Target,
+    secret: Option<&SecretString>,
+    mut request: Request,
+    inbound: ProtocolId,
+) -> Result<CountOutcome, PluginError> {
+    let field = match target.protocol {
+        ProtocolId::ANTHROPIC_MESSAGES => "input_tokens",
+        ProtocolId::GENERATIVE_LANGUAGE => "totalTokens",
+        other => {
+            return Err(PluginError::unsupported(format!(
+                "protocol `{}` has no SDK count transport",
+                other.as_str()
+            )));
+        }
+    };
+    let (codec, prepare, path) = route(target.protocol)?;
+    request.stream = false;
+    let url = match path {
+        Path::Fixed(path) => format!(
+            "{}/{path}/count_tokens",
+            target.base_url.trim_end_matches('/')
+        ),
+        Path::Model | Path::Converse => url_for(
+            &target.base_url,
+            target.model_root,
+            path,
+            &request.model,
+            Method::Count,
+        )?,
+    };
+    let mut body = prepare_body(target, codec, request, prepare, inbound)?;
+    if field == "input_tokens" {
+        body = omit_max_tokens(body);
+    }
+    let mut response = call(target, codec, secret, url)?
+        .header("content-type", "application/json")
+        .bytes(body)
+        .open_raw(http, ATTEMPTS)
+        .await?;
+    let status = response.status().as_u16();
+    let retry_after = parse_retry_after_headers(response.headers(), std::time::SystemTime::now());
+    let success = response.status().is_success();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.body_mut().next_chunk().await {
+        match chunk {
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(error) if success => return Err(error),
+            // The reference reads an error body best effort: a cut body is empty.
+            Err(_) => {
+                bytes.clear();
+                break;
+            }
+        }
+    }
+    classify_count(status, retry_after, &bytes, field)
+}
+
+/// The codec, body finisher, and path for a protocol this module sends.
+fn route(protocol: ProtocolId) -> Result<(&'static dyn Codec, Option<Prepare>, Path), PluginError> {
+    match protocol {
+        ProtocolId::OPENAI_CHAT => Ok((
+            &OpenAiChat,
+            Some(OpenAiChat::prepare_upstream_body),
+            Path::Fixed("chat/completions"),
+        )),
+        ProtocolId::OPENAI_RESPONSES => Ok((
+            &OpenAiResponses,
+            Some(OpenAiResponses::prepare_upstream_body),
+            Path::Fixed("responses"),
+        )),
+        ProtocolId::ANTHROPIC_MESSAGES => {
+            Ok((&AnthropicMessages, None, Path::Fixed("v1/messages")))
+        }
+        ProtocolId::GENERATIVE_LANGUAGE => Ok((
+            &GenerativeLanguage,
+            Some(GenerativeLanguage::prepare_upstream_body),
+            Path::Model,
+        )),
+        ProtocolId::BEDROCK_CONVERSE => Ok((&Converse, None, Path::Converse)),
+        other => Err(PluginError::unsupported(format!(
+            "protocol `{}` has no SDK transport",
+            other.as_str()
+        ))),
+    }
+}
+
+/// The URL a call posts to.
+fn url_for(
+    base: &str,
+    root: &str,
+    path: Path,
+    model: &str,
+    method: Method,
+) -> Result<String, PluginError> {
+    let base = base.trim_end_matches('/');
+    match path {
+        Path::Fixed(path) => Ok(format!("{base}/{path}")),
+        Path::Model => {
+            let model = model_segment(model)?;
+            Ok(match method {
+                Method::Generate => format!("{base}/{root}/{model}:generateContent"),
+                Method::Stream => format!("{base}/{root}/{model}:streamGenerateContent?alt=sse"),
+                Method::Count => format!("{base}/{root}/{model}:countTokens"),
+            })
+        }
+        Path::Converse => Ok(format!(
+            "{base}{}",
+            sigv4::model_wire_uri(model, matches!(method, Method::Stream))
+        )),
+    }
+}
+
+/// A signed Bedrock Converse `POST` of `body` for `model`, and its URL.
+///
+/// The URL is `{base}/model/{model}/converse`, or `/converse-stream` when
+/// `stream` is set. The call carries the signed headers described in the
+/// [module documentation](self) and the body. Send it with [`Call::open_raw`]
+/// or [`Call::open`]; a retry resends the same signature.
+///
+/// # Errors
+///
+/// Returns a 400 status error for an empty model, a config error when the
+/// target has no [`AwsSigner`] or its URL does not parse, and a decode error
+/// when the request cannot be signed.
+pub fn converse_call(
+    target: &Target,
+    model: &str,
+    stream: bool,
+    body: Vec<u8>,
+) -> Result<(String, Call), PluginError> {
+    if model.is_empty() {
+        return Err(PluginError::status_error(400, "model is empty"));
+    }
+    let signer = target
+        .signer
+        .as_ref()
+        .ok_or_else(|| PluginError::config("Converse needs AWS credentials"))?;
+    let path = sigv4::model_wire_uri(model, stream);
+    let canonical_path = sigv4::canonical_uri(&path, sigv4::UriEncoding::Double);
+    let url = format!("{}{path}", target.base_url.trim_end_matches('/'));
+    let parsed = url::Url::parse(&url)
+        .map_err(|error| PluginError::config(format!("provider URL is invalid: {error}")))?;
+    let (secs, host) = match signer.fixed_clock() {
+        Some((secs, host)) => (*secs, host.clone()),
+        None => (unix_now(), host_header(&parsed)),
+    };
+    let amz_date = sigv4::amz_date(secs);
+    let mut ours = vec![
+        ("content-type", "application/json".to_owned()),
+        ("host", host),
+        ("x-amz-content-sha256", sigv4::payload_hash(&body)),
+        ("x-amz-date", amz_date.clone()),
+    ];
+    if stream {
+        ours.push(("accept", "application/vnd.amazon.eventstream".to_owned()));
+    }
+    if let Some(token) = signer.session_token_text() {
+        ours.push(("x-amz-security-token", token.to_owned()));
+    }
+    // Name to (value, sensitive). Configured values are sensitive; ours
+    // replace a configured header of the same name.
+    let mut pairs = std::collections::BTreeMap::new();
+    for (name, value) in &target.headers {
+        pairs.insert(name.to_ascii_lowercase(), (value.clone(), true));
+    }
+    for (name, value) in ours {
+        pairs.insert(name.to_owned(), (value, name == "x-amz-security-token"));
+    }
+    let borrowed: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(name, (value, _))| (name.as_str(), value.as_str()))
+        .collect();
+    let input = sigv4::SignInput::new()
+        .method("POST")
+        .canonical_uri(&canonical_path)
+        .amz_date(&amz_date)
+        .scope(signer.region(), "bedrock")
+        .credentials(signer.access_key_id(), signer.secret_access_key())
+        .payload(&body)
+        .headers(&borrowed);
+    let sealed = sigv4::sign(&input)
+        .map_err(|error| PluginError::decode(format!("Converse signing: {error}")))?;
+    let mut call = Call::post(url.as_str());
+    for (name, (value, sensitive)) in pairs {
+        if name == "host" {
+            continue;
+        }
+        call = if sensitive {
+            call.sensitive_header(name, value)
+        } else {
+            call.header(name, value)
+        };
+    }
+    let call = call
+        .sensitive_header("authorization", sealed.authorization())
+        .bytes(body);
+    Ok((url, call))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+/// The `host` value a client sends: the port only when it is not the
+/// scheme's default.
+fn host_header(url: &url::Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    let default = match url.scheme() {
+        "https" => 443,
+        _ => 80,
+    };
+    match url.port_or_known_default() {
+        Some(port) if port != default => format!("{host}:{port}"),
+        _ => host.to_owned(),
+    }
+}
+
+/// The model as one escaped path segment, without a leading `models/`.
+///
+/// # Errors
+///
+/// Returns a 400 status error when the model is empty.
+pub fn model_segment(model: &str) -> Result<String, PluginError> {
+    let trimmed = model.trim();
+    let model = trimmed.strip_prefix("models/").unwrap_or(trimmed);
+    if model.is_empty() {
+        return Err(PluginError::status_error(400, "model is empty"));
+    }
+    Ok(path_segment(model))
+}
+
+/// Percent-encoding for one URL path segment. Unreserved characters and
+/// `$&+:=@` stay literal, so a tag keeps its colon and a slash is escaped.
+#[must_use]
+pub fn path_segment(text: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'_' | b'.' | b'~' | b'$' | b'&' | b'+' | b':' | b'=' | b'@'
+            )
+        {
+            out.push(char::from(byte));
+        } else {
+            out.push('%');
+            out.push(char::from(HEX[usize::from(byte >> 4)]));
+            out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    out
+}
+
+fn call(
+    target: &Target,
+    codec: &dyn Codec,
+    secret: Option<&SecretString>,
+    url: String,
+) -> Result<Call, PluginError> {
     let mut call = Call::post(url);
+    if codec.id() == AnthropicMessages.id() {
+        call = call.header(VERSION_HEADER.0, VERSION_HEADER.1);
+    }
     if let Some(secret) = secret.filter(|secret| !secret.expose_secret().is_empty()) {
         call = call.credential(target.credential, secret)?;
     }
@@ -174,7 +530,7 @@ fn prepare_body(
     target: &Target,
     codec: &dyn Codec,
     mut request: Request,
-    prepare: Prepare,
+    prepare: Option<Prepare>,
     inbound: ProtocolId,
 ) -> Result<Vec<u8>, PluginError> {
     if let Some(profile) = target.quirks {
@@ -189,7 +545,61 @@ fn prepare_body(
     let body = codec
         .encode_request(&request)
         .map_err(|error| PluginError::status_error(400, error.to_string()))?;
-    prepare(&body).map_err(|error| PluginError::decode(error.to_string()))
+    match prepare {
+        Some(prepare) => prepare(&body).map_err(|error| PluginError::decode(error.to_string())),
+        None => Ok(body),
+    }
+}
+
+/// The count endpoint rejects `max_tokens`, which the encoder fills for
+/// create calls.
+fn omit_max_tokens(body: Vec<u8>) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body;
+    };
+    object.remove("max_tokens");
+    serde_json::to_vec(&value).unwrap_or(body)
+}
+
+fn classify_count(
+    status: u16,
+    retry_after: Option<std::time::Duration>,
+    bytes: &[u8],
+    field: &str,
+) -> Result<CountOutcome, PluginError> {
+    if status == 404
+        || status == 405
+        || status == 501
+        || (status == 400 && endpoint_unsupported(bytes))
+    {
+        return Ok(CountOutcome::Unsupported);
+    }
+    if (200..300).contains(&status) {
+        let value: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|error| PluginError::decode(error.to_string()))?;
+        let tokens = value
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| PluginError::decode(format!("count response has no {field}")))?;
+        return Ok(CountOutcome::Counted(tokens));
+    }
+    Err(status_failure(status, retry_after, bytes))
+}
+
+/// Whether a 400 says the count endpoint itself is missing. A rejection of
+/// something in the request stays an error.
+fn endpoint_unsupported(bytes: &[u8]) -> bool {
+    let message = message_from(bytes).to_ascii_lowercase();
+    let message = message.trim();
+    message == "unsupported"
+        || message.contains("unsupported endpoint")
+        || message.contains("not supported")
+        || message.contains("not implemented")
+        || message.contains("does not support")
+        || message.contains("do not support")
 }
 
 async fn status_error(response: HttpResponse) -> PluginError {
@@ -197,8 +607,16 @@ async fn status_error(response: HttpResponse) -> PluginError {
         Ok(read) => read,
         Err(error) => return error,
     };
-    let message = message_from(&body);
-    let error = if is_quota_error(status, &body) {
+    status_failure(status, retry_after, &body)
+}
+
+fn status_failure(
+    status: u16,
+    retry_after: Option<std::time::Duration>,
+    body: &[u8],
+) -> PluginError {
+    let message = message_from(body);
+    let error = if is_quota_error(status, body) {
         PluginError::quota(message)
     } else {
         PluginError::status_error(status, message)
@@ -497,10 +915,15 @@ fn is_key_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hofund_codec::{AnthropicMessages, Codec};
+    use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage};
     use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
 
-    use super::{Target, consume_fields, failure_of, message_from, strip_billing_header};
+    use super::{
+        AwsSigner, Method, Path, Target, classify_count, consume_fields, converse_call,
+        endpoint_unsupported, failure_of, host_header, message_from, omit_max_tokens, path_segment,
+        route, sigv4, strip_billing_header, url_for,
+    };
+    use hofund_plugin_api::CountOutcome;
 
     const LINE: &str =
         "x-anthropic-billing-header: cc_version=2.1.197; cc_entrypoint=cli; cch=abc;";
@@ -611,5 +1034,355 @@ mod tests {
         let shown = format!("{target:?}");
         assert!(shown.contains("x-tenant"), "{shown}");
         assert!(!shown.contains("tenant-secret"), "{shown}");
+    }
+
+    #[test]
+    fn messages_route_to_v1_messages_without_a_body_finisher() {
+        let (codec, prepare, path) = route(ProtocolId::ANTHROPIC_MESSAGES).expect("messages");
+        assert_eq!(codec.id(), AnthropicMessages.id());
+        assert!(prepare.is_none());
+        assert_eq!(path, Path::Fixed("v1/messages"));
+        let (_, prepare, path) = route(ProtocolId::OPENAI_CHAT).expect("chat");
+        assert!(prepare.is_some());
+        assert_eq!(path, Path::Fixed("chat/completions"));
+        let (_, prepare, path) = route(ProtocolId::OPENAI_RESPONSES).expect("responses");
+        assert!(prepare.is_some());
+        assert_eq!(path, Path::Fixed("responses"));
+        let (codec, prepare, path) = route(ProtocolId::GENERATIVE_LANGUAGE).expect("generative");
+        assert_eq!(codec.id(), GenerativeLanguage.id());
+        assert!(prepare.is_some());
+        assert_eq!(path, Path::Model);
+        let (codec, prepare, path) = route(ProtocolId::BEDROCK_CONVERSE).expect("converse");
+        assert_eq!(codec.id(), hofund_codec::Converse.id());
+        assert!(prepare.is_none());
+        assert_eq!(path, Path::Converse);
+    }
+
+    const VECTOR_MODEL: &str = "anthropic.claude-3-5-sonnet-20240620-v1:0";
+    const VECTOR_BODY: &[u8] = br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}]}"#;
+
+    fn vector_target() -> Target {
+        let signer = AwsSigner::new(
+            "us-east-1",
+            "AKIDEXAMPLE",
+            secrecy::SecretString::from("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned()),
+        )
+        .session_token(secrecy::SecretString::from(
+            "SESSIONTOKENEXAMPLE".to_owned(),
+        ))
+        .fixed(1_440_938_160, "bedrock-runtime.us-east-1.amazonaws.com");
+        Target::new(
+            ProtocolId::BEDROCK_CONVERSE,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/",
+        )
+        .signer(signer)
+    }
+
+    fn header<'a>(triples: &[(&'a str, &'a str, bool)], name: &str) -> Option<(&'a str, bool)> {
+        triples
+            .iter()
+            .find(|(found, _, _)| *found == name)
+            .map(|(_, value, sensitive)| (*value, *sensitive))
+    }
+
+    #[test]
+    fn converse_signs_with_the_botocore_vector() {
+        // botocore 1.43.118 SigV4Auth for service bedrock, the same vector the
+        // kernel adapter was pinned to.
+        let (url, call) =
+            converse_call(&vector_target(), VECTOR_MODEL, false, VECTOR_BODY.to_vec())
+                .expect("signed");
+        assert_eq!(
+            url,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20240620-v1%3A0/converse"
+        );
+        assert_eq!(call.uri_and_body(), (url.as_str(), VECTOR_BODY));
+        let triples = call.header_triples();
+        assert_eq!(
+            header(&triples, "authorization"),
+            Some((
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=9acaa85e4b0b79f684cb81d4050d66206f71f74d9b7145bfbaa74b72a2c04655",
+                true
+            ))
+        );
+        assert_eq!(
+            header(&triples, "x-amz-date"),
+            Some(("20150830T123600Z", false))
+        );
+        assert_eq!(
+            header(&triples, "x-amz-security-token"),
+            Some(("SESSIONTOKENEXAMPLE", true))
+        );
+        assert_eq!(
+            header(&triples, "content-type"),
+            Some(("application/json", false))
+        );
+        let hash = sigv4::payload_hash(VECTOR_BODY);
+        assert_eq!(
+            header(&triples, "x-amz-content-sha256"),
+            Some((hash.as_str(), false))
+        );
+        assert_eq!(header(&triples, "host"), None);
+        assert_eq!(header(&triples, "accept"), None);
+        let names: Vec<&str> = triples.iter().map(|(name, _, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "content-type",
+                "x-amz-content-sha256",
+                "x-amz-date",
+                "x-amz-security-token",
+                "authorization"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_converse_stream_accepts_the_event_stream_and_signs_configured_headers() {
+        let target = vector_target().headers(vec![
+            ("X-Tenant".to_owned(), "blue".to_owned()),
+            ("Content-Type".to_owned(), "text/plain".to_owned()),
+        ]);
+        let (url, call) =
+            converse_call(&target, VECTOR_MODEL, true, VECTOR_BODY.to_vec()).expect("signed");
+        assert!(
+            url.ends_with("/model/anthropic.claude-3-5-sonnet-20240620-v1%3A0/converse-stream")
+        );
+        let triples = call.header_triples();
+        assert_eq!(
+            header(&triples, "accept"),
+            Some(("application/vnd.amazon.eventstream", false))
+        );
+        assert_eq!(header(&triples, "x-tenant"), Some(("blue", true)));
+        assert_eq!(
+            header(&triples, "content-type"),
+            Some(("application/json", false))
+        );
+        let authorization = header(&triples, "authorization").expect("authorization").0;
+        assert!(authorization.contains(
+            "SignedHeaders=accept;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-tenant,"
+        ));
+    }
+
+    #[test]
+    fn converse_without_a_token_or_a_fixed_clock_signs_now() {
+        let signer = AwsSigner::new(
+            "eu-west-1",
+            "AKIDEXAMPLE",
+            secrecy::SecretString::from("secret".to_owned()),
+        )
+        .session_token(secrecy::SecretString::from(String::new()));
+        let target =
+            Target::new(ProtocolId::BEDROCK_CONVERSE, "http://127.0.0.1:9/").signer(signer);
+        let (url, call) = converse_call(&target, "demo", false, b"{}".to_vec()).expect("signed");
+        assert_eq!(url, "http://127.0.0.1:9/model/demo/converse");
+        let triples = call.header_triples();
+        assert_eq!(header(&triples, "x-amz-security-token"), None);
+        let date = header(&triples, "x-amz-date").expect("date").0;
+        assert!(date.get(..4).is_some_and(|year| year >= "2026"), "{date}");
+        let authorization = header(&triples, "authorization").expect("authorization").0;
+        assert!(authorization.contains("/eu-west-1/bedrock/aws4_request"));
+    }
+
+    #[test]
+    fn converse_needs_a_model_a_signer_and_a_url() {
+        let error = converse_call(&vector_target(), "", false, Vec::new()).expect_err("model");
+        assert_eq!(error.status(), Some(400));
+        assert!(error.to_string().contains("model is empty"));
+        let bare = Target::new(ProtocolId::BEDROCK_CONVERSE, "https://up.test");
+        let error = converse_call(&bare, "demo", false, Vec::new()).expect_err("signer");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+        assert!(error.to_string().contains("Converse needs AWS credentials"));
+        let target = Target::new(ProtocolId::BEDROCK_CONVERSE, "not a url").signer(AwsSigner::new(
+            "us-east-1",
+            "AKID",
+            secrecy::SecretString::from("secret".to_owned()),
+        ));
+        let error = converse_call(&target, "demo", false, Vec::new()).expect_err("url");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+        assert!(error.to_string().contains("provider URL is invalid"));
+        let target = Target::new(ProtocolId::BEDROCK_CONVERSE, "https://up.test").signer(
+            AwsSigner::new("", "AKID", secrecy::SecretString::from("secret".to_owned())),
+        );
+        let error = converse_call(&target, "demo", false, Vec::new()).expect_err("sign");
+        assert_eq!(error.kind(), PluginErrorKind::Decode);
+        assert!(error.to_string().contains("Converse signing:"));
+    }
+
+    #[test]
+    fn the_host_header_names_a_port_only_off_the_default() {
+        let parse = |url: &str| url::Url::parse(url).expect("url");
+        assert_eq!(host_header(&parse("https://a.test/x")), "a.test");
+        assert_eq!(host_header(&parse("https://a.test:443/x")), "a.test");
+        assert_eq!(host_header(&parse("https://a.test:8443/x")), "a.test:8443");
+        assert_eq!(host_header(&parse("http://a.test:80/x")), "a.test");
+        assert_eq!(host_header(&parse("http://a.test:443/x")), "a.test:443");
+        assert_eq!(host_header(&parse("http://a.test:8080/x")), "a.test:8080");
+    }
+
+    #[test]
+    fn a_signer_debug_shows_no_credential() {
+        let shown = format!("{:?}", vector_target());
+        assert!(shown.contains("us-east-1"), "{shown}");
+        assert!(shown.contains("session_token: true"), "{shown}");
+        assert!(!shown.contains("AKIDEXAMPLE"), "{shown}");
+        assert!(!shown.contains("EXAMPLEKEY"), "{shown}");
+        assert!(!shown.contains("SESSIONTOKENEXAMPLE"), "{shown}");
+    }
+
+    #[test]
+    fn generative_urls_name_the_model_and_method() {
+        let base = "https://gl.example/v1beta/";
+        let cases = [
+            (
+                Method::Generate,
+                "https://gl.example/v1beta/models/gem-1:generateContent",
+            ),
+            (
+                Method::Stream,
+                "https://gl.example/v1beta/models/gem-1:streamGenerateContent?alt=sse",
+            ),
+            (
+                Method::Count,
+                "https://gl.example/v1beta/models/gem-1:countTokens",
+            ),
+        ];
+        for (method, want) in cases {
+            let url = url_for(base, "models", Path::Model, " models/gem-1 ", method).expect("url");
+            assert_eq!(url, want, "{method:?}");
+        }
+        let fixed = url_for(
+            base,
+            "models",
+            Path::Fixed("responses"),
+            "",
+            Method::Generate,
+        )
+        .expect("fixed");
+        assert_eq!(fixed, "https://gl.example/v1beta/responses");
+        let escaped = url_for(
+            base,
+            "models",
+            Path::Model,
+            "a/b c:tag$&+=@~é",
+            Method::Generate,
+        )
+        .expect("escaped");
+        assert_eq!(
+            escaped,
+            "https://gl.example/v1beta/models/a%2Fb%20c:tag$&+=@~%C3%A9:generateContent"
+        );
+        assert_eq!(path_segment("Az09-_.~"), "Az09-_.~");
+        assert_eq!(path_segment("?#%"), "%3F%23%25");
+        for model in ["", "  ", "models/", " models/ "] {
+            let Err(error) = url_for(base, "models", Path::Model, model, Method::Count) else {
+                panic!("empty model {model:?}");
+            };
+            assert_eq!(error.status(), Some(400), "{model:?}");
+            assert_eq!(error.message(), "model is empty");
+        }
+    }
+
+    #[test]
+    fn a_model_root_replaces_models_in_generative_urls() {
+        let target = Target::new(ProtocolId::GENERATIVE_LANGUAGE, "https://v.example/v1")
+            .model_root("/publishers/google/models/");
+        assert_eq!(target.model_root, "publishers/google/models");
+        let url = url_for(
+            &target.base_url,
+            target.model_root,
+            Path::Model,
+            "gem-1",
+            Method::Stream,
+        )
+        .expect("url");
+        assert_eq!(
+            url,
+            "https://v.example/v1/publishers/google/models/gem-1:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            Target::new(ProtocolId::GENERATIVE_LANGUAGE, "x").model_root,
+            "models"
+        );
+    }
+
+    #[test]
+    fn max_tokens_is_removed_and_other_bodies_pass_through() {
+        let body = br#"{"model":"demo","max_tokens":16,"messages":[]}"#.to_vec();
+        let kept: serde_json::Value = serde_json::from_slice(&omit_max_tokens(body)).expect("json");
+        assert_eq!(kept, serde_json::json!({"model": "demo", "messages": []}));
+        assert_eq!(omit_max_tokens(b"[1,2]".to_vec()), b"[1,2]");
+        assert_eq!(omit_max_tokens(b"not json".to_vec()), b"not json");
+    }
+
+    #[test]
+    fn count_statuses_are_classified() {
+        let counted =
+            classify_count(200, None, br#"{"input_tokens":12}"#, "input_tokens").expect("counted");
+        assert!(matches!(counted, CountOutcome::Counted(12)), "{counted:?}");
+        for status in [404, 405, 501] {
+            let outcome = classify_count(status, None, b"", "input_tokens").expect("unsupported");
+            assert!(matches!(outcome, CountOutcome::Unsupported), "{status}");
+        }
+        let missing = classify_count(
+            400,
+            None,
+            br#"{"error":{"message":"Not supported"}}"#,
+            "input_tokens",
+        )
+        .expect("unsupported");
+        assert!(matches!(missing, CountOutcome::Unsupported));
+        let Err(rejected) = classify_count(
+            400,
+            None,
+            br#"{"error":{"message":"bad tool"}}"#,
+            "input_tokens",
+        ) else {
+            panic!("a request rejection stays an error");
+        };
+        assert_eq!(rejected.status(), Some(400));
+        let after = std::time::Duration::from_secs(4);
+        let Err(limited) = classify_count(429, Some(after), b"slow", "input_tokens") else {
+            panic!("429 is an error");
+        };
+        assert_eq!(limited.retry_after(), Some(after));
+        let Err(quota) = classify_count(429, None, b"monthly quota exhausted", "input_tokens")
+        else {
+            panic!("quota is an error");
+        };
+        assert_eq!(quota.kind(), PluginErrorKind::Quota);
+        for body in [&br#"{"tokens":1}"#[..], b"ok"] {
+            let Err(error) = classify_count(201, None, body, "input_tokens") else {
+                panic!("no input_tokens");
+            };
+            assert_eq!(error.kind(), PluginErrorKind::Decode);
+        }
+        let total =
+            classify_count(200, None, br#"{"totalTokens":7}"#, "totalTokens").expect("total");
+        assert!(matches!(total, CountOutcome::Counted(7)), "{total:?}");
+        let Err(wrong) = classify_count(200, None, br#"{"input_tokens":7}"#, "totalTokens") else {
+            panic!("the field is per protocol");
+        };
+        assert_eq!(wrong.message(), "count response has no totalTokens");
+    }
+
+    #[test]
+    fn only_messages_about_the_endpoint_mean_unsupported() {
+        for message in [
+            "unsupported",
+            " Unsupported ",
+            "unsupported endpoint: count_tokens",
+            "count is not supported here",
+            "not implemented",
+            "this server does not support counting",
+            "we do not support it",
+        ] {
+            let body = serde_json::json!({"error": {"message": message}}).to_string();
+            assert!(endpoint_unsupported(body.as_bytes()), "{message}");
+        }
+        for message in ["unsupported image type png", "messages: field required", ""] {
+            let body = serde_json::json!({"error": {"message": message}}).to_string();
+            assert!(!endpoint_unsupported(body.as_bytes()), "{message}");
+        }
     }
 }
