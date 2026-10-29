@@ -45,6 +45,7 @@ mod models;
 mod models_state;
 mod registry;
 mod runtime;
+mod watch;
 
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
@@ -245,6 +246,11 @@ pub struct StartOptions {
     /// tests and the event stream. `None` uses a private channel.
     #[doc(hidden)]
     pub token_generation: Option<tokio::sync::watch::Sender<u64>>,
+    /// Leaves hand edits on disk unpublished until an explicit reload, for
+    /// tests that inspect an edit the daemon has not loaded. The file watcher
+    /// runs whenever local control is enabled and this is `false`.
+    #[doc(hidden)]
+    pub skip_config_watch: bool,
 }
 
 /// Binds the address in the config and serves until shutdown.
@@ -409,6 +415,9 @@ async fn start_inner(
             Arc::clone(&config),
             runtime_revision,
         ));
+        if !options.skip_config_watch {
+            running = running.with_task(watch::spawn(Arc::clone(&ops), path.to_path_buf()));
+        }
         let state = Arc::new(
             control::DaemonControl::new(
                 path,

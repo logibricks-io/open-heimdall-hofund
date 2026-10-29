@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A reload reuses provider instances whose identity is unchanged, so learned
   routes survive; the model refresh loop follows the published configuration;
   and agent plans use the bound model listener address and live route models.
+  Hand edits to the configuration file are followed too: the daemon watches
+  the config and symlink-target directories, debounces for 400 ms, ignores
+  sibling files, falls back to a 2 s poll, skips its own writes, and keeps the
+  last good configuration when an edit is invalid.
 - Control event stream (`GET /v1/hofund/events`): per-topic buses and replay
   rings, composite `Last-Event-ID` resume, targeted resyncs, token-checked
   heartbeats, and stream close on token rotation or shutdown. The typed client

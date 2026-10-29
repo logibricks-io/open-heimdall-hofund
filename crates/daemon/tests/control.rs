@@ -21,6 +21,8 @@ async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() 
         StartOptions {
             control_listen: Some("127.0.0.1:0".parse().expect("control address")),
             control_runtime: Some(ControlRuntime::new(None, dir.path().to_path_buf())),
+            // The hand edit below must stay unpublished.
+            skip_config_watch: true,
             ..StartOptions::default()
         },
     )
