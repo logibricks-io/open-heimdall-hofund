@@ -152,6 +152,16 @@ pub(crate) fn build(
 }
 
 impl SubscriptionState {
+    /// The built plugin instance.
+    pub(crate) fn instance(&self) -> &Arc<dyn Subscription> {
+        &self.instance
+    }
+
+    /// The host the instance was built with.
+    pub(crate) fn host(&self) -> &HostContext {
+        &self.host
+    }
+
     /// The current members, in route order.
     pub(crate) fn members(&self) -> Vec<SubscriptionMember> {
         self.members.lock().expect("subscription members").clone()
