@@ -58,6 +58,7 @@ flowchart BT
   pluginEcho["plugin-echo<br/>inbound"]
   pluginCodex["plugin-subscription-codex<br/>subscription"]
   pluginClaude["plugin-subscription-claude<br/>subscription"]
+  pluginCopilot["plugin-subscription-copilot<br/>subscription"]
   gateway["gateway<br/>HTTP server"]
   daemon["daemon<br/>composition root"]
   cli["cli<br/>hofund binary"]
@@ -81,6 +82,7 @@ flowchart BT
   pluginRegistry --> pluginEcho
   pluginRegistry --> pluginCodex
   pluginRegistry --> pluginClaude
+  pluginRegistry --> pluginCopilot
   pluginRegistry --> provider
   pluginRegistry --> quirks
   pluginRelay --> pluginApi
@@ -91,6 +93,8 @@ flowchart BT
   pluginCodex --> pluginSdk
   pluginClaude --> pluginApi
   pluginClaude --> pluginSdk
+  pluginCopilot --> pluginApi
+  pluginCopilot --> pluginSdk
   router --> pluginApi
   router --> ir
   gateway --> router
@@ -162,9 +166,10 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
 | `hofund-kit-upstream` | `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-kit-subscription` | `hofund-plugin-host` |
@@ -233,6 +238,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
 | `plugin-subscription-codex` | ChatGPT (Codex) subscription: browser sign-in, token refresh, and the Responses upstream. |
 | `plugin-subscription-claude` | Claude Code subscription: sign-in and refresh by running the `claude` command line in a private config directory. |
+| `plugin-subscription-copilot` | GitHub Copilot subscription, on github.com or a `<name>.ghe.com` enterprise host: device sign-in, session tokens, quota, and the Chat Completions upstream. |
 | `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |
 | `codec` | Per-protocol encode and decode to and from the IR. Hub-and-spoke, so N protocols do not become an N-by-M matrix. |
 | `quirks` | Data-driven vendor capability and quirk descriptions. |
