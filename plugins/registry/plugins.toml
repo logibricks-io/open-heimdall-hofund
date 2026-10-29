@@ -13,6 +13,13 @@ package = "hofund-plugin-subscription-codex"
 feature = "codex"
 
 [[plugin]]
+id = "copilot"
+kind = "subscription"
+path = "plugins/subscriptions/copilot"
+package = "hofund-plugin-subscription-copilot"
+feature = "copilot"
+
+[[plugin]]
 id = "echo"
 kind = "inbound"
 path = "plugins/inbound/echo"
