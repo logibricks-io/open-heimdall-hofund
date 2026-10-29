@@ -133,8 +133,8 @@ async fn a_user_header_is_sensitive_and_replaces_the_credential_of_the_same_name
 #[tokio::test]
 async fn another_protocol_is_unsupported_and_sends_nothing() {
     let (_root, host) = host();
-    let target = Target::new(ProtocolId::ANTHROPIC_MESSAGES, "http://up.test");
-    let error = run(&host, &target, None, ProtocolId::ANTHROPIC_MESSAGES)
+    let target = Target::new(ProtocolId::BEDROCK_CONVERSE, "http://up.test");
+    let error = run(&host, &target, None, ProtocolId::BEDROCK_CONVERSE)
         .await
         .err()
         .expect("unsupported");

@@ -165,6 +165,7 @@ pub fn openai_compat(
             .headers(headers)
             .quirks(quirks),
         secret,
+        counts: false,
         bridged,
     }))
 }
@@ -204,12 +205,14 @@ fn credential_style(credential: Credential) -> CredentialStyle {
     }
 }
 
-/// A Chat or Responses provider whose `execute` goes through the SDK transport
-/// on the host client. Counting, listing, and probing stay on the adapter.
+/// A provider whose `execute` goes through the SDK transport on the host
+/// client. Counting goes there too when `counts` is set. Listing and probing
+/// stay on the adapter.
 struct Direct {
     http: HttpHandle,
     target: Target,
     secret: Option<SecretString>,
+    counts: bool,
     bridged: Bridged,
 }
 
@@ -235,7 +238,17 @@ impl UpstreamProvider for Direct {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<PluginCount, PluginError> {
-        self.bridged.count_input(request, inbound).await
+        if !self.counts {
+            return self.bridged.count_input(request, inbound).await;
+        }
+        wire::count_input(
+            &self.http,
+            &self.target,
+            self.secret.as_ref(),
+            request,
+            inbound,
+        )
+        .await
     }
 
     async fn list_models(
@@ -273,12 +286,77 @@ impl UpstreamFactory for AnthropicFactory {
         cfg: &Self::Config,
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
-        let mut endpoint = cfg.endpoint.clone();
-        attach_client(&mut endpoint, host);
-        let adapter = Anthropic::new(endpoint).map_err(build_error)?;
-        Ok(Arc::new(Bridged {
-            inner: Arc::new(adapter),
-        }))
+        anthropic(cfg.endpoint.clone(), host)
+    }
+}
+
+/// Builds the `anthropic` provider.
+///
+/// `execute` and `count_input` go through the SDK transport on the host client
+/// unless the endpoint is Bedrock or Mantle. Listing, probing, and those
+/// endpoints stay on the adapter.
+///
+/// # Errors
+///
+/// Returns [`BuildError`] when the adapter rejects the endpoint.
+#[doc(hidden)]
+pub fn anthropic(
+    mut endpoint: Endpoint,
+    host: &HostContext,
+) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+    attach_client(&mut endpoint, host);
+    let style = messages_credential_style(endpoint.credential);
+    let headers = endpoint.headers.clone();
+    let quirks = endpoint.quirks;
+    let secret =
+        (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
+    let adapter = Arc::new(Anthropic::new(endpoint).map_err(build_error)?);
+    let bridged = Bridged {
+        inner: adapter.clone(),
+    };
+    let Some(base) = adapter.direct_base() else {
+        return Ok(Arc::new(bridged));
+    };
+    Ok(Arc::new(Direct {
+        http: host.http().clone(),
+        target: Target::new(ProtocolId::ANTHROPIC_MESSAGES, base)
+            .credential(style)
+            .headers(headers)
+            .quirks(quirks),
+        secret,
+        counts: true,
+        bridged,
+    }))
+}
+
+/// The `anthropic` provider with every call on the adapter's own transport.
+///
+/// Parity tests compare it with [`anthropic`].
+///
+/// # Errors
+///
+/// Returns [`BuildError`] when the adapter rejects the endpoint.
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub fn anthropic_adapter(
+    mut endpoint: Endpoint,
+    host: &HostContext,
+) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
+    attach_client(&mut endpoint, host);
+    let adapter = Anthropic::new(endpoint).map_err(build_error)?;
+    Ok(Arc::new(Bridged {
+        inner: Arc::new(adapter),
+    }))
+}
+
+/// The SDK header for a provider credential on Messages.
+///
+/// `Default` is the adapter's `x-api-key`. Every other value names the same
+/// header the adapter writes.
+fn messages_credential_style(credential: Credential) -> CredentialStyle {
+    match credential {
+        Credential::Default => CredentialStyle::XApiKey,
+        other => credential_style(other),
     }
 }
 
