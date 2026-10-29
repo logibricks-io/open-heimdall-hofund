@@ -343,6 +343,27 @@ impl Call {
         self
     }
 
+    /// Headers in order as `(name, value, sensitive)`, for unit tests.
+    #[cfg(test)]
+    pub(crate) fn header_triples(&self) -> Vec<(&str, &str, bool)> {
+        self.headers
+            .iter()
+            .map(|header| {
+                (
+                    header.name.as_str(),
+                    header.value.as_str(),
+                    header.sensitive,
+                )
+            })
+            .collect()
+    }
+
+    /// The URI and body, for unit tests.
+    #[cfg(test)]
+    pub(crate) fn uri_and_body(&self) -> (&str, &[u8]) {
+        (&self.uri, &self.body)
+    }
+
     fn request(self) -> Result<HttpRequest, PluginError> {
         let mut builder = http::Request::builder().method(self.method).uri(&self.uri);
         for header in &self.headers {

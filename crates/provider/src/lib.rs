@@ -7,7 +7,6 @@
 //! polls, which is the backpressure.
 
 mod anthropic;
-mod bedrock;
 mod billing;
 mod error;
 mod generative;
@@ -20,7 +19,6 @@ mod probe;
 mod stream;
 
 pub use anthropic::Anthropic;
-pub use bedrock::Bedrock;
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;
 pub use http::{Credential, Endpoint, pooled_reqwest};

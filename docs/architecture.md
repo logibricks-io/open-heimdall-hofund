@@ -233,7 +233,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-api` | Plugin traits, `PluginError`, newtypes, and `HostContext` handles. |
 | `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. SigV4, OAuth token parsing, form bodies, and JSON page cursors live here. Re-exports `tracing` and `async_trait`. |
 | `plugin-host` | The `HostContext` constructor, the pooled HTTP client, and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
-| `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` serves the built-in Chat, Responses, Messages, Generative, Vertex, and Bedrock adapters. |
+| `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` serves the built-in Chat, Responses, Messages, and Generative adapters. |
 | `plugin-relay` | Sample upstream plugin. The kit dependency is tests only. |
 | `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
 | `plugin-subscription-codex` | ChatGPT (Codex) subscription: browser sign-in, token refresh, and the Responses upstream. |

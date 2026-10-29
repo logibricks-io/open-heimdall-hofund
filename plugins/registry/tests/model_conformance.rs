@@ -101,7 +101,6 @@ async fn bedrock_factory_passes_static_catalog_conformance() {
         factory.as_ref(),
         |base| {
             let mut raw = RawTable::new();
-            raw.insert("id", RawValue::String("conformance".to_owned()));
             raw.insert("base_url", RawValue::String(base.to_owned()));
             raw.insert("region", RawValue::String("us-east-1".to_owned()));
             raw.insert("access_key_id", RawValue::String("access".to_owned()));

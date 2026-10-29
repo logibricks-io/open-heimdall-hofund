@@ -80,7 +80,7 @@ SigV4's result contains the access key id. That is what AWS puts in `Authorizati
 
 ## Known limits
 
-The Chat, Responses, Messages, Generative, Vertex, and Bedrock adapters still live in `hofund-provider`. The registry factories validate options and call those adapters. A later pull request can move one adapter into its own plugin crate. This slice deletes the daemon's `Vertex::new` and `Bedrock::new` arms, so every wire is `registry.factory`. Since E9b, the Vertex adapter is gone from `hofund-provider`; the `google-vertex` plugin replaces it.
+The Chat, Responses, Messages, and Generative adapters still live in `hofund-provider`. The registry factories validate options and call those adapters. A later pull request can move one adapter into its own plugin crate. This slice deletes the daemon's `Vertex::new` and `Bedrock::new` arms, so every wire is `registry.factory`. Since E9b, the Vertex adapter is gone from `hofund-provider`; the `google-vertex` plugin replaces it. Since E10, the Bedrock adapter is gone too; the `bedrock` plugin (`plugins/providers/bedrock`) replaces it, and any `bedrock-converse` provider builds that plugin.
 
 On that path the factory takes the `reqwest` client out of the host's `PooledHttp` and hands it to the adapter. The raw-client method is gated behind the kernel-only feature and is removed in row E, the first PR that moves an adapter into its own plugin crate (E3, Vertex). Connect and idle-read timeouts are the daemon's `HttpLimits`. A connection-establishment failure is retried once because the request was not sent; an error after a possible write is not retried. Hyper separately retries requests it cancelled on an idle socket before writing them. `HttpHandle::send` is still the API a real plugin calls. It streams a 2xx body and buffers an error body; SDK `Call` still reads the whole body. The SDK does not build a client.
 
@@ -88,9 +88,9 @@ Since PR E8a, `execute` for a Chat or Responses endpoint goes through the SDK `w
 
 An adapter constructed in a unit test, with no pooled client attached, still builds a private client. The daemon does not take that path. Vertex token mint has a 30 second total deadline on both private and pooled clients, and concurrent cache misses share one refresh.
 
-`Bedrock`'s `UpstreamSpec` credential is `SigV4`. The adapter rejects an API key and signs each request.
+The `bedrock` plugin signs each Converse request with the SDK `AwsSigner`. A stored API key on Converse is refused when a request or probe is sent.
 
-`plan` still reads `project`, `location`, and `region` as strings so `resolve` can build a catalog URL. A wrong type fails there, with the provider id and the key, before the factory runs. The factory repeats the check for a raw table that did not come from `plan`. `bedrock` is not a compiled preset. `resolve` still owns its URLs. Since E9b, `google-vertex` is a compiled preset with `options_base`: its plugin builds the base URL from `project` and `location`, so `select` accepts it without a `base_url`. The factory owns construction.
+`plan` still reads `project`, `location`, and `region` as strings so `resolve` can build a catalog URL. A wrong type fails there, with the provider id and the key, before the factory runs. The factory repeats the check for a raw table that did not come from `plan`. Since E10, `bedrock` is a compiled preset of the `bedrock` plugin; Converse takes the region's chat URL and the plugin strips `/openai/v1`. Since E9b, `google-vertex` is a compiled preset with `options_base`: its plugin builds the base URL from `project` and `location`, so `select` accepts it without a `base_url`. The factory owns construction.
 
 `list_models` and `probe` use the adapter's pooled endpoint client. The SDK pager owns cursor rules; the provider transport enforces body caps while reading. The relay remains unsupported. For `[providers.models].url`, the daemon fetches that exact URL through `HostContext` and the SDK pager rather than treating it as a plugin base. It redacts the resolved URL, its query, and every query value.
 
@@ -112,7 +112,7 @@ The daemon probe selector uses route mappings and listed endpoint metadata. `Nam
 | --- | --- |
 | `openai-compat`, `anthropic`, `generative` | none |
 | `google-vertex` (plugin) | `base_url`, `project`, `location`, `credentials`, `impersonate`, `token_url`, `iam_root` |
-| `bedrock` | `region`, `access_key_id`, `secret_access_key`, `session_token` |
+| `bedrock` (plugin) | `base_url`, `region`, `access_key_id`, `secret_access_key`, `session_token` |
 
 `config_schema` lists those option keys so a form can render them. Kernel keys are not options.
 

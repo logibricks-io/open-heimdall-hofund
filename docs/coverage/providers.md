@@ -1,7 +1,7 @@
 # hofund coverage: upstream providers and presets
 
 - magpie source: https://github.com/yetone/magpie at `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947` (commit date 2026-10-25 16:19 SGT)
-- hofund checked: `62242e3a5674be349fffcf0f93e31844623ef889`, files `crates/provider/presets.toml`, `crates/provider/src/presets.rs`, `plugins/providers/azure/src/lib.rs` (the `azure` plugin), `plugins/providers/google-vertex/src` (the `google-vertex` plugin), and the adapters in `crates/provider/src` (anthropic, openai_compat, generative, bedrock, mantle, sigv4)
+- hofund checked: `62242e3a5674be349fffcf0f93e31844623ef889`, files `crates/provider/presets.toml`, `crates/provider/src/presets.rs`, `plugins/providers/azure/src/lib.rs` (the `azure` plugin), `plugins/providers/google-vertex/src` (the `google-vertex` plugin), and the adapters in `crates/provider/src` (anthropic, openai_compat, generative, mantle, sigv4), and `plugins/providers/bedrock/src` (the `bedrock` plugin)
 - Date checked: 2026-10-25
 - Source of the list: the `PresetDef` table in `internal/provider/presets.go` (58 presets: 35 vendor, 18 relay, 4 local, 1 remote).
 - Auth: from `AuthHeaders` in `internal/provider/test.go` (line 457). Gemini protocol uses `x-goog-api-key`; Anthropic protocol uses `x-api-key` alone for anthropic.com and Bedrock, otherwise both headers unless the provider is set to one (`internal/provider/authheader.go`); everything else uses `Authorization: Bearer`.

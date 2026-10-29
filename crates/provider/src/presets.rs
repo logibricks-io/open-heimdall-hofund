@@ -199,7 +199,7 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
     };
     let endpoints = Endpoints::of(preset, region);
     if request.wire == Some(Wire::Converse) {
-        return resolve_converse(preset, request, &endpoints);
+        return Err(resolve_converse(preset));
     }
     if let Some(wire) = request.wire {
         let base = endpoints
@@ -267,42 +267,9 @@ fn prefer_override(catalog_url: &str, override_url: &str) -> String {
     }
 }
 
-/// Model ids recorded for one preset. `None` when the id is not in the catalog.
-pub(crate) fn preset_models(id: &str) -> Option<&[String]> {
-    catalog()
-        .preset
-        .iter()
-        .find(|preset| preset.id == id)
-        .map(|preset| preset.models.as_slice())
-}
-
-fn resolve_converse(
-    preset: &Preset,
-    request: &Resolve<'_>,
-    endpoints: &Endpoints<'_>,
-) -> Result<Resolved, PresetError> {
-    if preset.id != "bedrock" {
-        return Err(PresetError::new(format!(
-            "preset `{}` has no converse endpoint",
-            preset.id
-        )));
-    }
-    let chat = endpoints.url(Wire::Chat).unwrap_or("");
-    if chat.is_empty() && request.base_url.is_empty() {
-        return Err(PresetError::new(
-            "preset `bedrock` has no converse endpoint",
-        ));
-    }
-    let base = if request.base_url.is_empty() {
-        chat.to_owned()
-    } else {
-        request.base_url.to_owned()
-    };
-    Ok(finish(
-        preset,
-        Wire::Converse,
-        crate::bedrock::runtime_root(&base),
-    ))
+/// No kernel preset serves Converse. The Bedrock plugin owns that wire.
+fn resolve_converse(preset: &Preset) -> PresetError {
+    PresetError::new(format!("preset `{}` has no converse endpoint", preset.id))
 }
 
 fn unavailable(preset: &Preset) -> PresetError {
@@ -601,7 +568,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 3);
+        assert_eq!(catalog.preset.len(), 2);
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
@@ -653,48 +620,6 @@ mod tests {
 
     #[test]
     fn known_presets_resolve_to_the_recorded_endpoint_and_header() {
-        let bedrock = resolve(&Resolve {
-            id: "bedrock",
-            region: Some("eu-west-1"),
-            wire: Some(Wire::Messages),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("bedrock");
-        assert_eq!(
-            bedrock.base_url,
-            "https://bedrock-runtime.eu-west-1.amazonaws.com/anthropic"
-        );
-        assert_eq!(bedrock.credential, crate::Credential::XApiKey);
-        let bedrock_chat = resolve(&Resolve {
-            id: "bedrock",
-            region: Some("eu-west-1"),
-            wire: Some(Wire::Chat),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("bedrock chat");
-        assert_eq!(
-            bedrock_chat.base_url,
-            "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1"
-        );
-        assert_eq!(bedrock_chat.credential, crate::Credential::Bearer);
-        let converse = resolve(&Resolve {
-            id: "bedrock",
-            region: Some("eu-west-1"),
-            wire: Some(Wire::Converse),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("converse");
-        assert_eq!(converse.wire, Wire::Converse);
-        assert_eq!(
-            converse.base_url,
-            "https://bedrock-runtime.eu-west-1.amazonaws.com"
-        );
         let error = resolve(&Resolve {
             id: "bedrock-mantle",
             region: None,
@@ -704,7 +629,10 @@ mod tests {
             location: "",
         })
         .expect_err("mantle converse");
-        assert!(error.to_string().contains("no converse endpoint"));
+        assert_eq!(
+            error.to_string(),
+            "preset `bedrock-mantle` has no converse endpoint"
+        );
 
         let mantle = resolve(&Resolve {
             id: "bedrock-mantle",

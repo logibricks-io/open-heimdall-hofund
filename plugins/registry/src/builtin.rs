@@ -1,7 +1,7 @@
 //! Built-in factories for the adapters that still live in `hofund-provider`.
 //!
-//! The daemon looks every wire up here. Chat, Responses, Messages, Generative,
-//! and Bedrock each validate their own option schema and then call the
+//! The daemon looks every wire up here. Chat, Responses, Messages, and
+//! Generative each validate their own option schema and then call the
 //! adapter. Chat, Responses, Messages, and Generative calls go through the SDK
 //! transport. A later pull request can move one adapter into its own plugin crate.
 
@@ -18,8 +18,8 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::async_trait;
 use hofund_plugin_sdk::wire::{self, Target};
 use hofund_provider::{
-    Anthropic, Bedrock, Completion as ProviderCompletion, CountOutcome as ProviderCount,
-    Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, ProviderError,
+    Anthropic, Completion as ProviderCompletion, CountOutcome as ProviderCount, Credential,
+    Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, ProviderError,
 };
 use hofund_quirks::named;
 
@@ -30,7 +30,6 @@ pub fn factory(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
         "openai-compat" => Some(Arc::new(OpenAiFactory)),
         "anthropic" => Some(Arc::new(AnthropicFactory)),
         "generative" => Some(Arc::new(GenerativeFactory)),
-        "bedrock" => Some(Arc::new(BedrockFactory)),
         _ => None,
     }
 }
@@ -56,24 +55,9 @@ static GENERATIVE_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     ListKind::Live,
 );
 
-static BEDROCK_SPEC: UpstreamSpec = UpstreamSpec::from_static(
-    PluginId::from_static("bedrock"),
-    &[ProtocolId::BEDROCK_CONVERSE],
-    CredentialStyle::SigV4,
-    ListKind::Catalog,
-);
-
-const BEDROCK_OPTIONS: &[&str] = &[
-    "region",
-    "access_key_id",
-    "secret_access_key",
-    "session_token",
-];
-
 struct OpenAiFactory;
 struct AnthropicFactory;
 struct GenerativeFactory;
-struct BedrockFactory;
 
 struct EndpointConfig {
     endpoint: Endpoint,
@@ -90,11 +74,11 @@ impl UpstreamFactory for OpenAiFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        option_schema(&[])
+        empty_schema()
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        let mut config = read_endpoint(UpstreamFactory::spec(self), raw, true, &[])?;
+        let mut config = read_endpoint(UpstreamFactory::spec(self), raw, true)?;
         config.protocol = Some(read_protocol(raw, &config.endpoint.id)?);
         Ok(config)
     }
@@ -256,11 +240,11 @@ impl UpstreamFactory for AnthropicFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        option_schema(&[])
+        empty_schema()
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        read_endpoint(UpstreamFactory::spec(self), raw, false, &[])
+        read_endpoint(UpstreamFactory::spec(self), raw, false)
     }
 
     fn build(
@@ -350,11 +334,11 @@ impl UpstreamFactory for GenerativeFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        option_schema(&[])
+        empty_schema()
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        read_endpoint(UpstreamFactory::spec(self), raw, false, &[])
+        read_endpoint(UpstreamFactory::spec(self), raw, false)
     }
 
     fn build(
@@ -431,60 +415,6 @@ fn generative_credential_style(credential: Credential) -> CredentialStyle {
     }
 }
 
-struct BedrockConfig {
-    endpoint: Endpoint,
-    region: String,
-    access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
-}
-
-impl ValidConfig for BedrockConfig {}
-
-impl UpstreamFactory for BedrockFactory {
-    type Config = BedrockConfig;
-
-    fn spec(&self) -> &'static UpstreamSpec {
-        &BEDROCK_SPEC
-    }
-
-    fn config_schema(&self) -> Schema {
-        option_schema(BEDROCK_OPTIONS)
-    }
-
-    fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        let config = read_endpoint(UpstreamFactory::spec(self), raw, false, BEDROCK_OPTIONS)?;
-        let id = config.endpoint.id.as_str();
-        Ok(BedrockConfig {
-            region: option_string(raw, "region", id)?,
-            access_key_id: option_string(raw, "access_key_id", id)?,
-            secret_access_key: option_string(raw, "secret_access_key", id)?,
-            session_token: option_string(raw, "session_token", id)?,
-            endpoint: config.endpoint,
-        })
-    }
-
-    fn build(
-        &self,
-        cfg: &Self::Config,
-        host: &HostContext,
-    ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
-        let mut endpoint = cfg.endpoint.clone();
-        attach_client(&mut endpoint, host);
-        let adapter = Bedrock::new(
-            endpoint,
-            &cfg.region,
-            &cfg.access_key_id,
-            &cfg.secret_access_key,
-            &cfg.session_token,
-        )
-        .map_err(build_error)?;
-        Ok(Arc::new(Bridged {
-            inner: Arc::new(adapter),
-        }))
-    }
-}
-
 struct Bridged {
     inner: Arc<dyn Provider>,
 }
@@ -535,28 +465,14 @@ impl UpstreamProvider for Bridged {
     }
 }
 
-fn reject_options(
-    raw: &RawTable,
-    id: &str,
-    protocol: bool,
-    options: &[&str],
-) -> Result<(), ConfigError> {
+fn reject_options(raw: &RawTable, id: &str, protocol: bool) -> Result<(), ConfigError> {
     for key in raw.keys() {
-        if is_kernel(key, protocol) {
-            continue;
+        if !is_kernel(key, protocol) {
+            return Err(
+                ConfigError::new(format!("provider `{id}` has unknown option `{key}`"))
+                    .with_path(key),
+            );
         }
-        if options.contains(&key) {
-            if !matches!(raw.get(key), Some(RawValue::String(_))) {
-                return Err(ConfigError::new(format!(
-                    "provider `{id}` option `{key}` must be a string"
-                ))
-                .with_path(key));
-            }
-            continue;
-        }
-        return Err(
-            ConfigError::new(format!("provider `{id}` has unknown option `{key}`")).with_path(key),
-        );
     }
     Ok(())
 }
@@ -578,16 +494,9 @@ fn required_id<'a>(raw: &'a RawTable, spec: &UpstreamSpec) -> Result<&'a str, Co
     }
 }
 
-fn option_schema(fields: &[&str]) -> Schema {
-    let listed = fields
-        .iter()
-        .map(|name| ((*name).to_owned(), Schema::string()))
-        .collect();
-    Schema::object(listed, &[]).expect("option schema")
-}
-
-fn option_string(raw: &RawTable, key: &str, id: &str) -> Result<String, ConfigError> {
-    Ok(optional_string(raw, key, id)?.unwrap_or_default())
+/// The kernel factories take no options beyond the endpoint fields.
+fn empty_schema() -> Schema {
+    Schema::object(Vec::new(), &[]).expect("option schema")
 }
 
 fn attach_client(endpoint: &mut Endpoint, host: &HostContext) {
@@ -603,10 +512,9 @@ fn read_endpoint(
     spec: &'static UpstreamSpec,
     raw: &RawTable,
     protocol: bool,
-    options: &[&str],
 ) -> Result<EndpointConfig, ConfigError> {
     let id = required_id(raw, spec)?;
-    reject_options(raw, id, protocol, options)?;
+    reject_options(raw, id, protocol)?;
     let base_url = required_string(raw, "base_url", id)?;
     let mut endpoint = Endpoint::new(id, base_url);
     if let Some(value) = optional_string(raw, "preset", id)? {
@@ -734,7 +642,7 @@ fn plugin_completion(completion: ProviderCompletion) -> PluginCompletion {
 
 #[cfg(test)]
 mod tests {
-    use super::{BedrockFactory, OpenAiFactory};
+    use super::{AnthropicFactory, GenerativeFactory, OpenAiFactory};
     use hofund_plugin_api::{RawTable, RawValue, UpstreamFactory};
 
     fn raw(id: &str) -> RawTable {
@@ -773,31 +681,20 @@ mod tests {
         );
         assert!(!text.contains("SENTINEL-OPTION-VALUE"), "{text}");
 
-        let mut mistyped = raw("aws");
+        let mut mistyped = raw("primary");
+        mistyped.insert("protocol", RawValue::String("chat".to_owned()));
         let mut nested = RawTable::new();
         nested.insert("leak", RawValue::String("SENTINEL-NESTED".to_owned()));
-        mistyped.insert("region", RawValue::Table(nested));
-        let Err(error) = UpstreamFactory::validate(&BedrockFactory, &mistyped) else {
+        mistyped.insert("api_key", RawValue::Table(nested));
+        let Err(error) = UpstreamFactory::validate(&OpenAiFactory, &mistyped) else {
             panic!("wrong type was accepted");
         };
         let text = error.to_string();
         assert!(
-            text.contains("provider `aws` option `region` must be a string"),
+            text.contains("provider `primary` option `api_key` must be a string"),
             "{text}"
         );
         assert!(!text.contains("SENTINEL-NESTED"), "{text}");
-
-        let mut bedrock = raw("aws");
-        bedrock.insert("project", RawValue::String("demo-project".to_owned()));
-        let Err(error) = UpstreamFactory::validate(&BedrockFactory, &bedrock) else {
-            panic!("vertex key was accepted");
-        };
-        let text = error.to_string();
-        assert!(
-            text.contains("provider `aws` has unknown option `project`"),
-            "{text}"
-        );
-        assert!(!text.contains("demo-project"), "{text}");
     }
 
     #[test]
@@ -807,7 +704,7 @@ mod tests {
             Some(RawValue::String(String::new())),
             Some(RawValue::Integer(1)),
         ] {
-            let mut bedrock = match id {
+            let mut anthropic = match id {
                 Some(id) => {
                     let mut table = raw("temporary");
                     table.insert("id", id);
@@ -815,15 +712,17 @@ mod tests {
                 }
                 None => RawTable::new(),
             };
-            bedrock.insert(
+            anthropic.insert(
                 "unknown_option",
                 RawValue::String("SENTINEL-UNKNOWN-OPTION".to_owned()),
             );
-            let Err(error) = UpstreamFactory::validate(&BedrockFactory, &bedrock) else {
+            let Err(error) = UpstreamFactory::validate(&AnthropicFactory, &anthropic) else {
                 panic!("invalid id was accepted");
             };
             assert!(
-                error.to_string().contains("`bedrock` provider has no `id`"),
+                error
+                    .to_string()
+                    .contains("`anthropic` provider has no `id`"),
                 "{error}"
             );
             assert!(!error.to_string().contains("SENTINEL-UNKNOWN-OPTION"));
@@ -831,36 +730,23 @@ mod tests {
     }
 
     #[test]
-    fn raw_environment_references_pass_the_shape_check() {
-        let mut bedrock = raw("aws");
-        bedrock.insert(
-            "session_token",
-            RawValue::String("env:HOFUND_BEDROCK_TEST_TOKEN".to_owned()),
-        );
-        UpstreamFactory::validate(&BedrockFactory, &bedrock).expect("shape");
+    fn kernel_schemas_list_no_options() {
+        for names in [
+            UpstreamFactory::config_schema(&OpenAiFactory).field_names(),
+            UpstreamFactory::config_schema(&AnthropicFactory).field_names(),
+            UpstreamFactory::config_schema(&GenerativeFactory).field_names(),
+        ] {
+            assert!(names.is_empty(), "{names:?}");
+        }
     }
 
     #[test]
-    fn schemas_list_only_that_plugins_options() {
-        let bedrock = UpstreamFactory::config_schema(&BedrockFactory);
-        let names = bedrock.field_names();
-        assert!(names.contains(&"secret_access_key"));
-        assert!(!names.contains(&"project"));
-        assert!(
-            UpstreamFactory::config_schema(&OpenAiFactory)
-                .field_names()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn builtin_specs_advertise_live_and_static_model_lists() {
+    fn builtin_specs_advertise_live_model_lists() {
         use hofund_plugin_api::ListKind;
         for (id, kind) in [
             ("openai-compat", ListKind::Live),
             ("anthropic", ListKind::Live),
             ("generative", ListKind::Live),
-            ("bedrock", ListKind::Catalog),
         ] {
             assert_eq!(
                 super::factory(id).expect("factory").spec().list_kind(),

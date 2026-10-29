@@ -45,7 +45,7 @@ fn protocol(wire: Wire) -> ProtocolId {
 #[cfg(feature = "test-fixtures")]
 #[test]
 fn fixtures_are_separate_and_aliases_resolve_their_region() {
-    assert_eq!(compiled_presets().len(), 56);
+    assert_eq!(compiled_presets().len(), 57);
     assert_eq!(compiled_aliases().len(), 4);
     assert!(fixture_presets().len() >= 5);
     assert_eq!(fixture_aliases().len(), 1);
@@ -493,6 +493,64 @@ fn the_vertex_row_models_are_the_global_catalog() {
             &raw,
             host.context(),
             &BuildContext::new(ProtocolId::GENERATIVE_LANGUAGE),
+        )
+        .expect("build");
+    let list = block_on(provider.list_models(&ListQuery::default())).expect("list");
+    let ids: Vec<&str> = list.models().iter().map(|model| model.id()).collect();
+    assert_eq!(ids, row.models);
+    assert!(host.http().calls().is_empty());
+}
+
+/// The `bedrock` row's static models are the plugin's catalog, and Converse
+/// selects the region's chat URL, which the plugin reduces to the runtime root.
+#[test]
+fn the_bedrock_row_models_are_the_catalog_and_converse_takes_the_chat_url() {
+    use hofund_kit_upstream::{TestHost, block_on};
+    use hofund_plugin_api::{BuildContext, ListQuery, PluginId, RawTable, RawValue};
+    use hofund_plugin_registry::select;
+
+    let row = compiled_presets()
+        .iter()
+        .find(|preset| preset.id == "bedrock")
+        .expect("bedrock row");
+    assert_eq!(row.plugin, "bedrock");
+    assert!(row.no_list);
+    assert_eq!(row.regions.len(), 10);
+    let served = factory("bedrock")
+        .expect("bedrock factory")
+        .spec()
+        .protocols()
+        .to_vec();
+    let picked = select(
+        row,
+        Some("eu-west-3"),
+        &served,
+        Some(ProtocolId::BEDROCK_CONVERSE),
+        "",
+    )
+    .expect("converse");
+    assert_eq!(
+        picked.base_url,
+        "https://bedrock-runtime.eu-west-3.amazonaws.com/openai/v1"
+    );
+    let default = select(row, None, &served, None, "").expect("default");
+    assert_eq!(default.protocol, ProtocolId::OPENAI_CHAT);
+
+    let dir = tempfile::tempdir().expect("scratch");
+    let host = TestHost::open(PluginId::from_static("bedrock"), dir.path());
+    let mut raw = RawTable::new();
+    raw.insert("base_url", RawValue::String(picked.base_url.clone()));
+    raw.insert("access_key_id", RawValue::String("AKIDEXAMPLE".to_owned()));
+    raw.insert(
+        "secret_access_key",
+        RawValue::String("fake-secret".to_owned()),
+    );
+    let provider = factory("bedrock")
+        .expect("bedrock factory")
+        .validate_and_build_with(
+            &raw,
+            host.context(),
+            &BuildContext::new(ProtocolId::BEDROCK_CONVERSE),
         )
         .expect("build");
     let list = block_on(provider.list_models(&ListQuery::default())).expect("list");

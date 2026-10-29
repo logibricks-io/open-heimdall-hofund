@@ -375,8 +375,7 @@ async fn static_region_live_and_only_fallback_follow_preset_policy() {
         ..plan(&format!("{base}/live"), "", "", "")
     };
     let host = make_host()
-        .with_model_plan("static", static_plan.clone())
-        .with_model_plan("bedrock", static_plan)
+        .with_model_plan("static", static_plan)
         .with_model_plan("live", live_plan)
         .with_model_plan("mantle", plan(&format!("{base}/mantle"), "", "", ""));
     let new_config_path = make_config_path("kinds");
@@ -390,7 +389,9 @@ async fn static_region_live_and_only_fallback_follow_preset_policy() {
         .list_models(&config, &new_config_path, "bedrock")
         .await
         .expect("bedrock static");
-    assert_eq!(ids(&bedrock), ["static-model"]);
+    // The Bedrock plugin answers from its own catalog without a network call.
+    assert_eq!(bedrock.kind, ListKind::Catalog);
+    assert!(ids(&bedrock).contains(&"openai.gpt-oss-120b-1:0"));
     let vertex = host
         .list_models(&config, &new_config_path, "vertex")
         .await

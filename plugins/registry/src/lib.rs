@@ -109,8 +109,8 @@ pub fn factory(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
 /// Whether `id` names a kernel-owned factory rather than a linked plugin.
 ///
 /// Unlike [`builtin_factory_ids`], which lists only factories eligible for
-/// data-only preset fragments, this includes the catalog-only
-/// Bedrock factory and any future factory added to the builtin module.
+/// data-only preset fragments, this includes any future factory added to the
+/// builtin module that is not eligible for one.
 #[must_use]
 pub fn is_kernel_factory(id: &str) -> bool {
     builtin::factory(id).is_some()
@@ -149,9 +149,14 @@ pub fn builtin_protocols() -> Vec<ProtocolId> {
 /// otherwise built by a kernel factory. An Azure OpenAI resource host on Chat
 /// or Responses is served by the `azure` plugin instead: its deployment list,
 /// `api-key` header, and v1 root. Messages keeps the kernel's Anthropic
-/// adapter, whose base an Azure resource serves under `/anthropic`.
+/// adapter, whose base an Azure resource serves under `/anthropic`. Converse
+/// on any host is served by the `bedrock` plugin, the only one that signs it.
 #[must_use]
 pub fn host_plugin(protocol: ProtocolId, host: &str) -> Option<&'static str> {
+    #[cfg(feature = "bedrock")]
+    if protocol == ProtocolId::BEDROCK_CONVERSE {
+        return Some("bedrock");
+    }
     #[cfg(feature = "azure")]
     if matches!(
         protocol,
@@ -438,11 +443,11 @@ mod tests {
 
     #[test]
     fn kernel_factory_predicate_covers_builtins_and_excludes_linked_plugins() {
-        for id in ["openai-compat", "anthropic", "generative", "bedrock"] {
+        for id in ["openai-compat", "anthropic", "generative"] {
             assert!(super::builtin::factory(id).is_some(), "{id}");
             assert!(super::is_kernel_factory(id), "{id}");
         }
-        for id in ["azure", "google-vertex", "missing"] {
+        for id in ["azure", "bedrock", "google-vertex", "missing"] {
             assert!(super::builtin::factory(id).is_none(), "{id}");
             assert!(!super::is_kernel_factory(id), "{id}");
         }
@@ -451,9 +456,33 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bedrock")]
     #[test]
-    fn bedrock_spec_declares_sigv4() {
+    fn converse_on_any_host_goes_to_the_bedrock_plugin() {
+        for host in [
+            "bedrock-runtime.us-east-1.amazonaws.com",
+            "proxy.example.test",
+            "",
+        ] {
+            assert_eq!(
+                super::host_plugin(ProtocolId::BEDROCK_CONVERSE, host),
+                Some("bedrock"),
+                "{host}"
+            );
+        }
+        assert_eq!(
+            super::host_plugin(
+                ProtocolId::OPENAI_CHAT,
+                "bedrock-runtime.us-east-1.amazonaws.com"
+            ),
+            None
+        );
         let factory = super::factory("bedrock").expect("bedrock");
-        assert_eq!(factory.spec().credential(), CredentialStyle::SigV4);
+        assert!(
+            factory
+                .spec()
+                .protocols()
+                .contains(&ProtocolId::BEDROCK_CONVERSE)
+        );
     }
 }

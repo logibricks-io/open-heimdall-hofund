@@ -1,0 +1,3 @@
+id = "bedrock"
+kind = "provider"
+presets = ["presets.toml"]
