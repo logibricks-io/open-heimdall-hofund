@@ -1152,10 +1152,10 @@ mod tests {
         assert_eq!(added, vec![("session-id".to_owned(), "s-1".to_owned())]);
         let (body, added) = rewritten(Some(&rewrite), b"[1]".to_vec());
         assert_eq!(body, b"[1]");
-        assert!(added.is_empty());
+        assert_eq!(added, Vec::<(String, String)>::new());
         let (body, added) = rewritten(None, br#"{"user":"u"}"#.to_vec());
         assert_eq!(body, br#"{"user":"u"}"#);
-        assert!(added.is_empty());
+        assert_eq!(added, Vec::<(String, String)>::new());
     }
 
     #[test]

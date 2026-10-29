@@ -972,7 +972,7 @@ fn orphan_output_becomes_note() {
         json!({"type": "custom_tool_call_output", "call_id": null, "output": "notice"})
     );
 
-    let long = format!("{}é", "a".repeat(shape::MAX_NOTE - 1));
+    let long = format!("{}é", "a".repeat(15_999));
     let note = shape::orphan_note(json!({"output": long}).as_object().expect("object"), "c");
     let content = note["content"].as_str().expect("content");
     let text = content
@@ -980,9 +980,9 @@ fn orphan_output_becomes_note() {
         .expect("prefix");
     assert_eq!(
         text,
-        format!("{}\n...[truncated]", "a".repeat(shape::MAX_NOTE - 1))
+        format!("{}\n...[truncated]", "a".repeat(15_999))
     );
-    let exact = "b".repeat(shape::MAX_NOTE);
+    let exact = "b".repeat(16_000);
     let note = shape::orphan_note(json!({"output": exact}).as_object().expect("object"), "c");
     assert!(
         note["content"]
