@@ -182,13 +182,15 @@ pub(crate) fn parse(body: &[u8]) -> Result<(Vec<ModelSpec>, Vec<String>, Listed)
             .and_then(|policy| policy.get("terms"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if state == Some("enabled") || (policy.is_none() && picker) {
-        } else if policy.is_some() && !terms.is_empty() {
-            listed.waiting.insert(id.to_owned());
-        } else {
-            // Not the account's to enable: Copilot answers it 403.
-            dropped.push(id.to_owned());
-            continue;
+        let enabled = state == Some("enabled") || (policy.is_none() && picker);
+        if !enabled {
+            if policy.is_some() && !terms.is_empty() {
+                listed.waiting.insert(id.to_owned());
+            } else {
+                // Not the account's to enable: Copilot answers it 403.
+                dropped.push(id.to_owned());
+                continue;
+            }
         }
         let name = row
             .get("name")

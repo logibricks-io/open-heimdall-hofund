@@ -993,7 +993,14 @@ fn models_reply() -> Vec<u8> {
          "capabilities": {"type": "chat"},
          "policy": {"state": "enabled", "terms": ""}},
         {"id": "trajectory-1", "model_picker_enabled": true, "capabilities": {"type": "chat"},
-         "supported_endpoints": ["/responses"]}
+         "supported_endpoints": ["/responses"]},
+        {"id": "category-only", "model_picker_category": "versatile",
+         "capabilities": {"type": "chat"}},
+        {"id": "disabled", "model_picker_enabled": true, "capabilities": {"type": "chat"},
+         "policy": {"state": "disabled"}},
+        {"id": "lab-model", "vendor": "Experimental", "model_picker_enabled": true,
+         "capabilities": {"type": "chat"}},
+        {"id": "embed-1", "model_picker_enabled": true, "capabilities": {"type": "embeddings"}}
     ]})
     .to_string()
     .into_bytes()
@@ -1227,7 +1234,16 @@ fn list_models_reads_the_account_list() {
             "hidden-picked"
         ]
     );
-    assert_eq!(list.dropped(), ["trajectory-1"]);
+    assert_eq!(
+        list.dropped(),
+        [
+            "trajectory-1",
+            "category-only",
+            "disabled",
+            "lab-model",
+            "embed-1"
+        ]
+    );
     let gpt5 = &list.models()[1];
     assert_eq!(gpt5.display_name(), Some("GPT-5"));
     assert_eq!(gpt5.endpoints(), ["responses", "chat"]);
@@ -1315,4 +1331,26 @@ fn policy_path_escapes_the_model() {
         ProtocolId::OPENAI_CHAT,
     ));
     assert_eq!(uris(&host)[2], format!("{API}/models/a%2Fb%20c/policy"));
+}
+
+#[test]
+fn retry_keeps_the_model_protocol() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host);
+    host.http().enqueue(session_reply("tid=1", 3600));
+    host.http().enqueue(models_reply());
+    host.http().enqueue_response(401, &[], b"{}".to_vec());
+    host.http().enqueue(session_reply("tid=2", 3600));
+    host.http().enqueue_response(401, &[], b"{}".to_vec());
+    let error = block_on(upstream_for(&host, &id).execute(
+        request_for("gpt-5", ProtocolId::OPENAI_RESPONSES),
+        ProtocolId::OPENAI_RESPONSES,
+    ))
+    .err()
+    .expect("second 401 is returned");
+    assert_eq!(error.status(), Some(401));
+    let responses = format!("{API}/responses");
+    assert_eq!(uris(&host)[2], responses);
+    assert_eq!(uris(&host)[4], responses);
 }
