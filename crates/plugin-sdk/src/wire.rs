@@ -2127,24 +2127,27 @@ mod tests {
 
         #[tokio::test]
         async fn watch_stops_at_its_limit() {
-            let seen = Arc::new(Mutex::new(0_usize));
-            let into = Arc::clone(&seen);
             let limit = STREAM
                 .find("event: response.output_item.added")
                 .expect("item");
-            let completion = sent(&split(STREAM, 3), false)
-                .watch(
-                    limit,
-                    Arc::new(move |_: &[u8]| {
-                        *into.lock().expect("lock") += 1;
-                        false
-                    }),
-                )
-                .complete()
-                .await
-                .expect("complete");
-            assert_eq!(read(completion).await, STREAM.as_bytes());
-            assert_eq!(*seen.lock().expect("lock"), 2);
+            // Small pieces, and one piece that runs past the limit.
+            for size in [3, STREAM.len()] {
+                let seen = Arc::new(Mutex::new(0_usize));
+                let into = Arc::clone(&seen);
+                let completion = sent(&split(STREAM, size), false)
+                    .watch(
+                        limit,
+                        Arc::new(move |_: &[u8]| {
+                            *into.lock().expect("lock") += 1;
+                            false
+                        }),
+                    )
+                    .complete()
+                    .await
+                    .expect("complete");
+                assert_eq!(read(completion).await, STREAM.as_bytes());
+                assert_eq!(*seen.lock().expect("lock"), 2, "{size}");
+            }
         }
     }
 }
