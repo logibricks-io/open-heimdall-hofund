@@ -1,0 +1,1 @@
+- 22:57 ET L6e implemented in wt/l6e (terminate.rs, serve/serve_blocking via serve_until_signal, signal-hook 0.4.5 unix-only, cargo deny ok); 6 integration + 7 unit tests pass locally; post-impl-sup r1 (gates+14 mutations) started. L6d gates r1 GATES_FAILED=0; #280 CI: macOS test failed, logs pending (windows still running).
