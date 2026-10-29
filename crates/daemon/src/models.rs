@@ -1208,7 +1208,11 @@ impl ModelsHost {
         DaemonError,
     > {
         if kind == ListKind::Catalog {
-            let models = if matches!(planned.wire, Wire::Vertex | Wire::Converse) {
+            // Bedrock Converse and a linked plugin (Vertex AI's per-location
+            // ids) own their catalog list; other kernel wires read the plan.
+            let models = if planned.wire == Wire::Converse
+                || !self.registry.is_kernel_factory(configured_plugin)
+            {
                 configured
                     .list_models(&ListQuery::new())
                     .await
