@@ -1553,7 +1553,7 @@ mod request_event_tests {
         spy.started(&RequestStart {
             request_id: "r1".into(),
             route: "demo".into(),
-            inbound_protocol: "openai-chat".into(),
+            inbound_protocol: "echo-chat".into(),
             started_at_ms: 1,
         });
         assert_eq!(counter.load(Ordering::SeqCst), 1);
