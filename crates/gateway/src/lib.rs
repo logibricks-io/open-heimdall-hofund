@@ -1025,6 +1025,7 @@ fn tokens_match(expected: &str, presented: &str) -> bool {
     diff == 0
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn success(
     app: Arc<Inner>,
     codec: Arc<dyn Codec>,
@@ -1113,6 +1114,7 @@ async fn success(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn raw_body(
     app: Arc<Inner>,
     codec: Arc<dyn Codec>,

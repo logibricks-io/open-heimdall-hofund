@@ -200,6 +200,11 @@ async fn watcher_skips_daemon_write_when_revisions_match() {
         Some((_, EventPayload::ConfigReloaded(event))) => assert_eq!(event.generation, 2),
         other => panic!("expected config_reloaded, got {other:?}"),
     }
+    // L6f: successful publish also emits snapshot_published on the control topic.
+    match next_event(&mut stream, &mut buffer, Duration::from_secs(3)).await {
+        Some((_, EventPayload::SnapshotPublished(_))) => {}
+        other => panic!("expected snapshot_published, got {other:?}"),
+    }
     // The watcher sees the daemon's own write after the debounce and skips it.
     let quiet = next_event(&mut stream, &mut buffer, Duration::from_millis(1200)).await;
     assert!(
