@@ -309,6 +309,31 @@ fn a_list_error_hides_the_key_and_names_the_status() {
 }
 
 #[test]
+fn a_configured_header_value_is_hidden_in_list_and_probe_errors() {
+    with_host(|host| {
+        let mut config = raw(ROOT);
+        let mut headers = RawTable::new();
+        headers.insert("x-team-token", RawValue::String("HDR-SENTINEL".to_owned()));
+        config.insert("headers", RawValue::Table(headers));
+        let provider = build(host, &config, ProtocolId::OPENAI_CHAT);
+        host.http()
+            .enqueue_response(401, &[], r#"{"error":{"message":"bad team HDR-SENTINEL"}}"#);
+        let error = block_on(provider.list_models(&ListQuery::new())).expect_err("list refused");
+        assert!(error.to_string().contains("HTTP 401"), "{error}");
+        assert!(!error.to_string().contains("HDR-SENTINEL"), "{error}");
+        host.http()
+            .enqueue_response(403, &[], r#"{"error":{"message":"bad team HDR-SENTINEL"}}"#);
+        let error = block_on(
+            provider.probe(&ProbeQuery::new(ProtocolId::OPENAI_CHAT, "m").expect("probe")),
+        )
+        .map(drop)
+        .expect_err("probe refused");
+        assert_eq!(error.status(), Some(403));
+        assert!(!error.to_string().contains("HDR-SENTINEL"), "{error}");
+    });
+}
+
+#[test]
 fn the_probe_asks_chat_at_the_gateway_v1() {
     with_host(|host| {
         let provider = build(host, &raw(ROOT), ProtocolId::ANTHROPIC_MESSAGES);
