@@ -304,7 +304,7 @@ impl Subscription for Gemini {
                 "the stored Gemini CLI sign-in has no refresh token",
             ));
         }
-        if project::of(&blob, self.project.as_deref()).is_none() {
+        if !project::known(&blob, self.project.as_deref()) {
             return Ok(AccountStatus::NeedsSignIn {
                 reason: project::missing_reason(&blob),
             });

@@ -583,6 +583,43 @@ fn failed_setup_keeps_sign_in_and_refresh_retries() {
 }
 
 #[test]
+fn setup_keeps_a_project_stored_while_it_asked() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed(&host, &signed_in_blob(None));
+    host.http().enqueue(token_reply("acc-2", None, 3600));
+    host.http().enqueue(
+        br#"{"currentTier":{"id":"free-tier"},"cloudaicompanionProject":"proj-1"}"#.to_vec(),
+    );
+    block_on(async {
+        let accounts = host.context().accounts();
+        let held = accounts
+            .lease(&id, std::time::Duration::from_secs(5))
+            .await
+            .expect("lease");
+        let mut refresh = sub.refresh(&id, host.context());
+        // The setup asks Code Assist, then waits for the lease held here.
+        for _ in 0..1000 {
+            assert!(hofund_kit_subscription::poll_once(refresh.as_mut()).is_pending());
+            if host.http().calls().len() == 2 {
+                break;
+            }
+            hofund_kit_subscription::yield_times(1).await;
+        }
+        assert_eq!(host.http().calls().len(), 2, "the setup asked Code Assist");
+        held.commit(None, signed_in_blob(Some("proj-other")).to_secret())
+            .await
+            .expect("commit");
+        refresh.await.expect("refresh");
+    });
+    assert_eq!(
+        stored(&host, &id).text(project::PROJECT),
+        Some("proj-other")
+    );
+}
+
+#[test]
 fn refresh_needing_a_project_says_so() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

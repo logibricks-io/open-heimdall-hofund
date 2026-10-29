@@ -35,8 +35,8 @@ const LEASE_WAIT: Duration = Duration::from_secs(30);
 
 /// The project requests go to: the one Code Assist set up, else the one the
 /// config names.
-pub(crate) fn of<'a>(blob: &'a SecretObject, configured: Option<&'a str>) -> Option<&'a str> {
-    blob.text(PROJECT).or(configured)
+pub(crate) fn known(blob: &SecretObject, configured: Option<&str>) -> bool {
+    blob.text(PROJECT).is_some() || configured.is_some()
 }
 
 /// Why an account has no project.
