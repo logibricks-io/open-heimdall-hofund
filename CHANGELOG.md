@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SDK Messages transport: `hofund_plugin_sdk::wire::execute` posts a Messages
+  target to `{base}/v1/messages` with the `anthropic-version` header (a
+  configured header of that name replaces it), and `wire::count_input` posts
+  to `{base}/v1/messages/count_tokens`, treating 404, 405, 501, or a 400 that
+  says the endpoint is not supported as unsupported. The builtin `anthropic`
+  factory now sends `execute` and `count_input` through the SDK on the host
+  HTTP client for every endpoint that is not Bedrock or Mantle. Requests,
+  credentials (`x-api-key`, or both headers for a third-party host), and
+  outcomes match the adapter, checked by a differential test.
 - Claude Code subscription plugin `claude`
   (`hofund-plugin-subscription-claude`, registry feature `claude`, on by
   default): sign-in runs Claude Code's own `claude auth login --claudeai`
