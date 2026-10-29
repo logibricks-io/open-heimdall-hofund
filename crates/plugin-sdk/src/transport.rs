@@ -44,6 +44,15 @@ pub struct Reply {
 }
 
 impl Reply {
+    /// A reply built in a unit test.
+    #[cfg(test)]
+    pub(crate) fn from_parts(status: u16, body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            status,
+            body: body.into(),
+        }
+    }
+
     /// The HTTP status.
     #[must_use]
     pub fn status(&self) -> u16 {

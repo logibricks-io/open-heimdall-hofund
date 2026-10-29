@@ -1,11 +1,13 @@
-//! OAuth token responses and form bodies.
+//! OAuth token responses, form bodies, device sign-in, and token caching.
 //!
-//! This is the piece a provider needs when it trades a refresh token or a
-//! signed JWT. [`Pkce`], [`new_state`], and [`authorize_url`] build a browser
-//! sign-in; the kernel's loopback listener checks the callback. Device-flow
-//! polling is not here. Error text is a fixed sentence. The response body is never copied
-//! into it. OAuth token caching, refresh, and single-flight move into this
-//! module in row H (subscription plugins); Vertex keeps its own cache until then.
+//! [`parse_access_token`] and [`refresh_form`] cover a provider that trades a
+//! refresh token or a signed JWT. [`Pkce`], [`new_state`], and
+//! [`authorize_url`] build a browser sign-in; the kernel's loopback listener
+//! checks the callback. [`device`] runs an RFC 8628 device sign-in.
+//! [`TokenSet`], [`TokenCache`], [`token_error`], and [`account_id_from`] are
+//! what a subscription plugin keeps per account. Error text is a fixed
+//! sentence or a standard error code. The response body is never copied into
+//! it. Vertex keeps its own cache for now.
 
 use std::fmt;
 use std::time::Duration;
@@ -13,9 +15,18 @@ use std::time::Duration;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 
+mod account;
+mod cache;
+mod clock;
+pub mod device;
 mod pkce;
+mod token;
 
+pub use account::account_id_from;
+pub use cache::{NEGATIVE_TTL, TokenCache};
+pub use clock::Clock;
 pub use pkce::{Pkce, authorize_url, new_state};
+pub use token::{TokenSet, parse_token_set, token_error, unverified_claims};
 
 const DEFAULT_EXPIRES_SECS: u64 = 3600;
 const MAX_EXPIRES_SECS: u64 = u64::MAX / 1_000_000_000;
