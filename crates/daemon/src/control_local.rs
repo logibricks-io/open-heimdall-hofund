@@ -148,6 +148,14 @@ impl ControlSession {
         }
     }
 
+    /// Configuration sidecar lock used when the directory beside the file
+    /// cannot hold one (read-only or not writable).
+    pub(crate) fn config_lock_fallback(&self, runtime: &ControlRuntime) -> Option<PathBuf> {
+        prepare_runtime_dir(runtime)
+            .ok()
+            .map(|directory| directory.join(format!("config-{}.lock", self.identity.id)))
+    }
+
     #[cfg(unix)]
     pub(crate) fn socket_path(&self, runtime: &ControlRuntime) -> Result<PathBuf, String> {
         Ok(prepare_runtime_dir(runtime)?.join(format!("control-{}.sock", self.identity.id)))
