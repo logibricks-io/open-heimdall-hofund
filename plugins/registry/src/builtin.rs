@@ -1,7 +1,7 @@
 //! Built-in factories for the adapters that still live in `hofund-provider`.
 //!
 //! The daemon looks every wire up here. Chat, Responses, Messages, Generative,
-//! Vertex, and Bedrock each validate their own option schema and then call the
+//! and Bedrock each validate their own option schema and then call the
 //! adapter. Chat, Responses, Messages, and Generative calls go through the SDK
 //! transport. A later pull request can move one adapter into its own plugin crate.
 
@@ -20,7 +20,6 @@ use hofund_plugin_sdk::wire::{self, Target};
 use hofund_provider::{
     Anthropic, Bedrock, Completion as ProviderCompletion, CountOutcome as ProviderCount,
     Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider, ProviderError,
-    Vertex,
 };
 use hofund_quirks::named;
 
@@ -31,7 +30,6 @@ pub fn factory(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
         "openai-compat" => Some(Arc::new(OpenAiFactory)),
         "anthropic" => Some(Arc::new(AnthropicFactory)),
         "generative" => Some(Arc::new(GenerativeFactory)),
-        "google-vertex" => Some(Arc::new(VertexFactory)),
         "bedrock" => Some(Arc::new(BedrockFactory)),
         _ => None,
     }
@@ -58,28 +56,12 @@ static GENERATIVE_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     ListKind::Live,
 );
 
-static VERTEX_SPEC: UpstreamSpec = UpstreamSpec::from_static(
-    PluginId::from_static("google-vertex"),
-    &[ProtocolId::GENERATIVE_LANGUAGE],
-    CredentialStyle::Bearer,
-    ListKind::Catalog,
-);
-
 static BEDROCK_SPEC: UpstreamSpec = UpstreamSpec::from_static(
     PluginId::from_static("bedrock"),
     &[ProtocolId::BEDROCK_CONVERSE],
     CredentialStyle::SigV4,
     ListKind::Catalog,
 );
-
-const VERTEX_OPTIONS: &[&str] = &[
-    "project",
-    "location",
-    "credentials",
-    "impersonate",
-    "token_url",
-    "iam_root",
-];
 
 const BEDROCK_OPTIONS: &[&str] = &[
     "region",
@@ -91,7 +73,6 @@ const BEDROCK_OPTIONS: &[&str] = &[
 struct OpenAiFactory;
 struct AnthropicFactory;
 struct GenerativeFactory;
-struct VertexFactory;
 struct BedrockFactory;
 
 struct EndpointConfig {
@@ -450,65 +431,6 @@ fn generative_credential_style(credential: Credential) -> CredentialStyle {
     }
 }
 
-struct VertexConfig {
-    endpoint: Endpoint,
-    credentials: String,
-    impersonate: String,
-    token_url: String,
-    iam_root: String,
-}
-
-impl ValidConfig for VertexConfig {}
-
-impl UpstreamFactory for VertexFactory {
-    type Config = VertexConfig;
-
-    fn spec(&self) -> &'static UpstreamSpec {
-        &VERTEX_SPEC
-    }
-
-    fn config_schema(&self) -> Schema {
-        option_schema(VERTEX_OPTIONS)
-    }
-
-    fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        let config = read_endpoint(UpstreamFactory::spec(self), raw, false, VERTEX_OPTIONS)?;
-        let id = config.endpoint.id.as_str();
-        Ok(VertexConfig {
-            credentials: option_string(raw, "credentials", id)?,
-            impersonate: option_string(raw, "impersonate", id)?,
-            token_url: option_string(raw, "token_url", id)?,
-            iam_root: option_string(raw, "iam_root", id)?,
-            endpoint: config.endpoint,
-        })
-    }
-
-    fn preflight(&self, cfg: &Self::Config) -> Result<(), ConfigError> {
-        hofund_provider::check_vertex_credentials_file(&cfg.endpoint.id, &cfg.credentials)
-            .map_err(|error| ConfigError::new(error.to_string()).with_path("credentials"))
-    }
-
-    fn build(
-        &self,
-        cfg: &Self::Config,
-        host: &HostContext,
-    ) -> Result<Arc<dyn UpstreamProvider>, BuildError> {
-        let mut endpoint = cfg.endpoint.clone();
-        attach_client(&mut endpoint, host);
-        let adapter = Vertex::with_overrides(
-            endpoint,
-            cfg.credentials.clone(),
-            cfg.impersonate.clone(),
-            &cfg.token_url,
-            &cfg.iam_root,
-        )
-        .map_err(build_error)?;
-        Ok(Arc::new(Bridged {
-            inner: Arc::new(adapter),
-        }))
-    }
-}
-
 struct BedrockConfig {
     endpoint: Endpoint,
     region: String,
@@ -812,7 +734,7 @@ fn plugin_completion(completion: ProviderCompletion) -> PluginCompletion {
 
 #[cfg(test)]
 mod tests {
-    use super::{BedrockFactory, OpenAiFactory, VertexFactory};
+    use super::{BedrockFactory, OpenAiFactory};
     use hofund_plugin_api::{RawTable, RawValue, UpstreamFactory};
 
     fn raw(id: &str) -> RawTable {
@@ -851,16 +773,16 @@ mod tests {
         );
         assert!(!text.contains("SENTINEL-OPTION-VALUE"), "{text}");
 
-        let mut vertex = raw("vertex");
+        let mut mistyped = raw("aws");
         let mut nested = RawTable::new();
         nested.insert("leak", RawValue::String("SENTINEL-NESTED".to_owned()));
-        vertex.insert("project", RawValue::Table(nested));
-        let Err(error) = UpstreamFactory::validate(&VertexFactory, &vertex) else {
+        mistyped.insert("region", RawValue::Table(nested));
+        let Err(error) = UpstreamFactory::validate(&BedrockFactory, &mistyped) else {
             panic!("wrong type was accepted");
         };
         let text = error.to_string();
         assert!(
-            text.contains("provider `vertex` option `project` must be a string"),
+            text.contains("provider `aws` option `region` must be a string"),
             "{text}"
         );
         assert!(!text.contains("SENTINEL-NESTED"), "{text}");
@@ -885,7 +807,7 @@ mod tests {
             Some(RawValue::String(String::new())),
             Some(RawValue::Integer(1)),
         ] {
-            let mut vertex = match id {
+            let mut bedrock = match id {
                 Some(id) => {
                     let mut table = raw("temporary");
                     table.insert("id", id);
@@ -893,17 +815,15 @@ mod tests {
                 }
                 None => RawTable::new(),
             };
-            vertex.insert(
+            bedrock.insert(
                 "unknown_option",
                 RawValue::String("SENTINEL-UNKNOWN-OPTION".to_owned()),
             );
-            let Err(error) = UpstreamFactory::validate(&VertexFactory, &vertex) else {
+            let Err(error) = UpstreamFactory::validate(&BedrockFactory, &bedrock) else {
                 panic!("invalid id was accepted");
             };
             assert!(
-                error
-                    .to_string()
-                    .contains("`google-vertex` provider has no `id`"),
+                error.to_string().contains("`bedrock` provider has no `id`"),
                 "{error}"
             );
             assert!(!error.to_string().contains("SENTINEL-UNKNOWN-OPTION"));
@@ -912,37 +832,16 @@ mod tests {
 
     #[test]
     fn raw_environment_references_pass_the_shape_check() {
-        let mut vertex = raw("vertex");
-        vertex.insert(
-            "token_url",
-            RawValue::String("env:HOFUND_VERTEX_TEST_URL".to_owned()),
+        let mut bedrock = raw("aws");
+        bedrock.insert(
+            "session_token",
+            RawValue::String("env:HOFUND_BEDROCK_TEST_TOKEN".to_owned()),
         );
-        UpstreamFactory::validate(&VertexFactory, &vertex).expect("shape");
-    }
-
-    #[test]
-    fn vertex_preflight_error_has_only_the_credentials_path() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let missing = directory.path().join("missing-credentials.json");
-        let mut vertex = raw("vertex");
-        vertex.insert("project", RawValue::String("example-project".to_owned()));
-        vertex.insert(
-            "credentials",
-            RawValue::String(missing.to_string_lossy().into_owned()),
-        );
-        let config = UpstreamFactory::validate(&VertexFactory, &vertex).expect("config");
-        let error = UpstreamFactory::preflight(&VertexFactory, &config).expect_err("missing file");
-        assert_eq!(error.path(), "credentials");
-        assert!(!error.message().contains("credentials:"), "{error}");
+        UpstreamFactory::validate(&BedrockFactory, &bedrock).expect("shape");
     }
 
     #[test]
     fn schemas_list_only_that_plugins_options() {
-        let vertex = UpstreamFactory::config_schema(&VertexFactory);
-        let names = vertex.field_names();
-        assert!(names.contains(&"credentials"));
-        assert!(names.contains(&"token_url"));
-        assert!(!names.contains(&"access_key_id"));
         let bedrock = UpstreamFactory::config_schema(&BedrockFactory);
         let names = bedrock.field_names();
         assert!(names.contains(&"secret_access_key"));
@@ -961,7 +860,6 @@ mod tests {
             ("openai-compat", ListKind::Live),
             ("anthropic", ListKind::Live),
             ("generative", ListKind::Live),
-            ("google-vertex", ListKind::Catalog),
             ("bedrock", ListKind::Catalog),
         ] {
             assert_eq!(

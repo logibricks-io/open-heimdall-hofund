@@ -24,6 +24,8 @@ pub use async_trait::async_trait;
 pub use hofund_quirks::apply as apply_quirks;
 pub use serde_json as json;
 pub use tracing;
+/// The URL parser, so a plugin checks a URL the way the host does.
+pub use url;
 
 /// Waits `duration` on the host runtime, for a plugin that polls.
 pub async fn sleep(duration: std::time::Duration) {
@@ -37,8 +39,10 @@ pub async fn timeout<F: Future>(duration: std::time::Duration, future: F) -> Opt
 }
 
 pub mod classify;
+pub mod jwt;
 pub mod oauth;
 pub mod page;
+pub mod probe;
 pub mod process;
 pub mod register;
 pub mod sigv4;

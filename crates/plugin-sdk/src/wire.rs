@@ -17,7 +17,9 @@
 //!   `{base}/models/{model}:generateContent`, or
 //!   `{base}/models/{model}:streamGenerateContent?alt=sse` for a stream. A
 //!   leading `models/` is dropped and the rest is one escaped path segment. An
-//!   empty model is status 400 before anything is sent.
+//!   empty model is status 400 before anything is sent. [`Target::model_root`]
+//!   replaces `models` for an upstream such as Vertex AI, whose models sit at
+//!   `{base}/publishers/google/models/{model}`.
 //! - The call is a JSON `POST`. Only a connect failure is retried, once, so a
 //!   body that may have been written is never replayed.
 //! - A status outside 2xx keeps its status and `Retry-After`. Its message is the
@@ -82,6 +84,7 @@ pub struct Target {
     credential: CredentialStyle,
     headers: Vec<(String, String)>,
     quirks: Option<&'static hofund_quirks::Profile>,
+    model_root: &'static str,
 }
 
 impl Target {
@@ -95,6 +98,7 @@ impl Target {
             credential: CredentialStyle::Bearer,
             headers: Vec::new(),
             quirks: None,
+            model_root: "models",
         }
     }
 
@@ -119,6 +123,15 @@ impl Target {
         self.quirks = quirks;
         self
     }
+
+    /// The path under the base URL that a Generative Language model id
+    /// follows: `models` by default, `publishers/google/models` on Vertex AI.
+    /// Slashes around it are dropped. Other protocols ignore it.
+    #[must_use]
+    pub fn model_root(mut self, root: &'static str) -> Self {
+        self.model_root = root.trim_matches('/');
+        self
+    }
 }
 
 impl fmt::Debug for Target {
@@ -131,6 +144,7 @@ impl fmt::Debug for Target {
             .field("credential", &self.credential)
             .field("header_names", &names)
             .field("quirks", &self.quirks.is_some())
+            .field("model_root", &self.model_root)
             .finish()
     }
 }
@@ -160,7 +174,13 @@ pub async fn execute(
     } else {
         Method::Generate
     };
-    let url = url_for(&target.base_url, path, &request.model, method)?;
+    let url = url_for(
+        &target.base_url,
+        target.model_root,
+        path,
+        &request.model,
+        method,
+    )?;
     let body = prepare_body(target, codec, request, prepare, inbound)?;
     let response = call(target, codec, secret, url)?
         .header("content-type", "application/json")
@@ -184,7 +204,8 @@ pub async fn execute(
 /// The request is encoded as for [`execute`] without streaming. On Messages,
 /// `max_tokens` is removed and the body is posted to
 /// `{base}/v1/messages/count_tokens`, which answers `input_tokens`. On
-/// Generative Language it is posted to `{base}/models/{model}:countTokens`,
+/// Generative Language it is posted to `{base}/models/{model}:countTokens`
+/// (under [`Target::model_root`]),
 /// which answers `totalTokens`. Status 404, 405, or 501, or a 400 that says the
 /// endpoint is not supported, is [`CountOutcome::Unsupported`].
 ///
@@ -217,7 +238,13 @@ pub async fn count_input(
             "{}/{path}/count_tokens",
             target.base_url.trim_end_matches('/')
         ),
-        Path::Model => url_for(&target.base_url, path, &request.model, Method::Count)?,
+        Path::Model => url_for(
+            &target.base_url,
+            target.model_root,
+            path,
+            &request.model,
+            Method::Count,
+        )?,
     };
     let mut body = prepare_body(target, codec, request, prepare, inbound)?;
     if field == "input_tokens" {
@@ -275,23 +302,33 @@ fn route(protocol: ProtocolId) -> Result<(&'static dyn Codec, Option<Prepare>, P
 }
 
 /// The URL a call posts to.
-fn url_for(base: &str, path: Path, model: &str, method: Method) -> Result<String, PluginError> {
+fn url_for(
+    base: &str,
+    root: &str,
+    path: Path,
+    model: &str,
+    method: Method,
+) -> Result<String, PluginError> {
     let base = base.trim_end_matches('/');
     match path {
         Path::Fixed(path) => Ok(format!("{base}/{path}")),
         Path::Model => {
             let model = model_segment(model)?;
             Ok(match method {
-                Method::Generate => format!("{base}/models/{model}:generateContent"),
-                Method::Stream => format!("{base}/models/{model}:streamGenerateContent?alt=sse"),
-                Method::Count => format!("{base}/models/{model}:countTokens"),
+                Method::Generate => format!("{base}/{root}/{model}:generateContent"),
+                Method::Stream => format!("{base}/{root}/{model}:streamGenerateContent?alt=sse"),
+                Method::Count => format!("{base}/{root}/{model}:countTokens"),
             })
         }
     }
 }
 
 /// The model as one escaped path segment, without a leading `models/`.
-fn model_segment(model: &str) -> Result<String, PluginError> {
+///
+/// # Errors
+///
+/// Returns a 400 status error when the model is empty.
+pub fn model_segment(model: &str) -> Result<String, PluginError> {
     let trimmed = model.trim();
     let model = trimmed.strip_prefix("models/").unwrap_or(trimmed);
     if model.is_empty() {
@@ -302,7 +339,8 @@ fn model_segment(model: &str) -> Result<String, PluginError> {
 
 /// Percent-encoding for one URL path segment. Unreserved characters and
 /// `$&+:=@` stay literal, so a tag keeps its colon and a slash is escaped.
-fn path_segment(text: &str) -> String {
+#[must_use]
+pub fn path_segment(text: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
@@ -890,13 +928,26 @@ mod tests {
             ),
         ];
         for (method, want) in cases {
-            let url = url_for(base, Path::Model, " models/gem-1 ", method).expect("url");
+            let url = url_for(base, "models", Path::Model, " models/gem-1 ", method).expect("url");
             assert_eq!(url, want, "{method:?}");
         }
-        let fixed = url_for(base, Path::Fixed("responses"), "", Method::Generate).expect("fixed");
+        let fixed = url_for(
+            base,
+            "models",
+            Path::Fixed("responses"),
+            "",
+            Method::Generate,
+        )
+        .expect("fixed");
         assert_eq!(fixed, "https://gl.example/v1beta/responses");
-        let escaped =
-            url_for(base, Path::Model, "a/b c:tag$&+=@~é", Method::Generate).expect("escaped");
+        let escaped = url_for(
+            base,
+            "models",
+            Path::Model,
+            "a/b c:tag$&+=@~é",
+            Method::Generate,
+        )
+        .expect("escaped");
         assert_eq!(
             escaped,
             "https://gl.example/v1beta/models/a%2Fb%20c:tag$&+=@~%C3%A9:generateContent"
@@ -904,12 +955,35 @@ mod tests {
         assert_eq!(path_segment("Az09-_.~"), "Az09-_.~");
         assert_eq!(path_segment("?#%"), "%3F%23%25");
         for model in ["", "  ", "models/", " models/ "] {
-            let Err(error) = url_for(base, Path::Model, model, Method::Count) else {
+            let Err(error) = url_for(base, "models", Path::Model, model, Method::Count) else {
                 panic!("empty model {model:?}");
             };
             assert_eq!(error.status(), Some(400), "{model:?}");
             assert_eq!(error.message(), "model is empty");
         }
+    }
+
+    #[test]
+    fn a_model_root_replaces_models_in_generative_urls() {
+        let target = Target::new(ProtocolId::GENERATIVE_LANGUAGE, "https://v.example/v1")
+            .model_root("/publishers/google/models/");
+        assert_eq!(target.model_root, "publishers/google/models");
+        let url = url_for(
+            &target.base_url,
+            target.model_root,
+            Path::Model,
+            "gem-1",
+            Method::Stream,
+        )
+        .expect("url");
+        assert_eq!(
+            url,
+            "https://v.example/v1/publishers/google/models/gem-1:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            Target::new(ProtocolId::GENERATIVE_LANGUAGE, "x").model_root,
+            "models"
+        );
     }
 
     #[test]

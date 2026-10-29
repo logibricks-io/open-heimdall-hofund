@@ -7,6 +7,7 @@ use hofund_plugin_api::{
     AuthChoice, ListKind, ListQuery, ModelList, ModelSpec, PluginError, PluginErrorKind,
     redact_token, safe_url,
 };
+use hofund_plugin_sdk::probe::{probe_error_message, status_hint};
 use hofund_plugin_sdk::{
     PageError, PageErrorKind, after_id, gemini_models_with_dropped, json_error_message,
 };
@@ -698,133 +699,6 @@ pub(crate) async fn read_page(
         retry_after,
         body,
     })
-}
-
-pub(crate) fn probe_error_message(body: &[u8]) -> String {
-    if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        for pointer in [
-            "/error/message",
-            "/message",
-            "/msg",
-            "/detail",
-            "/errors/0/message",
-        ] {
-            if let Some(message) = value.pointer(pointer).and_then(Value::as_str)
-                && !message.trim().is_empty()
-            {
-                return cut_runes(message.trim(), 300);
-            }
-        }
-        if let Some(message) = value.get("error").and_then(Value::as_str) {
-            return cut_runes(message.trim(), 300);
-        }
-    }
-    let text = String::from_utf8_lossy(body);
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() || compact.starts_with('<') {
-        String::new()
-    } else {
-        cut_runes(&compact, 300)
-    }
-}
-
-fn cut_runes(text: &str, cap: usize) -> String {
-    if text.chars().count() <= cap {
-        return text.to_owned();
-    }
-    let mut cut = text.chars().take(cap).collect::<String>();
-    cut.push('…');
-    cut
-}
-
-const BLOCK_ADVICE: &str =
-    "the provider's network edge blocked this address; wait, or try another network or proxy";
-const VERIFY_ADVICE: &str = "this Google account needs verification";
-
-fn status_hint(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("request has been blocked")
-        || lower.contains("errors.aliyun.com")
-        || lower.contains(&BLOCK_ADVICE.to_ascii_lowercase())
-    {
-        return format!(" — {BLOCK_ADVICE}");
-    }
-    // reference: internal/provider/test.go:690-727
-    if let Some(link) = verification(body, &text, &lower) {
-        return link.map_or_else(
-            || format!(" — {VERIFY_ADVICE} before API access can work"),
-            |link| {
-                format!(
-                    " — {VERIFY_ADVICE}: open {link} in a browser, verify the account, then try again"
-                )
-            },
-        );
-    }
-    if lower.contains("go plan doesn") && lower.contains("include api access") {
-        return " — this Go plan does not include Provider API access; use an API-enabled plan or a provider API key".to_owned();
-    }
-    String::new()
-}
-
-fn verification(body: &[u8], text: &str, lower: &str) -> Option<Option<String>> {
-    let value: Option<Value> = serde_json::from_slice(body).ok();
-    let details = value
-        .as_ref()
-        .and_then(|value| value.pointer("/error/details"))
-        .and_then(Value::as_array);
-    let mut required = false;
-    let mut help = None;
-    let mut validation = None;
-    for detail in details.into_iter().flatten() {
-        for link in detail
-            .get("links")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if help.is_none() {
-                help = link.get("url").and_then(Value::as_str).map(str::to_owned);
-            }
-        }
-        if detail.get("reason").and_then(Value::as_str) == Some("VALIDATION_REQUIRED") {
-            required = true;
-            if validation.is_none() {
-                validation = detail
-                    .get("metadata")
-                    .and_then(Value::as_object)
-                    .and_then(|metadata| {
-                        metadata
-                            .get("validation_url")
-                            .or_else(|| metadata.get("validationUrl"))
-                    })
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-            }
-        }
-    }
-    let words = lower.contains("verify your account")
-        || lower.contains("account verification required")
-        || lower.contains(&VERIFY_ADVICE.to_ascii_lowercase());
-    if !required && !words {
-        return None;
-    }
-    let link = if required { validation.or(help) } else { None }
-        .or_else(|| own_advice_link(text))
-        .and_then(|link| {
-            let url = reqwest::Url::parse(&link).ok()?;
-            (url.scheme() == "https" && url.host_str().is_some()).then_some(link)
-        });
-    Some(link)
-}
-
-fn own_advice_link(text: &str) -> Option<String> {
-    let start = text.find(VERIFY_ADVICE)? + VERIFY_ADVICE.len();
-    let rest = text.get(start..)?.strip_prefix(": open ")?;
-    let end = rest
-        .find(|character: char| character.is_whitespace() || character == '"' || character == '\\')
-        .unwrap_or(rest.len());
-    Some(rest[..end].to_owned())
 }
 
 /// Joins error messages, preserving their shared kind. For mixed kinds, the

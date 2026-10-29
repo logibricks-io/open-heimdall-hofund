@@ -189,9 +189,6 @@ pub fn catalog_ids() -> Vec<&'static str> {
 pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
     let catalog = catalog();
     let (preset, alias_region) = find(catalog, request.id)?;
-    if preset.id == "google-vertex" {
-        return resolve_vertex(preset, request);
-    }
     if preset.id == "remote-gateway" {
         return Err(unavailable(preset));
     }
@@ -270,31 +267,6 @@ fn prefer_override(catalog_url: &str, override_url: &str) -> String {
     }
 }
 
-fn resolve_vertex(preset: &Preset, request: &Resolve<'_>) -> Result<Resolved, PresetError> {
-    if let Some(region) = request.region {
-        return Err(PresetError::new(format!(
-            "preset `google-vertex` has no region `{region}`"
-        )));
-    }
-    if let Some(wire) = request.wire
-        && wire != Wire::Vertex
-    {
-        return Err(PresetError::new(format!(
-            "preset `google-vertex` has no {} endpoint",
-            wire_name(wire)
-        )));
-    }
-    let base = crate::vertex::base_url(request.project, request.location, request.base_url)
-        .map_err(|error| PresetError::new(error.to_string()))?;
-    Ok(Resolved {
-        credential: Credential::Bearer,
-        preset_id: preset.id.clone(),
-        name: preset.name.clone(),
-        wire: Wire::Vertex,
-        base_url: base,
-    })
-}
-
 /// Model ids recorded for one preset. `None` when the id is not in the catalog.
 pub(crate) fn preset_models(id: &str) -> Option<&[String]> {
     catalog()
@@ -334,11 +306,6 @@ fn resolve_converse(
 }
 
 fn unavailable(preset: &Preset) -> PresetError {
-    if preset.id == "google-vertex" {
-        return PresetError::new(
-            "preset `google-vertex` signs with Google credentials. That adapter is not in this build.",
-        );
-    }
     if preset.id == "remote-gateway" {
         return PresetError::new(
             "preset `remote-gateway` forwards the client's own protocol. That adapter is not in this build.",
@@ -634,7 +601,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 4);
+        assert_eq!(catalog.preset.len(), 3);
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
@@ -753,44 +720,6 @@ mod tests {
             "https://bedrock-mantle.ap-southeast-2.api.aws/v1"
         );
 
-        let vertex = resolve(&Resolve {
-            id: "google-vertex",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "My-Project",
-            location: "",
-        })
-        .expect("vertex");
-        assert_eq!(vertex.wire, Wire::Vertex);
-        assert_eq!(
-            vertex.base_url,
-            "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global"
-        );
-        assert_eq!(vertex.credential, crate::Credential::Bearer);
-        let regional = resolve(&Resolve {
-            id: "google-vertex",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "my-project",
-            location: "us-central1",
-        })
-        .expect("region");
-        assert_eq!(
-            regional.base_url,
-            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1"
-        );
-        let error = resolve(&Resolve {
-            id: "google-vertex",
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect_err("vertex project");
-        assert!(error.to_string().contains("Google Cloud project"));
         let error = resolve(&Resolve {
             id: "nope",
             region: None,

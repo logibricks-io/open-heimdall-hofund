@@ -1,0 +1,18 @@
+# Row moved from the kernel catalog (`crates/provider/presets.toml`), recorded
+# from the reference preset list (`internal/provider/presets.go`) at commit
+# cbbf3163cb3c87ee0c327a56bc5689ddc5eda947. The preset id is the plugin id.
+# `options_base`: the plugin builds the base URL from `project` and
+# `location`, so the preset needs no `base_url`. `models` is the `global`
+# list; `src/base.rs` keeps the same ids and a test holds them equal.
+
+[[preset]]
+id = "google-vertex"
+name = "Google Vertex AI"
+short = "Vertex AI"
+kind = "vendor"
+note = "your Google Cloud project, with gcloud's sign-in"
+website = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models"
+no_list = true
+options_base = true
+models = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-4-argon", "gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+header_hints = ["X-Vertex-AI-LLM-Request-Type", "X-Vertex-AI-LLM-Shared-Request-Type"]

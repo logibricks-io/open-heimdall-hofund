@@ -362,7 +362,7 @@ async fn static_region_live_and_only_fallback_follow_preset_policy() {
         .await;
     let base = server.uri();
     let config = load_config(
-        "[[providers]]\nid = \"static\"\npreset = \"baidu-qianfan\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"live\"\npreset = \"baidu-qianfan\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"bedrock\"\npreset = \"bedrock\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"mantle\"\npreset = \"bedrock-mantle\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n[providers.options]\nproject = \"my-project\"\n",
+        "[[providers]]\nid = \"static\"\npreset = \"baidu-qianfan\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"live\"\npreset = \"baidu-qianfan\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"bedrock\"\npreset = \"bedrock\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"mantle\"\npreset = \"bedrock-mantle\"\nprotocol = \"openai-chat\"\n[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n[providers.options]\nproject = \"my-project\"\n[[providers]]\nid = \"vertex-region\"\npreset = \"google-vertex\"\n[providers.options]\nproject = \"my-project\"\nlocation = \"us-central1\"\n",
     );
     let static_plan = ModelPlan {
         no_list: true,
@@ -397,6 +397,20 @@ async fn static_region_live_and_only_fallback_follow_preset_policy() {
         .expect("vertex static");
     assert_eq!(vertex.kind, ListKind::Catalog);
     assert!(!vertex.models.is_empty());
+    // A region serves only the Gemini 2.5 ids, from the plugin's own catalog.
+    let vertex_region = host
+        .list_models(&config, &new_config_path, "vertex-region")
+        .await
+        .expect("vertex region");
+    assert_eq!(vertex_region.kind, ListKind::Catalog);
+    assert_eq!(
+        ids(&vertex_region),
+        [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite"
+        ]
+    );
     let live = host
         .list_models(&config, &new_config_path, "live")
         .await

@@ -25,15 +25,28 @@ const page::ERROR_RUNES
 const page::LIST_BUDGET
 const page::MAX_PAGES
 const page::PAGE_LIMIT
+const probe::ERROR_CAP
+const probe::PROBE_WAIT
+const probe::STREAM_CAP
 cursor_pages
 form_body
 gemini_models
 gemini_models_with_dropped
 json
 json_error_message
+jwt::KeyError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+jwt::KeyError::Encrypted
+jwt::KeyError::NotPem
+jwt::KeyError::NotRsa
+jwt::KeyError::Sign
+jwt::RsaSigner
+jwt::RsaSigner::fn from_pem (text : & str) -> Result < Self , KeyError >
+jwt::RsaSigner::fn sign (& self , header : & Value , claims : & Value) -> Result < String , KeyError >
 mod classify
+mod jwt
 mod oauth
 mod page
+mod probe
 mod process
 mod register
 mod sigv4
@@ -90,6 +103,17 @@ page::fn json_error_message (body : & [u8]) -> String
 page::fn next_cursor (page : & [u8]) -> Result < Option < String > , PageError >
 page::fn string_items (page : & [u8] , key : & str) -> Result < Vec < String > , PageError >
 parse_access_token
+probe::ProbePage derives(Clone, Debug, PartialEq, Eq)
+probe::ProbePage.body
+probe::ProbePage.retry_after
+probe::ProbePage.status
+probe::async fn read_probe (mut response : HttpResponse , stream : bool ,) -> Result < ProbePage , PluginError >
+probe::fn merge_extra (body : & mut Value , query : & ProbeQuery) -> Result < () , PluginError >
+probe::fn probe_error_message (body : & [u8]) -> String
+probe::fn probe_failure (url : & str , page : & ProbePage , secrets : & [& str]) -> PluginError
+probe::fn probe_report (url : & str , page : & ProbePage , stream : bool , secrets : & [& str] ,) -> Result < ProbeReport , PluginError >
+probe::fn status_hint (body : & [u8]) -> String
+probe::fn stream_report (body : & [u8]) -> Result < ProbeReport , PluginError >
 process::fn find_in (name : BinaryName , path : Option < & OsStr > , pathext : Option < & OsStr >) -> Option < PathBuf >
 process::fn find_program (name : BinaryName) -> Option < PathBuf >
 refresh_form
@@ -131,6 +155,7 @@ tracing
 transport::Call derives(Clone)
 transport::Call::async fn fetch (self , http : & HttpHandle) -> Result < Reply , PluginError >
 transport::Call::async fn open (self , http : & HttpHandle , attempts : u8) -> Result < HttpResponse , PluginError >
+transport::Call::async fn open_raw (self , http : & HttpHandle , attempts : u8 ,) -> Result < HttpResponse , PluginError >
 transport::Call::async fn send (self , http : & HttpHandle) -> Result < Reply , PluginError >
 transport::Call::async fn send_with_retry (self , http : & HttpHandle , attempts : u8 ,) -> Result < Reply , PluginError >
 transport::Call::fn bearer (self , token : & SecretString) -> Result < Self , PluginError >
@@ -152,10 +177,14 @@ transport::fn is_quota_error (status : u16 , body : & [u8]) -> bool
 transport::fn parse_retry_after (value : & str , now : std :: time :: SystemTime) -> Option < Duration >
 transport::fn parse_retry_after_headers (headers : & http :: HeaderMap , now : std :: time :: SystemTime ,) -> Option < Duration >
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse
+url
 wire::Target derives(Clone)
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
+wire::Target::fn model_root (mut self , root : & 'static str) -> Self
 wire::Target::fn new (protocol : ProtocolId , base_url : impl Into < String >) -> Self
 wire::Target::fn quirks (mut self , quirks : Option < & 'static hofund_quirks :: Profile >) -> Self
 wire::async fn count_input (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , mut request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
 wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
+wire::fn model_segment (model : & str) -> Result < String , PluginError >
+wire::fn path_segment (text : & str) -> String

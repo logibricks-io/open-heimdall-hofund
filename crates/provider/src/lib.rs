@@ -18,7 +18,6 @@ mod openai_compat;
 mod presets;
 mod probe;
 mod stream;
-mod vertex;
 
 pub use anthropic::Anthropic;
 pub use bedrock::Bedrock;
@@ -31,7 +30,6 @@ pub use presets::{
     ModelPlan, PresetError, Resolve, Resolved, Wire, catalog_commit, catalog_ids, credential_for,
     model_plan, resolve,
 };
-pub use vertex::{Vertex, check_credentials_file as check_vertex_credentials_file};
 
 pub use hofund_plugin_api::{
     DynSubscriptionFactory, DynUpstreamFactory, InboundSurface, Subscription, SubscriptionFactory,

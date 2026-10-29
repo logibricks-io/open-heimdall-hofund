@@ -109,8 +109,8 @@ pub fn factory(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
 /// Whether `id` names a kernel-owned factory rather than a linked plugin.
 ///
 /// Unlike [`builtin_factory_ids`], which lists only factories eligible for
-/// data-only preset fragments, this includes the catalog-only Vertex and
-/// Bedrock factories and any future factory added to the builtin module.
+/// data-only preset fragments, this includes the catalog-only
+/// Bedrock factory and any future factory added to the builtin module.
 #[must_use]
 pub fn is_kernel_factory(id: &str) -> bool {
     builtin::factory(id).is_some()
@@ -438,17 +438,11 @@ mod tests {
 
     #[test]
     fn kernel_factory_predicate_covers_builtins_and_excludes_linked_plugins() {
-        for id in [
-            "openai-compat",
-            "anthropic",
-            "generative",
-            "google-vertex",
-            "bedrock",
-        ] {
+        for id in ["openai-compat", "anthropic", "generative", "bedrock"] {
             assert!(super::builtin::factory(id).is_some(), "{id}");
             assert!(super::is_kernel_factory(id), "{id}");
         }
-        for id in ["azure", "missing"] {
+        for id in ["azure", "google-vertex", "missing"] {
             assert!(super::builtin::factory(id).is_none(), "{id}");
             assert!(!super::is_kernel_factory(id), "{id}");
         }

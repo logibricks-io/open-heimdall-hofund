@@ -1881,6 +1881,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-google-vertex"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-upstream",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-host"
 version = "0.1.0"
 dependencies = [
@@ -1917,6 +1927,7 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-azure",
  "hofund-plugin-echo",
+ "hofund-plugin-google-vertex",
  "hofund-plugin-registry",
  "hofund-plugin-relay",
  "hofund-plugin-sdk",
@@ -1948,6 +1959,7 @@ name = "hofund-plugin-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "hofund-codec",
@@ -2001,7 +2013,6 @@ name = "hofund-provider"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "bytes",
  "futures-util",
  "hofund-codec",
@@ -2011,10 +2022,8 @@ dependencies = [
  "hofund-quirks",
  "httpdate",
  "reqwest 0.12.28",
- "ring",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "toml_edit 0.25.17+spec-1.1.0",
