@@ -312,6 +312,22 @@ mod tests {
     }
 
     /// Waits up to `limit` for `count` to reach `want`.
+    /// Waits until `count` holds still for 500 ms and returns it. macOS
+    /// FSEvents can deliver the config file's own creation late, so a test
+    /// that asserts "no new check" compares against this baseline (#281).
+    async fn settled(count: &AtomicUsize) -> usize {
+        let mut last = count.load(Ordering::SeqCst);
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let now = count.load(Ordering::SeqCst);
+            if now == last {
+                return now;
+            }
+            last = now;
+        }
+        last
+    }
+
     async fn reaches(count: &AtomicUsize, want: usize, limit: Duration) -> bool {
         let until = Instant::now() + limit;
         while Instant::now() < until {
@@ -394,7 +410,7 @@ mod tests {
         let (dir, path) = scratch();
         let (count, check) = counter();
         let task = spawn_with(path.clone(), fast(), check);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let baseline = settled(&count).await;
         for name in [
             "hofund.usage.jsonl",
             "usage.sqlite",
@@ -412,10 +428,14 @@ mod tests {
         fs::create_dir(dir.path().join("sub")).expect("subdir");
         fs::write(dir.path().join("sub").join("hofund.toml"), "x").expect("nested");
         tokio::time::sleep(Duration::from_millis(900)).await;
-        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            baseline,
+            "a sibling write triggered a check"
+        );
         fs::write(&path, "listen = \"127.0.0.1:2\"\n").expect("edit");
         assert!(
-            reaches(&count, 1, Duration::from_secs(2)).await,
+            reaches(&count, baseline + 1, Duration::from_secs(2)).await,
             "edit missed"
         );
         task.abort();
