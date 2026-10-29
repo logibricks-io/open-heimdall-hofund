@@ -668,3 +668,27 @@ async fn custom_azure_resource_host_resolves_to_deployments() {
     assert_eq!(models.kind, ListKind::Deployments);
     assert_eq!(ids(&models), ["deployment"]);
 }
+
+#[tokio::test]
+async fn azure_messages_lists_live_models_not_deployments() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "claude-sonnet"}]
+        })))
+        .mount(&server)
+        .await;
+    let base = server.uri();
+    let host = make_host().with_base_host(&base, "resource.services.ai.azure.com");
+    let config = load_config(&format!(
+        "[[providers]]\nid = \"azure-messages\"\npreset = \"azure\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{base}\"\napi_key = \"test\"\n"
+    ));
+    let new_config_path = make_config_path("azure-messages");
+    let models = host
+        .list_models(&config, &new_config_path, "azure-messages")
+        .await
+        .expect("azure messages");
+    assert_eq!(models.kind, ListKind::Live);
+    assert_eq!(ids(&models), ["claude-sonnet"]);
+}

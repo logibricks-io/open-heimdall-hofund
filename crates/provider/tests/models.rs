@@ -594,6 +594,32 @@ async fn anthropic_probe_merges_extra_body_and_learns_one_auth_header() {
     );
 }
 
+// reference: internal/provider/azure.go:41-55
+#[tokio::test]
+async fn azure_anthropic_probe_sends_only_x_api_key_and_learns_nothing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/anthropic/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let report = Anthropic::new(resolved_endpoint(
+        &server,
+        "resource.services.ai.azure.com",
+        "/anthropic",
+    ))
+    .expect("anthropic")
+    .probe(&probe(ProtocolId::ANTHROPIC_MESSAGES, "claude"))
+    .await
+    .expect("probe");
+    assert_eq!(report.auth_choice(), None);
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].headers.get("x-api-key").is_some());
+    assert!(requests[0].headers.get("authorization").is_none());
+}
+
 #[tokio::test]
 async fn generative_probe_uses_native_url_body_and_key() {
     let server = MockServer::start().await;
