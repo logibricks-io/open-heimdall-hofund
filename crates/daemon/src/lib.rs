@@ -799,7 +799,7 @@ fn providers(
         let endpoint = endpoint_for(provider, &planned)?;
         let timeout = endpoint.timeout;
         let protocol = protocol_of(planned.wire);
-        let plugin_id = plugin_for(provider, planned.wire, registry);
+        let plugin_id = plugin_for(provider, &planned, registry);
         let fingerprint = provider_fingerprint(provider, &endpoint)?;
         let reused = reuse
             .and_then(|previous| previous.get(&provider.id))
@@ -926,10 +926,32 @@ fn endpoint_for(
 
 fn plugin_for(
     provider: &hofund_config::Provider,
-    wire: Wire,
+    planned: &Planned,
     registry: &Arc<dyn DaemonRegistry>,
 ) -> String {
-    plugin_for_using(provider, wire, |id| registry.find_preset(id), registry)
+    plugin_for_host(provider, planned, &planned_host(planned), registry)
+}
+
+/// [`plugin_for`] with the base URL's host given, so the models host can
+/// apply its test host overrides.
+fn plugin_for_host(
+    provider: &hofund_config::Provider,
+    planned: &Planned,
+    host: &str,
+    registry: &Arc<dyn DaemonRegistry>,
+) -> String {
+    plugin_for_using(
+        provider,
+        planned.wire,
+        host,
+        |id| registry.find_preset(id),
+        registry,
+    )
+}
+
+/// The lowercase host of the planned base URL, or an empty string.
+fn planned_host(planned: &Planned) -> String {
+    models::url_host(&planned.base_url).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -939,15 +961,20 @@ fn plugin_for_with(
     lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
 ) -> String {
     let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
-    plugin_for_using(provider, wire, lookup, &registry)
+    let host = models::url_host(&provider.base_url).unwrap_or_default();
+    plugin_for_using(provider, wire, &host, lookup, &registry)
 }
 
 fn plugin_for_using(
     provider: &hofund_config::Provider,
     wire: Wire,
+    host: &str,
     lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
     registry: &Arc<dyn DaemonRegistry>,
 ) -> String {
+    if let Some(plugin) = host_plugin_using(provider, wire, host, &lookup, registry) {
+        return plugin.to_owned();
+    }
     if let Some(preset) = &provider.preset
         && let Some((compiled, _)) = lookup(preset)
     {
@@ -957,6 +984,30 @@ fn plugin_for_using(
         return compiled.plugin.to_owned();
     }
     implementation_id(wire).to_owned()
+}
+
+/// The linked plugin that serves this provider's base by its host.
+///
+/// Only a provider a kernel factory would build is claimed: one with no
+/// preset, a catalog row, or a builtin-owned compiled preset. A listed
+/// plugin's own preset keeps its plugin. An Azure OpenAI host on Chat or
+/// Responses goes to the `azure` plugin.
+fn host_plugin_using(
+    provider: &hofund_config::Provider,
+    wire: Wire,
+    host: &str,
+    lookup: &impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
+    registry: &Arc<dyn DaemonRegistry>,
+) -> Option<&'static str> {
+    if let Some(preset) = &provider.preset
+        && let Some((compiled, _)) = lookup(preset)
+        && !registry.builtin_factory_ids().contains(&compiled.plugin)
+    {
+        return None;
+    }
+    let protocol = registry::protocol_for(wire)?;
+    let plugin = registry.host_plugin(protocol, host)?;
+    registry.factory(plugin).is_some().then_some(plugin)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -970,7 +1021,7 @@ fn build_plugin(
     cooldowns: Option<Arc<Cooldowns>>,
     registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<adapt::ProviderAdapter, DaemonError> {
-    let plugin_id = plugin_for(provider, planned.wire, registry);
+    let plugin_id = plugin_for(provider, planned, registry);
     let raw = raw_for(provider, planned, endpoint, registry)?;
     let upstream = build_raw_plugin(
         provider,
@@ -1057,10 +1108,28 @@ fn raw_for(
     endpoint: &Endpoint,
     registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<RawTable, DaemonError> {
+    raw_for_host(
+        provider,
+        planned,
+        endpoint,
+        &planned_host(planned),
+        registry,
+    )
+}
+
+/// [`raw_for`] with the base URL's host given, as [`plugin_for_host`].
+fn raw_for_host(
+    provider: &hofund_config::Provider,
+    planned: &Planned,
+    endpoint: &Endpoint,
+    host: &str,
+    registry: &Arc<dyn DaemonRegistry>,
+) -> Result<RawTable, DaemonError> {
     raw_for_using(
         provider,
         planned,
         endpoint,
+        host,
         |id| registry.find_preset(id),
         registry,
     )
@@ -1074,16 +1143,30 @@ fn raw_for_with(
     lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
 ) -> Result<RawTable, DaemonError> {
     let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
-    raw_for_using(provider, planned, endpoint, lookup, &registry)
+    raw_for_using(
+        provider,
+        planned,
+        endpoint,
+        &planned_host(planned),
+        lookup,
+        &registry,
+    )
 }
 
 fn raw_for_using(
     provider: &hofund_config::Provider,
     planned: &Planned,
     endpoint: &Endpoint,
+    host: &str,
     lookup: impl Fn(&str) -> Option<(&'static registry::CompiledPreset, Option<&'static str>)>,
     registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<RawTable, DaemonError> {
+    if let Some(plugin) = host_plugin_using(provider, planned.wire, host, &lookup, registry) {
+        let config = registry
+            .find_preset(plugin)
+            .map_or(&[][..], |(compiled, _)| compiled.config);
+        return raw_listed(config, provider, &planned.base_url, endpoint);
+    }
     if let Some(preset) = &provider.preset
         && let Some((compiled, _)) = lookup(preset)
         && !registry.builtin_factory_ids().contains(&compiled.plugin)
@@ -1102,8 +1185,18 @@ fn raw_from_preset(
     base_url: &str,
     endpoint: &Endpoint,
 ) -> Result<RawTable, DaemonError> {
+    raw_listed(preset.config, provider, base_url, endpoint)
+}
+
+/// [`raw_from_preset`] from a preset's config pairs.
+fn raw_listed(
+    config: &[(&str, &str)],
+    provider: &hofund_config::Provider,
+    base_url: &str,
+    endpoint: &Endpoint,
+) -> Result<RawTable, DaemonError> {
     let mut raw = RawTable::new();
-    for (key, value) in preset.config {
+    for (key, value) in config {
         raw.insert((*key).to_owned(), RawValue::String((*value).to_owned()));
     }
     if !base_url.is_empty() {
@@ -1666,7 +1759,77 @@ mod tests {
             assert_eq!(planned.protocol, Some(protocol), "{preset} {extra}");
             assert_eq!(planned.base_url, base_url);
             assert_eq!(planned.credential, credential);
-            assert_eq!(super::plugin_for(provider, wire, &registry()), plugin);
+            assert_eq!(super::plugin_for(provider, &planned, &registry()), plugin);
+        }
+    }
+
+    // reference: internal/provider/azure.go:41-55
+    #[test]
+    fn a_custom_chat_or_responses_base_on_an_azure_host_goes_to_the_azure_plugin() {
+        for (settings, plugin) in [
+            (
+                "protocol = \"openai-chat\"\nbase_url = \"https://mine.openai.azure.com/openai/v1\"\n",
+                "azure",
+            ),
+            (
+                "protocol = \"openai-responses\"\nbase_url = \"https://mine.cognitiveservices.azure.com/openai/deployments/d?api-version=1\"\n",
+                "azure",
+            ),
+            (
+                "preset = \"openai\"\nbase_url = \"https://mine.services.ai.azure.com/openai/v1\"\n",
+                "azure",
+            ),
+            (
+                "protocol = \"anthropic-messages\"\nbase_url = \"https://mine.services.ai.azure.com/anthropic\"\n",
+                "anthropic",
+            ),
+            (
+                "protocol = \"openai-chat\"\nbase_url = \"https://openai.azure.com/v1\"\n",
+                "openai-compat",
+            ),
+            (
+                "protocol = \"openai-chat\"\nbase_url = \"https://api.example.test/v1\"\n",
+                "openai-compat",
+            ),
+        ] {
+            let config = hofund_config::load(&format!(
+                "[[providers]]\nid = \"custom\"\n{settings}api_key = \"test-key\"\n[providers.headers]\nx-ms-client = \"hofund\"\n"
+            ))
+            .expect("config");
+            let provider = &config.providers[0];
+            let planned = super::plan(provider).expect("plan");
+            assert_eq!(
+                super::plugin_for(provider, &planned, &registry()),
+                plugin,
+                "{settings}"
+            );
+            let endpoint = super::endpoint_for(provider, &planned).expect("endpoint");
+            let raw = super::raw_for(provider, &planned, &endpoint, &registry()).expect("raw");
+            if plugin == "azure" {
+                assert_eq!(
+                    raw.get("base_url"),
+                    Some(&hofund_plugin_api::RawValue::String(
+                        planned.base_url.clone()
+                    )),
+                    "{settings}"
+                );
+                assert!(raw.get("api_key").is_none(), "{settings}");
+                assert!(raw.get("protocol").is_none(), "{settings}");
+                assert!(
+                    matches!(
+                        raw.get("headers"),
+                        Some(hofund_plugin_api::RawValue::Table(_))
+                    ),
+                    "{settings}"
+                );
+                registry()
+                    .factory("azure")
+                    .expect("azure")
+                    .validate(&raw)
+                    .expect("azure accepts the custom table");
+            } else {
+                assert!(raw.get("api_key").is_some(), "{settings}");
+            }
         }
     }
 

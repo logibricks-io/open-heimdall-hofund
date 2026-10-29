@@ -915,6 +915,62 @@ mod tests {
         });
     }
 
+    // reference: internal/catalog/live.go:422-423
+    #[test]
+    fn a_timed_out_deployment_list_still_tries_the_base_model_list() {
+        block_on(async {
+            let root = tempfile::tempdir().expect("scratch");
+            let host = keyed(root.path());
+            host.http().enqueue_timeout("slow");
+            host.http()
+                .enqueue(br#"{"data":[{"id":"base-gpt"}]}"#.to_vec());
+            let provider = provider(&host, &options("mine"), ProtocolId::OPENAI_CHAT);
+            let listed = provider.list_models(&ListQuery::new()).await.expect("list");
+            assert_eq!(listed.models()[0].id(), "base-gpt");
+            assert!(listed.base_model_fallback());
+            let calls = host.http().calls();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[1].uri(), MODELS);
+        });
+    }
+
+    #[test]
+    fn the_base_model_fallback_pages_by_after_id_with_the_users_headers() {
+        block_on(async {
+            let root = tempfile::tempdir().expect("scratch");
+            let host = keyed(root.path());
+            host.http().enqueue_response(404, &[], b"{}".to_vec());
+            host.http().enqueue(
+                br#"{"object":"list","has_more":true,"last_id":"team-gpt","data":[{"id":"team-gpt"}]}"#
+                    .to_vec(),
+            );
+            host.http()
+                .enqueue(br#"{"object":"list","data":[{"id":"gpt-4.1"}]}"#.to_vec());
+            let mut headers = RawTable::new();
+            headers.insert("X-Request-Origin", RawValue::String("hofund".to_owned()));
+            let mut raw = options("mine");
+            raw.insert("headers", RawValue::Table(headers));
+            let provider = provider(&host, &raw, ProtocolId::OPENAI_CHAT);
+            let listed = provider.list_models(&ListQuery::new()).await.expect("list");
+            let ids: Vec<&str> = listed.models().iter().map(|model| model.id()).collect();
+            assert_eq!(ids, ["team-gpt", "gpt-4.1"]);
+            assert!(listed.base_model_fallback());
+            let calls = host.http().calls();
+            assert_eq!(calls.len(), 3);
+            assert_eq!(calls[1].uri(), MODELS);
+            assert!(calls[2].uri().starts_with(MODELS), "{}", calls[2].uri());
+            assert!(
+                calls[2].uri().contains("after_id=team-gpt"),
+                "{}",
+                calls[2].uri()
+            );
+            assert_eq!(
+                calls[2].sensitive_headers(),
+                ["api-key", "x-request-origin"]
+            );
+        });
+    }
+
     #[test]
     fn joined_errors_keep_the_last_kind_and_retry_hint() {
         use hofund_plugin_api::PluginError;

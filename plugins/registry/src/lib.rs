@@ -140,6 +140,28 @@ pub fn builtin_protocols() -> Vec<ProtocolId> {
     .collect()
 }
 
+/// The linked plugin that serves a custom base on `host` for `protocol`.
+///
+/// A provider with no preset, a catalog row, or a builtin-owned preset is
+/// otherwise built by a kernel factory. An Azure OpenAI resource host on Chat
+/// or Responses is served by the `azure` plugin instead: its deployment list,
+/// `api-key` header, and v1 root. Messages keeps the kernel's Anthropic
+/// adapter, whose base an Azure resource serves under `/anthropic`.
+#[must_use]
+pub fn host_plugin(protocol: ProtocolId, host: &str) -> Option<&'static str> {
+    #[cfg(feature = "azure")]
+    if matches!(
+        protocol,
+        ProtocolId::OPENAI_CHAT | ProtocolId::OPENAI_RESPONSES
+    ) && hofund_plugin_azure::azure_host(host)
+    {
+        return Some("azure");
+    }
+    #[cfg(not(feature = "azure"))]
+    let _ = (protocol, host);
+    None
+}
+
 /// The preset record for `id`, when a linked plugin declares it.
 #[must_use]
 pub fn preset(id: &str) -> Option<&'static CompiledPreset> {
@@ -365,6 +387,30 @@ mod tests {
         assert!(super::factory("generative").is_some());
         assert!(super::factory("missing").is_none());
         assert!(super::factory("relay").is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "azure")]
+    fn an_azure_host_on_chat_or_responses_names_the_azure_plugin() {
+        for protocol in [ProtocolId::OPENAI_CHAT, ProtocolId::OPENAI_RESPONSES] {
+            assert_eq!(
+                super::host_plugin(protocol, "mine.openai.azure.com"),
+                Some("azure")
+            );
+            assert_eq!(
+                super::host_plugin(protocol, "mine.cognitiveservices.azure.com:443"),
+                Some("azure")
+            );
+            assert_eq!(super::host_plugin(protocol, "openai.azure.com"), None);
+            assert_eq!(super::host_plugin(protocol, "api.openai.com"), None);
+        }
+        for protocol in [
+            ProtocolId::ANTHROPIC_MESSAGES,
+            ProtocolId::GENERATIVE_LANGUAGE,
+        ] {
+            assert_eq!(super::host_plugin(protocol, "mine.openai.azure.com"), None);
+        }
+        assert!(super::factory("azure").is_some());
     }
 
     #[test]
