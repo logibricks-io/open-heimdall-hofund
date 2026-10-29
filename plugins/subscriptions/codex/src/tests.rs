@@ -7,9 +7,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use hofund_kit_subscription::{TestHost, block_on, join_all, poll_once, yield_times};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
-    RawTable, Request, SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription,
-    SubscriptionFactory, UpstreamProvider,
+    AccountId, AccountStatus, Completion, PluginErrorKind, PluginId, PluginKind, ProbeQuery,
+    ProtocolId, RawTable, Request, SecretString, SignInChallenge, SignInCtx, SignInProof,
+    Subscription, SubscriptionFactory, UpstreamProvider,
 };
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, same_secret};
 
@@ -689,7 +689,7 @@ fn headers_carry_account_id_and_originator() {
 }
 
 #[test]
-fn shaping_drops_sampling_and_rejects_unary() {
+fn shaping_drops_sampling() {
     let mut request = streaming_request();
     request.params.temperature = Some(0.5);
     request.params.top_p = Some(0.9);
@@ -722,17 +722,6 @@ fn shaping_drops_sampling_and_rejects_unary() {
         assert!(request.extensions.get(field).is_none(), "{field}");
         assert!(request.params.extensions.get(field).is_none(), "{field}");
     }
-
-    let dir = tempfile::tempdir().expect("dir");
-    let host = host(&dir);
-    let id = seed(&host, &access_token("first", 10_000));
-    let mut unary = streaming_request();
-    unary.stream = false;
-    let error = block_on(upstream_for(&host, &id).execute(unary, ProtocolId::OPENAI_RESPONSES))
-        .err()
-        .expect("unary");
-    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
-    assert!(host.http().calls().is_empty());
 }
 
 #[test]
@@ -1245,4 +1234,285 @@ fn a_missing_prompt_is_asked_for_once_per_ten_minutes_per_account() {
     assert!(prompts.may_ask(&one, at + models::ASK_AGAIN));
     assert!(!prompts.may_ask(&one, at + models::ASK_AGAIN));
     assert_eq!(models::ASK_AGAIN, Duration::from_secs(600));
+}
+
+const REPLY_STREAM: &str = concat!(
+    "event: response.created\n",
+    r#"data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5","status":"in_progress","output":[]}}"#,
+    "\n\n",
+    "event: codex.rate_limits\n",
+    r#"data: {"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":99.5,"window_minutes":300,"reset_after_seconds":600}},"credits":{"has_credits":false,"unlimited":false}}"#,
+    "\n\n",
+    "event: response.output_text.delta\n",
+    r#"data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hi there"}"#,
+    "\n\n",
+    "event: response.completed\n",
+    r#"data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hi there"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}"#,
+    "\n\n",
+);
+
+fn limit_headers() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("content-type", "text/event-stream"),
+        ("x-codex-primary-used-percent", "12.345"),
+        ("x-codex-primary-window-minutes", "300"),
+        ("x-codex-primary-reset-after-seconds", "120"),
+        ("x-codex-secondary-used-percent", "100"),
+        ("x-codex-secondary-window-minutes", "10080"),
+        ("x-codex-secondary-reset-at", "3600"),
+        ("x-codex-credits-has-credits", "True"),
+        ("x-codex-credits-balance", "5"),
+    ]
+}
+
+#[test]
+fn header_limits_observe_basis_points() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        200,
+        &limit_headers(),
+        b"event: response.completed\ndata: {}\n\n".to_vec(),
+    );
+    block_on(upstream_for(&host, &id).execute(streaming_request(), ProtocolId::OPENAI_RESPONSES))
+        .expect("execute");
+    let seen = host.observe().observations();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0].limit(), Some(10_000));
+    assert_eq!(seen[0].remaining(), Some(10_000 - 1_235));
+    assert_eq!(seen[0].window_reset(), Some(Duration::from_secs(120)));
+    assert!(seen[0].spending_credits());
+    assert_eq!(seen[1].remaining(), Some(0));
+    assert_eq!(seen[1].window_reset(), Some(Duration::from_secs(3600)));
+
+    // A window that does not say how long it runs is left out; a spent
+    // balance is no credits.
+    let mut headers =
+        crate::limits::header_limits(&hofund_plugin_sdk::HeaderMap::new(), UNIX_EPOCH);
+    assert!(headers.is_empty());
+    let mut map = hofund_plugin_sdk::HeaderMap::new();
+    map.insert("x-codex-primary-used-percent", "50".parse().expect("value"));
+    map.insert(
+        "x-codex-primary-window-minutes",
+        "0".parse().expect("value"),
+    );
+    map.insert(
+        "x-codex-secondary-used-percent",
+        "-3".parse().expect("value"),
+    );
+    map.insert(
+        "x-codex-secondary-window-minutes",
+        "60".parse().expect("value"),
+    );
+    map.insert(
+        "x-codex-credits-has-credits",
+        "true".parse().expect("value"),
+    );
+    map.insert("x-codex-credits-balance", "0".parse().expect("value"));
+    headers = crate::limits::header_limits(&map, UNIX_EPOCH);
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers[0].used(), 0);
+    assert_eq!(headers[0].resets_in, None);
+    assert!(!crate::limits::header_credits(&map));
+}
+
+#[test]
+fn basis_points_round_and_clamp() {
+    use crate::limits::basis_points;
+    assert_eq!(basis_points(12.344), 1_234);
+    assert_eq!(basis_points(12.345_1), 1_235);
+    assert_eq!(basis_points(100.0), 10_000);
+    assert_eq!(basis_points(250.0), 10_000);
+    assert_eq!(basis_points(-1.0), 0);
+    assert_eq!(basis_points(f64::NAN), 0);
+    assert_eq!(basis_points(0.004), 0);
+    assert_eq!(basis_points(0.006), 1);
+    assert!(crate::limits::goes_on_credits(false, true, Some("0")));
+    assert!(crate::limits::goes_on_credits(true, false, None));
+    assert!(crate::limits::goes_on_credits(true, false, Some("lots")));
+    assert!(crate::limits::goes_on_credits(true, false, Some(" 0.5 ")));
+    assert!(!crate::limits::goes_on_credits(true, false, Some("-1")));
+    assert!(!crate::limits::goes_on_credits(false, false, Some("9")));
+}
+
+#[test]
+fn event_limits_ignore_metered_other() {
+    use crate::limits::event_limits;
+    let event = |metered: &str| {
+        json!({
+            "type": "codex.rate_limits",
+            "metered_limit_name": metered,
+            "rate_limits": {
+                "primary": {"used_percent": 40.0, "window_minutes": 300, "reset_at": 100},
+                "secondary": {"used_percent": 5.0, "window_minutes": 0},
+            },
+        })
+    };
+    let now = UNIX_EPOCH + Duration::from_secs(40);
+    let own = event_limits(&event("Codex"), now).expect("own");
+    assert_eq!(own.limits.len(), 1);
+    assert_eq!(own.limits[0].used(), 4_000);
+    assert_eq!(own.limits[0].resets_in, Some(Duration::from_secs(60)));
+    assert_eq!(own.credits, None);
+    assert!(event_limits(&event(""), now).is_some());
+    assert!(event_limits(&event("codex-other"), now).is_none());
+    assert!(event_limits(&event("gpt-5-codex-mini"), now).is_none());
+    // A reset already passed is no reset.
+    let late = event_limits(&event("codex"), UNIX_EPOCH + Duration::from_secs(100)).expect("own");
+    assert_eq!(late.limits[0].resets_in, None);
+}
+
+#[test]
+fn rate_limits_event_observed_and_unary_folded() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "text/event-stream")],
+        REPLY_STREAM.as_bytes().to_vec(),
+    );
+    let mut unary = streaming_request();
+    unary.stream = false;
+    let completion =
+        block_on(upstream_for(&host, &id).execute(unary, ProtocolId::OPENAI_RESPONSES))
+            .expect("execute");
+    let Completion::Unary(response) = completion else {
+        panic!("a unary request gets one reply");
+    };
+    assert_eq!(response.model.as_deref(), Some("gpt-5"));
+    assert!(format!("{:?}", response.message.content).contains("Hi there"));
+    let body = String::from_utf8(host.http().calls()[0].body().to_vec()).expect("utf8");
+    assert!(body.contains(r#""stream":true"#), "{body}");
+
+    let seen = host.observe().observations();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].remaining(), Some(50));
+    assert_eq!(seen[0].window_reset(), Some(Duration::from_secs(600)));
+    assert!(!seen[0].spending_credits());
+}
+
+#[test]
+fn streaming_reply_passes_through_while_watched() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "text/event-stream")],
+        REPLY_STREAM.as_bytes().to_vec(),
+    );
+    let completion = block_on(
+        upstream_for(&host, &id).execute(streaming_request(), ProtocolId::OPENAI_RESPONSES),
+    )
+    .expect("execute");
+    let Completion::Raw(mut body) = completion else {
+        panic!("a same-protocol stream passes through");
+    };
+    let mut bytes = Vec::new();
+    block_on(async {
+        while let Some(chunk) = body.next_chunk().await {
+            bytes.extend_from_slice(&chunk.expect("chunk"));
+        }
+    });
+    assert_eq!(bytes, REPLY_STREAM.as_bytes());
+    assert_eq!(host.observe().observations().len(), 1);
+}
+
+const USAGE: &str = r#"{
+  "plan_type": "plus",
+  "rate_limit": {
+    "primary_window": {"used_percent": 33.3, "limit_window_seconds": 18000, "reset_after_seconds": 90},
+    "secondary_window": {"used_percent": 100, "limit_window_seconds": 604800, "reset_at": 7200}
+  },
+  "credits": {"has_credits": false, "unlimited": false, "balance": "0"}
+}"#;
+
+#[test]
+fn wham_usage_maps_windows() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        USAGE.as_bytes().to_vec(),
+    );
+    let windows = block_on(subscription(&host).quota(&id, host.context())).expect("quota");
+    let call = &host.http().calls()[0];
+    assert_eq!(call.uri(), "https://codex.test/backend-api/wham/usage");
+    assert!(
+        call.sensitive_headers()
+            .iter()
+            .any(|header| header == "authorization")
+    );
+    assert!(
+        call.sensitive_headers()
+            .iter()
+            .any(|header| header == "chatgpt-account-id")
+    );
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].name(), "5 hours");
+    assert_eq!(windows[0].used(), 3_330);
+    assert_eq!(windows[0].limit(), Some(10_000));
+    assert_eq!(
+        windows[0].resets_at(),
+        Some(UNIX_EPOCH + Duration::from_secs(90))
+    );
+    assert!(windows[0].blocking());
+    assert_eq!(windows[1].name(), "7 days");
+    assert_eq!(windows[1].used(), 10_000);
+    assert_eq!(
+        windows[1].resets_at(),
+        Some(UNIX_EPOCH + Duration::from_secs(7200))
+    );
+
+    host.http().enqueue_response(401, &[], b"no".to_vec());
+    let error = block_on(subscription(&host).quota(&id, host.context())).expect_err("refused");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    host.http().enqueue_response(500, &[], b"no".to_vec());
+    assert!(block_on(subscription(&host).quota(&id, host.context())).is_err());
+    host.http().enqueue_response(200, &[], b"<html>".to_vec());
+    let error = block_on(subscription(&host).quota(&id, host.context())).expect_err("not json");
+    assert_eq!(error.kind(), PluginErrorKind::Decode);
+}
+
+#[test]
+fn credits_window_nonblocking() {
+    let usage = |credits: &str| {
+        format!(
+            r#"{{"rate_limit":{{"primary_window":{{"used_percent":100,"limit_window_seconds":86400}},"secondary_window":null}},"credits":{credits}}}"#
+        )
+    };
+    let windows = crate::usage::windows(
+        usage(r#"{"has_credits":true,"balance":"12.5"}"#).as_bytes(),
+        UNIX_EPOCH,
+    )
+    .expect("windows");
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].name(), "1 day");
+    assert_eq!(windows[0].resets_at(), None);
+    assert!(!windows[0].blocking());
+    let unlimited = crate::usage::windows(usage(r#"{"unlimited":true}"#).as_bytes(), UNIX_EPOCH)
+        .expect("windows");
+    assert!(!unlimited[0].blocking());
+    let spent = crate::usage::windows(
+        usage(r#"{"has_credits":true,"balance":0}"#).as_bytes(),
+        UNIX_EPOCH,
+    )
+    .expect("windows");
+    assert!(spent[0].blocking());
+    assert!(
+        crate::usage::windows(b"{}", UNIX_EPOCH)
+            .expect("none")
+            .is_empty()
+    );
+
+    assert_eq!(crate::usage::window_name(3600), "1 hour");
+    assert_eq!(crate::usage::window_name(7200), "2 hours");
+    assert_eq!(crate::usage::window_name(172_800), "2 days");
+    assert_eq!(crate::usage::window_name(90), "Allowance");
+    assert_eq!(crate::usage::window_name(0), "Allowance");
+    assert_eq!(crate::usage::window_name(-86_400), "Allowance");
 }

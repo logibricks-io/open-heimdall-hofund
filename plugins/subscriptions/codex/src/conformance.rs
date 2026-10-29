@@ -60,7 +60,7 @@ fn unknown_account_needs_sign_in_and_sends_nothing() {
         "{status:?}"
     );
     let quota = block_on(built.quota(&account, host.context())).expect_err("quota");
-    assert_eq!(quota.kind(), PluginErrorKind::Unsupported);
+    assert_eq!(quota.kind(), PluginErrorKind::Auth);
     let models = block_on(built.list_models(&account, host.context())).expect_err("models");
     assert_eq!(models.kind(), PluginErrorKind::Auth);
     let refresh = block_on(built.refresh(&account, host.context())).expect_err("refresh");

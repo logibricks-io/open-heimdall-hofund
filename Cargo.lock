@@ -1986,6 +1986,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "hofund-codec",
+ "hofund-ir",
  "hofund-plugin-api",
  "hofund-quirks",
  "http",
