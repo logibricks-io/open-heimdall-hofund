@@ -189,9 +189,6 @@ pub fn catalog_ids() -> Vec<&'static str> {
 pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
     let catalog = catalog();
     let (preset, alias_region) = find(catalog, request.id)?;
-    if preset.id == "remote-gateway" {
-        return Err(unavailable(preset));
-    }
     let region_id = request.region.or(alias_region);
     let region = match region_id {
         Some(region_id) => Some(region_of(preset, region_id)?),
@@ -273,11 +270,6 @@ fn resolve_converse(preset: &Preset) -> PresetError {
 }
 
 fn unavailable(preset: &Preset) -> PresetError {
-    if preset.id == "remote-gateway" {
-        return PresetError::new(
-            "preset `remote-gateway` forwards the client's own protocol. That adapter is not in this build.",
-        );
-    }
     if !preset.decide.is_empty() {
         return PresetError::new(format!(
             "preset `{}` only classifies a route. It has no chat, responses, or messages endpoint.",
@@ -589,7 +581,11 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 1);
+        // Every row now lives in a plugin fragment; the empty catalog still
+        // parses and keeps its source commit.
+        assert!(catalog.preset.is_empty());
+        assert!(catalog.alias.is_empty());
+        assert!(super::catalog_ids().is_empty());
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"

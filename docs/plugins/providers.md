@@ -90,7 +90,7 @@ An adapter constructed in a unit test, with no pooled client attached, still bui
 
 The `bedrock` plugin signs each Converse request with the SDK `AwsSigner`. A stored API key on Converse is refused when a request or probe is sent.
 
-`plan` still reads `project`, `location`, and `region` as strings so `resolve` can build a catalog URL. A wrong type fails there, with the provider id and the key, before the factory runs. The factory repeats the check for a raw table that did not come from `plan`. Since E11, `bedrock-mantle` is a compiled preset of the `bedrock-mantle` plugin. Since E10, `bedrock` is a compiled preset of the `bedrock` plugin; Converse takes the region's chat URL and the plugin strips `/openai/v1`. Since E9b, `google-vertex` is a compiled preset with `options_base`: its plugin builds the base URL from `project` and `location`, so `select` accepts it without a `base_url`. The factory owns construction.
+`plan` still reads `project`, `location`, and `region` as strings so `resolve` can build a catalog URL. A wrong type fails there, with the provider id and the key, before the factory runs. The factory repeats the check for a raw table that did not come from `plan`. Since E11, `bedrock-mantle` is a compiled preset of the `bedrock-mantle` plugin. Since E13, `remote-gateway` is a compiled preset of the `remote-gateway` plugin; the row has no wire URL, so `select` takes the caller's `base_url` (the other gateway's address) on Chat, Responses, or Messages, and the kernel catalog in `crates/provider/presets.toml` is empty. Since E10, `bedrock` is a compiled preset of the `bedrock` plugin; Converse takes the region's chat URL and the plugin strips `/openai/v1`. Since E9b, `google-vertex` is a compiled preset with `options_base`: its plugin builds the base URL from `project` and `location`, so `select` accepts it without a `base_url`. The factory owns construction.
 
 `list_models` and `probe` use the adapter's pooled endpoint client. The SDK pager owns cursor rules; the provider transport enforces body caps while reading. The relay remains unsupported. For `[providers.models].url`, the daemon fetches that exact URL through `HostContext` and the SDK pager rather than treating it as a plugin base. It redacts the resolved URL, its query, and every query value.
 
@@ -114,6 +114,7 @@ The daemon probe selector uses route mappings and listed endpoint metadata. `Nam
 | `google-vertex` (plugin) | `base_url`, `project`, `location`, `credentials`, `impersonate`, `token_url`, `iam_root` |
 | `bedrock` (plugin) | `base_url`, `region`, `access_key_id`, `secret_access_key`, `session_token` |
 | `bedrock-mantle` (plugin) | `base_url` |
+| `remote-gateway` (plugin) | `base_url` |
 
 `config_schema` lists those option keys so a form can render them. Kernel keys are not options.
 

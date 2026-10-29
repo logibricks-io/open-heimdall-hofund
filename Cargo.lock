@@ -1952,6 +1952,7 @@ dependencies = [
  "hofund-plugin-google-vertex",
  "hofund-plugin-registry",
  "hofund-plugin-relay",
+ "hofund-plugin-remote-gateway",
  "hofund-plugin-sdk",
  "hofund-plugin-subscription-claude",
  "hofund-plugin-subscription-codex",
@@ -1969,6 +1970,16 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-relay"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-upstream",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-remote-gateway"
 version = "0.1.0"
 dependencies = [
  "hofund-kit-upstream",

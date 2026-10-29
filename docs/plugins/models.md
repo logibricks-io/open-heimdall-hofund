@@ -117,7 +117,7 @@ Today `ModelSpec` is an id and an optional display name. The code pull request e
 | `service_tiers` | `service_tiers` |
 | `price` | `magpie_price`: `input`, `output`, `cache_read`, `cache_write`, `cache_write_1h`, and `tiers`. Kept when the object is present and sane: no part is NaN, below zero, or above 1e6, and each tier's `above` is positive |
 
-The `magpie_label` and `magpie_price` fields, the `magpie` `web_search` value, and the dependent `plain` field are deferred to the remote-gateway preset pull request. Those reference-named wire fields cannot appear in code or tests in this branch; no alias or spelling workaround is used.
+The `magpie_label` and `magpie_price` fields, the `magpie` `web_search` value, and the dependent `plain` field are still deferred. Since E13 the `remote-gateway` plugin exists, but the reference-named wire fields wait for a naming ruling (follow-up issue). They cannot appear in code or tests; no alias or spelling workaround is used.
 
 Gemini rows fill `id`, `display_name`, `context` (`inputTokenLimit`), and `max_output` (`outputTokenLimit`). Price and endpoints stay empty. Rows 1.6 and 2.8 read `context` and `max_output` from this record. They do not fetch models.dev from the plugin. Catalog decoration is deferred to the models.dev catalog pull request for row 2.8: the aggregator will then apply `Decorate` to live rows and `Named` after it, filling names, efforts, context, and output; Azure gets `Decorate` without `Named`, preserving deployment names (`live.go` lines 781-822; `models.go` lines 83-97).
 
@@ -293,9 +293,9 @@ Every listing, probing, and refresh behaviour has one disposition here. A deferr
 | The `textModel` substring filter | `internal/catalog/live.go:571-588`; `internal/catalog/catalog.go:931,1448-1467` | Covered: code PR 1 | Rows that are not chat models |
 | `Draws`, `Films`, and `Decides` tagging | `internal/catalog/live.go:580-613`; `internal/catalog/catalog.go:1485-1497` | Covered: code PR 1 | Rows that are not chat models |
 | Applying the text filter and tags to Gemini rows | `internal/catalog/gemini_list.go:60-106`; `internal/catalog/live.go:571-613` | Deliberate difference: one classification rule for every wire, so a drawing or speech id never becomes a chat route because it was listed by a Gemini base | Rows that are not chat models |
-| `X-Magpie-Drawers` keeps every row from another gateway's list, including rows the normal filter would drop | `internal/catalog/live.go:580-587`; `internal/provider/remote_magpie.go:21-25,50-64,109-123` | Deferred: remote-gateway preset PR; its `resolve` implementation is missing today | Rows that are not chat models |
+| `X-Magpie-Drawers` keeps every row from another gateway's list, including rows the normal filter would drop | `internal/catalog/live.go:580-587`; `internal/provider/remote_magpie.go:21-25,50-64,109-123` | Deferred: naming ruling (follow-up issue). Since E13 the `remote-gateway` plugin lists the other gateway's `/v1/models` with the normal filter and sends no reference-named list header | Rows that are not chat models |
 | Row metadata, modalities, endpoints, limits, efforts, and tiers | `internal/catalog/live.go:589-632,664-739` | Covered: code PR 1 | Metadata one row carries |
-| `magpie_label`, `magpie_price`, the `magpie` `web_search` value, and `plain` | `internal/catalog/live.go:589-632,664-739` | Deferred: remote-gateway preset PR | Metadata one row carries |
+| `magpie_label`, `magpie_price`, the `magpie` `web_search` value, and `plain` | `internal/catalog/live.go:589-632,664-739` | Deferred: naming ruling (follow-up issue); the E13 plugin reads the other row fields only | Metadata one row carries |
 | `Decorate` and `Named`, with Azure decorated without `Named` | `internal/catalog/live.go:781-822`; `internal/provider/models.go:83-97` | Deferred: models.dev catalog PR (row 2.8) | Metadata one row carries |
 | `sharedImageInput` for bases versus `anyImageInput` for groups | `internal/provider/models.go:672-683,1331-1360` | Covered: code PR 1 | What the aggregator adds |
 | One fetch per list URL and auth, with `ErrAsked` for nothing new | `internal/catalog/live.go:230-349`; `internal/provider/models.go:687-696,764-780` | Covered: code PR 1 | What the aggregator adds |
@@ -451,7 +451,7 @@ The list kind is per configured instance. `V + A` means one mock for each declar
 | `lmstudio` | Live | V | Chat | None. |
 | `omlx` | Live | V + A | Chat, Responses, Anthropic | Decide listing and probe wait for the Decide PR. |
 | `mlx-serve` | Live | V + A | Chat, Responses, Anthropic | Decide listing and probe wait for the Decide PR. |
-| `remote-gateway` | Blocked by `resolve` | X | None until the remote-gateway preset PR | The implementation is missing. That PR owns the gateway list headers and the all-rows filter exception. |
+| `remote-gateway` | Live | V + A | Chat, Responses, Anthropic | Since E13, the `remote-gateway` plugin lists `{root}/v1/models` with the Bearer gateway key. The reference-named list headers, the all-rows filter exception, and per-model protocol choice are follow-ups. |
 
 ### Testing order
 

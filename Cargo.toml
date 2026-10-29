@@ -21,6 +21,7 @@ members = [
     "plugins/providers/fixture",
     "plugins/providers/google-vertex",
     "plugins/providers/relay",
+    "plugins/providers/remote-gateway",
     "plugins/registry",
     "plugins/subscriptions/claude",
     "plugins/subscriptions/codex",
@@ -71,6 +72,7 @@ hofund-plugin-host = { version = "0.1.0", path = "crates/plugin-host" }
 hofund-plugin-echo = { version = "0.1.0", path = "plugins/inbound/echo" }
 hofund-plugin-registry = { version = "0.1.0", path = "plugins/registry" }
 hofund-plugin-relay = { version = "0.1.0", path = "plugins/providers/relay" }
+hofund-plugin-remote-gateway = { version = "0.1.0", path = "plugins/providers/remote-gateway" }
 hofund-plugin-subscription-claude = { version = "0.1.0", path = "plugins/subscriptions/claude" }
 hofund-plugin-subscription-codex = { version = "0.1.0", path = "plugins/subscriptions/codex" }
 hofund-plugin-subscription-copilot = { version = "0.1.0", path = "plugins/subscriptions/copilot" }

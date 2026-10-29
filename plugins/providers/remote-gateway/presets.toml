@@ -1,0 +1,14 @@
+# Row moved from the kernel catalog (`crates/provider/presets.toml`), recorded
+# from the reference preset list (`internal/provider/presets.go`) at commit
+# cbbf3163cb3c87ee0c327a56bc5689ddc5eda947. The preset id is the plugin id.
+# The row has no wire URL: the caller supplies the other gateway's address as
+# base_url, and the plugin puts every wire on it.
+
+[[preset]]
+id = "remote-gateway"
+name = "Remote gateway"
+kind = "remote"
+note = "Another computer's gateway, shared on its network"
+endpoint = "http://192.168.1.20:3425"
+endpoint_hint = "The address and API key the other computer shows for sharing on the local network. Its models stay there. Each request continues in the protocol the client spoke."
+endpoint_needed = "The other gateway's address is needed"

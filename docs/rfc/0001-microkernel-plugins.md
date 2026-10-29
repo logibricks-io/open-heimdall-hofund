@@ -780,7 +780,7 @@ Until that move, paths stay `crates/<name>` and the new crates are `crates/plugi
 - Crate and package name: `hofund-plugin-<id>` when globally unique, or `hofund-plugin-<kind>-<id>` when needed to distinguish equal ids in different kinds. Registry feature names follow the same global-uniqueness rule. Existing package and feature names do not change. These are Cargo build identifiers, not user-facing plugin ids. Package path: `plugins/<kind>/<id>`. `plugins.toml` is sorted by id and then kind.
 - Kit package name: `hofund-kit-<kind>`, `publish = false`.
 - One implementation crate may own many preset ids. The fragment lists them. The id of the crate is the implementation id (`openai-compat`), and each `[[preset]]` id is the catalog id (`openai`, `deepseek`, and the other URL-only rows that share it).
-- `remote-gateway` stays a preset id that `resolve` rejects (line 109). It does not become a kernel type.
+- `remote-gateway` does not become a kernel type. Since E13 it is a compiled preset of the `remote-gateway` provider plugin, and `resolve` no longer special-cases it.
 - Protocol ids stay the codec ids, as `ProtocolId`, validated by the daemon from the config string. Vendor names do not appear in kernel paths. After the scan widens, they do not appear in kernel source. `SurfaceId` is a newtype, not a list of vendor names.
 
 ### Rules `xtask` enforces when the first plugin lands
@@ -1079,7 +1079,7 @@ Pull request #28 does not join a batch. It rebases onto B and merges only after 
 
 Assign one agent per directory. Do not assign two agents to the registry crate. The kernel owner merges B, B2, C, D, K, L, the YAML change, I, and J.
 
-The six presets that `resolve` still rejects (`typesafe`, `vercel-jev`, `cloudflare-jev`, `bailian-decision`, `qwen-decision`, `remote-gateway`, from [providers.md](../coverage/providers.md)) are fragment or code pull requests in E. They are not a reason to keep `presets.toml` inside the kernel.
+The six presets that `resolve` still rejects (`typesafe`, `vercel-jev`, `cloudflare-jev`, `bailian-decision`, `qwen-decision`, `remote-gateway`, from [providers.md](../coverage/providers.md)) are fragment or code pull requests in E. They are not a reason to keep `presets.toml` inside the kernel. Since E13, `remote-gateway` is the `remote-gateway` plugin and the kernel catalog has no rows.
 
 ### Who owns which path
 

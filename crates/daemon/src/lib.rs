@@ -1608,6 +1608,30 @@ mod tests {
     }
 
     #[test]
+    fn the_remote_gateway_preset_plans_through_its_plugin() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"lan\"\npreset = \"remote-gateway\"\nprotocol = \"anthropic-messages\"\nbase_url = \"http://10.0.0.7:3425\"\napi_key = \"test-key\"\n",
+        )
+        .expect("config");
+        let planned = super::plan(&config.providers[0]).expect("plan");
+        assert_eq!(planned.wire, hofund_provider::Wire::Messages);
+        assert_eq!(
+            planned.protocol,
+            Some(hofund_plugin_api::ProtocolId::ANTHROPIC_MESSAGES)
+        );
+        assert_eq!(planned.base_url, "http://10.0.0.7:3425");
+        assert_eq!(planned.credential, hofund_provider::Credential::Default);
+        let missing = hofund_config::load(
+            "[[providers]]\nid = \"lan\"\npreset = \"remote-gateway\"\napi_key = \"test-key\"\n",
+        )
+        .expect("config");
+        let Err(error) = super::plan(&missing.providers[0]) else {
+            panic!("a remote gateway needs an address");
+        };
+        assert!(error.to_string().contains("remote-gateway"), "{error}");
+    }
+
+    #[test]
     fn a_compiled_preset_accepts_a_later_factory_protocol() {
         let config = hofund_config::load(
             "[[providers]]\nid = \"multi\"\npreset = \"fixture-multi\"\nprotocol = \"openai-responses\"\napi_key = \"test-key\"\n",

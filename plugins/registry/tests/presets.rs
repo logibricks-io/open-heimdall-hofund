@@ -45,7 +45,7 @@ fn protocol(wire: Wire) -> ProtocolId {
 #[cfg(feature = "test-fixtures")]
 #[test]
 fn fixtures_are_separate_and_aliases_resolve_their_region() {
-    assert_eq!(compiled_presets().len(), 58);
+    assert_eq!(compiled_presets().len(), 59);
     assert_eq!(compiled_aliases().len(), 4);
     assert!(fixture_presets().len() >= 5);
     assert_eq!(fixture_aliases().len(), 1);
@@ -590,4 +590,53 @@ fn the_bedrock_mantle_row_is_live_and_has_no_converse_endpoint() {
         "https://bedrock-mantle.ap-southeast-2.api.aws/v1"
     );
     assert!(select(row, None, &served, Some(ProtocolId::BEDROCK_CONVERSE), "").is_err());
+}
+
+/// The `remote-gateway` row belongs to its plugin. It has no wire URL: the
+/// caller's address is the base on every protocol the plugin serves, and
+/// Chat when none is selected.
+#[test]
+fn the_remote_gateway_row_takes_the_callers_address_on_each_protocol() {
+    use hofund_plugin_registry::select;
+
+    let row = compiled_presets()
+        .iter()
+        .find(|preset| preset.id == "remote-gateway")
+        .expect("remote-gateway row");
+    assert_eq!(row.plugin, "remote-gateway");
+    assert_eq!(row.kind, "remote");
+    assert_eq!(row.endpoint, "http://192.168.1.20:3425");
+    assert!(!row.no_list);
+    assert!(!hofund_provider::catalog_ids().contains(&"remote-gateway"));
+    let served = factory("remote-gateway")
+        .expect("remote-gateway factory")
+        .spec()
+        .protocols()
+        .to_vec();
+    let address = "http://10.0.0.7:3425";
+    let picked = select(row, None, &served, None, address).expect("default");
+    assert_eq!(picked.protocol, ProtocolId::OPENAI_CHAT);
+    assert_eq!(picked.base_url, address);
+    for protocol in [
+        ProtocolId::OPENAI_CHAT,
+        ProtocolId::OPENAI_RESPONSES,
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ] {
+        let picked = select(row, None, &served, Some(protocol), address).expect("served");
+        assert_eq!(picked.protocol, protocol);
+        assert_eq!(picked.base_url, address);
+    }
+    assert!(
+        select(
+            row,
+            None,
+            &served,
+            Some(ProtocolId::GENERATIVE_LANGUAGE),
+            address
+        )
+        .is_err()
+    );
+    let missing = select(row, None, &served, Some(ProtocolId::OPENAI_CHAT), "")
+        .expect_err("needs an address");
+    assert!(missing.to_string().contains("needs base_url"), "{missing}");
 }
