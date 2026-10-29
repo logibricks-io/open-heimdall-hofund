@@ -1,4 +1,11 @@
 [[plugin]]
+id = "claude"
+kind = "subscription"
+path = "plugins/subscriptions/claude"
+package = "hofund-plugin-subscription-claude"
+feature = "claude"
+
+[[plugin]]
 id = "codex"
 kind = "subscription"
 path = "plugins/subscriptions/codex"

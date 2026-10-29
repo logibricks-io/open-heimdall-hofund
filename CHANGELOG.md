@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Claude Code subscription plugin `claude`
+  (`hofund-plugin-subscription-claude`, registry feature `claude`, on by
+  default): sign-in runs Claude Code's own `claude auth login --claudeai`
+  with no shell, an environment cleared to the host allowlist plus
+  `CLAUDE_CONFIG_DIR`, and a private per-session config directory. The
+  printed sign-in link is shown to the user, and the pasted `code#state` is
+  checked and written to the CLI's standard input; waiting for the CLI's
+  own browser callback also works. The `.credentials.json` and the
+  `oauthAccount` profile are stored in the account store, keyed by the
+  account UUID (or the email when Claude Code gives none) and labelled with
+  the email. Refresh lays the credentials out in a private account
+  directory, runs `claude auth status --json`, stores rotated credentials
+  once, removes the file again, and marks the account as needing a new
+  sign-in when Claude Code says it is signed out. The optional `command`
+  option names the binary by absolute path; otherwise it is found on
+  `PATH`. Requests through Claude Code, quota, and models land with H8;
+  the macOS Keychain is not read.
+- SDK: `json` (re-exported `serde_json`), `sleep`, `timeout`,
+  `process::find_program` (a `PATH`/`PATHEXT` lookup that never runs
+  anything), `oauth::secret_text`, `oauth::client_code_exchange_form`, and
+  `oauth::refresh_secret_form`, so a subscription plugin with a client
+  secret needs no other crate.
+- Host test backend: scripted piped children (`PipedScript`,
+  `PipedSpawn`) on `RecordingProcess`, re-exported by the subscription kit.
+
 - ChatGPT (Codex) subscription plugin `codex`
   (`hofund-plugin-subscription-codex`, registry feature `codex`, on by
   default): browser sign-in with PKCE on the loopback port 1455 Codex CLI is
