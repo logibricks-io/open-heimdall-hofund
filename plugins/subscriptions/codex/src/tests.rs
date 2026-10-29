@@ -978,10 +978,7 @@ fn orphan_output_becomes_note() {
     let text = content
         .strip_prefix("[Previous tool result; call_id=c]: ")
         .expect("prefix");
-    assert_eq!(
-        text,
-        format!("{}\n...[truncated]", "a".repeat(15_999))
-    );
+    assert_eq!(text, format!("{}\n...[truncated]", "a".repeat(15_999)));
     let exact = "b".repeat(16_000);
     let note = shape::orphan_note(json!({"output": exact}).as_object().expect("object"), "c");
     assert!(
