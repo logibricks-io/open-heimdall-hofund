@@ -463,6 +463,16 @@ fn status_script(
     })
 }
 
+/// What changes when a file is written again: inode, length and mtime.
+fn file_stamp(path: &Path) -> (u64, u64, std::time::SystemTime) {
+    let meta = std::fs::metadata(path).expect("metadata");
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    (inode, meta.len(), meta.modified().expect("mtime"))
+}
+
 #[test]
 fn rotated_credentials_committed_once() {
     let dir = tempfile::tempdir().expect("dir");
@@ -480,10 +490,13 @@ fn rotated_credentials_committed_once() {
     assert!(blob.text(creds::PROFILE).is_some(), "the profile is kept");
 
     // The next run gets the rotated file, and an unchanged file is not
-    // written back.
+    // written back: the account file is left as it was.
+    let accounts_file = dir.path().join("accounts.json");
+    let before = file_stamp(&accounts_file);
     host.process()
         .script_piped(status_script(None, true, Arc::clone(&seen)));
     block_on(sub.refresh(&id, host.context())).expect("refresh again");
+    assert_eq!(file_stamp(&accounts_file), before, "no commit");
     assert_eq!(*seen.lock().expect("seen"), vec![CREDENTIALS, ROTATED]);
     assert_eq!(stored(&host, &id).text(creds::CREDENTIALS), Some(ROTATED));
 
@@ -564,10 +577,12 @@ fn status_that_fails_after_rotating_keeps_the_rotated_file() {
     let sub = subscription(&host);
     let id = account_id_from(&["claude", UUID]);
     store(&host, &id, &signed_in_blob());
-    host.process().script_piped(PipedScript::new().exits(|spawn| {
-        std::fs::write(config_dir(spawn).join(creds::CREDENTIALS_FILE), ROTATED).expect("rotate");
-        vec!["Error: something broke".to_owned()]
-    }));
+    host.process()
+        .script_piped(PipedScript::new().exits(|spawn| {
+            std::fs::write(config_dir(spawn).join(creds::CREDENTIALS_FILE), ROTATED)
+                .expect("rotate");
+            vec!["Error: something broke".to_owned()]
+        }));
     let error = block_on(sub.refresh(&id, host.context())).expect_err("no status");
     assert_eq!(error.kind(), PluginErrorKind::Io);
     let blob = stored(&host, &id);
@@ -585,7 +600,10 @@ fn a_missing_program_fails_the_refresh() {
     // Nothing is scripted, so the spawn is refused.
     let error = block_on(sub.refresh(&id, host.context())).expect_err("no child");
     assert_eq!(error.kind(), PluginErrorKind::Io);
-    assert_eq!(stored(&host, &id).text(creds::CREDENTIALS), Some(CREDENTIALS));
+    assert_eq!(
+        stored(&host, &id).text(creds::CREDENTIALS),
+        Some(CREDENTIALS)
+    );
     let account_dir = state(&host).join("accounts").join(id.as_str());
     assert!(!account_dir.join(creds::CREDENTIALS_FILE).exists());
 }
