@@ -47,12 +47,14 @@ mod models;
 mod models_state;
 mod registry;
 mod runtime;
+mod terminate;
 mod watch;
 
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
 };
 pub use registry::{CompiledPreset, DaemonRegistry, RegistryAdapter};
+pub use terminate::{ConsoleEvent, Termination, TolerantWriter, finish, serve_until_signal};
 
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
@@ -530,15 +532,26 @@ async fn start_inner(
     Ok(running.with_task(refresh).with_task(maintenance))
 }
 
-/// Serves until the process receives a shutdown signal.
+/// Serves until a termination signal or a control shutdown, then drains.
+///
+/// See [`serve_until_signal`] for the signals. A signal or control shutdown
+/// returns `Ok`; process-level exit handling is left to the caller.
 ///
 /// # Errors
 ///
-/// Returns [`DaemonError`] when startup fails.
+/// Returns [`DaemonError`] when startup fails or a fatal error stopped the
+/// daemon.
 pub async fn serve(path: &Path) -> Result<(), DaemonError> {
+    match serve_reason(path).await? {
+        Termination::Fatal(message) => Err(DaemonError::new(message)),
+        _ => Ok(()),
+    }
+}
+
+async fn serve_reason(path: &Path) -> Result<Termination, DaemonError> {
     let running = start(path).await?;
-    eprintln!("listening on http://{}", running.local_addr);
-    serve_until_shutdown(running).await
+    terminate::notice(&format!("listening on http://{}", running.local_addr));
+    Ok(serve_until_signal(running).await)
 }
 
 /// Waits for Ctrl-C or a control `POST /v1/hofund/shutdown`, then drains.
@@ -565,17 +578,26 @@ pub async fn serve_until_shutdown(mut running: Running) -> Result<(), DaemonErro
     }
 }
 
-/// Builds a runtime and calls [`serve`].
+/// Builds a runtime, serves like [`serve`], and ends the process after a
+/// termination signal.
+///
+/// After the drain a Unix signal is raised again with its default
+/// disposition, and a Windows console event exits with the code
+/// [`finish`] maps it to, so this function does not return for them. A
+/// control shutdown returns `Ok`.
 ///
 /// # Errors
 ///
-/// Returns [`DaemonError`] when the runtime or startup fails.
+/// Returns [`DaemonError`] when the runtime or startup fails, or a fatal
+/// error stopped the daemon.
 pub fn serve_blocking(path: &Path) -> Result<(), DaemonError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(show)?;
-    runtime.block_on(serve(path))
+    let reason = runtime.block_on(serve_reason(path))?;
+    drop(runtime);
+    terminate::conclude(reason).map_err(DaemonError::new)
 }
 
 fn token_file(path: &Path) -> Result<TokenFile, DaemonError> {
@@ -1356,7 +1378,7 @@ fn expected_protocols() -> String {
 
 fn warn(config: &Config) {
     for warning in &config.warnings {
-        eprintln!("warning: {warning}");
+        terminate::notice(&format!("warning: {warning}"));
     }
 }
 
