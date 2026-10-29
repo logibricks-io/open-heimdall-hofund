@@ -129,7 +129,12 @@ fn resolved_token_urls_require_https_or_a_loopback_host() {
 
 #[test]
 fn a_credentials_path_is_absolute_or_home_relative() {
-    for good in ["", "~", "~/adc.json", "/etc/adc.json"] {
+    let absolute = if cfg!(windows) {
+        r"C:\adc.json"
+    } else {
+        "/etc/adc.json"
+    };
+    for good in ["", "~", "~/adc.json", absolute] {
         assert!(check_settings(good, "").is_ok(), "{good}");
     }
     let error = check_settings("adc.json", "")
