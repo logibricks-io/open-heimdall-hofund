@@ -10,6 +10,10 @@ use ring::digest::{SHA256, digest};
 /// Pass stable provider facts, such as the issuer and the subject. The same
 /// parts always give the same id. The parts themselves are not recoverable
 /// from it, so an email address does not end up in a file name.
+///
+/// # Panics
+///
+/// Does not panic: `a-` followed by hex digits is always a valid kebab id.
 #[must_use]
 pub fn account_id_from(parts: &[&str]) -> AccountId {
     let joined = parts.join("\0");
