@@ -13,6 +13,13 @@ package = "hofund-plugin-bedrock"
 feature = "bedrock"
 
 [[plugin]]
+id = "bedrock-mantle"
+kind = "provider"
+path = "plugins/providers/bedrock-mantle"
+package = "hofund-plugin-bedrock-mantle"
+feature = "bedrock-mantle"
+
+[[plugin]]
 id = "claude"
 kind = "subscription"
 path = "plugins/subscriptions/claude"

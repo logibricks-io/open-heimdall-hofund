@@ -174,7 +174,7 @@ impl fmt::Debug for Target {
 /// Sends `request` to `target` and returns the completion.
 ///
 /// `inbound` is the protocol the client spoke. A missing or empty `secret`
-/// sends no credential header.
+/// sends no credential header. This is [`send`] then [`Sent::complete`].
 ///
 /// # Errors
 ///
@@ -188,6 +188,67 @@ pub async fn execute(
     request: Request,
     inbound: ProtocolId,
 ) -> Result<Completion, PluginError> {
+    send(http, target, secret, request, inbound)
+        .await?
+        .complete()
+        .await
+}
+
+/// A 2xx response from [`send`] whose body is not read yet.
+pub struct Sent {
+    response: HttpResponse,
+    codec: &'static dyn Codec,
+    cross_protocol: bool,
+    streaming: bool,
+}
+
+impl fmt::Debug for Sent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Sent")
+            .field("status", &self.response.status().as_u16())
+            .field("codec", &self.codec.id())
+            .field("cross_protocol", &self.cross_protocol)
+            .field("streaming", &self.streaming)
+            .finish()
+    }
+}
+
+impl Sent {
+    /// Reads the body into the completion, as [`execute`] does after the status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the body cannot be read or decoded, or a
+    /// stream's first event is an upstream failure.
+    pub async fn complete(self) -> Result<Completion, PluginError> {
+        let body = self.response.into_body();
+        if self.cross_protocol {
+            decoded(body, self.codec, self.streaming).await
+        } else {
+            raw(body, self.codec, self.streaming).await
+        }
+    }
+}
+
+/// Encodes and posts `request` as [`execute`] does and stops at the status.
+///
+/// A caller that retries elsewhere on a refused call can tell a refusal (an
+/// error here) from a failure while reading an accepted body (an error from
+/// [`Sent::complete`]).
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the protocol has no SDK transport, the model
+/// or request cannot be encoded, the call fails, or the upstream answers
+/// outside 2xx.
+pub async fn send(
+    http: &HttpHandle,
+    target: &Target,
+    secret: Option<&SecretString>,
+    request: Request,
+    inbound: ProtocolId,
+) -> Result<Sent, PluginError> {
     let (codec, prepare, path) = route(target.protocol)?;
     let cross_protocol = codec.id() != inbound.as_str();
     let streaming = request.stream;
@@ -225,12 +286,12 @@ pub async fn execute(
     if !response.status().is_success() {
         return Err(status_error(response).await);
     }
-    let body = response.into_body();
-    if cross_protocol {
-        decoded(body, codec, streaming).await
-    } else {
-        raw(body, codec, streaming).await
-    }
+    Ok(Sent {
+        response,
+        codec,
+        cross_protocol,
+        streaming,
+    })
 }
 
 /// Counts the input tokens of `request` on a Messages or Generative Language

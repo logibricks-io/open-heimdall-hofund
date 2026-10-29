@@ -48,7 +48,6 @@ const BOTH_AUTH_REFUSALS: &[&str] = &[
 pub(crate) struct ModelClient {
     pub endpoint: Endpoint,
     pub client: reqwest::Client,
-    pub mantle: bool,
 }
 
 struct ListFailure(PluginError);
@@ -83,7 +82,6 @@ impl ModelClient {
         Ok(Self {
             endpoint: endpoint.clone(),
             client,
-            mantle: crate::mantle::is_mantle(endpoint),
         })
     }
 
@@ -177,7 +175,7 @@ impl ModelClient {
         supplied: Option<AuthChoice>,
         learned: &std::sync::Mutex<Option<AuthChoice>>,
     ) -> Result<Vec<u8>, PluginError> {
-        let initial = if azure || (anthropic && self.is_bedrock()) {
+        let initial = if azure {
             AuthChoice::XApiKey
         } else {
             supplied.unwrap_or(AuthChoice::Both)
@@ -324,14 +322,6 @@ impl ModelClient {
         azure_host(&url_host(&self.endpoint.base_url))
     }
 
-    pub fn is_bedrock(&self) -> bool {
-        crate::mantle::is_bedrock(&self.endpoint)
-    }
-
-    pub fn is_mantle(&self) -> bool {
-        self.mantle
-    }
-
     pub fn is_official_anthropic(&self) -> bool {
         anthropic_host(&url_host(&self.endpoint.base_url))
     }
@@ -441,7 +431,7 @@ pub fn both_auth_applies(
     pinned_auth: bool,
 ) -> bool {
     let host = host.to_ascii_lowercase();
-    let bedrock = crate::mantle::is_bedrock_host(&host);
+    let bedrock = bedrock_host(&host);
     api_key_present
         && base_present
         && credential != Credential::ApiKey
@@ -449,6 +439,13 @@ pub fn both_auth_applies(
         && !anthropic_host(&host)
         && !bedrock
         && !pinned_auth
+}
+
+/// Whether `host` is a Bedrock Runtime or Mantle host. Both take the key in
+/// one header, so listing never learns a single header there.
+pub(crate) fn bedrock_host(host: &str) -> bool {
+    (host.starts_with("bedrock-runtime.") && host.ends_with(".amazonaws.com"))
+        || (host.starts_with("bedrock-mantle.") && host.ends_with(".api.aws"))
 }
 
 /// Whether `host` is `anthropic.com` or one of its subdomains.
@@ -808,8 +805,7 @@ mod tests {
             "legacy",
             "https://bedrock-mantle.us-east-1.amazonaws.com/anthropic",
         );
-        let client = super::ModelClient::new(&legacy).expect("client");
-        assert!(!client.is_bedrock());
+        assert!(!super::bedrock_host(&super::url_host(&legacy.base_url)));
         assert!(super::both_auth_applies(
             "bedrock-mantle.us-east-1.amazonaws.com",
             true,

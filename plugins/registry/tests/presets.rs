@@ -45,7 +45,7 @@ fn protocol(wire: Wire) -> ProtocolId {
 #[cfg(feature = "test-fixtures")]
 #[test]
 fn fixtures_are_separate_and_aliases_resolve_their_region() {
-    assert_eq!(compiled_presets().len(), 57);
+    assert_eq!(compiled_presets().len(), 58);
     assert_eq!(compiled_aliases().len(), 4);
     assert!(fixture_presets().len() >= 5);
     assert_eq!(fixture_aliases().len(), 1);
@@ -557,4 +557,37 @@ fn the_bedrock_row_models_are_the_catalog_and_converse_takes_the_chat_url() {
     let ids: Vec<&str> = list.models().iter().map(|model| model.id()).collect();
     assert_eq!(ids, row.models);
     assert!(host.http().calls().is_empty());
+}
+
+/// The `bedrock-mantle` row belongs to its plugin. A region's Responses URL is
+/// its `/v1` root, and the row has no Converse endpoint.
+#[test]
+fn the_bedrock_mantle_row_is_live_and_has_no_converse_endpoint() {
+    use hofund_plugin_registry::select;
+
+    let row = compiled_presets()
+        .iter()
+        .find(|preset| preset.id == "bedrock-mantle")
+        .expect("bedrock-mantle row");
+    assert_eq!(row.plugin, "bedrock-mantle");
+    assert!(!row.no_list);
+    let served = factory("bedrock-mantle")
+        .expect("bedrock-mantle factory")
+        .spec()
+        .protocols()
+        .to_vec();
+    assert!(!served.contains(&ProtocolId::BEDROCK_CONVERSE));
+    let picked = select(
+        row,
+        Some("ap-southeast-2"),
+        &served,
+        Some(ProtocolId::OPENAI_RESPONSES),
+        "",
+    )
+    .expect("responses");
+    assert_eq!(
+        picked.base_url,
+        "https://bedrock-mantle.ap-southeast-2.api.aws/v1"
+    );
+    assert!(select(row, None, &served, Some(ProtocolId::BEDROCK_CONVERSE), "").is_err());
 }

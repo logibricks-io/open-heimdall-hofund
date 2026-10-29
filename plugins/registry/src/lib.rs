@@ -151,12 +151,29 @@ pub fn builtin_protocols() -> Vec<ProtocolId> {
 /// `api-key` header, and v1 root. Messages keeps the kernel's Anthropic
 /// adapter, whose base an Azure resource serves under `/anthropic`. Converse
 /// on any host is served by the `bedrock` plugin, the only one that signs it.
+/// Chat, Responses, and Messages on a Bedrock Mantle host are served by the
+/// `bedrock-mantle` plugin, which picks each model's route prefix, and on a
+/// Bedrock Runtime host by the `bedrock` plugin, which places the key and fits
+/// the Messages body as Bedrock asks.
 #[must_use]
 pub fn host_plugin(protocol: ProtocolId, host: &str) -> Option<&'static str> {
     #[cfg(feature = "bedrock")]
     if protocol == ProtocolId::BEDROCK_CONVERSE {
         return Some("bedrock");
     }
+    let api_key_wire = matches!(
+        protocol,
+        ProtocolId::OPENAI_CHAT | ProtocolId::OPENAI_RESPONSES | ProtocolId::ANTHROPIC_MESSAGES
+    );
+    #[cfg(feature = "bedrock-mantle")]
+    if api_key_wire && hofund_plugin_bedrock_mantle::mantle_host(host) {
+        return Some("bedrock-mantle");
+    }
+    #[cfg(feature = "bedrock")]
+    if api_key_wire && hofund_plugin_bedrock::runtime_host(host) {
+        return Some("bedrock");
+    }
+    let _ = api_key_wire;
     #[cfg(feature = "azure")]
     if matches!(
         protocol,
@@ -447,7 +464,13 @@ mod tests {
             assert!(super::builtin::factory(id).is_some(), "{id}");
             assert!(super::is_kernel_factory(id), "{id}");
         }
-        for id in ["azure", "bedrock", "google-vertex", "missing"] {
+        for id in [
+            "azure",
+            "bedrock",
+            "bedrock-mantle",
+            "google-vertex",
+            "missing",
+        ] {
             assert!(super::builtin::factory(id).is_none(), "{id}");
             assert!(!super::is_kernel_factory(id), "{id}");
         }
@@ -470,9 +493,31 @@ mod tests {
                 "{host}"
             );
         }
+        for protocol in [
+            ProtocolId::OPENAI_CHAT,
+            ProtocolId::OPENAI_RESPONSES,
+            ProtocolId::ANTHROPIC_MESSAGES,
+        ] {
+            for host in [
+                "bedrock-runtime.us-east-1.amazonaws.com",
+                "Bedrock-Runtime.eu-west-1.amazonaws.com:443",
+            ] {
+                assert_eq!(
+                    super::host_plugin(protocol, host),
+                    Some("bedrock"),
+                    "{protocol} {host}"
+                );
+            }
+            for host in [
+                "bedrock-runtime.us-east-1.amazonaws.com.example",
+                "bedrock.us-east-1.amazonaws.com",
+            ] {
+                assert_eq!(super::host_plugin(protocol, host), None, "{host}");
+            }
+        }
         assert_eq!(
             super::host_plugin(
-                ProtocolId::OPENAI_CHAT,
+                ProtocolId::GENERATIVE_LANGUAGE,
                 "bedrock-runtime.us-east-1.amazonaws.com"
             ),
             None
@@ -480,6 +525,43 @@ mod tests {
         let factory = super::factory("bedrock").expect("bedrock");
         assert!(
             factory
+                .spec()
+                .protocols()
+                .contains(&ProtocolId::BEDROCK_CONVERSE)
+        );
+    }
+    #[cfg(feature = "bedrock-mantle")]
+    #[test]
+    fn a_mantle_host_goes_to_the_bedrock_mantle_plugin() {
+        for protocol in [
+            ProtocolId::OPENAI_CHAT,
+            ProtocolId::OPENAI_RESPONSES,
+            ProtocolId::ANTHROPIC_MESSAGES,
+        ] {
+            for host in [
+                "bedrock-mantle.us-east-1.api.aws",
+                "BEDROCK-MANTLE.eu-west-1.api.aws:8443",
+            ] {
+                assert_eq!(
+                    super::host_plugin(protocol, host),
+                    Some("bedrock-mantle"),
+                    "{protocol} {host}"
+                );
+            }
+            for host in ["bedrock-mantle.us-east-1.amazonaws.com", "api.aws"] {
+                assert_eq!(super::host_plugin(protocol, host), None, "{host}");
+            }
+        }
+        assert_eq!(
+            super::host_plugin(
+                ProtocolId::GENERATIVE_LANGUAGE,
+                "bedrock-mantle.us-east-1.api.aws"
+            ),
+            None
+        );
+        let factory = super::factory("bedrock-mantle").expect("bedrock-mantle");
+        assert!(
+            !factory
                 .spec()
                 .protocols()
                 .contains(&ProtocolId::BEDROCK_CONVERSE)

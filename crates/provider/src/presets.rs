@@ -288,8 +288,11 @@ fn unavailable(preset: &Preset) -> PresetError {
 }
 
 /// Derives the credential placement for a preset, wire, and resolved base URL.
+///
+/// The placement follows the wire and the base host. No kernel preset needs
+/// its own placement, so the preset id is not read.
 #[must_use]
-pub fn credential_for(preset_id: &str, wire: Wire, base_url: &str) -> Credential {
+pub fn credential_for(_preset_id: &str, wire: Wire, base_url: &str) -> Credential {
     if wire == Wire::Vertex || wire == Wire::Converse {
         return Credential::Bearer;
     }
@@ -300,18 +303,13 @@ pub fn credential_for(preset_id: &str, wire: Wire, base_url: &str) -> Credential
     if wire == Wire::Messages {
         if crate::models::anthropic_host(&host)
             || crate::models::azure_host(&host)
-            || matches!(preset_id, "bedrock" | "bedrock-mantle")
-            || is_bedrock(&host)
+            || crate::models::bedrock_host(&host)
         {
             return Credential::XApiKey;
         }
         return Credential::MessagesBoth;
     }
     Credential::Bearer
-}
-
-fn is_bedrock(host: &str) -> bool {
-    crate::mantle::is_bedrock_host(host)
 }
 
 fn host_of(url: &str) -> String {
@@ -568,7 +566,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 2);
+        assert_eq!(catalog.preset.len(), 1);
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
@@ -619,35 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn known_presets_resolve_to_the_recorded_endpoint_and_header() {
-        let error = resolve(&Resolve {
-            id: "bedrock-mantle",
-            region: None,
-            wire: Some(Wire::Converse),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect_err("mantle converse");
-        assert_eq!(
-            error.to_string(),
-            "preset `bedrock-mantle` has no converse endpoint"
-        );
-
-        let mantle = resolve(&Resolve {
-            id: "bedrock-mantle",
-            region: Some("ap-southeast-2"),
-            wire: Some(Wire::Responses),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect("mantle");
-        assert_eq!(
-            mantle.base_url,
-            "https://bedrock-mantle.ap-southeast-2.api.aws/v1"
-        );
-
+    fn an_unknown_preset_is_refused() {
         let error = resolve(&Resolve {
             id: "nope",
             region: None,

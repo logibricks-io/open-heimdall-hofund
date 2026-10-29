@@ -95,8 +95,8 @@ impl UpstreamFactory for OpenAiFactory {
 
 /// Builds the `openai-compat` provider.
 ///
-/// `execute` goes through the SDK transport on the host client unless the base
-/// is a Mantle root. Counting, listing, probing, and Mantle stay on the adapter.
+/// `execute` goes through the SDK transport on the host client. Counting,
+/// listing, and probing stay on the adapter.
 ///
 /// # Errors
 ///
@@ -117,9 +117,7 @@ pub fn openai_compat(
     let bridged = Bridged {
         inner: adapter.clone(),
     };
-    let Some(base) = adapter.direct_base() else {
-        return Ok(Arc::new(bridged));
-    };
+    let base = adapter.direct_base();
     let wire = match protocol {
         OpenAiProtocol::Chat => ProtocolId::OPENAI_CHAT,
         OpenAiProtocol::Responses => ProtocolId::OPENAI_RESPONSES,
@@ -258,9 +256,8 @@ impl UpstreamFactory for AnthropicFactory {
 
 /// Builds the `anthropic` provider.
 ///
-/// `execute` and `count_input` go through the SDK transport on the host client
-/// unless the endpoint is Bedrock or Mantle. Listing, probing, and those
-/// endpoints stay on the adapter.
+/// `execute` and `count_input` go through the SDK transport on the host client.
+/// Listing and probing stay on the adapter.
 ///
 /// # Errors
 ///
@@ -280,9 +277,7 @@ pub fn anthropic(
     let bridged = Bridged {
         inner: adapter.clone(),
     };
-    let Some(base) = adapter.direct_base() else {
-        return Ok(Arc::new(bridged));
-    };
+    let base = adapter.direct_base();
     Ok(Arc::new(Direct {
         http: host.http().clone(),
         target: Target::new(ProtocolId::ANTHROPIC_MESSAGES, base)

@@ -1013,7 +1013,7 @@ E1 is the first slice of row E. The threat model is [docs/plugins/providers.md](
 - After that validation, the daemon trims string options and resolves `env:`; resolution errors name the provider and key. It rejects a reserved kernel key inside `options`. `plan` still reads `project`, `location`, and `region` to build catalog URLs.
 - Built-in adapters take the pooled `reqwest` client from a kernel-only host-handle method, so `HttpLimits` apply. `HttpHandle::send` was unchanged here; PR H0g-a later made it stream 2xx bodies. Moving the five protocol transports into the SDK and streaming through `HttpHandle::send` is targeted at the first row E PR that moves an adapter into its own plugin crate (E3, Vertex), which also removes the raw-client method.
 - `google-vertex` and `bedrock` are not compiled presets. `resolve` still owns their URLs. Per-preset `/models` and the connectivity probe are the next pull request.
-- Mantle parity is complete in `hofund-provider` (Option C). Moving Mantle into its own crate waits for Option B: SDK streaming transport, then the Vertex crate, then the Mantle crate.
+- Mantle parity is complete in `hofund-provider` (Option C). Moving Mantle into its own crate waits for Option B: SDK streaming transport, then the Vertex crate, then the Mantle crate. Since E11, Mantle is the `bedrock-mantle` plugin crate and `crates/provider/src/mantle.rs` is gone.
 
 ### PR K notes
 
@@ -1133,7 +1133,7 @@ Kernel globs, `plugins/registry`, the control crates, and `fuzz/` belong to whoe
 ### PR E8a notes
 
 - New SDK module `hofund_plugin_sdk::wire` and the edge `plugin-sdk -> codec`. `wire::execute` encodes a Chat or Responses request, sends it on `HttpHandle`, and returns raw bytes for the same protocol or decoded events across protocols. Cross-protocol calls drop request extensions, as the adapter does.
-- The builtin `openai-compat` factory uses `wire::execute` unless the base is a Bedrock Mantle root (`OpenAiCompat::direct_base`). Model lists and probes stay on the adapter transport.
+- The builtin `openai-compat` factory uses `wire::execute` unless the base is a Bedrock Mantle root (`OpenAiCompat::direct_base`). Model lists and probes stay on the adapter transport. Since E11 the Mantle path is the `bedrock-mantle` plugin, and `direct_base` is always the configured base.
 - Only a connection-establishment failure is retried, once. A reset after the write is `Transport` and is not replayed. The adapter labels the same failure `Connect`, which the router fails over; that label is a follow-up in `hofund-provider`.
 - A leading in-band error event fails the call before any event is yielded, and a non-2xx status keeps its `Retry-After`. Error messages are capped at 512 bytes.
 - `hofund-kit-upstream` re-exports `runtime_host` and `HttpLimits` so registry tests can run both transports on the pooled client against a mock.
