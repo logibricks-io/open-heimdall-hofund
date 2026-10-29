@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Gemini CLI (Code Assist) subscription plugin `gemini`
+  (`hofund-plugin-subscription-gemini`, registry feature `gemini`, on by
+  default): browser sign-in with PKCE on an ephemeral IPv4 loopback port at
+  `/oauth2callback`, using Gemini CLI's installed-app client and asking for
+  offline access; the account is keyed by the Google email from userinfo.
+  Only the refresh token and the Code Assist project are stored: Google does
+  not rotate refresh tokens, so the access token lives in memory, refreshed
+  2 minutes before expiry with one request per account at a time. Sign-in
+  sets the account up as Gemini CLI does (`loadCodeAssist`, then
+  `onboardUser` for the default tier, asked up to 5 times); the optional
+  `project` option supplies a Google Cloud project for tiers that need one,
+  and a failed setup is retried on refresh. A refused refresh marks the
+  account as needing a new sign-in. Requests, quota, and the model list land
+  with H4.
+- SDK: `json` (re-exported `serde_json`), `sleep`,
+  `oauth::client_code_exchange_form`, and `oauth::refresh_secret_form`, so a
+  plugin with a client secret needs no other crate.
+
 - Amazon Bedrock Mantle plugin `bedrock-mantle`
   (`plugins/providers/bedrock-mantle`): preset `bedrock-mantle` moved out of
   the built-in catalog, unchanged (17 regions), and now builds this plugin.
