@@ -38,11 +38,6 @@ pub async fn timeout<F: Future>(duration: std::time::Duration, future: F) -> Opt
     tokio::time::timeout(duration, future).await.ok()
 }
 
-/// Waits `duration` on the host runtime, for a plugin that polls.
-pub async fn sleep(duration: std::time::Duration) {
-    tokio::time::sleep(duration).await;
-}
-
 pub mod classify;
 pub mod jwt;
 pub mod oauth;
