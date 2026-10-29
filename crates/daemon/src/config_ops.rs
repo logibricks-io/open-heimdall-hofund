@@ -164,7 +164,7 @@ impl ConfigOps {
     }
 
     fn check(&self, text: &str) -> Result<(Config, crate::runtime::Candidate), Vec<FieldIssue>> {
-        let config = hofund_config::load(text).map_err(|error| vec![config_issue(&error)])?;
+        let config = hofund_config::load(text).map_err(|error| vec![config_issue(&error, text)])?;
         let candidate = self.runtime.prepare(&config).map_err(|error| {
             vec![FieldIssue::new(
                 "providers",
@@ -182,7 +182,7 @@ impl ConfigOps {
             return Err(stale_revision());
         }
         let written = revision(text.as_bytes());
-        let (config, candidate) = self.check(&text).map_err(|issues| {
+        let (_, candidate) = self.check(&text).map_err(|issues| {
             self.reject(&written, issues.clone());
             invalid(issues)
         })?;
@@ -197,7 +197,7 @@ impl ConfigOps {
             );
             write_failure(failure)
         })?;
-        let live = self.publish(config, candidate, written.clone())?;
+        let live = self.publish(candidate, written.clone())?;
         Ok(response(&live, written, text))
     }
 
@@ -223,23 +223,23 @@ impl ConfigOps {
         if origin == ReloadOrigin::Watcher && current.runtime_revision == disk_revision {
             return Ok(response(&current, disk_revision, text));
         }
-        let (config, candidate) = match self.check(&text) {
+        let (_, candidate) = match self.check(&text) {
             Ok(checked) => checked,
             Err(issues) => {
                 self.reject(&disk_revision, issues.clone());
                 return Err(invalid(issues));
             }
         };
-        let live = self.publish(config, candidate, disk_revision.clone())?;
+        let live = self.publish(candidate, disk_revision.clone())?;
         Ok(response(&live, disk_revision, text))
     }
 
     fn publish(
         &self,
-        config: Config,
         candidate: crate::runtime::Candidate,
         runtime_revision: String,
     ) -> Result<Arc<LiveConfig>, ControlFailure> {
+        let config = Arc::clone(candidate.config());
         let changed = self
             .runtime
             .publish(candidate)
@@ -247,7 +247,7 @@ impl ConfigOps {
         let (pending_restart, not_applied) = restart_diff(&self.started, &config);
         let mut live = self.live.write().expect("live config");
         let next = Arc::new(LiveConfig {
-            config: Arc::new(config),
+            config,
             runtime_revision,
             generation: live.generation + 1,
             pending_restart,
@@ -310,7 +310,7 @@ async fn run_blocking<T: Send + 'static>(
 /// One sanitized issue for a load failure. TOML syntax errors quote the
 /// offending source line, which may hold a secret, so only the position line
 /// and the final description are kept.
-fn config_issue(error: &ConfigError) -> FieldIssue {
+fn config_issue(error: &ConfigError, text: &str) -> FieldIssue {
     match error {
         ConfigError::Syntax(message) => {
             let mut lines = message
@@ -324,13 +324,14 @@ fn config_issue(error: &ConfigError) -> FieldIssue {
                 .unwrap_or("invalid TOML");
             FieldIssue::new("config", "syntax", format!("{position}: {description}"))
         }
-        ConfigError::Invalid(message) => FieldIssue::new("config", "invalid", message.clone()),
-        ConfigError::Read(message) => FieldIssue::new("config", "read", message.clone()),
+        ConfigError::Invalid(message) => FieldIssue::new("config", "invalid", scrub(message, text)),
+        ConfigError::Read(message) => FieldIssue::new("config", "read", scrub(message, text)),
     }
 }
 
 /// Removes any quoted value from `message` that appears verbatim in `text`
-/// as a string value, so a provider construction error cannot echo a secret.
+/// as a string value, so a validation or provider construction error cannot
+/// echo a secret.
 fn scrub(message: &str, text: &str) -> String {
     let mut scrubbed = message.to_owned();
     for value in text.split('"').skip(1).step_by(2) {
@@ -737,8 +738,9 @@ mod tests {
 
     #[test]
     fn syntax_issue_drops_the_quoted_source_line() {
-        let error = hofund_config::load(&format!("api_key = \"{SECRET}\n")).expect_err("syntax");
-        let issue = super::config_issue(&error);
+        let text = format!("api_key = \"{SECRET}\n");
+        let error = hofund_config::load(&text).expect_err("syntax");
+        let issue = super::config_issue(&error, &text);
         assert_eq!(issue.reason, "syntax");
         assert!(!issue.message.contains(SECRET), "{}", issue.message);
         assert!(issue.message.contains("line 1"), "{}", issue.message);

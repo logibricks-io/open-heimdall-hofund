@@ -7,8 +7,8 @@ use hofund_agent::Session;
 use hofund_control_proto::{
     API_VERSION, AgentAction, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
     AgentListResponse, AgentPlanRequest, AgentPlanResponse, AgentState, AgentStatusResponse,
-    ControlErrorKind, TokenRotateRequest, TokenRotateResponse, decode_error_envelope,
-    decode_response,
+    ConfigApplyRequest, ConfigResponse, ControlErrorKind, TokenRotateRequest, TokenRotateResponse,
+    decode_error_envelope, decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
 use reqwest::StatusCode;
@@ -578,5 +578,40 @@ async fn token_rotate_scrubs_pre_rotation_status_errors() {
     assert!(message.contains("[redacted]"), "{message}");
     assert!(!message.contains(&old), "{message}");
     assert!(!String::from_utf8_lossy(&body).contains(&old));
+    daemon.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_plan_uses_reloaded_routes_and_bound_address() {
+    let daemon = Daemon::start("reloaded").await;
+    let bound = format!("http://{}", daemon.running.local_addr);
+    assert!(!bound.ends_with(":0"), "{bound}");
+    let before = daemon
+        .plan("claude-code", AgentAction::Connect, false)
+        .await;
+    let diff = &before.changes[0].diff;
+    assert!(diff.contains(&bound), "{diff}");
+    assert!(!diff.contains("routed-after-reload"), "{diff}");
+
+    let (status, body) = daemon.get("config", &daemon.token()).await;
+    assert_eq!(status, StatusCode::OK);
+    let current: ConfigResponse = decode_response(API_VERSION, &body).expect("config");
+    let edited = CONFIG.replace("model = \"m\"", "model = \"routed-after-reload\"");
+    let (status, body) = daemon
+        .post(
+            "config/apply",
+            &daemon.token(),
+            &ConfigApplyRequest::new(current.disk_revision.as_str(), edited.as_str()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let after = daemon
+        .plan("claude-code", AgentAction::Connect, false)
+        .await;
+    let diff = &after.changes[0].diff;
+    assert!(diff.contains(&bound), "{diff}");
+    assert!(diff.contains("routed-after-reload"), "{diff}");
+    assert_ne!(after.plan_revision, before.plan_revision);
     daemon.running.shutdown().await;
 }

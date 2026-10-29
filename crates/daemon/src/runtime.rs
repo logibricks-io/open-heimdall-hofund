@@ -6,15 +6,20 @@ use std::time::Duration;
 use hofund_config::Config;
 use hofund_plugin_api::MemberId;
 use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
+use tokio::sync::watch;
 
 use crate::membership::{self, Table};
-use crate::{DaemonError, DaemonRegistry, ModelsHost, providers, route_plan, router};
+use crate::{
+    Built, DaemonError, DaemonRegistry, Instance, ModelsHost, providers, route_plan, router,
+};
 
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Providers and routes built from a candidate configuration, not yet live.
 pub(crate) struct Candidate {
+    config: Arc<Config>,
     built: BTreeMap<String, membership::BuiltProvider>,
+    instances: HashMap<String, Instance>,
     fingerprints: HashMap<MemberId, String>,
     routes: BTreeMap<String, Vec<membership::PlannedHop>>,
     policy: FailoverPolicy,
@@ -27,6 +32,18 @@ pub(crate) struct Runtime {
     path: PathBuf,
     max_idle_per_host: Option<usize>,
     table: OnceLock<Arc<Table>>,
+    /// Built instances by provider id; a reload reuses an unchanged one.
+    instances: Mutex<HashMap<String, Instance>>,
+    /// The list and probe host, attached once it is shared.
+    models: OnceLock<Arc<ModelsHost>>,
+    /// The published configuration, for tasks that follow reloads.
+    config: OnceLock<watch::Sender<Arc<Config>>>,
+}
+
+impl Candidate {
+    pub(crate) fn config(&self) -> &Arc<Config> {
+        &self.config
+    }
 }
 
 impl Runtime {
@@ -45,6 +62,9 @@ impl Runtime {
             path: path.to_path_buf(),
             max_idle_per_host,
             table: OnceLock::new(),
+            instances: Mutex::new(HashMap::new()),
+            models: OnceLock::new(),
+            config: OnceLock::new(),
         })
     }
 
@@ -53,7 +73,7 @@ impl Runtime {
         config: &Config,
         models_host: Option<&mut ModelsHost>,
     ) -> Result<Snapshot, DaemonError> {
-        let (snapshot, table, fingerprints) = router(
+        let (snapshot, table, fingerprints, instances) = router(
             config,
             &self.path,
             self.max_idle_per_host,
@@ -62,6 +82,10 @@ impl Runtime {
             &self.registry,
         )?;
         *self.fingerprints.lock().expect("provider fingerprints") = fingerprints;
+        *self.instances.lock().expect("provider instances") = instances;
+        self.config
+            .set(watch::Sender::new(Arc::new(config.clone())))
+            .map_err(|_| DaemonError::new("runtime published its first configuration twice"))?;
         self.table.set(Arc::clone(&table)).map_err(|_| {
             DaemonError::new("runtime initialized its membership table more than once")
         })?;
@@ -69,17 +93,34 @@ impl Runtime {
         Ok(snapshot.hold(owner))
     }
 
+    /// Shares the list and probe host so reloads plan through it and
+    /// replace its instances.
+    pub(crate) fn attach_models(&self, host: Arc<ModelsHost>) {
+        let _ = self.models.set(host);
+    }
+
+    /// Follows the published configuration.
+    pub(crate) fn config_updates(&self) -> watch::Receiver<Arc<Config>> {
+        self.config.get().expect("initial snapshot").subscribe()
+    }
+
     /// Builds the providers for `config` without publishing anything.
+    ///
+    /// A provider whose instance identity is unchanged reuses the running
+    /// instance, so its connection pool and learned state carry over.
     pub(crate) fn prepare(&self, config: &Config) -> Result<Candidate, DaemonError> {
-        let built = providers(
+        let reuse = self.instances.lock().expect("provider instances").clone();
+        let Built { built, instances } = providers(
             config,
             &self.path,
             self.max_idle_per_host,
             crate::Mode::Serve,
-            None,
+            self.models.get().map(AsRef::as_ref),
+            Some(&reuse),
             Some(Arc::clone(&self.cooldowns)),
             &self.registry,
         )?;
+        drop(reuse);
         let mut fingerprints = HashMap::new();
         let mut owners: HashMap<MemberId, &str> = HashMap::new();
         for (id, provider) in &built {
@@ -105,7 +146,9 @@ impl Runtime {
             }
         }
         Ok(Candidate {
+            config: Arc::new(config.clone()),
             built,
+            instances,
             fingerprints,
             routes,
             policy,
@@ -116,13 +159,29 @@ impl Runtime {
     /// added, removed, or whose fingerprint changed, sorted.
     pub(crate) fn publish(&self, candidate: Candidate) -> Result<Vec<String>, DaemonError> {
         let Candidate {
+            config,
             built,
+            instances,
             fingerprints,
             routes,
             policy,
         } = candidate;
         let table = self.table.get().expect("initial snapshot").clone();
         table.replace(&built, routes, policy)?;
+        if let Some(host) = self.models.get() {
+            host.replace_instances(instances.iter().map(|(id, instance)| {
+                (
+                    id.clone(),
+                    Arc::clone(&instance.upstream),
+                    instance.base_url.clone(),
+                )
+            }));
+        }
+        // Retired instances drop here unless a request still holds them.
+        *self.instances.lock().expect("provider instances") = instances;
+        if let Some(sender) = self.config.get() {
+            sender.send_replace(config);
+        }
 
         // Published routes omit failed members; every configured candidate
         // member must retain its rest regardless of that transient flag.
@@ -380,6 +439,125 @@ mod tests {
         runtime.publish_candidate(&changed).expect("changed");
         assert_eq!(runtime.cooldowns.cooling(&member_id("first")), None);
         assert!(runtime.cooldowns.cooling(&member_id("second")).is_some());
+    }
+
+    fn adapter(runtime: &Runtime, id: &str) -> Arc<dyn hofund_provider::Provider> {
+        Arc::clone(&runtime.instances.lock().expect("instances")[id].adapter)
+    }
+
+    fn hosted(config: &Config) -> (Arc<Runtime>, Arc<crate::ModelsHost>, tempfile::TempDir) {
+        let root = tempfile::tempdir().expect("runtime directory");
+        let runtime = Runtime::new(
+            Arc::new(RegistryAdapter),
+            &root.path().join("hofund.toml"),
+            Some(0),
+        );
+        let mut host = crate::ModelsHost::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        runtime
+            .initial_snapshot(config, Some(&mut host))
+            .expect("snapshot");
+        let host = Arc::new(host);
+        runtime.attach_models(Arc::clone(&host));
+        (runtime, host, root)
+    }
+
+    #[test]
+    fn unchanged_fingerprint_reuses_instance_and_preserves_learned_routes() {
+        let config = config(&["first", "second"]);
+        let (runtime, host, _root) = hosted(&config);
+        let first = adapter(&runtime, "first");
+        let upstream = host.instance("first").expect("registered");
+        cool(&runtime, "first");
+        let changed = runtime.publish_candidate(&config).expect("reload");
+        assert!(changed.is_empty(), "{changed:?}");
+        assert!(Arc::ptr_eq(&first, &adapter(&runtime, "first")));
+        assert!(Arc::ptr_eq(
+            &upstream,
+            &host.instance("first").expect("still registered")
+        ));
+        assert!(runtime.cooldowns.cooling(&member_id("first")).is_some());
+    }
+
+    #[test]
+    fn changed_fingerprint_rebuilds_instance() {
+        let original = config(&["first", "second"]);
+        let (runtime, host, _root) = hosted(&original);
+        let first = adapter(&runtime, "first");
+        let second = adapter(&runtime, "second");
+        let upstream = host.instance("first").expect("registered");
+
+        let mut changed = original.clone();
+        changed.providers[0].api_key = "changed-key".to_owned();
+        let ids = runtime.publish_candidate(&changed).expect("reload");
+        assert_eq!(ids, [member_id("first").to_string()]);
+        assert!(!Arc::ptr_eq(&first, &adapter(&runtime, "first")));
+        assert!(Arc::ptr_eq(&second, &adapter(&runtime, "second")));
+        assert!(!Arc::ptr_eq(
+            &upstream,
+            &host.instance("first").expect("re-registered")
+        ));
+
+        // A setting outside the fingerprint still rebuilds the instance, but
+        // keeps the member's identity and its cooldown.
+        let rebuilt = adapter(&runtime, "first");
+        cool(&runtime, "first");
+        let mut capped = changed;
+        capped.providers[0].max_output_tokens = Some(64);
+        assert!(
+            runtime
+                .publish_candidate(&capped)
+                .expect("reload")
+                .is_empty()
+        );
+        assert!(!Arc::ptr_eq(&rebuilt, &adapter(&runtime, "first")));
+        assert!(runtime.cooldowns.cooling(&member_id("first")).is_some());
+
+        let mut slower = capped;
+        slower.read_timeout += std::time::Duration::from_secs(1);
+        let before = adapter(&runtime, "second");
+        runtime.publish_candidate(&slower).expect("reload");
+        assert!(!Arc::ptr_eq(&before, &adapter(&runtime, "second")));
+    }
+
+    #[test]
+    fn long_stream_finishes_before_retired_instance_shutdown() {
+        let original = config(&["member"]);
+        let (runtime, host, _root) = hosted(&original);
+        // A request in flight holds the adapter it was routed to.
+        let in_flight = adapter(&runtime, "member");
+        let retired = Arc::downgrade(&in_flight);
+        let mut changed = original;
+        changed.providers[0].api_key = "changed-key".to_owned();
+        runtime.publish_candidate(&changed).expect("reload");
+        assert!(!Arc::ptr_eq(&in_flight, &adapter(&runtime, "member")));
+        assert!(host.instance("member").is_some());
+        assert!(
+            retired.upgrade().is_some(),
+            "the retired instance must outlive its in-flight request"
+        );
+        drop(in_flight);
+        assert!(
+            retired.upgrade().is_none(),
+            "the retired instance must drop with its last request"
+        );
+    }
+
+    #[tokio::test]
+    async fn published_configuration_reaches_followers() {
+        let original = config(&["member"]);
+        let (runtime, _root) = runtime(&original);
+        let mut updates = runtime.config_updates();
+        assert_eq!(updates.borrow_and_update().providers.len(), 1);
+        let next = config(&["member", "added"]);
+        runtime.publish_candidate(&next).expect("reload");
+        assert!(updates.has_changed().expect("sender alive"));
+        assert_eq!(updates.borrow_and_update().providers.len(), 2);
+        // A candidate that is only prepared is not published.
+        runtime.prepare(&original).expect("candidate");
+        assert!(!updates.has_changed().expect("sender alive"));
     }
 
     #[tokio::test(start_paused = true)]

@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlinks, mode, and owner, and publish a new router snapshot without a
   restart. Failures emit `config_rejected` and change nothing; publications
   emit `config_reloaded` and report restart-only and not-yet-applied fields.
+  A reload reuses provider instances whose identity is unchanged, so learned
+  routes survive; the model refresh loop follows the published configuration;
+  and agent plans use the bound model listener address and live route models.
 - Control event stream (`GET /v1/hofund/events`): per-topic buses and replay
   rings, composite `Last-Event-ID` resume, targeted resyncs, token-checked
   heartbeats, and stream close on token rotation or shutdown. The typed client
