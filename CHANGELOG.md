@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address or token, Ctrl-C (exit 130), or a 10-minute deadline. Every exit
   path cancels the plugin's sign-in and closes the loopback listener. The
   JSON listing carries ids, labels, the flow, and account status only.
+- SDK OAuth helpers for subscription plugins: `oauth::device::{start, poll}`
+  runs an RFC 8628 device sign-in (`authorization_pending` keeps polling,
+  `slow_down` adds 5 s, a 1 s interval floor, five failed polls in a row or
+  `expires_in` end it); `TokenSet` and `parse_token_set` read access,
+  refresh, and ID tokens with an absolute expiry; `unverified_claims` reads
+  JWT claims without checking the signature; `TokenCache` refreshes once per
+  account for concurrent callers, inside a margin, remembers a failure for
+  5 s, and drops a value only when the caller's stale check matches;
+  `token_error` maps `invalid_grant`, `invalid_client`, 400, and 401 to
+  `Auth` without copying `error_description`; and `account_id_from` derives
+  `a-` plus 16 hex digits from stable provider facts.
 
 - Subscription accounts as route members: a route hop
   `{ subscription = "id" }` expands to one member per signed-in account,
