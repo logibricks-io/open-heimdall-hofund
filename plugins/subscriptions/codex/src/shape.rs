@@ -54,7 +54,10 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
     }
     if let Some(Value::String(text)) = body.get("input") {
         let text = text.clone();
-        body.insert("input".to_owned(), Value::Array(vec![message("user", &text)]));
+        body.insert(
+            "input".to_owned(),
+            Value::Array(vec![message("user", &text)]),
+        );
     }
     let input = match body.remove("input") {
         Some(Value::Array(items)) => items,
@@ -94,7 +97,8 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
     body.insert("stream".to_owned(), Value::Bool(true));
     body.insert("tool_choice".to_owned(), Value::String("auto".to_owned()));
     declare_search(body);
-    body.entry("parallel_tool_calls").or_insert(Value::Bool(true));
+    body.entry("parallel_tool_calls")
+        .or_insert(Value::Bool(true));
     body.entry("text")
         .or_insert_with(|| json::json!({"verbosity": "medium"}));
     reasoning(body);

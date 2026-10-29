@@ -73,9 +73,7 @@ type Prepare = fn(&[u8]) -> Result<Vec<u8>, CodecError>;
 /// in place and returns headers to add to the call; those are sensitive and
 /// replace a header of the same name, as [`Target::headers`] do.
 pub type Rewrite = Arc<
-    dyn Fn(&mut serde_json::Map<String, serde_json::Value>) -> Vec<(String, String)>
-        + Send
-        + Sync,
+    dyn Fn(&mut serde_json::Map<String, serde_json::Value>) -> Vec<(String, String)> + Send + Sync,
 >;
 
 /// Where a protocol's calls go under the base URL.

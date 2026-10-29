@@ -47,7 +47,9 @@ impl Prompts {
     /// The kept instructions of `model`.
     pub(crate) fn get(&self, host: &HostContext, model: &str) -> Option<String> {
         let path = prompts_path(host)?;
-        let modified = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok()?;
+        let modified = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()?;
         let mut kept = self.lock();
         let current = kept
             .read
@@ -242,8 +244,15 @@ pub(crate) fn parse(body: &[u8]) -> Result<(Vec<ModelSpec>, Vec<String>), Plugin
             .filter(|name| !name.is_empty())
             .map(str::to_owned);
         let mut spec = ModelSpec::new(slug, name)?
-            .with_context(row.get("context_window").and_then(Value::as_u64).unwrap_or(0))
-            .with_efforts(strings(row.get("supported_reasoning_levels"), Some("effort")))
+            .with_context(
+                row.get("context_window")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            )
+            .with_efforts(strings(
+                row.get("supported_reasoning_levels"),
+                Some("effort"),
+            ))
             .with_service_tiers(strings(row.get("service_tiers"), Some("id")));
         if let Some(Value::Array(_)) = row.get("input_modalities") {
             let modalities = strings(row.get("input_modalities"), None);

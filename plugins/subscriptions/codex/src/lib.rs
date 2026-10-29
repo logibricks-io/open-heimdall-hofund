@@ -296,7 +296,8 @@ impl Subscription for Codex {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let access = tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
+        let access =
+            tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
         models::list(host, &self.endpoints, &access, &self.prompts).await
     }
 
