@@ -14,6 +14,8 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, same_secret};
 
 use crate::tokens::{self, Need};
+use crate::{models, shape};
+use hofund_plugin_sdk::json::{self, Value, json};
 use crate::upstream::{self, CodexUpstream};
 use crate::{Endpoints, factory_with_endpoints, sign_in};
 
@@ -120,7 +122,23 @@ fn seed(host: &TestHost, access: &str) -> AccountId {
             .await
             .expect("upsert");
     });
+    seed_prompts(host, &[("gpt-5", CODEX_PROMPT)]);
     id
+}
+
+const CODEX_PROMPT: &str = "You are Codex, a coding agent.\nBe brief.";
+
+fn prompts_file(host: &TestHost) -> std::path::PathBuf {
+    host.context()
+        .dirs()
+        .cache_dir()
+        .expect("cache dir")
+        .join(models::PROMPTS_FILE)
+}
+
+fn seed_prompts(host: &TestHost, prompts: &[(&str, &str)]) {
+    let map: std::collections::BTreeMap<&str, &str> = prompts.iter().copied().collect();
+    std::fs::write(prompts_file(host), json::to_vec(&map).expect("json")).expect("write");
 }
 
 fn stored(host: &TestHost, id: &AccountId) -> SecretObject {
@@ -535,7 +553,12 @@ fn server_error_keeps_the_sign_in() {
 }
 
 fn upstream_for(host: &TestHost, id: &AccountId) -> CodexUpstream {
-    CodexUpstream::new(id.clone(), host.context().clone(), Arc::new(endpoints()))
+    CodexUpstream::new(
+        id.clone(),
+        host.context().clone(),
+        Arc::new(endpoints()),
+        Arc::default(),
+    )
 }
 
 const EXPIRED_401: &[u8] = br#"{"error":{"message":"Provided authentication token is expired. Please try signing in again.","type":"invalid_request_error","code":"token_expired"}}"#;
@@ -744,4 +767,381 @@ fn no_token_sentinel_in_debug_or_errors() {
     assert!(!shown.contains(&format!("{SENTINEL}.e30.x")), "{shown}");
     let status = block_on(sub.account_status(&id, host.context())).expect("status");
     assert!(!format!("{status:?}").contains(SENTINEL));
+}
+
+fn shaped(body: Value, codex: Option<&str>) -> (Value, Vec<(String, String)>) {
+    let Value::Object(mut map) = body else {
+        panic!("object")
+    };
+    let headers = shape::body(&mut map, codex);
+    (Value::Object(map), headers)
+}
+
+#[test]
+fn body_drops_sampling_and_forces_store_false() {
+    let mut body = json!({
+        "model": "gpt-5",
+        "input": "hi",
+        "store": true,
+        "stream": false,
+        "tool_choice": "required",
+        "service_tier": "flex",
+    });
+    for key in shape::DELETED_KEYS {
+        body[key] = json!(1);
+    }
+    let (out, _) = shaped(body, None);
+    for key in shape::DELETED_KEYS {
+        assert!(out.get(key).is_none(), "{key}");
+    }
+    assert!(out.get("service_tier").is_none());
+    assert_eq!(out["store"], json!(false));
+    assert_eq!(out["stream"], json!(true));
+    assert_eq!(out["tool_choice"], json!("auto"));
+    assert_eq!(out["parallel_tool_calls"], json!(true));
+    assert_eq!(out["text"], json!({"verbosity": "medium"}));
+    assert_eq!(out["include"], json!(["reasoning.encrypted_content"]));
+    assert_eq!(
+        out["input"],
+        json!([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}])
+    );
+    for tier in ["priority", "ultrafast"] {
+        let (out, _) = shaped(json!({"service_tier": tier, "parallel_tool_calls": false, "text": {"verbosity": "low"}}), None);
+        assert_eq!(out["service_tier"], json!(tier));
+        assert_eq!(out["parallel_tool_calls"], json!(false));
+        assert_eq!(out["text"], json!({"verbosity": "low"}));
+        assert_eq!(out["input"], json!([]));
+        assert!(out.get("prompt_cache_key").is_none());
+    }
+}
+
+#[test]
+fn reasoning_effort_and_include_follow_codex() {
+    let (out, _) = shaped(
+        json!({"reasoning": {"effort": "ultra"}, "include": ["x", "reasoning.encrypted_content"]}),
+        None,
+    );
+    assert_eq!(out["reasoning"], json!({"effort": "max", "summary": "auto"}));
+    assert_eq!(out["include"], json!(["x", "reasoning.encrypted_content"]));
+    let (out, _) = shaped(
+        json!({"reasoning": {"effort": "none"}, "include": ["x"]}),
+        None,
+    );
+    assert_eq!(out["reasoning"], json!({"effort": "none"}));
+    assert!(out.get("include").is_none());
+    let (out, _) = shaped(
+        json!({"reasoning": {"effort": "high", "summary": "detailed"}}),
+        None,
+    );
+    assert_eq!(out["reasoning"], json!({"effort": "high", "summary": "detailed"}));
+}
+
+#[test]
+fn system_role_becomes_developer() {
+    let (out, _) = shaped(
+        json!({"input": [
+            {"role": "system", "content": "rules"},
+            {"type": "message", "role": "system", "content": "more", "id": "msg_1", "status": "completed"},
+            {"type": "reasoning", "id": "rs_1", "status": "done", "summary": []},
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}", "id": "fc_1", "status": "completed"},
+            {"type": "item_reference", "id": "msg_0"},
+            "loose",
+        ]}),
+        None,
+    );
+    assert_eq!(
+        out["input"],
+        json!([
+            {"role": "developer", "content": "rules"},
+            {"type": "message", "role": "developer", "content": "more"},
+            {"type": "reasoning", "summary": []},
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}", "status": "completed"},
+            "loose",
+        ])
+    );
+}
+
+#[test]
+fn instructions_ride_first_unless_they_are_codex() {
+    let input = json!([{"role": "user", "content": "hi"}]);
+    let (out, _) = shaped(
+        json!({"instructions": "Be a pirate.", "input": input.clone()}),
+        Some(CODEX_PROMPT),
+    );
+    assert_eq!(out["instructions"], json!(CODEX_PROMPT));
+    assert_eq!(
+        out["input"][0],
+        json!({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Be a pirate."}]})
+    );
+    let own = "  You are Codex, a coding agent.\nAnd more.";
+    let (out, _) = shaped(
+        json!({"instructions": own, "input": input.clone()}),
+        Some(CODEX_PROMPT),
+    );
+    assert_eq!(out["instructions"], json!(own));
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(1));
+    let (out, _) = shaped(json!({"instructions": " \n", "input": input.clone()}), Some(CODEX_PROMPT));
+    assert_eq!(out["instructions"], json!(CODEX_PROMPT));
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(1));
+    let (out, _) = shaped(json!({"instructions": "Be a pirate.", "input": input}), None);
+    assert_eq!(out["instructions"], json!("Be a pirate."));
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn long_call_id_hashed_to_64() {
+    let fits = "c".repeat(64);
+    assert_eq!(shape::bound_call_id(&fits), fits);
+    let long = format!(" {} ", "d".repeat(70));
+    let bound = shape::bound_call_id(&long);
+    assert_eq!(bound.len(), 64);
+    assert!(bound.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(bound, shape::bound_call_id(long.trim()));
+    assert_ne!(bound, shape::bound_call_id(&"d".repeat(71)));
+    let (out, _) = shaped(
+        json!({"input": [
+            {"role": "user", "content": "hi"},
+            {"type": "function_call", "call_id": long, "name": "f", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": long, "output": "ok"},
+            {"type": "tool_search_call", "call_id": long},
+            {"type": "message", "role": "user", "call_id": long, "content": "x"},
+        ]}),
+        None,
+    );
+    assert_eq!(out["input"][1]["call_id"], json!(bound));
+    assert_eq!(out["input"][2], json!({"type": "function_call_output", "call_id": bound, "output": "ok"}));
+    assert_eq!(out["input"][3]["call_id"], json!(bound));
+    assert_eq!(out["input"][4]["call_id"], json!(long));
+}
+
+#[test]
+fn orphan_output_becomes_note() {
+    let (out, _) = shaped(
+        json!({"input": [
+            {"type": "local_shell_call", "call_id": "sh", "action": {}},
+            {"type": "function_call_output", "call_id": "sh", "output": "paired"},
+            {"type": "custom_tool_call_output", "call_id": "gone", "name": "grep", "output": {"n": 1}, "id": "x"},
+            {"type": "local_shell_call_output", "call_id": " ", "output": "z"},
+            {"type": "function_call_output", "output": "notice", "id": "keep"},
+            {"type": "custom_tool_call_output", "call_id": null, "output": "notice"},
+        ]}),
+        None,
+    );
+    let input = out["input"].as_array().expect("input");
+    assert_eq!(input[1], json!({"type": "function_call_output", "call_id": "sh", "output": "paired"}));
+    assert_eq!(
+        input[2],
+        json!({"type": "message", "role": "assistant", "content": "[Previous grep result; call_id=gone]: {\"n\":1}"})
+    );
+    assert_eq!(
+        input[3],
+        json!({"type": "message", "role": "assistant", "content": "[Previous tool result; call_id=unknown]: z"})
+    );
+    assert_eq!(input[4], json!({"type": "function_call_output", "output": "notice", "id": "keep"}));
+    assert_eq!(input[5], json!({"type": "custom_tool_call_output", "call_id": null, "output": "notice"}));
+
+    let long = format!("{}é", "a".repeat(shape::MAX_NOTE - 1));
+    let note = shape::orphan_note(
+        json!({"output": long}).as_object().expect("object"),
+        "c",
+    );
+    let content = note["content"].as_str().expect("content");
+    let text = content.strip_prefix("[Previous tool result; call_id=c]: ").expect("prefix");
+    assert_eq!(text, format!("{}\n...[truncated]", "a".repeat(shape::MAX_NOTE - 1)));
+    let exact = "b".repeat(shape::MAX_NOTE);
+    let note = shape::orphan_note(json!({"output": exact}).as_object().expect("object"), "c");
+    assert!(note["content"].as_str().is_some_and(|content| content.ends_with(&exact)));
+    let note = shape::orphan_note(json!({"name": ""}).as_object().expect("object"), "c");
+    assert_eq!(note["content"], json!("[Previous tool result; call_id=c]: null"));
+}
+
+#[test]
+fn cache_key_sets_session_headers() {
+    let first = json!({"instructions": "sys", "input": [
+        {"role": "developer", "content": "d"},
+        {"content": "hi", "role": "user"},
+    ]});
+    let later = json!({"instructions": "sys", "input": [
+        {"content": "d", "role": "developer"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "more"},
+    ]});
+    let (one, headers) = shaped(first, None);
+    let (two, _) = shaped(later, None);
+    let key = one["prompt_cache_key"].as_str().expect("key").to_owned();
+    assert_eq!(two["prompt_cache_key"], json!(key));
+    let parts: Vec<usize> = key.split('-').map(str::len).collect();
+    assert_eq!(parts, vec![8, 4, 4, 4, 12]);
+    assert_eq!(
+        headers,
+        vec![
+            ("session-id".to_owned(), key.clone()),
+            ("thread-id".to_owned(), key.clone()),
+        ]
+    );
+    let (other, _) = shaped(json!({"instructions": "other", "input": [{"role": "user", "content": "hi"}]}), None);
+    assert_ne!(other["prompt_cache_key"], json!(key));
+    let (kept, headers) = shaped(json!({"prompt_cache_key": "mine", "input": [{"role": "user", "content": "hi"}]}), None);
+    assert_eq!(kept["prompt_cache_key"], json!("mine"));
+    assert_eq!(headers[0], ("session-id".to_owned(), "mine".to_owned()));
+    let (none, headers) = shaped(json!({"input": [{"role": "assistant", "content": "hi"}]}), None);
+    assert!(none.get("prompt_cache_key").is_none());
+    assert!(headers.is_empty());
+    assert_eq!(
+        shape::conversation_key("", &[json!({"role": "user", "b": 1, "a": [{"y": 1, "x": 2}]})]),
+        shape::conversation_key("", &[json!({"a": [{"x": 2, "y": 1}], "b": 1, "role": "user"})]),
+    );
+}
+
+#[test]
+fn replayed_search_declares_the_cached_tool() {
+    let cached = json!({"type": "web_search", "external_web_access": false});
+    let searched = json!([{"role": "user", "content": "q"}, {"type": "web_search_call", "id": "ws"}]);
+    let (out, _) = shaped(json!({"input": searched.clone()}), None);
+    assert_eq!(out["tools"], json!([cached.clone()]));
+    assert_eq!(out["tool_choice"], json!("none"));
+    let function = json!({"type": "function", "name": "f"});
+    let (out, _) = shaped(json!({"input": searched.clone(), "tools": [function.clone()]}), None);
+    assert_eq!(out["tools"], json!([function.clone(), cached.clone()]));
+    assert_eq!(out["tool_choice"], json!("auto"));
+    for declared in [
+        json!({"type": "web_search_preview"}),
+        json!({"type": "function", "name": "web.run"}),
+        json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "run"}]}),
+    ] {
+        let (out, _) = shaped(json!({"input": searched.clone(), "tools": [declared.clone()]}), None);
+        assert_eq!(out["tools"], json!([declared]));
+    }
+    assert!(!shape::declares_search(&[json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "open"}]})]));
+    let (out, _) = shaped(json!({"input": [{"role": "user", "content": "q"}]}), None);
+    assert!(out.get("tools").is_none());
+    let (out, _) = shaped(json!({"input": searched.clone(), "reasoning": {"context": "all_turns"}}), None);
+    assert!(out.get("tools").is_none());
+    assert_eq!(
+        out["input"][0],
+        json!({"type": "additional_tools", "role": "developer", "tools": [cached.clone()]})
+    );
+    let mut items = searched.as_array().expect("items").clone();
+    items.push(json!({"type": "additional_tools", "tools": [function.clone()]}));
+    let (out, _) = shaped(json!({"input": items}), None);
+    assert_eq!(out["input"][2]["tools"], json!([function, cached]));
+    assert_eq!(out["tool_choice"], json!("auto"));
+    assert!(out.get("tools").is_none());
+    let (out, _) = shaped(json!({"input": searched, "tools": "odd"}), None);
+    assert_eq!(out["tools"], json!("odd"));
+}
+
+#[test]
+fn shaped_request_goes_out_with_session_headers() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream_for(&host, &id).execute(streaming_request(), ProtocolId::OPENAI_RESPONSES))
+        .expect("execute");
+    let call = &host.http().calls()[0];
+    let body: Value = json::from_slice(call.body()).expect("json");
+    assert_eq!(body["instructions"], json!(CODEX_PROMPT));
+    assert!(body["prompt_cache_key"].as_str().is_some_and(|key| key.len() == 36));
+    assert_eq!(body["store"], json!(false));
+    for name in ["session-id", "thread-id"] {
+        assert!(call.sensitive_headers().iter().any(|header| header == name), "{name}");
+    }
+}
+
+const MODELS: &[u8] = br#"{"models":[
+ {"slug":"gpt-late","display_name":"Late","priority":5,"context_window":200000,"input_modalities":["text"],"base_instructions":"late prompt"},
+ {"slug":"gpt-5","display_name":"GPT-5","priority":1,"context_window":272000,"input_modalities":["text","image"],
+  "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"service_tiers":[{"id":"priority"}],
+  "base_instructions":"base","model_messages":{"instructions_template":"template prompt"}},
+ {"slug":"gpt-hidden","visibility":"hide","base_instructions":"hidden prompt"},
+ {"slug":""}
+]}"#;
+
+#[test]
+fn missing_prompt_asks_the_model_list_once() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    seed_prompts(&host, &[("other", "other prompt")]);
+    host.http().enqueue(MODELS.to_vec());
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    let upstream = upstream_for(&host, &id);
+    block_on(upstream.execute(streaming_request(), ProtocolId::OPENAI_RESPONSES)).expect("execute");
+    let calls = host.http().calls();
+    assert_eq!(calls[0].uri(), format!("{BASE}/models?client_version={}", crate::CODEX_VERSION));
+    assert!(calls[0].sensitive_headers().iter().any(|name| name == "authorization"));
+    let body: Value = json::from_slice(calls[1].body()).expect("json");
+    assert_eq!(body["instructions"], json!("template prompt"));
+    let kept: Value = json::from_slice(&std::fs::read(prompts_file(&host)).expect("file")).expect("json");
+    assert_eq!(
+        kept,
+        json!({"gpt-5": "template prompt", "gpt-late": "late prompt", "gpt-hidden": "hidden prompt", "other": "other prompt"})
+    );
+
+    let mut request = streaming_request();
+    request.model = "gpt-unknown".to_owned();
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream.execute(request.clone(), ProtocolId::OPENAI_RESPONSES)).expect("execute");
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream.execute(request, ProtocolId::OPENAI_RESPONSES)).expect("execute");
+    let uris: Vec<String> = host.http().calls().iter().map(|call| call.uri().to_owned()).collect();
+    assert_eq!(uris.iter().filter(|uri| uri.contains("/models")).count(), 1, "{uris:?}");
+    assert_eq!(uris.len(), 4);
+}
+
+#[test]
+fn list_models_reads_the_account_list() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    std::fs::remove_file(prompts_file(&host)).expect("remove");
+    let sub = subscription(&host);
+    host.http().enqueue(MODELS.to_vec());
+    let list = block_on(sub.list_models(&id, host.context())).expect("list");
+    let ids: Vec<&str> = list.models().iter().map(|model| model.id()).collect();
+    assert_eq!(ids, vec!["gpt-5", "gpt-late"]);
+    assert_eq!(list.dropped(), ["gpt-hidden".to_owned()]);
+    let first = &list.models()[0];
+    assert_eq!(first.display_name(), Some("GPT-5"));
+    assert_eq!(first.context(), 272_000);
+    assert_eq!(first.input_modalities(), ["text".to_owned(), "image".to_owned()]);
+    assert_eq!(first.efforts(), ["low".to_owned(), "high".to_owned()]);
+    assert_eq!(first.service_tiers(), ["priority".to_owned()]);
+    assert_eq!(list.models()[1].input_modalities(), ["text".to_owned()]);
+    let kept: Value = json::from_slice(&std::fs::read(prompts_file(&host)).expect("file")).expect("json");
+    assert_eq!(kept["gpt-5"], json!("template prompt"));
+
+    host.http().enqueue_response(403, &[], b"{}".to_vec());
+    let error = block_on(sub.list_models(&id, host.context())).expect_err("403");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    host.http().enqueue_response(502, &[], b"{}".to_vec());
+    let error = block_on(sub.list_models(&id, host.context())).expect_err("502");
+    assert_eq!(error.status(), Some(502));
+    host.http().enqueue(br#"{"models":[]}"#.to_vec());
+    let error = block_on(sub.list_models(&id, host.context())).expect_err("empty");
+    assert_eq!(error.kind(), PluginErrorKind::Decode);
+    host.http().enqueue(b"nope".to_vec());
+    let error = block_on(sub.list_models(&id, host.context())).expect_err("not json");
+    assert_eq!(error.kind(), PluginErrorKind::Decode);
+}
+
+#[test]
+fn a_missing_prompt_is_asked_for_once_per_ten_minutes_per_account() {
+    let prompts = models::Prompts::default();
+    let one = AccountId::from_static("a-0000000000000001");
+    let two = AccountId::from_static("a-0000000000000002");
+    let at = Duration::from_secs(1_000);
+    assert!(prompts.may_ask(&one, at));
+    assert!(!prompts.may_ask(&one, at));
+    assert!(prompts.may_ask(&two, at));
+    assert!(!prompts.may_ask(&one, at + models::ASK_AGAIN - Duration::from_secs(1)));
+    assert!(prompts.may_ask(&one, at + models::ASK_AGAIN));
+    assert!(!prompts.may_ask(&one, at + models::ASK_AGAIN));
+    assert_eq!(models::ASK_AGAIN, Duration::from_secs(600));
 }

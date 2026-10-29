@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Codex subscription (`plugins/subscriptions/codex`): requests are shaped as
+  Codex CLI sends them (stream only, `store: false`, no sampling or output
+  caps, ids and item references dropped, call ids over 64 characters hashed,
+  orphan tool outputs told as notes, `system` items sent as `developer`, a
+  cached `web_search` tool declared for replayed searches, encrypted reasoning
+  included) with `session-id` and `thread-id` headers naming the
+  conversation. Each model's own instructions come from `/codex/models`,
+  cached in `codex-prompts.json` and fetched at most every 10 minutes per
+  account; the client's instructions ride first as a developer message.
+  `list_models` reads `/codex/models`.
+- SDK: `wire::Target::rewrite` (`wire::Rewrite`), a hook that edits a JSON
+  request body after encoding and adds headers to the call.
+
 - Amazon Bedrock Mantle plugin `bedrock-mantle`
   (`plugins/providers/bedrock-mantle`): preset `bedrock-mantle` moved out of
   the built-in catalog, unchanged (17 regions), and now builds this plugin.

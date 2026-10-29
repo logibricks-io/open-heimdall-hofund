@@ -17,6 +17,8 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, constant_time_eq, new_state};
 
+mod models;
+mod shape;
 mod sign_in;
 mod tokens;
 mod upstream;
@@ -127,6 +129,7 @@ impl SubscriptionFactory for CodexFactory {
             endpoints: Arc::clone(&self.endpoints),
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
+            prompts: Arc::default(),
         }))
     }
 }
@@ -143,6 +146,8 @@ struct Codex {
     flow: SignInFlow,
     /// Sign-ins in progress, by session id.
     pending: Mutex<HashMap<String, Pending>>,
+    /// The instructions each model is sent with.
+    prompts: Arc<models::Prompts>,
 }
 
 impl Codex {
@@ -288,12 +293,11 @@ impl Subscription for Codex {
 
     async fn list_models(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        Err(PluginError::unsupported(
-            "the ChatGPT model list is not read yet",
-        ))
+        let access = tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
+        models::list(host, &self.endpoints, &access, &self.prompts).await
     }
 
     fn upstream(
@@ -305,6 +309,7 @@ impl Subscription for Codex {
             account.clone(),
             host.clone(),
             Arc::clone(&self.endpoints),
+            Arc::clone(&self.prompts),
         )))
     }
 }
