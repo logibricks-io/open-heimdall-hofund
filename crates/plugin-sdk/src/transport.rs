@@ -220,6 +220,23 @@ impl Call {
         classify(status, retry_after, body)
     }
 
+    /// Sends the call once and returns the reply whatever its status.
+    ///
+    /// For an OAuth token endpoint, whose refusals carry an error code that
+    /// [`token_error`](crate::oauth::token_error) reads. The body of a
+    /// refusal can carry an `error_description`; do not log it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when a header is invalid, the host client
+    /// fails, or the body cannot be read.
+    pub async fn fetch(self, http: &HttpHandle) -> Result<Reply, PluginError> {
+        let request = self.request()?;
+        let response = http.send(request).await?;
+        let (status, _, body) = read_body(response).await?;
+        Ok(Reply { status, body })
+    }
+
     /// Sends the call up to `attempts` times, including the first try.
     ///
     /// The cap is three attempts. [`PluginErrorKind::Connect`] is retried for

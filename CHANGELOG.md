@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ChatGPT (Codex) subscription plugin `codex`
+  (`hofund-plugin-subscription-codex`, registry feature `codex`, on by
+  default): browser sign-in with PKCE on the loopback port 1455 Codex CLI is
+  registered with, requiring ID, access, and refresh tokens; the account id
+  comes from the ID token's `sub` and ChatGPT account, so signing in again
+  replaces the account; the label is the email plus the workspace kind for a
+  shared plan. The access token is refreshed 5 minutes before its `exp`
+  under the account lease, rechecked after the lease is taken, and run as a
+  detached job so a cancelled request still stores the rotated token; a
+  refused refresh marks the account as needing a new sign-in. The upstream
+  posts streaming Responses calls to the ChatGPT Codex backend with Codex
+  CLI's headers, drops the sampling and storage keys the backend refuses,
+  and retries a `token_expired` 401 once after a forced refresh. Quota and
+  the model list land with H2.
+- SDK: `oauth::code_exchange_form`, `oauth::SecretObject` (a JSON account
+  blob whose `Debug` shows field names only), `oauth::same_secret` and
+  `oauth::constant_time_eq`, `oauth::detached` (a one-shot job its caller
+  cannot cancel), and `transport::Call::fetch` (one send, any status).
+  `RecordingHttp::enqueue_response` scripts a status and headers, and the
+  subscription kit gains `block_on`, `join_all`, `poll_once`, and
+  `yield_times`.
+
 - `hofund subscription` commands: `list [--json]`, `sign-in <id> [--host H]
   [--label L]`, `sign-out <id> <account>`, `refresh <id> [<account>]`, and
   `quota [<id>] [--json]`. Sign-in never opens a browser: it prints the

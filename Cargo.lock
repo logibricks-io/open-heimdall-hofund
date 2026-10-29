@@ -1820,7 +1820,9 @@ dependencies = [
 name = "hofund-kit-subscription"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "hofund-plugin-host",
+ "tokio",
 ]
 
 [[package]]
@@ -1907,6 +1909,7 @@ dependencies = [
  "hofund-plugin-registry",
  "hofund-plugin-relay",
  "hofund-plugin-sdk",
+ "hofund-plugin-subscription-codex",
  "hofund-provider",
  "hofund-quirks",
  "serde",
@@ -1947,6 +1950,16 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-codex"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
 ]
 
 [[package]]

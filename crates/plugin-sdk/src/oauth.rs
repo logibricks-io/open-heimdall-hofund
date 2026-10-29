@@ -2,10 +2,14 @@
 //!
 //! [`parse_access_token`] and [`refresh_form`] cover a provider that trades a
 //! refresh token or a signed JWT. [`Pkce`], [`new_state`], and
-//! [`authorize_url`] build a browser sign-in; the kernel's loopback listener
+//! [`authorize_url`] build a browser sign-in and [`code_exchange_form`]
+//! trades its code; the kernel's loopback listener
 //! checks the callback. [`device`] runs an RFC 8628 device sign-in.
 //! [`TokenSet`], [`TokenCache`], [`token_error`], and [`account_id_from`] are
-//! what a subscription plugin keeps per account. Error text is a fixed
+//! what a subscription plugin keeps per account. [`SecretObject`] stores an
+//! account's tokens as JSON in its secret and builds JSON token requests,
+//! [`same_secret`] and [`constant_time_eq`] compare tokens and `state`, and
+//! [`detached`] runs a refresh that outlives its caller. Error text is a fixed
 //! sentence or a standard error code. The response body is never copied into
 //! it. Vertex keeps its own cache for now.
 
@@ -18,14 +22,18 @@ use serde_json::Value;
 mod account;
 mod cache;
 mod clock;
+mod detached;
 pub mod device;
+mod object;
 mod pkce;
 mod token;
 
 pub use account::account_id_from;
 pub use cache::{NEGATIVE_TTL, TokenCache};
 pub use clock::Clock;
-pub use pkce::{Pkce, authorize_url, new_state};
+pub use detached::detached;
+pub use object::{SecretObject, constant_time_eq, same_secret};
+pub use pkce::{Pkce, authorize_url, code_exchange_form, new_state};
 pub use token::{TokenSet, parse_token_set, token_error, unverified_claims};
 
 const DEFAULT_EXPIRES_SECS: u64 = 3600;

@@ -638,6 +638,11 @@ impl RecordedRequest {
 
 enum Scripted {
     Body(Vec<u8>),
+    Response {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
     Connect(String),
     Timeout(String),
 }
@@ -653,6 +658,27 @@ impl RecordingHttp {
     /// Queues a 200 body. The next `send` pops it. An empty queue replies with `ok`.
     pub fn enqueue(&self, body: impl Into<Vec<u8>>) {
         self.push(Scripted::Body(body.into()));
+    }
+
+    /// Queues a reply with `status`, `headers`, and `body`.
+    ///
+    /// # Panics
+    ///
+    /// The next `send` panics when `status` or a header is not valid HTTP.
+    pub fn enqueue_response(
+        &self,
+        status: u16,
+        headers: &[(&str, &str)],
+        body: impl Into<Vec<u8>>,
+    ) {
+        self.push(Scripted::Response {
+            status,
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            body: body.into(),
+        });
     }
 
     /// The next `send` fails as [`PluginErrorKind::Connect`](hofund_plugin_api::PluginErrorKind::Connect).
@@ -706,6 +732,19 @@ impl HttpBackend for RecordingHttp {
             Some(Scripted::Connect(message)) => Err(PluginError::connect(message)),
             Some(Scripted::Timeout(message)) => Err(PluginError::timeout(message)),
             Some(Scripted::Body(body)) => Ok(HttpResponse::new(BodyStream::from_bytes(body))),
+            Some(Scripted::Response {
+                status,
+                headers,
+                body,
+            }) => {
+                let mut builder = HttpResponse::builder().status(status);
+                for (name, value) in headers {
+                    builder = builder.header(name, value);
+                }
+                Ok(builder
+                    .body(BodyStream::from_bytes(body))
+                    .expect("scripted response is valid HTTP"))
+            }
             None => Ok(HttpResponse::new(BodyStream::from_bytes(b"ok".to_vec()))),
         }
     }
@@ -1227,6 +1266,40 @@ mod tests {
         );
         assert!(host.auth().accepted());
         let _ = SystemClock.monotonic();
+    }
+
+    #[tokio::test]
+    async fn scripted_response_keeps_status_headers_and_body() {
+        let root = root();
+        let host = super::TestHost::open(plugin(), root.to_path_buf());
+        host.http()
+            .enqueue_response(401, &[("retry-after", "7")], b"denied".to_vec());
+        let send = || {
+            host.context().http().send(
+                hofund_plugin_api::kernel::HttpRequest::builder()
+                    .uri("https://example.test/v1")
+                    .body(hofund_plugin_api::Body::from_bytes(b"".as_slice()))
+                    .expect("request"),
+            )
+        };
+        let response = send().await.expect("send");
+        assert_eq!(response.status().as_u16(), 401);
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("7")
+        );
+        let chunk = response
+            .into_body()
+            .next_chunk()
+            .await
+            .expect("chunk")
+            .expect("bytes");
+        assert_eq!(&chunk[..], b"denied");
+        let fallback = send().await.expect("send");
+        assert_eq!(fallback.status().as_u16(), 200);
     }
 
     #[tokio::test]
