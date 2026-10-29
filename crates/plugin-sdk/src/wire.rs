@@ -1,9 +1,10 @@
-//! Chat Completions, Responses, and Messages calls on the host's HTTP handle.
+//! Chat Completions, Responses, Messages, and Generative Language calls on the
+//! host's HTTP handle.
 //!
 //! [`execute`] encodes a [`Request`] for the target protocol, posts it with
-//! [`Call`], and returns a [`Completion`]. [`count_input`] asks a Messages
-//! upstream to count the input tokens of a request. Both mirror the builtin
-//! adapters' transport step for step:
+//! [`Call`], and returns a [`Completion`]. [`count_input`] asks a Messages or
+//! Generative Language upstream to count the input tokens of a request. Both
+//! mirror the builtin adapters' transport step for step:
 //!
 //! - Quirks are applied first. When the inbound protocol differs from the
 //!   target, unmapped tools are logged once per name, the billing line is
@@ -12,6 +13,11 @@
 //!   protocol cannot carry.
 //! - A Messages call carries the protocol version header, which a configured
 //!   header of the same name replaces.
+//! - A Generative Language call names the model in the path:
+//!   `{base}/models/{model}:generateContent`, or
+//!   `{base}/models/{model}:streamGenerateContent?alt=sse` for a stream. A
+//!   leading `models/` is dropped and the rest is one escaped path segment. An
+//!   empty model is status 400 before anything is sent.
 //! - The call is a JSON `POST`. Only a connect failure is retried, once, so a
 //!   body that may have been written is never replayed.
 //! - A status outside 2xx keeps its status and `Retry-After`. Its message is the
@@ -29,8 +35,8 @@ use std::sync::{Mutex, OnceLock};
 
 use bytes::Bytes;
 use hofund_codec::{
-    AnthropicMessages, Codec, CodecError, OpenAiChat, OpenAiResponses, StreamDecoder,
-    UNMAPPED_TOOLS,
+    AnthropicMessages, Codec, CodecError, GenerativeLanguage, OpenAiChat, OpenAiResponses,
+    StreamDecoder, UNMAPPED_TOOLS,
 };
 use hofund_plugin_api::{
     BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle, PluginError,
@@ -50,6 +56,23 @@ const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
 const VERSION_HEADER: (&str, &str) = ("anthropic-version", "2023-06-01");
 
 type Prepare = fn(&[u8]) -> Result<Vec<u8>, CodecError>;
+
+/// Where a protocol's calls go under the base URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Path {
+    /// One path for every call.
+    Fixed(&'static str),
+    /// `models/{model}:{method}`, the Generative Language form.
+    Model,
+}
+
+/// The Generative Language method a call names.
+#[derive(Clone, Copy, Debug)]
+enum Method {
+    Generate,
+    Stream,
+    Count,
+}
 
 /// Where and how [`execute`] sends a call. [`Debug`] omits header values.
 #[derive(Clone)]
@@ -119,9 +142,9 @@ impl fmt::Debug for Target {
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] when the protocol is not Chat Completions or
-/// Responses, the request cannot be encoded, the call fails, the upstream
-/// answers outside 2xx, or the body cannot be decoded.
+/// Returns [`PluginError`] when the protocol has no SDK transport, the model
+/// or request cannot be encoded, the call fails, the upstream answers outside
+/// 2xx, or the body cannot be decoded.
 pub async fn execute(
     http: &HttpHandle,
     target: &Target,
@@ -132,8 +155,13 @@ pub async fn execute(
     let (codec, prepare, path) = route(target.protocol)?;
     let cross_protocol = codec.id() != inbound.as_str();
     let streaming = request.stream;
+    let method = if streaming {
+        Method::Stream
+    } else {
+        Method::Generate
+    };
+    let url = url_for(&target.base_url, path, &request.model, method)?;
     let body = prepare_body(target, codec, request, prepare, inbound)?;
-    let url = format!("{}/{path}", target.base_url.trim_end_matches('/'));
     let response = call(target, codec, secret, url)?
         .header("content-type", "application/json")
         .bytes(body)
@@ -150,18 +178,21 @@ pub async fn execute(
     }
 }
 
-/// Counts the input tokens of `request` on a Messages target.
+/// Counts the input tokens of `request` on a Messages or Generative Language
+/// target.
 ///
-/// The request is encoded as for [`execute`] without streaming, `max_tokens`
-/// is removed, and the body is posted to `{base}/v1/messages/count_tokens`.
-/// Status 404, 405, or 501, or a 400 that says the endpoint is not supported,
-/// is [`CountOutcome::Unsupported`].
+/// The request is encoded as for [`execute`] without streaming. On Messages,
+/// `max_tokens` is removed and the body is posted to
+/// `{base}/v1/messages/count_tokens`, which answers `input_tokens`. On
+/// Generative Language it is posted to `{base}/models/{model}:countTokens`,
+/// which answers `totalTokens`. Status 404, 405, or 501, or a 400 that says the
+/// endpoint is not supported, is [`CountOutcome::Unsupported`].
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] when the target is not Messages, the request cannot
-/// be encoded, the call fails, the upstream answers with another status
-/// outside 2xx, or a 2xx body has no `input_tokens`.
+/// Returns [`PluginError`] when the target is neither protocol, the model or
+/// request cannot be encoded, the call fails, the upstream answers with another
+/// status outside 2xx, or a 2xx body has no token count.
 pub async fn count_input(
     http: &HttpHandle,
     target: &Target,
@@ -169,19 +200,29 @@ pub async fn count_input(
     mut request: Request,
     inbound: ProtocolId,
 ) -> Result<CountOutcome, PluginError> {
-    if target.protocol != ProtocolId::ANTHROPIC_MESSAGES {
-        return Err(PluginError::unsupported(format!(
-            "protocol `{}` has no SDK count transport",
-            target.protocol.as_str()
-        )));
-    }
+    let field = match target.protocol {
+        ProtocolId::ANTHROPIC_MESSAGES => "input_tokens",
+        ProtocolId::GENERATIVE_LANGUAGE => "totalTokens",
+        other => {
+            return Err(PluginError::unsupported(format!(
+                "protocol `{}` has no SDK count transport",
+                other.as_str()
+            )));
+        }
+    };
     let (codec, prepare, path) = route(target.protocol)?;
     request.stream = false;
-    let body = omit_max_tokens(prepare_body(target, codec, request, prepare, inbound)?);
-    let url = format!(
-        "{}/{path}/count_tokens",
-        target.base_url.trim_end_matches('/')
-    );
+    let url = match path {
+        Path::Fixed(path) => format!(
+            "{}/{path}/count_tokens",
+            target.base_url.trim_end_matches('/')
+        ),
+        Path::Model => url_for(&target.base_url, path, &request.model, Method::Count)?,
+    };
+    let mut body = prepare_body(target, codec, request, prepare, inbound)?;
+    if field == "input_tokens" {
+        body = omit_max_tokens(body);
+    }
     let mut response = call(target, codec, secret, url)?
         .header("content-type", "application/json")
         .bytes(body)
@@ -202,30 +243,83 @@ pub async fn count_input(
             }
         }
     }
-    classify_count(status, retry_after, &bytes)
+    classify_count(status, retry_after, &bytes, field)
 }
 
 /// The codec, body finisher, and path for a protocol this module sends.
-fn route(
-    protocol: ProtocolId,
-) -> Result<(&'static dyn Codec, Option<Prepare>, &'static str), PluginError> {
+fn route(protocol: ProtocolId) -> Result<(&'static dyn Codec, Option<Prepare>, Path), PluginError> {
     match protocol {
         ProtocolId::OPENAI_CHAT => Ok((
             &OpenAiChat,
             Some(OpenAiChat::prepare_upstream_body),
-            "chat/completions",
+            Path::Fixed("chat/completions"),
         )),
         ProtocolId::OPENAI_RESPONSES => Ok((
             &OpenAiResponses,
             Some(OpenAiResponses::prepare_upstream_body),
-            "responses",
+            Path::Fixed("responses"),
         )),
-        ProtocolId::ANTHROPIC_MESSAGES => Ok((&AnthropicMessages, None, "v1/messages")),
+        ProtocolId::ANTHROPIC_MESSAGES => {
+            Ok((&AnthropicMessages, None, Path::Fixed("v1/messages")))
+        }
+        ProtocolId::GENERATIVE_LANGUAGE => Ok((
+            &GenerativeLanguage,
+            Some(GenerativeLanguage::prepare_upstream_body),
+            Path::Model,
+        )),
         other => Err(PluginError::unsupported(format!(
             "protocol `{}` has no SDK transport",
             other.as_str()
         ))),
     }
+}
+
+/// The URL a call posts to.
+fn url_for(base: &str, path: Path, model: &str, method: Method) -> Result<String, PluginError> {
+    let base = base.trim_end_matches('/');
+    match path {
+        Path::Fixed(path) => Ok(format!("{base}/{path}")),
+        Path::Model => {
+            let model = model_segment(model)?;
+            Ok(match method {
+                Method::Generate => format!("{base}/models/{model}:generateContent"),
+                Method::Stream => format!("{base}/models/{model}:streamGenerateContent?alt=sse"),
+                Method::Count => format!("{base}/models/{model}:countTokens"),
+            })
+        }
+    }
+}
+
+/// The model as one escaped path segment, without a leading `models/`.
+fn model_segment(model: &str) -> Result<String, PluginError> {
+    let trimmed = model.trim();
+    let model = trimmed.strip_prefix("models/").unwrap_or(trimmed);
+    if model.is_empty() {
+        return Err(PluginError::status_error(400, "model is empty"));
+    }
+    Ok(path_segment(model))
+}
+
+/// Percent-encoding for one URL path segment. Unreserved characters and
+/// `$&+:=@` stay literal, so a tag keeps its colon and a slash is escaped.
+fn path_segment(text: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'_' | b'.' | b'~' | b'$' | b'&' | b'+' | b':' | b'=' | b'@'
+            )
+        {
+            out.push(char::from(byte));
+        } else {
+            out.push('%');
+            out.push(char::from(HEX[usize::from(byte >> 4)]));
+            out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    out
 }
 
 fn call(
@@ -289,6 +383,7 @@ fn classify_count(
     status: u16,
     retry_after: Option<std::time::Duration>,
     bytes: &[u8],
+    field: &str,
 ) -> Result<CountOutcome, PluginError> {
     if status == 404
         || status == 405
@@ -301,9 +396,9 @@ fn classify_count(
         let value: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|error| PluginError::decode(error.to_string()))?;
         let tokens = value
-            .get("input_tokens")
+            .get(field)
             .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| PluginError::decode("count response has no input_tokens"))?;
+            .ok_or_else(|| PluginError::decode(format!("count response has no {field}")))?;
         return Ok(CountOutcome::Counted(tokens));
     }
     Err(status_failure(status, retry_after, bytes))
@@ -635,12 +730,12 @@ fn is_key_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hofund_codec::{AnthropicMessages, Codec};
+    use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage};
     use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
 
     use super::{
-        Target, classify_count, consume_fields, endpoint_unsupported, failure_of, message_from,
-        omit_max_tokens, route, strip_billing_header,
+        Method, Path, Target, classify_count, consume_fields, endpoint_unsupported, failure_of,
+        message_from, omit_max_tokens, path_segment, route, strip_billing_header, url_for,
     };
     use hofund_plugin_api::CountOutcome;
 
@@ -760,17 +855,61 @@ mod tests {
         let (codec, prepare, path) = route(ProtocolId::ANTHROPIC_MESSAGES).expect("messages");
         assert_eq!(codec.id(), AnthropicMessages.id());
         assert!(prepare.is_none());
-        assert_eq!(path, "v1/messages");
+        assert_eq!(path, Path::Fixed("v1/messages"));
         let (_, prepare, path) = route(ProtocolId::OPENAI_CHAT).expect("chat");
         assert!(prepare.is_some());
-        assert_eq!(path, "chat/completions");
+        assert_eq!(path, Path::Fixed("chat/completions"));
         let (_, prepare, path) = route(ProtocolId::OPENAI_RESPONSES).expect("responses");
         assert!(prepare.is_some());
-        assert_eq!(path, "responses");
-        let Err(error) = route(ProtocolId::GENERATIVE_LANGUAGE) else {
-            panic!("generative has no SDK transport");
+        assert_eq!(path, Path::Fixed("responses"));
+        let (codec, prepare, path) = route(ProtocolId::GENERATIVE_LANGUAGE).expect("generative");
+        assert_eq!(codec.id(), GenerativeLanguage.id());
+        assert!(prepare.is_some());
+        assert_eq!(path, Path::Model);
+        let Err(error) = route(ProtocolId::BEDROCK_CONVERSE) else {
+            panic!("converse has no SDK transport yet");
         };
         assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn generative_urls_name_the_model_and_method() {
+        let base = "https://gl.example/v1beta/";
+        let cases = [
+            (
+                Method::Generate,
+                "https://gl.example/v1beta/models/gem-1:generateContent",
+            ),
+            (
+                Method::Stream,
+                "https://gl.example/v1beta/models/gem-1:streamGenerateContent?alt=sse",
+            ),
+            (
+                Method::Count,
+                "https://gl.example/v1beta/models/gem-1:countTokens",
+            ),
+        ];
+        for (method, want) in cases {
+            let url = url_for(base, Path::Model, " models/gem-1 ", method).expect("url");
+            assert_eq!(url, want, "{method:?}");
+        }
+        let fixed = url_for(base, Path::Fixed("responses"), "", Method::Generate).expect("fixed");
+        assert_eq!(fixed, "https://gl.example/v1beta/responses");
+        let escaped =
+            url_for(base, Path::Model, "a/b c:tag$&+=@~é", Method::Generate).expect("escaped");
+        assert_eq!(
+            escaped,
+            "https://gl.example/v1beta/models/a%2Fb%20c:tag$&+=@~%C3%A9:generateContent"
+        );
+        assert_eq!(path_segment("Az09-_.~"), "Az09-_.~");
+        assert_eq!(path_segment("?#%"), "%3F%23%25");
+        for model in ["", "  ", "models/", " models/ "] {
+            let Err(error) = url_for(base, Path::Model, model, Method::Count) else {
+                panic!("empty model {model:?}");
+            };
+            assert_eq!(error.status(), Some(400), "{model:?}");
+            assert_eq!(error.message(), "model is empty");
+        }
     }
 
     #[test]
@@ -784,35 +923,53 @@ mod tests {
 
     #[test]
     fn count_statuses_are_classified() {
-        let counted = classify_count(200, None, br#"{"input_tokens":12}"#).expect("counted");
+        let counted =
+            classify_count(200, None, br#"{"input_tokens":12}"#, "input_tokens").expect("counted");
         assert!(matches!(counted, CountOutcome::Counted(12)), "{counted:?}");
         for status in [404, 405, 501] {
-            let outcome = classify_count(status, None, b"").expect("unsupported");
+            let outcome = classify_count(status, None, b"", "input_tokens").expect("unsupported");
             assert!(matches!(outcome, CountOutcome::Unsupported), "{status}");
         }
-        let missing = classify_count(400, None, br#"{"error":{"message":"Not supported"}}"#)
-            .expect("unsupported");
+        let missing = classify_count(
+            400,
+            None,
+            br#"{"error":{"message":"Not supported"}}"#,
+            "input_tokens",
+        )
+        .expect("unsupported");
         assert!(matches!(missing, CountOutcome::Unsupported));
-        let Err(rejected) = classify_count(400, None, br#"{"error":{"message":"bad tool"}}"#)
-        else {
+        let Err(rejected) = classify_count(
+            400,
+            None,
+            br#"{"error":{"message":"bad tool"}}"#,
+            "input_tokens",
+        ) else {
             panic!("a request rejection stays an error");
         };
         assert_eq!(rejected.status(), Some(400));
         let after = std::time::Duration::from_secs(4);
-        let Err(limited) = classify_count(429, Some(after), b"slow") else {
+        let Err(limited) = classify_count(429, Some(after), b"slow", "input_tokens") else {
             panic!("429 is an error");
         };
         assert_eq!(limited.retry_after(), Some(after));
-        let Err(quota) = classify_count(429, None, b"monthly quota exhausted") else {
+        let Err(quota) = classify_count(429, None, b"monthly quota exhausted", "input_tokens")
+        else {
             panic!("quota is an error");
         };
         assert_eq!(quota.kind(), PluginErrorKind::Quota);
         for body in [&br#"{"tokens":1}"#[..], b"ok"] {
-            let Err(error) = classify_count(201, None, body) else {
+            let Err(error) = classify_count(201, None, body, "input_tokens") else {
                 panic!("no input_tokens");
             };
             assert_eq!(error.kind(), PluginErrorKind::Decode);
         }
+        let total =
+            classify_count(200, None, br#"{"totalTokens":7}"#, "totalTokens").expect("total");
+        assert!(matches!(total, CountOutcome::Counted(7)), "{total:?}");
+        let Err(wrong) = classify_count(200, None, br#"{"input_tokens":7}"#, "totalTokens") else {
+            panic!("the field is per protocol");
+        };
+        assert_eq!(wrong.message(), "count response has no totalTokens");
     }
 
     #[test]

@@ -5,9 +5,9 @@
 //! A status of 400 or higher becomes [`PluginErrorKind::Status`].
 //!
 //! `HttpHandle::send` streams a 2xx body. [`Call::send`] reads the whole body,
-//! and [`Call::open`] returns a 2xx body unread. The Chat and Responses
-//! transport is [`crate::wire`]. Messages, Generative, and Converse move into
-//! the SDK later.
+//! and [`Call::open`] returns a 2xx body unread. The Chat, Responses,
+//! Messages, and Generative Language transport is [`crate::wire`]. Converse
+//! moves into the SDK later.
 //!
 //! [`Call::send_with_retry`] retries at most three times. [`PluginErrorKind::Connect`]
 //! (the request was not sent) is retried for every method. [`PluginErrorKind::Timeout`]

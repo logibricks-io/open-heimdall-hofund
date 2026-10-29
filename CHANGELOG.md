@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SDK Generative Language transport: `hofund_plugin_sdk::wire::execute`
+  posts a Generative Language target to `{base}/models/{model}:generateContent`,
+  or `:streamGenerateContent?alt=sse` for a stream, with a leading `models/`
+  dropped and the model escaped as one path segment; an empty model is status
+  400 and sends nothing. `wire::count_input` posts to
+  `{base}/models/{model}:countTokens` and reads `totalTokens`. The builtin
+  `generative` factory now sends `execute` and `count_input` through the SDK
+  on the host HTTP client, at the base the adapter normalized. Requests,
+  credentials (`x-goog-api-key` by default), and outcomes match the adapter,
+  checked by a differential test.
 - Azure OpenAI plugin `azure` (`plugins/providers/azure`): preset `azure` now
   builds this plugin instead of the kernel adapter. Chat and Responses send
   `api-key` and list the resource's deployments, then fall back to base models
