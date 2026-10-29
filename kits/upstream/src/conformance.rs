@@ -11,6 +11,10 @@ use wiremock::matchers::{method, path, query_param};
 use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const MODEL: &str = "conformance-model";
+/// The data-plane deployment list under the loopback root.
+const DEPLOYMENTS_PATH: &str = "/deployments";
+/// The data plane's deployment-list `api-version`.
+const DEPLOYMENTS_VERSION: &str = "2022-12-01";
 
 /// Checks model listing and, for a live factory, one minimal probe.
 ///
@@ -25,8 +29,7 @@ const MODEL: &str = "conformance-model";
 /// partial result at 20 pages. Other live wires use `after_id` and reject that
 /// partial result. A catalog must return rows without dialing. Unsupported and
 /// unknown future list kinds must return [`PluginErrorKind::Unsupported`].
-/// `Deployments` is an instance-level result on a live factory spec, so it is
-/// covered by preset-aware host tests rather than this factory-only helper.
+/// A `Deployments` spec gets [`check_deployments`].
 ///
 /// # Panics
 ///
@@ -48,7 +51,10 @@ pub async fn check_list_and_probe(
             }
         }
         ListKind::Catalog => check_catalog(factory, &raw_for_base, api_key, scratch).await,
-        ListKind::Deployments | ListKind::Unsupported | _ => {
+        ListKind::Deployments => {
+            check_deployments(factory, &raw_for_base, protocol, api_key, scratch).await;
+        }
+        ListKind::Unsupported | _ => {
             check_unsupported(factory, &raw_for_base, api_key, scratch).await;
         }
     }
@@ -262,6 +268,133 @@ async fn minimal_probe(
     assert_eq!(requests.len(), 1);
     let body: Value = serde_json::from_slice(&requests[0].body).expect("probe JSON");
     assert!(has_16_token_limit(&body), "probe body has no 16-token cap");
+    finish(provider);
+    server.verify().await;
+}
+
+/// Runs the deployment-list cases and the minimal probe against `factory`,
+/// whatever its spec's bound: a `Live`-spec factory may resolve an instance
+/// to `Deployments` (Azure on Chat or Responses), which
+/// [`check_list_and_probe`] cannot see from the spec alone.
+///
+/// The list is `{root}/deployments?api-version=2022-12-01`, `root` being the
+/// base without its `/v1`, paged with `after_id`; a refused list falls back
+/// to `{base}/models`, labelled as base models; both lists empty is an error.
+///
+/// # Panics
+///
+/// Panics when a case does not hold.
+pub async fn check_deployments(
+    factory: &dyn DynUpstreamFactory,
+    raw_for_base: impl Fn(&str) -> RawTable,
+    protocol: ProtocolId,
+    api_key: &str,
+    scratch: &std::path::Path,
+) {
+    deployment_pages(factory, &raw_for_base, api_key, scratch).await;
+    base_model_fallback(factory, &raw_for_base, api_key, scratch).await;
+    no_deployments(factory, &raw_for_base, api_key, scratch).await;
+    minimal_probe(factory, &raw_for_base, protocol, api_key, scratch).await;
+}
+
+async fn deployment_pages(
+    factory: &dyn DynUpstreamFactory,
+    raw_for_base: &impl Fn(&str) -> RawTable,
+    api_key: &str,
+    scratch: &std::path::Path,
+) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(DEPLOYMENTS_PATH))
+        .and(query_param("api-version", DEPLOYMENTS_VERSION))
+        .and(NoAfterId)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "deployment-1", "model": "model-1"}],
+            "has_more": true,
+            "last_id": "deployment-1"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(DEPLOYMENTS_PATH))
+        .and(query_param("api-version", DEPLOYMENTS_VERSION))
+        .and(query_param("after_id", "deployment-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "deployment-2", "model": "model-2"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = build(factory, raw_for_base, &server, api_key, false, scratch);
+    let listed = provider
+        .list_models(&ListQuery::new())
+        .await
+        .expect("deployment list");
+    let ids: Vec<&str> = listed.models().iter().map(|model| model.id()).collect();
+    assert_eq!(ids, ["deployment-1", "deployment-2"]);
+    assert_eq!(listed.kind(), ListKind::Deployments);
+    assert!(!listed.base_model_fallback());
+    assert_eq!(request_count(&server).await, 2);
+    finish(provider);
+    server.verify().await;
+}
+
+async fn base_model_fallback(
+    factory: &dyn DynUpstreamFactory,
+    raw_for_base: &impl Fn(&str) -> RawTable,
+    api_key: &str,
+    scratch: &std::path::Path,
+) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(DEPLOYMENTS_PATH))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(list_path(false)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "base-model"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = build(factory, raw_for_base, &server, api_key, false, scratch);
+    let listed = provider
+        .list_models(&ListQuery::new())
+        .await
+        .expect("base-model fallback");
+    assert_eq!(listed.models().len(), 1);
+    assert_eq!(listed.models()[0].id(), "base-model");
+    assert_eq!(listed.kind(), ListKind::Deployments);
+    assert!(listed.base_model_fallback());
+    finish(provider);
+    server.verify().await;
+}
+
+async fn no_deployments(
+    factory: &dyn DynUpstreamFactory,
+    raw_for_base: &impl Fn(&str) -> RawTable,
+    api_key: &str,
+    scratch: &std::path::Path,
+) {
+    let server = MockServer::start().await;
+    for list in [DEPLOYMENTS_PATH, list_path(false)] {
+        Mock::given(method("GET"))
+            .and(path(list))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let provider = build(factory, raw_for_base, &server, api_key, false, scratch);
+    let error = provider
+        .list_models(&ListQuery::new())
+        .await
+        .expect_err("empty deployment and base-model lists must fail");
+    assert!(error.to_string().contains("no models listed"), "{error}");
     finish(provider);
     server.verify().await;
 }

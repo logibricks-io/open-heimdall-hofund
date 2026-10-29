@@ -211,9 +211,6 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
             .map(str::to_owned);
         let base = match base {
             Some(base) => prefer_override(&base, request.base_url),
-            None if preset.id == "azure" && !request.base_url.is_empty() => {
-                azure_base(request.base_url)?
-            }
             None => {
                 return Err(PresetError::new(format!(
                     "preset `{}` has no {} endpoint",
@@ -243,19 +240,14 @@ pub fn resolve(request: &Resolve<'_>) -> Result<Resolved, PresetError> {
             ));
         }
     }
-    if preset.id == "azure" || !preset.endpoint.is_empty() {
+    if !preset.endpoint.is_empty() {
         if request.base_url.is_empty() {
             return Err(PresetError::new(format!(
                 "preset `{}` needs base_url",
                 preset.id
             )));
         }
-        let base = if preset.id == "azure" {
-            azure_base(request.base_url)?
-        } else {
-            request.base_url.to_owned()
-        };
-        return Ok(finish(preset, Wire::Chat, base));
+        return Ok(finish(preset, Wire::Chat, request.base_url.to_owned()));
     }
     Err(unavailable(preset))
 }
@@ -388,47 +380,6 @@ pub fn credential_for(preset_id: &str, wire: Wire, base_url: &str) -> Credential
         return Credential::MessagesBoth;
     }
     Credential::Bearer
-}
-
-/// The v1 API root of an Azure OpenAI resource.
-///
-/// A pasted resource, `https://<resource>.openai.azure.com`, a host of
-/// `cognitiveservices.azure.com` or `services.ai.azure.com`, or the resource
-/// name alone, becomes `https://<host>/openai/v1`. A localhost URL is kept, so
-/// a test server is not rewritten. Checked against the v1 API
-/// (<https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle>,
-/// 2026-10-25): chat, responses, and the model list sit on that prefix, and
-/// the key is the `api-key` header.
-///
-/// # Errors
-///
-/// Returns [`PresetError`] when the value is not an Azure OpenAI host.
-pub fn azure_base(raw: &str) -> Result<String, PresetError> {
-    let mut raw = raw.trim().to_owned();
-    if raw.is_empty() {
-        return Err(PresetError::new("preset `azure` needs base_url"));
-    }
-    if !raw.contains("://") {
-        raw = format!("https://{raw}");
-    }
-    let url = reqwest::Url::parse(&raw).map_err(|error| {
-        PresetError::new(format!("preset `azure` base URL is invalid: {error}"))
-    })?;
-    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-        return Ok(raw.trim_end_matches('/').to_owned());
-    }
-    let host = if host.contains('.') {
-        host
-    } else {
-        format!("{host}.openai.azure.com")
-    };
-    if !crate::models::azure_host(&host) {
-        return Err(PresetError::new(format!(
-            "preset `azure` base URL `{raw}` is not an Azure OpenAI host"
-        )));
-    }
-    Ok(format!("https://{host}/openai/v1"))
 }
 
 fn is_bedrock(host: &str) -> bool {
@@ -689,7 +640,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_every_preset_and_parses_its_endpoints() {
         let catalog = catalog();
-        assert_eq!(catalog.preset.len(), 9);
+        assert_eq!(catalog.preset.len(), 8);
         assert_eq!(
             super::catalog_commit(),
             "cbbf3163cb3c87ee0c327a56bc5689ddc5eda947"
@@ -807,32 +758,6 @@ mod tests {
             mantle.base_url,
             "https://bedrock-mantle.ap-southeast-2.api.aws/v1"
         );
-
-        let azure = resolve(&Resolve {
-            id: "azure",
-            region: None,
-            wire: None,
-            base_url: "my-resource",
-            project: "",
-            location: "",
-        })
-        .expect("azure");
-        assert_eq!(
-            azure.base_url,
-            "https://my-resource.openai.azure.com/openai/v1"
-        );
-        assert_eq!(azure.credential, crate::Credential::ApiKey);
-        let pasted = resolve(&Resolve {
-            id: "azure",
-            region: None,
-            wire: Some(Wire::Responses),
-            base_url: "https://mine.openai.azure.com/openai/deployments/demo?api-version=2024-10-21",
-            project: "",
-            location: "",
-        })
-        .expect("pasted");
-        assert_eq!(pasted.base_url, "https://mine.openai.azure.com/openai/v1");
-        assert_eq!(pasted.wire, Wire::Responses);
 
         let vertex = resolve(&Resolve {
             id: "google-vertex",

@@ -11,7 +11,8 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["claude", "codex", "copilot", "echo", "relay"]
+default = ["azure", "claude", "codex", "copilot", "echo", "relay"]
+azure = ["dep:hofund-plugin-azure"]
 claude = ["dep:hofund-plugin-subscription-claude"]
 codex = ["dep:hofund-plugin-subscription-codex"]
 copilot = ["dep:hofund-plugin-subscription-copilot"]
@@ -23,6 +24,7 @@ test-fixtures = []
 futures-util = "0.3.32"
 hofund-plugin-api = { workspace = true, features = ["kernel-internal"] }
 hofund-plugin-sdk = { workspace = true }
+hofund-plugin-azure = { workspace = true, optional = true }
 hofund-plugin-echo = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }
 hofund-plugin-subscription-claude = { workspace = true, optional = true }

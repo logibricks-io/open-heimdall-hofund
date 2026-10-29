@@ -234,18 +234,6 @@ responses = "https://bedrock-mantle.sa-east-1.api.aws/v1"
 anthropic = "https://bedrock-mantle.sa-east-1.api.aws/anthropic"
 
 [[preset]]
-id = "azure"
-name = "Azure OpenAI"
-kind = "vendor"
-catalog = "azure, openai"
-note = "your resource's endpoint and key"
-website = "https://ai.azure.com"
-keys_url = "https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/OpenAI"
-hosts = true
-endpoint = "https://<resource>.openai.azure.com"
-endpoint_hint = "Your resource's endpoint, from Keys and Endpoint in the Azure portal. Once added, the gateway asks the resource for its deployments with this key, over its v1 API; the deployments' names are the model ids."
-
-[[preset]]
 id = "ollama"
 name = "Ollama"
 kind = "local"

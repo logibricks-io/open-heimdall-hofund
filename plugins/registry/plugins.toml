@@ -1,4 +1,11 @@
 [[plugin]]
+id = "azure"
+kind = "provider"
+path = "plugins/providers/azure"
+package = "hofund-plugin-azure"
+feature = "azure"
+
+[[plugin]]
 id = "claude"
 kind = "subscription"
 path = "plugins/subscriptions/claude"

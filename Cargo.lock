@@ -1856,6 +1856,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-azure"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-upstream",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-echo"
 version = "0.1.0"
 dependencies = [
@@ -1905,6 +1915,7 @@ dependencies = [
  "hofund-kit-agent",
  "hofund-kit-upstream",
  "hofund-plugin-api",
+ "hofund-plugin-azure",
  "hofund-plugin-echo",
  "hofund-plugin-registry",
  "hofund-plugin-relay",

@@ -10,7 +10,7 @@
 
 mod conformance;
 
-pub use conformance::check_list_and_probe;
+pub use conformance::{check_deployments, check_list_and_probe};
 pub use hofund_plugin_host::{
     HttpLimits, RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler,
     RecordingSecrets, TestHost, runtime_host, test_host,
