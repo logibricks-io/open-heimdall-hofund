@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- GitHub Copilot subscription plugin `copilot`
+  (`hofund-plugin-subscription-copilot`, registry feature `copilot`, on by
+  default): GitHub device sign-in with the Copilot editors' OAuth app on
+  github.com or an enterprise `<name>.ghe.com` host (the `host` config key or
+  sign-in option). The device page shown is derived from the host, never from
+  the reply. Sign-in checks the user has a Copilot seat and stores the GitHub
+  token, host and login; the account is keyed by host and user id. Short-lived
+  Copilot session tokens are traded single-flight and again within two minutes
+  of expiry; the session's `endpoints.api` is used only when it is an https
+  `githubcopilot.com` origin (or `copilot-api.<name>.ghe.com`). A refused trade
+  (401/403) marks the account as needing a new sign-in unless a newer sign-in
+  replaced the token. Requests go to Chat Completions with the editor headers,
+  `X-Initiator`, and `Copilot-Vision-Request` for images; a 401 trades a new
+  session and retries once. Quota reads chat, completions and premium request
+  snapshots from `copilot_internal/user`. Models are not listed yet.
 - Claude Code subscription plugin `claude`
   (`hofund-plugin-subscription-claude`, registry feature `claude`, on by
   default): sign-in runs Claude Code's own `claude auth login --claudeai`
