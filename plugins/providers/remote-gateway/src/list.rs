@@ -112,7 +112,8 @@ impl Lister<'_> {
             message.push_str(&format!(" ({detail})"));
         }
         message.push_str(&status_hint(&body));
-        let mut error = PluginError::status_error(status, self.redact(&message));
+        // `list` redacts every failure, this one included.
+        let mut error = PluginError::status_error(status, message);
         if let Some(after) = retry_after {
             error = error.with_retry_after(after);
         }

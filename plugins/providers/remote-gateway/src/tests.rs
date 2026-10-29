@@ -367,6 +367,18 @@ fn config_and_build_refuse_what_they_cannot_use() {
                 .is_err()
             );
         }
+        // The typed entry refuses an unserved protocol itself, not only
+        // behind the host's checked entry.
+        let config = UpstreamFactory::validate(&factory, &raw(ROOT)).expect("valid");
+        assert!(
+            UpstreamFactory::build_with(
+                &factory,
+                &config,
+                host.context(),
+                &BuildContext::new(ProtocolId::GENERATIVE_LANGUAGE),
+            )
+            .is_err()
+        );
         // `build` is Chat.
         let provider = DynUpstreamFactory::validate_and_build(&factory, &raw(ROOT), host.context())
             .expect("build");

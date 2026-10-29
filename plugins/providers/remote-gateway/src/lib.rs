@@ -58,8 +58,8 @@ static SPEC: UpstreamSpec = UpstreamSpec::from_static(
     ListKind::Live,
 );
 
-/// The address suffixes [`root`] strips, longest first where two share a
-/// start. reference: internal/provider remote gateway endpoints, lines 91-97
+/// The address suffixes [`root`] strips. None ends with another, so at most
+/// one matches and the order does not matter. reference: internal/provider remote gateway endpoints, lines 91-97
 const SUFFIXES: [&str; 13] = [
     "/v1/messages/count_tokens",
     "/v1/messages",
