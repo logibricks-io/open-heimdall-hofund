@@ -486,6 +486,48 @@ fn the_list_sends_the_learned_choice_and_messages_send_the_key_alone() {
 }
 
 #[test]
+fn a_list_with_no_chat_model_moves_to_the_next_candidate() {
+    with_host(|host| {
+        let provider = build(host, &raw(MESSAGES), ProtocolId::ANTHROPIC_MESSAGES);
+        host.http()
+            .enqueue(r#"{"data":[{"id":"text-embedding-3"}]}"#);
+        host.http()
+            .enqueue(r#"{"data":[{"id":"anthropic.claude-opus-4-7"}]}"#);
+        let list = block_on(provider.list_models(&ListQuery::new())).expect("list");
+        let ids: Vec<&str> = list.models().iter().map(|model| model.id()).collect();
+        assert_eq!(ids, ["anthropic.claude-opus-4-7"]);
+        assert!(list.v1_fallback());
+        assert_eq!(
+            list.source_url(),
+            Some(format!("{MESSAGES}/v1/models").as_str())
+        );
+    });
+}
+
+#[test]
+fn a_messages_list_on_a_versioned_base_also_asks_the_v1_candidates() {
+    with_host(|host| {
+        let provider = build(
+            host,
+            &raw("https://relay.example/v1"),
+            ProtocolId::ANTHROPIC_MESSAGES,
+        );
+        host.http()
+            .enqueue_response(404, &[], r#"{"error":{"message":"no"}}"#);
+        host.http()
+            .enqueue(r#"{"data":[{"id":"anthropic.claude-opus-4-7"}]}"#);
+        block_on(provider.list_models(&ListQuery::new())).expect("list");
+        assert_eq!(
+            uris(host),
+            [
+                "https://relay.example/v1/models",
+                "https://relay.example/v1/v1/models",
+            ]
+        );
+    });
+}
+
+#[test]
 fn list_failures_are_joined_redacted_and_keep_the_wait() {
     with_host(|host| {
         host.secrets()

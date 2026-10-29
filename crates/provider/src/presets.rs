@@ -539,6 +539,29 @@ mod tests {
     }
 
     #[test]
+    fn bedrock_hosts_keep_x_api_key_on_messages() {
+        use crate::Credential;
+        for base in [
+            "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic",
+            "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+        ] {
+            assert_eq!(
+                super::credential_for("custom", Wire::Messages, base),
+                Credential::XApiKey,
+                "{base}"
+            );
+        }
+        assert_eq!(
+            super::credential_for(
+                "custom",
+                Wire::Messages,
+                "https://bedrock-mantle.us-east-1.amazonaws.com/anthropic"
+            ),
+            Credential::MessagesBoth
+        );
+    }
+
+    #[test]
     fn anthropic_workspace_host_keeps_x_api_key() {
         use crate::Credential;
         for base in [

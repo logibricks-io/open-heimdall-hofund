@@ -165,3 +165,91 @@ async fn a_chat_call_refused_on_its_route_is_answered_at_the_other_prefix() {
         );
     }
 }
+
+/// A server that refuses every `/v1/...` call as the wrong route and closes
+/// every other connection after reading the request. Returns its base and the
+/// paths it was asked.
+fn refusing_then_closing_server() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&paths);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let path = line.split(' ').nth(1).unwrap_or_default().to_owned();
+            let mut length = 0usize;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; length];
+            let _ = reader.read_exact(&mut body);
+            seen.lock().expect("paths").push(path.clone());
+            if path.starts_with("/v1/") {
+                let reply = r#"{"error":{"message":"The model `newmaker.model` isn't supported on this route"}}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+            }
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    });
+    (base, paths)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reroute_that_breaks_in_transport_returns_the_refusal_and_forgets_the_route() {
+    let (base, paths) = refusing_then_closing_server();
+    let (_root, _host, provider) = build(format!("{base}/v1"), &[], ProtocolId::OPENAI_CHAT);
+    for _ in 0..2 {
+        let request: Request = serde_json::from_value(json!({
+            "model": "newmaker.model",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        }))
+        .expect("request");
+        let error = provider
+            .execute(request, ProtocolId::OPENAI_CHAT)
+            .await
+            .map(drop)
+            .expect_err("refused");
+        assert_eq!(error.status(), Some(400), "{error}");
+        assert!(
+            error.message().contains("supported on this route"),
+            "{error}"
+        );
+    }
+    let paths = paths.lock().expect("paths").clone();
+    assert_eq!(
+        paths.first().map(String::as_str),
+        Some("/v1/chat/completions")
+    );
+    assert!(
+        paths.contains(&"/openai/v1/chat/completions".to_owned()),
+        "{paths:?}"
+    );
+    // The route was forgotten, so the second call starts at `/v1` again.
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| path.as_str() == "/v1/chat/completions")
+            .count(),
+        2,
+        "{paths:?}"
+    );
+}

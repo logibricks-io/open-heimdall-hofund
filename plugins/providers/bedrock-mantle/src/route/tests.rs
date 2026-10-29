@@ -46,6 +46,20 @@ fn learning_twice_keeps_one_entry_and_forget_drops_it() {
 }
 
 #[test]
+fn a_model_learned_twice_is_evicted_once() {
+    let routes = LearnedRoutes::default();
+    routes.learn_other("a");
+    routes.learn_other("a");
+    for index in 0..=LEARNED_ROUTE_CAPACITY {
+        routes.learn_other(&format!("model-{index}"));
+        assert!(routes.len() <= LEARNED_ROUTE_CAPACITY, "{index}");
+    }
+    assert!(!routes.other("a"));
+    assert!(!routes.other("model-0"));
+    assert!(routes.other("model-1"));
+}
+
+#[test]
 fn a_closed_model_uses_the_openai_prefix() {
     let cases = [
         (V1, "openai.gpt-oss-120b", false, V1),
