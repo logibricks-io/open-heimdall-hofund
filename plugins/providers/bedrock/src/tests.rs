@@ -318,8 +318,7 @@ fn converse_refuses_a_stored_api_key() {
         let error = block_on(
             provider.probe(&ProbeQuery::new(ProtocolId::BEDROCK_CONVERSE, "demo").expect("probe")),
         )
-        .err()
-        .expect("probe key");
+        .expect_err("probe key");
         assert_eq!(error.kind(), PluginErrorKind::Config);
         assert!(error.to_string().contains("not an API key"), "{error}");
         assert!(host.http().calls().is_empty());

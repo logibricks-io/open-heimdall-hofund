@@ -22,7 +22,7 @@
 //!   `{base}/publishers/google/models/{model}`.
 //! - A Bedrock Converse call names the model in the path:
 //!   `{base}/model/{model}/converse`, or `/converse-stream` for a stream, with
-//!   SigV4 percent-encoding. It is signed with the target's [`AwsSigner`]
+//!   `SigV4` percent-encoding. It is signed with the target's [`AwsSigner`]
 //!   (service `bedrock`), never an API key. The signed headers are the
 //!   configured headers, lowercased, then `content-type`, `host`,
 //!   `x-amz-content-sha256`, `x-amz-date`, `accept` for a stream, and
@@ -75,7 +75,7 @@ enum Path {
     Fixed(&'static str),
     /// `models/{model}:{method}`, the Generative Language form.
     Model,
-    /// `/model/{model}/converse`, signed with SigV4.
+    /// `/model/{model}/converse`, signed with `SigV4`.
     Converse,
 }
 
@@ -431,7 +431,7 @@ pub fn converse_call(
         .credentials(signer.access_key_id(), signer.secret_access_key())
         .payload(&body)
         .headers(&borrowed);
-    let signed = sigv4::sign(&input)
+    let sealed = sigv4::sign(&input)
         .map_err(|error| PluginError::decode(format!("Converse signing: {error}")))?;
     let mut call = Call::post(url.as_str());
     for (name, (value, sensitive)) in pairs {
@@ -445,7 +445,7 @@ pub fn converse_call(
         };
     }
     let call = call
-        .sensitive_header("authorization", signed.authorization())
+        .sensitive_header("authorization", sealed.authorization())
         .bytes(body);
     Ok((url, call))
 }

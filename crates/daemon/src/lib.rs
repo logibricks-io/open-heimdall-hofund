@@ -2047,10 +2047,9 @@ mod tests {
     #[test]
     fn kernel_catalog_factories_build_through_the_legacy_path_without_a_protocol() {
         let dir = scratch();
-        for (plugin_id, source) in [(
-            "openai-compat",
-            "[[providers]]\nid = \"openai\"\npreset = \"openai\"\nprotocol = \"openai-responses\"\napi_key = \"test\"\n",
-        )] {
+        let plugin_id = "openai-compat";
+        let source = "[[providers]]\nid = \"openai\"\npreset = \"openai\"\nprotocol = \"openai-responses\"\napi_key = \"test\"\n";
+        {
             let config = hofund_config::load(source).expect("config");
             let provider = &config.providers[0];
             let planned = super::plan(provider).expect("plan");

@@ -420,10 +420,9 @@ impl AwsSigner {
     }
 
     pub(crate) fn session_token_text(&self) -> Option<&str> {
-        use secrecy::ExposeSecret as _;
         self.session_token
             .as_ref()
-            .map(|token| token.expose_secret())
+            .map(secrecy::ExposeSecret::expose_secret)
     }
 
     pub(crate) fn fixed_clock(&self) -> Option<&(u64, String)> {
