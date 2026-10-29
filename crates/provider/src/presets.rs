@@ -363,15 +363,9 @@ pub fn credential_for(preset_id: &str, wire: Wire, base_url: &str) -> Credential
         return Credential::GoogApiKey;
     }
     let host = host_of(base_url);
-    if preset_id == "azure" || crate::models::azure_host(&host) {
-        return match wire {
-            Wire::Messages => Credential::XApiKey,
-            Wire::Chat | Wire::Responses | Wire::Vertex | Wire::Converse => Credential::ApiKey,
-            Wire::Generative => Credential::GoogApiKey,
-        };
-    }
     if wire == Wire::Messages {
         if crate::models::anthropic_host(&host)
+            || crate::models::azure_host(&host)
             || matches!(preset_id, "bedrock" | "bedrock-mantle")
             || is_bedrock(&host)
         {

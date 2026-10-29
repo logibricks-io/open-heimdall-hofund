@@ -68,7 +68,7 @@ Messages, including Azure's v1 root and Bedrock's API-key headers, are on
 root. Vertex credentials (row 2.4) are in. Bedrock Converse is signed with SigV4,
 and Mantle chat and Responses pick `/openai/v1` or `/v1` from the model id
 (row 2.5). Azure deployment names are read from the resource
-(`list_deployments`, row 2.6). That behavior is verified with mocks only.
+(the `azure` plugin, row 2.6). That behavior is verified with mocks only.
 CI run 40178604119 on `73656ae` executed the tests. Still open in item 4:
 live model lists, a connectivity test, and every subscription provider.
 Agent, provider, and subscription inventories derived from magpie's source

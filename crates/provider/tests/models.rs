@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use hofund_plugin_api::{AuthChoice, ListKind, ListQuery, ProbeQuery, ProtocolId};
 use hofund_provider::{
     Anthropic, Bedrock, Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider,
-    Vertex, azure_host,
+    Vertex,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, query_param};
@@ -281,13 +281,13 @@ async fn official_anthropic_auth_refusal_is_not_retried() {
 async fn azure_anthropic_uses_x_api_key_without_learning() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/openai/v1/models"))
+        .and(path("/anthropic/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "claude"}]})))
         .expect(1)
         .mount(&server)
         .await;
-    let mut endpoint = endpoint(&server, "/openai/v1");
-    endpoint.credential = Credential::ApiKey;
+    let mut endpoint = resolved_endpoint(&server, "resource.services.ai.azure.com", "/anthropic");
+    endpoint.credential = Credential::XApiKey;
     let listed = Anthropic::new(endpoint)
         .expect("anthropic")
         .list_models(&ListQuery::new())
@@ -424,75 +424,6 @@ async fn gemini_twentieth_page_returns_the_partial_list() {
 }
 
 #[tokio::test]
-async fn azure_plugin_returns_deployments_then_marks_the_base_model_fallback() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/openai/deployments"))
-        .and(query_param("api-version", "2022-12-01"))
-        .respond_with(ResponseTemplate::new(404))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/openai/v1/models"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "base-gpt"}]})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let mut endpoint = endpoint(&server, "/openai/v1");
-    endpoint.credential = Credential::ApiKey;
-    let listed = openai(endpoint)
-        .list_models(&ListQuery::new())
-        .await
-        .expect("fallback");
-    assert_eq!(listed.kind(), ListKind::Deployments);
-    assert!(listed.base_model_fallback());
-    assert_eq!(ids(&listed), ["base-gpt"]);
-    let requests = server.received_requests().await.expect("requests");
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.headers.get("api-key").is_some())
-    );
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.headers.get("authorization").is_none())
-    );
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.headers.get("x-api-key").is_none())
-    );
-}
-
-// reference: internal/provider/azure.go:149-160
-#[tokio::test]
-async fn azure_both_failures_keep_the_last_http_status_and_deployment_guidance() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(401))
-        .expect(2)
-        .mount(&server)
-        .await;
-    let mut endpoint = endpoint(&server, "/openai/v1");
-    endpoint.credential = Credential::ApiKey;
-    let error = openai(endpoint)
-        .list_models(&ListQuery::new())
-        .await
-        .expect_err("failure");
-    assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Status);
-    assert_eq!(error.status(), Some(401));
-    assert!(
-        error
-            .to_string()
-            .ends_with("type your deployments' names in as model ids")
-    );
-}
-
-#[tokio::test]
 async fn vertex_and_bedrock_static_catalogs_make_no_network_requests() {
     let server = MockServer::start().await;
     let vertex = Vertex::new(vertex_endpoint(&server), "", "").expect("vertex");
@@ -525,8 +456,6 @@ async fn vertex_and_bedrock_static_catalogs_make_no_network_requests() {
             .expect("requests")
             .is_empty()
     );
-    assert!(azure_host("resource.openai.azure.com:443"));
-    assert!(!azure_host("openai.azure.com"));
 }
 
 #[tokio::test]
@@ -575,10 +504,10 @@ async fn chat_and_responses_probes_send_minimal_bodies_and_ignore_learned_auth()
 }
 
 #[tokio::test]
-async fn azure_and_bedrock_chat_probes_use_max_completion_tokens() {
-    for (host, azure) in [
-        ("resource.openai.azure.com", true),
-        ("bedrock-runtime.us-east-1.amazonaws.com", false),
+async fn bedrock_chat_probes_use_max_completion_tokens_and_bearer() {
+    for (host, capped) in [
+        ("bedrock-runtime.us-east-1.amazonaws.com", true),
+        ("api.example.test", false),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -594,9 +523,15 @@ async fn azure_and_bedrock_chat_probes_use_max_completion_tokens() {
             .expect("probe");
         let requests = server.received_requests().await.expect("requests");
         let body = requests[0].body_json::<Value>().expect("body");
-        assert_eq!(body["max_completion_tokens"], 16);
-        assert!(body.get("max_tokens").is_none());
-        assert_eq!(requests[0].headers.get("api-key").is_some(), azure);
+        let (cap, other) = if capped {
+            ("max_completion_tokens", "max_tokens")
+        } else {
+            ("max_tokens", "max_completion_tokens")
+        };
+        assert_eq!(body[cap], 16, "{host}");
+        assert!(body.get(other).is_none(), "{host}");
+        assert!(requests[0].headers.get("api-key").is_none(), "{host}");
+        assert!(requests[0].headers.get("authorization").is_some(), "{host}");
     }
 }
 
@@ -657,6 +592,32 @@ async fn anthropic_probe_merges_extra_body_and_learns_one_auth_header() {
             .iter()
             .all(|request| request.headers.get("anthropic-version").is_some())
     );
+}
+
+// reference: internal/provider/azure.go:41-55
+#[tokio::test]
+async fn azure_anthropic_probe_sends_only_x_api_key_and_learns_nothing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/anthropic/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let report = Anthropic::new(resolved_endpoint(
+        &server,
+        "resource.services.ai.azure.com",
+        "/anthropic",
+    ))
+    .expect("anthropic")
+    .probe(&probe(ProtocolId::ANTHROPIC_MESSAGES, "claude"))
+    .await
+    .expect("probe");
+    assert_eq!(report.auth_choice(), None);
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].headers.get("x-api-key").is_some());
+    assert!(requests[0].headers.get("authorization").is_none());
 }
 
 #[tokio::test]
@@ -1060,78 +1021,6 @@ async fn edge_block_hint_matches_reference_pages_and_is_idempotent() {
             .expect_err("status");
         assert_eq!(error.to_string().contains("network edge blocked"), blocked);
     }
-}
-
-// reference: internal/catalog/live.go:422-423
-#[tokio::test]
-async fn azure_per_url_timeout_still_tries_the_second_deployment_url() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/openai/deployments"))
-        .respond_with(ResponseTemplate::new(500).set_delay(std::time::Duration::from_millis(200)))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/openai/v1/models"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{"id": "base-gpt"}]
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let mut endpoint = endpoint(&server, "/openai/v1");
-    endpoint.credential = Credential::ApiKey;
-    endpoint.timeout = std::time::Duration::from_millis(30);
-    let listed = openai(endpoint)
-        .list_models(&ListQuery::new())
-        .await
-        .expect("second URL after per-URL timeout");
-    assert_eq!(ids(&listed), ["base-gpt"]);
-    assert!(listed.base_model_fallback());
-    server.verify().await;
-}
-
-// reference: internal/provider/azure.go:149-158
-#[tokio::test]
-async fn azure_cancelling_the_call_never_requests_the_second_deployment_url() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/openai/deployments"))
-        .respond_with(ResponseTemplate::new(500).set_delay(std::time::Duration::from_millis(100)))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/openai/v1/models"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&server)
-        .await;
-    let mut endpoint = endpoint(&server, "/openai/v1");
-    endpoint.credential = Credential::ApiKey;
-    let provider = openai(endpoint);
-    let call = tokio::spawn(async move { provider.list_models(&ListQuery::new()).await });
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if !server
-                .received_requests()
-                .await
-                .expect("requests")
-                .is_empty()
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("first request started");
-    // Aborting drops the call future, which is Rust's caller-cancellation signal.
-    call.abort();
-    let _ = call.await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    server.verify().await;
 }
 
 // reference: internal/catalog/gemini_list.go:30-44

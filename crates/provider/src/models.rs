@@ -91,7 +91,7 @@ impl ModelClient {
         query: &ListQuery,
         anthropic: bool,
     ) -> Result<ModelList, PluginError> {
-        let azure = self.is_azure();
+        let azure = self.is_azure_host();
         let learning = anthropic && self.can_learn_auth();
         let mut errors = Vec::new();
         for candidate in list_urls(&self.endpoint.base_url, anthropic) {
@@ -285,18 +285,6 @@ impl ModelClient {
         self.user_headers(headers)
     }
 
-    pub fn azure_headers(&self) -> Result<HeaderMap, PluginError> {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            reqwest::header::ACCEPT,
-            HeaderValue::from_static("application/json"),
-        );
-        if !self.endpoint.api_key.is_empty() {
-            insert_secret(&mut headers, "api-key", &self.endpoint.api_key)?;
-        }
-        self.user_headers(headers)
-    }
-
     pub fn bearer_headers(&self) -> Result<HeaderMap, PluginError> {
         self.auth_headers(AuthChoice::Bearer, false, false)
     }
@@ -329,8 +317,10 @@ impl ModelClient {
         )
     }
 
-    pub fn is_azure(&self) -> bool {
-        self.endpoint.credential == Credential::ApiKey || azure_url(&self.endpoint.base_url)
+    /// Whether the base is on an Azure resource host. Only the Messages
+    /// adapter reaches one: Chat and Responses there go to the azure plugin.
+    pub fn is_azure_host(&self) -> bool {
+        azure_host(&url_host(&self.endpoint.base_url))
     }
 
     pub fn is_bedrock(&self) -> bool {
@@ -460,10 +450,6 @@ pub fn both_auth_applies(
         && !pinned_auth
 }
 
-pub(crate) fn azure_url(base: &str) -> bool {
-    azure_host(&url_host(base))
-}
-
 /// Whether `host` is `anthropic.com` or one of its subdomains.
 ///
 /// Lookalike hosts such as `evilanthropic.com` do not match.
@@ -473,11 +459,14 @@ pub(crate) fn anthropic_host(host: &str) -> bool {
     host == "anthropic.com" || host.ends_with(".anthropic.com")
 }
 
-/// Whether `host` is an Azure OpenAI resource host, with an optional port.
+/// Whether `host` is an Azure resource host, with an optional port.
 ///
+/// Kept for the Messages adapter's `x-api-key` and BothAuth rules: an Azure
+/// resource serves Anthropic Messages under `/anthropic`, which the azure
+/// plugin's v1 root does not.
 // reference: internal/provider/azure.go:27-53
 #[must_use]
-pub fn azure_host(host: &str) -> bool {
+pub(crate) fn azure_host(host: &str) -> bool {
     const SUFFIXES: &[&str] = &[
         ".openai.azure.com",
         ".cognitiveservices.azure.com",
@@ -1038,6 +1027,40 @@ mod tests {
             hofund_plugin_api::PluginErrorKind::Interrupted
         );
         server.await.expect("server");
+    }
+
+    // reference: internal/provider/azure.go:27-53
+    #[test]
+    fn azure_hosts_keep_messages_on_x_api_key_and_chat_off_api_key() {
+        assert!(super::azure_host("resource.openai.azure.com:443"));
+        assert!(super::azure_host("Resource.Services.AI.Azure.com"));
+        assert!(!super::azure_host("openai.azure.com"));
+        assert!(!super::azure_host("evil-openai.azure.com.example"));
+        let base = "https://resource.services.ai.azure.com/anthropic";
+        assert_eq!(
+            crate::credential_for("", crate::Wire::Messages, base),
+            crate::Credential::XApiKey
+        );
+        for wire in [crate::Wire::Chat, crate::Wire::Responses] {
+            assert_eq!(
+                crate::credential_for("", wire, base),
+                crate::Credential::Bearer
+            );
+        }
+        assert!(!super::both_auth_applies(
+            "resource.services.ai.azure.com",
+            true,
+            true,
+            crate::Credential::MessagesBoth,
+            false,
+        ));
+        let mut endpoint = crate::http::Endpoint::new("azure", base);
+        endpoint.credential = crate::Credential::ApiKey;
+        let client = super::ModelClient::new(&endpoint).expect("client");
+        assert!(client.is_azure_host());
+        endpoint.base_url = "https://api.example.test/v1".to_owned();
+        let client = super::ModelClient::new(&endpoint).expect("client");
+        assert!(!client.is_azure_host());
     }
 
     #[test]

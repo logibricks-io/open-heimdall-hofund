@@ -190,11 +190,7 @@ impl Provider for OpenAiCompat {
         &self,
         query: &hofund_plugin_api::ListQuery,
     ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
-        if self.models.is_azure() {
-            crate::azure::azure_list(&self.models.endpoint).await
-        } else {
-            self.models.live_list(query, false).await
-        }
+        self.models.live_list(query, false).await
     }
 
     async fn probe(
