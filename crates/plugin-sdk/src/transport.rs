@@ -296,7 +296,14 @@ impl Call {
     }
 
     /// Like [`Call::open`], but every status comes back unread.
-    pub(crate) async fn open_raw(
+    ///
+    /// For a caller that reads a refusal itself, under its own size cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last [`PluginError`] when every attempt fails, or the
+    /// first error that this call must not retry.
+    pub async fn open_raw(
         self,
         http: &HttpHandle,
         attempts: u8,

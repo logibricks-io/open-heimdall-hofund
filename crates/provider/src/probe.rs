@@ -5,7 +5,9 @@ use std::time::Duration;
 use hofund_plugin_api::{AuthChoice, PluginError, ProbeQuery, ProbeReport};
 use serde_json::{Map, Value};
 
-use crate::models::{ModelClient, Page, both_auth_refused, probe_error_message};
+use hofund_plugin_sdk::probe::{merge_extra, stream_report};
+
+use crate::models::{ModelClient, Page, both_auth_refused};
 use crate::openai_compat::OpenAiProtocol;
 
 pub(crate) const PROBE_WAIT: Duration = Duration::from_secs(20);
@@ -270,94 +272,6 @@ impl ModelClient {
         }
         Ok(ProbeReport::new(String::from_utf8_lossy(&body)))
     }
-}
-
-fn merge_extra(body: &mut Value, query: &ProbeQuery) -> Result<(), PluginError> {
-    let Some(extra) = query.extra_body() else {
-        return Ok(());
-    };
-    let extra: Value = serde_json::from_slice(extra)
-        .map_err(|_| PluginError::decode("probe extra body is not JSON"))?;
-    let Some(extra) = extra.as_object() else {
-        return Err(PluginError::decode("probe extra body is not a JSON object"));
-    };
-    let Some(object) = body.as_object_mut() else {
-        return Err(PluginError::decode("probe body is not a JSON object"));
-    };
-    for (key, value) in extra {
-        object.insert(key.clone(), value.clone());
-    }
-    Ok(())
-}
-
-// reference: internal/provider/test.go:580-631
-fn stream_report(body: &[u8]) -> Result<ProbeReport, PluginError> {
-    for line in String::from_utf8_lossy(body).lines() {
-        let Some(data) = line.trim().strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
-        if kind == "error" || event.get("error").is_some_and(|error| !error.is_null()) {
-            return Err(PluginError::decode(format!(
-                "error in the stream: {}",
-                probe_error_message(data.as_bytes())
-            )));
-        }
-        if kind == "response.failed" {
-            let detail = event.pointer("/response/error").map_or_else(
-                || "response failed".to_owned(),
-                |error| probe_error_message(error.to_string().as_bytes()),
-            );
-            return Err(PluginError::decode(detail));
-        }
-        if matches!(
-            kind,
-            "content_block_start" | "content_block_delta" | "response.output_item.added"
-        ) || (kind.starts_with("response.") && kind.ends_with(".delta"))
-        {
-            return Ok(ProbeReport::new(data));
-        }
-        if event
-            .get("choices")
-            .and_then(Value::as_array)
-            .is_some_and(|choices| {
-                choices.iter().any(|choice| {
-                    choice
-                        .get("delta")
-                        .and_then(Value::as_object)
-                        .is_some_and(|delta| {
-                            ["content", "reasoning", "reasoning_content", "tool_calls"]
-                                .iter()
-                                .any(|key| {
-                                    delta.get(*key).is_some_and(|value| {
-                                        !value.is_null() && value.as_str() != Some("")
-                                    })
-                                })
-                        })
-                })
-            })
-            || event
-                .pointer("/candidates/0/content/parts")
-                .and_then(Value::as_array)
-                .is_some_and(|parts| {
-                    parts.iter().any(|part| {
-                        ["text", "thought", "functionCall"]
-                            .iter()
-                            .any(|key| part.get(*key).is_some_and(|value| !value.is_null()))
-                    })
-                })
-        {
-            return Ok(ProbeReport::new(data));
-        }
-    }
-    Ok(ProbeReport::new(""))
 }
 
 fn probe_error(page: &Page) -> String {
