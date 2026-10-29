@@ -3,8 +3,8 @@
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, RawTable, RawValue,
-    SignInFlowKind,
+    AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
+    RawTable, RawValue, SignInFlowKind,
 };
 
 fn host(dir: &tempfile::TempDir) -> TestHost {
@@ -64,16 +64,15 @@ fn unknown_account_needs_sign_in_and_sends_nothing() {
         "{status:?}"
     );
     let quota = block_on(built.quota(&account, host.context())).expect_err("quota");
-    assert_eq!(quota.kind(), PluginErrorKind::Unsupported);
+    assert_eq!(quota.kind(), PluginErrorKind::Auth);
     let models = block_on(built.list_models(&account, host.context())).expect_err("models");
-    assert_eq!(models.kind(), PluginErrorKind::Unsupported);
+    assert_eq!(models.kind(), PluginErrorKind::Auth);
     let refresh = block_on(built.refresh(&account, host.context())).expect_err("refresh");
     assert_eq!(refresh.kind(), PluginErrorKind::Auth);
-    let upstream = built
-        .upstream(&account, host.context())
-        .err()
-        .expect("not served yet");
-    assert_eq!(upstream.kind(), PluginErrorKind::Unsupported);
+    let upstream = built.upstream(&account, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::GENERATIVE_LANGUAGE, "gemini-2.5-pro").expect("query");
+    let probe = block_on(upstream.probe(&query)).expect_err("no sign-in");
+    assert_eq!(probe.kind(), PluginErrorKind::Auth);
     assert!(block_on(built.health()).is_ok());
     assert!(host.http().calls().is_empty());
 }

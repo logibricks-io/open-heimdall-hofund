@@ -21,6 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `list_models` reads `/codex/models`.
 - SDK: `wire::Target::rewrite` (`wire::Rewrite`), a hook that edits a JSON
   request body after encoding and adds headers to the call.
+- Gemini subscription: requests go to Code Assist `v1internal` as Gemini CLI
+  sends them, wrapped as `{model, project, user_prompt_id, request}` with
+  Gemini CLI's user agent, and each reply, unary or streamed, is lifted out of
+  its `response` envelope. The project is the one Code Assist set up, else the
+  configured one, else set up on first use. A 401 refreshes the token once.
+  `quota` and `list_models` read `retrieveUserQuota`: one window per model
+  (scoped to it, used out of 10000 from `remainingFraction`, with its reset
+  time), skipping `_vertex` and repeated models. Token counting is not
+  offered on Code Assist.
+- SDK: `wire::Target::method_root` posts Generative Language calls to
+  `{base}/{root}:{method}` with the model in the body; `wire::Target::unwrap`
+  (`wire::Unwrap`) rewrites each JSON value of a 2xx reply, the whole unary
+  body or each `data:` line of a stream; a Google `RetryInfo.retryDelay` in an
+  error body sets the error's retry-after when no `Retry-After` header did.
+  `time::parse_rfc3339` reads RFC 3339 times (moved from the Copilot plugin).
 - Gemini CLI (Code Assist) subscription plugin `gemini`
   (`hofund-plugin-subscription-gemini`, registry feature `gemini`, on by
   default): browser sign-in with PKCE on an ephemeral IPv4 loopback port at

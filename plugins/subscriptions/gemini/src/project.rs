@@ -129,6 +129,44 @@ pub(crate) async fn ensure(
     }
 }
 
+/// The project requests for `account` go to: the one Code Assist set up,
+/// else the one the config names, else one set up now.
+///
+/// # Errors
+///
+/// Returns an `Auth` error when there is no stored sign-in or the account
+/// still needs a project named, and the setup's error when it failed.
+pub(crate) async fn resolve(
+    host: &HostContext,
+    endpoints: &Endpoints,
+    account: &AccountId,
+    access: &SecretString,
+    configured: Option<&str>,
+) -> Result<String, PluginError> {
+    if let Some(project) = stored(host, account).await? {
+        return Ok(project);
+    }
+    if let Some(project) = configured {
+        return Ok(project.to_owned());
+    }
+    ensure(host, endpoints, account, access, None).await?;
+    stored(host, account)
+        .await?
+        .ok_or_else(|| PluginError::auth(PENDING_REASON))
+}
+
+/// The project stored for `account`, if any.
+async fn stored(host: &HostContext, account: &AccountId) -> Result<Option<String>, PluginError> {
+    let secret = host
+        .accounts()
+        .secret(account)
+        .await?
+        .ok_or_else(|| PluginError::auth("no Gemini CLI sign-in is stored for this account"))?;
+    Ok(SecretObject::parse(&secret)?
+        .text(PROJECT)
+        .map(str::to_owned))
+}
+
 /// What Code Assist is told about the client, as Gemini CLI sends it.
 fn metadata(wanted: Option<&str>) -> Value {
     let mut meta = json!({
@@ -306,7 +344,7 @@ async fn onboard(
 }
 
 /// Posts one Code Assist method and reads its JSON reply.
-async fn call(
+pub(crate) async fn call(
     host: &HostContext,
     endpoints: &Endpoints,
     access: &SecretString,
