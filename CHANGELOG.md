@@ -181,6 +181,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Breaking (plugin API, N9): `SignInFlow::Device` now carries a `DeviceFlow`
+  built from validated options instead of a static URL, so a device-code
+  subscription can serve an enterprise host. `DeviceFlow::new` takes a bare
+  DNS name or `https://` plus one and rejects other schemes, userinfo, ports,
+  paths, queries and fragments; hosts are lowercased. `SubscriptionSpec::flow`
+  returns the new `SignInFlowKind`, `SignInFlow` is no longer `Copy`, and
+  building a subscription whose instance flow kind differs from its spec now
+  fails. `StaticUrl` is removed.
+
 - The pooled plugin HTTP client streams a success body as the upstream sends
   it instead of buffering the whole response (row H0g). A read failure after
   the headers is one `Interrupted` chunk that ends the stream; error bodies

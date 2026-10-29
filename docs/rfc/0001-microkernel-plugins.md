@@ -460,7 +460,7 @@ pub trait Subscription: Send + Sync + 'static {
 }
 ```
 
-`SignInChallenge` is declarative so a UI can render it without a vendor match. The variants, defined fully in PR B, are at least: open a URL, show a device code, or show instructions for a bridge. `SignInFlow` variants are `Pkce`, `Device`, `TokenFile`, and `Bridge`. `Bridge` names a binary the spawner resolves. It is not a shell string.
+`SignInChallenge` is declarative so a UI can render it without a vendor match. The variants, defined fully in PR B, are at least: open a URL, show a device code, or show instructions for a bridge. `SignInFlow` variants are `Pkce`, `Device`, `TokenFile`, and `Bridge`. `Bridge` names a binary the spawner resolves. It is not a shell string. Since N9, `Device` carries a `DeviceFlow` whose host comes from the instance's validated options, and the spec states only the `SignInFlowKind`.
 
 `complete_sign_in` stores the account through `host.accounts()` and returns the `AccountId`. Codex returns a ChatGPT-backend `UpstreamProvider`. Copilot returns the Copilot API client. Gemini Code Assist returns the Code Assist client. Claude returns the bridge client. The router never sees `Subscription`. It sees a `Member`.
 
@@ -1191,7 +1191,7 @@ These are not required before acceptance. They have homes so they are not forgot
 | N2 | Add a capability set on `UpstreamSpec`: `count`, `list`, `probe`, `quota`, `passthrough`. The UI reads it instead of calling the method. | With or just after B, before a settings UI depends on it. |
 | N5 | A `[capabilities]` table in `plugin.toml`: network hosts, filesystem paths, spawn. Reviewers check it. The future process host enforces it. | Before the process-host RFC, and earlier if the owner wants the review aid. |
 | N8 | Per-member `enabled` in config. A disabled member stays linked and is left out of the snapshot. This is the desktop equivalent of magpie's `plugins.yml` toggle, at member granularity. | With L, before the desktop settings form. |
-| N9 | `SignInFlow::Device` takes the host from validated options (`DeviceFlow { host: Url }`), not a `'static` URL, so GitHub Enterprise is expressible. Import and discovery stay the kernel `AccountSource` and the `import_providers` hook from section 2.4. | N9 merges before the Copilot pull request in H. |
+| N9 | `SignInFlow::Device` takes the host from validated options (`DeviceFlow { host: Url }`), not a `'static` URL, so GitHub Enterprise is expressible. Import and discovery stay the kernel `AccountSource` and the `import_providers` hook from section 2.4. | N9 merges before the Copilot pull request in H. Landed: `SignInFlow::Device(DeviceFlow)` is built per instance from validated options. `DeviceFlow::new` accepts a bare DNS name or `https://` plus one, rejects any other scheme, userinfo, port, path, query or fragment, and lowercases the host; `with_path` adds a fixed verification path. `SubscriptionSpec::flow` is now the `Copy` `SignInFlowKind`, and `validate_and_build` fails when the built instance's `SignInFlow::kind` differs from it. `StaticUrl` is removed. |
 
 ## Sign-off
 

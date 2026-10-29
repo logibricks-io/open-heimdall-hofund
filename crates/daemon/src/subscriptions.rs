@@ -438,7 +438,9 @@ mod tests {
     use std::time::Duration;
 
     use hofund_config::Config;
-    use hofund_plugin_api::{AccountId, MemberId, PluginId, ProtocolId, Request};
+    use hofund_plugin_api::{
+        AccountId, MemberId, PluginId, ProtocolId, Request, SignInFlow, SignInFlowKind,
+    };
     use hofund_router::{CooldownPolicy, Cooldowns};
 
     use super::{QuotaPolls, Subscriptions, build};
@@ -503,6 +505,71 @@ mod tests {
 
     fn cooldowns() -> Arc<Cooldowns> {
         Arc::new(Cooldowns::new(CooldownPolicy::default()))
+    }
+
+    #[test]
+    fn spec_kind_matches_instance_flow() {
+        let dir = tempfile::tempdir().expect("dir");
+        let states = states(dir.path(), &config(""));
+        let state = states.get(PLUGIN).expect("fixture state");
+        let registry = RegistryAdapter;
+        let spec = registry.subscription(PLUGIN).expect("factory").spec();
+        assert_eq!(state.instance.flow().kind(), spec.flow());
+        assert_eq!(spec.flow(), SignInFlowKind::Device);
+    }
+
+    #[test]
+    fn device_host_comes_from_validated_options() {
+        let dir = tempfile::tempdir().expect("dir");
+        let states = states(
+            dir.path(),
+            &config("host = \"https://Tenant.Example.COM/\""),
+        );
+        let state = states.get(PLUGIN).expect("fixture state");
+        let SignInFlow::Device(flow) = state.instance.flow() else {
+            panic!("device flow expected");
+        };
+        assert_eq!(flow.host(), "tenant.example.com");
+        assert_eq!(flow.verification_url(), "https://tenant.example.com/device");
+    }
+
+    #[test]
+    fn invalid_device_host_fails_at_build() {
+        let dir = tempfile::tempdir().expect("dir");
+        let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
+        let config = config("host = \"http://tenant.example.com\"");
+        let error = build(
+            &config,
+            &dir.path().join("hofund.toml"),
+            Some(0),
+            &registry,
+            None,
+        )
+        .err()
+        .expect("http host rejected");
+        assert!(error.to_string().contains("https"), "{error}");
+    }
+
+    #[test]
+    fn instance_flow_kind_mismatch_fails_at_build() {
+        let dir = tempfile::tempdir().expect("dir");
+        let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
+        let config = config("flow = \"token-file\"");
+        let error = build(
+            &config,
+            &dir.path().join("hofund.toml"),
+            Some(0),
+            &registry,
+            None,
+        )
+        .err()
+        .expect("kind mismatch rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("built a TokenFile sign-in flow but its spec declares Device"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

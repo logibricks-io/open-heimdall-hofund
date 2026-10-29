@@ -57,7 +57,8 @@ pub trait DynSubscriptionFactory: Send + Sync + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError`] when validation or construction fails.
+    /// Returns [`BuildError`] when validation or construction fails, or the
+    /// built instance's [`SignInFlow::kind`] differs from the spec's flow kind.
     fn validate_and_build(
         &self,
         raw: &RawTable,
@@ -83,7 +84,17 @@ where
         host: &HostContext,
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         let cfg = self.validate(raw)?;
-        self.build(&cfg, host)
+        let built = self.build(&cfg, host)?;
+        let spec = SubscriptionFactory::spec(self);
+        if built.flow().kind() != spec.flow() {
+            return Err(BuildError::new(format!(
+                "subscription {} built a {:?} sign-in flow but its spec declares {:?}",
+                spec.plugin(),
+                built.flow().kind(),
+                spec.flow()
+            )));
+        }
+        Ok(built)
     }
 }
 
