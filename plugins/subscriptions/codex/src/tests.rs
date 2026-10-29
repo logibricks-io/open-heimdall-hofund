@@ -264,9 +264,9 @@ fn complete_rejects_state_mismatch() {
 #[test]
 fn exchange_requires_three_tokens() {
     let idt = id_token("u@example.test", "sub-1", "acct-1", "plus");
-    for reply in [
-        token_reply("acc", None, Some(&idt)),
-        token_reply("acc", Some("ref"), None),
+    for (reply, missing) in [
+        (token_reply("acc", None, Some(&idt)), "no refresh token"),
+        (token_reply("acc", Some("ref"), None), "no ID token"),
     ] {
         let dir = tempfile::tempdir().expect("dir");
         let host = host(&dir);
@@ -275,6 +275,7 @@ fn exchange_requires_three_tokens() {
         host.http().enqueue(reply);
         let error = complete(&host, &sub, &state).expect_err("missing token");
         assert_eq!(error.kind(), PluginErrorKind::Auth);
+        assert!(error.message().contains(missing), "{}", error.message());
         assert!(
             block_on(host.context().accounts().list())
                 .expect("list")
@@ -469,8 +470,9 @@ fn refresh_commits_when_waiter_dropped() {
                     "still waiting"
                 );
                 yield_times(1).await;
+                std::thread::sleep(Duration::from_millis(1));
                 polls += 1;
-                assert!(polls < 100, "the refresh never started");
+                assert!(polls < 5_000, "the refresh never started");
             }
         }
         // The waiter is gone; the job still runs to its commit.

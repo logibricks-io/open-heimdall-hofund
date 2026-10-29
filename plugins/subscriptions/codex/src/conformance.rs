@@ -17,7 +17,7 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
 
 #[test]
 fn contributes_one_pkce_subscription() {
-    let contribution = hofund_plugin_subscription_codex::contribute();
+    let contribution = crate::contribute();
     assert!(contribution.upstreams().is_empty());
     assert!(contribution.surfaces().is_empty());
     let [factory] = contribution.subscriptions() else {
@@ -45,7 +45,7 @@ fn contributes_one_pkce_subscription() {
 
 #[test]
 fn unknown_account_needs_sign_in_and_sends_nothing() {
-    let contribution = hofund_plugin_subscription_codex::contribute();
+    let contribution = crate::contribute();
     let factory = &contribution.subscriptions()[0];
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
