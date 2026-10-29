@@ -35,10 +35,12 @@ fn contributes_one_bridge_subscription() {
     assert_eq!(built.flow().kind(), SignInFlowKind::Bridge);
 
     let mut named = RawTable::new();
-    named.insert(
-        "command",
-        RawValue::String("/opt/claude/bin/claude".to_owned()),
-    );
+    let program = if cfg!(windows) {
+        r"C:\claude\bin\claude.exe"
+    } else {
+        "/opt/claude/bin/claude"
+    };
+    named.insert("command", RawValue::String(program.to_owned()));
     assert!(factory.validate_and_build(&named, host.context()).is_ok());
 
     let mut unknown = RawTable::new();

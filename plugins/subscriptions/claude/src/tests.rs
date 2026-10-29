@@ -13,7 +13,11 @@ use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 use crate::{ClaudeFactory, cli, creds, pasted_code};
 
 const SESSION: &str = "0123456789abcdef0123456789abcdef";
+// Config needs an absolute path, which on Windows starts with a drive.
+#[cfg(not(windows))]
 const PROGRAM: &str = "/opt/claude/bin/claude";
+#[cfg(windows)]
+const PROGRAM: &str = r"C:\claude\bin\claude.exe";
 const LINK: &str = "https://claude.ai/oauth/authorize?code=true&client_id=c&state=s1";
 const UUID: &str = "4f6c1a52-1111-4222-8333-944455556666";
 const EMAIL: &str = "ada@example.test";

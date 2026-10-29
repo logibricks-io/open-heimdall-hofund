@@ -97,8 +97,9 @@ mod tests {
     fn first_program_on_the_path_wins() {
         let first = tempfile::tempdir().expect("dir");
         let second = tempfile::tempdir().expect("dir");
+        // Windows lists PATHEXT in upper case, and the found path keeps it.
         let name = if cfg!(windows) {
-            "example-agent.exe"
+            "example-agent.EXE"
         } else {
             "example-agent"
         };
@@ -154,7 +155,7 @@ mod tests {
     #[test]
     fn pathext_finds_the_extension() {
         let dir = tempfile::tempdir().expect("dir");
-        let wanted = write(dir.path(), "example-agent.cmd", true);
+        let wanted = write(dir.path(), "example-agent.CMD", true);
         let path = joined(&[dir.path()]);
         let pathext = std::ffi::OsString::from(".EXE;.CMD");
         assert_eq!(find_in(NAME, Some(&path), Some(&pathext)), Some(wanted));
