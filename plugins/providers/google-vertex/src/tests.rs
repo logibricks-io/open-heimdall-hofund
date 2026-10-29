@@ -396,6 +396,101 @@ fn a_credentials_file_created_after_construction_is_used() {
 }
 
 #[test]
+fn a_token_inside_the_refresh_lead_is_minted_again() {
+    block_on(async {
+        let dir = tempfile::tempdir().expect("scratch");
+        let host = TestHost::open(plugin(), dir.path());
+        let creds = write_creds(dir.path(), &person());
+        // The test clock stands still: 60 s of life is inside the 5 minute lead.
+        host.http()
+            .enqueue(json!({"access_token": "short", "expires_in": 60}).to_string());
+        host.http().enqueue(REPLY);
+        host.http().enqueue(token_body("long"));
+        host.http().enqueue(REPLY);
+        let provider = build(&host, &local(&creds, ""));
+        for _ in 0..2 {
+            provider
+                .execute(Request::new(MODEL), ProtocolId::GENERATIVE_LANGUAGE)
+                .await
+                .expect("completion");
+        }
+        let calls = host.http().calls();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[2].uri(), TOKEN);
+    });
+}
+
+#[test]
+fn an_impersonated_token_expires_at_its_expire_time() {
+    block_on(async {
+        let dir = tempfile::tempdir().expect("scratch");
+        let host = TestHost::open(plugin(), dir.path());
+        let creds = write_creds(dir.path(), &person());
+        // One minute after the test clock: inside the lead, so the second
+        // call trades again; the one-hour default would have reused it.
+        for _ in 0..2 {
+            host.http().enqueue(token_body("source-token"));
+            host.http().enqueue(
+                json!({"accessToken": "impersonated", "expireTime": "1970-01-01T00:01:00Z"})
+                    .to_string(),
+            );
+            host.http().enqueue(REPLY);
+        }
+        let provider = build(&host, &local(&creds, "worker@example.com"));
+        for _ in 0..2 {
+            provider
+                .execute(Request::new(MODEL), ProtocolId::GENERATIVE_LANGUAGE)
+                .await
+                .expect("completion");
+        }
+        let calls = host.http().calls();
+        assert_eq!(calls.len(), 6);
+        assert!(calls[4].uri().ends_with(":generateAccessToken"));
+    });
+}
+
+#[test]
+fn a_same_size_rewrite_is_read_again() {
+    block_on(async {
+        let dir = tempfile::tempdir().expect("scratch");
+        let host = TestHost::open(plugin(), dir.path());
+        let creds = write_creds(dir.path(), &person());
+        let early = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&creds)
+            .and_then(|file| file.set_modified(early))
+            .expect("first mtime");
+        host.http().enqueue(token_body("first"));
+        host.http().enqueue(REPLY);
+        let provider = build(&host, &local(&creds, ""));
+        provider
+            .execute(Request::new(MODEL), ProtocolId::GENERATIVE_LANGUAGE)
+            .await
+            .expect("first");
+        let before = std::fs::metadata(&creds).expect("meta").len();
+        let mut same = person();
+        same["refresh_token"] = json!("refresh-tokem");
+        write_creds(dir.path(), &same);
+        assert_eq!(std::fs::metadata(&creds).expect("meta").len(), before);
+        std::fs::File::options()
+            .write(true)
+            .open(&creds)
+            .and_then(|file| file.set_modified(early + std::time::Duration::from_secs(60)))
+            .expect("second mtime");
+        host.http().enqueue(token_body("second"));
+        host.http().enqueue(REPLY);
+        provider
+            .execute(Request::new(MODEL), ProtocolId::GENERATIVE_LANGUAGE)
+            .await
+            .expect("second");
+        let calls = host.http().calls();
+        assert_eq!(calls.len(), 4);
+        assert!(form(calls[2].body()).contains("refresh_token=refresh-tokem"));
+    });
+}
+
+#[test]
 fn a_rewritten_credentials_file_is_read_again() {
     block_on(async {
         let dir = tempfile::tempdir().expect("scratch");
