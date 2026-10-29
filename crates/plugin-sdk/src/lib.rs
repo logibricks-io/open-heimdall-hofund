@@ -6,7 +6,8 @@
 //! plugin does not name those crates. [`sleep`] waits on the host runtime. The
 //! API does not depend on quirks.
 //!
-//! [`sigv4`] signs one AWS request. [`oauth`] parses a token response and
+//! [`sigv4`] signs one AWS request. [`bedrock`] fits Anthropic betas for
+//! Bedrock's Messages wire. [`oauth`] parses a token response and
 //! builds a form body. [`page`] reads cursors and walks bounded model lists.
 //! PKCE, the loopback callback, and device flow are not here. The host handle
 //! streams a 2xx body. [`transport::Call::send`] still reads all of it, and
@@ -38,6 +39,7 @@ pub async fn timeout<F: Future>(duration: std::time::Duration, future: F) -> Opt
     tokio::time::timeout(duration, future).await.ok()
 }
 
+pub mod bedrock;
 pub mod classify;
 pub mod jwt;
 pub mod oauth;

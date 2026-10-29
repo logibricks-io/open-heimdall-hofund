@@ -1,0 +1,22 @@
+[package]
+name = "hofund-plugin-bedrock-mantle"
+description = "Amazon Bedrock Mantle upstream: Chat, Responses, and Messages with a Bedrock API key, picking each model's route prefix."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-plugin-api = { workspace = true }
+hofund-plugin-sdk = { workspace = true }
+
+[dev-dependencies]
+hofund-kit-upstream = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

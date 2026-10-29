@@ -1,4 +1,7 @@
 //! Adapter for upstreams that speak the Anthropic Messages protocol.
+//!
+//! A Bedrock Runtime or Mantle base, whose headers and body Bedrock fits, is
+//! served by the `bedrock` or `bedrock-mantle` plugin instead.
 
 use async_trait::async_trait;
 use hofund_codec::AnthropicMessages;
@@ -16,8 +19,8 @@ const VERSION: &str = "2023-06-01";
 pub struct Anthropic {
     upstream: Upstream,
     models: crate::models::ModelClient,
-    bedrock: bool,
-    direct: Option<String>,
+    /// The configured base URL.
+    direct: String,
 }
 
 impl Anthropic {
@@ -30,13 +33,6 @@ impl Anthropic {
     ///
     /// Returns [`ProviderError`] when the id, base URL, or a header is unusable.
     pub fn new(endpoint: Endpoint) -> Result<Self, ProviderError> {
-        let mut endpoint = endpoint;
-        crate::mantle::normalize(&mut endpoint, crate::Wire::Messages);
-        let bedrock = crate::mantle::is_bedrock(&endpoint);
-        if bedrock {
-            endpoint.credential = http::Credential::XApiKey;
-            fit_bedrock_headers(&mut endpoint.headers);
-        }
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("anthropic-version"),
@@ -50,29 +46,18 @@ impl Anthropic {
         )?;
         let models = crate::models::ModelClient::new(&endpoint)
             .map_err(|error| ProviderError::decode(error.message()))?;
-        let direct = (!bedrock).then(|| endpoint.base_url.clone());
+        let direct = endpoint.base_url.clone();
         Ok(Self {
             upstream: Upstream::open(endpoint, "v1/messages", headers)?,
             models,
-            bedrock,
             direct,
         })
     }
 
-    /// The base URL a caller may post to directly.
-    ///
-    /// This is the configured base. It is `None` for a Bedrock or Mantle
-    /// endpoint, whose headers and request body this adapter fits, so only
-    /// this adapter can send to it.
+    /// The base URL a caller may post to directly: the configured base.
     #[must_use]
-    pub fn direct_base(&self) -> Option<&str> {
-        self.direct.as_deref()
-    }
-
-    fn fit_request(&self, request: &mut Request) {
-        if self.bedrock {
-            fit_bedrock_request(request);
-        }
+    pub fn direct_base(&self) -> &str {
+        &self.direct
     }
 }
 
@@ -88,7 +73,6 @@ impl Provider for Anthropic {
         inbound_protocol: &str,
     ) -> Result<CountOutcome, ProviderError> {
         request.stream = false;
-        self.fit_request(&mut request);
         let body = omit_max_tokens(http::prepare_body(
             &self.upstream,
             &AnthropicMessages,
@@ -110,10 +94,9 @@ impl Provider for Anthropic {
 
     async fn execute(
         &self,
-        mut request: Request,
+        request: Request,
         inbound_protocol: &str,
     ) -> Result<Completion, ProviderError> {
-        self.fit_request(&mut request);
         http::execute(
             &self.upstream,
             &AnthropicMessages,
@@ -137,77 +120,6 @@ impl Provider for Anthropic {
     ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
         self.models.anthropic_probe(query).await
     }
-}
-
-// reference: internal/gateway/betas.go:23-35 and internal/gateway/gateway.go:4413-4420
-fn fit_bedrock_headers(headers: &mut Vec<(String, String)>) {
-    let mut fitted = Vec::with_capacity(headers.len());
-    for (name, value) in std::mem::take(headers) {
-        if name.eq_ignore_ascii_case("anthropic-beta") {
-            let betas = fit_betas(std::iter::once(value.as_str()));
-            if !betas.is_empty() {
-                fitted.push((name, betas.join(",")));
-            }
-        } else {
-            fitted.push((name, value));
-        }
-    }
-    *headers = fitted;
-}
-
-// reference: internal/gateway/betas.go:105-139, internal/gateway/gateway.go:4045,
-// internal/gateway/gateway.go:4416-4420 and 5256-5259
-fn fit_bedrock_request(request: &mut Request) {
-    request.extensions.remove("metadata");
-    if let Some(serde_json::Value::Array(values)) = request.extensions.get("anthropic_beta") {
-        let asked: Vec<String> = values.iter().map(beta_text).collect();
-        let fitted = fit_betas(asked.iter().map(String::as_str));
-        if fitted == asked {
-            return;
-        }
-        if fitted.is_empty() {
-            request.extensions.remove("anthropic_beta");
-        } else {
-            request.extensions.insert(
-                "anthropic_beta",
-                serde_json::Value::Array(
-                    fitted.into_iter().map(serde_json::Value::String).collect(),
-                ),
-            );
-        }
-    }
-}
-
-fn beta_text(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Null => String::new(),
-        other => serde_json::to_string(other).expect("a JSON value must serialize"),
-    }
-}
-
-fn fit_betas<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut fitted = Vec::new();
-    for value in values {
-        for value in value.split(',') {
-            let value = value.trim();
-            let value = match value {
-                "advanced-tool-use-2025-11-20" => "tool-search-tool-2025-10-19",
-                other => other,
-            };
-            if value.is_empty()
-                || matches!(
-                    value,
-                    "prompt-caching-scope-2026-01-05" | "redact-thinking-2026-02-12"
-                )
-                || fitted.iter().any(|present| present == value)
-            {
-                continue;
-            }
-            fitted.push(value.to_owned());
-        }
-    }
-    fitted
 }
 
 /// The count endpoint rejects `max_tokens`. Create still requires it, so the
@@ -275,27 +187,14 @@ mod direct_tests {
     use crate::http::Endpoint;
 
     #[test]
-    fn a_plain_messages_endpoint_has_a_direct_base() {
-        let adapter = Anthropic::new(Endpoint::new("plain", "https://gateway.example/api/"))
-            .expect("adapter");
-        assert_eq!(adapter.direct_base(), Some("https://gateway.example/api/"));
-    }
-
-    #[test]
-    fn bedrock_and_mantle_endpoints_stay_on_the_adapter() {
-        let mut preset = Endpoint::new("preset", "https://gateway.example");
-        preset.preset = Some("bedrock".to_owned());
-        let mut mantle_preset = Endpoint::new("mantle-preset", "https://gateway.example");
-        mantle_preset.preset = Some("bedrock-mantle".to_owned());
-        for endpoint in [
-            preset,
-            mantle_preset,
-            Endpoint::new("runtime", "https://bedrock-runtime.us-east-1.amazonaws.com"),
-            Endpoint::new("mantle", "https://bedrock-mantle.us-east-1.api.aws/v1"),
+    fn the_direct_base_is_the_configured_base_on_any_host() {
+        for base in [
+            "https://gateway.example/api/",
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "https://bedrock-mantle.us-east-1.api.aws/anthropic",
         ] {
-            let id = endpoint.id.clone();
-            let adapter = Anthropic::new(endpoint).expect("adapter");
-            assert_eq!(adapter.direct_base(), None, "{id}");
+            let adapter = Anthropic::new(Endpoint::new("plain", base)).expect("adapter");
+            assert_eq!(adapter.direct_base(), base);
         }
     }
 }

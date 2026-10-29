@@ -46,34 +46,15 @@ impl ModelClient {
             }),
         };
         if protocol == OpenAiProtocol::Chat {
-            body[if self.is_bedrock() {
-                "max_completion_tokens"
-            } else {
-                "max_tokens"
-            }] = Value::from(16);
+            body["max_tokens"] = Value::from(16);
         }
         merge_extra(&mut body, query)?;
         let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         let bytes = serde_json::to_vec(&body)
             .map_err(|_| PluginError::decode("could not encode probe body"))?;
         let headers = self.bearer_headers()?;
-        let base = if self.is_mantle() {
-            crate::mantle::mantle_base(&self.endpoint.base_url, model, false)
-        } else {
-            self.endpoint.base_url.clone()
-        };
-        let mut url = format!("{}/{}", base.trim_end_matches('/'), path);
-        let mut page = self
-            .post_probe(&url, headers.clone(), bytes.clone(), stream)
-            .await?;
-        if self.is_mantle()
-            && !model.is_empty()
-            && crate::mantle::wrong_route(Some(page.status), &probe_error(&page))
-        {
-            let base = crate::mantle::mantle_base(&self.endpoint.base_url, model, true);
-            url = format!("{}/{}", base.trim_end_matches('/'), path);
-            page = self.post_probe(&url, headers, bytes, stream).await?;
-        }
+        let url = format!("{}/{}", self.endpoint.base_url.trim_end_matches('/'), path);
+        let page = self.post_probe(&url, headers, bytes, stream).await?;
         self.probe_report(&url, page, stream)
     }
 
@@ -97,7 +78,7 @@ impl ModelClient {
         let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         let bytes = serde_json::to_vec(&body)
             .map_err(|_| PluginError::decode("could not encode probe body"))?;
-        let initial = if self.is_azure_host() || self.is_bedrock() || self.is_official_anthropic() {
+        let initial = if self.is_azure_host() || self.is_official_anthropic() {
             AuthChoice::XApiKey
         } else {
             query.auth_choice().unwrap_or(AuthChoice::Both)
@@ -219,8 +200,4 @@ impl ModelClient {
         }
         Ok(ProbeReport::new(String::from_utf8_lossy(&body)))
     }
-}
-
-fn probe_error(page: &Page) -> String {
-    String::from_utf8_lossy(&page.body).into_owned()
 }

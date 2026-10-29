@@ -1,14 +1,16 @@
-//! Bedrock's Messages wire takes a subset of Anthropic's betas and no
-//! `metadata`. These fit the header and body before sending.
+//! Bedrock's Messages wire, on the runtime and on Mantle, takes a subset of
+//! Anthropic's betas and no `metadata`. These fit the header and body before
+//! sending.
 //!
 //! Reference: `internal/gateway/betas.go:23-35` and `105-139`,
 //! `internal/gateway/gateway.go:4045`, `4413-4420`, and `5256-5259`.
 
 use hofund_plugin_api::Request;
-use hofund_plugin_sdk::json::Value;
+use serde_json::Value;
 
 /// Fits each `anthropic-beta` header value and drops one left empty.
-pub(crate) fn fit_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+#[must_use]
+pub fn fit_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
     let mut fitted = Vec::with_capacity(headers.len());
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("anthropic-beta") {
@@ -25,7 +27,7 @@ pub(crate) fn fit_headers(headers: &[(String, String)]) -> Vec<(String, String)>
 
 /// Drops `metadata` and fits the body's `anthropic_beta` list, removing it
 /// when nothing is left.
-pub(crate) fn fit_request(request: &mut Request) {
+pub fn fit_request(request: &mut Request) {
     request.extensions.remove("metadata");
     if let Some(Value::Array(values)) = request.extensions.get("anthropic_beta") {
         let asked: Vec<String> = values.iter().map(beta_text).collect();

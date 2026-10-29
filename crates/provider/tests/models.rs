@@ -455,11 +455,14 @@ async fn chat_and_responses_probes_send_minimal_bodies_and_ignore_learned_auth()
     );
 }
 
+/// A kernel Chat probe caps `max_tokens` and sends Bearer on any host. Bedrock
+/// hosts are served by their plugins, so no host changes the cap here.
 #[tokio::test]
-async fn bedrock_chat_probes_use_max_completion_tokens_and_bearer() {
-    for (host, capped) in [
-        ("bedrock-runtime.us-east-1.amazonaws.com", true),
-        ("api.example.test", false),
+async fn kernel_chat_probes_use_max_tokens_and_bearer_on_any_host() {
+    for host in [
+        "bedrock-runtime.us-east-1.amazonaws.com",
+        "bedrock-mantle.us-east-1.api.aws",
+        "api.example.test",
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -474,46 +477,13 @@ async fn bedrock_chat_probes_use_max_completion_tokens_and_bearer() {
             .await
             .expect("probe");
         let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1, "{host}");
         let body = requests[0].body_json::<Value>().expect("body");
-        let (cap, other) = if capped {
-            ("max_completion_tokens", "max_tokens")
-        } else {
-            ("max_tokens", "max_completion_tokens")
-        };
-        assert_eq!(body[cap], 16, "{host}");
-        assert!(body.get(other).is_none(), "{host}");
+        assert_eq!(body["max_tokens"], 16, "{host}");
+        assert!(body.get("max_completion_tokens").is_none(), "{host}");
         assert!(requests[0].headers.get("api-key").is_none(), "{host}");
         assert!(requests[0].headers.get("authorization").is_some(), "{host}");
     }
-}
-
-#[tokio::test]
-async fn mantle_probe_retries_the_other_model_prefix() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-            "error": {"message": "model is not supported on this route"}
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/openai/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let provider = openai(resolved_endpoint(
-        &server,
-        "bedrock-mantle.us-east-1.api.aws",
-        "/v1",
-    ));
-    provider
-        .probe(&probe(ProtocolId::OPENAI_CHAT, "newmaker.model"))
-        .await
-        .expect("retry");
-    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
 }
 
 #[tokio::test]
@@ -944,14 +914,6 @@ async fn every_list_shape_falls_back_to_the_id_for_its_display_name() {
     server.verify().await;
 }
 
-struct NoQuery;
-
-impl Match for NoQuery {
-    fn matches(&self, request: &Request) -> bool {
-        request.url.query().is_none()
-    }
-}
-
 struct NoPageToken;
 
 impl Match for NoPageToken {
@@ -961,34 +923,6 @@ impl Match for NoPageToken {
             .query_pairs()
             .any(|(name, _)| name == "pageToken")
     }
-}
-
-#[tokio::test]
-async fn mantle_openai_base_lists_v1_models_only() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v1/models"))
-        .and(NoQuery)
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "chat"}]})))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let listed = openai(resolved_endpoint(
-        &server,
-        "bedrock-mantle.us-east-1.api.aws",
-        "/openai/v1",
-    ))
-    .list_models(&ListQuery::new())
-    .await
-    .expect("list");
-    assert_eq!(ids(&listed), ["chat"]);
-    let requests = server.received_requests().await.expect("requests");
-    assert_eq!(requests.len(), 1);
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.url.path() != "/openai/v1/models")
-    );
 }
 
 #[tokio::test]

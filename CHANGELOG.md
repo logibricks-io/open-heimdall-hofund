@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `oauth::client_code_exchange_form`, and `oauth::refresh_secret_form`, so a
   plugin with a client secret needs no other crate.
 
+- Amazon Bedrock Mantle plugin `bedrock-mantle`
+  (`plugins/providers/bedrock-mantle`): preset `bedrock-mantle` moved out of
+  the built-in catalog, unchanged (17 regions), and now builds this plugin.
+  Chat and Responses pick `/v1` or `/openai/v1` per model id and retry once at
+  the other prefix on a route refusal, remembering the answer for up to 256
+  models. Messages sends `x-api-key` alone and fits beta headers and body
+  `anthropic_beta`. Models are listed live; the probe retries the other prefix
+  like a call. The built-in catalog now holds only `remote-gateway`.
+- SDK: `hofund_plugin_sdk::bedrock` (`fit_headers`, `fit_request`), the Bedrock
+  Messages beta fitting both Bedrock plugins share, moved from the `bedrock`
+  plugin; `wire::send` returns a `wire::Sent` once the status is a 2xx, so a
+  caller can judge the status before reading the body.
 - Amazon Bedrock plugin `bedrock` (`plugins/providers/bedrock`): preset
   `bedrock` and every `bedrock-converse` provider now build this plugin
   instead of the kernel adapter. Converse is signed with SigV4 through the SDK
@@ -347,6 +359,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response body. Token `Debug` is redacted.
 
 ### Changed
+
+- A Chat, Responses, or Messages provider whose base is on a Bedrock host no
+  longer uses the kernel adapter: a `bedrock-mantle.<region>.api.aws` base
+  builds the `bedrock-mantle` plugin and a
+  `bedrock-runtime.<region>.amazonaws.com` base builds the `bedrock` plugin.
+  Such a runtime base without the `bedrock` preset now lists the static
+  catalog instead of asking `/models`. The kernel adapters lose their Mantle
+  and Bedrock paths: `OpenAiCompat::direct_base` and `Anthropic::direct_base`
+  return `&str`, and a kernel Chat probe always sends `max_tokens`.
 
 - The local presets `ollama`, `lmstudio`, `omlx` and `mlx-serve` moved from
   the built-in catalog into the `openai-compat` preset fragment, unchanged:
