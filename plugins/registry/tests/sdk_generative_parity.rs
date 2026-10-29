@@ -29,6 +29,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Builds one canned upstream reply.
 type Reply = Box<dyn Fn() -> ResponseTemplate>;
+type Build = fn() -> Request;
 
 const KEY: &str = "parity-key";
 const MODEL: &str = "models/demo-1.5:tag/x";
@@ -413,7 +414,7 @@ fn an_encode_error_or_empty_model_matches_and_sends_nothing() {
                 call,
                 ..Case::execute(ProtocolId::OPENAI_CHAT)
             };
-            let bad: [(&str, fn() -> Request); 3] = [
+            let bad: [(&str, Build); 3] = [
                 ("nan", || {
                     let mut request = request(false);
                     request.params.temperature = Some(f64::NAN);
