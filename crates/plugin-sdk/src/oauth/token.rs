@@ -37,7 +37,7 @@ impl TokenSet {
         self.refresh.as_ref()
     }
 
-    /// The OpenID Connect ID token, when the endpoint returned one.
+    /// The `id_token` field, when the endpoint returned one.
     #[must_use]
     pub fn id_token(&self) -> Option<&SecretString> {
         self.id_token.as_ref()

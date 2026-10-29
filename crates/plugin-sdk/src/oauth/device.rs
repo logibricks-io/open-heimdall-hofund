@@ -121,13 +121,10 @@ where
 ///
 /// Returns a `Decode` error naming the missing field. The body is not copied.
 pub fn parse_start(body: &[u8]) -> Result<DeviceStart, PluginError> {
-    let object = match serde_json::from_slice(body) {
-        Ok(Value::Object(object)) => object,
-        _ => {
-            return Err(PluginError::decode(
-                "device authorization response is not a JSON object",
-            ));
-        }
+    let Ok(Value::Object(object)) = serde_json::from_slice(body) else {
+        return Err(PluginError::decode(
+            "device authorization response is not a JSON object",
+        ));
     };
     let field = |name: &'static str| {
         text(&object, name).ok_or_else(|| {
