@@ -363,7 +363,7 @@ impl Azure {
                         .with_source_url(candidate.url.as_str()));
                 }
                 Err(error) => {
-                    let stop = error.kind() == PluginErrorKind::Cancelled;
+                    let stop = stops(&error);
                     errors.push(error);
                     if stop {
                         break;
@@ -378,6 +378,11 @@ impl Azure {
         };
         Err(join_errors(errors, suffix))
     }
+}
+
+/// Whether a failed candidate ends the list instead of trying the next one.
+fn stops(error: &PluginError) -> bool {
+    error.kind() == PluginErrorKind::Cancelled
 }
 
 /// One list URL and what a non-empty answer from it means.
@@ -788,6 +793,35 @@ mod tests {
             assert_eq!(calls[0].uri(), DEPLOYMENTS);
             assert_eq!(calls[0].sensitive_headers(), ["api-key"]);
         });
+    }
+
+    #[test]
+    fn a_deployment_list_of_only_embeddings_falls_back_to_base_models() {
+        block_on(async {
+            let root = tempfile::tempdir().expect("scratch");
+            let host = keyed(root.path());
+            host.http().enqueue(
+                br#"{"data":[{"id":"text-embedding-3-small","model":"text-embedding-3-small"}]}"#
+                    .to_vec(),
+            );
+            host.http()
+                .enqueue(br#"{"data":[{"id":"gpt-5"}]}"#.to_vec());
+            let provider = provider(&host, &options("mine"), ProtocolId::OPENAI_CHAT);
+            let listed = provider.list_models(&ListQuery::new()).await.expect("list");
+            let ids: Vec<&str> = listed.models().iter().map(|model| model.id()).collect();
+            assert_eq!(ids, ["gpt-5"]);
+            assert!(listed.base_model_fallback());
+            assert_eq!(host.http().calls().len(), 2);
+        });
+    }
+
+    #[test]
+    fn only_a_cancelled_list_stops_before_the_next_candidate() {
+        assert!(super::stops(&super::PluginError::cancelled("gone")));
+        assert!(!super::stops(&super::PluginError::status_error(
+            403, "denied"
+        )));
+        assert!(!super::stops(&super::PluginError::decode("bad")));
     }
 
     #[test]
