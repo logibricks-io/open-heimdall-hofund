@@ -160,7 +160,11 @@ async fn negative_cache_five_seconds() {
     };
     let first = cache.get(&clock, &work, failing).await.expect_err("fails");
     assert_eq!(first.kind(), PluginErrorKind::Quota);
-    clock.advance(NEGATIVE_TTL - Duration::from_millis(1));
+    clock.advance(
+        NEGATIVE_TTL
+            .checked_sub(Duration::from_millis(1))
+            .expect("ttl"),
+    );
     let replayed = cache.get(&clock, &work, failing).await.expect_err("cached");
     assert_eq!(
         calls.load(Ordering::SeqCst),

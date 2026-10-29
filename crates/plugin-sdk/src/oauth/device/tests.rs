@@ -62,6 +62,10 @@ fn pending(count: usize) -> Vec<Result<Reply, PluginError>> {
     (0..count).map(|_| ok(400, PENDING)).collect()
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "scripted answers are transport results"
+)]
 fn ok(status: u16, body: &str) -> Result<Reply, PluginError> {
     Ok(Reply::from_parts(status, body))
 }
@@ -195,7 +199,7 @@ fn parse_start_reads_fields_and_defaults() {
         start.verification_uri_complete(),
         Some("https://example.com/v?c=U")
     );
-    assert_eq!(start.expires_in(), Duration::from_secs(900));
+    assert_eq!(start.expires_in(), Duration::from_mins(15));
     assert_eq!(start.interval(), Duration::from_secs(5));
     assert_eq!(start.device_code().expose_secret(), "d");
     let debug = format!("{:?}", device(10, 1));

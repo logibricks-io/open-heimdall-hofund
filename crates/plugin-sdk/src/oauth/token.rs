@@ -258,7 +258,7 @@ mod tests {
         );
         assert_eq!(
             read(r#"{"access_token":"a","expires_in":99999999}"#),
-            Some(at() + Duration::from_secs(86_400))
+            Some(at() + Duration::from_hours(24))
         );
     }
 
