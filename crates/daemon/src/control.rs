@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,11 +7,11 @@ use hofund_config::Config;
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError, ControlErrorKind,
-    FieldIssue, HealthResponse, ListenSource, ModelEntry, ModelListResponse, PicksResponse,
-    PicksSetRequest, ProviderListResponse, ProviderSummary, ProviderTestRequest,
-    ProviderTestResponse, ProviderTestResult, RouteModel, RouteModelListResponse, ShutdownRequest,
-    ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
+    FieldIssue, HealthResponse, ModelEntry, ModelListResponse, PicksResponse, PicksSetRequest,
+    ProviderListResponse, ProviderSummary, ProviderTestRequest, ProviderTestResponse,
+    ProviderTestResult, RouteModel, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod,
+    UsageQuery, UsageResponse, UsageRow, UsageTotals,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -38,8 +37,6 @@ use super::{
 
 pub(crate) struct DaemonControl {
     config_path: PathBuf,
-    configured: SocketAddr,
-    running: SocketAddr,
     started_at_ms: u64,
     models: Arc<ModelsHost>,
     ops: Arc<ConfigOps>,
@@ -55,8 +52,6 @@ impl DaemonControl {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config_path: &Path,
-        configured: SocketAddr,
-        running: SocketAddr,
         started_at_ms: u64,
         models: Arc<ModelsHost>,
         ops: Arc<ConfigOps>,
@@ -68,10 +63,9 @@ impl DaemonControl {
     ) -> Self {
         let registry_agents = registry.agents();
         let routes_from = Arc::clone(&ops);
+        let listener_from = Arc::clone(&ops);
         Self {
             config_path: config_path.to_path_buf(),
-            configured,
-            running,
             started_at_ms,
             models,
             registry,
@@ -79,9 +73,12 @@ impl DaemonControl {
             agents: AgentOps::new(
                 registry_agents,
                 config_path,
-                // The bound address, so a `listen` port of 0 still names the
-                // port agents can reach.
-                format!("http://{running}"),
+                // The address served now, so a `listen` port of 0 still names
+                // the port agents can reach and a relisten is followed.
+                Arc::new(move || {
+                    let listener = listener_from.listener();
+                    format!("http://{}", listener.running.unwrap_or(listener.effective))
+                }),
                 Arc::new(move || {
                     routes_from
                         .live()
@@ -109,7 +106,6 @@ impl DaemonControl {
     /// Builds snapshots from the same sources as [`ControlState::status`].
     fn snapshot_source(&self) -> SnapshotSource {
         let ops = Arc::clone(&self.ops);
-        let configured = self.configured.to_string();
         let cooldowns = Arc::clone(&self.cooldowns);
         let shutdown = self.shutdown.subscribe();
         Arc::new(move || {
@@ -132,8 +128,9 @@ impl DaemonControl {
                     member
                 })
                 .collect();
-            snapshot.effective_listen.clone_from(&configured);
-            snapshot.listen_source = ListenSource::Config;
+            let listener = ops.listener();
+            snapshot.effective_listen = listener.effective.to_string();
+            snapshot.listen_source = listener.source;
             snapshot.shutdown = if *shutdown.borrow() {
                 ShutdownState::Draining
             } else {
@@ -203,10 +200,11 @@ impl ControlState for DaemonControl {
         } else {
             ShutdownState::Running
         };
-        status.model_listener.configured = self.configured.to_string();
-        status.model_listener.effective = self.configured.to_string();
-        status.model_listener.running = Some(self.running.to_string());
-        status.model_listener.effective_source = ListenSource::Config;
+        let listener = self.ops.listener();
+        status.model_listener.configured = listener.configured.to_string();
+        status.model_listener.effective = listener.effective.to_string();
+        status.model_listener.running = listener.running.map(|running| running.to_string());
+        status.model_listener.effective_source = listener.source;
         status
     }
 

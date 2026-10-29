@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the config and symlink-target directories, debounces for 400 ms, ignores
   sibling files, falls back to a 2 s poll, skips its own writes, and keeps the
   last good configuration when an edit is invalid.
+- Live model relisten: a published `listen` change moves the model listener
+  without a restart. A port change binds the new address before closing the
+  old one; a same-port host change closes first and rebinds the old address if
+  the new bind fails. A bind failure keeps the rest of the configuration live,
+  reports `listen` in `not_applied`, and emits `listener_relisten_failed`; an
+  explicit reload retries. If the old address cannot be restored, the daemon
+  exits non-zero. `HOFUND_ADDR` overrides `listen` for the daemon and local
+  one-shot commands, never relistens, and is reported as `env_override`;
+  status shows the configured, effective, and running addresses and the
+  source.
 - Control event stream (`GET /v1/hofund/events`): per-topic buses and replay
   rings, composite `Last-Event-ID` resume, targeted resyncs, token-checked
   heartbeats, and stream close on token rotation or shutdown. The typed client

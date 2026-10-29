@@ -5,24 +5,130 @@
 //! construction, the write itself) all run before anything is published, so a
 //! failure leaves the file, the router snapshot, the generation and the
 //! cooldowns unchanged.
+//!
+//! After publication the model listener follows the new `listen` (L6d). A
+//! failed move does not undo the publication; it is reported in
+//! `not_applied` and as `listener_relisten_failed`.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use hofund_config::{Config, ConfigError};
 use hofund_control_proto::{
     ConfigRejectedEvent, ConfigReloadedEvent, ConfigResponse, ConfigValidationResponse,
-    ControlError, ControlErrorKind, EventPayload, FieldIssue,
+    ControlError, ControlErrorKind, EventPayload, FieldIssue, ListenSource,
+    ListenerRelistenFailedEvent,
 };
 use hofund_gateway::control::ControlFailure;
+use hofund_gateway::{Relisten, RelistenError};
+use tokio::sync::watch;
 
 use crate::config_write::{SidecarLock, WriteFailure, atomic_write, primary_lock_path};
 use crate::control::revision;
 use crate::events::EventBus;
 use crate::runtime::Runtime;
 
-/// Reason code for a changed `listen` before live relisten exists.
-pub(crate) const PENDING_L6D: &str = "pending_l6d";
+/// Reason code for a configured `listen` that `HOFUND_ADDR` overrides.
+pub(crate) const ENV_OVERRIDE: &str = "env_override";
+/// Reason code for a `listen` the model listener could not bind; the old
+/// address is still served.
+pub(crate) const BIND_FAILED: &str = "bind_failed";
+/// Reason code for a relisten that lost the old address too. The daemon exits.
+pub(crate) const RESTORE_FAILED: &str = "restore_failed";
+/// Reason code for a relisten after the model listener stopped.
+pub(crate) const LISTENER_STOPPED: &str = "listener_stopped";
+const ENV_OVERRIDE_MESSAGE: &str = "HOFUND_ADDR overrides the configured listener";
+
+/// The model listener as the configuration transaction sees it.
+pub(crate) struct ModelListener {
+    /// `HOFUND_ADDR`, resolved at startup. When set the listener never moves.
+    env: Option<SocketAddr>,
+    /// Moves the running listener. `None` in unit tests without a server.
+    handle: Option<Relisten>,
+    /// Reports a lost listener; the daemon then shuts down and exits non-zero.
+    fatal: watch::Sender<Option<String>>,
+}
+
+/// The listener addresses that status and snapshots report.
+pub(crate) struct ListenerView {
+    pub(crate) configured: SocketAddr,
+    pub(crate) effective: SocketAddr,
+    pub(crate) running: Option<SocketAddr>,
+    pub(crate) source: ListenSource,
+}
+
+impl ModelListener {
+    pub(crate) fn new(
+        env: Option<SocketAddr>,
+        handle: Option<Relisten>,
+        fatal: watch::Sender<Option<String>>,
+    ) -> Self {
+        Self { env, handle, fatal }
+    }
+
+    fn view(&self, config: &Config) -> ListenerView {
+        let (effective, source) = match self.env {
+            Some(env) => (env, ListenSource::Environment),
+            None => (config.listen, ListenSource::Config),
+        };
+        ListenerView {
+            configured: config.listen,
+            effective,
+            running: self.handle.as_ref().map(Relisten::local_addr),
+            source,
+        }
+    }
+
+    /// The `listen` issue while `HOFUND_ADDR` overrides a different value.
+    fn env_issue(&self, config: &Config) -> Option<FieldIssue> {
+        let env = self.env?;
+        (env != config.listen)
+            .then(|| FieldIssue::new("listen", ENV_OVERRIDE, ENV_OVERRIDE_MESSAGE))
+    }
+
+    /// Moves the listener to `config`'s `listen` and returns the `listen`
+    /// issue to report, plus whether `listener_relisten_failed` is due.
+    async fn follow(&self, config: &Config) -> Option<(FieldIssue, bool)> {
+        if self.env.is_some() {
+            return self.env_issue(config).map(|issue| (issue, false));
+        }
+        let handle = self.handle.as_ref()?;
+        match handle.relisten(config.listen).await {
+            Ok(_) => None,
+            Err(error @ RelistenError::Bind { .. }) => Some((
+                FieldIssue::new("listen", BIND_FAILED, error.to_string()),
+                true,
+            )),
+            Err(error @ RelistenError::RestoreFailed { .. }) => {
+                let message = format!("the model listener is lost: {error}");
+                tracing::error!(%error, "the model listener could not be restored; shutting down");
+                self.fatal.send_replace(Some(message.clone()));
+                Some((FieldIssue::new("listen", RESTORE_FAILED, message), true))
+            }
+            Err(error) => Some((
+                FieldIssue::new("listen", LISTENER_STOPPED, error.to_string()),
+                false,
+            )),
+        }
+    }
+}
+
+/// A candidate the runtime has published, waiting for the listener step.
+struct Staged {
+    config: Arc<Config>,
+    runtime_revision: String,
+    disk_revision: String,
+    text: String,
+    changed: Vec<String>,
+}
+
+/// What the blocking part of a reload produced.
+enum Reloaded {
+    /// Nothing to publish; respond with this.
+    Unchanged(ConfigResponse),
+    Staged(Staged),
+}
 
 /// The configuration currently serving traffic.
 #[derive(Clone, Debug)]
@@ -53,6 +159,7 @@ pub(crate) struct ConfigOps {
     /// compared against it, so reverting an edit clears `pending_restart`.
     started: Arc<Config>,
     live: RwLock<Arc<LiveConfig>>,
+    listener: ModelListener,
 }
 
 impl ConfigOps {
@@ -63,13 +170,14 @@ impl ConfigOps {
         bus: Arc<EventBus>,
         config: Arc<Config>,
         runtime_revision: String,
+        listener: ModelListener,
     ) -> Self {
         let live = LiveConfig {
             config: Arc::clone(&config),
             runtime_revision,
             generation: 1,
             pending_restart: Vec::new(),
-            not_applied: Vec::new(),
+            not_applied: listener.env_issue(&config).into_iter().collect(),
         };
         Self {
             gate: tokio::sync::Mutex::new(()),
@@ -79,7 +187,13 @@ impl ConfigOps {
             bus,
             started: config,
             live: RwLock::new(Arc::new(live)),
+            listener,
         }
+    }
+
+    /// The listener addresses for the published configuration.
+    pub(crate) fn listener(&self) -> ListenerView {
+        self.listener.view(&self.live().config)
     }
 
     /// The published configuration.
@@ -107,8 +221,7 @@ impl ConfigOps {
         match self.check(text) {
             Ok((config, _candidate)) => {
                 response.valid = true;
-                let (pending, _) = restart_diff(&self.started, &config);
-                response.pending_restart = pending;
+                response.pending_restart = restart_diff(&self.started, &config);
             }
             Err(issues) => {
                 response.valid = false;
@@ -126,7 +239,8 @@ impl ConfigOps {
         let _gate = self.gate.lock().await;
         let ops = Arc::clone(self);
         let expected = expected.to_owned();
-        run_blocking(move || ops.apply_locked(&expected, text)).await
+        let staged = run_blocking(move || ops.apply_locked(&expected, text)).await?;
+        Ok(self.finish(staged).await)
     }
 
     pub(crate) async fn reload(
@@ -137,7 +251,10 @@ impl ConfigOps {
         let _gate = self.gate.lock().await;
         let ops = Arc::clone(self);
         let expected = expected.map(str::to_owned);
-        run_blocking(move || ops.reload_locked(expected.as_deref(), origin)).await
+        match run_blocking(move || ops.reload_locked(expected.as_deref(), origin)).await? {
+            Reloaded::Unchanged(response) => Ok(response),
+            Reloaded::Staged(staged) => Ok(self.finish(staged).await),
+        }
     }
 
     fn lock(&self) -> Result<SidecarLock, ControlFailure> {
@@ -174,7 +291,7 @@ impl ConfigOps {
         Ok((config, candidate))
     }
 
-    fn apply_locked(&self, expected: &str, text: String) -> Result<ConfigResponse, ControlFailure> {
+    fn apply_locked(&self, expected: &str, text: String) -> Result<Staged, ControlFailure> {
         let _lock = self.lock()?;
         let (disk_revision, _) = self.read_disk()?;
         if disk_revision != expected {
@@ -196,8 +313,7 @@ impl ConfigOps {
             );
             write_failure(failure)
         })?;
-        let live = self.publish(candidate, written.clone())?;
-        Ok(response(&live, written, text))
+        self.publish(candidate, written.clone(), text)
     }
 
     /// Emits `config_rejected` for a candidate that was not published.
@@ -212,7 +328,7 @@ impl ConfigOps {
         &self,
         expected: Option<&str>,
         origin: ReloadOrigin,
-    ) -> Result<ConfigResponse, ControlFailure> {
+    ) -> Result<Reloaded, ControlFailure> {
         let _lock = self.lock()?;
         let (disk_revision, text) = self.read_disk()?;
         if expected.is_some_and(|expected| expected != disk_revision) {
@@ -220,7 +336,7 @@ impl ConfigOps {
         }
         let current = self.live();
         if origin == ReloadOrigin::Watcher && current.runtime_revision == disk_revision {
-            return Ok(response(&current, disk_revision, text));
+            return Ok(Reloaded::Unchanged(response(&current, disk_revision, text)));
         }
         let (_, candidate) = match self.check(&text) {
             Ok(checked) => checked,
@@ -229,28 +345,42 @@ impl ConfigOps {
                 return Err(invalid(issues));
             }
         };
-        let live = self.publish(candidate, disk_revision.clone())?;
-        Ok(response(&live, disk_revision, text))
+        self.publish(candidate, disk_revision.clone(), text)
+            .map(Reloaded::Staged)
     }
 
+    /// Publishes the router state. The live record and the events wait for
+    /// [`Self::finish`], so they can report the listener step.
     fn publish(
         &self,
         candidate: crate::runtime::Candidate,
         runtime_revision: String,
-    ) -> Result<Arc<LiveConfig>, ControlFailure> {
+        text: String,
+    ) -> Result<Staged, ControlFailure> {
         let config = Arc::clone(candidate.config());
         let changed = self
             .runtime
             .publish(candidate)
             .map_err(|error| internal(format!("publication failed: {error}")))?;
-        let (pending_restart, not_applied) = restart_diff(&self.started, &config);
+        Ok(Staged {
+            config,
+            disk_revision: runtime_revision.clone(),
+            runtime_revision,
+            text,
+            changed,
+        })
+    }
+
+    /// Moves the listener, then records and announces the publication.
+    async fn finish(&self, staged: Staged) -> ConfigResponse {
+        let listen = self.listener.follow(&staged.config).await;
         let mut live = self.live.write().expect("live config");
         let next = Arc::new(LiveConfig {
-            config,
-            runtime_revision,
+            pending_restart: restart_diff(&self.started, &staged.config),
+            not_applied: listen.iter().map(|(issue, _)| issue.clone()).collect(),
+            config: staged.config,
+            runtime_revision: staged.runtime_revision,
             generation: live.generation + 1,
-            pending_restart,
-            not_applied,
         });
         *live = Arc::clone(&next);
         drop(live);
@@ -258,17 +388,31 @@ impl ConfigOps {
         event.disk_revision.clone_from(&next.runtime_revision);
         event.runtime_revision.clone_from(&next.runtime_revision);
         event.generation = next.generation;
-        event.changed_members = changed;
+        event.changed_members = staged.changed;
         event.pending_restart.clone_from(&next.pending_restart);
         event.not_applied.clone_from(&next.not_applied);
         self.bus.emit(EventPayload::ConfigReloaded(event));
-        Ok(next)
+        if let Some((issue, true)) = listen {
+            let mut event = ListenerRelistenFailedEvent::default();
+            event.issue = issue;
+            event.running = self
+                .listener
+                .view(&next.config)
+                .running
+                .map(|running| running.to_string())
+                .unwrap_or_default();
+            event.disk_revision.clone_from(&next.runtime_revision);
+            event.runtime_revision.clone_from(&next.runtime_revision);
+            event.generation = next.generation;
+            self.bus.emit(EventPayload::ListenerRelistenFailed(event));
+        }
+        response(&next, staged.disk_revision, staged.text)
     }
 }
 
-/// Settings that only take effect at startup, and live settings that cannot be
-/// applied yet, compared against the configuration the process started with.
-pub(crate) fn restart_diff(running: &Config, candidate: &Config) -> (Vec<String>, Vec<FieldIssue>) {
+/// Settings that only take effect at startup, compared against the
+/// configuration the process started with.
+pub(crate) fn restart_diff(running: &Config, candidate: &Config) -> Vec<String> {
     let mut pending = Vec::new();
     if running.token_file != candidate.token_file {
         pending.push("token_file".to_owned());
@@ -276,15 +420,7 @@ pub(crate) fn restart_diff(running: &Config, candidate: &Config) -> (Vec<String>
     if running.usage_file != candidate.usage_file {
         pending.push("usage_file".to_owned());
     }
-    let mut not_applied = Vec::new();
-    if running.listen != candidate.listen {
-        not_applied.push(FieldIssue::new(
-            "listen",
-            PENDING_L6D,
-            "the model listener moves to a new address after a restart",
-        ));
-    }
-    (pending, not_applied)
+    pending
 }
 
 fn response(live: &LiveConfig, disk_revision: String, text: String) -> ConfigResponse {
@@ -397,7 +533,7 @@ mod tests {
     use hofund_plugin_api::PluginError;
     use hofund_router::Snapshot;
 
-    use super::{ConfigOps, ReloadOrigin, restart_diff};
+    use super::{ConfigOps, ENV_OVERRIDE, ModelListener, ReloadOrigin, restart_diff};
     use crate::RegistryAdapter;
     use crate::control::revision;
     use crate::events::EventBus;
@@ -446,6 +582,7 @@ mod tests {
             Arc::clone(&bus),
             Arc::new(config),
             revision(text.as_bytes()),
+            ModelListener::new(None, None, tokio::sync::watch::channel(None).0),
         ));
         Fixture {
             ops,
@@ -724,15 +861,40 @@ mod tests {
     }
 
     #[test]
-    fn listen_change_is_reported_not_applied_until_relisten_exists() {
+    fn listen_is_live_not_a_restart_setting() {
         let running = hofund_config::load("listen = \"127.0.0.1:0\"\n").expect("running");
         let moved = hofund_config::load("listen = \"127.0.0.1:1\"\n").expect("moved");
-        let (pending, not_applied) = restart_diff(&running, &moved);
-        assert!(pending.is_empty());
-        assert_eq!(not_applied.len(), 1);
-        assert_eq!(not_applied[0].field, "listen");
-        assert_eq!(not_applied[0].reason, super::PENDING_L6D);
-        assert_eq!(restart_diff(&running, &running), (Vec::new(), Vec::new()));
+        assert!(restart_diff(&running, &moved).is_empty());
+        let mut token = hofund_config::load("listen = \"127.0.0.1:0\"\n").expect("token");
+        "other.token".clone_into(&mut token.token_file);
+        assert_eq!(
+            restart_diff(&running, &token),
+            vec!["token_file".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn env_override_listener_never_moves_and_reports_a_differing_listen() {
+        let env = "127.0.0.1:4000".parse().expect("env");
+        let listener = ModelListener::new(Some(env), None, tokio::sync::watch::channel(None).0);
+        let same = hofund_config::load("listen = \"127.0.0.1:4000\"\n").expect("same");
+        let other = hofund_config::load("listen = \"127.0.0.1:4001\"\n").expect("other");
+
+        assert!(listener.follow(&same).await.is_none());
+        let (issue, event) = listener.follow(&other).await.expect("issue");
+        assert_eq!(
+            (issue.field.as_str(), issue.reason.as_str()),
+            ("listen", ENV_OVERRIDE)
+        );
+        assert_eq!(
+            issue.message,
+            "HOFUND_ADDR overrides the configured listener"
+        );
+        assert!(!event, "an override is not a relisten failure");
+        let view = listener.view(&other);
+        assert_eq!(view.effective, env);
+        assert_eq!(view.configured, other.listen);
+        assert_eq!(view.source, hofund_control_proto::ListenSource::Environment);
     }
 
     #[test]

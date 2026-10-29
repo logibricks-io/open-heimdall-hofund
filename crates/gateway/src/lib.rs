@@ -7,8 +7,12 @@
 
 pub mod control;
 mod endpoints;
+mod relisten;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
+#[doc(hidden)]
+pub use relisten::BindHook;
+pub use relisten::{Relisten, RelistenError};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -93,7 +97,8 @@ impl fmt::Debug for TokenState {
 
 /// A bound server.
 pub struct Running {
-    /// The address the listener accepted.
+    /// The address the listener accepted at start. After a relisten,
+    /// [`Running::listen_addr`] gives the address served now.
     pub local_addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
@@ -103,6 +108,8 @@ pub struct Running {
     control_socket_path: Option<PathBuf>,
     resources: Vec<Box<dyn std::any::Any + Send>>,
     shutdown_request: Option<watch::Receiver<bool>>,
+    relisten: Option<Relisten>,
+    fatal: Option<watch::Receiver<Option<String>>>,
 }
 
 /// The listener could not be bound.
@@ -240,24 +247,37 @@ impl Gateway {
     /// # Errors
     ///
     /// Returns [`GatewayError`] when the address cannot be bound.
+    ///
+    /// The returned server can move to another address with
+    /// [`Running::relisten`].
     pub async fn bind(self, listen: SocketAddr) -> Result<Running, GatewayError> {
-        let listener = TcpListener::bind(listen)
-            .await
-            .map_err(|source| GatewayError::Bind { listen, source })?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|source| GatewayError::Bind { listen, source })?;
-        let router = self.into_router();
-        let (shutdown, signal) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    let _ = signal.await;
-                })
-                .await
-        });
-        Ok(Running::new(local_addr, shutdown, task))
+        serve_relistenable(self.into_router(), listen).await
     }
+}
+
+/// Serves `router` on `listen` behind a swappable accept loop.
+async fn serve_relistenable(
+    router: axum::Router,
+    listen: SocketAddr,
+) -> Result<Running, GatewayError> {
+    let listener = TcpListener::bind(listen)
+        .await
+        .map_err(|source| GatewayError::Bind { listen, source })?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|source| GatewayError::Bind { listen, source })?;
+    let (accept, handle) = relisten::swappable(listener, listen, local_addr);
+    let (shutdown, signal) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        axum::serve(accept, router)
+            .with_graceful_shutdown(async move {
+                let _ = signal.await;
+            })
+            .await
+    });
+    let mut running = Running::new(local_addr, shutdown, task);
+    running.relisten = Some(handle);
+    Ok(running)
 }
 
 impl Running {
@@ -276,7 +296,65 @@ impl Running {
             control_socket_path: None,
             resources: Vec::new(),
             shutdown_request: None,
+            relisten: None,
+            fatal: None,
         }
+    }
+
+    /// The address the model listener serves now: the start address until a
+    /// relisten moves it.
+    #[must_use]
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.relisten
+            .as_ref()
+            .map_or(self.local_addr, Relisten::local_addr)
+    }
+
+    /// A handle that moves this server's listener, shared with its clones.
+    /// `None` for control listeners, which never move.
+    #[must_use]
+    pub fn relisten_handle(&self) -> Option<Relisten> {
+        self.relisten.clone()
+    }
+
+    /// Moves the listener to `to`; see [`Relisten::relisten`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelistenError`] when the move fails, and
+    /// [`RelistenError::Stopped`] for a server that cannot move.
+    pub async fn relisten(&self, to: SocketAddr) -> Result<SocketAddr, RelistenError> {
+        match &self.relisten {
+            Some(handle) => handle.relisten(to).await,
+            None => Err(RelistenError::Stopped),
+        }
+    }
+
+    /// Runs `hook` before each relisten bind, for tests that need one to fail.
+    /// Call it before taking a [`Running::relisten_handle`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_bind_hook(mut self, hook: BindHook) -> Self {
+        if let Some(handle) = self.relisten.as_mut() {
+            handle.set_hook(hook);
+        }
+        self
+    }
+
+    /// Attaches the channel on which the daemon reports a fatal error. A
+    /// reported error also resolves [`Running::shutdown_requested`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_fatal(mut self, fatal: watch::Receiver<Option<String>>) -> Self {
+        self.fatal = Some(fatal);
+        self
+    }
+
+    /// The fatal error the daemon reported, if any. A server that stops for
+    /// this reason should exit non-zero.
+    #[must_use]
+    pub fn fatal(&self) -> Option<String> {
+        self.fatal.as_ref().and_then(|fatal| fatal.borrow().clone())
     }
 
     /// Attaches the flag a control client sets to request shutdown.
@@ -291,12 +369,29 @@ impl Running {
     ///
     /// Without an attached request flag, or after its sender is gone without
     /// a request, this never resolves; a signal handler must stop the server.
+    ///
+    /// A fatal error reported through [`Running::with_fatal`] resolves it too.
     pub async fn shutdown_requested(&mut self) {
-        let Some(request) = self.shutdown_request.as_mut() else {
-            return std::future::pending().await;
+        let (request, fatal) = (self.shutdown_request.as_mut(), self.fatal.as_mut());
+        let requested = async {
+            let Some(request) = request else {
+                return std::future::pending().await;
+            };
+            if request.wait_for(|requested| *requested).await.is_err() {
+                std::future::pending::<()>().await;
+            }
         };
-        if request.wait_for(|requested| *requested).await.is_err() {
-            std::future::pending::<()>().await;
+        let fatal = async {
+            let Some(fatal) = fatal else {
+                return std::future::pending().await;
+            };
+            if fatal.wait_for(Option::is_some).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            () = requested => {}
+            () = fatal => {}
         }
     }
 

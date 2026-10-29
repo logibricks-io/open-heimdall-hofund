@@ -338,7 +338,8 @@ async fn shutdown_route_drains_inflight_model_request() {
     tokio::time::timeout(Duration::from_secs(10), served)
         .await
         .expect("serve returned")
-        .expect("serve task");
+        .expect("serve task")
+        .expect("a requested shutdown is not fatal");
 
     assert!(
         tokio::net::TcpStream::connect(model_addr).await.is_err(),

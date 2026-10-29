@@ -18,6 +18,8 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_host::HttpLimits;
 
+#[doc(hidden)]
+pub use hofund_gateway::BindHook;
 pub use hofund_gateway::Running;
 use hofund_provider::{Credential, Endpoint, Provider, Wire, resolve};
 use hofund_quirks::named;
@@ -158,8 +160,9 @@ pub fn token_rotate(path: &Path) -> Result<String, DaemonError> {
 /// The listen URL and bearer token an agent adapter should write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalGateway {
-    /// `http://` plus the configured listen address. IPv6 addresses keep their
-    /// brackets, as in `http://[::1]:3425`.
+    /// `http://` plus the model listen address: `HOFUND_ADDR` when set,
+    /// otherwise the config's `listen`. IPv6 addresses keep their brackets, as
+    /// in `http://[::1]:3425`.
     pub base_url: String,
     /// Bearer token from the token file. The file is created on first use.
     pub token: String,
@@ -178,8 +181,11 @@ pub fn local_gateway(path: &Path) -> Result<LocalGateway, DaemonError> {
     let token = TokenFile::new(beside(path, &config.token_file))
         .load_or_create()
         .map_err(show)?;
+    let (listen, _) =
+        hofund_config::effective_listen(&config, hofund_config::addr_env().as_deref())
+            .map_err(show)?;
     Ok(LocalGateway {
-        base_url: format!("http://{}", config.listen),
+        base_url: format!("http://{listen}"),
         token,
     })
 }
@@ -251,11 +257,19 @@ pub struct StartOptions {
     /// runs whenever local control is enabled and this is `false`.
     #[doc(hidden)]
     pub skip_config_watch: bool,
+    /// The `HOFUND_ADDR` value to use instead of the process environment, for
+    /// tests. `None` reads the environment.
+    #[doc(hidden)]
+    pub hofund_addr: Option<String>,
+    /// Runs before each relisten bind, for tests that need a bind to fail.
+    #[doc(hidden)]
+    pub relisten_hook: Option<hofund_gateway::BindHook>,
 }
 
-/// Binds the address in the config and serves until shutdown.
+/// Binds the model address and serves until shutdown.
 ///
-/// The bound address is available on the returned [`Running`] value. This
+/// The address is `HOFUND_ADDR` when it is set and not empty, otherwise the
+/// config's `listen`. The bound address is available on the returned [`Running`] value. This
 /// entry point does not start a control listener.
 ///
 /// # Errors
@@ -388,10 +402,19 @@ async fn start_inner(
         Arc::clone(&usage),
     )
     .with_surfaces(registry.surfaces());
+    let env = match options.hofund_addr {
+        Some(value) => Some(value),
+        None => hofund_config::addr_env(),
+    };
+    let (listen, source) =
+        hofund_config::effective_listen(&config, env.as_deref()).map_err(show)?;
     let mut running = gateway
-        .bind(config.listen)
+        .bind(listen)
         .await
         .map_err(|error| DaemonError::new(error.to_string()))?;
+    if let Some(hook) = options.relisten_hook {
+        running = running.with_bind_hook(hook);
+    }
     let models_host = Arc::new(models_host);
     runtime.attach_models(Arc::clone(&models_host));
     let config = Arc::new(config);
@@ -407,6 +430,13 @@ async fn start_inner(
             token_generation.subscribe(),
             shutdown_request.subscribe(),
         );
+        let (fatal, fatal_reported) = tokio::sync::watch::channel(None);
+        running = running.with_fatal(fatal_reported);
+        let listener = config_ops::ModelListener::new(
+            (source == hofund_config::ListenSource::Environment).then_some(listen),
+            running.relisten_handle(),
+            fatal,
+        );
         let ops = Arc::new(config_ops::ConfigOps::new(
             path,
             session.config_lock_fallback(&control_runtime),
@@ -414,6 +444,7 @@ async fn start_inner(
             Arc::clone(&events),
             Arc::clone(&config),
             runtime_revision,
+            listener,
         ));
         if !options.skip_config_watch {
             running = running.with_task(watch::spawn(Arc::clone(&ops), path.to_path_buf()));
@@ -421,8 +452,6 @@ async fn start_inner(
         let state = Arc::new(
             control::DaemonControl::new(
                 path,
-                config.listen,
-                running.local_addr,
                 started_at_ms,
                 Arc::clone(&models_host),
                 ops,
@@ -509,8 +538,7 @@ async fn start_inner(
 pub async fn serve(path: &Path) -> Result<(), DaemonError> {
     let running = start(path).await?;
     eprintln!("listening on http://{}", running.local_addr);
-    serve_until_shutdown(running).await;
-    Ok(())
+    serve_until_shutdown(running).await
 }
 
 /// Waits for Ctrl-C or a control `POST /v1/hofund/shutdown`, then drains.
@@ -518,12 +546,23 @@ pub async fn serve(path: &Path) -> Result<(), DaemonError> {
 /// Linked control listeners stop first, the model listener then finishes its
 /// in-flight requests, and daemon resources such as the control lock and
 /// socket are released when the server is dropped.
-pub async fn serve_until_shutdown(mut running: Running) {
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] after a fatal error stopped the daemon, such as a
+/// relisten that could not restore the old model listener. The process should
+/// then exit non-zero so its supervisor restarts it.
+pub async fn serve_until_shutdown(mut running: Running) -> Result<(), DaemonError> {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         () = running.shutdown_requested() => {}
     }
+    let fatal = running.fatal();
     running.shutdown().await;
+    match fatal {
+        Some(message) => Err(DaemonError::new(message)),
+        None => Ok(()),
+    }
 }
 
 /// Builds a runtime and calls [`serve`].

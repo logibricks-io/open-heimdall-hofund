@@ -1,4 +1,5 @@
-//! L6b configuration transaction over the control listener.
+//! L6b configuration transaction and L6d live relisten over the control
+//! listener.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -6,8 +7,8 @@ use std::time::Duration;
 use hofund_agent::Session;
 use hofund_control_proto::{
     API_VERSION, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
-    ConfigValidationResponse, ControlErrorKind, EventEnvelope, EventPayload, ReloadRequest,
-    StatusResponse, decode_error_envelope, decode_response,
+    ConfigValidationResponse, ControlErrorKind, EventEnvelope, EventPayload, ListenSource,
+    ReloadRequest, StatusResponse, decode_error_envelope, decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
 use sha2::{Digest, Sha256};
@@ -64,19 +65,28 @@ async fn start_at(scratch: &Scratch, config_path: &Path, text: &str) -> Running 
 
 /// Starts a daemon; `watch = false` leaves hand edits unpublished.
 async fn start_watching(scratch: &Scratch, config_path: &Path, text: &str, watch: bool) -> Running {
+    let mut options = options(scratch);
+    options.skip_config_watch = !watch;
+    start_with(config_path, text, options).await
+}
+
+/// Isolated options with control enabled, no `HOFUND_ADDR` and no watcher.
+fn options(scratch: &Scratch) -> StartOptions {
+    StartOptions {
+        control_listen: Some("127.0.0.1:0".parse().expect("control address")),
+        control_runtime: Some(ControlRuntime::new(None, scratch.runtime_dir.clone())),
+        agent_session: Some(Session::new(scratch.runtime_dir.join("home")).with_path("")),
+        skip_config_watch: true,
+        hofund_addr: Some(String::new()),
+        ..StartOptions::default()
+    }
+}
+
+async fn start_with(config_path: &Path, text: &str, options: StartOptions) -> Running {
     std::fs::write(config_path, text).expect("config");
-    start_with_options(
-        config_path,
-        StartOptions {
-            control_listen: Some("127.0.0.1:0".parse().expect("control address")),
-            control_runtime: Some(ControlRuntime::new(None, scratch.runtime_dir.clone())),
-            agent_session: Some(Session::new(scratch.runtime_dir.join("home")).with_path("")),
-            skip_config_watch: !watch,
-            ..StartOptions::default()
-        },
-    )
-    .await
-    .expect("daemon")
+    start_with_options(config_path, options)
+        .await
+        .expect("daemon")
 }
 
 struct Client {
@@ -351,11 +361,7 @@ async fn pending_restart_fields_agree_across_response_status_and_events() {
     let client = Client::new(&running, &scratch);
     let mut stream = client.events().await;
 
-    let edited = config("token_file = \"other.token\"\nusage_file = \"other.db\"\n").replacen(
-        "listen = \"127.0.0.1:0\"",
-        "listen = \"127.0.0.1:1\"",
-        1,
-    );
+    let edited = config("token_file = \"other.token\"\nusage_file = \"other.db\"\n");
     let (status, body) = client
         .post(
             "/v1/hofund/config/validate",
@@ -371,9 +377,7 @@ async fn pending_restart_fields_agree_across_response_status_and_events() {
     let (status, body) = client.apply(&revision(&original), &edited).await;
     let applied = ok(status, &body);
     assert_eq!(applied.pending_restart, ["token_file", "usage_file"]);
-    assert_eq!(applied.not_applied.len(), 1);
-    assert_eq!(applied.not_applied[0].field, "listen");
-    assert_eq!(applied.not_applied[0].reason, "pending_l6d");
+    assert!(applied.not_applied.is_empty(), "{:?}", applied.not_applied);
 
     let status = client.status().await;
     assert_eq!(status.pending_restart, applied.pending_restart);
@@ -656,5 +660,221 @@ async fn rotated_key_reaches_the_model_host_after_apply() {
         .map(|model| model.id.as_str())
         .collect();
     assert_eq!(ids, ["fresh"]);
+    running.shutdown().await;
+}
+
+/// Returns a loopback address whose port was free a moment ago.
+fn free_addr() -> std::net::SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("probe bind")
+        .local_addr()
+        .expect("probe address")
+}
+
+fn with_listen(listen: &str) -> String {
+    config("").replacen(
+        "listen = \"127.0.0.1:0\"",
+        &format!("listen = \"{listen}\""),
+        1,
+    )
+}
+
+async fn health(addr: std::net::SocketAddr) -> Result<reqwest::StatusCode, reqwest::Error> {
+    reqwest::Client::new()
+        .get(format!("http://{addr}/health"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map(|response| response.status())
+}
+
+#[tokio::test]
+async fn relisten_port_change_moves_the_model_listener_and_status() {
+    let scratch = Scratch::new("relisten-move");
+    let original = config("");
+    let running = start_with(&scratch.path(), &original, options(&scratch)).await;
+    let client = Client::new(&running, &scratch);
+    let old = running.listen_addr();
+    assert_eq!(
+        client.status().await.model_listener.running,
+        Some(old.to_string())
+    );
+
+    let to = free_addr();
+    let edited = with_listen(&to.to_string());
+    let (status, body) = client.apply(&revision(&original), &edited).await;
+    let applied = ok(status, &body);
+    assert!(applied.not_applied.is_empty(), "{:?}", applied.not_applied);
+    assert!(applied.pending_restart.is_empty());
+
+    let listener = client.status().await.model_listener;
+    assert_eq!(listener.configured, to.to_string());
+    assert_eq!(listener.effective, to.to_string());
+    assert_eq!(listener.running, Some(to.to_string()));
+    assert_eq!(listener.effective_source, ListenSource::Config);
+    assert_eq!(running.listen_addr(), to);
+    assert_eq!(
+        health(to).await.expect("new listener"),
+        reqwest::StatusCode::OK
+    );
+    assert!(health(old).await.is_err(), "the old listener is closed");
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn relisten_failure_publishes_rest_and_reports_not_applied() {
+    let scratch = Scratch::new("relisten-fail");
+    let original = config("");
+    let running = start_with(&scratch.path(), &original, options(&scratch)).await;
+    let client = Client::new(&running, &scratch);
+    let old = running.listen_addr();
+    let mut stream = client.events().await;
+
+    let held = std::net::TcpListener::bind("127.0.0.1:0").expect("held port");
+    let target = held.local_addr().expect("held address");
+    let edited = with_listen(&target.to_string()).replace("model = \"m\"", "model = \"m2\"");
+    let (status, body) = client.apply(&revision(&original), &edited).await;
+    let applied = ok(status, &body);
+    // The rest of the candidate is live even though the listener stayed put.
+    assert_eq!(applied.generation, 2);
+    assert_eq!(applied.runtime_revision, revision(&edited));
+    assert_eq!(applied.not_applied.len(), 1, "{:?}", applied.not_applied);
+    assert_eq!(applied.not_applied[0].field, "listen");
+    assert_eq!(applied.not_applied[0].reason, "bind_failed");
+    assert!(!applied.not_applied[0].message.contains(SECRET));
+
+    let status = client.status().await;
+    assert_eq!(status.not_applied, applied.not_applied);
+    assert_eq!(status.model_listener.configured, target.to_string());
+    assert_eq!(status.model_listener.running, Some(old.to_string()));
+    assert_eq!(client.config().await.not_applied, applied.not_applied);
+    assert_eq!(
+        health(old).await.expect("old listener"),
+        reqwest::StatusCode::OK
+    );
+
+    let events = next_events(&mut stream, 2).await;
+    match events.as_slice() {
+        [
+            (first, EventPayload::ConfigReloaded(reloaded)),
+            (second, EventPayload::ListenerRelistenFailed(failed)),
+        ] => {
+            assert_eq!(first, "config_reloaded");
+            assert_eq!(second, "listener_relisten_failed");
+            assert_eq!(reloaded.not_applied, applied.not_applied);
+            assert_eq!(failed.issue, applied.not_applied[0]);
+            assert_eq!(failed.running, old.to_string());
+            assert_eq!(failed.generation, 2);
+            assert_eq!(failed.runtime_revision, applied.runtime_revision);
+            assert_eq!(failed.disk_revision, applied.disk_revision);
+        }
+        other => panic!("expected config_reloaded then listener_relisten_failed, got {other:?}"),
+    }
+
+    // Once the port frees up, an explicit reload of the same revision retries.
+    drop(held);
+    let (status, body) = client.reload(&applied.disk_revision).await;
+    let retried = ok(status, &body);
+    assert_eq!(retried.generation, 3);
+    assert!(retried.not_applied.is_empty(), "{:?}", retried.not_applied);
+    assert_eq!(
+        client.status().await.model_listener.running,
+        Some(target.to_string())
+    );
+    assert_eq!(running.listen_addr(), target);
+    drop(stream);
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn relisten_restore_failure_exits_nonzero() {
+    let scratch = Scratch::new("relisten-restore");
+    let original = config("");
+    let mut options = options(&scratch);
+    options.relisten_hook = Some(hofund_daemon::BindHook::new(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "test hook refuses every bind",
+        ))
+    }));
+    let running = start_with(&scratch.path(), &original, options).await;
+    let client = Client::new(&running, &scratch);
+    let port = running.listen_addr().port();
+
+    // Same port, different host: the old socket closes first, so a failed
+    // bind needs a restore, and the hook makes that fail too.
+    let edited = with_listen(&format!("0.0.0.0:{port}"));
+    let (status, body) = client.apply(&revision(&original), &edited).await;
+    let applied = ok(status, &body);
+    assert_eq!(applied.not_applied.len(), 1, "{:?}", applied.not_applied);
+    assert_eq!(applied.not_applied[0].reason, "restore_failed");
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        hofund_daemon::serve_until_shutdown(running),
+    )
+    .await
+    .expect("a lost model listener ends the daemon");
+    assert!(outcome.is_err(), "restore failure must be fatal");
+}
+
+#[tokio::test]
+async fn reload_listen_with_hofund_addr_reports_not_applied_env_override() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let scratch = Scratch::new("relisten-env");
+    let original = config("");
+    let env = free_addr();
+    let binds = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&binds);
+    let mut options = options(&scratch);
+    options.hofund_addr = Some(format!(" {env} "));
+    options.relisten_hook = Some(hofund_daemon::BindHook::new(move |_| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }));
+    let running = start_with(&scratch.path(), &original, options).await;
+    let client = Client::new(&running, &scratch);
+    assert_eq!(running.listen_addr(), env);
+
+    let status = client.status().await;
+    assert_eq!(
+        status.model_listener.effective_source,
+        ListenSource::Environment
+    );
+    assert_eq!(status.model_listener.configured, "127.0.0.1:0");
+    assert_eq!(status.model_listener.effective, env.to_string());
+    assert_eq!(status.model_listener.running, Some(env.to_string()));
+    assert_eq!(status.not_applied.len(), 1, "{:?}", status.not_applied);
+    assert_eq!(status.not_applied[0].field, "listen");
+    assert_eq!(status.not_applied[0].reason, "env_override");
+
+    let mut stream = client.events().await;
+    let elsewhere = free_addr();
+    let edited = with_listen(&elsewhere.to_string());
+    let (status, body) = client.apply(&revision(&original), &edited).await;
+    let applied = ok(status, &body);
+    assert_eq!(applied.not_applied.len(), 1, "{:?}", applied.not_applied);
+    assert_eq!(applied.not_applied[0].reason, "env_override");
+    assert_eq!(running.listen_addr(), env);
+    assert_eq!(
+        binds.load(Ordering::SeqCst),
+        0,
+        "HOFUND_ADDR never relistens"
+    );
+
+    // Only config_reloaded: an override is not a relisten failure.
+    let (status, body) = client.apply(&revision(&edited), &original).await;
+    ok(status, &body);
+    let events = next_events(&mut stream, 2).await;
+    match events.as_slice() {
+        [
+            (_, EventPayload::ConfigReloaded(first)),
+            (_, EventPayload::ConfigReloaded(_)),
+        ] => assert_eq!(first.not_applied, applied.not_applied),
+        other => panic!("expected two config_reloaded events, got {other:?}"),
+    }
+    drop(stream);
     running.shutdown().await;
 }
