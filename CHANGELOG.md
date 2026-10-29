@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Amazon Bedrock plugin `bedrock` (`plugins/providers/bedrock`): preset
+  `bedrock` and every `bedrock-converse` provider now build this plugin
+  instead of the kernel adapter. Converse is signed with SigV4 through the SDK
+  (`hofund_plugin_sdk::sigv4::AwsSigner`, `wire::Target::signer`,
+  `wire::converse_call`); Chat, Responses, and Messages go through the SDK
+  `wire` module with the stored API key. `list_models` returns the static
+  catalog with no network call. A stored API key on Converse is now refused
+  when a request or probe is sent, not when the provider is built.
+
 - Google Vertex AI plugin `google-vertex` (`plugins/providers/google-vertex`):
   preset `google-vertex` now builds this plugin instead of the kernel adapter.
   The base URL comes from `project` and `location`, so the preset needs no

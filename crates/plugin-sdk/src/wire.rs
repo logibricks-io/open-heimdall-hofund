@@ -1,5 +1,5 @@
-//! Chat Completions, Responses, Messages, and Generative Language calls on the
-//! host's HTTP handle.
+//! Chat Completions, Responses, Messages, Generative Language, and Bedrock
+//! Converse calls on the host's HTTP handle.
 //!
 //! [`execute`] encodes a [`Request`] for the target protocol, posts it with
 //! [`Call`], and returns a [`Completion`]. [`count_input`] asks a Messages or
@@ -20,6 +20,14 @@
 //!   empty model is status 400 before anything is sent. [`Target::model_root`]
 //!   replaces `models` for an upstream such as Vertex AI, whose models sit at
 //!   `{base}/publishers/google/models/{model}`.
+//! - A Bedrock Converse call names the model in the path:
+//!   `{base}/model/{model}/converse`, or `/converse-stream` for a stream, with
+//!   SigV4 percent-encoding. It is signed with the target's [`AwsSigner`]
+//!   (service `bedrock`), never an API key. The signed headers are the
+//!   configured headers, lowercased, then `content-type`, `host`,
+//!   `x-amz-content-sha256`, `x-amz-date`, `accept` for a stream, and
+//!   `x-amz-security-token` for temporary credentials; a signed header
+//!   replaces a configured one of the same name. An empty model is status 400.
 //! - The call is a JSON `POST`. Only a connect failure is retried, once, so a
 //!   body that may have been written is never replayed.
 //! - A status outside 2xx keeps its status and `Retry-After`. Its message is the
@@ -37,8 +45,8 @@ use std::sync::{Mutex, OnceLock};
 
 use bytes::Bytes;
 use hofund_codec::{
-    AnthropicMessages, Codec, CodecError, GenerativeLanguage, OpenAiChat, OpenAiResponses,
-    StreamDecoder, UNMAPPED_TOOLS,
+    AnthropicMessages, Codec, CodecError, Converse, GenerativeLanguage, OpenAiChat,
+    OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS,
 };
 use hofund_plugin_api::{
     BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle, PluginError,
@@ -46,6 +54,7 @@ use hofund_plugin_api::{
 };
 use secrecy::ExposeSecret;
 
+use crate::sigv4::{self, AwsSigner};
 use crate::transport::{Call, HttpResponse, is_quota_error, parse_retry_after_headers, read_body};
 
 /// Attempts per call. Only a connect failure is retried.
@@ -66,6 +75,8 @@ enum Path {
     Fixed(&'static str),
     /// `models/{model}:{method}`, the Generative Language form.
     Model,
+    /// `/model/{model}/converse`, signed with SigV4.
+    Converse,
 }
 
 /// The Generative Language method a call names.
@@ -85,6 +96,7 @@ pub struct Target {
     headers: Vec<(String, String)>,
     quirks: Option<&'static hofund_quirks::Profile>,
     model_root: &'static str,
+    signer: Option<AwsSigner>,
 }
 
 impl Target {
@@ -99,6 +111,7 @@ impl Target {
             headers: Vec::new(),
             quirks: None,
             model_root: "models",
+            signer: None,
         }
     }
 
@@ -132,6 +145,14 @@ impl Target {
         self.model_root = root.trim_matches('/');
         self
     }
+
+    /// The AWS credentials a Bedrock Converse call is signed with. Other
+    /// protocols ignore them.
+    #[must_use]
+    pub fn signer(mut self, signer: AwsSigner) -> Self {
+        self.signer = Some(signer);
+        self
+    }
 }
 
 impl fmt::Debug for Target {
@@ -145,6 +166,7 @@ impl fmt::Debug for Target {
             .field("header_names", &names)
             .field("quirks", &self.quirks.is_some())
             .field("model_root", &self.model_root)
+            .field("signer", &self.signer)
             .finish()
     }
 }
@@ -174,19 +196,32 @@ pub async fn execute(
     } else {
         Method::Generate
     };
-    let url = url_for(
-        &target.base_url,
-        target.model_root,
-        path,
-        &request.model,
-        method,
-    )?;
-    let body = prepare_body(target, codec, request, prepare, inbound)?;
-    let response = call(target, codec, secret, url)?
-        .header("content-type", "application/json")
-        .bytes(body)
-        .open_raw(http, ATTEMPTS)
-        .await?;
+    let call = if path == Path::Converse {
+        if secret.is_some_and(|secret| !secret.expose_secret().is_empty()) {
+            return Err(PluginError::config(
+                "Converse uses AWS credentials, not an API key",
+            ));
+        }
+        if request.model.is_empty() {
+            return Err(PluginError::status_error(400, "model is empty"));
+        }
+        let model = request.model.clone();
+        let body = prepare_body(target, codec, request, prepare, inbound)?;
+        converse_call(target, &model, streaming, body)?.1
+    } else {
+        let url = url_for(
+            &target.base_url,
+            target.model_root,
+            path,
+            &request.model,
+            method,
+        )?;
+        let body = prepare_body(target, codec, request, prepare, inbound)?;
+        call(target, codec, secret, url)?
+            .header("content-type", "application/json")
+            .bytes(body)
+    };
+    let response = call.open_raw(http, ATTEMPTS).await?;
     if !response.status().is_success() {
         return Err(status_error(response).await);
     }
@@ -238,7 +273,7 @@ pub async fn count_input(
             "{}/{path}/count_tokens",
             target.base_url.trim_end_matches('/')
         ),
-        Path::Model => url_for(
+        Path::Model | Path::Converse => url_for(
             &target.base_url,
             target.model_root,
             path,
@@ -294,6 +329,7 @@ fn route(protocol: ProtocolId) -> Result<(&'static dyn Codec, Option<Prepare>, P
             Some(GenerativeLanguage::prepare_upstream_body),
             Path::Model,
         )),
+        ProtocolId::BEDROCK_CONVERSE => Ok((&Converse, None, Path::Converse)),
         other => Err(PluginError::unsupported(format!(
             "protocol `{}` has no SDK transport",
             other.as_str()
@@ -320,6 +356,117 @@ fn url_for(
                 Method::Count => format!("{base}/{root}/{model}:countTokens"),
             })
         }
+        Path::Converse => Ok(format!(
+            "{base}{}",
+            sigv4::model_wire_uri(model, matches!(method, Method::Stream))
+        )),
+    }
+}
+
+/// A signed Bedrock Converse `POST` of `body` for `model`, and its URL.
+///
+/// The URL is `{base}/model/{model}/converse`, or `/converse-stream` when
+/// `stream` is set. The call carries the signed headers described in the
+/// [module documentation](self) and the body. Send it with [`Call::open_raw`]
+/// or [`Call::open`]; a retry resends the same signature.
+///
+/// # Errors
+///
+/// Returns a 400 status error for an empty model, a config error when the
+/// target has no [`AwsSigner`] or its URL does not parse, and a decode error
+/// when the request cannot be signed.
+pub fn converse_call(
+    target: &Target,
+    model: &str,
+    stream: bool,
+    body: Vec<u8>,
+) -> Result<(String, Call), PluginError> {
+    if model.is_empty() {
+        return Err(PluginError::status_error(400, "model is empty"));
+    }
+    let signer = target
+        .signer
+        .as_ref()
+        .ok_or_else(|| PluginError::config("Converse needs AWS credentials"))?;
+    let path = sigv4::model_wire_uri(model, stream);
+    let canonical_path = sigv4::canonical_uri(&path, sigv4::UriEncoding::Double);
+    let url = format!("{}{path}", target.base_url.trim_end_matches('/'));
+    let parsed = url::Url::parse(&url)
+        .map_err(|error| PluginError::config(format!("provider URL is invalid: {error}")))?;
+    let (secs, host) = match signer.fixed_clock() {
+        Some((secs, host)) => (*secs, host.clone()),
+        None => (unix_now(), host_header(&parsed)),
+    };
+    let amz_date = sigv4::amz_date(secs);
+    let mut ours = vec![
+        ("content-type", "application/json".to_owned()),
+        ("host", host),
+        ("x-amz-content-sha256", sigv4::payload_hash(&body)),
+        ("x-amz-date", amz_date.clone()),
+    ];
+    if stream {
+        ours.push(("accept", "application/vnd.amazon.eventstream".to_owned()));
+    }
+    if let Some(token) = signer.session_token_text() {
+        ours.push(("x-amz-security-token", token.to_owned()));
+    }
+    // Name to (value, sensitive). Configured values are sensitive; ours
+    // replace a configured header of the same name.
+    let mut pairs = std::collections::BTreeMap::new();
+    for (name, value) in &target.headers {
+        pairs.insert(name.to_ascii_lowercase(), (value.clone(), true));
+    }
+    for (name, value) in ours {
+        pairs.insert(name.to_owned(), (value, name == "x-amz-security-token"));
+    }
+    let borrowed: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(name, (value, _))| (name.as_str(), value.as_str()))
+        .collect();
+    let input = sigv4::SignInput::new()
+        .method("POST")
+        .canonical_uri(&canonical_path)
+        .amz_date(&amz_date)
+        .scope(signer.region(), "bedrock")
+        .credentials(signer.access_key_id(), signer.secret_access_key())
+        .payload(&body)
+        .headers(&borrowed);
+    let signed = sigv4::sign(&input)
+        .map_err(|error| PluginError::decode(format!("Converse signing: {error}")))?;
+    let mut call = Call::post(url.as_str());
+    for (name, (value, sensitive)) in pairs {
+        if name == "host" {
+            continue;
+        }
+        call = if sensitive {
+            call.sensitive_header(name, value)
+        } else {
+            call.header(name, value)
+        };
+    }
+    let call = call
+        .sensitive_header("authorization", signed.authorization())
+        .bytes(body);
+    Ok((url, call))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+/// The `host` value a client sends: the port only when it is not the
+/// scheme's default.
+fn host_header(url: &url::Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    let default = match url.scheme() {
+        "https" => 443,
+        _ => 80,
+    };
+    match url.port_or_known_default() {
+        Some(port) if port != default => format!("{host}:{port}"),
+        _ => host.to_owned(),
     }
 }
 
@@ -772,8 +919,9 @@ mod tests {
     use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
 
     use super::{
-        Method, Path, Target, classify_count, consume_fields, endpoint_unsupported, failure_of,
-        message_from, omit_max_tokens, path_segment, route, strip_billing_header, url_for,
+        AwsSigner, Method, Path, Target, classify_count, consume_fields, converse_call,
+        endpoint_unsupported, failure_of, host_header, message_from, omit_max_tokens, path_segment,
+        route, sigv4, strip_billing_header, url_for,
     };
     use hofund_plugin_api::CountOutcome;
 
@@ -904,10 +1052,182 @@ mod tests {
         assert_eq!(codec.id(), GenerativeLanguage.id());
         assert!(prepare.is_some());
         assert_eq!(path, Path::Model);
-        let Err(error) = route(ProtocolId::BEDROCK_CONVERSE) else {
-            panic!("converse has no SDK transport yet");
-        };
-        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        let (codec, prepare, path) = route(ProtocolId::BEDROCK_CONVERSE).expect("converse");
+        assert_eq!(codec.id(), hofund_codec::Converse.id());
+        assert!(prepare.is_none());
+        assert_eq!(path, Path::Converse);
+    }
+
+    const VECTOR_MODEL: &str = "anthropic.claude-3-5-sonnet-20240620-v1:0";
+    const VECTOR_BODY: &[u8] = br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}]}"#;
+
+    fn vector_target() -> Target {
+        let signer = AwsSigner::new(
+            "us-east-1",
+            "AKIDEXAMPLE",
+            secrecy::SecretString::from("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned()),
+        )
+        .session_token(secrecy::SecretString::from(
+            "SESSIONTOKENEXAMPLE".to_owned(),
+        ))
+        .fixed(1_440_938_160, "bedrock-runtime.us-east-1.amazonaws.com");
+        Target::new(
+            ProtocolId::BEDROCK_CONVERSE,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/",
+        )
+        .signer(signer)
+    }
+
+    fn header<'a>(triples: &[(&'a str, &'a str, bool)], name: &str) -> Option<(&'a str, bool)> {
+        triples
+            .iter()
+            .find(|(found, _, _)| *found == name)
+            .map(|(_, value, sensitive)| (*value, *sensitive))
+    }
+
+    #[test]
+    fn converse_signs_with_the_botocore_vector() {
+        // botocore 1.43.118 SigV4Auth for service bedrock, the same vector the
+        // kernel adapter was pinned to.
+        let (url, call) =
+            converse_call(&vector_target(), VECTOR_MODEL, false, VECTOR_BODY.to_vec())
+                .expect("signed");
+        assert_eq!(
+            url,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20240620-v1%3A0/converse"
+        );
+        assert_eq!(call.uri_and_body(), (url.as_str(), VECTOR_BODY));
+        let triples = call.header_triples();
+        assert_eq!(
+            header(&triples, "authorization"),
+            Some((
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=9acaa85e4b0b79f684cb81d4050d66206f71f74d9b7145bfbaa74b72a2c04655",
+                true
+            ))
+        );
+        assert_eq!(
+            header(&triples, "x-amz-date"),
+            Some(("20150830T123600Z", false))
+        );
+        assert_eq!(
+            header(&triples, "x-amz-security-token"),
+            Some(("SESSIONTOKENEXAMPLE", true))
+        );
+        assert_eq!(
+            header(&triples, "content-type"),
+            Some(("application/json", false))
+        );
+        let hash = sigv4::payload_hash(VECTOR_BODY);
+        assert_eq!(
+            header(&triples, "x-amz-content-sha256"),
+            Some((hash.as_str(), false))
+        );
+        assert_eq!(header(&triples, "host"), None);
+        assert_eq!(header(&triples, "accept"), None);
+        let names: Vec<&str> = triples.iter().map(|(name, _, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "content-type",
+                "x-amz-content-sha256",
+                "x-amz-date",
+                "x-amz-security-token",
+                "authorization"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_converse_stream_accepts_the_event_stream_and_signs_configured_headers() {
+        let target = vector_target().headers(vec![
+            ("X-Tenant".to_owned(), "blue".to_owned()),
+            ("Content-Type".to_owned(), "text/plain".to_owned()),
+        ]);
+        let (url, call) =
+            converse_call(&target, VECTOR_MODEL, true, VECTOR_BODY.to_vec()).expect("signed");
+        assert!(
+            url.ends_with("/model/anthropic.claude-3-5-sonnet-20240620-v1%3A0/converse-stream")
+        );
+        let triples = call.header_triples();
+        assert_eq!(
+            header(&triples, "accept"),
+            Some(("application/vnd.amazon.eventstream", false))
+        );
+        assert_eq!(header(&triples, "x-tenant"), Some(("blue", true)));
+        assert_eq!(
+            header(&triples, "content-type"),
+            Some(("application/json", false))
+        );
+        let authorization = header(&triples, "authorization").expect("authorization").0;
+        assert!(authorization.contains(
+            "SignedHeaders=accept;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-tenant,"
+        ));
+    }
+
+    #[test]
+    fn converse_without_a_token_or_a_fixed_clock_signs_now() {
+        let signer = AwsSigner::new(
+            "eu-west-1",
+            "AKIDEXAMPLE",
+            secrecy::SecretString::from("secret".to_owned()),
+        )
+        .session_token(secrecy::SecretString::from(String::new()));
+        let target =
+            Target::new(ProtocolId::BEDROCK_CONVERSE, "http://127.0.0.1:9/").signer(signer);
+        let (url, call) = converse_call(&target, "demo", false, b"{}".to_vec()).expect("signed");
+        assert_eq!(url, "http://127.0.0.1:9/model/demo/converse");
+        let triples = call.header_triples();
+        assert_eq!(header(&triples, "x-amz-security-token"), None);
+        let date = header(&triples, "x-amz-date").expect("date").0;
+        assert!(date.get(..4).is_some_and(|year| year >= "2026"), "{date}");
+        let authorization = header(&triples, "authorization").expect("authorization").0;
+        assert!(authorization.contains("/eu-west-1/bedrock/aws4_request"));
+    }
+
+    #[test]
+    fn converse_needs_a_model_a_signer_and_a_url() {
+        let error = converse_call(&vector_target(), "", false, Vec::new()).expect_err("model");
+        assert_eq!(error.status(), Some(400));
+        assert!(error.to_string().contains("model is empty"));
+        let bare = Target::new(ProtocolId::BEDROCK_CONVERSE, "https://up.test");
+        let error = converse_call(&bare, "demo", false, Vec::new()).expect_err("signer");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+        assert!(error.to_string().contains("Converse needs AWS credentials"));
+        let target = Target::new(ProtocolId::BEDROCK_CONVERSE, "not a url").signer(AwsSigner::new(
+            "us-east-1",
+            "AKID",
+            secrecy::SecretString::from("secret".to_owned()),
+        ));
+        let error = converse_call(&target, "demo", false, Vec::new()).expect_err("url");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+        assert!(error.to_string().contains("provider URL is invalid"));
+        let target = Target::new(ProtocolId::BEDROCK_CONVERSE, "https://up.test").signer(
+            AwsSigner::new("", "AKID", secrecy::SecretString::from("secret".to_owned())),
+        );
+        let error = converse_call(&target, "demo", false, Vec::new()).expect_err("sign");
+        assert_eq!(error.kind(), PluginErrorKind::Decode);
+        assert!(error.to_string().contains("Converse signing:"));
+    }
+
+    #[test]
+    fn the_host_header_names_a_port_only_off_the_default() {
+        let parse = |url: &str| url::Url::parse(url).expect("url");
+        assert_eq!(host_header(&parse("https://a.test/x")), "a.test");
+        assert_eq!(host_header(&parse("https://a.test:443/x")), "a.test");
+        assert_eq!(host_header(&parse("https://a.test:8443/x")), "a.test:8443");
+        assert_eq!(host_header(&parse("http://a.test:80/x")), "a.test");
+        assert_eq!(host_header(&parse("http://a.test:443/x")), "a.test:443");
+        assert_eq!(host_header(&parse("http://a.test:8080/x")), "a.test:8080");
+    }
+
+    #[test]
+    fn a_signer_debug_shows_no_credential() {
+        let shown = format!("{:?}", vector_target());
+        assert!(shown.contains("us-east-1"), "{shown}");
+        assert!(shown.contains("session_token: true"), "{shown}");
+        assert!(!shown.contains("AKIDEXAMPLE"), "{shown}");
+        assert!(!shown.contains("EXAMPLEKEY"), "{shown}");
+        assert!(!shown.contains("SESSIONTOKENEXAMPLE"), "{shown}");
     }
 
     #[test]

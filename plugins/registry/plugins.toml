@@ -6,6 +6,13 @@ package = "hofund-plugin-azure"
 feature = "azure"
 
 [[plugin]]
+id = "bedrock"
+kind = "provider"
+path = "plugins/providers/bedrock"
+package = "hofund-plugin-bedrock"
+feature = "bedrock"
+
+[[plugin]]
 id = "claude"
 kind = "subscription"
 path = "plugins/subscriptions/claude"

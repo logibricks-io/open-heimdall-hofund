@@ -16,6 +16,7 @@ members = [
     "crates/plugin-sdk",
     "plugins/inbound/echo",
     "plugins/providers/azure",
+    "plugins/providers/bedrock",
     "plugins/providers/fixture",
     "plugins/providers/google-vertex",
     "plugins/providers/relay",
@@ -61,6 +62,7 @@ hofund-kit-subscription = { version = "0.1.0", path = "kits/subscription" }
 hofund-kit-upstream = { version = "0.1.0", path = "kits/upstream" }
 hofund-plugin-api = { version = "0.1.0", path = "crates/plugin-api" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
+hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }
 hofund-plugin-google-vertex = { version = "0.1.0", path = "plugins/providers/google-vertex" }
 hofund-plugin-host = { version = "0.1.0", path = "crates/plugin-host" }
 hofund-plugin-echo = { version = "0.1.0", path = "plugins/inbound/echo" }

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hofund_plugin_api::{AuthChoice, ListKind, ListQuery, ProbeQuery, ProtocolId};
 use hofund_provider::{
-    Anthropic, Bedrock, Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider,
+    Anthropic, Credential, Endpoint, Generative, OpenAiCompat, OpenAiProtocol, Provider,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, query_param};
@@ -32,12 +32,6 @@ fn resolved_endpoint(server: &MockServer, host: &str, suffix: &str) -> Endpoint 
 
 fn openai(endpoint: Endpoint) -> OpenAiCompat {
     OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("openai")
-}
-
-fn bedrock_endpoint(server: &MockServer) -> Endpoint {
-    let mut endpoint = endpoint(server, "");
-    endpoint.api_key.clear();
-    endpoint
 }
 
 fn probe(protocol: ProtocolId, model: &str) -> ProbeQuery {
@@ -417,32 +411,6 @@ async fn gemini_twentieth_page_returns_the_partial_list() {
 }
 
 #[tokio::test]
-async fn the_bedrock_static_catalog_makes_no_network_requests() {
-    let server = MockServer::start().await;
-    let bedrock = Bedrock::new(
-        bedrock_endpoint(&server),
-        "us-east-1",
-        "access",
-        "secret",
-        "",
-    )
-    .expect("bedrock");
-    let listed = bedrock
-        .list_models(&ListQuery::new())
-        .await
-        .expect("catalog");
-    assert_eq!(listed.kind(), ListKind::Catalog);
-    assert!(ids(&listed).contains(&"openai.gpt-oss-120b-1:0"));
-    assert!(
-        server
-            .received_requests()
-            .await
-            .expect("requests")
-            .is_empty()
-    );
-}
-
-#[tokio::test]
 async fn chat_and_responses_probes_send_minimal_bodies_and_ignore_learned_auth() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -624,43 +592,6 @@ async fn generative_probe_uses_native_url_body_and_key() {
     assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
     assert!(requests[0].headers.get("x-goog-api-key").is_some());
     assert!(requests[0].headers.get("authorization").is_none());
-}
-
-#[tokio::test]
-async fn bedrock_probe_signs_one_minimal_converse_call() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/model/anthropic.claude/converse"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Bedrock::new(
-        bedrock_endpoint(&server),
-        "us-east-1",
-        "access",
-        "secret",
-        "",
-    )
-    .expect("bedrock")
-    .probe(&probe(ProtocolId::BEDROCK_CONVERSE, "anthropic.claude"))
-    .await
-    .expect("probe");
-    let requests = server.received_requests().await.expect("requests");
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].body_json::<Value>().expect("body")["inferenceConfig"]["maxTokens"],
-        16
-    );
-    assert!(
-        requests[0]
-            .headers
-            .get("authorization")
-            .expect("signed")
-            .to_str()
-            .expect("text")
-            .starts_with("AWS4-HMAC-SHA256")
-    );
 }
 
 #[tokio::test]

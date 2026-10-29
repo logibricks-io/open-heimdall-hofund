@@ -337,13 +337,15 @@ impl<'a> Endpoints<'a> {
             .any(|url| !url.is_empty())
     }
 
+    /// Converse takes the chat URL: a plugin serving it (Bedrock) derives the
+    /// runtime root from that base.
     fn url(&self, wire: Wire) -> Option<&'a str> {
         match wire {
-            Wire::Chat => Some(self.chat),
+            Wire::Chat | Wire::Converse => Some(self.chat),
             Wire::Responses => Some(self.responses),
             Wire::Messages => Some(self.anthropic),
             Wire::Generative => Some(self.generative),
-            Wire::Vertex | Wire::Converse => None,
+            Wire::Vertex => None,
         }
     }
 }

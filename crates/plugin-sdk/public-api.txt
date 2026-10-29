@@ -125,6 +125,11 @@ register::Contribution::fn surface (mut self , surface : impl InboundSurface) ->
 register::Contribution::fn surfaces (& self) -> & [Arc < dyn InboundSurface >]
 register::Contribution::fn upstream (mut self , factory : impl DynUpstreamFactory) -> Self
 register::Contribution::fn upstreams (& self) -> & [Arc < dyn DynUpstreamFactory >]
+sigv4::AwsSigner derives(Clone)
+sigv4::AwsSigner::fn fixed (mut self , unix_secs : u64 , host : impl Into < String >) -> Self
+sigv4::AwsSigner::fn new (region : impl Into < String > , access_key_id : impl Into < String > , secret_access_key : secrecy :: SecretString ,) -> Self
+sigv4::AwsSigner::fn region (& self) -> & str
+sigv4::AwsSigner::fn session_token (mut self , token : secrecy :: SecretString) -> Self
 sigv4::SignError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 sigv4::SignError::InvalidAmzDate
 sigv4::SignError::InvalidCanonicalUri
@@ -184,7 +189,9 @@ wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Sel
 wire::Target::fn model_root (mut self , root : & 'static str) -> Self
 wire::Target::fn new (protocol : ProtocolId , base_url : impl Into < String >) -> Self
 wire::Target::fn quirks (mut self , quirks : Option < & 'static hofund_quirks :: Profile >) -> Self
+wire::Target::fn signer (mut self , signer : AwsSigner) -> Self
 wire::async fn count_input (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , mut request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
 wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
+wire::fn converse_call (target : & Target , model : & str , stream : bool , body : Vec < u8 > ,) -> Result < (String , Call) , PluginError >
 wire::fn model_segment (model : & str) -> Result < String , PluginError >
 wire::fn path_segment (text : & str) -> String

@@ -1866,6 +1866,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-bedrock"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-upstream",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-echo"
 version = "0.1.0"
 dependencies = [
@@ -1926,6 +1936,7 @@ dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-api",
  "hofund-plugin-azure",
+ "hofund-plugin-bedrock",
  "hofund-plugin-echo",
  "hofund-plugin-google-vertex",
  "hofund-plugin-registry",

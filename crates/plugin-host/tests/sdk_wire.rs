@@ -1,4 +1,4 @@
-//! The SDK Chat and Responses transport against the recording host.
+//! The SDK wire transport against the recording host.
 //!
 //! The SDK cannot depend on this crate, so its `TestHost` tests live here.
 
@@ -7,6 +7,7 @@ use hofund_plugin_api::{
     SecretString,
 };
 use hofund_plugin_host::TestHost;
+use hofund_plugin_sdk::sigv4::AwsSigner;
 use hofund_plugin_sdk::wire::{self, Target};
 
 const CHAT_REPLY: &str = r#"{"id":"c1","object":"chat.completion","model":"demo","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#;
@@ -130,16 +131,116 @@ async fn a_user_header_is_sensitive_and_replaces_the_credential_of_the_same_name
     );
 }
 
+fn converse_target() -> Target {
+    let signer = AwsSigner::new(
+        "us-east-1",
+        "AKIDEXAMPLE",
+        SecretString::from("fake-secret".to_owned()),
+    );
+    Target::new(ProtocolId::BEDROCK_CONVERSE, "http://up.test/").signer(signer)
+}
+
+/// A one-turn request; Converse needs the first message to be a user's.
+fn converse_request(model: &str) -> Request {
+    let mut request = Request::new(model);
+    request.messages = serde_json::from_value(serde_json::json!([
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+    ]))
+    .expect("messages");
+    request
+}
+
+async fn converse_run(
+    host: &TestHost,
+    target: &Target,
+    secret: Option<&SecretString>,
+    model: &str,
+    inbound: ProtocolId,
+) -> Result<Completion, PluginError> {
+    wire::execute(
+        host.context().http(),
+        target,
+        secret,
+        converse_request(model),
+        inbound,
+    )
+    .await
+}
+
 #[tokio::test]
-async fn another_protocol_is_unsupported_and_sends_nothing() {
+async fn converse_posts_a_signed_call_to_the_model_path() {
+    const CONVERSE_REPLY: &str = r#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#;
     let (_root, host) = host();
-    let target = Target::new(ProtocolId::BEDROCK_CONVERSE, "http://up.test");
-    let error = run(&host, &target, None, ProtocolId::BEDROCK_CONVERSE)
+    host.http().enqueue(CONVERSE_REPLY);
+    let target = converse_target().headers(vec![("x-tenant".to_owned(), "blue".to_owned())]);
+    let completion = converse_run(&host, &target, None, "demo", ProtocolId::BEDROCK_CONVERSE)
+        .await
+        .expect("execute");
+    assert_eq!(raw_bytes(completion).await, CONVERSE_REPLY.as_bytes());
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].method(), "POST");
+    assert_eq!(calls[0].uri(), "http://up.test/model/demo/converse");
+    assert_eq!(calls[0].sensitive_headers(), ["authorization", "x-tenant"]);
+    let body: serde_json::Value = serde_json::from_slice(calls[0].body()).expect("json body");
+    assert!(body.get("model").is_none(), "{body}");
+
+    let (_root, host) = self::host();
+    host.http().enqueue(CONVERSE_REPLY);
+    let completion = converse_run(
+        &host,
+        &converse_target(),
+        None,
+        "demo",
+        ProtocolId::OPENAI_CHAT,
+    )
+    .await
+    .expect("cross protocol");
+    assert!(matches!(completion, Completion::Unary(_)));
+}
+
+#[tokio::test]
+async fn converse_refuses_an_api_key_an_empty_model_and_no_signer() {
+    let (_root, host) = host();
+    let error = converse_run(
+        &host,
+        &converse_target(),
+        Some(&secret()),
+        "demo",
+        ProtocolId::BEDROCK_CONVERSE,
+    )
+    .await
+    .err()
+    .expect("api key");
+    assert_eq!(error.kind(), PluginErrorKind::Config);
+    assert!(error.to_string().contains("not an API key"), "{error}");
+    converse_run(
+        &host,
+        &converse_target(),
+        Some(&SecretString::from(String::new())),
+        "demo",
+        ProtocolId::BEDROCK_CONVERSE,
+    )
+    .await
+    .expect("an empty secret is no key");
+    let error = converse_run(
+        &host,
+        &converse_target(),
+        None,
+        "",
+        ProtocolId::BEDROCK_CONVERSE,
+    )
+    .await
+    .err()
+    .expect("empty model");
+    assert_eq!(error.status(), Some(400));
+    let bare = Target::new(ProtocolId::BEDROCK_CONVERSE, "http://up.test");
+    let error = converse_run(&host, &bare, None, "demo", ProtocolId::BEDROCK_CONVERSE)
         .await
         .err()
-        .expect("unsupported");
-    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
-    assert!(host.http().calls().is_empty());
+        .expect("no signer");
+    assert_eq!(error.kind(), PluginErrorKind::Config);
+    assert_eq!(host.http().calls().len(), 1);
 }
 
 #[tokio::test]

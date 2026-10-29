@@ -747,14 +747,6 @@ fn insert_secret(
     Ok(())
 }
 
-pub(crate) fn static_models(ids: Vec<String>) -> Result<ModelList, PluginError> {
-    let models = ids
-        .into_iter()
-        .map(|id| ModelSpec::new(id, None))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ModelList::new(models, None).with_kind(ListKind::Catalog))
-}
-
 #[cfg(test)]
 mod tests {
     #[test]

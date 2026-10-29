@@ -2047,16 +2047,10 @@ mod tests {
     #[test]
     fn kernel_catalog_factories_build_through_the_legacy_path_without_a_protocol() {
         let dir = scratch();
-        for (plugin_id, source) in [
-            (
-                "openai-compat",
-                "[[providers]]\nid = \"openai\"\npreset = \"openai\"\nprotocol = \"openai-responses\"\napi_key = \"test\"\n",
-            ),
-            (
-                "bedrock",
-                "[[providers]]\nid = \"bedrock\"\nprotocol = \"bedrock-converse\"\nbase_url = \"https://bedrock-runtime.us-east-1.amazonaws.com\"\nregion = \"us-east-1\"\naccess_key_id = \"test-access\"\nsecret_access_key = \"test-secret\"\n",
-            ),
-        ] {
+        for (plugin_id, source) in [(
+            "openai-compat",
+            "[[providers]]\nid = \"openai\"\npreset = \"openai\"\nprotocol = \"openai-responses\"\napi_key = \"test\"\n",
+        )] {
             let config = hofund_config::load(source).expect("config");
             let provider = &config.providers[0];
             let planned = super::plan(provider).expect("plan");

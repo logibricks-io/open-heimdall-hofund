@@ -355,6 +355,92 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// The AWS credentials and region that sign a Bedrock Runtime call.
+///
+/// [`Debug`] shows the region and whether a session token is set, never a
+/// credential. The service name is always `bedrock`.
+#[derive(Clone)]
+pub struct AwsSigner {
+    region: String,
+    access_key_id: String,
+    secret_access_key: secrecy::SecretString,
+    session_token: Option<secrecy::SecretString>,
+    fixed: Option<(u64, String)>,
+}
+
+impl AwsSigner {
+    /// Signs in `region` with a long-lived or temporary key pair.
+    #[must_use]
+    pub fn new(
+        region: impl Into<String>,
+        access_key_id: impl Into<String>,
+        secret_access_key: secrecy::SecretString,
+    ) -> Self {
+        Self {
+            region: region.into(),
+            access_key_id: access_key_id.into(),
+            secret_access_key,
+            session_token: None,
+            fixed: None,
+        }
+    }
+
+    /// The session token of temporary credentials, sent and signed as
+    /// `x-amz-security-token`. An empty token is ignored.
+    #[must_use]
+    pub fn session_token(mut self, token: secrecy::SecretString) -> Self {
+        use secrecy::ExposeSecret as _;
+        self.session_token = (!token.expose_secret().is_empty()).then_some(token);
+        self
+    }
+
+    /// Signs at a fixed Unix time with a fixed `host` value, so a test can
+    /// compare a signature with a published vector. Calls are still sent to
+    /// the target URL.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn fixed(mut self, unix_secs: u64, host: impl Into<String>) -> Self {
+        self.fixed = Some((unix_secs, host.into()));
+        self
+    }
+
+    /// The signing region.
+    #[must_use]
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+
+    pub(crate) fn access_key_id(&self) -> &str {
+        &self.access_key_id
+    }
+
+    pub(crate) fn secret_access_key(&self) -> &str {
+        use secrecy::ExposeSecret as _;
+        self.secret_access_key.expose_secret()
+    }
+
+    pub(crate) fn session_token_text(&self) -> Option<&str> {
+        use secrecy::ExposeSecret as _;
+        self.session_token
+            .as_ref()
+            .map(|token| token.expose_secret())
+    }
+
+    pub(crate) fn fixed_clock(&self) -> Option<&(u64, String)> {
+        self.fixed.as_ref()
+    }
+}
+
+impl fmt::Debug for AwsSigner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AwsSigner")
+            .field("region", &self.region)
+            .field("session_token", &self.session_token.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Days since the Unix epoch to a Gregorian year, month, and day.
 ///
 /// This is Howard Hinnant's `civil_from_days`. The casts are the algorithm's
