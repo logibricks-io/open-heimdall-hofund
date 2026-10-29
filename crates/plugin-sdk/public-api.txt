@@ -75,6 +75,8 @@ parse_access_token
 refresh_form
 register::Contribution derives(Default)
 register::Contribution::fn new () -> Self
+register::Contribution::fn subscription (mut self , factory : impl DynSubscriptionFactory) -> Self
+register::Contribution::fn subscriptions (& self) -> & [Arc < dyn DynSubscriptionFactory >]
 register::Contribution::fn surface (mut self , surface : impl InboundSurface) -> Self
 register::Contribution::fn surfaces (& self) -> & [Arc < dyn InboundSurface >]
 register::Contribution::fn upstream (mut self , factory : impl DynUpstreamFactory) -> Self
