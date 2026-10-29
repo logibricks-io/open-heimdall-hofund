@@ -2,8 +2,9 @@
 //!
 //! [`transport::Call`] sends on the host's pooled client. The client itself
 //! lives in `hofund-plugin-host`. This crate re-exports [`tracing`],
-//! [`macro@async_trait`], and [`apply_quirks`] so a plugin does not name those
-//! crates. The API does not depend on quirks.
+//! [`json`] (`serde_json`), [`macro@async_trait`], and [`apply_quirks`] so a
+//! plugin does not name those crates. [`sleep`] waits on the host runtime. The
+//! API does not depend on quirks.
 //!
 //! [`sigv4`] signs one AWS request. [`oauth`] parses a token response and
 //! builds a form body. [`page`] reads cursors and walks bounded model lists.
@@ -21,7 +22,13 @@
 
 pub use async_trait::async_trait;
 pub use hofund_quirks::apply as apply_quirks;
+pub use serde_json as json;
 pub use tracing;
+
+/// Waits `duration` on the host runtime, for a plugin that polls.
+pub async fn sleep(duration: std::time::Duration) {
+    tokio::time::sleep(duration).await;
+}
 
 pub mod classify;
 pub mod oauth;

@@ -29,6 +29,7 @@ cursor_pages
 form_body
 gemini_models
 gemini_models_with_dropped
+json
 json_error_message
 mod classify
 mod oauth
@@ -54,6 +55,7 @@ oauth::TokenError::const fn message (self) -> & 'static str
 oauth::TokenSet
 oauth::account_id_from
 oauth::authorize_url
+oauth::client_code_exchange_form
 oauth::code_exchange_form
 oauth::constant_time_eq
 oauth::detached
@@ -61,6 +63,7 @@ oauth::fn form_body (pairs : & [(& str , & str)]) -> String
 oauth::fn parse_access_token (body : & [u8]) -> Result < AccessToken , TokenError >
 oauth::fn parse_iam_access_token (body : & [u8]) -> Result < IamAccessToken , TokenError >
 oauth::fn refresh_form (client_id : & str , client_secret : & str , refresh_token : & str) -> String
+oauth::fn refresh_secret_form (client_id : & str , client_secret : & str , refresh_token : & SecretString ,) -> String
 oauth::new_state
 oauth::parse_token_set
 oauth::same_secret

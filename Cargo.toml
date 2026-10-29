@@ -19,6 +19,7 @@ members = [
     "plugins/providers/relay",
     "plugins/registry",
     "plugins/subscriptions/codex",
+    "plugins/subscriptions/gemini",
     "crates/provider",
     "kits/agent",
     "kits/subscription",
@@ -61,6 +62,7 @@ hofund-plugin-echo = { version = "0.1.0", path = "plugins/inbound/echo" }
 hofund-plugin-registry = { version = "0.1.0", path = "plugins/registry" }
 hofund-plugin-relay = { version = "0.1.0", path = "plugins/providers/relay" }
 hofund-plugin-subscription-codex = { version = "0.1.0", path = "plugins/subscriptions/codex" }
+hofund-plugin-subscription-gemini = { version = "0.1.0", path = "plugins/subscriptions/gemini" }
 hofund-plugin-sdk = { version = "0.1.0", path = "crates/plugin-sdk" }
 hofund-provider = { version = "0.1.0", path = "crates/provider" }
 hofund-quirks = { version = "0.1.0", path = "crates/quirks" }

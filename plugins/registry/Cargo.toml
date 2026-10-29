@@ -11,9 +11,10 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["codex", "echo", "relay"]
+default = ["codex", "echo", "gemini", "relay"]
 codex = ["dep:hofund-plugin-subscription-codex"]
 echo = ["dep:hofund-plugin-echo"]
+gemini = ["dep:hofund-plugin-subscription-gemini"]
 relay = ["dep:hofund-plugin-relay"]
 test-fixtures = []
 
@@ -24,6 +25,7 @@ hofund-plugin-sdk = { workspace = true }
 hofund-plugin-echo = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }
 hofund-plugin-subscription-codex = { workspace = true, optional = true }
+hofund-plugin-subscription-gemini = { workspace = true, optional = true }
 hofund-provider = { workspace = true }
 hofund-quirks = { workspace = true }
 

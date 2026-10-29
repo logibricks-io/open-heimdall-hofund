@@ -109,6 +109,28 @@ pub fn code_exchange_form(
     ])
 }
 
+/// [`code_exchange_form`] for a client that has a secret, such as an
+/// installed-app client whose secret ships in public builds.
+///
+/// It contains the code, the verifier, and the client secret. Do not log it.
+#[must_use]
+pub fn client_code_exchange_form(
+    client_id: &str,
+    client_secret: &str,
+    redirect_uri: &str,
+    code: &SecretString,
+    verifier: &SecretString,
+) -> String {
+    super::form_body(&[
+        ("grant_type", "authorization_code"),
+        ("code", code.expose_secret()),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("code_verifier", verifier.expose_secret()),
+    ])
+}
+
 fn random_token() -> Result<String, PluginError> {
     let mut bytes = [0_u8; RANDOM_BYTES];
     SystemRandom::new()
@@ -139,7 +161,9 @@ fn base64url(bytes: &[u8]) -> String {
 mod tests {
     use secrecy::{ExposeSecret, SecretString};
 
-    use super::{Pkce, authorize_url, base64url, code_exchange_form, new_state};
+    use super::{
+        Pkce, authorize_url, base64url, client_code_exchange_form, code_exchange_form, new_state,
+    };
 
     #[test]
     fn code_exchange_form_carries_the_grant_and_verifier() {
@@ -154,6 +178,23 @@ mod tests {
             "grant_type=authorization_code&code=c%2F1\
              &redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback\
              &client_id=app_1&code_verifier=v-1"
+        );
+    }
+
+    #[test]
+    fn client_code_exchange_form_adds_the_secret() {
+        let form = client_code_exchange_form(
+            "app_1",
+            "s/1",
+            "http://127.0.0.1:9/cb",
+            &SecretString::from("c".to_owned()),
+            &SecretString::from("v".to_owned()),
+        );
+        assert_eq!(
+            form,
+            "grant_type=authorization_code&code=c\
+             &redirect_uri=http%3A%2F%2F127.0.0.1%3A9%2Fcb\
+             &client_id=app_1&client_secret=s%2F1&code_verifier=v"
         );
     }
 

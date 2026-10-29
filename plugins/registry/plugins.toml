@@ -13,6 +13,13 @@ package = "hofund-plugin-echo"
 feature = "echo"
 
 [[plugin]]
+id = "gemini"
+kind = "subscription"
+path = "plugins/subscriptions/gemini"
+package = "hofund-plugin-subscription-gemini"
+feature = "gemini"
+
+[[plugin]]
 id = "relay"
 kind = "provider"
 path = "plugins/providers/relay"

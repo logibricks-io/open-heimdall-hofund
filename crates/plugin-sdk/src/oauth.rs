@@ -33,7 +33,7 @@ pub use cache::{NEGATIVE_TTL, TokenCache};
 pub use clock::Clock;
 pub use detached::detached;
 pub use object::{SecretObject, constant_time_eq, same_secret};
-pub use pkce::{Pkce, authorize_url, code_exchange_form, new_state};
+pub use pkce::{Pkce, authorize_url, client_code_exchange_form, code_exchange_form, new_state};
 pub use token::{TokenSet, parse_token_set, token_error, unverified_claims};
 
 const DEFAULT_EXPIRES_SECS: u64 = 3600;
@@ -233,6 +233,16 @@ pub fn refresh_form(client_id: &str, client_secret: &str, refresh_token: &str) -
     ])
 }
 
+/// [`refresh_form`] for a refresh token held as a secret. Do not log it.
+#[must_use]
+pub fn refresh_secret_form(
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &SecretString,
+) -> String {
+    refresh_form(client_id, client_secret, refresh_token.expose_secret())
+}
+
 fn form_escape(text: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(text.len());
@@ -250,7 +260,10 @@ fn form_escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{form_body, parse_access_token, parse_iam_access_token, refresh_form};
+    use super::{
+        SecretString, form_body, parse_access_token, parse_iam_access_token, refresh_form,
+        refresh_secret_form,
+    };
 
     #[test]
     fn an_iam_token_response_parses_and_redacts() {
@@ -325,6 +338,11 @@ mod tests {
         assert_eq!(
             form_body(&[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")]),
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer"
+        );
+        let secret = SecretString::from("refresh token".to_owned());
+        assert_eq!(
+            refresh_secret_form("client id", "secret/value", &secret),
+            body
         );
     }
 }
