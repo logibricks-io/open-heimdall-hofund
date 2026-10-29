@@ -246,6 +246,15 @@ website = "https://www.kimi.com/code"
 keys_url = "https://www.kimi.com/code/console"
 
 [[preset]]
+id = "lmstudio"
+name = "LM Studio"
+kind = "local"
+note = "local server, port 1234 by default"
+chat = "http://localhost:1234/v1"
+website = "https://lmstudio.ai"
+no_key = true
+
+[[preset]]
 id = "minimax"
 name = "MiniMax"
 kind = "vendor"
@@ -273,6 +282,18 @@ catalog = "mistral"
 chat = "https://api.mistral.ai/v1"
 website = "https://console.mistral.ai"
 keys_url = "https://console.mistral.ai/api-keys"
+
+[[preset]]
+id = "mlx-serve"
+name = "MLX-Serve"
+kind = "local"
+note = "local server, port 11234 by default"
+chat = "http://localhost:11234/v1"
+responses = "http://localhost:11234/v1"
+anthropic = "http://localhost:11234"
+decide = "http://localhost:11234/v1"
+website = "https://github.com/ddalcu/mlx-serve"
+no_key = true
 
 [[preset]]
 id = "modelscope"
@@ -325,6 +346,17 @@ website = "https://build.nvidia.com"
 keys_url = "https://build.nvidia.com/settings/api-keys"
 
 [[preset]]
+id = "ollama"
+name = "Ollama"
+kind = "local"
+note = "your local models"
+chat = "http://localhost:11434/v1"
+anthropic = "http://localhost:11434"
+decide = "http://localhost:11434/v1"
+website = "https://ollama.com"
+no_key = true
+
+[[preset]]
 id = "ollama-cloud"
 name = "Ollama Cloud"
 kind = "vendor"
@@ -336,6 +368,18 @@ decide = "https://ollama.com/v1"
 website = "https://docs.ollama.com/cloud"
 keys_url = "https://ollama.com/settings/keys"
 hosts = true
+
+[[preset]]
+id = "omlx"
+name = "oMLX"
+kind = "local"
+note = "local server, port 8000 by default"
+chat = "http://localhost:8000/v1"
+responses = "http://localhost:8000/v1"
+anthropic = "http://localhost:8000"
+decide = "http://localhost:8000/v1"
+website = "https://omlx.ai"
+no_key = true
 
 [[preset]]
 id = "openai"
