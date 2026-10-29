@@ -44,7 +44,9 @@ fn a_pkcs1_key_is_the_same_key_as_its_pkcs8_form() {
     let one = RsaSigner::from_pem(PKCS1).expect("pkcs1 key");
     let eight = RsaSigner::from_pem(PKCS8).expect("pkcs8 key");
     assert_eq!(one.key.public().as_ref(), eight.key.public().as_ref());
-    let token = one.sign(&serde_json::json!({}), &serde_json::json!({})).expect("sign");
+    let token = one
+        .sign(&serde_json::json!({}), &serde_json::json!({}))
+        .expect("sign");
     assert!(verifies(&eight, &token));
 }
 
@@ -53,8 +55,14 @@ fn unusable_keys_are_named() {
     let cases = [
         ("", KeyError::NotPem),
         ("no pem here", KeyError::NotPem),
-        ("-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----", KeyError::NotPem),
-        ("-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----", KeyError::NotPem),
+        (
+            "-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----",
+            KeyError::NotPem,
+        ),
+        (
+            "-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----",
+            KeyError::NotPem,
+        ),
         (
             "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----",
             KeyError::Encrypted,
@@ -71,8 +79,14 @@ fn unusable_keys_are_named() {
     for (text, want) in cases {
         assert_eq!(RsaSigner::from_pem(text).err(), Some(want), "{text:?}");
     }
-    assert_eq!(KeyError::Encrypted.to_string(), "the private key is encrypted");
-    assert_eq!(format!("{:?}", RsaSigner::from_pem(PKCS8).expect("key")), "RsaSigner");
+    assert_eq!(
+        KeyError::Encrypted.to_string(),
+        "the private key is encrypted"
+    );
+    assert_eq!(
+        format!("{:?}", RsaSigner::from_pem(PKCS8).expect("key")),
+        "RsaSigner"
+    );
 }
 
 #[test]

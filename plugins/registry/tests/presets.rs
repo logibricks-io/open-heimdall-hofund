@@ -45,7 +45,7 @@ fn protocol(wire: Wire) -> ProtocolId {
 #[cfg(feature = "test-fixtures")]
 #[test]
 fn fixtures_are_separate_and_aliases_resolve_their_region() {
-    assert_eq!(compiled_presets().len(), 55);
+    assert_eq!(compiled_presets().len(), 56);
     assert_eq!(compiled_aliases().len(), 4);
     assert!(fixture_presets().len() >= 5);
     assert_eq!(fixture_aliases().len(), 1);
@@ -467,4 +467,36 @@ fn fixture_lookup_is_separate_from_production_lookup() {
         assert_eq!(found.id, alias.preset);
         assert_eq!(region, alias.region);
     }
+}
+
+/// The `google-vertex` row's static models are the plugin's `global` catalog,
+/// so the setup list and the served list cannot drift apart.
+#[test]
+fn the_vertex_row_models_are_the_global_catalog() {
+    use hofund_kit_upstream::{TestHost, block_on};
+    use hofund_plugin_api::{BuildContext, ListQuery, PluginId, RawTable, RawValue};
+
+    let row = compiled_presets()
+        .iter()
+        .find(|preset| preset.id == "google-vertex")
+        .expect("google-vertex row");
+    assert_eq!(row.plugin, "google-vertex");
+    assert!(row.options_base);
+    let dir = tempfile::tempdir().expect("scratch");
+    let host = TestHost::open(PluginId::from_static("google-vertex"), dir.path());
+    let mut raw = RawTable::new();
+    raw.insert("project", RawValue::String("my-project".to_owned()));
+    raw.insert("location", RawValue::String("global".to_owned()));
+    let provider = factory("google-vertex")
+        .expect("google-vertex factory")
+        .validate_and_build_with(
+            &raw,
+            host.context(),
+            &BuildContext::new(ProtocolId::GENERATIVE_LANGUAGE),
+        )
+        .expect("build");
+    let list = block_on(provider.list_models(&ListQuery::default())).expect("list");
+    let ids: Vec<&str> = list.models().iter().map(|model| model.id()).collect();
+    assert_eq!(ids, row.models);
+    assert!(host.http().calls().is_empty());
 }

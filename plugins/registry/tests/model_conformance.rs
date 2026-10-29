@@ -81,8 +81,8 @@ async fn vertex_factory_passes_static_catalog_conformance() {
         factory.as_ref(),
         |base| {
             let mut raw = RawTable::new();
-            raw.insert("id", RawValue::String("conformance".to_owned()));
             raw.insert("base_url", RawValue::String(base.to_owned()));
+            raw.insert("project", RawValue::String("conformance".to_owned()));
             raw.insert("location", RawValue::String("global".to_owned()));
             raw
         },

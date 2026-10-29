@@ -17,7 +17,7 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_host::HttpLimits;
 use hofund_plugin_sdk::{Call, PageError, PageErrorKind, after_id};
-use hofund_provider::{Credential, Endpoint, ModelPlan, Vertex, Wire};
+use hofund_provider::{Credential, Endpoint, ModelPlan, Wire};
 use tracing::Instrument;
 
 use super::events::EventBus;
@@ -1176,11 +1176,7 @@ impl ModelsHost {
         };
         let (mut merged, winning_base, sides) =
             result.map_err(|error| redactor.clean_error(error))?;
-        let models = self.plan_models(
-            provider,
-            model_plan.as_ref(),
-            std::mem::take(&mut merged.models),
-        )?;
+        let models = self.plan_models(model_plan.as_ref(), std::mem::take(&mut merged.models))?;
         merged.models = models;
         self.append_public_drawers(&host, &winning_base, &mut merged.models)
             .await;
@@ -1857,17 +1853,13 @@ impl ModelsHost {
 
     fn plan_models(
         &self,
-        provider: &hofund_config::Provider,
         model_plan: Option<&ModelPlan>,
         live: Vec<ModelSpec>,
     ) -> Result<Vec<ModelSpec>, DaemonError> {
         let Some(model_plan) = model_plan else {
             return Ok(live);
         };
-        let mut static_ids = model_plan.models.clone();
-        if provider.preset.as_deref() == Some("google-vertex") {
-            static_ids = Vertex::models_for(super::option(provider, "location")?);
-        }
+        let static_ids = &model_plan.models;
         if model_plan.only.is_empty() && (static_ids.is_empty() || !live.is_empty()) {
             return Ok(live);
         }
@@ -1876,7 +1868,7 @@ impl ModelsHost {
             .filter(|model| model.id().starts_with(&model_plan.only))
             .collect::<Vec<_>>();
         if planned.is_empty() {
-            planned = static_models(&static_ids)?;
+            planned = static_models(static_ids)?;
         }
         if let Some(limits) = &self.catalog_limits {
             planned = planned

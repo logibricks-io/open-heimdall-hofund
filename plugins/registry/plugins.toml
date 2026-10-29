@@ -34,6 +34,13 @@ package = "hofund-plugin-echo"
 feature = "echo"
 
 [[plugin]]
+id = "google-vertex"
+kind = "provider"
+path = "plugins/providers/google-vertex"
+package = "hofund-plugin-google-vertex"
+feature = "google-vertex"
+
+[[plugin]]
 id = "relay"
 kind = "provider"
 path = "plugins/providers/relay"

@@ -38,6 +38,8 @@ pub struct PresetToml {
     #[serde(default)]
     pub no_list: bool,
     #[serde(default)]
+    pub options_base: bool,
+    #[serde(default)]
     pub hosts: bool,
     #[serde(default)]
     pub only: String,
@@ -432,7 +434,7 @@ pub fn render_preset(preset: &PresetToml, plugin: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "CompiledPreset {{ id: {:?}, plugin: {:?}, name: {:?}, kind: {:?}, short: {:?}, note: {:?}, catalog: {:?}, website: {:?}, keys_url: {:?}, site_host: {:?}, key_hint: {:?}, no_key: {}, no_list: {}, hosts: {}, only: {:?}, models: {}, header_hints: {}, endpoint: {:?}, endpoint_hint: {:?}, endpoint_needed: {:?}, region_label: {:?}, decide: {:?}, chat: {:?}, responses: {:?}, anthropic: {:?}, generative: {:?}, config: &[{}], regions: &[{}] }}",
+        "CompiledPreset {{ id: {:?}, plugin: {:?}, name: {:?}, kind: {:?}, short: {:?}, note: {:?}, catalog: {:?}, website: {:?}, keys_url: {:?}, site_host: {:?}, key_hint: {:?}, no_key: {}, no_list: {}, options_base: {}, hosts: {}, only: {:?}, models: {}, header_hints: {}, endpoint: {:?}, endpoint_hint: {:?}, endpoint_needed: {:?}, region_label: {:?}, decide: {:?}, chat: {:?}, responses: {:?}, anthropic: {:?}, generative: {:?}, config: &[{}], regions: &[{}] }}",
         preset.id,
         plugin,
         preset.name.as_deref().unwrap_or(""),
@@ -446,6 +448,7 @@ pub fn render_preset(preset: &PresetToml, plugin: &str) -> String {
         preset.key_hint,
         preset.no_key,
         preset.no_list,
+        preset.options_base,
         preset.hosts,
         preset.only,
         strings(&preset.models),

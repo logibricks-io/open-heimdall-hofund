@@ -1078,7 +1078,7 @@ fn build_raw_plugin(
     }
     .map_err(show)?;
     // Kernel-owned factories (`openai-compat`, `anthropic`, `generative`,
-    // `google-vertex`, `bedrock`) are not linked plugins: they read the wire
+    // `bedrock`) are not linked plugins: they read the wire
     // from the `protocol` raw key or are single-wire catalog factories, and
     // keep the default `build_with`, so they build through `validate_and_build`.
     // Only a linked (listed) plugin receives the selected protocol in
@@ -2053,10 +2053,6 @@ mod tests {
                 "[[providers]]\nid = \"openai\"\npreset = \"openai\"\nprotocol = \"openai-responses\"\napi_key = \"test\"\n",
             ),
             (
-                "google-vertex",
-                "[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n[providers.options]\nproject = \"my-project\"\n",
-            ),
-            (
                 "bedrock",
                 "[[providers]]\nid = \"bedrock\"\nprotocol = \"bedrock-converse\"\nbase_url = \"https://bedrock-runtime.us-east-1.amazonaws.com\"\nregion = \"us-east-1\"\naccess_key_id = \"test-access\"\nsecret_access_key = \"test-secret\"\n",
             ),
@@ -2198,14 +2194,24 @@ mod tests {
         let path = dir.join("hofund.toml");
         std::fs::write(
             &path,
+            "[[providers]]\nid = \"aws\"\npreset = \"bedrock\"\n[providers.options]\nregion = 1\n",
+        )
+        .expect("write");
+        let error = check(&path).expect_err("region type");
+        assert!(
+            error
+                .to_string()
+                .contains("provider `aws` option `region` must be a string"),
+            "{error}"
+        );
+        std::fs::write(
+            &path,
             "[[providers]]\nid = \"vertex\"\npreset = \"google-vertex\"\n[providers.options]\nproject = 1\n",
         )
         .expect("write");
         let error = check(&path).expect_err("project type");
         assert!(
-            error
-                .to_string()
-                .contains("provider `vertex` option `project` must be a string"),
+            error.to_string().contains("project: must be a string"),
             "{error}"
         );
         std::fs::write(

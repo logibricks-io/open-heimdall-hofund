@@ -174,7 +174,13 @@ pub async fn execute(
     } else {
         Method::Generate
     };
-    let url = url_for(&target.base_url, target.model_root, path, &request.model, method)?;
+    let url = url_for(
+        &target.base_url,
+        target.model_root,
+        path,
+        &request.model,
+        method,
+    )?;
     let body = prepare_body(target, codec, request, prepare, inbound)?;
     let response = call(target, codec, secret, url)?
         .header("content-type", "application/json")
@@ -318,7 +324,11 @@ fn url_for(
 }
 
 /// The model as one escaped path segment, without a leading `models/`.
-fn model_segment(model: &str) -> Result<String, PluginError> {
+///
+/// # Errors
+///
+/// Returns a 400 status error when the model is empty.
+pub fn model_segment(model: &str) -> Result<String, PluginError> {
     let trimmed = model.trim();
     let model = trimmed.strip_prefix("models/").unwrap_or(trimmed);
     if model.is_empty() {
@@ -329,7 +339,8 @@ fn model_segment(model: &str) -> Result<String, PluginError> {
 
 /// Percent-encoding for one URL path segment. Unreserved characters and
 /// `$&+:=@` stay literal, so a tag keeps its colon and a slash is escaped.
-fn path_segment(text: &str) -> String {
+#[must_use]
+pub fn path_segment(text: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
@@ -920,10 +931,23 @@ mod tests {
             let url = url_for(base, "models", Path::Model, " models/gem-1 ", method).expect("url");
             assert_eq!(url, want, "{method:?}");
         }
-        let fixed = url_for(base, "models", Path::Fixed("responses"), "", Method::Generate).expect("fixed");
+        let fixed = url_for(
+            base,
+            "models",
+            Path::Fixed("responses"),
+            "",
+            Method::Generate,
+        )
+        .expect("fixed");
         assert_eq!(fixed, "https://gl.example/v1beta/responses");
-        let escaped =
-            url_for(base, "models", Path::Model, "a/b c:tag$&+=@~é", Method::Generate).expect("escaped");
+        let escaped = url_for(
+            base,
+            "models",
+            Path::Model,
+            "a/b c:tag$&+=@~é",
+            Method::Generate,
+        )
+        .expect("escaped");
         assert_eq!(
             escaped,
             "https://gl.example/v1beta/models/a%2Fb%20c:tag$&+=@~%C3%A9:generateContent"

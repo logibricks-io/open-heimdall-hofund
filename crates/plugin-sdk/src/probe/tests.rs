@@ -5,8 +5,8 @@ use hofund_plugin_api::{BodyStream, PluginError, PluginErrorKind, ProbeQuery, Pr
 use serde_json::json;
 
 use super::{
-    ERROR_CAP, PROBE_WAIT, ProbePage, STREAM_CAP, merge_extra, probe_error_message,
-    probe_failure, probe_report, read_probe, status_hint, stream_report,
+    ERROR_CAP, PROBE_WAIT, ProbePage, STREAM_CAP, merge_extra, probe_error_message, probe_failure,
+    probe_report, read_probe, status_hint, stream_report,
 };
 use crate::HttpResponse;
 
@@ -67,7 +67,11 @@ fn a_refusal_names_the_url_status_detail_and_hint() {
 fn secrets_are_redacted_from_a_refusal_and_its_hint() {
     let secret = "sk-header-secret-value-1234";
     let body = format!(r#"{{"error":{{"message":"bad {secret}"}}}}"#);
-    let error = probe_failure("https://v.example/m", &page(401, body.as_bytes()), &["", secret]);
+    let error = probe_failure(
+        "https://v.example/m",
+        &page(401, body.as_bytes()),
+        &["", secret],
+    );
     assert!(!error.to_string().contains(secret), "{error}");
     assert!(error.to_string().contains("bad "), "{error}");
 }
@@ -85,8 +89,13 @@ fn a_report_reads_2xx_bodies_and_streams() {
     assert!(report.snippet().contains("hi"), "{}", report.snippet());
     let secret = "sk-stream-secret-value-1234";
     let bad = format!("data: {{\"error\":{{\"message\":\"no {secret}\"}}}}\n\n");
-    let error = probe_report("https://v.example", page(200, bad.as_bytes()), true, &[secret])
-        .expect_err("stream error");
+    let error = probe_report(
+        "https://v.example",
+        page(200, bad.as_bytes()),
+        true,
+        &[secret],
+    )
+    .expect_err("stream error");
     assert_eq!(error.kind(), PluginErrorKind::Decode);
     assert!(!error.to_string().contains(secret), "{error}");
     assert_eq!(stream_report(b"").expect("empty").snippet(), "");
@@ -94,18 +103,24 @@ fn a_report_reads_2xx_bodies_and_streams() {
 
 #[test]
 fn extra_body_keys_replace_top_level_keys() {
-    let query = ProbeQuery::new(ProtocolId::GENERATIVE_LANGUAGE, "m").expect("query")
+    let query = ProbeQuery::new(ProtocolId::GENERATIVE_LANGUAGE, "m")
+        .expect("query")
         .with_extra_body(Bytes::from_static(br#"{"a":2,"b":3}"#));
     let mut body = json!({"a": 1, "c": 4});
     merge_extra(&mut body, &query).expect("merged");
     assert_eq!(body, json!({"a": 2, "b": 3, "c": 4}));
-    let bad = ProbeQuery::new(ProtocolId::GENERATIVE_LANGUAGE, "m").expect("query").with_extra_body(Bytes::from_static(b"[1]"));
+    let bad = ProbeQuery::new(ProtocolId::GENERATIVE_LANGUAGE, "m")
+        .expect("query")
+        .with_extra_body(Bytes::from_static(b"[1]"));
     assert!(merge_extra(&mut json!({}), &bad).is_err());
 }
 
 #[test]
 fn messages_and_hints_follow_the_builtin_rules() {
-    assert_eq!(probe_error_message(br#"{"error":{"message":"denied"}}"#), "denied");
+    assert_eq!(
+        probe_error_message(br#"{"error":{"message":"denied"}}"#),
+        "denied"
+    );
     assert_eq!(probe_error_message(b"<html>x</html>"), "");
     assert!(status_hint(b"<html>request has been blocked</html>").contains("network edge"));
     assert_eq!(status_hint(b"{}"), "");
@@ -114,9 +129,13 @@ fn messages_and_hints_follow_the_builtin_rules() {
 #[tokio::test]
 async fn a_stream_is_read_to_one_mib_and_a_refusal_to_four_kib() {
     let big = vec![Ok(Bytes::from(vec![b' '; STREAM_CAP + 10]))];
-    let read = read_probe(response(200, &[], big.clone()), true).await.expect("read");
+    let read = read_probe(response(200, &[], big.clone()), true)
+        .await
+        .expect("read");
     assert_eq!(read.body.len(), STREAM_CAP);
-    let read = read_probe(response(200, &[], big.clone()), false).await.expect("read");
+    let read = read_probe(response(200, &[], big.clone()), false)
+        .await
+        .expect("read");
     assert_eq!(read.body.len(), ERROR_CAP);
     let read = read_probe(response(500, &[("retry-after", "9")], big), true)
         .await
@@ -125,7 +144,9 @@ async fn a_stream_is_read_to_one_mib_and_a_refusal_to_four_kib() {
     assert_eq!(read.status, 500);
     assert_eq!(read.retry_after, Some(Duration::from_secs(9)));
     let chunks = vec![Ok(Bytes::from_static(b"ab")), Ok(Bytes::from_static(b"cd"))];
-    let read = read_probe(response(200, &[], chunks), true).await.expect("read");
+    let read = read_probe(response(200, &[], chunks), true)
+        .await
+        .expect("read");
     assert_eq!(read.body, b"abcd");
 }
 

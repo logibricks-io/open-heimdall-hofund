@@ -38,7 +38,10 @@ pub struct ProbePage {
 /// # Errors
 ///
 /// Returns an interrupted error when a 2xx body fails mid-read.
-pub async fn read_probe(mut response: HttpResponse, stream: bool) -> Result<ProbePage, PluginError> {
+pub async fn read_probe(
+    mut response: HttpResponse,
+    stream: bool,
+) -> Result<ProbePage, PluginError> {
     let status = response.status().as_u16();
     let retry_after = parse_retry_after_headers(response.headers(), std::time::SystemTime::now());
     let ok = (200..300).contains(&status);
@@ -252,7 +255,9 @@ fn redact(text: &str, secrets: &[&str]) -> String {
     secrets
         .iter()
         .filter(|secret| !secret.is_empty())
-        .fold(text.to_owned(), |clean, secret| redact_token(&clean, secret))
+        .fold(text.to_owned(), |clean, secret| {
+            redact_token(&clean, secret)
+        })
 }
 
 /// Copies the probe's extra body keys over the top-level keys of `body`.

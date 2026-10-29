@@ -336,7 +336,7 @@ pub(crate) async fn post_json(
     url: &str,
     body: Vec<u8>,
 ) -> Result<reqwest::Response, ProviderError> {
-    send_json(upstream, url, body, None).await
+    send_json(upstream, url, body).await
 }
 
 pub(crate) async fn post_with_headers(
@@ -374,30 +374,17 @@ pub(crate) fn extra_header_pairs(upstream: &Upstream) -> Vec<(String, String)> {
         .collect()
 }
 
-pub(crate) async fn post_bearer(
-    upstream: &Upstream,
-    url: &str,
-    body: Vec<u8>,
-    bearer: &str,
-) -> Result<reqwest::Response, ProviderError> {
-    send_json(upstream, url, body, Some(bearer)).await
-}
-
 async fn send_json(
     upstream: &Upstream,
     url: &str,
     body: Vec<u8>,
-    bearer: Option<&str>,
 ) -> Result<reqwest::Response, ProviderError> {
-    let mut builder = upstream
+    let builder = upstream
         .client
         .post(url)
         .headers(upstream.headers.clone())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body);
-    if let Some(token) = bearer {
-        builder = builder.header(reqwest::header::AUTHORIZATION, bearer_header(token)?);
-    }
     send_builder(builder).await
 }
 
@@ -425,13 +412,6 @@ pub(crate) async fn send_builder(
     }
 }
 
-fn bearer_header(token: &str) -> Result<HeaderValue, ProviderError> {
-    let mut value = HeaderValue::try_from(format!("Bearer {token}"))
-        .map_err(|_| ProviderError::decode("access token is not valid header text"))?;
-    value.set_sensitive(true);
-    Ok(value)
-}
-
 pub(crate) async fn execute(
     upstream: &Upstream,
     codec: &dyn Codec,
@@ -441,31 +421,6 @@ pub(crate) async fn execute(
 ) -> Result<Completion, ProviderError> {
     let url = upstream.url.clone();
     execute_at(upstream, &url, codec, request, prepare, inbound_protocol).await
-}
-
-/// Posts `request` to `url` with `bearer` in `Authorization`.
-///
-/// The header is marked sensitive. It is not taken from the map captured at
-/// [`Upstream::open`], because a minted token expires.
-pub(crate) async fn execute_bearer(
-    upstream: &Upstream,
-    url: &str,
-    codec: &dyn Codec,
-    request: Request,
-    prepare: Option<Prepare>,
-    inbound_protocol: &str,
-    bearer: &str,
-) -> Result<Completion, ProviderError> {
-    finish(
-        upstream,
-        url,
-        codec,
-        request,
-        prepare,
-        inbound_protocol,
-        Some(bearer),
-    )
-    .await
 }
 
 /// Posts `request` to `url` with the upstream's headers.
@@ -481,16 +436,7 @@ pub(crate) async fn execute_at(
     prepare: Option<Prepare>,
     inbound_protocol: &str,
 ) -> Result<Completion, ProviderError> {
-    finish(
-        upstream,
-        url,
-        codec,
-        request,
-        prepare,
-        inbound_protocol,
-        None,
-    )
-    .await
+    finish(upstream, url, codec, request, prepare, inbound_protocol).await
 }
 
 /// A successful upstream response waiting for its body to be completed.
@@ -534,20 +480,11 @@ async fn finish(
     request: Request,
     prepare: Option<Prepare>,
     inbound_protocol: &str,
-    bearer: Option<&str>,
 ) -> Result<Completion, ProviderError> {
-    send(
-        upstream,
-        url,
-        codec,
-        request,
-        prepare,
-        inbound_protocol,
-        bearer,
-    )
-    .await?
-    .complete()
-    .await
+    send(upstream, url, codec, request, prepare, inbound_protocol)
+        .await?
+        .complete()
+        .await
 }
 
 /// Prepares and sends a request, returning only after its status is known.
@@ -559,16 +496,7 @@ pub(crate) async fn send_at<'a>(
     prepare: Option<Prepare>,
     inbound_protocol: &str,
 ) -> Result<Sent<'a>, ProviderError> {
-    send(
-        upstream,
-        url,
-        codec,
-        request,
-        prepare,
-        inbound_protocol,
-        None,
-    )
-    .await
+    send(upstream, url, codec, request, prepare, inbound_protocol).await
 }
 
 async fn send<'a>(
@@ -578,12 +506,11 @@ async fn send<'a>(
     request: Request,
     prepare: Option<Prepare>,
     inbound_protocol: &str,
-    bearer: Option<&str>,
 ) -> Result<Sent<'a>, ProviderError> {
     let cross_protocol = codec.id() != inbound_protocol;
     let streaming = request.stream;
     let body = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
-    let response = send_json(upstream, url, body, bearer).await?;
+    let response = send_json(upstream, url, body).await?;
     let status = response.status();
     if !status.is_success() {
         let retry_after = retry_after(response.headers());

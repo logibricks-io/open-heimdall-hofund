@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use hofund_plugin_api::{AuthChoice, PluginError, ProbeQuery, ProbeReport};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use hofund_plugin_sdk::probe::{merge_extra, stream_report};
 
@@ -161,59 +161,6 @@ impl ModelClient {
         .await
     }
 
-    pub async fn vertex_probe(
-        &self,
-        query: &ProbeQuery,
-        token: &str,
-    ) -> Result<ProbeReport, PluginError> {
-        tokio::time::timeout(PROBE_WAIT, self.vertex_probe_inner(query, token))
-            .await
-            .map_err(|_| PluginError::timeout("provider probe exceeded 20 seconds"))?
-    }
-
-    async fn vertex_probe_inner(
-        &self,
-        query: &ProbeQuery,
-        token: &str,
-    ) -> Result<ProbeReport, PluginError> {
-        let model = crate::generative::escape_model(query.model())
-            .map_err(|error| PluginError::decode(error.message))?;
-        let url = format!(
-            "{}/publishers/google/models/{model}:generateContent",
-            self.endpoint.base_url.trim_end_matches('/')
-        );
-        let mut generation = Map::new();
-        generation.insert("maxOutputTokens".to_owned(), Value::from(16));
-        let lower = query.model().to_ascii_lowercase();
-        if lower.starts_with("gemini-2.5-pro") {
-            generation.insert(
-                "thinkingConfig".to_owned(),
-                serde_json::json!({"thinkingBudget": 128}),
-            );
-        } else if lower.starts_with("gemini-2.5") {
-            generation.insert(
-                "thinkingConfig".to_owned(),
-                serde_json::json!({"thinkingBudget": 0}),
-            );
-        } else if vertex_generation(&lower) >= 3 {
-            generation.insert(
-                "thinkingConfig".to_owned(),
-                serde_json::json!({"thinkingLevel": "low"}),
-            );
-        }
-        let mut body = serde_json::json!({
-            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-            "generationConfig": generation,
-        });
-        merge_extra(&mut body, query)?;
-        let mut headers = self.user_headers(reqwest::header::HeaderMap::new())?;
-        let mut bearer = reqwest::header::HeaderValue::try_from(format!("Bearer {token}"))
-            .map_err(|_| PluginError::config("access token is not valid header text"))?;
-        bearer.set_sensitive(true);
-        headers.insert(reqwest::header::AUTHORIZATION, bearer);
-        self.post_and_report(&url, headers, body).await
-    }
-
     pub async fn post_and_report(
         &self,
         url: &str,
@@ -276,26 +223,4 @@ impl ModelClient {
 
 fn probe_error(page: &Page) -> String {
     String::from_utf8_lossy(&page.body).into_owned()
-}
-
-fn vertex_generation(model: &str) -> u32 {
-    let Some(rest) = model.strip_prefix("gemini-") else {
-        return 0;
-    };
-    rest.split(['-', '.'])
-        .next()
-        .and_then(|generation| generation.parse().ok())
-        .unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::vertex_generation;
-
-    #[test]
-    fn vertex_generation_requires_a_number() {
-        assert_eq!(vertex_generation("gemini-3-flash"), 3);
-        assert_eq!(vertex_generation("gemini-2.5-pro"), 2);
-        assert_eq!(vertex_generation("gemini-flash-latest"), 0);
-    }
 }

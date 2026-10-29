@@ -163,7 +163,7 @@ pub fn select(
                 wire_name(wire)
             )));
         }
-        if base_url.is_empty() {
+        if base_url.is_empty() && !preset.options_base {
             return Err(SelectError::new(format!(
                 "preset `{}` needs base_url",
                 preset.id
@@ -212,7 +212,9 @@ pub fn select(
             preset.plugin
         ))
     })?;
-    if base_url.is_empty() {
+    // A plugin that builds its base from its own options (Vertex AI's
+    // project and location) takes an empty base URL here.
+    if base_url.is_empty() && !preset.options_base {
         return Err(SelectError::new(format!(
             "preset `{}` needs base_url",
             preset.id

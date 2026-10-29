@@ -1,0 +1,22 @@
+[package]
+name = "hofund-plugin-google-vertex"
+description = "Google Vertex AI upstream: Gemini under a Google Cloud project, signed with Google credentials."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-plugin-api = { workspace = true }
+hofund-plugin-sdk = { workspace = true }
+
+[dev-dependencies]
+hofund-kit-upstream = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

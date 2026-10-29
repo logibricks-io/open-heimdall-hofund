@@ -636,6 +636,9 @@ pub struct CompiledPreset {{
     pub no_key: bool,
     /// Whether the preset has no ordinary live model list.
     pub no_list: bool,
+    /// Whether the plugin builds its base URL from its own options, so a
+    /// preset without an endpoint needs no `base_url`.
+    pub options_base: bool,
     /// Whether the endpoint serves other makers' models.
     pub hosts: bool,
     /// Required live-model id prefix.

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Google Vertex AI plugin `google-vertex` (`plugins/providers/google-vertex`):
+  preset `google-vertex` now builds this plugin instead of the kernel adapter.
+  The base URL comes from `project` and `location`, so the preset needs no
+  `base_url` (new preset field `options_base`). OAuth tokens are minted from an
+  ADC file (`authorized_user`, `service_account` as an RS256 JWT,
+  `impersonated_service_account`) or an impersonation email and cached until
+  shortly before expiry. Generate, stream, and count go through the SDK
+  Generative Language transport; `list_models` returns the static ids the
+  location serves; `probe` sends one unary request.
+- SDK helpers: `hofund_plugin_sdk::jwt` (RS256 compact JWT signing),
+  `hofund_plugin_sdk::probe` (probe bodies and outcome classification, moved
+  from the kernel), `wire::Target::model_root` (the Generative Language model
+  path root, `publishers/google/models` on Vertex), and a public
+  `transport::Call::open_raw`.
+
 - SDK Generative Language transport: `hofund_plugin_sdk::wire::execute`
   posts a Generative Language target to `{base}/models/{model}:generateContent`,
   or `:streamGenerateContent?alt=sse` for a stream, with a leading `models/`
