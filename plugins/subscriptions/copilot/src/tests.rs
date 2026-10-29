@@ -12,6 +12,7 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::json::{self, json};
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache, account_id_from};
 
+use crate::models::{self, Book};
 use crate::session::{self, LAPSED, LAPSED_REASON, MARGIN, Session};
 use crate::site::Site;
 use crate::upstream::{CopilotUpstream, has_image, initiator, request_headers};
@@ -618,11 +619,21 @@ fn stored_blob_problems_need_sign_in() {
 }
 
 fn upstream_for(host: &TestHost, id: &AccountId) -> CopilotUpstream {
+    upstream_with(host, id, Arc::new(Book::default()))
+}
+
+fn upstream_with(host: &TestHost, id: &AccountId, book: Arc<Book>) -> CopilotUpstream {
     CopilotUpstream::new(
         id.clone(),
         host.context().clone(),
         Arc::new(TokenCache::new(MARGIN)),
+        book,
     )
+}
+
+/// A `/models` reply with no models: every model goes to Chat Completions.
+fn no_models() -> Vec<u8> {
+    br#"{"data":[]}"#.to_vec()
 }
 
 #[test]
@@ -631,6 +642,7 @@ fn chat_401_trades_again_once() {
     let host = host(&dir);
     let id = seed(&host);
     host.http().enqueue(session_reply("tid=1", 3600));
+    host.http().enqueue(no_models());
     host.http().enqueue_response(401, &[], b"{}".to_vec());
     host.http().enqueue(session_reply("tid=2", 3600));
     host.http().enqueue_response(401, &[], b"{}".to_vec());
@@ -640,8 +652,12 @@ fn chat_401_trades_again_once() {
     assert_eq!(error.status(), Some(401));
     let token = "https://api.github.com/copilot_internal/v2/token".to_owned();
     let chat = format!("{API}/chat/completions");
-    assert_eq!(uris(&host), vec![token.clone(), chat.clone(), token, chat]);
-    let chat_call = &host.http().calls()[1];
+    let listed = format!("{API}/models");
+    assert_eq!(
+        uris(&host),
+        vec![token.clone(), listed, chat.clone(), token, chat]
+    );
+    let chat_call = &host.http().calls()[2];
     assert!(
         chat_call
             .sensitive_headers()
@@ -655,12 +671,13 @@ fn other_chat_errors_are_not_retried() {
     let host = host(&dir);
     let id = seed(&host);
     host.http().enqueue(session_reply("tid=1", 3600));
+    host.http().enqueue(no_models());
     host.http().enqueue_response(403, &[], b"{}".to_vec());
     let error = block_on(upstream_for(&host, &id).execute(chat_request(), ProtocolId::OPENAI_CHAT))
         .err()
         .expect("403");
     assert_eq!(error.status(), Some(403));
-    assert_eq!(host.http().calls().len(), 2);
+    assert_eq!(host.http().calls().len(), 3);
 }
 
 #[test]
@@ -958,4 +975,344 @@ fn no_token_in_debug_or_errors() {
         stored(&host, &id)
     );
     assert!(!shown.contains(SENTINEL), "{shown}");
+}
+
+fn models_reply() -> Vec<u8> {
+    json!({"data": [
+        {"id": "claude-sonnet", "name": "Claude Sonnet", "model_picker_enabled": true,
+         "capabilities": {"type": "chat"},
+         "supported_endpoints": ["/v1/messages", "/chat/completions"]},
+        {"id": "gpt-5", "name": "GPT-5", "model_picker_enabled": true,
+         "capabilities": {"type": "chat", "supports": {"reasoning_effort": ["low", "high"]}},
+         "supported_endpoints": ["/responses", "/chat/completions", "ws:/responses"]},
+        {"id": "gpt-4.1", "model_picker_enabled": true, "capabilities": {"type": "chat"}},
+        {"id": "o-terms", "model_picker_enabled": true, "capabilities": {"type": "chat"},
+         "supported_endpoints": ["/responses"],
+         "policy": {"state": "unconfigured", "terms": "Enable access to o-terms."}},
+        {"id": "hidden-picked", "model_picker_category": "powerful",
+         "capabilities": {"type": "chat"},
+         "policy": {"state": "enabled", "terms": ""}},
+        {"id": "trajectory-1", "model_picker_enabled": true, "capabilities": {"type": "chat"},
+         "supported_endpoints": ["/responses"]}
+    ]})
+    .to_string()
+    .into_bytes()
+}
+
+fn request_for(model: &str, protocol: ProtocolId) -> Request {
+    let mut request = ProbeQuery::new(protocol, model)
+        .expect("query")
+        .minimal_request();
+    request.stream = false;
+    request
+}
+
+#[test]
+fn endpoints_select_protocol() {
+    let (_, _, listed) = models::parse(&models_reply()).expect("parse");
+    let cases = [
+        (
+            "claude-sonnet",
+            ProtocolId::ANTHROPIC_MESSAGES,
+            ProtocolId::ANTHROPIC_MESSAGES,
+        ),
+        (
+            "claude-sonnet",
+            ProtocolId::OPENAI_CHAT,
+            ProtocolId::OPENAI_CHAT,
+        ),
+        (
+            "claude-sonnet",
+            ProtocolId::OPENAI_RESPONSES,
+            ProtocolId::ANTHROPIC_MESSAGES,
+        ),
+        (
+            "gpt-5",
+            ProtocolId::ANTHROPIC_MESSAGES,
+            ProtocolId::OPENAI_RESPONSES,
+        ),
+        ("gpt-5", ProtocolId::OPENAI_CHAT, ProtocolId::OPENAI_CHAT),
+        (
+            "o-terms",
+            ProtocolId::OPENAI_CHAT,
+            ProtocolId::OPENAI_RESPONSES,
+        ),
+        // Internal models are not offered, but a call naming one still
+        // goes to the API the list gave it.
+        (
+            "trajectory-1",
+            ProtocolId::OPENAI_CHAT,
+            ProtocolId::OPENAI_RESPONSES,
+        ),
+    ];
+    for (model, inbound, expected) in cases {
+        assert_eq!(
+            listed.protocol(model, inbound),
+            expected,
+            "{model} {inbound:?}"
+        );
+    }
+    assert_eq!(
+        models::apis(&[
+            "/v1/chat/completions/".to_owned(),
+            "/v1/responses".to_owned(),
+            "/messages".to_owned(),
+            "/chat/completions".to_owned(),
+            "/v1/embeddings".to_owned(),
+        ]),
+        [
+            ProtocolId::OPENAI_CHAT,
+            ProtocolId::OPENAI_RESPONSES,
+            ProtocolId::ANTHROPIC_MESSAGES
+        ]
+    );
+
+    // End to end: the call goes to the path of the chosen API.
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host);
+    let upstream = upstream_for(&host, &id);
+    host.http().enqueue(session_reply("tid=1", 3600));
+    host.http().enqueue(models_reply());
+    host.http().enqueue(
+        br#"{"id":"r1","object":"response","status":"completed","model":"gpt-5","output":[]}"#
+            .to_vec(),
+    );
+    block_on(upstream.execute(
+        request_for("gpt-5", ProtocolId::ANTHROPIC_MESSAGES),
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ))
+    .expect("responses call");
+    host.http().enqueue(
+        br#"{"id":"m1","type":"message","role":"assistant","model":"claude-sonnet","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#
+            .to_vec(),
+    );
+    block_on(upstream.execute(
+        request_for("claude-sonnet", ProtocolId::ANTHROPIC_MESSAGES),
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ))
+    .expect("messages call");
+    let calls = host.http().calls();
+    assert_eq!(
+        uris(&host),
+        vec![
+            "https://api.github.com/copilot_internal/v2/token".to_owned(),
+            format!("{API}/models"),
+            format!("{API}/responses"),
+            format!("{API}/v1/messages"),
+        ]
+    );
+    assert!(
+        calls[1]
+            .sensitive_headers()
+            .contains(&"authorization".to_owned())
+    );
+    assert_eq!(calls[1].method(), "GET");
+}
+
+#[test]
+fn no_endpoints_means_chat() {
+    assert_eq!(models::apis(&[]), [ProtocolId::OPENAI_CHAT]);
+    let (models, _, listed) = models::parse(&models_reply()).expect("parse");
+    let plain = models
+        .iter()
+        .find(|model| model.id() == "gpt-4.1")
+        .expect("listed");
+    assert_eq!(plain.endpoints(), ["chat"]);
+    assert_eq!(
+        listed.protocol("gpt-4.1", ProtocolId::ANTHROPIC_MESSAGES),
+        ProtocolId::OPENAI_CHAT
+    );
+    // A model the list never named goes to Chat Completions too.
+    assert_eq!(
+        listed.protocol("unknown", ProtocolId::OPENAI_RESPONSES),
+        ProtocolId::OPENAI_CHAT
+    );
+
+    // A list that fails leaves the call on Chat Completions, and the next
+    // call asks for the list again.
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host);
+    let upstream = upstream_for(&host, &id);
+    host.http().enqueue(session_reply("tid=1", 3600));
+    host.http().enqueue_response(500, &[], b"down".to_vec());
+    host.http().enqueue_response(403, &[], b"{}".to_vec());
+    host.http().enqueue(no_models());
+    host.http().enqueue_response(403, &[], b"{}".to_vec());
+    for _ in 0..2 {
+        let error = block_on(upstream.execute(
+            request_for("gpt-5", ProtocolId::OPENAI_RESPONSES),
+            ProtocolId::OPENAI_RESPONSES,
+        ))
+        .err()
+        .expect("403");
+        assert_eq!(error.status(), Some(403));
+    }
+    let chat = format!("{API}/chat/completions");
+    let listed = format!("{API}/models");
+    assert_eq!(
+        uris(&host)[1..],
+        [listed.clone(), chat.clone(), listed, chat]
+    );
+}
+
+#[test]
+fn internal_ids_dropped() {
+    for id in [
+        "copilot-search-1",
+        "exec-agent",
+        "trajectory-2",
+        "gpt-5-mini-secondary",
+        "claude-tertiary",
+        "gpt-4th",
+        "gpt-5-free-auto",
+    ] {
+        assert!(models::internal(id), "{id}");
+    }
+    for id in [
+        "my-copilot-search",
+        "gpt-4th-gen",
+        "secondary-model",
+        "gpt-5",
+    ] {
+        assert!(!models::internal(id), "{id}");
+    }
+    let body = json!({"data": [
+        {"id": "embed", "model_picker_enabled": true, "capabilities": {"type": "embeddings"}},
+        {"id": "exp", "vendor": "Experimental", "model_picker_enabled": true, "capabilities": {"type": "chat"}},
+        {"id": "snapshot", "capabilities": {"type": "chat"}},
+        {"id": "seatless", "model_picker_enabled": true, "capabilities": {"type": "chat"},
+         "policy": {"state": "disabled"}},
+        {"id": "gpt-5-mini-secondary", "model_picker_enabled": true, "capabilities": {"type": "chat"}},
+        {"id": "", "model_picker_enabled": true, "capabilities": {"type": "chat"}},
+        {"id": "kept", "model_picker_enabled": true, "capabilities": {"type": "chat"}}
+    ]})
+    .to_string();
+    let (models, dropped, listed) = models::parse(body.as_bytes()).expect("parse");
+    let ids: Vec<&str> = models.iter().map(|model| model.id()).collect();
+    assert_eq!(ids, ["kept"]);
+    assert_eq!(
+        dropped,
+        [
+            "embed",
+            "exp",
+            "snapshot",
+            "seatless",
+            "gpt-5-mini-secondary"
+        ]
+    );
+    assert!(!listed.waits("seatless"));
+    assert!(models::parse(b"not json").is_err());
+    assert!(models::parse(br#"{"models":[]}"#).is_err());
+}
+
+#[test]
+fn list_models_reads_the_account_list() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host);
+    let sub = subscription(&host);
+    host.http().enqueue(session_reply("tid=1", 3600));
+    host.http().enqueue(models_reply());
+    let list = block_on(sub.list_models(&id, host.context())).expect("list");
+    let ids: Vec<&str> = list.models().iter().map(|model| model.id()).collect();
+    assert_eq!(
+        ids,
+        [
+            "claude-sonnet",
+            "gpt-5",
+            "gpt-4.1",
+            "o-terms",
+            "hidden-picked"
+        ]
+    );
+    assert_eq!(list.dropped(), ["trajectory-1"]);
+    let gpt5 = &list.models()[1];
+    assert_eq!(gpt5.display_name(), Some("GPT-5"));
+    assert_eq!(gpt5.endpoints(), ["responses", "chat"]);
+    assert_eq!(gpt5.efforts(), ["low", "high"]);
+    assert_eq!(list.models()[0].endpoints(), ["anthropic", "chat"]);
+    assert_eq!(uris(&host)[1], format!("{API}/models"));
+
+    for (status, kind) in [
+        (401, PluginErrorKind::Auth),
+        (403, PluginErrorKind::Auth),
+        (500, PluginErrorKind::Status),
+    ] {
+        host.http().enqueue_response(status, &[], b"{}".to_vec());
+        let error = block_on(sub.list_models(&id, host.context())).expect_err("refused");
+        assert_eq!(error.kind(), kind, "{status}");
+    }
+}
+
+#[test]
+fn terms_accepted_once() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host);
+    let book = Arc::new(Book::default());
+    let upstream = upstream_with(&host, &id, Arc::clone(&book));
+    let reply =
+        br#"{"id":"r1","object":"response","status":"completed","model":"o-terms","output":[]}"#;
+    host.http().enqueue(session_reply("tid=1", 3600));
+    host.http().enqueue(models_reply());
+    // The first acceptance is refused: the call still goes out, and the
+    // next call asks again.
+    host.http().enqueue_response(403, &[], b"{}".to_vec());
+    host.http().enqueue(reply.to_vec());
+    host.http().enqueue_response(204, &[], Vec::new());
+    host.http().enqueue(reply.to_vec());
+    host.http().enqueue(reply.to_vec());
+    for _ in 0..3 {
+        block_on(upstream.execute(
+            request_for("o-terms", ProtocolId::OPENAI_RESPONSES),
+            ProtocolId::OPENAI_RESPONSES,
+        ))
+        .expect("call");
+    }
+    let policy = format!("{API}/models/o-terms/policy");
+    let responses = format!("{API}/responses");
+    assert_eq!(
+        uris(&host)[2..],
+        [
+            policy.clone(),
+            responses.clone(),
+            policy,
+            responses.clone(),
+            responses
+        ]
+    );
+    let calls = host.http().calls();
+    assert_eq!(calls[2].method(), "POST");
+    assert_eq!(calls[2].body(), br#"{"state":"enabled"}"#);
+    assert!(
+        calls[2]
+            .sensitive_headers()
+            .contains(&"authorization".to_owned())
+    );
+    let listed = book.get(&id).expect("listed");
+    assert!(!listed.waits("o-terms"));
+}
+
+#[test]
+fn policy_path_escapes_the_model() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host);
+    let upstream = upstream_for(&host, &id);
+    let body = json!({"data": [
+        {"id": "a/b c", "model_picker_enabled": true, "capabilities": {"type": "chat"},
+         "policy": {"state": "unconfigured", "terms": "t"}}
+    ]})
+    .to_string();
+    host.http().enqueue(session_reply("tid=1", 3600));
+    host.http().enqueue(body.into_bytes());
+    host.http().enqueue(Vec::new());
+    host.http().enqueue_response(403, &[], b"{}".to_vec());
+    let _ = block_on(upstream.execute(
+        request_for("a/b c", ProtocolId::OPENAI_CHAT),
+        ProtocolId::OPENAI_CHAT,
+    ));
+    assert_eq!(uris(&host)[2], format!("{API}/models/a%2Fb%20c/policy"));
 }

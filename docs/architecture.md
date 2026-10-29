@@ -238,7 +238,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
 | `plugin-subscription-codex` | ChatGPT (Codex) subscription: browser sign-in, token refresh, and the Responses upstream. |
 | `plugin-subscription-claude` | Claude Code subscription: sign-in and refresh by running the `claude` command line in a private config directory. |
-| `plugin-subscription-copilot` | GitHub Copilot subscription, on github.com or a `<name>.ghe.com` enterprise host: device sign-in, session tokens, quota, and the Chat Completions upstream. |
+| `plugin-subscription-copilot` | GitHub Copilot subscription, on github.com or a `<name>.ghe.com` enterprise host: device sign-in, session tokens, quota, the account model list, and per-model Chat Completions, Responses and Messages routing. |
 | `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |
 | `codec` | Per-protocol encode and decode to and from the IR. Hub-and-spoke, so N protocols do not become an N-by-M matrix. |
 | `quirks` | Data-driven vendor capability and quirk descriptions. |

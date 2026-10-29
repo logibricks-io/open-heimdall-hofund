@@ -1,4 +1,5 @@
-//! The Copilot API as an OpenAI chat completions upstream.
+//! The Copilot API as an upstream: Chat Completions, Responses, or
+//! Messages, as the account's model list says each model is served.
 
 use std::sync::Arc;
 
@@ -9,6 +10,7 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::oauth::{TokenCache, same_secret};
 use hofund_plugin_sdk::wire::{self, Target};
 
+use crate::models::{self, Book, Listed};
 use crate::session::{self, EDITOR_HEADERS, Session};
 
 /// The GitHub API version Copilot chat calls name.
@@ -18,6 +20,7 @@ pub(crate) struct CopilotUpstream {
     account: AccountId,
     host: HostContext,
     sessions: Arc<TokenCache<Session>>,
+    book: Arc<Book>,
 }
 
 impl CopilotUpstream {
@@ -25,21 +28,57 @@ impl CopilotUpstream {
         account: AccountId,
         host: HostContext,
         sessions: Arc<TokenCache<Session>>,
+        book: Arc<Book>,
     ) -> Self {
         Self {
             account,
             host,
             sessions,
+            book,
         }
+    }
+
+    /// What the account's model list says, listing it once when the plugin
+    /// has not yet. A list that fails leaves every model on Chat
+    /// Completions; the request's own answer then says what is wrong.
+    async fn listed(&self, session: &Session) -> Listed {
+        if let Some(listed) = self.book.get(&self.account) {
+            return listed;
+        }
+        let _ = models::list(&self.host, session, &self.account, &self.book).await;
+        self.book.get(&self.account).unwrap_or_default()
+    }
+
+    /// Picks the protocol for `request` and accepts the model's terms when
+    /// they wait, as Copilot's editors do the first time a model is picked.
+    async fn prepare(
+        &self,
+        session: &Session,
+        request: &Request,
+        inbound: ProtocolId,
+    ) -> ProtocolId {
+        let listed = self.listed(session).await;
+        if listed.waits(&request.model) {
+            models::accept(
+                &self.host,
+                session,
+                &self.account,
+                &self.book,
+                &request.model,
+            )
+            .await;
+        }
+        listed.protocol(&request.model, inbound)
     }
 
     async fn send(
         &self,
         session: &Session,
+        protocol: ProtocolId,
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let target = Target::new(ProtocolId::OPENAI_CHAT, session.base.clone())
+        let target = Target::new(protocol, session.base.clone())
             .credential(CredentialStyle::Bearer)
             .headers(request_headers(&request));
         wire::execute(
@@ -61,7 +100,8 @@ impl UpstreamProvider for CopilotUpstream {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let first = session::session(&self.sessions, &self.host, &self.account).await?;
-        match self.send(&first, request.clone(), inbound).await {
+        let protocol = self.prepare(&first, &request, inbound).await;
+        match self.send(&first, protocol, request.clone(), inbound).await {
             Err(error) if error.status() == Some(401) => {
                 // The session token was revoked before its expiry: trade
                 // again once, unless another caller already did.
@@ -71,7 +111,7 @@ impl UpstreamProvider for CopilotUpstream {
                     })
                     .await;
                 let renewed = session::session(&self.sessions, &self.host, &self.account).await?;
-                self.send(&renewed, request, inbound).await
+                self.send(&renewed, protocol, request, inbound).await
             }
             other => other,
         }
