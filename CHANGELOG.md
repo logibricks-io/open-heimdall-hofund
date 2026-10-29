@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Live configuration apply and reload on the control plane: `GET /config`,
+  `POST /config/validate`, `/config/apply`, and `/config/reload` run under a
+  sidecar lock with revision checks, atomic byte-exact writes that keep
+  symlinks, mode, and owner, and publish a new router snapshot without a
+  restart. Failures emit `config_rejected` and change nothing; publications
+  emit `config_reloaded` and report restart-only and not-yet-applied fields.
 - Control event stream (`GET /v1/hofund/events`): per-topic buses and replay
   rings, composite `Last-Event-ID` resume, targeted resyncs, token-checked
   heartbeats, and stream close on token rotation or shutdown. The typed client

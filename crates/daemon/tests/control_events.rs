@@ -1,12 +1,11 @@
-//! Daemon event stream and the L6a configuration route skeleton over TCP.
+//! Daemon event stream over TCP.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hofund_agent::Session;
 use hofund_control_proto::{
-    API_VERSION, ConfigApplyRequest, ConfigValidateRequest, ControlErrorKind, EventEnvelope,
-    EventPayload, ReloadRequest, ShutdownState, TokenRotateRequest, Topic, decode_error_envelope,
+    API_VERSION, EventEnvelope, EventPayload, ShutdownState, TokenRotateRequest, Topic,
     decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
@@ -99,39 +98,6 @@ async fn read_events(
             None => return (events, true),
         }
     }
-}
-
-#[tokio::test]
-async fn config_routes_return_unavailable_until_l6b() {
-    let dir = Scratch::new("config");
-    let running = start(&dir.0).await;
-    let client = reqwest::Client::new();
-    let text = "listen = \"127.0.0.1:0\"\n";
-    let requests = [
-        client.get(url(&running, "/v1/hofund/config")),
-        client
-            .post(url(&running, "/v1/hofund/config/validate"))
-            .json(&ConfigValidateRequest::new(text)),
-        client
-            .post(url(&running, "/v1/hofund/config/apply"))
-            .json(&ConfigApplyRequest::new("0".repeat(64), text)),
-        client
-            .post(url(&running, "/v1/hofund/config/reload"))
-            .json(&ReloadRequest::new("0".repeat(64))),
-    ];
-    for request in requests {
-        let response = request
-            .bearer_auth(token(&dir.0))
-            .send()
-            .await
-            .expect("send");
-        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-        let body = response.bytes().await.expect("body");
-        let error = decode_error_envelope(API_VERSION, &body).expect("error envelope");
-        assert_eq!(error.error.kind, ControlErrorKind::Unavailable);
-        assert!(!String::from_utf8_lossy(&body).contains("provider-key"));
-    }
-    running.shutdown().await;
 }
 
 #[tokio::test]

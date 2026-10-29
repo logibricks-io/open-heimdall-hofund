@@ -26,6 +26,8 @@ use hofund_secrets::TokenFile;
 use hofund_usage::Ledger;
 
 mod adapt;
+mod config_ops;
+mod config_write;
 mod control;
 mod control_agents;
 mod control_local;
@@ -389,15 +391,22 @@ async fn start_inner(
             token_generation.subscribe(),
             shutdown_request.subscribe(),
         );
+        let ops = Arc::new(config_ops::ConfigOps::new(
+            path,
+            session.config_lock_fallback(&control_runtime),
+            Arc::clone(&runtime),
+            Arc::clone(&events),
+            Arc::clone(&config),
+            runtime_revision,
+        ));
         let state = Arc::new(
             control::DaemonControl::new(
                 path,
                 config.listen,
                 running.local_addr,
                 started_at_ms,
-                runtime_revision,
                 Arc::clone(&models_host),
-                Arc::clone(&config),
+                ops,
                 Arc::clone(&registry),
                 cooldowns,
                 Arc::clone(&usage),

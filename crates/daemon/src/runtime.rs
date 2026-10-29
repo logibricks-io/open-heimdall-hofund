@@ -1,16 +1,24 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use hofund_config::Config;
 use hofund_plugin_api::MemberId;
-use hofund_router::{CooldownPolicy, Cooldowns, Snapshot};
+use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
 
 use crate::membership::{self, Table};
 use crate::{DaemonError, DaemonRegistry, ModelsHost, providers, route_plan, router};
 
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Providers and routes built from a candidate configuration, not yet live.
+pub(crate) struct Candidate {
+    built: BTreeMap<String, membership::BuiltProvider>,
+    fingerprints: HashMap<MemberId, String>,
+    routes: BTreeMap<String, Vec<membership::PlannedHop>>,
+    policy: FailoverPolicy,
+}
 
 pub(crate) struct Runtime {
     registry: Arc<dyn DaemonRegistry>,
@@ -61,8 +69,8 @@ impl Runtime {
         Ok(snapshot.hold(owner))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn publish_candidate(&self, config: &Config) -> Result<(), DaemonError> {
+    /// Builds the providers for `config` without publishing anything.
+    pub(crate) fn prepare(&self, config: &Config) -> Result<Candidate, DaemonError> {
         let built = providers(
             config,
             &self.path,
@@ -72,11 +80,47 @@ impl Runtime {
             Some(Arc::clone(&self.cooldowns)),
             &self.registry,
         )?;
-        let fingerprints = built
-            .iter()
-            .map(|(id, provider)| (membership::member_id(id), provider.fingerprint.clone()))
-            .collect::<HashMap<_, _>>();
+        let mut fingerprints = HashMap::new();
+        let mut owners: HashMap<MemberId, &str> = HashMap::new();
+        for (id, provider) in &built {
+            let member = membership::member_id(id);
+            // Publication rejects two providers that share a member id; check
+            // here so the candidate fails before anything is written.
+            if let Some(previous) = owners.insert(member.clone(), id) {
+                return Err(DaemonError::new(format!(
+                    "member id `{member}` is shared by `{previous}` and `{id}`"
+                )));
+            }
+            fingerprints.insert(member, provider.fingerprint.clone());
+        }
         let (routes, policy) = route_plan(config);
+        // Publication cannot fail after the file is written: every routed
+        // provider must already be built.
+        for (model, hops) in &routes {
+            if let Some(hop) = hops.iter().find(|hop| !built.contains_key(&hop.provider)) {
+                return Err(DaemonError::new(format!(
+                    "route `{model}` names unknown provider `{}`",
+                    hop.provider
+                )));
+            }
+        }
+        Ok(Candidate {
+            built,
+            fingerprints,
+            routes,
+            policy,
+        })
+    }
+
+    /// Publishes a prepared candidate and returns the ids of members that were
+    /// added, removed, or whose fingerprint changed, sorted.
+    pub(crate) fn publish(&self, candidate: Candidate) -> Result<Vec<String>, DaemonError> {
+        let Candidate {
+            built,
+            fingerprints,
+            routes,
+            policy,
+        } = candidate;
         let table = self.table.get().expect("initial snapshot").clone();
         table.replace(&built, routes, policy)?;
 
@@ -85,13 +129,37 @@ impl Runtime {
         let members = fingerprints.keys().cloned().collect::<HashSet<_>>();
         self.cooldowns.retain_members(&members);
         let mut previous = self.fingerprints.lock().expect("provider fingerprints");
+        let mut changed = Vec::new();
         for (id, fingerprint) in &fingerprints {
-            if previous.get(id).is_some_and(|old| old != fingerprint) {
-                self.cooldowns.remove(id);
+            match previous.get(id) {
+                Some(old) if old == fingerprint => {}
+                Some(_) => {
+                    self.cooldowns.remove(id);
+                    changed.push(id.to_string());
+                }
+                None => changed.push(id.to_string()),
             }
         }
+        changed.extend(
+            previous
+                .keys()
+                .filter(|id| !fingerprints.contains_key(*id))
+                .map(ToString::to_string),
+        );
+        changed.sort();
         *previous = fingerprints;
-        Ok(())
+        Ok(changed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cooldown_book(&self) -> &Arc<Cooldowns> {
+        &self.cooldowns
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_candidate(&self, config: &Config) -> Result<Vec<String>, DaemonError> {
+        let candidate = self.prepare(config)?;
+        self.publish(candidate)
     }
 
     pub(crate) fn spawn_maintenance(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -147,6 +215,22 @@ mod tests {
         );
         runtime.initial_snapshot(config, None).expect("snapshot");
         (runtime, root)
+    }
+
+    #[test]
+    fn prepare_rejects_a_route_to_a_provider_it_did_not_build() {
+        let config = config(&["first", "second"]);
+        let (runtime, _root) = runtime(&config);
+        runtime.prepare(&config).expect("valid candidate");
+        let mut orphaned = config.clone();
+        orphaned
+            .providers
+            .retain(|provider| provider.id != "second");
+        let error = runtime.prepare(&orphaned).err().expect("orphaned route");
+        assert!(
+            error.to_string().contains("unknown provider `second`"),
+            "{error}"
+        );
     }
 
     fn fingerprint(config: &Config, index: usize) -> String {

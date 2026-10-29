@@ -27,6 +27,7 @@ use hofund_usage::{Ledger, Window};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
+use super::config_ops::{ConfigOps, ReloadOrigin};
 use super::control_agents::AgentOps;
 use super::events::{EventBus, SnapshotSource};
 use super::models::{PicksError, Timed, test_timeout};
@@ -40,9 +41,8 @@ pub(crate) struct DaemonControl {
     configured: SocketAddr,
     running: SocketAddr,
     started_at_ms: u64,
-    runtime_revision: String,
     models: Arc<ModelsHost>,
-    config: Arc<Config>,
+    ops: Arc<ConfigOps>,
     registry: Arc<dyn DaemonRegistry>,
     cooldowns: Arc<Cooldowns>,
     usage: Arc<Ledger>,
@@ -58,9 +58,8 @@ impl DaemonControl {
         configured: SocketAddr,
         running: SocketAddr,
         started_at_ms: u64,
-        runtime_revision: String,
         models: Arc<ModelsHost>,
-        config: Arc<Config>,
+        ops: Arc<ConfigOps>,
         registry: Arc<dyn DaemonRegistry>,
         cooldowns: Arc<Cooldowns>,
         usage: Arc<Ledger>,
@@ -68,12 +67,12 @@ impl DaemonControl {
         shutdown: watch::Sender<bool>,
     ) -> Self {
         let registry_agents = registry.agents();
+        let config = ops.live().config.clone();
         Self {
             config_path: config_path.to_path_buf(),
             configured,
             running,
             started_at_ms,
-            runtime_revision,
             models,
             registry,
             cooldowns,
@@ -89,7 +88,7 @@ impl DaemonControl {
                 token_path,
             ),
             usage,
-            config,
+            ops,
             shutdown,
             events: Arc::new(EventBus::new()),
         }
@@ -103,20 +102,20 @@ impl DaemonControl {
 
     /// Builds snapshots from the same sources as [`ControlState::status`].
     fn snapshot_source(&self) -> SnapshotSource {
-        let config_path = self.config_path.clone();
-        let runtime_revision = self.runtime_revision.clone();
+        let ops = Arc::clone(&self.ops);
         let configured = self.configured.to_string();
-        let config = Arc::clone(&self.config);
         let cooldowns = Arc::clone(&self.cooldowns);
         let shutdown = self.shutdown.subscribe();
         Arc::new(move || {
             let mut snapshot = SnapshotEvent::default();
-            snapshot.disk_revision = std::fs::read(&config_path)
-                .map(|bytes| revision(&bytes))
-                .unwrap_or_default();
-            snapshot.runtime_revision.clone_from(&runtime_revision);
-            snapshot.generation = 1;
-            snapshot.members = config
+            let live = ops.live();
+            snapshot.disk_revision = ops.disk_revision();
+            snapshot.runtime_revision.clone_from(&live.runtime_revision);
+            snapshot.generation = live.generation;
+            snapshot.pending_restart.clone_from(&live.pending_restart);
+            snapshot.not_applied.clone_from(&live.not_applied);
+            snapshot.members = live
+                .config
                 .providers
                 .iter()
                 .map(|provider| {
@@ -153,8 +152,9 @@ impl DaemonControl {
         self
     }
 
-    fn config(&self) -> &Config {
-        &self.config
+    /// The published configuration.
+    fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.ops.live().config)
     }
 
     fn provider_exists(&self, id: &str) -> Result<(), ControlError> {
@@ -185,11 +185,12 @@ impl ControlState for DaemonControl {
         let mut status = StatusResponse::default();
         status.pid = std::process::id();
         status.started_at_ms = self.started_at_ms;
-        status.generation = 1;
-        status.disk_revision = std::fs::read(&self.config_path)
-            .map(|bytes| revision(&bytes))
-            .unwrap_or_default();
-        status.runtime_revision = self.runtime_revision.clone();
+        let live = self.ops.live();
+        status.generation = live.generation;
+        status.disk_revision = self.ops.disk_revision();
+        status.runtime_revision.clone_from(&live.runtime_revision);
+        status.pending_restart.clone_from(&live.pending_restart);
+        status.not_applied.clone_from(&live.not_applied);
         status.in_flight = 0;
         status.shutdown = if self.draining() {
             ShutdownState::Draining
@@ -250,9 +251,10 @@ impl ControlState for DaemonControl {
     fn refresh_models(&self, id: String) -> ControlFuture<'_, ModelListResponse> {
         Box::pin(async move {
             self.provider_exists(&id)?;
+            let config = self.config();
             let refreshed = self
                 .models
-                .refresh(self.config(), &self.config_path, &id)
+                .refresh(&config, &self.config_path, &id)
                 .await
                 .map_err(daemon_failure)?;
             let mut response = ModelListResponse::default();
@@ -275,10 +277,11 @@ impl ControlState for DaemonControl {
             self.provider_exists(&id)?;
             let named = request.models.unwrap_or_default();
             let limit = test_timeout(!named.is_empty());
+            let config = self.config();
             let probes = tokio::time::timeout(
                 limit,
                 self.models.probe_timed(
-                    self.config(),
+                    &config,
                     &self.config_path,
                     &id,
                     named.iter().map(String::as_str).collect(),
@@ -402,37 +405,35 @@ impl ControlState for DaemonControl {
     }
 
     fn config(&self) -> ControlFuture<'_, ConfigResponse> {
-        Box::pin(async { Err(config_unavailable()) })
+        Box::pin(self.ops.get())
     }
 
     fn validate_config(
         &self,
-        _request: ConfigValidateRequest,
+        request: ConfigValidateRequest,
     ) -> ControlFuture<'_, ConfigValidationResponse> {
-        Box::pin(async { Err(config_unavailable()) })
+        Box::pin(async move { Ok(self.ops.validate(&request.text).await) })
     }
 
-    fn apply_config(&self, _request: ConfigApplyRequest) -> ControlFuture<'_, ConfigResponse> {
-        Box::pin(async { Err(config_unavailable()) })
+    fn apply_config(&self, request: ConfigApplyRequest) -> ControlFuture<'_, ConfigResponse> {
+        Box::pin(async move {
+            self.ops
+                .apply(&request.expected_revision, request.text)
+                .await
+        })
     }
 
-    fn reload_config(&self, _request: ReloadRequest) -> ControlFuture<'_, ConfigResponse> {
-        Box::pin(async { Err(config_unavailable()) })
+    fn reload_config(&self, request: ReloadRequest) -> ControlFuture<'_, ConfigResponse> {
+        Box::pin(async move {
+            self.ops
+                .reload(Some(&request.expected_revision), ReloadOrigin::Explicit)
+                .await
+        })
     }
 
     fn events(&self, query: EventsQuery) -> Result<EventSubscription, ControlFailure> {
         Ok(self.events.subscribe(&query, self.snapshot_source()))
     }
-}
-
-/// Configuration routes are wired in L6a and served by the daemon from L6b.
-fn config_unavailable() -> ControlFailure {
-    ControlError::new(
-        ControlErrorKind::Unavailable,
-        "configuration control is not available in this daemon yet",
-        "control",
-    )
-    .into()
 }
 
 fn model_entries(models: &[ModelSpec]) -> Vec<ModelEntry> {

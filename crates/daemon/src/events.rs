@@ -146,6 +146,17 @@ impl EventBus {
         &self.boot_id
     }
 
+    /// Encoded control-topic events still held in the replay ring.
+    #[cfg(test)]
+    pub(crate) fn control_frames(&self) -> Vec<Arc<str>> {
+        self.control
+            .ring()
+            .frames
+            .iter()
+            .map(|frame| Arc::clone(&frame.json))
+            .collect()
+    }
+
     fn bus(&self, topic: Topic) -> &TopicBus {
         match topic {
             Topic::Requests => &self.requests,
