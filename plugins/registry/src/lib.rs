@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 
-use hofund_plugin_api::{DynUpstreamFactory, InboundSurface, PluginKind, ProtocolId};
+use hofund_plugin_api::{
+    DynSubscriptionFactory, DynUpstreamFactory, InboundSurface, PluginKind, ProtocolId,
+};
 
 mod builtin;
 #[allow(dead_code)]
@@ -39,6 +41,9 @@ mod fixture_preset_descriptions {
 
 #[cfg(feature = "test-fixtures")]
 mod fixture_upstream;
+
+#[cfg(feature = "test-fixtures")]
+mod fixture_subscription;
 
 #[cfg(test)]
 mod agent_toml;
@@ -79,6 +84,12 @@ pub fn contributions() -> Vec<(PluginKind, &'static str, hofund_plugin_sdk::Cont
         PluginKind::Provider,
         "fixture-multi-listed",
         fixture_upstream::contribute(),
+    ));
+    #[cfg(feature = "test-fixtures")]
+    linked.push((
+        PluginKind::Subscription,
+        "fixture-sub",
+        fixture_subscription::contribute(),
     ));
     linked
 }
@@ -195,6 +206,25 @@ pub fn upstream(id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
     upstream_in(&contributions(), id)
 }
 
+fn subscription_in(
+    contributions: &[(PluginKind, &'static str, hofund_plugin_sdk::Contribution)],
+    id: &str,
+) -> Option<Arc<dyn DynSubscriptionFactory>> {
+    contributions.iter().find_map(|(kind, name, contribution)| {
+        if *kind == PluginKind::Subscription && *name == id {
+            contribution.subscriptions().first().cloned()
+        } else {
+            None
+        }
+    })
+}
+
+/// The subscription factory for `id`, when that subscription plugin is linked.
+#[must_use]
+pub fn subscription(id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
+    subscription_in(&contributions(), id)
+}
+
 fn surface_in(
     contributions: &[(PluginKind, &'static str, hofund_plugin_sdk::Contribution)],
     id: &str,
@@ -237,7 +267,9 @@ pub fn match_route(method: &str, path: &str) -> Option<&'static str> {
 mod tests {
     use hofund_plugin_api::{CredentialStyle, ListKind, PluginKind, ProtocolId};
 
-    use super::{match_route, surface, surface_in, upstream, upstream_in};
+    use super::{
+        match_route, subscription, subscription_in, surface, surface_in, upstream, upstream_in,
+    };
 
     #[test]
     fn same_id_lookups_ignore_contributions_of_another_kind() {
@@ -266,6 +298,29 @@ mod tests {
         )];
         assert!(surface_in(&non_inbound, "shared").is_none());
         assert!(surface_in(&inbound, "shared").is_some());
+    }
+
+    #[test]
+    fn subscription_lookup_ignores_other_kinds() {
+        #[cfg(feature = "test-fixtures")]
+        {
+            assert!(subscription("fixture-sub").is_some());
+            assert_eq!(
+                subscription("fixture-sub")
+                    .expect("fixture")
+                    .spec()
+                    .plugin()
+                    .as_str(),
+                "fixture-sub"
+            );
+            assert!(upstream("fixture-sub").is_none());
+        }
+        let provider = [(
+            PluginKind::Provider,
+            "shared",
+            hofund_plugin_relay::contribute(),
+        )];
+        assert!(subscription_in(&provider, "shared").is_none());
     }
 
     #[test]

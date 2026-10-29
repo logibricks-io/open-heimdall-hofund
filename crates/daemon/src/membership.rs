@@ -32,6 +32,7 @@ use tower::Service;
 
 use crate::DaemonError;
 
+#[derive(Clone)]
 pub(crate) struct BuiltProvider {
     pub adapter: Arc<dyn Provider>,
     pub protocol: &'static str,
@@ -114,10 +115,14 @@ pub(crate) fn observe_backend(
     provider_id: &str,
     cooldowns: Arc<Cooldowns>,
 ) -> Arc<dyn ObserveBackend> {
-    Arc::new(MemberObserve {
-        id: member_id(provider_id),
-        cooldowns,
-    })
+    observe_backend_for(member_id(provider_id), cooldowns)
+}
+
+pub(crate) fn observe_backend_for(
+    id: MemberId,
+    cooldowns: Arc<Cooldowns>,
+) -> Arc<dyn ObserveBackend> {
+    Arc::new(MemberObserve { id, cooldowns })
 }
 
 #[cfg(test)]
@@ -174,7 +179,16 @@ fn build_specs(
     for (model, planned) in routes {
         let mut specs = Vec::new();
         for hop in planned {
-            let label = member_id(&hop.provider).to_string();
+            if let Some(subscription) = &hop.subscription {
+                return Err(DaemonError::new(format!(
+                    "route `{model}` subscription `{subscription}` was not expanded into members"
+                )));
+            }
+            let label = hop
+                .member_id
+                .clone()
+                .unwrap_or_else(|| member_id(&hop.provider))
+                .to_string();
             if let Some(previous) = seen_ids.insert(label.clone(), hop.provider.clone())
                 && previous != hop.provider
             {
@@ -193,6 +207,7 @@ fn build_specs(
                 member: Arc::new(LiveMember::new(
                     built,
                     &hop.provider,
+                    hop.member_id.clone(),
                     Arc::clone(&table.cooldowns),
                     Arc::downgrade(table),
                 )),
@@ -205,8 +220,15 @@ fn build_specs(
     Ok(stored)
 }
 
+#[derive(Clone)]
 pub(crate) struct PlannedHop {
+    /// Provider config id when this hop is a provider. Empty for subscription hops
+    /// before expansion. After expansion, the built-map key for the member.
     pub provider: String,
+    /// Subscription config id when this hop should expand to account members.
+    pub subscription: Option<String>,
+    /// Explicit member id for subscription accounts. Provider hops leave this unset.
+    pub member_id: Option<MemberId>,
     pub wire_model: Option<String>,
     pub max_output_tokens: Option<u64>,
 }
@@ -252,10 +274,11 @@ impl LiveMember {
     fn new(
         built: &BuiltProvider,
         route_id: &str,
+        id: Option<MemberId>,
         cooldowns: Arc<Cooldowns>,
         reload: Weak<Table>,
     ) -> Self {
-        let id = member_id(route_id);
+        let id = id.unwrap_or_else(|| member_id(route_id));
         let failed = Arc::new(AtomicU64::new(0));
         let guard = Guard {
             inner: ProviderCall {
@@ -832,6 +855,8 @@ mod tests {
             "demo".to_owned(),
             vec![PlannedHop {
                 provider: "boom".to_owned(),
+                subscription: None,
+                member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
             }],
@@ -918,6 +943,8 @@ mod tests {
             "demo".to_owned(),
             vec![PlannedHop {
                 provider: "later".to_owned(),
+                subscription: None,
+                member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
             }],
@@ -995,6 +1022,8 @@ mod tests {
             "demo".to_owned(),
             vec![PlannedHop {
                 provider: "quiet".to_owned(),
+                subscription: None,
+                member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
             }],
@@ -1071,6 +1100,8 @@ mod tests {
             "demo".to_owned(),
             vec![PlannedHop {
                 provider: "pace".to_owned(),
+                subscription: None,
+                member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
             }],
@@ -1119,11 +1150,15 @@ mod tests {
             vec![
                 PlannedHop {
                     provider: "My_Provider".to_owned(),
+                    subscription: None,
+                    member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
                 },
                 PlannedHop {
                     provider: "my-provider".to_owned(),
+                    subscription: None,
+                    member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
                 },
@@ -1153,6 +1188,8 @@ mod tests {
             ids.iter()
                 .map(|id| PlannedHop {
                     provider: (*id).to_owned(),
+                    subscription: None,
+                    member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
                 })

@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use hofund_plugin_api::{AgentDescription, DynUpstreamFactory, InboundSurface, ProtocolId};
+use hofund_plugin_api::{
+    AgentDescription, DynSubscriptionFactory, DynUpstreamFactory, InboundSurface, ProtocolId,
+};
 
 pub use hofund_plugin_registry::CompiledPreset;
 pub(crate) use hofund_plugin_registry::{
@@ -36,6 +38,12 @@ pub trait DaemonRegistry: Send + Sync {
 
     /// Returns every contributed inbound surface.
     fn surfaces(&self) -> Vec<Arc<dyn InboundSurface>>;
+
+    /// Returns the subscription factory for `id`. The default links none.
+    fn subscription(&self, id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
+        let _ = id;
+        None
+    }
 }
 
 /// Compatibility adapter backed by the compile-time plugin registry.
@@ -69,6 +77,10 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn surfaces(&self) -> Vec<Arc<dyn InboundSurface>> {
         hofund_plugin_registry::surfaces()
+    }
+
+    fn subscription(&self, id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
+        hofund_plugin_registry::subscription(id)
     }
 }
 

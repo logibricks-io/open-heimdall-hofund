@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
-use hofund_config::{Config, ConfigError, Value, load_path};
+use hofund_config::{Config, ConfigError, UpstreamTarget, Value, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 use hofund_plugin_api::{
     AgentDescription, BuildContext, DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue,
@@ -41,6 +41,7 @@ mod models;
 mod models_state;
 mod registry;
 mod runtime;
+mod subscriptions;
 mod terminate;
 mod watch;
 
@@ -132,6 +133,7 @@ pub fn check(path: &Path) -> Result<(), DaemonError> {
         None,
         &registry,
     )?;
+    let _ = subscriptions::build(&config, path, None, &registry, None)?;
     Ok(())
 }
 
@@ -385,6 +387,8 @@ async fn start_inner(
         .with_state_root(beside(path, ".hofund"))
         .with_registry(Arc::clone(&registry));
     let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
+    // Subscription members join before the port opens.
+    runtime.refresh_subscriptions().await;
     let cooldowns = snapshot
         .load()
         .cooldowns()
@@ -542,7 +546,11 @@ async fn start_inner(
         refresh_timing.unwrap_or_default(),
     );
     let maintenance = runtime.spawn_maintenance();
-    Ok(running.with_task(refresh).with_task(maintenance))
+    let subscriptions = runtime.spawn_subscriptions();
+    Ok(running
+        .with_task(refresh)
+        .with_task(maintenance)
+        .with_task(subscriptions))
 }
 
 /// Serves until a termination signal or a control shutdown, then drains.
@@ -618,12 +626,18 @@ fn token_file(path: &Path) -> Result<TokenFile, DaemonError> {
     Ok(TokenFile::new(beside(path, &config.token_file)))
 }
 
-type RouterParts = (
-    Snapshot,
-    Arc<membership::Table>,
-    HashMap<hofund_plugin_api::MemberId, String>,
-    HashMap<String, Instance>,
-);
+/// What the first router build returns to the runtime.
+pub(crate) struct RouterParts {
+    pub(crate) snapshot: Snapshot,
+    pub(crate) table: Arc<membership::Table>,
+    pub(crate) fingerprints: HashMap<hofund_plugin_api::MemberId, String>,
+    pub(crate) instances: HashMap<String, Instance>,
+    /// Providers only; subscription members are added at each publication.
+    pub(crate) built: BTreeMap<String, membership::BuiltProvider>,
+    /// Routes before subscription expansion.
+    pub(crate) routes: BTreeMap<String, Vec<membership::PlannedHop>>,
+    pub(crate) policy: FailoverPolicy,
+}
 
 /// One built provider, kept so a reload can reuse it.
 ///
@@ -656,6 +670,7 @@ fn router(
     models_host: Option<&mut ModelsHost>,
     cooldowns: Arc<Cooldowns>,
     registry: &Arc<dyn DaemonRegistry>,
+    subscriptions: &subscriptions::Subscriptions,
 ) -> Result<RouterParts, DaemonError> {
     let Built { built, instances } = providers(
         config,
@@ -681,8 +696,18 @@ fn router(
         .map(|(id, provider)| (membership::member_id(id), provider.fingerprint.clone()))
         .collect();
     let (routes, policy) = route_plan(config);
-    let (snapshot, table) = membership::open_with_table(&built, routes, policy, cooldowns)?;
-    Ok((snapshot, table, fingerprints, instances))
+    let (members, expanded) = subscriptions::expand(&built, &routes, subscriptions)?;
+    let (snapshot, table) =
+        membership::open_with_table(&members, expanded, policy.clone(), cooldowns)?;
+    Ok(RouterParts {
+        snapshot,
+        table,
+        fingerprints,
+        instances,
+        built,
+        routes,
+        policy,
+    })
 }
 
 fn route_plan(
@@ -704,13 +729,28 @@ fn route_plan(
     for route in &config.routes {
         let mut list = Vec::new();
         for upstream in &route.upstreams {
-            list.push(membership::PlannedHop {
-                provider: upstream.provider.clone(),
-                wire_model: upstream.model.clone(),
-                max_output_tokens: upstream
-                    .max_output_tokens
-                    .or_else(|| caps.get(upstream.provider.as_str()).copied()),
-            });
+            match &upstream.target {
+                UpstreamTarget::Provider(provider) => {
+                    list.push(membership::PlannedHop {
+                        provider: provider.clone(),
+                        subscription: None,
+                        member_id: None,
+                        wire_model: upstream.model.clone(),
+                        max_output_tokens: upstream
+                            .max_output_tokens
+                            .or_else(|| caps.get(provider.as_str()).copied()),
+                    });
+                }
+                UpstreamTarget::Subscription(subscription) => {
+                    list.push(membership::PlannedHop {
+                        provider: String::new(),
+                        subscription: Some(subscription.clone()),
+                        member_id: None,
+                        wire_model: upstream.model.clone(),
+                        max_output_tokens: upstream.max_output_tokens,
+                    });
+                }
+            }
         }
         routes.insert(route.model.clone(), list);
     }
@@ -1132,19 +1172,27 @@ fn resolve_options(
     for (key, value) in &provider.options {
         raw.insert(
             key.clone(),
-            raw_value(value, Some((provider.id.as_str(), key.as_str())))?,
+            raw_value(
+                value,
+                Some(("provider", provider.id.as_str(), key.as_str())),
+            )?,
         );
     }
     Ok(())
 }
 
-fn raw_value(value: &Value, environment: Option<(&str, &str)>) -> Result<RawValue, DaemonError> {
+/// Converts a config value. With `environment` (owner kind, owner id, option
+/// key), strings resolve `env:` references.
+fn raw_value(
+    value: &Value,
+    environment: Option<(&str, &str, &str)>,
+) -> Result<RawValue, DaemonError> {
     Ok(match value {
         Value::String(text) => {
             let text = text.trim();
             let resolved = match environment {
-                Some((provider, key)) => hofund_secrets::resolve(text).map_err(|error| {
-                    DaemonError::new(format!("provider `{provider}` option `{key}`: {error}"))
+                Some((kind, owner, key)) => hofund_secrets::resolve(text).map_err(|error| {
+                    DaemonError::new(format!("{kind} `{owner}` option `{key}`: {error}"))
                 })?,
                 None => text.to_owned(),
             };

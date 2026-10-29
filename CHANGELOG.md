@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Subscription accounts as route members: a route hop
+  `{ subscription = "id" }` expands to one member per signed-in account,
+  ordered by label then id, with `account:{subscription}:{account}` member
+  ids. The daemon rereads accounts every 5 s and on each publication,
+  polls quota every 5 minutes per member with jitter, and cools a member
+  whose blocking quota window is spent. One id may not be both a provider and
+  a subscription in one route, and an unlinked subscription id now fails at
+  startup and in `config check`.
+
 - Control-plane request topic and remaining live emissions: the gateway reports
   `request_started` / `request_finished` (ids, route, member, status class,
   latency, usage tokens only) and shares an `in_flight` counter with status and

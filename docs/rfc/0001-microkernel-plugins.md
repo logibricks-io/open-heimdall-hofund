@@ -472,6 +472,8 @@ Feature-parity row 2.12 models keys as router members. Row 3.7 does the same for
 2. At startup, and again on every membership change (sign-in, sign-out, config reload), the daemon loads the factory, calls `upstream` once per selected account, and adapts each result to a `Member`.
 3. The `MemberId` is `MemberId::from_parts(subscription, account)`. It is stable across snapshots.
 
+As landed in H0d (`crates/daemon/src/subscriptions.rs`): only accounts whose status is `Ready` join; a `NeedsSignIn` account or a failed status check is left out. A route hop `{ subscription = "id" }` expands in place to one hop per account, ordered by label and then account id. The member's route id is its `MemberId` text, `account:{subscription}:{account}`. A 5 s tick and every publication reread the account list and republish only when the ordered ids change. Quota is polled every 5 minutes per member with 20% jitter; a blocking, model-wide window with a known limit and `used >= limit` cools that member until its reset. An `Unsupported` quota answer stops polling that member. Each member's host binds `observe` to the member, not the subscription. One id may not name both a provider and a subscription in one route, and a subscription id that no linked plugin knows now fails at startup and in `config check`.
+
 Ordered failover and PR K's cooldown exist today; [architecture.md](../architecture.md) describes the member cooldown book. Cooldown is a kernel mechanism and merges before any subscription plugin. A plugin pull request does not edit `crates/router`.
 
 Row 3.8 is the shared quota model: windows, resets, and credits. Two feeds, both kernel-owned:
@@ -1000,7 +1002,7 @@ B2 is the config shape from section 2.1. It does not add a plugin.
 - A string that is empty or only whitespace is absent. That applies to those legacy keys and to string values in `[providers.options]` and `[subscriptions.options]`, including a string nested in a table. The key is omitted. There is no error and no warning. A blank string inside an array is kept. `0`, `false`, an empty array, and an empty table are values and are kept.
 - `[providers.options]` and `[subscriptions.options]` hold a string, an integer, a boolean, an array, or a table. Config does not name `RawTable`. A value of the wrong type for a factory's schema is a check error that names the provider and the key. `Debug` shows option keys and header names, and redacts every option value, every header value, and `api_key`. The table is opaque and may hold secrets, so config has no allowlist of safe keys. The factory schema is that allowlist. See PR E1 notes.
 - The daemon forwards `options` into the factory. It does not construct `Vertex` or `Bedrock` itself. See PR E1 notes.
-- `[[subscriptions]]` has `id`, `accounts` (`*` or one account id), and `[subscriptions.options]`. The daemon stores the table and does not build members. That is H. An id that no plugin knows still loads until H.
+- `[[subscriptions]]` has `id`, `accounts` (`*` or one account id), and `[subscriptions.options]`. The daemon stores the table and does not build members. That is H. An id that no plugin knows still loads until H; since H0d it fails at factory resolution.
 
 ### PR E1 notes
 

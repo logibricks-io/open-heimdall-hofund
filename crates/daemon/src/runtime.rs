@@ -12,8 +12,10 @@ use tokio::sync::watch;
 use crate::control_map;
 use crate::events::EventBus;
 use crate::membership::{self, Table};
+use crate::subscriptions::{self, QuotaPolls, Subscriptions};
 use crate::{
-    Built, DaemonError, DaemonRegistry, Instance, ModelsHost, providers, route_plan, router,
+    Built, DaemonError, DaemonRegistry, Instance, ModelsHost, RouterParts, providers, route_plan,
+    router,
 };
 
 /// Cooldown observer tick. One second keeps cooled/recovered events prompt
@@ -28,6 +30,17 @@ pub(crate) struct Candidate {
     fingerprints: HashMap<MemberId, String>,
     routes: BTreeMap<String, Vec<membership::PlannedHop>>,
     policy: FailoverPolicy,
+    subscriptions: Subscriptions,
+}
+
+/// The published providers and routes before subscription expansion, kept so
+/// an account change republishes without rebuilding providers.
+#[derive(Default)]
+struct Plan {
+    built: BTreeMap<String, membership::BuiltProvider>,
+    routes: BTreeMap<String, Vec<membership::PlannedHop>>,
+    policy: FailoverPolicy,
+    subscriptions: Subscriptions,
 }
 
 pub(crate) struct Runtime {
@@ -45,6 +58,10 @@ pub(crate) struct Runtime {
     config: OnceLock<watch::Sender<Arc<Config>>>,
     /// Optional control bus for cooldown membership events.
     events: OnceLock<Arc<EventBus>>,
+    plan: Mutex<Plan>,
+    polls: tokio::sync::Mutex<QuotaPolls>,
+    /// Wakes the subscription task after a publication.
+    wake: tokio::sync::Notify,
 }
 
 impl Candidate {
@@ -73,6 +90,9 @@ impl Runtime {
             models: OnceLock::new(),
             config: OnceLock::new(),
             events: OnceLock::new(),
+            plan: Mutex::new(Plan::default()),
+            polls: tokio::sync::Mutex::new(QuotaPolls::default()),
+            wake: tokio::sync::Notify::new(),
         })
     }
 
@@ -81,14 +101,36 @@ impl Runtime {
         config: &Config,
         models_host: Option<&mut ModelsHost>,
     ) -> Result<Snapshot, DaemonError> {
-        let (snapshot, table, fingerprints, instances) = router(
+        let subscriptions = subscriptions::build(
+            config,
+            &self.path,
+            self.max_idle_per_host,
+            &self.registry,
+            None,
+        )?;
+        let RouterParts {
+            snapshot,
+            table,
+            fingerprints,
+            instances,
+            built,
+            routes,
+            policy,
+        } = router(
             config,
             &self.path,
             self.max_idle_per_host,
             models_host,
             Arc::clone(&self.cooldowns),
             &self.registry,
+            &subscriptions,
         )?;
+        *self.plan.lock().expect("published plan") = Plan {
+            built,
+            routes,
+            policy,
+            subscriptions,
+        };
         *self.fingerprints.lock().expect("provider fingerprints") = fingerprints;
         *self.instances.lock().expect("provider instances") = instances;
         self.config
@@ -134,6 +176,20 @@ impl Runtime {
             &self.registry,
         )?;
         drop(reuse);
+        let previous = self
+            .plan
+            .lock()
+            .expect("published plan")
+            .subscriptions
+            .clone();
+        let subscriptions = subscriptions::build(
+            config,
+            &self.path,
+            self.max_idle_per_host,
+            &self.registry,
+            Some(&previous),
+        )?;
+        drop(previous);
         let mut fingerprints = HashMap::new();
         let mut owners: HashMap<MemberId, &str> = HashMap::new();
         for (id, provider) in &built {
@@ -151,11 +207,22 @@ impl Runtime {
         // Publication cannot fail after the file is written: every routed
         // provider must already be built.
         for (model, hops) in &routes {
-            if let Some(hop) = hops.iter().find(|hop| !built.contains_key(&hop.provider)) {
-                return Err(DaemonError::new(format!(
-                    "route `{model}` names unknown provider `{}`",
-                    hop.provider
-                )));
+            for hop in hops {
+                match &hop.subscription {
+                    Some(id) if !subscriptions.contains_key(id) => {
+                        return Err(DaemonError::new(format!(
+                            "route `{model}` names unknown subscription `{id}`"
+                        )));
+                    }
+                    Some(_) => {}
+                    None if !built.contains_key(&hop.provider) => {
+                        return Err(DaemonError::new(format!(
+                            "route `{model}` names unknown provider `{}`",
+                            hop.provider
+                        )));
+                    }
+                    None => {}
+                }
             }
         }
         Ok(Candidate {
@@ -165,6 +232,7 @@ impl Runtime {
             fingerprints,
             routes,
             policy,
+            subscriptions,
         })
     }
 
@@ -178,9 +246,19 @@ impl Runtime {
             fingerprints,
             routes,
             policy,
+            subscriptions,
         } = candidate;
-        let table = self.table.get().expect("initial snapshot").clone();
-        table.replace(&built, routes, policy)?;
+        let plan = Plan {
+            built,
+            routes,
+            policy,
+            subscriptions,
+        };
+        let mut published = self.plan.lock().expect("published plan");
+        self.apply(&plan)?;
+        let subscription_members = subscriptions::member_ids(&plan.subscriptions);
+        *published = plan;
+        drop(published);
         if let Some(host) = self.models.get() {
             host.replace_instances(instances.iter().map(|(id, instance)| {
                 (
@@ -198,7 +276,8 @@ impl Runtime {
 
         // Published routes omit failed members; every configured candidate
         // member must retain its rest regardless of that transient flag.
-        let members = fingerprints.keys().cloned().collect::<HashSet<_>>();
+        let mut members = fingerprints.keys().cloned().collect::<HashSet<_>>();
+        members.extend(subscription_members);
         self.cooldowns.retain_members(&members);
         let mut previous = self.fingerprints.lock().expect("provider fingerprints");
         let mut changed = Vec::new();
@@ -220,7 +299,82 @@ impl Runtime {
         );
         changed.sort();
         *previous = fingerprints;
+        drop(previous);
+        self.wake.notify_one();
         Ok(changed)
+    }
+
+    /// Expands `plan` and replaces the membership table.
+    fn apply(&self, plan: &Plan) -> Result<(), DaemonError> {
+        let (built, routes) =
+            subscriptions::expand(&plan.built, &plan.routes, &plan.subscriptions)?;
+        let table = self.table.get().expect("initial snapshot").clone();
+        table.replace(&built, routes, plan.policy.clone())
+    }
+
+    /// Rereads every subscription's accounts and republishes when a member
+    /// list changed. Returns whether one did.
+    pub(crate) async fn refresh_subscriptions(&self) -> bool {
+        let current = self
+            .plan
+            .lock()
+            .expect("published plan")
+            .subscriptions
+            .clone();
+        let mut changed = false;
+        for state in current.values() {
+            changed |= state.resolve(&self.cooldowns).await;
+        }
+        if changed {
+            let plan = self.plan.lock().expect("published plan");
+            if let Err(error) = self.apply(&plan) {
+                tracing::warn!(%error, "subscription members were not republished");
+                return false;
+            }
+            let mut members = self
+                .fingerprints
+                .lock()
+                .expect("provider fingerprints")
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>();
+            members.extend(subscriptions::member_ids(&plan.subscriptions));
+            self.cooldowns.retain_members(&members);
+        }
+        changed
+    }
+
+    /// Polls quota for each subscription member that is due.
+    pub(crate) async fn poll_quotas(&self, now: tokio::time::Instant) -> Vec<MemberId> {
+        let current = self
+            .plan
+            .lock()
+            .expect("published plan")
+            .subscriptions
+            .clone();
+        self.polls
+            .lock()
+            .await
+            .poll(&current, &self.cooldowns, now)
+            .await
+    }
+
+    /// Rereads accounts every tick and after each publication, then polls
+    /// quota for members that are due.
+    pub(crate) fn spawn_subscriptions(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(subscriptions::ACCOUNT_TICK);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    () = runtime.wake.notified() => {}
+                }
+                runtime.refresh_subscriptions().await;
+                runtime.poll_quotas(tokio::time::Instant::now()).await;
+            }
+        })
     }
 
     #[cfg(test)]
@@ -392,7 +546,8 @@ mod tests {
         let (runtime, _root) = runtime(&original);
         cool(&runtime, "member");
         let mut rejected = original.clone();
-        rejected.routes[0].upstreams[0].provider = "missing".to_owned();
+        rejected.routes[0].upstreams[0].target =
+            hofund_config::UpstreamTarget::Provider("missing".to_owned());
         runtime
             .publish_candidate(&rejected)
             .expect_err("unknown route provider");
