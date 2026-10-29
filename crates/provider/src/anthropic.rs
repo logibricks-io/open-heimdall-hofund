@@ -17,6 +17,7 @@ pub struct Anthropic {
     upstream: Upstream,
     models: crate::models::ModelClient,
     bedrock: bool,
+    direct: Option<String>,
 }
 
 impl Anthropic {
@@ -49,11 +50,23 @@ impl Anthropic {
         )?;
         let models = crate::models::ModelClient::new(&endpoint)
             .map_err(|error| ProviderError::decode(error.message()))?;
+        let direct = (!bedrock).then(|| endpoint.base_url.clone());
         Ok(Self {
             upstream: Upstream::open(endpoint, "v1/messages", headers)?,
             models,
             bedrock,
+            direct,
         })
+    }
+
+    /// The base URL a caller may post to directly.
+    ///
+    /// This is the configured base. It is `None` for a Bedrock or Mantle
+    /// endpoint, whose headers and request body this adapter fits, so only
+    /// this adapter can send to it.
+    #[must_use]
+    pub fn direct_base(&self) -> Option<&str> {
+        self.direct.as_deref()
     }
 
     fn fit_request(&self, request: &mut Request) {
@@ -254,4 +267,35 @@ fn endpoint_unsupported(bytes: &[u8]) -> bool {
         || message.contains("not implemented")
         || message.contains("does not support")
         || message.contains("do not support")
+}
+
+#[cfg(test)]
+mod direct_tests {
+    use super::Anthropic;
+    use crate::http::Endpoint;
+
+    #[test]
+    fn a_plain_messages_endpoint_has_a_direct_base() {
+        let adapter = Anthropic::new(Endpoint::new("plain", "https://gateway.example/api/"))
+            .expect("adapter");
+        assert_eq!(adapter.direct_base(), Some("https://gateway.example/api/"));
+    }
+
+    #[test]
+    fn bedrock_and_mantle_endpoints_stay_on_the_adapter() {
+        let mut preset = Endpoint::new("preset", "https://gateway.example");
+        preset.preset = Some("bedrock".to_owned());
+        let mut mantle_preset = Endpoint::new("mantle-preset", "https://gateway.example");
+        mantle_preset.preset = Some("bedrock-mantle".to_owned());
+        for endpoint in [
+            preset,
+            mantle_preset,
+            Endpoint::new("runtime", "https://bedrock-runtime.us-east-1.amazonaws.com"),
+            Endpoint::new("mantle", "https://bedrock-mantle.us-east-1.api.aws/v1"),
+        ] {
+            let id = endpoint.id.clone();
+            let adapter = Anthropic::new(endpoint).expect("adapter");
+            assert_eq!(adapter.direct_base(), None, "{id}");
+        }
+    }
 }

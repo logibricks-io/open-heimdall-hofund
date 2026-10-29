@@ -56,7 +56,7 @@ use check::path_matches;
 pub use agent_descriptions::{agent, agents};
 #[cfg(feature = "test-fixtures")]
 #[doc(hidden)]
-pub use builtin::{openai_compat, openai_compat_adapter};
+pub use builtin::{anthropic, anthropic_adapter, openai_compat, openai_compat_adapter};
 pub use check::builtin_factory_ids;
 #[cfg(feature = "test-fixtures")]
 pub use fixture_agent_descriptions::fixture_agents;

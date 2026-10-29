@@ -157,4 +157,5 @@ wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
 wire::Target::fn new (protocol : ProtocolId , base_url : impl Into < String >) -> Self
 wire::Target::fn quirks (mut self , quirks : Option < & 'static hofund_quirks :: Profile >) -> Self
+wire::async fn count_input (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , mut request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
 wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >

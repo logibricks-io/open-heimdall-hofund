@@ -1,14 +1,17 @@
-//! Chat Completions and Responses calls on the host's HTTP handle.
+//! Chat Completions, Responses, and Messages calls on the host's HTTP handle.
 //!
 //! [`execute`] encodes a [`Request`] for the target protocol, posts it with
-//! [`Call`], and returns a [`Completion`]. It mirrors the builtin adapter's
-//! transport step for step:
+//! [`Call`], and returns a [`Completion`]. [`count_input`] asks a Messages
+//! upstream to count the input tokens of a request. Both mirror the builtin
+//! adapters' transport step for step:
 //!
 //! - Quirks are applied first. When the inbound protocol differs from the
 //!   target, unmapped tools are logged once per name, the billing line is
 //!   removed from system text, and extension bags are dropped.
 //! - An encode failure is status 400: the client sent something the target
 //!   protocol cannot carry.
+//! - A Messages call carries the protocol version header, which a configured
+//!   header of the same name replaces.
 //! - The call is a JSON `POST`. Only a connect failure is retried, once, so a
 //!   body that may have been written is never replayed.
 //! - A status outside 2xx keeps its status and `Retry-After`. Its message is the
@@ -25,14 +28,17 @@ use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
 use bytes::Bytes;
-use hofund_codec::{Codec, CodecError, OpenAiChat, OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS};
+use hofund_codec::{
+    AnthropicMessages, Codec, CodecError, OpenAiChat, OpenAiResponses, StreamDecoder,
+    UNMAPPED_TOOLS,
+};
 use hofund_plugin_api::{
-    BodyStream, Completion, ContentPart, CredentialStyle, HttpHandle, PluginError, ProtocolId,
-    Request, Role, SecretString, StreamEvent,
+    BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle, PluginError,
+    ProtocolId, Request, Role, SecretString, StreamEvent,
 };
 use secrecy::ExposeSecret;
 
-use crate::transport::{Call, HttpResponse, is_quota_error, read_body};
+use crate::transport::{Call, HttpResponse, is_quota_error, parse_retry_after_headers, read_body};
 
 /// Attempts per call. Only a connect failure is retried.
 const ATTEMPTS: u8 = 2;
@@ -40,6 +46,8 @@ const ATTEMPTS: u8 = 2;
 const MESSAGE_LIMIT: usize = 512;
 /// Prefix of the billing line some clients put in system text.
 const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
+/// Messages protocol version header and the value sent by default.
+const VERSION_HEADER: (&str, &str) = ("anthropic-version", "2023-06-01");
 
 type Prepare = fn(&[u8]) -> Result<Vec<u8>, CodecError>;
 
@@ -121,29 +129,12 @@ pub async fn execute(
     request: Request,
     inbound: ProtocolId,
 ) -> Result<Completion, PluginError> {
-    let (codec, prepare, path): (&'static dyn Codec, Prepare, &str) = match target.protocol {
-        ProtocolId::OPENAI_CHAT => (
-            &OpenAiChat,
-            OpenAiChat::prepare_upstream_body,
-            "chat/completions",
-        ),
-        ProtocolId::OPENAI_RESPONSES => (
-            &OpenAiResponses,
-            OpenAiResponses::prepare_upstream_body,
-            "responses",
-        ),
-        other => {
-            return Err(PluginError::unsupported(format!(
-                "protocol `{}` has no SDK transport",
-                other.as_str()
-            )));
-        }
-    };
+    let (codec, prepare, path) = route(target.protocol)?;
     let cross_protocol = codec.id() != inbound.as_str();
     let streaming = request.stream;
     let body = prepare_body(target, codec, request, prepare, inbound)?;
     let url = format!("{}/{path}", target.base_url.trim_end_matches('/'));
-    let response = call(target, secret, url)?
+    let response = call(target, codec, secret, url)?
         .header("content-type", "application/json")
         .bytes(body)
         .open_raw(http, ATTEMPTS)
@@ -159,8 +150,94 @@ pub async fn execute(
     }
 }
 
-fn call(target: &Target, secret: Option<&SecretString>, url: String) -> Result<Call, PluginError> {
+/// Counts the input tokens of `request` on a Messages target.
+///
+/// The request is encoded as for [`execute`] without streaming, `max_tokens`
+/// is removed, and the body is posted to `{base}/v1/messages/count_tokens`.
+/// Status 404, 405, or 501, or a 400 that says the endpoint is not supported,
+/// is [`CountOutcome::Unsupported`].
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the target is not Messages, the request cannot
+/// be encoded, the call fails, the upstream answers with another status
+/// outside 2xx, or a 2xx body has no `input_tokens`.
+pub async fn count_input(
+    http: &HttpHandle,
+    target: &Target,
+    secret: Option<&SecretString>,
+    mut request: Request,
+    inbound: ProtocolId,
+) -> Result<CountOutcome, PluginError> {
+    if target.protocol != ProtocolId::ANTHROPIC_MESSAGES {
+        return Err(PluginError::unsupported(format!(
+            "protocol `{}` has no SDK count transport",
+            target.protocol.as_str()
+        )));
+    }
+    let (codec, prepare, path) = route(target.protocol)?;
+    request.stream = false;
+    let body = omit_max_tokens(prepare_body(target, codec, request, prepare, inbound)?);
+    let url = format!(
+        "{}/{path}/count_tokens",
+        target.base_url.trim_end_matches('/')
+    );
+    let mut response = call(target, codec, secret, url)?
+        .header("content-type", "application/json")
+        .bytes(body)
+        .open_raw(http, ATTEMPTS)
+        .await?;
+    let status = response.status().as_u16();
+    let retry_after = parse_retry_after_headers(response.headers(), std::time::SystemTime::now());
+    let success = response.status().is_success();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.body_mut().next_chunk().await {
+        match chunk {
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(error) if success => return Err(error),
+            // The reference reads an error body best effort: a cut body is empty.
+            Err(_) => {
+                bytes.clear();
+                break;
+            }
+        }
+    }
+    classify_count(status, retry_after, &bytes)
+}
+
+/// The codec, body finisher, and path for a protocol this module sends.
+fn route(
+    protocol: ProtocolId,
+) -> Result<(&'static dyn Codec, Option<Prepare>, &'static str), PluginError> {
+    match protocol {
+        ProtocolId::OPENAI_CHAT => Ok((
+            &OpenAiChat,
+            Some(OpenAiChat::prepare_upstream_body),
+            "chat/completions",
+        )),
+        ProtocolId::OPENAI_RESPONSES => Ok((
+            &OpenAiResponses,
+            Some(OpenAiResponses::prepare_upstream_body),
+            "responses",
+        )),
+        ProtocolId::ANTHROPIC_MESSAGES => Ok((&AnthropicMessages, None, "v1/messages")),
+        other => Err(PluginError::unsupported(format!(
+            "protocol `{}` has no SDK transport",
+            other.as_str()
+        ))),
+    }
+}
+
+fn call(
+    target: &Target,
+    codec: &dyn Codec,
+    secret: Option<&SecretString>,
+    url: String,
+) -> Result<Call, PluginError> {
     let mut call = Call::post(url);
+    if codec.id() == AnthropicMessages.id() {
+        call = call.header(VERSION_HEADER.0, VERSION_HEADER.1);
+    }
     if let Some(secret) = secret.filter(|secret| !secret.expose_secret().is_empty()) {
         call = call.credential(target.credential, secret)?;
     }
@@ -174,7 +251,7 @@ fn prepare_body(
     target: &Target,
     codec: &dyn Codec,
     mut request: Request,
-    prepare: Prepare,
+    prepare: Option<Prepare>,
     inbound: ProtocolId,
 ) -> Result<Vec<u8>, PluginError> {
     if let Some(profile) = target.quirks {
@@ -189,7 +266,60 @@ fn prepare_body(
     let body = codec
         .encode_request(&request)
         .map_err(|error| PluginError::status_error(400, error.to_string()))?;
-    prepare(&body).map_err(|error| PluginError::decode(error.to_string()))
+    match prepare {
+        Some(prepare) => prepare(&body).map_err(|error| PluginError::decode(error.to_string())),
+        None => Ok(body),
+    }
+}
+
+/// The count endpoint rejects `max_tokens`, which the encoder fills for
+/// create calls.
+fn omit_max_tokens(body: Vec<u8>) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body;
+    };
+    object.remove("max_tokens");
+    serde_json::to_vec(&value).unwrap_or(body)
+}
+
+fn classify_count(
+    status: u16,
+    retry_after: Option<std::time::Duration>,
+    bytes: &[u8],
+) -> Result<CountOutcome, PluginError> {
+    if status == 404
+        || status == 405
+        || status == 501
+        || (status == 400 && endpoint_unsupported(bytes))
+    {
+        return Ok(CountOutcome::Unsupported);
+    }
+    if (200..300).contains(&status) {
+        let value: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|error| PluginError::decode(error.to_string()))?;
+        let tokens = value
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| PluginError::decode("count response has no input_tokens"))?;
+        return Ok(CountOutcome::Counted(tokens));
+    }
+    Err(status_failure(status, retry_after, bytes))
+}
+
+/// Whether a 400 says the count endpoint itself is missing. A rejection of
+/// something in the request stays an error.
+fn endpoint_unsupported(bytes: &[u8]) -> bool {
+    let message = message_from(bytes).to_ascii_lowercase();
+    let message = message.trim();
+    message == "unsupported"
+        || message.contains("unsupported endpoint")
+        || message.contains("not supported")
+        || message.contains("not implemented")
+        || message.contains("does not support")
+        || message.contains("do not support")
 }
 
 async fn status_error(response: HttpResponse) -> PluginError {
@@ -197,8 +327,16 @@ async fn status_error(response: HttpResponse) -> PluginError {
         Ok(read) => read,
         Err(error) => return error,
     };
-    let message = message_from(&body);
-    let error = if is_quota_error(status, &body) {
+    status_failure(status, retry_after, &body)
+}
+
+fn status_failure(
+    status: u16,
+    retry_after: Option<std::time::Duration>,
+    body: &[u8],
+) -> PluginError {
+    let message = message_from(body);
+    let error = if is_quota_error(status, body) {
         PluginError::quota(message)
     } else {
         PluginError::status_error(status, message)
@@ -500,7 +638,11 @@ mod tests {
     use hofund_codec::{AnthropicMessages, Codec};
     use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
 
-    use super::{Target, consume_fields, failure_of, message_from, strip_billing_header};
+    use super::{
+        Target, classify_count, consume_fields, endpoint_unsupported, failure_of, message_from,
+        omit_max_tokens, route, strip_billing_header,
+    };
+    use hofund_plugin_api::CountOutcome;
 
     const LINE: &str =
         "x-anthropic-billing-header: cc_version=2.1.197; cc_entrypoint=cli; cch=abc;";
@@ -611,5 +753,85 @@ mod tests {
         let shown = format!("{target:?}");
         assert!(shown.contains("x-tenant"), "{shown}");
         assert!(!shown.contains("tenant-secret"), "{shown}");
+    }
+
+    #[test]
+    fn messages_route_to_v1_messages_without_a_body_finisher() {
+        let (codec, prepare, path) = route(ProtocolId::ANTHROPIC_MESSAGES).expect("messages");
+        assert_eq!(codec.id(), AnthropicMessages.id());
+        assert!(prepare.is_none());
+        assert_eq!(path, "v1/messages");
+        let (_, prepare, path) = route(ProtocolId::OPENAI_CHAT).expect("chat");
+        assert!(prepare.is_some());
+        assert_eq!(path, "chat/completions");
+        let (_, prepare, path) = route(ProtocolId::OPENAI_RESPONSES).expect("responses");
+        assert!(prepare.is_some());
+        assert_eq!(path, "responses");
+        let Err(error) = route(ProtocolId::GENERATIVE_LANGUAGE) else {
+            panic!("generative has no SDK transport");
+        };
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn max_tokens_is_removed_and_other_bodies_pass_through() {
+        let body = br#"{"model":"demo","max_tokens":16,"messages":[]}"#.to_vec();
+        let kept: serde_json::Value = serde_json::from_slice(&omit_max_tokens(body)).expect("json");
+        assert_eq!(kept, serde_json::json!({"model": "demo", "messages": []}));
+        assert_eq!(omit_max_tokens(b"[1,2]".to_vec()), b"[1,2]");
+        assert_eq!(omit_max_tokens(b"not json".to_vec()), b"not json");
+    }
+
+    #[test]
+    fn count_statuses_are_classified() {
+        let counted = classify_count(200, None, br#"{"input_tokens":12}"#).expect("counted");
+        assert!(matches!(counted, CountOutcome::Counted(12)), "{counted:?}");
+        for status in [404, 405, 501] {
+            let outcome = classify_count(status, None, b"").expect("unsupported");
+            assert!(matches!(outcome, CountOutcome::Unsupported), "{status}");
+        }
+        let missing = classify_count(400, None, br#"{"error":{"message":"Not supported"}}"#)
+            .expect("unsupported");
+        assert!(matches!(missing, CountOutcome::Unsupported));
+        let Err(rejected) = classify_count(400, None, br#"{"error":{"message":"bad tool"}}"#)
+        else {
+            panic!("a request rejection stays an error");
+        };
+        assert_eq!(rejected.status(), Some(400));
+        let after = std::time::Duration::from_secs(4);
+        let Err(limited) = classify_count(429, Some(after), b"slow") else {
+            panic!("429 is an error");
+        };
+        assert_eq!(limited.retry_after(), Some(after));
+        let Err(quota) = classify_count(429, None, b"monthly quota exhausted") else {
+            panic!("quota is an error");
+        };
+        assert_eq!(quota.kind(), PluginErrorKind::Quota);
+        for body in [&br#"{"tokens":1}"#[..], b"ok"] {
+            let Err(error) = classify_count(201, None, body) else {
+                panic!("no input_tokens");
+            };
+            assert_eq!(error.kind(), PluginErrorKind::Decode);
+        }
+    }
+
+    #[test]
+    fn only_messages_about_the_endpoint_mean_unsupported() {
+        for message in [
+            "unsupported",
+            " Unsupported ",
+            "unsupported endpoint: count_tokens",
+            "count is not supported here",
+            "not implemented",
+            "this server does not support counting",
+            "we do not support it",
+        ] {
+            let body = serde_json::json!({"error": {"message": message}}).to_string();
+            assert!(endpoint_unsupported(body.as_bytes()), "{message}");
+        }
+        for message in ["unsupported image type png", "messages: field required", ""] {
+            let body = serde_json::json!({"error": {"message": message}}).to_string();
+            assert!(!endpoint_unsupported(body.as_bytes()), "{message}");
+        }
     }
 }
