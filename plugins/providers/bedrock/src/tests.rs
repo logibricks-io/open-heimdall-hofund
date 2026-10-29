@@ -12,7 +12,6 @@ use super::{BedrockFactory, MODELS};
 const RUNTIME: &str = "https://bedrock-runtime.us-east-1.amazonaws.com";
 const CHAT: &str = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1";
 const MESSAGES: &str = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic";
-const PRESETS: &str = include_str!("../presets.toml");
 
 fn plugin() -> PluginId {
     PluginId::from_static("bedrock")
@@ -85,19 +84,6 @@ fn has(names: &[String], name: &str) -> bool {
 const CONVERSE_REPLY: &str = r#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#;
 const CHAT_REPLY: &str = r#"{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
 const MESSAGES_REPLY: &str = r#"{"id":"m1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
-
-#[test]
-fn the_static_models_match_the_catalog_row() {
-    let start = PRESETS.find("models = [").expect("models line");
-    let line = PRESETS[start..].lines().next().expect("line");
-    let listed: Vec<&str> = line
-        .trim_start_matches("models = [")
-        .trim_end_matches(']')
-        .split(", ")
-        .map(|id| id.trim_matches('"'))
-        .collect();
-    assert_eq!(listed, MODELS);
-}
 
 #[test]
 fn the_catalog_lists_with_no_network_call() {

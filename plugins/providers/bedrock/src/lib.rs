@@ -58,7 +58,7 @@ const OPTIONS: &[&str] = &[
     "session_token",
 ];
 
-/// The catalog row's model ids. A test holds them equal to `presets.toml`.
+/// The catalog row's model ids. A registry test holds them equal to `presets.toml`.
 pub(crate) const MODELS: &[&str] = &[
     "global.anthropic.claude-opus-5-5",
     "global.anthropic.claude-sonnet-5-5",
