@@ -41,6 +41,7 @@ mod models;
 mod models_state;
 mod registry;
 mod runtime;
+mod sign_in;
 mod subscriptions;
 mod terminate;
 mod watch;
@@ -49,6 +50,11 @@ pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
 };
 pub use registry::{CompiledPreset, DaemonRegistry, RegistryAdapter};
+pub use sign_in::{
+    AccountListing, INTERRUPTED_EXIT, QuotaLine, QuotaListing, SIGN_IN_DEADLINE, SignInError,
+    SignInOptions, SubscriptionListing, quota_json, subscription_list, subscription_quota,
+    subscription_refresh, subscription_sign_in, subscription_sign_out, subscriptions_json,
+};
 pub use terminate::{ConsoleEvent, Termination, TolerantWriter, finish, serve_until_signal};
 
 /// A configuration, credential, or startup failure.

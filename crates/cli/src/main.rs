@@ -3,6 +3,8 @@
 //! The binary parses arguments and calls the daemon. It does not route and it
 //! does not encode a protocol.
 
+mod subscription;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -11,6 +13,7 @@ use hofund_daemon::{
     agent_descriptions, check, local_gateway, route_models, serve_blocking, token_rotate,
     token_show, usage_report, user_config_path,
 };
+use subscription::{SubscriptionCommand, SubscriptionFlags};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -45,6 +48,7 @@ fn main() -> ExitCode {
         Command::AgentStatus => {
             return finish(agent_status(&config));
         }
+        Command::Subscription(command) => return subscription::run(&config, command),
     };
     finish(result)
 }
@@ -62,6 +66,7 @@ enum Command {
     AgentConnect { name: String, dry_run: bool },
     AgentDisconnect { name: String, force: bool },
     AgentStatus,
+    Subscription(SubscriptionCommand),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -78,6 +83,12 @@ enum HelpTopic {
     AgentConnect,
     AgentDisconnect,
     AgentStatus,
+    Subscription,
+    SubscriptionList,
+    SubscriptionSignIn,
+    SubscriptionSignOut,
+    SubscriptionRefresh,
+    SubscriptionQuota,
 }
 
 fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
@@ -85,6 +96,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut dry_run = false;
     let mut force = false;
     let mut help = false;
+    let mut flags = SubscriptionFlags::default();
     let mut words = Vec::new();
     let mut iter = arguments.iter();
     while let Some(argument) = iter.next() {
@@ -97,6 +109,19 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             }
             "--dry-run" => dry_run = true,
             "--force" => force = true,
+            "--json" => flags.json = true,
+            "--host" => {
+                let host = iter
+                    .next()
+                    .ok_or_else(|| "--host needs a value".to_owned())?;
+                flags.host = Some(host.clone());
+            }
+            "--label" => {
+                let label = iter
+                    .next()
+                    .ok_or_else(|| "--label needs a value".to_owned())?;
+                flags.label = Some(label.clone());
+            }
             "-h" | "--help" => help = true,
             "--version" | "-V" => words.push(argument.as_str()),
             other if other.starts_with('-') => {
@@ -117,6 +142,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             Err(message) => Err(message),
         };
     }
+    let subscription_flags = flags.json || flags.host.is_some() || flags.label.is_some();
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
         ["serve"] => Command::Serve,
@@ -134,8 +160,17 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             force,
         },
         ["agent", "status"] => Command::AgentStatus,
+        ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
+            Some(parsed) => Command::Subscription(parsed?),
+            None => return Err(help_text(HelpTopic::Subscription)),
+        },
         _ => return Err(help_text(HelpTopic::Overview)),
     };
+    if subscription_flags && !matches!(command, Command::Subscription(_)) {
+        return Err(
+            "--json, --host, and --label are only valid with subscription commands".to_owned(),
+        );
+    }
     if dry_run && !matches!(command, Command::AgentConnect { .. }) {
         return Err("--dry-run is only valid with agent connect".to_owned());
     }
@@ -159,6 +194,12 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["agent", "disconnect", ..] => HelpTopic::AgentDisconnect,
         ["agent", "status", ..] => HelpTopic::AgentStatus,
         ["agent", ..] => HelpTopic::Agent,
+        ["subscription", "list", ..] => HelpTopic::SubscriptionList,
+        ["subscription", "sign-in", ..] => HelpTopic::SubscriptionSignIn,
+        ["subscription", "sign-out", ..] => HelpTopic::SubscriptionSignOut,
+        ["subscription", "refresh", ..] => HelpTopic::SubscriptionRefresh,
+        ["subscription", "quota", ..] => HelpTopic::SubscriptionQuota,
+        ["subscription", ..] => HelpTopic::Subscription,
         _ => {
             return Err(format!(
                 "{}\nunknown command `{}`",
@@ -184,6 +225,12 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::AgentConnect => AGENT_CONNECT_HELP,
         HelpTopic::AgentDisconnect => AGENT_DISCONNECT_HELP,
         HelpTopic::AgentStatus => AGENT_STATUS_HELP,
+        HelpTopic::Subscription => subscription::SUBSCRIPTION_HELP,
+        HelpTopic::SubscriptionList => subscription::LIST_HELP,
+        HelpTopic::SubscriptionSignIn => subscription::SIGN_IN_HELP,
+        HelpTopic::SubscriptionSignOut => subscription::SIGN_OUT_HELP,
+        HelpTopic::SubscriptionRefresh => subscription::REFRESH_HELP,
+        HelpTopic::SubscriptionQuota => subscription::QUOTA_HELP,
     };
     body.to_owned()
 }
@@ -208,6 +255,11 @@ commands:
   agent connect <name> [--dry-run]
   agent disconnect <name> [--force]
   agent status
+  subscription list [--json]      list subscriptions and their accounts
+  subscription sign-in <id> [--host HOST] [--label LABEL]
+  subscription sign-out <id> <account>
+  subscription refresh <id> [<account>]
+  subscription quota [<id>] [--json]
 
 hofund <command> --help prints that command.
 examples/hofund.toml is a documented config with [[providers]] and [[routes]].
@@ -517,9 +569,10 @@ fn agent_status(config: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, HelpTopic, connect_models_note, model_has_route, opencode_models_note, parse,
-        redact_diff,
+        Command, HelpTopic, SubscriptionCommand, connect_models_note, model_has_route,
+        opencode_models_note, parse, redact_diff,
     };
+    use hofund_daemon::SignInOptions;
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -570,6 +623,94 @@ mod tests {
             &routes
         ));
         assert!(model_has_route(codex.model_prefix(), "route-a", &routes));
+    }
+
+    fn subscription(values: &[&str]) -> Result<Command, String> {
+        parse(&words(values)).map(|(_, command)| command)
+    }
+
+    #[test]
+    fn subscription_commands_parse() {
+        assert_eq!(
+            subscription(&["subscription", "list"]),
+            Ok(Command::Subscription(SubscriptionCommand::List {
+                json: false
+            }))
+        );
+        assert_eq!(
+            subscription(&["subscription", "list", "--json"]),
+            Ok(Command::Subscription(SubscriptionCommand::List {
+                json: true
+            }))
+        );
+        assert_eq!(
+            subscription(&[
+                "subscription",
+                "sign-in",
+                "codex-sub",
+                "--host",
+                "corp.example.test",
+                "--label",
+                "work",
+            ]),
+            Ok(Command::Subscription(SubscriptionCommand::SignIn {
+                id: "codex-sub".to_owned(),
+                options: SignInOptions {
+                    host: Some("corp.example.test".to_owned()),
+                    label: Some("work".to_owned()),
+                },
+            }))
+        );
+        assert_eq!(
+            subscription(&["subscription", "sign-out", "codex-sub", "a-1"]),
+            Ok(Command::Subscription(SubscriptionCommand::SignOut {
+                id: "codex-sub".to_owned(),
+                account: "a-1".to_owned(),
+            }))
+        );
+        assert_eq!(
+            subscription(&["subscription", "refresh", "codex-sub"]),
+            Ok(Command::Subscription(SubscriptionCommand::Refresh {
+                id: "codex-sub".to_owned(),
+                account: None,
+            }))
+        );
+        assert_eq!(
+            subscription(&["subscription", "refresh", "codex-sub", "a-1"]),
+            Ok(Command::Subscription(SubscriptionCommand::Refresh {
+                id: "codex-sub".to_owned(),
+                account: Some("a-1".to_owned()),
+            }))
+        );
+        assert_eq!(
+            subscription(&["subscription", "quota", "--json"]),
+            Ok(Command::Subscription(SubscriptionCommand::Quota {
+                id: None,
+                json: true,
+            }))
+        );
+        assert_eq!(
+            subscription(&["subscription", "quota", "codex-sub"]),
+            Ok(Command::Subscription(SubscriptionCommand::Quota {
+                id: Some("codex-sub".to_owned()),
+                json: false,
+            }))
+        );
+        assert_eq!(
+            subscription(&["subscription", "sign-in", "--help"]),
+            Ok(Command::Help(HelpTopic::SubscriptionSignIn))
+        );
+        assert_eq!(
+            subscription(&["help", "subscription"]),
+            Ok(Command::Help(HelpTopic::Subscription))
+        );
+        assert!(subscription(&["subscription", "sign-out", "codex-sub"]).is_err());
+        assert!(subscription(&["subscription", "nope"]).is_err());
+        assert!(subscription(&["subscription", "refresh", "x", "--json"]).is_err());
+        assert!(subscription(&["subscription", "list", "--label", "work"]).is_err());
+        assert!(subscription(&["subscription", "quota", "--host", "h"]).is_err());
+        assert!(subscription(&["subscription", "sign-in", "x", "--host"]).is_err());
+        assert!(subscription(&["agent", "status", "--json"]).is_err());
     }
 
     #[test]

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hofund subscription` commands: `list [--json]`, `sign-in <id> [--host H]
+  [--label L]`, `sign-out <id> <account>`, `refresh <id> [<account>]`, and
+  `quota [<id>] [--json]`. Sign-in never opens a browser: it prints the
+  address or device code, then waits for the loopback callback, a pasted
+  address or token, Ctrl-C (exit 130), or a 10-minute deadline. Every exit
+  path cancels the plugin's sign-in and closes the loopback listener. The
+  JSON listing carries ids, labels, the flow, and account status only.
+
 - Subscription accounts as route members: a route hop
   `{ subscription = "id" }` expands to one member per signed-in account,
   ordered by label then id, with `account:{subscription}:{account}` member

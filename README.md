@@ -34,7 +34,8 @@ publish a GitHub release; the tag step is described in
 `hofund serve` listens on `127.0.0.1:3425` unless the config says otherwise.
 Every `/v1` request needs the bearer token from `hofund token show`. The
 commands are `serve`, `config check`, `token show`, `token rotate`, `usage`,
-`agent list`, `agent connect`, `agent disconnect`, and `agent status`.
+`agent list`, `agent connect`, `agent disconnect`, `agent status`, and
+`subscription list`, `sign-in`, `sign-out`, `refresh`, and `quota`.
 
 ## Planned features
 
