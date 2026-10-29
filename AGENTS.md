@@ -39,6 +39,8 @@ Present:
 - coding-agent config adapters (`agent`) for Claude Code, Codex CLI, Gemini
   CLI, and OpenCode, with `hofund agent list`, `hofund agent connect`,
   `hofund agent disconnect`, and `hofund agent status`
+- subscription account commands (`daemon::sign_in`, `cli`): `hofund
+  subscription list`, `sign-in`, `sign-out`, `refresh`, and `quota`
 - a Tauri v2 menu-bar app at `apps/desktop` (`hofund-desktop`) that starts and
   stops the gateway, lists agents from the catalog, and shows the usage table
 
