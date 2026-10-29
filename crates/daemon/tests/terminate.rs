@@ -53,26 +53,28 @@ fn launch(how: Launch) -> Daemon {
         "--nocapture",
         "--test-threads=1",
     ];
-    let mut command = match how {
-        Launch::Foreground | Launch::ClosedOutput => Command::new(&exe),
-        Launch::Detached => {
-            if Path::new("/usr/bin/setsid").exists() {
-                let mut command = Command::new("/usr/bin/setsid");
-                command.arg(&exe);
-                command
-            } else {
-                Command::new(&exe)
-            }
+    // A runner started under `nohup` passes SIGHUP down as ignored, which
+    // the daemon must keep; GNU env restores the default for the helper.
+    let mut program: Vec<std::ffi::OsString> = Vec::new();
+    if cfg!(target_os = "linux") && !matches!(how, Launch::IgnoringHangup) {
+        program.extend(["env".into(), "--default-signal=HUP".into()]);
+    }
+    match how {
+        Launch::Detached if Path::new("/usr/bin/setsid").exists() => {
+            program.push("/usr/bin/setsid".into());
         }
         Launch::IgnoringHangup => {
-            let mut command = Command::new("/bin/sh");
-            command
-                .arg("-c")
-                .arg("trap '' HUP; exec \"$0\" \"$@\"")
-                .arg(&exe);
-            command
+            program.extend([
+                "/bin/sh".into(),
+                "-c".into(),
+                "trap '' HUP; exec \"$0\" \"$@\"".into(),
+            ]);
         }
-    };
+        _ => {}
+    }
+    program.push(exe.into());
+    let mut command = Command::new(&program[0]);
+    command.args(&program[1..]);
     command
         .args(args)
         .env(HELPER, &config)
