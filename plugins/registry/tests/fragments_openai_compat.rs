@@ -2,7 +2,7 @@
 
 use hofund_plugin_api::ProtocolId;
 use hofund_plugin_registry::{builtin_protocols, find_preset, model_plan_of, select};
-use hofund_provider::{Credential, ModelPlan, Resolve, Wire, catalog_ids, credential_for, resolve};
+use hofund_provider::{Credential, ModelPlan, Wire, credential_for};
 
 const OVERRIDE: &str = "https://override.example.test/v1";
 
@@ -1621,40 +1621,17 @@ fn expected_model_plan(row: &Row, region: Option<&Region>) -> ModelPlan {
 }
 
 #[test]
-fn batch_rows_live_in_openai_compat_and_left_the_catalog() {
-    let catalog = catalog_ids();
+fn batch_rows_live_in_openai_compat() {
     for row in ROWS {
         let (preset, region) = find_preset(row.id).expect("compiled batch row");
         assert_eq!(preset.plugin, "openai-compat");
         assert_eq!(region, None);
-        assert!(!catalog.contains(&row.id), "{}", row.id);
-        let error = resolve(&Resolve {
-            id: row.id,
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect_err("row left the built-in catalog");
-        assert_eq!(error.to_string(), format!("unknown preset `{}`", row.id));
     }
     for alias in ALIASES {
         let (preset, region) = find_preset(alias.id).expect("compiled batch alias");
         assert_eq!(preset.id, alias.preset);
         assert_eq!(preset.plugin, "openai-compat");
         assert_eq!(region, alias.region);
-        assert!(!catalog.contains(&alias.id), "{}", alias.id);
-        let error = resolve(&Resolve {
-            id: alias.id,
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect_err("alias left the built-in catalog");
-        assert_eq!(error.to_string(), format!("unknown preset `{}`", alias.id));
     }
 }
 

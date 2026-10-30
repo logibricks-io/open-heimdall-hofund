@@ -13,9 +13,9 @@ mod generative;
 mod http;
 mod models;
 mod openai_compat;
-mod presets;
 mod probe;
 mod stream;
+mod wire;
 
 pub use anthropic::Anthropic;
 pub use error::{ProviderError, ProviderErrorKind};
@@ -23,10 +23,7 @@ pub use generative::Generative;
 pub use http::{Credential, Endpoint, pooled_reqwest};
 pub use models::{both_auth_applies, both_auth_refused, parse_model_rows};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
-pub use presets::{
-    ModelPlan, PresetError, Resolve, Resolved, Wire, catalog_commit, catalog_ids, credential_for,
-    model_plan, resolve,
-};
+pub use wire::{ModelPlan, Wire, credential_for};
 
 pub use hofund_plugin_api::{
     DynSubscriptionFactory, DynUpstreamFactory, InboundSurface, Subscription, SubscriptionFactory,

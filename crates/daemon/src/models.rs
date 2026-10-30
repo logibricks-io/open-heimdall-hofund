@@ -24,7 +24,7 @@ use super::events::EventBus;
 use super::{
     DaemonError, DaemonRegistry, ErrorKind, Planned, RegistryAdapter, beside, build_raw_plugin,
     credential_name, endpoint_for, implementation_id, insert_options, option_present, plan_using,
-    protocol_of, resolve, show,
+    protocol_of, show,
 };
 
 const NO_MODEL: &str = "no model to try: expose one, or refresh the model list";
@@ -1669,7 +1669,7 @@ impl ModelsHost {
             .map_err(show)?;
             return Ok(Some(super::registry::model_plan_of(compiled, region)));
         }
-        hofund_provider::model_plan(preset, option_present(provider, "region")?).map_err(show)
+        Ok(None)
     }
 
     fn kind(
@@ -1728,16 +1728,7 @@ impl ModelsHost {
             let region = option_present(provider, "region")?.or(alias_region);
             return super::compiled_credential(compiled, region, wire, &self.registry);
         }
-        resolve(&hofund_provider::Resolve {
-            id: preset,
-            region: option_present(provider, "region")?,
-            wire: Some(wire),
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .map(|resolved| resolved.credential)
-        .map_err(show)
+        Err(super::unknown_preset(preset))
     }
 
     async fn fetch_exact(
@@ -2696,6 +2687,30 @@ mod tests {
             .credential(&catalog.providers[0], Wire::Messages)
             .expect("catalog credential");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn an_unknown_preset_has_no_model_plan_and_no_credential() {
+        let host = super::ModelsHost::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        // The region is set so a lookup that wrongly read it would still fail
+        // the same way: no fragment owns this id.
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"gone\"\npreset = \"no-such-preset\"\nprotocol = \"openai-chat\"\n[providers.options]\nregion = \"api\"\n",
+        )
+        .expect("config");
+        let provider = &config.providers[0];
+        assert_eq!(host.model_plan(provider).expect("model plan"), None);
+        let error = host
+            .credential(provider, Wire::Chat)
+            .expect_err("unknown preset credential");
+        assert_eq!(error.to_string(), "unknown preset `no-such-preset`");
+        let Err(error) = super::super::plan(provider) else {
+            panic!("an unknown preset planned");
+        };
+        assert_eq!(error.to_string(), "unknown preset `no-such-preset`");
     }
 
     #[test]

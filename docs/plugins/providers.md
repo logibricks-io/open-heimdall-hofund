@@ -4,6 +4,8 @@ This note is the contract for row E of RFC 0001 before the factories change. The
 
 ## Preset fragments
 
+PR I deleted the kernel catalog (`crates/provider/presets.toml` and its `resolve` in `crates/provider/src/presets.rs`) once every row was a fragment. Below, "the catalog" names that former code: fragment selection was built to match it, and the line references are to the last commit that had it, `27d762e`.
+
 A preset fragment is the data-only form of a catalog row. Its `[[preset]]` keys intentionally match `crates/provider/presets.toml`, but each batch must re-sort presets and aliases by id within each destination file because the catalog is not sorted. The preset shape follows `reference: internal/provider/presets.go:23-66`; regions follow `reference: internal/provider/presets.go:68-100`.
 
 A preset requires `id`, `name`, and `kind`. `kind` is `vendor`, `relay`, `local`, or `remote` (`reference: internal/provider/presets.go:13-19`). The optional keys are:
@@ -45,7 +47,7 @@ The reference provider exposes per-protocol URLs through `Base(proto)` and lists
 
 An unknown region error lists valid ids in declared order, unlike the catalog's shorter error in `crates/provider/src/presets.rs:497-503`. Naming a region on a regionless preset is a separate error. Two known message differences between fragment selection and the catalog remain. A region on a regionless fragment row reports ``preset `{id}` has no regions``, while the catalog reports ``preset `{id}` has no region `{region}` ``. A fragment row whose plugin lacks the requested protocol reports ``... which does not speak `bedrock-converse` ``, while the catalog reports ``preset `{id}` has no converse endpoint``. Runtime registry tests check builtin-owned wires against the combined builtin protocol set and other wires against their owning factory, and require every fragment id to differ from the remaining catalog ids; these checks need factory data that the build script cannot use. The production-fragment checks are not gated on `test-fixtures`, so they run in default CI, and they are a required gate for every batch.
 
-For a builtin-owned row, credential placement comes from `hofund_provider::credential_for` with the final base URL (the region-resolved URL, or a provider `base_url` override when one is set), the same derivation used for catalog rows. The model-list path, which has no override, uses the region-resolved URL in `crates/provider/src/presets.rs:340-365`. Other plugins keep the default credential. A builtin-owned row with no wire URLs defaults to chat, as `resolve` does for endpoint-style catalog rows. A listed plugin's schema must accept `base_url`, because the daemon injects the selected preset URL into its raw table.
+For a builtin-owned row, credential placement comes from `hofund_provider::credential_for` with the final base URL (the region-resolved URL, or a provider `base_url` override when one is set), the same derivation used for catalog rows. The model-list path, which has no override, uses the region-resolved URL (`credential_for` in `crates/provider/src/wire.rs`). Other plugins keep the default credential. A builtin-owned row with no wire URLs defaults to chat, as `resolve` does for endpoint-style catalog rows. A listed plugin's schema must accept `base_url`, because the daemon injects the selected preset URL into its raw table.
 
 ### Decisions
 
