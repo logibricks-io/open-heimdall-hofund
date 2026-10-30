@@ -7,7 +7,7 @@ use hofund_plugin_api::{Body, BodyStream, InboundSurface, Method, PluginError};
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{HttpRequest, HttpResponse, async_trait, text_response};
 
-use super::{CONTEXT, Kernel, LIST_CAP, Muse, OUTPUT, failure_message, serve};
+use super::{Kernel, LIST_CAP, Muse, failure_message, serve};
 
 /// Runs `future` on this thread. Everything here is ready at once.
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -145,6 +145,8 @@ fn every_model_is_a_row_muse_shows() {
             }},
         })
     );
+    // A limit without its window or its reply size hides the model in Muse,
+    // and with no reply size Muse asks for replies as long as the window.
     for row in &rows[2..] {
         assert_eq!(row["owned_by"], "hofund");
         assert_eq!(row["metadata"]["muse-code"]["family"], "hofund");
@@ -153,14 +155,6 @@ fn every_model_is_a_row_muse_shows() {
         *gateway.seen.lock().expect("seen"),
         [("GET".to_owned(), "/v1/models".to_owned())]
     );
-}
-
-#[test]
-fn a_model_of_unknown_window_gets_muses_defaults() {
-    // A limit without both its window and its reply size hides the model in
-    // Muse; with none Muse asks for replies as long as the window.
-    assert_eq!((CONTEXT, OUTPUT), (128_000, 32_000));
-    assert!(OUTPUT < CONTEXT);
 }
 
 #[test]
@@ -202,6 +196,11 @@ fn a_failing_model_list_keeps_its_status() {
         json::from_str::<Value>(&body).expect("json"),
         json!({"error": {"message": "bad key", "type": "hofund_error"}})
     );
+    // A redirect is no answer Muse can follow here.
+    let gateway = Gateway::answering(302, "moved");
+    let (status, _, body) = ask(&gateway, "/muse-code/models");
+    assert_eq!(status, 502);
+    assert!(body.contains("moved"), "{body}");
 }
 
 #[test]
