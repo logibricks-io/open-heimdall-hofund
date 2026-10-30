@@ -28,13 +28,11 @@ use hofund_control_proto::{
     ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
     TokenRotateRequest, TokenRotateResponse, Topic, UsageQuery, UsageResponse, decode_request,
 };
-#[cfg(unix)]
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
-#[cfg(unix)]
 use tower::Service;
 
 use super::{GatewayError, Running, TokenState, tokens_match};
