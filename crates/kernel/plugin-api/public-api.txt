@@ -650,6 +650,7 @@ Slot::Json
 Slot::Literal
 Slot::ModelArray
 Slot::ModelIfUnset
+Slot::ModelMap
 Slot::ModelTier
 Slot::Origin
 Slot::Token

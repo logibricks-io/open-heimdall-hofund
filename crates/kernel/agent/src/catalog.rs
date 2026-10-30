@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 
 use hofund_plugin_api::{
     AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, ModelField, ModelValue,
-    OwnerTest, Slot as ApiSlot, Visible,
+    Slot as ApiSlot, Visible,
 };
 
 use crate::edit::{
-    Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at, strip_owned,
+    Assignment, FileKind, Shared, get, is_empty_document, is_empty_json, remove_keys, render,
+    string_at, strip_owned,
 };
 use crate::store::{
     backup_once, clear_markers, created_here, delete_verified, marker_present, read_optional,
@@ -428,7 +429,7 @@ impl Engine {
                     key: model.key,
                     value: self.prefixed(id),
                     raw_json: false,
-                    owner: None,
+                    shared: None,
                 });
             }
             // Clear renders over the original text so the keys it keeps stay
@@ -566,12 +567,14 @@ impl Engine {
                 };
                 let current = get(kind, text, set.key).map_err(|error| annotate(&path, error))?;
                 let expected = match set.slot {
-                    ApiSlot::Append { owner, .. } => {
+                    ApiSlot::Append { .. } | ApiSlot::ModelMap { .. } => {
+                        // Compare after a merge, so entries hofund does not
+                        // own are not counted against it.
                         let assignment = Assignment {
                             key: set.key,
                             value: expected,
                             raw_json: true,
-                            owner: Some(owner),
+                            shared: shared_of(&set.slot),
                         };
                         let merged = render(kind, Some(text), &[assignment])
                             .map_err(|error| annotate(&path, error))?;
@@ -617,7 +620,7 @@ impl Engine {
                 path,
                 location.kind,
                 self.owned_keys(location.file),
-                &self.append_keys(location.file),
+                &self.shared_keys(location.file),
                 self.tracked_key(location.file),
                 &preserve,
                 self.id,
@@ -742,11 +745,9 @@ impl Engine {
                             | ApiSlot::Json(_)
                             | ApiSlot::ModelArray { .. }
                             | ApiSlot::Append { .. }
+                            | ApiSlot::ModelMap { .. }
                     ),
-                    owner: match set.slot {
-                        ApiSlot::Append { owner, .. } => Some(owner),
-                        _ => None,
-                    },
+                    shared: shared_of(&set.slot),
                 })
             })
             .collect()
@@ -804,6 +805,9 @@ impl Engine {
                 serde_json::Value::Array(vec![field_object(fields, None, &models, target)])
                     .to_string()
             }),
+            ApiSlot::ModelMap { prefix, fields } if gateway => {
+                Some(model_map_json(&models, prefix, fields, target))
+            }
             _ => None,
         }
     }
@@ -846,15 +850,12 @@ impl Engine {
             .collect()
     }
 
-    /// The keys of `file` holding arrays hofund shares with the user.
-    fn append_keys(&self, file: &str) -> Vec<(&'static str, &'static [OwnerTest])> {
+    /// The keys of `file` holding arrays or maps hofund shares with the user.
+    fn shared_keys(&self, file: &str) -> Vec<(&'static str, Shared)> {
         self.sets
             .iter()
             .filter(|set| set.file == file)
-            .filter_map(|set| match set.slot {
-                ApiSlot::Append { owner, .. } => Some((set.key, owner)),
-                _ => None,
-            })
+            .filter_map(|set| Some((set.key, shared_of(&set.slot)?)))
             .collect()
     }
 
@@ -997,6 +998,35 @@ fn catalog_models_json(models: &[String]) -> String {
 }
 
 /// One object per distinct non-empty model, in route order, holding `fields`.
+/// How hofund's entries are found in the value a slot writes, when the user
+/// shares that value.
+fn shared_of(slot: &ApiSlot) -> Option<Shared> {
+    match slot {
+        ApiSlot::Append { owner, .. } => Some(Shared::Array(owner)),
+        ApiSlot::ModelMap { prefix, .. } if !prefix.is_empty() => Some(Shared::Map(prefix)),
+        _ => None,
+    }
+}
+
+/// A JSON object with one entry per distinct non-empty model, named
+/// `prefix` and the model id, in route order.
+fn model_map_json(
+    models: &[String],
+    prefix: &str,
+    fields: &[ModelField],
+    target: &GatewayTarget,
+) -> String {
+    let mut entries = serde_json::Map::new();
+    for id in models {
+        let name = format!("{prefix}{id}");
+        if id.is_empty() || entries.contains_key(&name) {
+            continue;
+        }
+        entries.insert(name, field_object(fields, Some(id), models, target));
+    }
+    serde_json::Value::Object(entries).to_string()
+}
+
 fn model_array_json(models: &[String], fields: &[ModelField], target: &GatewayTarget) -> String {
     model_items(models, fields, target).to_string()
 }
@@ -1052,9 +1082,9 @@ fn field_object(
 fn carries_token(slot: &ApiSlot) -> bool {
     match slot {
         ApiSlot::Token => true,
-        ApiSlot::ModelArray { fields } | ApiSlot::Append { fields, .. } => {
-            fields.iter().any(|field| field.value().has_token())
-        }
+        ApiSlot::ModelArray { fields }
+        | ApiSlot::Append { fields, .. }
+        | ApiSlot::ModelMap { fields, .. } => fields.iter().any(|field| field.value().has_token()),
         _ => false,
     }
 }
@@ -1106,7 +1136,7 @@ fn snapshot_wrote(
                 Some(Assignment {
                     key,
                     raw_json: is_json_value(&value),
-                    owner: None,
+                    shared: None,
                     value,
                 })
             })
@@ -1169,7 +1199,7 @@ fn merge_owned_keys(
     path: &Path,
     kind: FileKind,
     keys: Vec<&'static str>,
-    appends: &[(&'static str, &'static [OwnerTest])],
+    shared_keys: &[(&'static str, Shared)],
     tracked: Option<&'static str>,
     preserve: &[PathBuf],
     id: &str,
@@ -1202,9 +1232,10 @@ fn merge_owned_keys(
     for key in keys.into_iter().chain(tracked) {
         let current_value =
             get(kind, current_text, key).map_err(|error| refused(id, path, &error.to_string()))?;
-        if let Some((_, owner)) = appends.iter().find(|(append, _)| *append == key) {
-            // Shared arrays lose only hofund's entries; the user's stay.
-            let kept = strip_owned(kind, current_text, key, owner)
+        if let Some((_, shared)) = shared_keys.iter().find(|(shared, _)| *shared == key) {
+            // Shared values lose only hofund's entries; the user's stay.
+            let shared = *shared;
+            let kept = strip_owned(kind, current_text, key, shared)
                 .map_err(|error| refused(id, path, &error.to_string()))?;
             let Some(kept) = kept.filter(|kept| Some(kept) != current_value.as_ref()) else {
                 continue;
@@ -1215,14 +1246,16 @@ fn merge_owned_keys(
                 }
                 None => None,
             };
-            if kept == "[]" && original.is_none() && key != "." {
+            if is_empty_json(&kept) && original.is_none() && key != "." {
                 remove.push(key);
             } else {
+                // Merging no entries drops hofund's in place, so the user's
+                // keep their layout.
                 restore.push(Assignment {
                     key,
-                    value: kept,
+                    value: shared.empty().to_owned(),
                     raw_json: true,
-                    owner: None,
+                    shared: Some(shared),
                 });
             }
             continue;
@@ -1243,7 +1276,7 @@ fn merge_owned_keys(
                 Some(value) => restore.push(Assignment {
                     key,
                     raw_json: is_json_value(&value),
-                    owner: None,
+                    shared: None,
                     value,
                 }),
                 None => remove.push(key),

@@ -66,6 +66,20 @@ pub enum SlotToml {
     Json(JsonSlot),
     ModelArray(ModelArraySlot),
     Append(AppendSlot),
+    ModelMap(ModelMapSlot),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelMapSlot {
+    pub model_map: ModelMapToml,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelMapToml {
+    pub prefix: String,
+    pub fields: Vec<ModelFieldToml>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -371,6 +385,15 @@ fn validate(
                 "json, model_array, and append require a JSON or YAML file",
             ));
         }
+        if matches!(&set.slot, SlotToml::ModelMap(_))
+            && !matches!(file.kind.as_str(), "json" | "yaml" | "toml")
+        {
+            return Err(error(
+                source,
+                format!("{field}.slot"),
+                "model_map requires a JSON, YAML, or TOML file",
+            ));
+        }
         validate_slot(&set.slot, source, &field)?;
         if agent.route == "none" && gateway_slot(&set.slot) {
             return Err(error(
@@ -450,6 +473,12 @@ fn validate_slot(slot: &SlotToml, source: &str, field: &str) -> Result<(), Strin
             &format!("{field}.slot.model_array.fields"),
         ),
         SlotToml::Append(AppendSlot { append }) => validate_append(append, source, field),
+        SlotToml::ModelMap(ModelMapSlot { model_map }) => validate_fields(
+            &model_map.fields,
+            true,
+            source,
+            &format!("{field}.slot.model_map.fields"),
+        ),
         _ => Ok(()),
     }
 }
@@ -603,7 +632,7 @@ fn gateway_slot(slot: &SlotToml) -> bool {
         SlotToml::Name(name) => {
             matches!(name.as_str(), "origin" | "v1" | "token" | "catalog_models")
         }
-        SlotToml::ModelArray(_) | SlotToml::Append(_) => true,
+        SlotToml::ModelArray(_) | SlotToml::Append(_) | SlotToml::ModelMap(_) => true,
         _ => false,
     }
 }
@@ -804,6 +833,11 @@ fn render_slot(slot: &SlotToml) -> String {
                 render_fields(&slot.append.fields)
             )
         }
+        SlotToml::ModelMap(slot) => format!(
+            "hofund_plugin_api::Slot::ModelMap {{ prefix: {:?}, fields: &[{}] }}",
+            slot.model_map.prefix,
+            render_fields(&slot.model_map.fields)
+        ),
     }
 }
 
@@ -1022,6 +1056,48 @@ key = "effort"
         let none = |slot: &str| with_slot(slot).replace("route = \"gateway\"", "route = \"none\"");
         reject(none(array), "route `none`");
         validate(&none("{ json = \"false\" }")).expect("json is not a gateway slot");
+    }
+
+    #[test]
+    fn model_map_slots_are_validated_and_rendered() {
+        let map = "{ model_map = { prefix = \"hofund/\", fields = [ { key = \"model\", value = \"id\" }, { key = \"max_context_size\", json = \"128000\" }, { key = \"api_key\", value = \"token\" } ] } }";
+        let rendered = "hofund_plugin_api::Slot::ModelMap { prefix: \"hofund/\", fields: &[hofund_plugin_api::ModelField::id(\"model\"), hofund_plugin_api::ModelField::json(\"max_context_size\", \"128000\"), hofund_plugin_api::ModelField::token(\"api_key\")] }";
+        for (kind, name) in [
+            ("json", "config.json"),
+            ("yaml", "config.yaml"),
+            ("toml", "config.toml"),
+        ] {
+            let text = with_slot(map)
+                .replace("kind = \"json\"", &format!("kind = \"{kind}\""))
+                .replace("config.json", name);
+            let source = render(&validate(&text).expect("model map")).1;
+            assert!(source.contains(rendered), "{source}");
+        }
+        let whole =
+            "{ model_map = { prefix = \"\", fields = [ { key = \"id\", value = \"id\" } ] } }";
+        let source = render(&validate(&with_slot(whole)).expect("empty prefix")).1;
+        assert!(
+            source.contains("hofund_plugin_api::Slot::ModelMap { prefix: \"\", fields: &[hofund_plugin_api::ModelField::id(\"id\")] }"),
+            "{source}"
+        );
+        reject(
+            with_slot(map)
+                .replace("kind = \"json\"", "kind = \"env\"")
+                .replace("config.json", "config.env"),
+            "model_map requires a JSON, YAML, or TOML file",
+        );
+        reject(
+            with_slot(map).replace("route = \"gateway\"", "route = \"none\""),
+            "route `none` does not allow gateway slots",
+        );
+        reject(
+            with_slot("{ model_map = { prefix = \"h/\", fields = [] } }"),
+            "set[0].slot.model_map.fields: must not be empty",
+        );
+        reject(
+            with_slot("{ model_map = { fields = [ { key = \"a\", value = \"id\" } ] } }"),
+            "did not match any variant",
+        );
     }
 
     #[test]

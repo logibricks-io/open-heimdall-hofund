@@ -1503,6 +1503,25 @@ pub enum Slot {
         /// The fields of each object hofund writes.
         fields: &'static [ModelField],
     },
+    /// hofund's entries in a map keyed by name: a JSON object, a YAML
+    /// mapping, or a TOML table.
+    ///
+    /// Each distinct non-empty visible model gets one entry, named `prefix`
+    /// followed by the model id, holding `fields` in declaration order;
+    /// entries follow route order. An entry is hofund's when its name starts
+    /// with `prefix`. Writing drops hofund's entries, keeps the user's, and
+    /// adds hofund's after them; disconnect drops hofund's entries and keeps
+    /// every other entry. An empty `prefix` makes every entry hofund's, so
+    /// the map is replaced and disconnect restores what was there before. In
+    /// a TOML file each entry is a table and JSON numbers, booleans, arrays,
+    /// and objects keep their types. The key `.` names the document root.
+    #[doc(hidden)]
+    ModelMap {
+        /// The start of every entry name hofund writes.
+        prefix: &'static str,
+        /// The fields of each entry.
+        fields: &'static [ModelField],
+    },
 }
 
 /// One test an array entry passes when hofund owns it.
