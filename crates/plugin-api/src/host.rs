@@ -867,8 +867,8 @@ pub struct GatewayHandle {
 impl GatewayHandle {
     /// Runs `request` on the gateway's codec routes, such as
     /// `POST /v1/chat/completions`, or `GET /v1/models`. The request is
-    /// authenticated as the inbound request was; credentials the surface
-    /// sets are dropped. Any other path, including surface routes, answers
+    /// authenticated with the gateway's own token, whatever credential the
+    /// surface sets. Any other path, including surface routes, answers
     /// `404`.
     ///
     /// # Errors

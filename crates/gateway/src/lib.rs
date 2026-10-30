@@ -655,8 +655,9 @@ fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
 
 /// The gateway's codec routes, run in process for an inbound surface.
 ///
-/// The request is authenticated as the inbound one was: credentials the
-/// surface set are dropped and the current gateway token is presented.
+/// The request presents the current gateway token as its bearer. Any other
+/// credential the surface sets is ignored: one matching secret is enough for
+/// `authorized`, so it can neither help nor hurt.
 struct InProcess {
     app: std::sync::Weak<Inner>,
 }
@@ -671,10 +672,6 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             return Err(PluginError::cancelled("the gateway is shutting down"));
         };
         let (mut parts, body) = request.into_parts();
-        parts.uri = without_key_query(&parts.uri);
-        parts.headers.remove(header::AUTHORIZATION);
-        parts.headers.remove("x-api-key");
-        parts.headers.remove("x-goog-api-key");
         let bearer =
             axum::http::HeaderValue::try_from(format!("Bearer {}", current_token(&app)))
                 .map_err(|_| PluginError::internal("the gateway token is not a header value"))?;
@@ -693,25 +690,6 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             BodyStream::from_stream(stream),
         ))
     }
-}
-
-/// `uri` without any `key` query pair, so a surface cannot present its own
-/// credential.
-fn without_key_query(uri: &Uri) -> Uri {
-    let Some(query) = uri.query() else {
-        return uri.clone();
-    };
-    let kept: Vec<&str> = query
-        .split('&')
-        .filter(|pair| pair.split('=').next() != Some("key"))
-        .collect();
-    let path = uri.path();
-    let target = if kept.is_empty() {
-        path.to_owned()
-    } else {
-        format!("{path}?{}", kept.join("&"))
-    };
-    Uri::try_from(target).unwrap_or_else(|_| Uri::from_static("/"))
 }
 
 async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Response {

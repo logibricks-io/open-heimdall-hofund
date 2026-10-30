@@ -172,7 +172,7 @@ agent configs and refresh them after a token rotation.
 surface request gets `SurfaceHost::gateway()`, which runs the gateway's codec
 routes and model lists in process (S0). A surface that translates a client's
 API calls a codec route there instead of opening a socket. The call presents
-the gateway token, never a credential the surface set, and cannot reach a
+the gateway token, whatever credential the surface set, and cannot reach a
 surface route, so surfaces cannot call each other.
 The subscription kit depends only on `plugin-host`. The agent kit also depends
 on `agent` for the shared engine and `plugin-api` for descriptions. The upstream
