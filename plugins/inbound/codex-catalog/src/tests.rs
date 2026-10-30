@@ -214,6 +214,16 @@ fn a_catalog_past_codexs_limit_leaves_out_the_last() {
     assert_eq!(status, 200);
     assert_eq!(header, Some(left_out.to_string()));
     assert_eq!(served, body);
+
+    // One left out is said too.
+    let gateway = Gateway::listing(&Value::Array(
+        ids[..=models.len()]
+            .iter()
+            .map(|id| json!({"id": id}))
+            .collect(),
+    ));
+    let (_, _, header, served) = ask(&gateway, "/v1/codex/models");
+    assert_eq!((header.as_deref(), served), (Some("1"), body));
 }
 
 #[test]
