@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Remote gateway provider plugin (`plugins/providers/remote-gateway`, E13):
+  preset `remote-gateway` now works. It forwards Chat, Responses, and
+  Messages requests to another gateway in the protocol the client spoke,
+  with the gateway key as Bearer (Messages also sends `x-api-key`). The
+  address may be typed with or without a scheme or a known path suffix.
+  `list_models` reads the other gateway's `/v1/models`; the probe asks
+  Chat. The row moved out of the kernel catalog, which is now empty.
 - Codex subscription (`plugins/subscriptions/codex`): requests are shaped as
   Codex CLI sends them (stream only, `store: false`, no sampling or output
   caps, ids and item references dropped, call ids over 64 characters hashed,
