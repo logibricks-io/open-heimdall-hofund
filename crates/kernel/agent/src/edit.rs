@@ -926,7 +926,8 @@ fn json_to_toml_item(value: &Value) -> Item {
             for (key, value) in object {
                 table.insert(key, json_to_toml_item(value));
             }
-            table.set_implicit(!table.is_empty() && table.iter().all(|(_, item)| item.is_table()));
+            // Only an empty table needs its own header.
+            table.set_implicit(!table.is_empty());
             Item::Table(table)
         }
         Value::Null => Item::None,
@@ -1623,6 +1624,8 @@ mod tests {
             error.to_string().contains("inside an inline table"),
             "{error}"
         );
+        let empty = text(FileKind::Toml, None, &[assign("e", "{}", true)]);
+        assert_eq!(empty, "[e]\n");
         let nulls = text(
             FileKind::Toml,
             None,
