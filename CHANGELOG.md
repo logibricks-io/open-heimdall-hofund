@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SurfaceHost::gateway()` (S0): an inbound surface runs the gateway's codec
+  routes and model lists in process, for example a translated chat on
+  `POST /v1/chat/completions`. The call is authenticated with the gateway
+  token; credentials the surface sets are dropped, and surface routes are not
+  reachable from it. `SurfaceHost::from_parts` takes the backend;
+  `hofund_plugin_host::surface_host_with_gateway` builds one.
 - `hofund agent set <agent> model=<id|default>` and
   `POST /v1/hofund/agents/{id}/model` (L8e2). Setting a route model connects
   the agent when needed; `model=default` drops the model hofund chose. The id

@@ -39,7 +39,7 @@ use hofund_plugin_api::{
 };
 
 pub use accounts::{AccountStorageKind, AccountStore, StoreError};
-pub use hofund_plugin_api::kernel::ObserveBackend;
+pub use hofund_plugin_api::kernel::{GatewayBackend, ObserveBackend};
 pub use loopback::LoopbackRegistry;
 pub use pool::{HttpLimits, HttpProfile, PooledHttp};
 pub use scripted::{PipedScript, PipedSpawn};
@@ -136,7 +136,18 @@ pub fn surface_host(
     protocols: Vec<ProtocolId>,
     accepted: bool,
 ) -> SurfaceHost {
-    SurfaceHost::from_parts(members, protocols, AuthResult::new(accepted))
+    SurfaceHost::from_parts(members, protocols, AuthResult::new(accepted), None)
+}
+
+/// Builds a [`SurfaceHost`] whose gateway handle runs `gateway`.
+#[must_use]
+pub fn surface_host_with_gateway(
+    members: Vec<MemberId>,
+    protocols: Vec<ProtocolId>,
+    accepted: bool,
+    gateway: Arc<dyn GatewayBackend>,
+) -> SurfaceHost {
+    SurfaceHost::from_parts(members, protocols, AuthResult::new(accepted), Some(gateway))
 }
 
 /// A provider-scoped [`HostContext`] for one configured provider.

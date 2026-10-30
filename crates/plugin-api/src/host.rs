@@ -5,6 +5,7 @@
 use std::any::Any;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -16,9 +17,9 @@ use crate::error::PluginError;
 use crate::id::PluginKind;
 use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
 use crate::kernel::{
-    AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, HttpBackend, LoopbackBackend,
-    NoLoopback, ObserveBackend, PipedChildBackend, ProcessBackend, SchedulerBackend,
-    SecretsBackend,
+    AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, GatewayBackend, HttpBackend,
+    LoopbackBackend, NoLoopback, ObserveBackend, PipedChildBackend, ProcessBackend,
+    SchedulerBackend, SecretsBackend,
 };
 use crate::records::{Account, QuotaObservation, SignInCtx};
 use bytes::Bytes;
@@ -853,6 +854,64 @@ impl AuthResult {
     }
 }
 
+/// The gateway's codec routes, reached in process by an inbound surface.
+///
+/// A surface that translates a client's API into one the kernel already
+/// speaks sends the translated request here instead of opening a socket.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct GatewayHandle {
+    inner: Option<Arc<dyn GatewayBackend>>,
+}
+
+impl GatewayHandle {
+    /// Runs `request` on the gateway's codec routes, such as
+    /// `POST /v1/chat/completions`, or `GET /v1/models`. The request is
+    /// authenticated as the inbound request was; credentials the surface
+    /// sets are dropped. Any other path, including surface routes, answers
+    /// `404`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the kernel cannot run the request, or
+    /// `unsupported` when this host has no gateway.
+    pub async fn call(
+        &self,
+        request: http::Request<Body>,
+    ) -> Result<http::Response<BodyStream>, PluginError> {
+        match &self.inner {
+            Some(inner) => inner.call(request).await,
+            None => Err(PluginError::unsupported("this host has no gateway")),
+        }
+    }
+
+    /// Whether this host can run gateway calls.
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        self.inner.is_some()
+    }
+}
+
+impl fmt::Debug for GatewayHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GatewayHandle")
+            .field("available", &self.inner.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for GatewayHandle {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.inner, &other.inner) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for GatewayHandle {}
+
 /// What an inbound surface may ask the kernel. Constructed in `hofund-plugin-host`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -860,6 +919,7 @@ pub struct SurfaceHost {
     members: Vec<MemberId>,
     protocols: Vec<ProtocolId>,
     auth: AuthResult,
+    gateway: GatewayHandle,
 }
 
 impl SurfaceHost {
@@ -871,11 +931,13 @@ impl SurfaceHost {
         members: Vec<MemberId>,
         protocols: Vec<ProtocolId>,
         auth: AuthResult,
+        gateway: Option<Arc<dyn GatewayBackend>>,
     ) -> Self {
         Self {
             members,
             protocols,
             auth,
+            gateway: GatewayHandle { inner: gateway },
         }
     }
 
@@ -895,6 +957,12 @@ impl SurfaceHost {
     #[must_use]
     pub const fn auth(&self) -> AuthResult {
         self.auth
+    }
+
+    /// The gateway's codec routes, run in process.
+    #[must_use]
+    pub const fn gateway(&self) -> &GatewayHandle {
+        &self.gateway
     }
 }
 

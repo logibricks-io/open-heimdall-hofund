@@ -193,6 +193,10 @@ FileKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 FileKind::Env
 FileKind::Json
 FileKind::Toml
+GatewayHandle
+GatewayHandle #[non_exhaustive] derives(Clone)
+GatewayHandle::async fn call (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
+GatewayHandle::const fn is_available (& self) -> bool
 GatewayTarget
 GatewayTarget #[non_exhaustive] derives(Clone)
 GatewayTarget::fn base_url (& self) -> & str
@@ -636,7 +640,8 @@ SubscriptionSpec::const fn plugin (& self) -> & PluginId
 SurfaceHost
 SurfaceHost #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SurfaceHost::const fn auth (& self) -> AuthResult
-SurfaceHost::fn from_parts (members : Vec < MemberId > , protocols : Vec < ProtocolId > , auth : AuthResult ,) -> Self
+SurfaceHost::const fn gateway (& self) -> & GatewayHandle
+SurfaceHost::fn from_parts (members : Vec < MemberId > , protocols : Vec < ProtocolId > , auth : AuthResult , gateway : Option < Arc < dyn GatewayBackend > > ,) -> Self
 SurfaceHost::fn members (& self) -> & [MemberId]
 SurfaceHost::fn protocols (& self) -> & [ProtocolId]
 SurfaceId
@@ -699,6 +704,8 @@ kernel::ClockBackend::fn now (& self) -> SystemTime
 kernel::DirBackend
 kernel::DirBackend::fn cache_dir (& self , plugin : & PluginKey) -> Result < PathBuf , PluginError >
 kernel::DirBackend::fn state_dir (& self , plugin : & PluginKey) -> Result < PathBuf , PluginError >
+kernel::GatewayBackend
+kernel::GatewayBackend::async fn call (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
 kernel::HttpBackend
 kernel::HttpBackend::async fn send (& self , request : HttpRequest < Body > ,) -> Result < HttpResponse < BodyStream > , PluginError >
 kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
