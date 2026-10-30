@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent descriptions can fill gateway values into text and pair a provider
+  with the model (G6, #418): `slot = { template = "Bearer {token}" }` writes
+  the text with `{origin}`, `{v1}`, and `{token}` filled in and is rewritten
+  on token refresh. `slot = { model_pair = { value, unless } }` writes
+  `value` beside the model key whenever the model is set to a route, and on
+  connect when the model is a route and neither this key nor an `unless`
+  key is set; clearing the model drops it.
 - Agent descriptions can write a model map (G5, #417): `slot = { model_map =
   { prefix, fields } }` writes one entry per visible route model, named
   prefix plus model id, into a JSON, YAML, or TOML map. Entries without the

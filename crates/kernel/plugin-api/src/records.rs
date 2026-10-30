@@ -1449,6 +1449,29 @@ pub enum Slot {
         /// Another key in the same file from which to take the model.
         from: Option<&'static str>,
     },
+    /// Text with gateway values filled in, such as `Bearer {token}`.
+    ///
+    /// `{origin}`, `{v1}`, and `{token}` are replaced with the gateway
+    /// origin, the origin followed by `/v1`, and the gateway token; every
+    /// other character is written as is. The write is skipped when the agent
+    /// does not route through the gateway.
+    #[doc(hidden)]
+    Template(&'static str),
+    /// A value that names hofund beside the model, such as a provider key
+    /// read together with the model key.
+    ///
+    /// `value` is written when the model is set to a route, and when connect
+    /// leaves the description's model key, in the same logical file, on a
+    /// visible route while this key and every `unless` key in the file have
+    /// no non-empty string. It is dropped with the model when the model is
+    /// cleared.
+    #[doc(hidden)]
+    ModelPair {
+        /// The text written.
+        value: &'static str,
+        /// Keys whose non-empty string means the user picked a provider.
+        unless: &'static [&'static str],
+    },
     /// A tier environment variable.
     ///
     /// The value is the non-empty string at the description's model key when

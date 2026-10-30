@@ -67,6 +67,28 @@ pub enum SlotToml {
     ModelArray(ModelArraySlot),
     Append(AppendSlot),
     ModelMap(ModelMapSlot),
+    Template(TemplateSlot),
+    ModelPair(ModelPairSlot),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateSlot {
+    pub template: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelPairSlot {
+    pub model_pair: ModelPairToml,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelPairToml {
+    pub value: String,
+    #[serde(default)]
+    pub unless: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -395,6 +417,24 @@ fn validate(
             ));
         }
         validate_slot(&set.slot, source, &field)?;
+        if matches!(&set.slot, SlotToml::ModelPair(_))
+            && agent.model.as_ref().map(|model| model.file.as_str()) != Some(set.file.as_str())
+        {
+            return Err(error(
+                source,
+                format!("{field}.slot"),
+                "model_pair requires the model key in the same file",
+            ));
+        }
+        if matches!(&set.slot, SlotToml::ModelPair(_))
+            && agent.model.as_ref().map(|model| model.key.as_str()) == Some(set.key.as_str())
+        {
+            return Err(error(
+                source,
+                format!("{field}.key"),
+                "model_pair must sit beside the model key, not on it",
+            ));
+        }
         if agent.route == "none" && gateway_slot(&set.slot) {
             return Err(error(
                 source,
@@ -479,8 +519,75 @@ fn validate_slot(slot: &SlotToml, source: &str, field: &str) -> Result<(), Strin
             source,
             &format!("{field}.slot.model_map.fields"),
         ),
+        SlotToml::Template(TemplateSlot { template }) => {
+            validate_template(template, source, &format!("{field}.slot.template"))
+        }
+        SlotToml::ModelPair(ModelPairSlot { model_pair }) => {
+            let field = format!("{field}.slot.model_pair");
+            if model_pair.value.is_empty() {
+                return Err(error(source, format!("{field}.value"), "must not be empty"));
+            }
+            let mut keys = BTreeSet::new();
+            for (index, key) in model_pair.unless.iter().enumerate() {
+                if key.is_empty() {
+                    return Err(error(
+                        source,
+                        format!("{field}.unless[{index}]"),
+                        "must not be empty",
+                    ));
+                }
+                if !keys.insert(key.as_str()) {
+                    return Err(error(
+                        source,
+                        format!("{field}.unless[{index}]"),
+                        "duplicates another key",
+                    ));
+                }
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
+}
+
+/// Checks a template: every `{` opens `{origin}`, `{v1}`, or `{token}`, and
+/// at least one placeholder is present, or a literal slot would do.
+fn validate_template(text: &str, source: &str, field: &str) -> Result<(), String> {
+    let mut rest = text;
+    let mut placeholders = 0;
+    loop {
+        let open = rest.find('{');
+        let close = rest.find('}');
+        match (open, close) {
+            (None, None) => break,
+            (Some(open), close) if close.is_none_or(|close| open < close) => {
+                let tail = &rest[open..];
+                let Some(name) = ["{origin}", "{v1}", "{token}"]
+                    .into_iter()
+                    .find(|name| tail.starts_with(name))
+                else {
+                    return Err(error(
+                        source,
+                        field,
+                        "unknown placeholder; expected `{origin}`, `{v1}`, or `{token}`",
+                    ));
+                };
+                placeholders += 1;
+                rest = &tail[name.len()..];
+            }
+            _ => {
+                return Err(error(source, field, "has a `}` that closes no placeholder"));
+            }
+        }
+    }
+    if placeholders == 0 {
+        return Err(error(
+            source,
+            field,
+            "needs a placeholder; use a literal slot for fixed text",
+        ));
+    }
+    Ok(())
 }
 
 fn valid_json(text: &str, source: &str, field: &str) -> Result<(), String> {
@@ -632,7 +739,11 @@ fn gateway_slot(slot: &SlotToml) -> bool {
         SlotToml::Name(name) => {
             matches!(name.as_str(), "origin" | "v1" | "token" | "catalog_models")
         }
-        SlotToml::ModelArray(_) | SlotToml::Append(_) | SlotToml::ModelMap(_) => true,
+        SlotToml::ModelArray(_)
+        | SlotToml::Append(_)
+        | SlotToml::ModelMap(_)
+        | SlotToml::Template(_)
+        | SlotToml::ModelPair(_) => true,
         _ => false,
     }
 }
@@ -837,6 +948,13 @@ fn render_slot(slot: &SlotToml) -> String {
             "hofund_plugin_api::Slot::ModelMap {{ prefix: {:?}, fields: &[{}] }}",
             slot.model_map.prefix,
             render_fields(&slot.model_map.fields)
+        ),
+        SlotToml::Template(slot) => {
+            format!("hofund_plugin_api::Slot::Template({:?})", slot.template)
+        }
+        SlotToml::ModelPair(slot) => format!(
+            "hofund_plugin_api::Slot::ModelPair {{ value: {:?}, unless: &{:?} }}",
+            slot.model_pair.value, slot.model_pair.unless
         ),
     }
 }
@@ -1097,6 +1215,97 @@ key = "effort"
         reject(
             with_slot("{ model_map = { fields = [ { key = \"a\", value = \"id\" } ] } }"),
             "did not match any variant",
+        );
+    }
+
+    #[test]
+    fn template_slots_are_validated_and_rendered() {
+        for kind in ["json", "toml", "yaml", "env"] {
+            let text = with_slot("{ template = \"Bearer {token} at {v1}/{origin}\" }")
+                .replace("kind = \"json\"", &format!("kind = \"{kind}\""));
+            let source = render(&validate(&text).expect("template")).1;
+            assert!(
+                source.contains(
+                    "hofund_plugin_api::Slot::Template(\"Bearer {token} at {v1}/{origin}\")"
+                ),
+                "{source}"
+            );
+        }
+        validate(&with_slot("{ template = \"{v1}\" }")).expect("one placeholder");
+        reject(
+            with_slot("{ template = \"{token}\" }")
+                .replace("route = \"gateway\"", "route = \"none\""),
+            "route `none` does not allow gateway slots",
+        );
+        for (text, needle) in [
+            ("Bearer", "set[0].slot.template: needs a placeholder"),
+            ("", "set[0].slot.template: needs a placeholder"),
+            ("{key}", "set[0].slot.template: unknown placeholder"),
+            ("{token", "set[0].slot.template: unknown placeholder"),
+            ("{token}{", "set[0].slot.template: unknown placeholder"),
+            ("{{token}}", "set[0].slot.template: unknown placeholder"),
+            (
+                "{token}}",
+                "set[0].slot.template: has a `}` that closes no placeholder",
+            ),
+            (
+                "} {token}",
+                "set[0].slot.template: has a `}` that closes no placeholder",
+            ),
+        ] {
+            reject(with_slot(&format!("{{ template = {text:?} }}")), needle);
+        }
+    }
+
+    #[test]
+    fn model_pair_slots_are_validated_and_rendered() {
+        let pair = "{ model_pair = { value = \"hofund\", unless = [\"GOOSE_PROVIDER\", \"b\"] } }";
+        let source = render(&validate(&with_slot(pair)).expect("pair")).1;
+        assert!(
+            source.contains("hofund_plugin_api::Slot::ModelPair { value: \"hofund\", unless: &[\"GOOSE_PROVIDER\", \"b\"] }"),
+            "{source}"
+        );
+        let source =
+            render(&validate(&with_slot("{ model_pair = { value = \"h\" } }")).expect("no unless"))
+                .1;
+        assert!(
+            source.contains("hofund_plugin_api::Slot::ModelPair { value: \"h\", unless: &[] }"),
+            "{source}"
+        );
+        reject(
+            with_slot(pair).replace("route = \"gateway\"", "route = \"none\""),
+            "route `none` does not allow gateway slots",
+        );
+        reject(
+            with_slot("{ model_pair = { value = \"\" } }"),
+            "set[0].slot.model_pair.value: must not be empty",
+        );
+        reject(
+            with_slot("{ model_pair = { value = \"h\", unless = [\"a\", \"\"] } }"),
+            "set[0].slot.model_pair.unless[1]: must not be empty",
+        );
+        reject(
+            with_slot("{ model_pair = { value = \"h\", unless = [\"a\", \"a\"] } }"),
+            "set[0].slot.model_pair.unless[1]: duplicates another key",
+        );
+        let other_file = format!(
+            "{}\n[[file]]\nid = \"other\"\nkind = \"json\"\nlinux = \"~/.o.json\"\nmacos = \"~/.o.json\"\nwindows = \"~/.o.json\"\n",
+            with_slot(pair)
+        )
+        .replacen("file = \"config\"\nkey = \"model\"", "file = \"other\"\nkey = \"model\"", 1);
+        reject(
+            other_file,
+            "set[0].slot: model_pair requires the model key in the same file",
+        );
+        let on_model = with_slot(pair).replacen("key = \"literal\"", "key = \"model\"", 1);
+        reject(
+            on_model,
+            "set[0].key: model_pair must sit beside the model key, not on it",
+        );
+        let no_model = with_slot(pair).replace("[model]\nfile = \"config\"\nkey = \"model\"\n", "");
+        reject(
+            no_model,
+            "set[0].slot: model_pair requires the model key in the same file",
         );
     }
 

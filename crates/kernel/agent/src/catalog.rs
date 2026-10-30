@@ -512,7 +512,11 @@ impl Engine {
             self.sets
                 .iter()
                 .filter(|set| {
-                    set.file == model.file && matches!(set.slot, ApiSlot::ModelTier { .. })
+                    set.file == model.file
+                        && matches!(
+                            set.slot,
+                            ApiSlot::ModelTier { .. } | ApiSlot::ModelPair { .. }
+                        )
                 })
                 .map(|set| set.key),
         );
@@ -772,6 +776,36 @@ impl Engine {
             ApiSlot::V1 if gateway => Some(format!("{}/v1", origin(target.base_url()))),
             ApiSlot::Token if gateway => Some(target.token().to_owned()),
             ApiSlot::Literal(text) => Some((*text).to_owned()),
+            ApiSlot::Template(text) if gateway => Some(fill_template(text, target)),
+            ApiSlot::ModelPair { value, unless } if gateway => {
+                let model = self.model.filter(|model| model.file == set.file)?;
+                if chosen.is_none() {
+                    let picked = |key| existing.and_then(|text| string_value(kind, text, key));
+                    if picked(set.key).is_some() || unless.iter().any(|key| picked(key).is_some()) {
+                        return None;
+                    }
+                    // The model the file holds after this write: the one
+                    // already there, or the one the model key's own set writes.
+                    let main = match picked(model.key) {
+                        Some(value) => value,
+                        None => {
+                            let owner = self.sets.iter().find(|owner| {
+                                owner.file == model.file
+                                    && owner.key == model.key
+                                    && !matches!(owner.slot, ApiSlot::ModelPair { .. })
+                            })?;
+                            self.slot_value(owner, kind, target, existing, choice)?
+                        }
+                    };
+                    if !models
+                        .iter()
+                        .any(|id| *id == main || self.prefixed(id) == main)
+                    {
+                        return None;
+                    }
+                }
+                Some((*value).to_owned())
+            }
             ApiSlot::ModelIfUnset { from } => match chosen {
                 Some(id) if self.model.is_some_and(|model| model.key == set.key) => {
                     Some(self.prefixed(id))
@@ -1082,11 +1116,37 @@ fn field_object(
 fn carries_token(slot: &ApiSlot) -> bool {
     match slot {
         ApiSlot::Token => true,
+        ApiSlot::Template(text) => text.contains("{token}"),
         ApiSlot::ModelArray { fields }
         | ApiSlot::Append { fields, .. }
         | ApiSlot::ModelMap { fields, .. } => fields.iter().any(|field| field.value().has_token()),
         _ => false,
     }
+}
+
+/// `text` with `{origin}`, `{v1}`, and `{token}` replaced in one pass, so a
+/// filled value is never read as a placeholder.
+fn fill_template(text: &str, target: &GatewayTarget) -> String {
+    let origin = origin(target.base_url());
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let (value, len) = if rest.starts_with("{origin}") {
+            (origin.clone(), "{origin}".len())
+        } else if rest.starts_with("{v1}") {
+            (format!("{origin}/v1"), "{v1}".len())
+        } else if rest.starts_with("{token}") {
+            (target.token().to_owned(), "{token}".len())
+        } else {
+            ("{".to_owned(), 1)
+        };
+        out.push_str(&value);
+        rest = &rest[len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn origin(base_url: &str) -> String {

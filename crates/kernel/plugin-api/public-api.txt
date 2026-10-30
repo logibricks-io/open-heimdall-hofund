@@ -651,8 +651,10 @@ Slot::Literal
 Slot::ModelArray
 Slot::ModelIfUnset
 Slot::ModelMap
+Slot::ModelPair
 Slot::ModelTier
 Slot::Origin
+Slot::Template
 Slot::Token
 Slot::V1
 Slot::const fn model_if_unset (from : Option < & 'static str >) -> Self

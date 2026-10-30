@@ -1044,6 +1044,363 @@ static MAP_WHOLE: AgentDescription = AgentDescription::from_static(
     &[],
 );
 
+static PAIR_SETS: &[AgentSet] = &[
+    AgentSet::from_static(
+        "config",
+        "headers.Authorization",
+        Slot::Template("Bearer {token}"),
+    ),
+    AgentSet::from_static(
+        "config",
+        "url",
+        Slot::Template("{v1}/chat {origin} {nope} {"),
+    ),
+    AgentSet::from_static(
+        "config",
+        "provider",
+        Slot::ModelPair {
+            value: "hofund",
+            unless: &["legacy", "other"],
+        },
+    ),
+    AgentSet::from_static("config", "model", Slot::model_if_unset(None)),
+];
+static PAIR: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("pair"),
+    "Pair",
+    "pair",
+    ARRAY_JSON_FILES,
+    PAIR_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
+static PAIR_NONE: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("pair-none"),
+    "Pair None",
+    "pair-none",
+    ARRAY_JSON_FILES,
+    PAIR_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::None,
+    &[],
+);
+static PAIR_ELSEWHERE_SETS: &[AgentSet] = &[AgentSet::from_static(
+    "settings",
+    "provider",
+    Slot::ModelPair {
+        value: "hofund",
+        unless: &[],
+    },
+)];
+static PAIR_ELSEWHERE: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("pair-elsewhere"),
+    "Pair Elsewhere",
+    "pair-elsewhere",
+    GEMINI_FILES,
+    PAIR_ELSEWHERE_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+)
+.with_model_file("env");
+
+static PAIR_PREFIXED: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("pair-prefixed"),
+    "Pair Prefixed",
+    "pair-prefixed",
+    ARRAY_JSON_FILES,
+    PAIR_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+)
+.with_model_prefix("p/");
+static PAIR_UNOWNED_SETS: &[AgentSet] = &[
+    AgentSet::from_static(
+        "config",
+        "provider",
+        Slot::ModelPair {
+            value: "hofund",
+            unless: &[],
+        },
+    ),
+    AgentSet::from_static("config", "fallback", Slot::model_if_unset(None)),
+];
+static PAIR_UNOWNED: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("pair-unowned"),
+    "Pair Unowned",
+    "pair-unowned",
+    ARRAY_JSON_FILES,
+    PAIR_UNOWNED_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
+static PAIR_FROM_SETS: &[AgentSet] = &[
+    AgentSet::from_static(
+        "config",
+        "provider",
+        Slot::ModelPair {
+            value: "hofund",
+            unless: &[],
+        },
+    ),
+    AgentSet::from_static("config", "model", Slot::model_if_unset(Some("old"))),
+];
+static PAIR_FROM: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("pair-from"),
+    "Pair From",
+    "pair-from",
+    ARRAY_JSON_FILES,
+    PAIR_FROM_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
+
+#[test]
+fn model_pair_reads_the_model_the_file_ends_up_with() {
+    let one = target_with(&["a"]);
+    let cases: [(&AgentDescription, &str, Option<&str>); 7] = [
+        (&PAIR_PREFIXED, "{\"model\":\"p/a\"}", Some("hofund")),
+        (&PAIR_PREFIXED, "{}", Some("hofund")),
+        (&PAIR_PREFIXED, "{\"model\":\"p/b\"}", None),
+        (&PAIR_UNOWNED, "{}", None),
+        (&PAIR_UNOWNED, "{\"model\":\"a\"}", Some("hofund")),
+        (&PAIR_FROM, "{\"old\":\"gpt\"}", None),
+        (&PAIR_FROM, "{\"old\":\"a\"}", Some("hofund")),
+    ];
+    for (description, original, provider) in cases {
+        let home = scratch();
+        let session = Session::new(&*home);
+        let path = path_in(&home);
+        seed(&path, original);
+        let agent = Compiled::new(description);
+        agent.apply(&session, &one).expect("apply");
+        let json = read_json(&path);
+        assert_eq!(json["provider"].as_str(), provider, "{original}: {json}");
+    }
+}
+
+static PAIR_SPLIT_SETS: &[AgentSet] = &[
+    AgentSet::from_static(
+        "settings",
+        "provider",
+        Slot::ModelPair {
+            value: "hofund",
+            unless: &[],
+        },
+    ),
+    AgentSet::from_static("env", "model", Slot::model_if_unset(None)),
+];
+static PAIR_SPLIT: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("pair-split"),
+    "Pair Split",
+    "pair-split",
+    GEMINI_FILES,
+    PAIR_SPLIT_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+)
+.with_model_file("settings");
+
+static PAIR_SELF_SETS: &[AgentSet] = &[AgentSet::from_static(
+    "settings",
+    "model",
+    Slot::ModelPair {
+        value: "hofund",
+        unless: &[],
+    },
+)];
+static PAIR_SELF: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("pair-self"),
+    "Pair Self",
+    "pair-self",
+    GEMINI_FILES,
+    PAIR_SELF_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+)
+.with_model_file("settings");
+
+#[test]
+fn template_fills_gateway_values_in_one_pass() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".array").join("config.json");
+    seed(&path, "{\"headers\":{\"X-Mine\":\"keep\"}}");
+    let target = GatewayTarget::new("http://127.0.0.1:3425/", "t{v1}", vec!["a".to_owned()]);
+    let agent = Compiled::new(&PAIR);
+    agent.apply(&session, &target).expect("apply");
+    let json = read_json(&path);
+    assert_eq!(json["headers"]["Authorization"], "Bearer t{v1}");
+    assert_eq!(json["headers"]["X-Mine"], "keep");
+    assert_eq!(
+        json["url"],
+        "http://127.0.0.1:3425/v1/chat http://127.0.0.1:3425 {nope} {"
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+
+    let fresh = GatewayTarget::new("http://127.0.0.1:3425/", "fresh", vec!["a".to_owned()]);
+    assert_eq!(
+        agent.refresh_token(&session, &fresh).expect("refresh"),
+        vec![path.clone()]
+    );
+    assert_eq!(read_json(&path)["headers"]["Authorization"], "Bearer fresh");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(
+        read_json(&path),
+        serde_json::json!({"headers": {"X-Mine": "keep"}})
+    );
+
+    Compiled::new(&PAIR_NONE)
+        .apply(&session, &target)
+        .expect("apply none");
+    let json = read_json(&path);
+    assert!(json["headers"].get("Authorization").is_none(), "{json}");
+    assert!(json.get("url").is_none(), "{json}");
+    assert!(json.get("provider").is_none(), "{json}");
+}
+
+#[test]
+fn model_pair_follows_the_model_hofund_picks() {
+    let target = target_with(&["a"]);
+    let agent = Compiled::new(&PAIR);
+    let cases = [
+        ("{}", Some("a"), Some("hofund")),
+        ("{\"model\":\"a\"}", Some("a"), Some("hofund")),
+        ("{\"model\":\"gpt\"}", Some("gpt"), None),
+        ("{\"provider\":\"openai\"}", Some("a"), Some("openai")),
+        ("{\"provider\":\"\"}", Some("a"), Some("hofund")),
+        ("{\"other\":\"openai\"}", Some("a"), None),
+        ("{\"legacy\":\"openai\"}", Some("a"), None),
+    ];
+    for (original, model, provider) in cases {
+        let home = scratch();
+        let session = Session::new(&*home);
+        let path = home.join(".array").join("config.json");
+        seed(&path, original);
+        agent.apply(&session, &target).expect("apply");
+        let json = read_json(&path);
+        assert_eq!(json["model"].as_str(), model, "{original}: {json}");
+        assert_eq!(json["provider"].as_str(), provider, "{original}: {json}");
+        agent.disconnect(&session, false).expect("disconnect");
+        assert_eq!(
+            read_json(&path),
+            serde_json::from_str::<serde_json::Value>(original).expect("json")
+        );
+    }
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".array").join("config.json");
+    let two = target_with(&["a", "b"]);
+    agent.apply(&session, &two).expect("apply");
+    let json = read_json(&path);
+    assert!(
+        json.get("model").is_none() && json.get("provider").is_none(),
+        "{json}"
+    );
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!path.exists());
+}
+
+#[test]
+fn model_pair_is_set_and_cleared_with_the_model() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".array").join("config.json");
+    let original = "{\"model\":\"gpt\",\"provider\":\"openai\",\"legacy\":\"openai\"}";
+    seed(&path, original);
+    let two = target_with(&["a", "b"]);
+    let agent = Compiled::new(&PAIR);
+    agent.set_model(&session, &two, Some("b")).expect("set");
+    let json = read_json(&path);
+    assert_eq!(json["model"], "b");
+    assert_eq!(json["provider"], "hofund");
+    assert!(
+        agent
+            .apply(&session, &two)
+            .expect("again")
+            .changes()
+            .is_empty()
+    );
+    agent.set_model(&session, &two, None).expect("clear");
+    let json = read_json(&path);
+    assert!(
+        json.get("model").is_none() && json.get("provider").is_none(),
+        "{json}"
+    );
+    assert_eq!(json["legacy"], "openai");
+    agent
+        .set_model(&session, &two, Some("a"))
+        .expect("set again");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(
+        read_json(&path),
+        serde_json::from_str::<serde_json::Value>(original).expect("json")
+    );
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let one = target_with(&["a"]);
+    agent.set_model(&session, &one, Some("a")).expect("set one");
+    agent.set_model(&session, &one, None).expect("clear one");
+    let json = read_json(&path_in(&home));
+    assert_eq!(json["model"], "a");
+    assert_eq!(json["provider"], "hofund");
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let elsewhere = Compiled::new(&PAIR_ELSEWHERE);
+    let settings = home.join(".gemini").join("settings.json");
+    seed(&settings, "{\"model\":\"a\"}");
+    elsewhere.apply(&session, &one).expect("apply elsewhere");
+    assert_eq!(read_json(&settings), serde_json::json!({"model": "a"}));
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".gemini").join("settings.json");
+    seed(&settings, "{}");
+    Compiled::new(&PAIR_SPLIT)
+        .apply(&session, &one)
+        .expect("apply split");
+    assert_eq!(read_json(&settings), serde_json::json!({}));
+
+    // A pair on the model key itself has no owner to read and writes nothing.
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".gemini").join("settings.json");
+    seed(&settings, "{}");
+    Compiled::new(&PAIR_SELF)
+        .apply(&session, &one)
+        .expect("apply self");
+    assert_eq!(read_json(&settings), serde_json::json!({}));
+}
+
+fn path_in(home: &Path) -> PathBuf {
+    home.join(".array").join("config.json")
+}
+
 fn map_entry(id: &str, token: &str) -> String {
     format!(
         "model = \"{id}\"\nmax_context_size = 128000\nbase_url = \"http://127.0.0.1:3425/v1\"\napi_key = \"{token}\"\n"
