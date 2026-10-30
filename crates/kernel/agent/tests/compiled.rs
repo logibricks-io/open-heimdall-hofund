@@ -960,6 +960,13 @@ fn append_once_at_the_root_writes_one_group() {
     assert_eq!(read_json(&path), serde_json::json!([group]));
     agent.disconnect(&session, false).expect("disconnect");
     assert!(!path.exists());
+
+    // A file hofund created and the user only reformatted is removed too.
+    agent.apply(&session, &target).expect("apply");
+    let pretty = serde_json::to_string_pretty(&read_json(&path)).expect("pretty");
+    fs::write(&path, pretty).expect("user reformat");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!path.exists());
 }
 
 fn codex_path(home: &Path) -> PathBuf {

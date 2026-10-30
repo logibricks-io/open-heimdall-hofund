@@ -1102,6 +1102,10 @@ mod tests {
         assert!(is_empty_document(FileKind::Json, b"[]").expect("empty"));
         assert!(!is_empty_document(FileKind::Json, b"[1]").expect("not empty"));
         assert!(is_empty_document(FileKind::Yaml, b"[]\n").expect("empty yaml"));
+        assert_eq!(
+            text(FileKind::Yaml, Some("- id: u\n"), &[append(".", ours)]),
+            "- id: u\n- id: hof/a\n  kind: gw\n"
+        );
 
         let yaml = text(
             FileKind::Yaml,
