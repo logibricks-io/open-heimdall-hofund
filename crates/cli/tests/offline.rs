@@ -567,6 +567,47 @@ fn offline_agent_disconnect_one_shot() {
 }
 
 #[test]
+fn offline_agent_set_model_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:4304", ROUTED);
+    let written = codex_config(&scratch);
+    fs::create_dir_all(written.parent().expect("dir")).expect("mkdir");
+    let original = "model = \"mine\"\n# keep me\n";
+    fs::write(&written, original).expect("seed");
+    let out = scratch.hofund(&["agent", "set", "codex", "model=m"]);
+    assert_eq!(out.ok(), "codex: model m");
+    let text = fs::read_to_string(&written).expect("connected");
+    assert!(text.contains("model = \"m\""), "{text}");
+    assert!(text.contains("127.0.0.1:4304"), "{text}");
+    let out = scratch.hofund(&["agent", "set", "codex", "model=m"]);
+    assert_eq!(out.ok(), "codex: model m (unchanged)");
+    let out = scratch.hofund(&["agent", "set", "codex", "model=zzz"]);
+    assert!(out.failed().contains("hofund model list"), "{out:#?}");
+    let out = scratch.hofund(&["agent", "disconnect", "codex"]);
+    assert_eq!(out.ok(), "codex: restored");
+    assert_eq!(fs::read_to_string(&written).expect("restored"), original);
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_agent_clear_model_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:4305", ROUTED);
+    let written = codex_config(&scratch);
+    fs::create_dir_all(written.parent().expect("dir")).expect("mkdir");
+    fs::write(&written, "model = \"mine\"\n# keep me\n").expect("seed");
+    let out = scratch.hofund(&["agent", "set", "codex", "model=default"]);
+    assert_eq!(out.ok(), "codex: model default");
+    assert_eq!(
+        fs::read_to_string(&written).expect("cleared"),
+        "# keep me\n"
+    );
+    let out = scratch.hofund(&["agent", "set", "codex", "model=default"]);
+    assert_eq!(out.ok(), "codex: model default (unchanged)");
+    let out = scratch.hofund(&["agent", "status", "codex"]);
+    assert!(out.ok().contains("disconnected"), "{out:#?}");
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
 fn offline_healthcheck_fails_without_daemon() {
     let port = free_port();
     let scratch = Scratch::new(&format!("127.0.0.1:{port}"), ROUTED);

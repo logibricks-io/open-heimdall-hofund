@@ -6,9 +6,9 @@ use std::sync::{Mutex, OnceLock};
 use hofund_agent::Session;
 use hofund_control_proto::{
     API_VERSION, AgentAction, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
-    AgentListResponse, AgentPlanRequest, AgentPlanResponse, AgentState, AgentStatusResponse,
-    ConfigApplyRequest, ConfigResponse, ControlErrorKind, TokenRotateRequest, TokenRotateResponse,
-    decode_error_envelope, decode_response,
+    AgentListResponse, AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentState,
+    AgentStatusResponse, ConfigApplyRequest, ConfigResponse, ControlErrorKind, TokenRotateRequest,
+    TokenRotateResponse, decode_error_envelope, decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
 use reqwest::StatusCode;
@@ -217,6 +217,66 @@ async fn agent_status_reflects_connected_files() {
         .expect("claude row");
     assert_eq!(row.model.as_deref(), Some("m"));
     assert!(row.paths.contains(&daemon.settings().display().to_string()));
+    daemon.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_model_sets_connects_and_clears() {
+    let daemon = Daemon::start("model").await;
+    daemon.write_settings("{\"model\": \"mine\"}\n");
+    let set = |model: Option<&str>| {
+        let request = AgentModelRequest::new(model.map(str::to_owned));
+        let daemon = &daemon;
+        async move {
+            daemon
+                .post("agents/claude-code/model", &daemon.token(), &request)
+                .await
+        }
+    };
+    let (status, body) = set(Some("m")).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let change: AgentChangeResponse = decode_response(API_VERSION, &body).expect("set model");
+    assert_eq!(change.action, AgentAction::SetModel);
+    assert_eq!(change.model.as_deref(), Some("m"));
+    assert_eq!(
+        change.changed_paths,
+        [daemon.settings().display().to_string()]
+    );
+    assert_eq!(
+        state_of(&daemon.status().await, "claude-code"),
+        AgentState::Connected
+    );
+
+    let (status, body) = set(Some("zzz")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (kind, _, message) = error_kind(&body);
+    assert_eq!(kind, ControlErrorKind::Unprocessable);
+    assert!(message.contains("hofund model list"), "{message}");
+    assert!(!message.contains(&daemon.token()));
+
+    let (status, body) = set(None).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let change: AgentChangeResponse = decode_response(API_VERSION, &body).expect("clear model");
+    assert_eq!(change.model.as_deref(), Some("m"), "the sole route stays");
+    assert!(change.changed_paths.is_empty());
+
+    let (status, _) = daemon
+        .post(
+            "agents/nope/model",
+            &daemon.token(),
+            &AgentModelRequest::new(None),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = daemon
+        .post(
+            "agents/claude-code/disconnect",
+            &daemon.token(),
+            &AgentDisconnectRequest::new(false, None),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(daemon.read_settings(), "{\"model\": \"mine\"}\n");
     daemon.running.shutdown().await;
 }
 

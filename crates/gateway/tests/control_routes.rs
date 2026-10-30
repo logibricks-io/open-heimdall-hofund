@@ -9,9 +9,9 @@ use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use futures_util::StreamExt;
 use hofund_control_proto::{
     API_VERSION, AgentAction, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
-    AgentListResponse, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
-    ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES, ModelListResponse,
-    PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
+    AgentListResponse, AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES,
+    ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
     ProviderTestResponse, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
     StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
     decode_error_envelope,
@@ -149,6 +149,14 @@ impl ControlState for FakeControlState {
         self.reply(format!("disconnect_agent:{id}"))
     }
 
+    fn set_agent_model(
+        &self,
+        id: String,
+        request: AgentModelRequest,
+    ) -> ControlFuture<'_, AgentChangeResponse> {
+        self.reply(format!("set_agent_model:{id}:{:?}", request.model))
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         self.reply(format!("usage:{:?}", query.period))
     }
@@ -249,6 +257,11 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             Method::POST,
             "/v1/hofund/agents/agent/disconnect",
             json!(&AgentDisconnectRequest::new(false, None)),
+        ),
+        (
+            Method::POST,
+            "/v1/hofund/agents/agent/model",
+            json!(&AgentModelRequest::new(Some("m".to_owned()))),
         ),
         (Method::GET, "/v1/hofund/usage?period=day", Vec::new()),
         (
@@ -370,6 +383,7 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "plan_agent:agent",
             "connect_agent:agent",
             "disconnect_agent:agent",
+            "set_agent_model:agent:Some(\"m\")",
             "usage:Day",
             "rotate_token",
             "shutdown",

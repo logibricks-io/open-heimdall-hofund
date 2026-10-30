@@ -82,6 +82,9 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
                 commands::agent_disconnect(config, &name, force).await
             }
             Command::AgentStatus { name } => commands::agent_status(config, name.as_deref()).await,
+            Command::AgentSet { name, model } => {
+                commands::agent_set(config, &name, model.as_deref()).await
+            }
             Command::ProviderList => provider::list(config).await,
             Command::ProviderShow { id } => provider::show(config, &id).await,
             Command::ProviderTest { id, models } => provider::test(config, &id, &models).await,
@@ -139,6 +142,11 @@ enum Command {
     },
     AgentStatus {
         name: Option<String>,
+    },
+    /// `agent set <name> model=<id|default>`; `None` clears the model.
+    AgentSet {
+        name: String,
+        model: Option<String>,
     },
     Subscription(SubscriptionCommand),
     ProviderList,
@@ -210,6 +218,7 @@ enum HelpTopic {
     AgentConnect,
     AgentDisconnect,
     AgentStatus,
+    AgentSet,
     Subscription,
     SubscriptionList,
     SubscriptionSignIn,
@@ -309,6 +318,11 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["agent", "status", name] => Command::AgentStatus {
             name: Some((*name).to_owned()),
         },
+        ["agent", "set", name, pairs @ ..] if !pairs.is_empty() => Command::AgentSet {
+            name: (*name).to_owned(),
+            model: agent_model(pairs)?,
+        },
+        ["agent", "set", ..] => return Err(help_text(HelpTopic::AgentSet)),
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
@@ -409,6 +423,28 @@ fn pick_change(words: &[&str], argument: &str) -> bool {
     matches!(words, ["provider", "models", _, ..]) && !argument.starts_with("--")
 }
 
+/// The model an `agent set` pair list asks for: `Some(id)`, or `None` for
+/// `model=default`. Only the `model` key is supported.
+fn agent_model(pairs: &[&str]) -> Result<Option<String>, String> {
+    let mut model = None;
+    for pair in pairs {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(format!("expected key=value, got `{pair}`"));
+        };
+        if key != "model" {
+            return Err(format!("unsupported key `{key}`; supported: model"));
+        }
+        if value.is_empty() {
+            return Err("model needs a value; model=default clears it".to_owned());
+        }
+        if model.is_some() {
+            return Err("model is given more than once".to_owned());
+        }
+        model = Some((value != "default").then(|| value.to_owned()));
+    }
+    Ok(model.flatten())
+}
+
 fn owned(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
@@ -432,6 +468,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["agent", "connect", ..] => HelpTopic::AgentConnect,
         ["agent", "disconnect", ..] => HelpTopic::AgentDisconnect,
         ["agent", "status", ..] => HelpTopic::AgentStatus,
+        ["agent", "set", ..] => HelpTopic::AgentSet,
         ["agent", ..] => HelpTopic::Agent,
         ["subscription", "list", ..] => HelpTopic::SubscriptionList,
         ["subscription", "sign-in", ..] => HelpTopic::SubscriptionSignIn,
@@ -472,6 +509,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::AgentConnect => AGENT_CONNECT_HELP,
         HelpTopic::AgentDisconnect => AGENT_DISCONNECT_HELP,
         HelpTopic::AgentStatus => AGENT_STATUS_HELP,
+        HelpTopic::AgentSet => AGENT_SET_HELP,
         HelpTopic::Subscription => subscription::SUBSCRIPTION_HELP,
         HelpTopic::SubscriptionList => subscription::LIST_HELP,
         HelpTopic::SubscriptionSignIn => subscription::SIGN_IN_HELP,
@@ -510,6 +548,7 @@ commands:
   agent connect <name> [--dry-run]
   agent disconnect <name> [--force]
   agent status [<name>]
+  agent set <name> model=<id|default>
   subscription list [--json]      list subscriptions and their accounts
   subscription sign-in <id> [--host HOST] [--label LABEL]
   subscription sign-out <id> <account>
@@ -659,6 +698,7 @@ usage: hofund agent list [--config PATH]
        hofund agent connect <name> [--dry-run] [--config PATH]
        hofund agent disconnect <name> [--force] [--config PATH]
        hofund agent status [<name>] [--config PATH]
+       hofund agent set <name> model=<id|default> [--config PATH]
 
 Adapters: claude-code, codex, gemini-cli, opencode.
 ";
@@ -690,6 +730,16 @@ usage: hofund agent status [<name>] [--config PATH]
 
 Print each adapter's state (connected, disconnected, or drifted) and the
 model its files select. <name> limits the output to one adapter.
+";
+
+const AGENT_SET_HELP: &str = "\
+usage: hofund agent set <name> model=<id|default> [--config PATH]
+
+Make <name> use the route model <id>, connecting it first when it is not
+connected. `hofund model list` shows the route models. model=default drops
+the model hofund chose: a connected agent goes back to what connect picks,
+and a disconnected one loses its model key. disconnect still restores the
+model the agent had before connect.
 ";
 
 const PROVIDER_HELP: &str = "\
@@ -1016,6 +1066,55 @@ mod tests {
         assert!(parse(&words(&["nope"])).is_err());
         assert!(parse(&words(&["agent", "status", "--dry-run"])).is_err());
         assert!(parse(&words(&["serve", "--force"])).is_err());
+    }
+
+    #[test]
+    fn agent_set_parses_model_pairs() {
+        let set = |model: Option<&str>| Command::AgentSet {
+            name: "codex".to_owned(),
+            model: model.map(str::to_owned),
+        };
+        assert_eq!(
+            command(&["agent", "set", "codex", "model=m"]),
+            Ok(set(Some("m")))
+        );
+        assert_eq!(
+            command(&["agent", "set", "codex", "model=a=b"]),
+            Ok(set(Some("a=b")))
+        );
+        assert_eq!(
+            command(&["agent", "set", "codex", "model=default"]),
+            Ok(set(None))
+        );
+        assert_eq!(
+            command(&["agent", "set", "codex", "effort=high"]),
+            Err("unsupported key `effort`; supported: model".to_owned())
+        );
+        assert_eq!(
+            command(&["agent", "set", "codex", "model="]),
+            Err("model needs a value; model=default clears it".to_owned())
+        );
+        assert_eq!(
+            command(&["agent", "set", "codex", "model"]),
+            Err("expected key=value, got `model`".to_owned())
+        );
+        assert_eq!(
+            command(&["agent", "set", "codex", "model=a", "model=b"]),
+            Err("model is given more than once".to_owned())
+        );
+        assert_eq!(
+            command(&["agent", "set", "codex"]),
+            Err(help_text(HelpTopic::AgentSet))
+        );
+        assert_eq!(
+            command(&["agent", "set"]),
+            Err(help_text(HelpTopic::AgentSet))
+        );
+        assert_eq!(
+            command(&["help", "agent", "set"]),
+            Ok(Command::Help(HelpTopic::AgentSet))
+        );
+        assert!(command(&["agent", "set", "codex", "model=m", "--force"]).is_err());
     }
 
     fn command(values: &[&str]) -> Result<Command, String> {

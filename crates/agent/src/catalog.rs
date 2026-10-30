@@ -199,8 +199,31 @@ struct Engine {
     locations: Vec<EngineLocation>,
     sets: Vec<EngineSet>,
     model: Option<ModelKey>,
+    model_prefix: Option<&'static str>,
     visible: Visible,
     route: AgentRoute,
+}
+
+/// What an apply does with the agent's model setting.
+#[derive(Clone, Copy)]
+enum Choice<'a> {
+    /// Keep a model the user picked; fill it only when it is unset.
+    Keep,
+    /// Write this route model.
+    Set(&'a str),
+    /// Drop the model so the connect default applies.
+    Clear,
+}
+
+/// One managed file as an apply would write it.
+struct Rendered {
+    path: PathBuf,
+    kind: FileKind,
+    before: Option<Vec<u8>>,
+    after: Vec<u8>,
+    assignments: Vec<Assignment>,
+    /// Model keys whose snapshot value must match the written file.
+    pinned: Vec<(&'static str, Option<String>)>,
 }
 
 impl Engine {
@@ -258,6 +281,7 @@ impl Engine {
             locations,
             sets,
             model,
+            model_prefix: description.model_prefix(),
             visible: description.visible(),
             route: description.route(),
         })
@@ -284,9 +308,94 @@ impl Engine {
     }
 
     fn plan(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
-        let mut changes = Vec::new();
+        Ok(plan_of(&self.render_all(target, Choice::Keep)?))
+    }
+
+    fn apply(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
+        self.apply_with(target, Choice::Keep)
+    }
+
+    fn apply_with(&self, target: &GatewayTarget, choice: Choice<'_>) -> Result<Plan, AgentError> {
+        let rendered = self.render_all(target, choice)?;
+        let plan = plan_of(&rendered);
+        for change in plan.changes() {
+            backup_once(change.path())?;
+        }
+        for change in plan.changes() {
+            write_atomic(change.path(), change.after())?;
+        }
+        for file in rendered {
+            if marker_present(&file.path) {
+                snapshot_wrote(&file.path, file.kind, &file.assignments, &file.pinned)?;
+            }
+        }
+        Ok(plan)
+    }
+
+    fn set_model(&self, target: &GatewayTarget, model: Option<&str>) -> Result<Plan, AgentError> {
+        let Some(key) = self.model else {
+            return Err(AgentError::rejected(format!(
+                "`{}` has no model setting",
+                self.id
+            )));
+        };
+        let Some(id) = model else {
+            return self.clear_model(target, key);
+        };
+        if !self.models(target).iter().any(|route| route == id) {
+            return Err(AgentError::rejected(format!(
+                "`{id}` is not a route model `{}` can use; `hofund model list` shows them",
+                self.id
+            )));
+        }
+        self.apply_with(target, Choice::Set(id))
+    }
+
+    /// Drops the model key. A connected agent is re-applied so the snapshot
+    /// follows; a disconnected one is edited in place without a backup.
+    fn clear_model(&self, target: &GatewayTarget, model: ModelKey) -> Result<Plan, AgentError> {
+        let chosen = self
+            .chosen()?
+            .into_iter()
+            .find(|chosen| chosen.file == model.file)
+            .ok_or_else(|| {
+                AgentError::message(format!("`{}` has no config location", model.file))
+            })?;
+        if marker_present(&chosen.path) {
+            return self.apply_with(target, Choice::Clear);
+        }
+        let Some(before) = read_optional(&chosen.path)? else {
+            return Ok(Plan::new(Vec::new()));
+        };
+        let text = utf8(&chosen.path, &before)?;
+        let current =
+            get(chosen.kind, text, model.key).map_err(|error| annotate(&chosen.path, error))?;
+        if current.is_none() {
+            return Ok(Plan::new(Vec::new()));
+        }
+        let after = remove_keys(chosen.kind, text, &[model.key])
+            .map_err(|error| annotate(&chosen.path, error))?;
+        write_atomic(&chosen.path, &after)?;
+        let diff = unified_diff(&chosen.path, &before, &after);
+        Ok(Plan::new(vec![FileChange::new(
+            chosen.path,
+            before,
+            after,
+            diff,
+        )]))
+    }
+
+    fn render_all(
+        &self,
+        target: &GatewayTarget,
+        choice: Choice<'_>,
+    ) -> Result<Vec<Rendered>, AgentError> {
+        let mut rendered = Vec::new();
         for Chosen {
-            path, kind, sets, ..
+            file,
+            path,
+            kind,
+            sets,
         } in self.chosen()?
         {
             let before = read_optional(&path)?;
@@ -294,32 +403,118 @@ impl Engine {
                 Some(bytes) => Some(utf8(&path, bytes)?),
                 None => None,
             };
-            let assignments = self.assignments_for(&sets, kind, target, text);
-            let after = render(kind, text, &assignments).map_err(|error| annotate(&path, error))?;
-            let before_bytes = before.unwrap_or_default();
-            if before_bytes != after {
-                let diff = unified_diff(&path, &before_bytes, &after);
-                changes.push(FileChange::new(path, before_bytes, after, diff));
+            let model = self.model.filter(|model| model.file == file);
+            let stripped = match (choice, model, text) {
+                (Choice::Clear, Some(model), Some(text)) => {
+                    let keys = self.model_keys(model);
+                    let bytes =
+                        remove_keys(kind, text, &keys).map_err(|error| annotate(&path, error))?;
+                    Some(utf8(&path, &bytes)?.to_owned())
+                }
+                _ => None,
+            };
+            let base = stripped.as_deref().or(text);
+            let mut assignments = self.assignments_for(&sets, kind, target, base, choice);
+            if let (Choice::Set(id), Some(model)) = (choice, model)
+                && !assignments
+                    .iter()
+                    .any(|assignment| assignment.key == model.key)
+            {
+                assignments.push(Assignment {
+                    key: model.key,
+                    value: self.prefixed(id),
+                    raw_json: false,
+                });
             }
+            // Clear renders over the original text so the keys it keeps stay
+            // in place, then drops the model keys no set wrote back.
+            let mut after =
+                render(kind, text, &assignments).map_err(|error| annotate(&path, error))?;
+            if let (Choice::Clear, Some(model)) = (choice, model) {
+                let leftover: Vec<&'static str> = self
+                    .model_keys(model)
+                    .into_iter()
+                    .filter(|key| !assignments.iter().any(|assignment| assignment.key == *key))
+                    .collect();
+                let written = utf8(&path, &after)?.to_owned();
+                after = remove_keys(kind, &written, &leftover)
+                    .map_err(|error| annotate(&path, error))?;
+            }
+            let pinned = match model {
+                Some(model) => self.pinned(&path, kind, text, &after, model, choice)?,
+                None => Vec::new(),
+            };
+            rendered.push(Rendered {
+                path,
+                kind,
+                before,
+                after,
+                assignments,
+                pinned,
+            });
         }
-        Ok(Plan::new(changes))
+        Ok(rendered)
     }
 
-    fn apply(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
-        let plan = self.plan(target)?;
-        for change in plan.changes() {
-            backup_once(change.path())?;
-        }
-        let snapshots = self.snapshot_inputs(target)?;
-        for change in plan.changes() {
-            write_atomic(change.path(), change.after())?;
-        }
-        for (path, kind, assignments) in snapshots {
-            if marker_present(&path) {
-                snapshot_wrote(&path, kind, &assignments)?;
+    /// The model keys whose snapshot value follows the written file.
+    ///
+    /// Set and clear decide the model and its tiers. A plain connect keeps a
+    /// model an earlier set or clear decided, which is when the live value
+    /// still matches the previous snapshot.
+    fn pinned(
+        &self,
+        path: &Path,
+        kind: FileKind,
+        text: Option<&str>,
+        after: &[u8],
+        model: ModelKey,
+        choice: Choice<'_>,
+    ) -> Result<Vec<(&'static str, Option<String>)>, AgentError> {
+        let keys = match choice {
+            Choice::Set(_) | Choice::Clear => self.model_keys(model),
+            Choice::Keep => {
+                let Some(earlier) = read_optional(&sibling_wrote(path))? else {
+                    return Ok(Vec::new());
+                };
+                let earlier = utf8(path, &earlier)?;
+                let current = match text {
+                    Some(text) => {
+                        get(kind, text, model.key).map_err(|error| annotate(path, error))?
+                    }
+                    None => None,
+                };
+                if get(kind, earlier, model.key).map_err(|error| annotate(path, error))? != current
+                {
+                    return Ok(Vec::new());
+                }
+                vec![model.key]
             }
-        }
-        Ok(plan)
+        };
+        let after = utf8(path, after)?;
+        keys.into_iter()
+            .map(|key| {
+                let value = get(kind, after, key).map_err(|error| annotate(path, error))?;
+                Ok((key, value))
+            })
+            .collect()
+    }
+
+    /// The model key and the tier keys that follow it in the model file.
+    fn model_keys(&self, model: ModelKey) -> Vec<&'static str> {
+        let mut keys = vec![model.key];
+        keys.extend(
+            self.sets
+                .iter()
+                .filter(|set| {
+                    set.file == model.file && matches!(set.slot, ApiSlot::ModelTier { .. })
+                })
+                .map(|set| set.key),
+        );
+        keys
+    }
+
+    fn prefixed(&self, id: &str) -> String {
+        format!("{}{id}", self.model_prefix.unwrap_or(""))
     }
 
     fn revert(&self) -> Result<(), AgentError> {
@@ -360,7 +555,8 @@ impl Engine {
             };
             let text = utf8(&path, &bytes)?;
             for set in sets {
-                let Some(expected) = self.slot_value(set, kind, target, Some(text)) else {
+                let Some(expected) = self.slot_value(set, kind, target, Some(text), Choice::Keep)
+                else {
                     continue;
                 };
                 let current = get(kind, text, set.key).map_err(|error| annotate(&path, error))?;
@@ -401,6 +597,7 @@ impl Engine {
                 path,
                 location.kind,
                 self.owned_keys(location.file),
+                self.tracked_key(location.file),
                 &preserve,
                 self.id,
             )?);
@@ -425,7 +622,8 @@ impl Engine {
                 continue;
             };
             let text = utf8(&chosen.path, &before)?;
-            let assignments = self.assignments_for(&token_sets, chosen.kind, target, Some(text));
+            let assignments =
+                self.assignments_for(&token_sets, chosen.kind, target, Some(text), Choice::Keep);
             let after = render(chosen.kind, Some(text), &assignments)
                 .map_err(|error| annotate(&chosen.path, error))?;
             if before != after {
@@ -453,23 +651,6 @@ impl Engine {
                 .map_err(|error| annotate(&chosen.path, error));
         }
         Ok(None)
-    }
-
-    fn snapshot_inputs(
-        &self,
-        target: &GatewayTarget,
-    ) -> Result<Vec<(PathBuf, FileKind, Vec<Assignment>)>, AgentError> {
-        let mut snapshots = Vec::new();
-        for chosen in self.chosen()? {
-            let bytes = read_optional(&chosen.path)?;
-            let text = match &bytes {
-                Some(bytes) => Some(utf8(&chosen.path, bytes)?),
-                None => None,
-            };
-            let assignments = self.assignments_for(&chosen.sets, chosen.kind, target, text);
-            snapshots.push((chosen.path, chosen.kind, assignments));
-        }
-        Ok(snapshots)
     }
 
     fn chosen(&self) -> Result<Vec<Chosen<'_>>, AgentError> {
@@ -526,10 +707,11 @@ impl Engine {
         kind: FileKind,
         target: &GatewayTarget,
         existing: Option<&str>,
+        choice: Choice<'_>,
     ) -> Vec<Assignment> {
         sets.iter()
             .filter_map(|set| {
-                let value = self.slot_value(set, kind, target, existing)?;
+                let value = self.slot_value(set, kind, target, existing, choice)?;
                 Some(Assignment {
                     key: set.key,
                     value,
@@ -545,21 +727,32 @@ impl Engine {
         kind: FileKind,
         target: &GatewayTarget,
         existing: Option<&str>,
+        choice: Choice<'_>,
     ) -> Option<String> {
         let models = self.models(target);
+        let chosen = match choice {
+            Choice::Set(id) => Some(id),
+            Choice::Keep | Choice::Clear => None,
+        };
         let gateway = self.route == AgentRoute::Gateway;
         match &set.slot {
             ApiSlot::Origin if gateway => Some(origin(target.base_url())),
             ApiSlot::V1 if gateway => Some(format!("{}/v1", origin(target.base_url()))),
             ApiSlot::Token if gateway => Some(target.token().to_owned()),
             ApiSlot::Literal(text) => Some((*text).to_owned()),
-            ApiSlot::ModelIfUnset { from } => {
-                model_if_unset(kind, existing, set.key, *from, &models)
-            }
+            ApiSlot::ModelIfUnset { from } => match chosen {
+                Some(id) if self.model.is_some_and(|model| model.key == set.key) => {
+                    Some(self.prefixed(id))
+                }
+                _ => model_if_unset(kind, existing, set.key, *from, &models),
+            },
             ApiSlot::ModelTier {
                 when_model_matches, ..
             } => {
-                let main = self.tier_model(set, kind, existing, &models)?;
+                let main = match chosen {
+                    Some(id) => id.to_owned(),
+                    None => self.tier_model(set, kind, existing, &models)?,
+                };
                 if when_model_matches
                     .is_some_and(|needle| !main.to_ascii_lowercase().contains(needle.as_str()))
                 {
@@ -608,6 +801,17 @@ impl Engine {
             .filter(|set| set.file == file)
             .map(|set| set.key)
             .collect()
+    }
+
+    /// The model key when no set owns it, so disconnect restores it only
+    /// when hofund changed it.
+    fn tracked_key(&self, file: &str) -> Option<&'static str> {
+        let model = self.model?;
+        let owned = self
+            .sets
+            .iter()
+            .any(|set| set.file == file && set.key == model.key);
+        (model.file == file && !owned).then_some(model.key)
     }
 }
 
@@ -658,6 +862,15 @@ impl AgentAdapter for Compiled {
         target: &GatewayTarget,
     ) -> Result<Vec<PathBuf>, AgentError> {
         self.engine(session)?.refresh_token(target)
+    }
+
+    fn set_model(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+        model: Option<&str>,
+    ) -> Result<Plan, AgentError> {
+        self.engine(session)?.set_model(target, model)
     }
 
     fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError> {
@@ -732,22 +945,70 @@ fn origin(base_url: &str) -> String {
     base_url.trim_end_matches('/').to_owned()
 }
 
+fn plan_of(rendered: &[Rendered]) -> Plan {
+    let mut changes = Vec::new();
+    for file in rendered {
+        let before = file.before.clone().unwrap_or_default();
+        if before != file.after {
+            let diff = unified_diff(&file.path, &before, &file.after);
+            changes.push(FileChange::new(
+                file.path.clone(),
+                before,
+                file.after.clone(),
+                diff,
+            ));
+        }
+    }
+    Plan::new(changes)
+}
+
 /// Records the bytes apply would write onto the pre-connect file.
 ///
 /// User edits are not part of this snapshot. Disconnect compares the live file
 /// with it, per key, so a later edit is not treated as something hofund wrote.
+/// Each `pinned` key then takes the value apply wrote, or is removed, so a
+/// model hofund set or cleared is restored on disconnect.
 fn snapshot_wrote(
     path: &Path,
     kind: FileKind,
     assignments: &[Assignment],
+    pinned: &[(&'static str, Option<String>)],
 ) -> Result<(), AgentError> {
     let backup = read_optional(&sibling_bak(path))?;
     let text = match &backup {
         Some(bytes) => Some(utf8(path, bytes)?),
         None => None,
     };
-    let wrote = render(kind, text, assignments).map_err(|error| annotate(path, error))?;
+    let mut wrote = render(kind, text, assignments).map_err(|error| annotate(path, error))?;
+    if !pinned.is_empty() {
+        let values: Vec<Assignment> = pinned
+            .iter()
+            .filter_map(|(key, value)| {
+                let value = value.clone()?;
+                Some(Assignment {
+                    key,
+                    raw_json: is_json_value(&value),
+                    value,
+                })
+            })
+            .collect();
+        let removed: Vec<&str> = pinned
+            .iter()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| *key)
+            .collect();
+        let set = render(kind, Some(utf8(path, &wrote)?), &values)
+            .map_err(|error| annotate(path, error))?;
+        wrote = remove_keys(kind, utf8(path, &set)?, &removed)
+            .map_err(|error| annotate(path, error))?;
+    }
     write_atomic(&sibling_wrote(path), &wrote)
+}
+
+/// Whether a value read back with `get` is JSON text rather than a string.
+fn is_json_value(value: &str) -> bool {
+    let value = value.trim_start();
+    value.starts_with('{') || value.starts_with('[')
 }
 
 /// Applies a token refresh to the connect snapshot, not to a user-edited copy.
@@ -789,6 +1050,7 @@ fn merge_owned_keys(
     path: &Path,
     kind: FileKind,
     keys: Vec<&'static str>,
+    tracked: Option<&'static str>,
     preserve: &[PathBuf],
     id: &str,
 ) -> Result<Vec<String>, AgentError> {
@@ -817,7 +1079,7 @@ fn merge_owned_keys(
     let mut restore = Vec::new();
     let mut remove = Vec::new();
     let mut warnings = Vec::new();
-    for key in keys {
+    for key in keys.into_iter().chain(tracked) {
         let current_value =
             get(kind, current_text, key).map_err(|error| refused(id, path, &error.to_string()))?;
         let wrote_value =
@@ -828,12 +1090,14 @@ fn merge_owned_keys(
             }
             None => None,
         };
+        if tracked == Some(key) && wrote_value == original {
+            continue;
+        }
         if current_value == wrote_value {
             match original {
                 Some(value) => restore.push(Assignment {
                     key,
-                    raw_json: value.trim_start().starts_with('{')
-                        || value.trim_start().starts_with('['),
+                    raw_json: is_json_value(&value),
                     value,
                 }),
                 None => remove.push(key),

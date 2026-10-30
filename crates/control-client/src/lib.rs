@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ConfigApplyRequest, ConfigResponse,
-    ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
-    HealthResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
-    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, ReloadRequest,
-    RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, Topic, UsagePeriod, UsageQuery, UsageResponse, decode_error_envelope,
-    decode_response,
+    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
+    ControlError, ErrorEnvelope, EventEnvelope, HealthResponse, MAX_RESPONSE_BODY_BYTES,
+    ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
+    ProviderTestResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UsagePeriod, UsageQuery,
+    UsageResponse, decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -387,6 +387,20 @@ impl Client {
         self.request(
             http::Method::POST,
             &format!("/v1/hofund/agents/{}/disconnect", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Sets or clears the model an agent uses.
+    pub async fn set_agent_model(
+        &self,
+        id: &str,
+        request: AgentModelRequest,
+    ) -> Result<AgentChangeResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/model", encode_segment(id)),
             Some(json_body(&request)?),
         )
         .await
@@ -966,7 +980,9 @@ mod route_tests {
             "/v1/hofund/agents/agent-1/plan" => {
                 serde_json::to_vec(&proto::AgentPlanResponse::default())
             }
-            "/v1/hofund/agents/agent-1/connect" | "/v1/hofund/agents/agent-1/disconnect" => {
+            "/v1/hofund/agents/agent-1/connect"
+            | "/v1/hofund/agents/agent-1/disconnect"
+            | "/v1/hofund/agents/agent%2F1/model" => {
                 serde_json::to_vec(&proto::AgentChangeResponse::default())
             }
             "/v1/hofund/usage" => serde_json::to_vec(&proto::UsageResponse::default()),
@@ -1073,10 +1089,10 @@ mod route_tests {
     #[tokio::test]
     async fn every_typed_method_sends_its_verb_path_headers_and_body() {
         use hofund_control_proto::{
-            AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentPlanRequest,
-            ConfigApplyRequest, ConfigValidateRequest, PicksSetRequest, ProviderTestRequest,
-            ReloadRequest, ShutdownRequest, TokenRotateRequest, UsagePeriod, UsageQuery,
-            decode_request,
+            AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentModelRequest,
+            AgentPlanRequest, ConfigApplyRequest, ConfigValidateRequest, PicksSetRequest,
+            ProviderTestRequest, ReloadRequest, ShutdownRequest, TokenRotateRequest, UsagePeriod,
+            UsageQuery, decode_request,
         };
 
         let (address, recorded, server) = recording_server().await;
@@ -1092,6 +1108,7 @@ mod route_tests {
         let validate_request = ConfigValidateRequest::new("listen = \"127.0.0.1:0\"\n");
         let apply_request = ConfigApplyRequest::new("a".repeat(64), "listen = \"127.0.0.1:0\"\n");
         let reload_request = ReloadRequest::new("b".repeat(64));
+        let model_request = AgentModelRequest::new(Some("model-a".to_owned()));
 
         client.health().await.expect("health");
         client.status().await.expect("status");
@@ -1153,6 +1170,10 @@ mod route_tests {
             .reload_config(reload_request.clone())
             .await
             .expect("reload config");
+        client
+            .set_agent_model("agent/1", model_request.clone())
+            .await
+            .expect("set agent model");
         server.abort();
 
         let recorded = std::mem::take(&mut *recorded.lock().expect("recorded"));
@@ -1187,6 +1208,7 @@ mod route_tests {
                 (http::Method::POST, "/v1/hofund/config/validate"),
                 (http::Method::POST, "/v1/hofund/config/apply"),
                 (http::Method::POST, "/v1/hofund/config/reload"),
+                (http::Method::POST, "/v1/hofund/agents/agent%2F1/model"),
             ]
         );
 
@@ -1254,6 +1276,10 @@ mod route_tests {
         assert_eq!(
             decode_request::<ReloadRequest>(1, body(20)).expect("reload body"),
             reload_request
+        );
+        assert_eq!(
+            decode_request::<AgentModelRequest>(1, body(21)).expect("model body"),
+            model_request
         );
         assert!(
             recorded

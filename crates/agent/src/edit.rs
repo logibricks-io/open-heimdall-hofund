@@ -177,6 +177,14 @@ pub(crate) fn json_root(text: &str) -> Result<Value, AgentError> {
 fn remove_json(original: &str, keys: &[&str]) -> Result<String, AgentError> {
     let mut root = json_root(original)?;
     for key in keys {
+        // `model.name` may still be the older string `model`.
+        if *key == "model.name"
+            && let Some(object) = root.as_object_mut()
+            && object.get("model").is_some_and(Value::is_string)
+        {
+            object.remove("model");
+            continue;
+        }
         unset_json(&mut root, &split_key(key))?;
     }
     pretty_json(&root)
