@@ -152,7 +152,7 @@ pub(crate) fn one_shot_client(config: &Path) -> Result<Client, String> {
 /// The bearer token a running daemon would accept, read without creating
 /// the token file. A daemon creates the file before it publishes discovery,
 /// so a missing file only means no daemon and an empty token is harmless.
-fn local_token(config: &Path) -> String {
+pub(crate) fn local_token(config: &Path) -> String {
     hofund_config::load_path(config)
         .ok()
         .and_then(|loaded| {

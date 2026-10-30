@@ -1667,6 +1667,7 @@ dependencies = [
  "hofund-daemon",
  "hofund-secrets",
  "http",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hofund events tail [--requests]` (L8d): prints daemon events as JSON
+  lines. With no daemon running it starts `hofundd` in the background,
+  logging to `.hofund/daemon-<config-id>.log` beside the config; that daemon
+  keeps running after the tail exits until `hofund shutdown`. The tail
+  reconnects after a token rotation without repeating the snapshot and exits
+  0 when the daemon shuts down.
 - `hofund provider list`, `show`, `test`, `refresh` (alias `fetch`), and
   `models`, and `hofund model list` and `show` (L8b). They use the running
   daemon or, with none, one-shot `hofundd`. Pick edits retry a stale
