@@ -65,6 +65,29 @@ pub enum SlotToml {
     ModelTier(ModelTierSlot),
     Json(JsonSlot),
     ModelArray(ModelArraySlot),
+    Append(AppendSlot),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppendSlot {
+    pub append: AppendToml,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppendToml {
+    pub owner: Vec<OwnerToml>,
+    pub each: String,
+    pub fields: Vec<ModelFieldToml>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerToml {
+    pub key: String,
+    pub equals: Option<String>,
+    pub prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -92,6 +115,8 @@ pub struct ModelFieldToml {
     pub value: Option<String>,
     pub literal: Option<String>,
     pub json: Option<String>,
+    pub prefixed: Option<String>,
+    pub models: Option<Vec<ModelFieldToml>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -335,13 +360,15 @@ fn validate(
                 "catalog_models requires a JSON file",
             ));
         }
-        if matches!(&set.slot, SlotToml::Json(_) | SlotToml::ModelArray(_))
-            && !matches!(file.kind.as_str(), "json" | "yaml")
+        if matches!(
+            &set.slot,
+            SlotToml::Json(_) | SlotToml::ModelArray(_) | SlotToml::Append(_)
+        ) && !matches!(file.kind.as_str(), "json" | "yaml")
         {
             return Err(error(
                 source,
                 format!("{field}.slot"),
-                "json and model_array require a JSON or YAML file",
+                "json, model_array, and append require a JSON or YAML file",
             ));
         }
         validate_slot(&set.slot, source, &field)?;
@@ -416,9 +443,13 @@ fn validate_slot(slot: &SlotToml, source: &str, field: &str) -> Result<(), Strin
             Ok(())
         }
         SlotToml::Json(slot) => valid_json(&slot.json, source, &format!("{field}.slot.json")),
-        SlotToml::ModelArray(ModelArraySlot { model_array }) => {
-            validate_model_array(model_array, source, field)
-        }
+        SlotToml::ModelArray(ModelArraySlot { model_array }) => validate_fields(
+            &model_array.fields,
+            true,
+            source,
+            &format!("{field}.slot.model_array.fields"),
+        ),
+        SlotToml::Append(AppendSlot { append }) => validate_append(append, source, field),
         _ => Ok(()),
     }
 }
@@ -429,13 +460,19 @@ fn valid_json(text: &str, source: &str, field: &str) -> Result<(), String> {
         .map_err(|_| error(source, field, "must be valid JSON"))
 }
 
-fn validate_model_array(array: &ModelArray, source: &str, field: &str) -> Result<(), String> {
-    let field = format!("{field}.slot.model_array.fields");
-    if array.fields.is_empty() {
+/// Checks the fields of one written object. `per_model` is whether a model id
+/// is known for the object, so `id` and `prefixed` are allowed.
+fn validate_fields(
+    fields: &[ModelFieldToml],
+    per_model: bool,
+    source: &str,
+    field: &str,
+) -> Result<(), String> {
+    if fields.is_empty() {
         return Err(error(source, field, "must not be empty"));
     }
     let mut keys = BTreeSet::new();
-    for (index, item) in array.fields.iter().enumerate() {
+    for (index, item) in fields.iter().enumerate() {
         let item_field = format!("{field}[{index}]");
         if item.key.is_empty() {
             return Err(error(
@@ -451,24 +488,111 @@ fn validate_model_array(array: &ModelArray, source: &str, field: &str) -> Result
                 "duplicates another field",
             ));
         }
-        match (&item.value, &item.literal, &item.json) {
-            (Some(value), None, None) if value == "id" => {}
-            (Some(_), None, None) => {
+        match (
+            &item.value,
+            &item.literal,
+            &item.json,
+            &item.prefixed,
+            &item.models,
+        ) {
+            (Some(value), None, None, None, None) => match value.as_str() {
+                "id" if per_model => {}
+                "v1" | "origin" | "token" => {}
+                "id" => {
+                    return Err(error(
+                        source,
+                        format!("{item_field}.value"),
+                        "`id` needs one object per model",
+                    ));
+                }
+                _ => {
+                    return Err(error(
+                        source,
+                        format!("{item_field}.value"),
+                        "unknown value; expected `id`, `v1`, `origin`, or `token`",
+                    ));
+                }
+            },
+            (None, Some(_), None, None, None) => {}
+            (None, None, Some(text), None, None) => {
+                valid_json(text, source, &format!("{item_field}.json"))?;
+            }
+            (None, None, None, Some(_), None) if per_model => {}
+            (None, None, None, Some(_), None) => {
                 return Err(error(
                     source,
-                    format!("{item_field}.value"),
-                    "unknown value; expected `id`",
+                    format!("{item_field}.prefixed"),
+                    "needs one object per model",
                 ));
             }
-            (None, Some(_), None) => {}
-            (None, None, Some(text)) => valid_json(text, source, &format!("{item_field}.json"))?,
+            (None, None, None, None, Some(nested)) => {
+                validate_fields(nested, true, source, &format!("{item_field}.models"))?;
+            }
             _ => {
                 return Err(error(
                     source,
                     item_field,
-                    "needs exactly one of value, literal, or json",
+                    "needs exactly one of value, literal, json, prefixed, or models",
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Checks an append slot. Every owner test must hold for each object hofund
+/// writes, or a second connect would add the objects again.
+fn validate_append(append: &AppendToml, source: &str, field: &str) -> Result<(), String> {
+    let field = format!("{field}.slot.append");
+    let per_model = match append.each.as_str() {
+        "model" => true,
+        "once" => false,
+        _ => {
+            return Err(error(
+                source,
+                format!("{field}.each"),
+                "unknown value; expected `model` or `once`",
+            ));
+        }
+    };
+    validate_fields(
+        &append.fields,
+        per_model,
+        source,
+        &format!("{field}.fields"),
+    )?;
+    if append.owner.is_empty() {
+        return Err(error(source, format!("{field}.owner"), "must not be empty"));
+    }
+    for (index, test) in append.owner.iter().enumerate() {
+        let test_field = format!("{field}.owner[{index}]");
+        let (text, prefix) = match (&test.equals, &test.prefix) {
+            (Some(text), None) => (text, false),
+            (None, Some(text)) => (text, true),
+            _ => {
+                return Err(error(
+                    source,
+                    test_field,
+                    "needs exactly one of equals or prefix",
+                ));
+            }
+        };
+        if test.key.is_empty() || text.is_empty() {
+            return Err(error(source, test_field, "key and text must not be empty"));
+        }
+        let written = append.fields.iter().find(|item| item.key == test.key);
+        let holds = written.is_some_and(|item| match (&item.literal, &item.prefixed) {
+            (Some(literal), _) if prefix => literal.starts_with(text.as_str()),
+            (Some(literal), _) => literal == text,
+            (None, Some(start)) => prefix && start.starts_with(text.as_str()),
+            (None, None) => false,
+        });
+        if !holds {
+            return Err(error(
+                source,
+                test_field,
+                "must hold for every object written; test a literal or prefixed field",
+            ));
         }
     }
     Ok(())
@@ -479,7 +603,7 @@ fn gateway_slot(slot: &SlotToml) -> bool {
         SlotToml::Name(name) => {
             matches!(name.as_str(), "origin" | "v1" | "token" | "catalog_models")
         }
-        SlotToml::ModelArray(_) => true,
+        SlotToml::ModelArray(_) | SlotToml::Append(_) => true,
         _ => false,
     }
 }
@@ -652,29 +776,70 @@ fn render_slot(slot: &SlotToml) -> String {
             )
         }
         SlotToml::Json(slot) => format!("hofund_plugin_api::Slot::Json({:?})", slot.json),
-        SlotToml::ModelArray(slot) => {
-            let fields: Vec<String> = slot
-                .model_array
-                .fields
+        SlotToml::ModelArray(slot) => format!(
+            "hofund_plugin_api::Slot::ModelArray {{ fields: &[{}] }}",
+            render_fields(&slot.model_array.fields)
+        ),
+        SlotToml::Append(slot) => {
+            let owner: Vec<String> = slot
+                .append
+                .owner
                 .iter()
-                .map(|item| match (&item.literal, &item.json) {
+                .map(|test| match (&test.equals, &test.prefix) {
                     (Some(text), _) => format!(
-                        "hofund_plugin_api::ModelField::literal({:?}, {text:?})",
-                        item.key
+                        "hofund_plugin_api::OwnerTest::equals({:?}, {text:?})",
+                        test.key
                     ),
-                    (None, Some(text)) => format!(
-                        "hofund_plugin_api::ModelField::json({:?}, {text:?})",
-                        item.key
+                    (None, text) => format!(
+                        "hofund_plugin_api::OwnerTest::prefix({:?}, {:?})",
+                        test.key,
+                        text.as_deref().unwrap_or_default()
                     ),
-                    (None, None) => format!("hofund_plugin_api::ModelField::id({:?})", item.key),
                 })
                 .collect();
             format!(
-                "hofund_plugin_api::Slot::ModelArray {{ fields: &[{}] }}",
-                fields.join(", ")
+                "hofund_plugin_api::Slot::Append {{ owner: &[{}], each_model: {}, fields: &[{}] }}",
+                owner.join(", "),
+                slot.append.each == "model",
+                render_fields(&slot.append.fields)
             )
         }
     }
+}
+
+/// The `ModelField` constructors for `fields`, comma separated.
+fn render_fields(fields: &[ModelFieldToml]) -> String {
+    let rendered: Vec<String> = fields
+        .iter()
+        .map(|item| {
+            let key = &item.key;
+            match (&item.value, &item.literal, &item.json, &item.prefixed, &item.models) {
+                (_, Some(text), ..) => {
+                    format!("hofund_plugin_api::ModelField::literal({key:?}, {text:?})")
+                }
+                (_, None, Some(text), ..) => {
+                    format!("hofund_plugin_api::ModelField::json({key:?}, {text:?})")
+                }
+                (_, None, None, Some(prefix), _) => {
+                    format!("hofund_plugin_api::ModelField::prefixed({key:?}, {prefix:?})")
+                }
+                (_, None, None, None, Some(nested)) => format!(
+                    "hofund_plugin_api::ModelField::models({key:?}, {{ const FIELDS: &[hofund_plugin_api::ModelField] = &[{}]; FIELDS }})",
+                    render_fields(nested)
+                ),
+                (value, None, None, None, None) => format!(
+                    "hofund_plugin_api::ModelField::{}({key:?})",
+                    match value.as_deref() {
+                        Some("v1") => "v1",
+                        Some("origin") => "origin",
+                        Some("token") => "token",
+                        _ => "id",
+                    }
+                ),
+            }
+        })
+        .collect();
+    rendered.join(", ")
 }
 
 #[cfg(test)]
@@ -857,6 +1022,186 @@ key = "effort"
         let none = |slot: &str| with_slot(slot).replace("route = \"gateway\"", "route = \"none\"");
         reject(none(array), "route `none`");
         validate(&none("{ json = \"false\" }")).expect("json is not a gateway slot");
+    }
+
+    #[test]
+    fn append_slots_are_validated_and_rendered() {
+        let each = "{ append = { each = \"model\", owner = [ { key = \"id\", prefix = \"custom:hofund/\" } ], fields = [ { key = \"model\", value = \"id\" }, { key = \"id\", prefixed = \"custom:hofund/\" }, { key = \"baseUrl\", value = \"v1\" }, { key = \"apiKey\", value = \"token\" } ] } }";
+        let source = render(&validate(&with_slot(each)).expect("append each")).1;
+        assert!(
+            source.contains(
+                "hofund_plugin_api::Slot::Append { owner: &[hofund_plugin_api::OwnerTest::prefix(\"id\", \"custom:hofund/\")], each_model: true, fields: &[hofund_plugin_api::ModelField::id(\"model\"), hofund_plugin_api::ModelField::prefixed(\"id\", \"custom:hofund/\"), hofund_plugin_api::ModelField::v1(\"baseUrl\"), hofund_plugin_api::ModelField::token(\"apiKey\")] }"
+            ),
+            "{source}"
+        );
+        let once = "{ append = { each = \"once\", owner = [ { key = \"vendor\", equals = \"custom\" }, { key = \"name\", prefix = \"hof\" } ], fields = [ { key = \"vendor\", literal = \"custom\" }, { key = \"name\", literal = \"hofund\" }, { key = \"url\", value = \"origin\" }, { key = \"models\", models = [ { key = \"id\", value = \"id\" }, { key = \"label\", prefixed = \"h/\" } ] } ] } }";
+        let source = render(&validate(&with_slot(once)).expect("append once")).1;
+        assert!(
+            source.contains(
+                "hofund_plugin_api::Slot::Append { owner: &[hofund_plugin_api::OwnerTest::equals(\"vendor\", \"custom\"), hofund_plugin_api::OwnerTest::prefix(\"name\", \"hof\")], each_model: false, fields: &[hofund_plugin_api::ModelField::literal(\"vendor\", \"custom\"), hofund_plugin_api::ModelField::literal(\"name\", \"hofund\"), hofund_plugin_api::ModelField::origin(\"url\"), hofund_plugin_api::ModelField::models(\"models\", { const FIELDS: &[hofund_plugin_api::ModelField] = &[hofund_plugin_api::ModelField::id(\"id\"), hofund_plugin_api::ModelField::prefixed(\"label\", \"h/\")]; FIELDS })] }"
+            ),
+            "{source}"
+        );
+        let toml = with_slot(each)
+            .replace("kind = \"json\"", "kind = \"toml\"")
+            .replace("config.json", "config.toml");
+        reject(toml, "require a JSON or YAML file");
+        let none = with_slot(each).replace("route = \"gateway\"", "route = \"none\"");
+        reject(none, "route `none`");
+
+        let owner = "owner = [ { key = \"name\", equals = \"hofund\" } ]";
+        let fields = "fields = [ { key = \"name\", literal = \"hofund\" } ]";
+        let slot = |each: &str, owner: &str, fields: &str| {
+            with_slot(&format!(
+                "{{ append = {{ each = \"{each}\", {owner}, {fields} }} }}"
+            ))
+        };
+        validate(&slot("once", owner, fields)).expect("minimal once");
+        let cases = [
+            (
+                slot("twice", owner, fields),
+                "slot.append.each: unknown value",
+            ),
+            (
+                slot("once", "owner = []", fields),
+                "slot.append.owner: must not be empty",
+            ),
+            (
+                slot("once", "owner = [ { key = \"name\" } ]", fields),
+                "owner[0]: needs exactly one of equals or prefix",
+            ),
+            (
+                slot(
+                    "once",
+                    "owner = [ { key = \"name\", equals = \"a\", prefix = \"a\" } ]",
+                    fields,
+                ),
+                "owner[0]: needs exactly one of equals or prefix",
+            ),
+            (
+                slot(
+                    "once",
+                    "owner = [ { key = \"\", equals = \"hofund\" } ]",
+                    fields,
+                ),
+                "owner[0]: key and text must not be empty",
+            ),
+            (
+                slot(
+                    "once",
+                    "owner = [ { key = \"name\", equals = \"\" } ]",
+                    fields,
+                ),
+                "owner[0]: key and text must not be empty",
+            ),
+            (
+                slot(
+                    "once",
+                    "owner = [ { key = \"name\", equals = \"other\" } ]",
+                    fields,
+                ),
+                "owner[0]: must hold for every object written",
+            ),
+            (
+                slot(
+                    "once",
+                    "owner = [ { key = \"name\", prefix = \"x\" } ]",
+                    fields,
+                ),
+                "owner[0]: must hold for every object written",
+            ),
+            (
+                slot(
+                    "once",
+                    "owner = [ { key = \"missing\", equals = \"hofund\" } ]",
+                    fields,
+                ),
+                "owner[0]: must hold for every object written",
+            ),
+            (
+                slot(
+                    "once",
+                    "owner = [ { key = \"name\", equals = \"hofund\" } ]",
+                    "fields = [ { key = \"name\", value = \"token\" } ]",
+                ),
+                "owner[0]: must hold for every object written",
+            ),
+            (
+                slot(
+                    "model",
+                    "owner = [ { key = \"id\", equals = \"p/\" } ]",
+                    "fields = [ { key = \"id\", prefixed = \"p/\" } ]",
+                ),
+                "owner[0]: must hold for every object written",
+            ),
+            (
+                slot(
+                    "model",
+                    "owner = [ { key = \"id\", prefix = \"q\" } ]",
+                    "fields = [ { key = \"id\", prefixed = \"p/\" } ]",
+                ),
+                "owner[0]: must hold for every object written",
+            ),
+            (
+                slot("once", owner, "fields = []"),
+                "slot.append.fields: must not be empty",
+            ),
+            (
+                slot(
+                    "once",
+                    owner,
+                    "fields = [ { key = \"name\", literal = \"hofund\" }, { key = \"m\", value = \"id\" } ]",
+                ),
+                "fields[1].value: `id` needs one object per model",
+            ),
+            (
+                slot(
+                    "once",
+                    owner,
+                    "fields = [ { key = \"name\", literal = \"hofund\" }, { key = \"m\", prefixed = \"p\" } ]",
+                ),
+                "fields[1].prefixed: needs one object per model",
+            ),
+            (
+                slot(
+                    "once",
+                    owner,
+                    "fields = [ { key = \"name\", literal = \"hofund\" }, { key = \"m\", models = [] } ]",
+                ),
+                "fields[1].models: must not be empty",
+            ),
+            (
+                slot(
+                    "once",
+                    owner,
+                    "fields = [ { key = \"name\", literal = \"hofund\" }, { key = \"m\", models = [ { key = \"x\", value = \"bad\" } ] } ]",
+                ),
+                "fields[1].models[0].value: unknown value; expected `id`, `v1`, `origin`, or `token`",
+            ),
+            (
+                slot(
+                    "once",
+                    owner,
+                    "fields = [ { key = \"name\", literal = \"hofund\", prefixed = \"x\" } ]",
+                ),
+                "fields[0]: needs exactly one of value, literal, json, prefixed, or models",
+            ),
+        ];
+        for (text, needle) in cases {
+            reject(text, needle);
+        }
+        validate(&slot(
+            "model",
+            "owner = [ { key = \"id\", prefix = \"p\" } ]",
+            "fields = [ { key = \"id\", prefixed = \"p/\" } ]",
+        ))
+        .expect("prefix of a prefixed field");
+        validate(&slot(
+            "once",
+            "owner = [ { key = \"name\", prefix = \"hof\" } ]",
+            fields,
+        ))
+        .expect("prefix of a literal");
     }
 
     #[test]

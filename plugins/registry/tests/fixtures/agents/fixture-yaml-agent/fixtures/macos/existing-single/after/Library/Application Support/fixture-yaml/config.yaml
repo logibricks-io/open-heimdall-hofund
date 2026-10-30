@@ -16,3 +16,9 @@ providers:
         reasoning: true
 features:
   stream: false
+groups:
+  - name: hofund
+    url: "http://127.0.0.1:3425/v1"
+    models:
+      - id: hofund/route-a
+        key: old-token

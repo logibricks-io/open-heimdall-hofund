@@ -4,6 +4,8 @@ use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item};
 use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 
+use hofund_plugin_api::OwnerTest;
+
 use crate::AgentError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +21,9 @@ pub(crate) struct Assignment {
     pub value: String,
     /// When set, `value` is JSON text and is written as that value, not as a string.
     pub raw_json: bool,
+    /// When set, `value` is a JSON array of hofund's entries, merged into the
+    /// array at `key`: entries passing these tests are replaced, others kept.
+    pub owner: Option<&'static [OwnerTest]>,
 }
 
 pub(crate) fn render(
@@ -78,18 +83,117 @@ pub(crate) fn is_empty_document(kind: FileKind, bytes: &[u8]) -> Result<bool, Ag
     let text = std::str::from_utf8(bytes)
         .map_err(|_| AgentError::message("file is not UTF-8".to_owned()))?;
     match kind {
-        FileKind::Json => Ok(json_root(text)?
-            .as_object()
-            .is_some_and(|object| object.is_empty())),
+        FileKind::Json => Ok(match json_root(text)? {
+            Value::Object(object) => object.is_empty(),
+            Value::Array(items) => items.is_empty(),
+            _ => false,
+        }),
         FileKind::Toml => Ok(parse_toml(text)?.as_table().is_empty()),
         FileKind::Env => Ok(!split_lines(text)
             .iter()
             .any(|line| parse_assignment(line).is_some())),
         FileKind::Yaml => Ok(match yaml_root(text)? {
             Yaml::Hash(hash) => hash.is_empty(),
+            Yaml::Array(items) => items.is_empty(),
             _ => false,
         }),
     }
+}
+
+/// The array at `key` without hofund's entries, as JSON text.
+///
+/// `None` when the key is absent. Only JSON and YAML files hold arrays.
+pub(crate) fn strip_owned(
+    kind: FileKind,
+    text: &str,
+    key: &str,
+    owner: &[OwnerTest],
+) -> Result<Option<String>, AgentError> {
+    let path = split_key(key);
+    let existing = match kind {
+        FileKind::Json => json_child(&json_root(text)?, &path).cloned(),
+        FileKind::Yaml => yaml_child(&yaml_root(text)?, &path).map(yaml_to_json),
+        FileKind::Toml | FileKind::Env => {
+            return Err(AgentError::message(format!(
+                "`{key}` cannot hold an array in this file kind"
+            )));
+        }
+    };
+    match kept_entries(existing.as_ref(), path.is_empty(), key, owner)? {
+        Some(kept) => Ok(Some(Value::Array(kept).to_string())),
+        None => Ok(None),
+    }
+}
+
+/// The user's entries of an existing array value, in order.
+///
+/// `None` when there is no array yet. An empty object root counts as no
+/// array, so a missing root-array file can be created.
+fn kept_entries(
+    existing: Option<&Value>,
+    root: bool,
+    key: &str,
+    owner: &[OwnerTest],
+) -> Result<Option<Vec<Value>>, AgentError> {
+    match existing {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(object)) if root && object.is_empty() => Ok(None),
+        Some(Value::Array(items)) => Ok(Some(
+            items
+                .iter()
+                .filter(|item| !owned(item, owner))
+                .cloned()
+                .collect(),
+        )),
+        Some(_) => Err(AgentError::message(format!("`{key}` is not an array"))),
+    }
+}
+
+/// Whether hofund owns an array entry: an object passing every test.
+fn owned(item: &Value, owner: &[OwnerTest]) -> bool {
+    let Some(object) = item.as_object() else {
+        return false;
+    };
+    !owner.is_empty()
+        && owner.iter().all(|test| {
+            object
+                .get(test.key())
+                .and_then(Value::as_str)
+                .is_some_and(|value| test.matches(value))
+        })
+}
+
+/// The user's entries followed by hofund's, or `None` to leave the key out.
+fn merged(
+    existing: Option<&Value>,
+    root: bool,
+    assignment: &Assignment,
+    owner: &[OwnerTest],
+) -> Result<Option<Value>, AgentError> {
+    let ours: Value = serde_json::from_str(&assignment.value).map_err(|error| {
+        AgentError::message(format!("`{}` is not JSON: {error}", assignment.key))
+    })?;
+    let Value::Array(ours) = ours else {
+        return Err(AgentError::message(format!(
+            "`{}` entries are not an array",
+            assignment.key
+        )));
+    };
+    let kept = kept_entries(existing, root, assignment.key, owner)?;
+    if kept.is_none() && ours.is_empty() {
+        return Ok(None);
+    }
+    let mut items = kept.unwrap_or_default();
+    items.extend(ours);
+    Ok(Some(Value::Array(items)))
+}
+
+fn json_child<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut cursor = value;
+    for part in path {
+        cursor = cursor.as_object()?.get(*part)?;
+    }
+    Some(cursor)
 }
 
 fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
@@ -110,6 +214,24 @@ fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, Age
     }
     for assignment in assignments {
         if string_model_restore(assignment).is_some() {
+            continue;
+        }
+        let path = split_key(assignment.key);
+        if let Some(owner) = assignment.owner {
+            let existing = json_child(&root, &path);
+            let Some(value) = merged(existing, path.is_empty(), assignment, owner)? else {
+                continue;
+            };
+            if path.is_empty() {
+                root = value;
+            } else {
+                set_json(&mut root, &path, &value.to_string(), true)?;
+            }
+            continue;
+        }
+        if path.is_empty() && assignment.raw_json {
+            root = serde_json::from_str(&assignment.value)
+                .map_err(|error| AgentError::message(format!("root is not JSON: {error}")))?;
             continue;
         }
         set_json(
@@ -385,6 +507,19 @@ fn set_json(
 fn render_yaml(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
     let mut root = yaml_root(original)?;
     for assignment in assignments {
+        let path = split_key(assignment.key);
+        if let Some(owner) = assignment.owner {
+            let existing = yaml_child(&root, &path).map(yaml_to_json);
+            let Some(value) = merged(existing.as_ref(), path.is_empty(), assignment, owner)? else {
+                continue;
+            };
+            if path.is_empty() {
+                root = json_to_yaml(&value);
+            } else {
+                set_yaml(&mut root, &path, json_to_yaml(&value))?;
+            }
+            continue;
+        }
         let value = if assignment.raw_json {
             let value: Value = serde_json::from_str(&assignment.value).map_err(|error| {
                 AgentError::message(format!("`{}` is not JSON: {error}", assignment.key))
@@ -393,7 +528,11 @@ fn render_yaml(original: &str, assignments: &[Assignment]) -> Result<String, Age
         } else {
             Yaml::String(assignment.value.clone())
         };
-        set_yaml(&mut root, &split_key(assignment.key), value)?;
+        if path.is_empty() && assignment.raw_json {
+            root = value;
+            continue;
+        }
+        set_yaml(&mut root, &path, value)?;
     }
     emit_yaml(&root)
 }
@@ -888,13 +1027,147 @@ fn loosen_json(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
+    use super::{
+        Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at, strip_owned,
+    };
+    use hofund_plugin_api::OwnerTest;
+
+    static OWNER: &[OwnerTest] = &[
+        OwnerTest::prefix("id", "hof/"),
+        OwnerTest::equals("kind", "gw"),
+    ];
+
+    fn append(key: &'static str, value: &str) -> Assignment {
+        Assignment {
+            key,
+            value: value.to_owned(),
+            raw_json: true,
+            owner: Some(OWNER),
+        }
+    }
+
+    fn text(kind: FileKind, original: Option<&str>, assignments: &[Assignment]) -> String {
+        String::from_utf8(render(kind, original, assignments).expect("render")).expect("utf8")
+    }
+
+    #[test]
+    fn append_merges_after_user_entries_and_replaces_ours() {
+        let ours = r#"[{"id":"hof/a","kind":"gw"}]"#;
+        let original = r#"{"list":[{"id":"hof/old","kind":"gw"},{"id":"hof/x"},{"id":"mine","kind":"gw"},"s",{"id":7,"kind":"gw"}],"k":1}"#;
+        let first = text(FileKind::Json, Some(original), &[append("list", ours)]);
+        let value: serde_json::Value = serde_json::from_str(&first).expect("json");
+        assert_eq!(
+            value["list"],
+            serde_json::json!([{"id":"hof/x"},{"id":"mine","kind":"gw"},"s",{"id":7,"kind":"gw"},{"id":"hof/a","kind":"gw"}])
+        );
+        assert_eq!(value["k"], 1);
+        assert_eq!(
+            text(FileKind::Json, Some(&first), &[append("list", ours)]),
+            first
+        );
+
+        let created = text(FileKind::Json, Some("{}"), &[append("a.list", ours)]);
+        let value: serde_json::Value = serde_json::from_str(&created).expect("json");
+        assert_eq!(
+            value["a"]["list"],
+            serde_json::json!([{"id":"hof/a","kind":"gw"}])
+        );
+        let none = text(FileKind::Json, Some("{\"k\":1}"), &[append("list", "[]")]);
+        assert!(!none.contains("list"), "{none}");
+        let emptied = text(FileKind::Json, Some(&first), &[append("list", "[]")]);
+        let value: serde_json::Value = serde_json::from_str(&emptied).expect("json");
+        assert_eq!(value["list"].as_array().expect("list").len(), 4);
+    }
+
+    #[test]
+    fn append_handles_a_root_array_and_yaml() {
+        let ours = r#"[{"id":"hof/a","kind":"gw"}]"#;
+        let root = text(FileKind::Json, None, &[append(".", ours)]);
+        let value: serde_json::Value = serde_json::from_str(&root).expect("json");
+        assert_eq!(value, serde_json::json!([{"id":"hof/a","kind":"gw"}]));
+        let kept = text(
+            FileKind::Json,
+            Some(r#"[{"id":"u"}]"#),
+            &[append(".", ours)],
+        );
+        let value: serde_json::Value = serde_json::from_str(&kept).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!([{"id":"u"},{"id":"hof/a","kind":"gw"}])
+        );
+        assert_eq!(
+            strip_owned(FileKind::Json, &kept, ".", OWNER).expect("strip"),
+            Some(r#"[{"id":"u"}]"#.to_owned())
+        );
+        assert!(is_empty_document(FileKind::Json, b"[]").expect("empty"));
+        assert!(!is_empty_document(FileKind::Json, b"[1]").expect("not empty"));
+        assert!(is_empty_document(FileKind::Yaml, b"[]\n").expect("empty yaml"));
+
+        let yaml = text(
+            FileKind::Yaml,
+            Some("list:\n  - id: u\nk: 1\n"),
+            &[append("list", ours)],
+        );
+        assert_eq!(
+            yaml,
+            "list:\n  - id: u\n  - id: hof/a\n    kind: gw\nk: 1\n"
+        );
+        assert_eq!(
+            text(FileKind::Yaml, Some(&yaml), &[append("list", ours)]),
+            yaml
+        );
+        assert_eq!(
+            strip_owned(FileKind::Yaml, &yaml, "list", OWNER).expect("strip"),
+            Some(r#"[{"id":"u"}]"#.to_owned())
+        );
+        assert_eq!(
+            strip_owned(FileKind::Yaml, "k: 1\n", "list", OWNER).expect("absent"),
+            None
+        );
+    }
+
+    #[test]
+    fn append_rejects_shapes_it_cannot_merge() {
+        let ours = r#"[{"id":"hof/a","kind":"gw"}]"#;
+        for (kind, original, key) in [
+            (FileKind::Json, r#"{"list":{"id":"x"}}"#, "list"),
+            (FileKind::Json, r#"{"k":1}"#, "."),
+            (FileKind::Yaml, "list: 3\n", "list"),
+        ] {
+            let error = render(kind, Some(original), &[append(key, ours)]).expect_err("shape");
+            assert!(error.to_string().contains("is not an array"), "{error}");
+            let error = strip_owned(kind, original, key, OWNER).expect_err("strip shape");
+            assert!(error.to_string().contains("is not an array"), "{error}");
+        }
+        let error = render(FileKind::Json, None, &[append("list", "{}")]).expect_err("object");
+        assert!(error.to_string().contains("not an array"), "{error}");
+        let error = render(FileKind::Json, None, &[append("list", "[")]).expect_err("json");
+        assert!(error.to_string().contains("is not JSON"), "{error}");
+        for kind in [FileKind::Toml, FileKind::Env] {
+            let error = strip_owned(kind, "", "list", OWNER).expect_err("kind");
+            assert!(
+                error.to_string().contains("cannot hold an array"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            strip_owned(
+                FileKind::Json,
+                r#"{"l":[{"id":"hof/a","kind":"gw"}]}"#,
+                "l",
+                &[]
+            )
+            .expect("no owner"),
+            Some(r#"[{"id":"hof/a","kind":"gw"}]"#.to_owned())
+        );
+    }
 
     fn assign(key: &'static str, value: &str, raw_json: bool) -> Assignment {
         Assignment {
             key,
             value: value.to_owned(),
             raw_json,
+            owner: None,
         }
     }
 
@@ -1061,6 +1334,7 @@ mod tests {
             key: "env.ANTHROPIC_BASE_URL",
             value: "http://127.0.0.1:3425".to_owned(),
             raw_json: false,
+            owner: None,
         }];
         let bytes = render(FileKind::Json, Some(original), &assignments).expect("render");
         let text = String::from_utf8(bytes).expect("utf8");
@@ -1083,6 +1357,7 @@ mod tests {
             key: "model_provider",
             value: "hofund".to_owned(),
             raw_json: false,
+            owner: None,
         }];
         let bytes = render(FileKind::Toml, Some(original), &assignments).expect("render");
         let text = String::from_utf8(bytes).expect("utf8");
@@ -1107,16 +1382,19 @@ mod tests {
                 key: "GEMINI_API_KEY",
                 value: "local-token".to_owned(),
                 raw_json: false,
+                owner: None,
             },
             Assignment {
                 key: "GOOGLE_GEMINI_BASE_URL",
                 value: "http://127.0.0.1:3425".to_owned(),
                 raw_json: false,
+                owner: None,
             },
             Assignment {
                 key: "ODD",
                 value: "a b#c".to_owned(),
                 raw_json: false,
+                owner: None,
             },
         ];
         let bytes = render(FileKind::Env, Some(original), &assignments).expect("render");
@@ -1178,11 +1456,13 @@ experimental_bearer_token = \"local-token\"
                 key: "security.auth.selectedType",
                 value: "gemini-api-key".to_owned(),
                 raw_json: false,
+                owner: None,
             },
             Assignment {
                 key: "model.name",
                 value: "user-model".to_owned(),
                 raw_json: false,
+                owner: None,
             },
         ];
         let connected = render(FileKind::Json, Some(original), &connect).expect("connect");
@@ -1203,6 +1483,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: original_model,
             raw_json: true,
+            owner: None,
         }];
         let restored = render(FileKind::Json, Some(&edited), &restore).expect("restore");
         let restored = String::from_utf8(restored).expect("restored UTF-8");
@@ -1227,6 +1508,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: "hofund-model".to_owned(),
             raw_json: false,
+            owner: None,
         }];
         let connected = render(FileKind::Json, Some(original), &connect).expect("connect");
         let connected = String::from_utf8(connected).expect("connected UTF-8");
@@ -1251,6 +1533,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: original_model,
             raw_json: false,
+            owner: None,
         }];
         let restored = render(FileKind::Json, Some(&edited), &restore).expect("restore");
         let restored: serde_json::Value = serde_json::from_slice(&restored).expect("restored JSON");
@@ -1295,6 +1578,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: original_model,
             raw_json: true,
+            owner: None,
         }];
         let error = render(FileKind::Json, Some(current), &restore)
             .expect_err("extra model key")
@@ -1312,6 +1596,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: r#"{"name":"x","extra":1}"#.to_owned(),
             raw_json: true,
+            owner: None,
         }];
         let rendered = render(FileKind::Json, Some(original), &restore).expect("render");
         let rendered: serde_json::Value = serde_json::from_slice(&rendered).expect("rendered JSON");

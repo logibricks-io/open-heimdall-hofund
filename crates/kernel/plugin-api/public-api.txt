@@ -335,6 +335,11 @@ ModelField::const fn id (key : & 'static str) -> Self
 ModelField::const fn json (key : & 'static str , text : & 'static str) -> Self
 ModelField::const fn key (& self) -> & 'static str
 ModelField::const fn literal (key : & 'static str , text : & 'static str) -> Self
+ModelField::const fn models (key : & 'static str , fields : & 'static [Self]) -> Self
+ModelField::const fn origin (key : & 'static str) -> Self
+ModelField::const fn prefixed (key : & 'static str , prefix : & 'static str) -> Self
+ModelField::const fn token (key : & 'static str) -> Self
+ModelField::const fn v1 (key : & 'static str) -> Self
 ModelField::const fn value (& self) -> ModelValue
 ModelList
 ModelList #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
@@ -387,10 +392,24 @@ ModelValue #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 ModelValue::Id
 ModelValue::Json
 ModelValue::Literal
+ModelValue::Models
+ModelValue::Origin
+ModelValue::Prefixed
+ModelValue::Token
+ModelValue::V1
+ModelValue::fn has_token (& self) -> bool
 ObserveHandle
 ObserveHandle #[non_exhaustive] derives(Clone)
 ObserveHandle::fn observation (& self) -> QuotaObservation
 ObserveHandle::fn observe (& self , observation : QuotaObservation) -> Result < () , PluginError >
+OwnerTest
+OwnerTest derives(Clone, Copy, Debug, PartialEq, Eq)
+OwnerTest::const fn equals (key : & 'static str , text : & 'static str) -> Self
+OwnerTest::const fn is_prefix (& self) -> bool
+OwnerTest::const fn key (& self) -> & 'static str
+OwnerTest::const fn prefix (key : & 'static str , text : & 'static str) -> Self
+OwnerTest::const fn text (& self) -> & 'static str
+OwnerTest::fn matches (& self , value : & str) -> bool
 PROBE_CAP
 PipedChild
 PipedChild #[non_exhaustive]
@@ -625,6 +644,7 @@ SignInProof::fn device (user_code : impl Into < SecretString >) -> Self
 SignInProof::fn token (token : impl Into < SecretString >) -> Self
 Slot
 Slot #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+Slot::Append
 Slot::CatalogModels
 Slot::Json
 Slot::Literal

@@ -1485,6 +1485,84 @@ pub enum Slot {
         /// The fields of each model object.
         fields: &'static [ModelField],
     },
+    /// hofund's entries in an array the user also writes to.
+    ///
+    /// An entry is hofund's when it is an object that passes every `owner`
+    /// test. Writing drops hofund's entries, keeps the user's in order, and
+    /// adds hofund's after them: one object per distinct non-empty visible
+    /// model when `each_model` is set, otherwise one object. Disconnect drops
+    /// hofund's entries and keeps every other entry, including entries added
+    /// after connect. The key `.` names the document root. This slot is valid
+    /// only in JSON and YAML files.
+    #[doc(hidden)]
+    Append {
+        /// Tests that all hold for an entry hofund owns.
+        owner: &'static [OwnerTest],
+        /// One object per model when set, otherwise a single object.
+        each_model: bool,
+        /// The fields of each object hofund writes.
+        fields: &'static [ModelField],
+    },
+}
+
+/// One test an array entry passes when hofund owns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnerTest {
+    key: &'static str,
+    text: &'static str,
+    prefix: bool,
+}
+
+impl OwnerTest {
+    /// The entry's string at `key` equals `text`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn equals(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            text,
+            prefix: false,
+        }
+    }
+
+    /// The entry's string at `key` starts with `text`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn prefix(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            text,
+            prefix: true,
+        }
+    }
+
+    /// The entry key the test reads.
+    #[must_use]
+    pub const fn key(&self) -> &'static str {
+        self.key
+    }
+
+    /// The text the entry's string is compared with.
+    #[must_use]
+    pub const fn text(&self) -> &'static str {
+        self.text
+    }
+
+    /// Whether the string only has to start with [`Self::text`].
+    #[must_use]
+    pub const fn is_prefix(&self) -> bool {
+        self.prefix
+    }
+
+    /// Whether `value`, an entry's string at [`Self::key`], passes.
+    #[must_use]
+    pub fn matches(&self, value: &str) -> bool {
+        if self.prefix {
+            value.starts_with(self.text)
+        } else {
+            value == self.text
+        }
+    }
 }
 
 /// One field of each object a [`Slot::ModelArray`] writes.
@@ -1525,6 +1603,56 @@ impl ModelField {
         }
     }
 
+    /// A field holding the gateway origin plus `/v1`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn v1(key: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::V1,
+        }
+    }
+
+    /// A field holding the gateway origin, without `/v1`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn origin(key: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Origin,
+        }
+    }
+
+    /// A field holding the bearer token.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn token(key: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Token,
+        }
+    }
+
+    /// A field holding the model id after a fixed prefix.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn prefixed(key: &'static str, prefix: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Prefixed(prefix),
+        }
+    }
+
+    /// A field holding an array with one object of `fields` per model.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn models(key: &'static str, fields: &'static [Self]) -> Self {
+        Self {
+            key,
+            value: ModelValue::Models(fields),
+        }
+    }
+
     /// The object key.
     #[must_use]
     pub const fn key(&self) -> &'static str {
@@ -1548,6 +1676,28 @@ pub enum ModelValue {
     Literal(&'static str),
     /// Fixed JSON text.
     Json(&'static str),
+    /// The gateway origin plus `/v1`.
+    V1,
+    /// The gateway origin, without `/v1`.
+    Origin,
+    /// The bearer token.
+    Token,
+    /// The model id after a fixed prefix.
+    Prefixed(&'static str),
+    /// An array with one object of these fields per model.
+    Models(&'static [ModelField]),
+}
+
+impl ModelValue {
+    /// Whether this value, or a nested one, is the bearer token.
+    #[must_use]
+    pub fn has_token(&self) -> bool {
+        match self {
+            Self::Token => true,
+            Self::Models(fields) => fields.iter().any(|field| field.value.has_token()),
+            _ => false,
+        }
+    }
 }
 
 impl Slot {
