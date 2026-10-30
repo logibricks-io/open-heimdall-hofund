@@ -128,9 +128,12 @@ pub(crate) fn wait(mut command: Command, daemon: &Path) -> Result<i32, String> {
     let status = command
         .status()
         .map_err(|error| format!("cannot run {}: {error}", daemon.display()))?;
-    status
-        .code()
-        .ok_or_else(|| format!("{} stopped without an exit code ({status})", daemon.display()))
+    status.code().ok_or_else(|| {
+        format!(
+            "{} stopped without an exit code ({status})",
+            daemon.display()
+        )
+    })
 }
 
 #[cfg(windows)]
@@ -274,7 +277,10 @@ mod tests {
         );
         assert!(error.contains("not on PATH"), "{error}");
         assert!(error.contains("hofund-daemon-bin"), "{error}");
-        assert!(error.contains("cargo install --path apps/hofundd --locked"), "{error}");
+        assert!(
+            error.contains("cargo install --path apps/hofundd --locked"),
+            "{error}"
+        );
         assert!(error.contains("--in-process"), "{error}");
         let error = locate(None, None).expect_err("missing");
         assert!(error.contains("its directory is unknown"), "{error}");
@@ -314,13 +320,19 @@ mod tests {
     fn wait_reports_a_child_that_cannot_start() {
         let missing = Path::new("/nonexistent/hofundd-for-test");
         let error = wait(Command::new(missing), missing).expect_err("cannot start");
-        assert!(error.starts_with("cannot run /nonexistent/hofundd-for-test: "), "{error}");
+        assert!(
+            error.starts_with("cannot run /nonexistent/hofundd-for-test: "),
+            "{error}"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn a_child_killed_by_a_signal_is_a_failure() {
         let error = wait(shell("kill -9 $$"), Path::new("child")).expect_err("no code");
-        assert!(error.starts_with("child stopped without an exit code"), "{error}");
+        assert!(
+            error.starts_with("child stopped without an exit code"),
+            "{error}"
+        );
     }
 }

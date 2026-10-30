@@ -107,7 +107,10 @@ fn serve(path: &Path) -> ExitCode {
         }
     };
     if let Err(message) = logging::install(level, logging::Stderr) {
-        say(stderr(), &format!("hofundd: cannot install logging: {message}"));
+        say(
+            stderr(),
+            &format!("hofundd: cannot install logging: {message}"),
+        );
         return ExitCode::FAILURE;
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -116,7 +119,10 @@ fn serve(path: &Path) -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            say(stderr(), &format!("hofundd: cannot start the runtime: {error}"));
+            say(
+                stderr(),
+                &format!("hofundd: cannot start the runtime: {error}"),
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -126,7 +132,10 @@ fn serve(path: &Path) -> ExitCode {
             ..StartOptions::default()
         };
         let running = start_linked(path, Arc::new(registry::LinkedRegistry), options).await?;
-        say(stderr(), &format!("listening on http://{}", running.local_addr));
+        say(
+            stderr(),
+            &format!("listening on http://{}", running.local_addr),
+        );
         Ok::<Termination, DaemonError>(serve_until_signal(running).await)
     });
     // Background tasks end here, before a signal is re-raised.

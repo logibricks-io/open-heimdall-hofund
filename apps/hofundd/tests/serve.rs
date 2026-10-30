@@ -64,18 +64,25 @@ fn a_bad_command_line_exits_two() {
 #[test]
 fn a_bad_log_level_exits_two_before_reading_the_config() {
     let dir = scratch();
-    let output = run(hofundd(dir.path())
-        .env("HOFUND_LOG", "loud")
-        .args(["--config".as_ref(), dir.path().join("absent.toml").as_os_str()]));
+    let output = run(hofundd(dir.path()).env("HOFUND_LOG", "loud").args([
+        "--config".as_ref(),
+        dir.path().join("absent.toml").as_os_str(),
+    ]));
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("HOFUND_LOG=loud"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("HOFUND_LOG=loud"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
 fn a_missing_config_is_a_startup_failure() {
     let dir = scratch();
-    let output = run(hofundd(dir.path())
-        .args(["--config".as_ref(), dir.path().join("absent.toml").as_os_str()]));
+    let output = run(hofundd(dir.path()).args([
+        "--config".as_ref(),
+        dir.path().join("absent.toml").as_os_str(),
+    ]));
     assert_eq!(output.status.code(), Some(1));
     let text = stderr(&output);
     assert!(text.starts_with("hofundd: "), "{text}");
@@ -110,7 +117,11 @@ impl Daemon {
         let daemon = Self { child, log };
         let deadline = Instant::now() + Duration::from_secs(60);
         while !daemon.text().contains("listening on http://127.0.0.1:") {
-            assert!(Instant::now() < deadline, "never listened: {}", daemon.text());
+            assert!(
+                Instant::now() < deadline,
+                "never listened: {}",
+                daemon.text()
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         daemon

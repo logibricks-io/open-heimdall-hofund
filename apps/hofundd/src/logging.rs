@@ -100,7 +100,10 @@ mod tests {
         assert_eq!(level(Some("off")), Ok(LevelFilter::OFF));
         let error = level(Some("loud")).expect_err("not a level");
         assert!(error.contains("HOFUND_LOG=loud"), "{error}");
-        assert!(error.contains("off, error, warn, info, debug, or trace"), "{error}");
+        assert!(
+            error.contains("off, error, warn, info, debug, or trace"),
+            "{error}"
+        );
     }
 
     /// The only test in this binary that installs the global subscriber.

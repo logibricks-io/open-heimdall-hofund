@@ -82,12 +82,18 @@ mod tests {
         let mut kernel = 0;
         let mut plugin = 0;
         for id in linked.builtin_factory_ids().iter().chain(IDS) {
-            let ours = linked.factory(id).map(|factory| std::ptr::from_ref(factory.spec()));
+            let ours = linked
+                .factory(id)
+                .map(|factory| std::ptr::from_ref(factory.spec()));
             let theirs = hofund_plugin_registry::factory(id)
                 .map(|factory| std::ptr::from_ref(factory.spec()));
             assert_eq!(ours, theirs, "{id}");
             let is_kernel = linked.is_kernel_factory(id);
-            assert_eq!(is_kernel, hofund_plugin_registry::is_kernel_factory(id), "{id}");
+            assert_eq!(
+                is_kernel,
+                hofund_plugin_registry::is_kernel_factory(id),
+                "{id}"
+            );
             if is_kernel {
                 kernel += 1;
             } else if ours.is_some() {
@@ -140,7 +146,11 @@ mod tests {
         let mut linked_subscriptions = 0;
         for id in IDS {
             let ours = linked.subscription(id).is_some();
-            assert_eq!(ours, hofund_plugin_registry::subscription(id).is_some(), "{id}");
+            assert_eq!(
+                ours,
+                hofund_plugin_registry::subscription(id).is_some(),
+                "{id}"
+            );
             linked_subscriptions += usize::from(ours);
         }
         assert!(linked_subscriptions > 0);

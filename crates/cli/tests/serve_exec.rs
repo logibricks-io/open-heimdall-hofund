@@ -108,7 +108,10 @@ fn serve_execs_the_daemon_from_the_install_layout() {
     let run = serve(&cli, &on_path, &out, &["--config", "/explicit/hofund.toml"]);
     assert_eq!(run.output.status.code(), Some(7), "{:?}", run.output);
     let record = run.record.expect("fake hofundd ran");
-    assert!(record.starts_with(&format!("pid={}\n", run.pid)), "{record}");
+    assert!(
+        record.starts_with(&format!("pid={}\n", run.pid)),
+        "{record}"
+    );
     assert!(record.ends_with("from=path\n"), "{record}");
 
     // Neither place: an actionable error and exit 1.

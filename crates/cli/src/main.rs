@@ -66,14 +66,22 @@ enum Command {
     Help(HelpTopic),
     Version,
     /// `in_process` keeps the pre-daemon server; it goes away in the next release.
-    Serve { in_process: bool },
+    Serve {
+        in_process: bool,
+    },
     Check,
     TokenShow,
     TokenRotate,
     Usage,
     AgentList,
-    AgentConnect { name: String, dry_run: bool },
-    AgentDisconnect { name: String, force: bool },
+    AgentConnect {
+        name: String,
+        dry_run: bool,
+    },
+    AgentDisconnect {
+        name: String,
+        force: bool,
+    },
     AgentStatus,
     Subscription(SubscriptionCommand),
 }
@@ -592,8 +600,8 @@ mod tests {
         Command, HelpTopic, SubscriptionCommand, connect_models_note, help_text, help_topic,
         model_has_route, opencode_models_note, parse, redact_diff,
     };
-    use std::path::PathBuf;
     use hofund_daemon::SignInOptions;
+    use std::path::PathBuf;
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
