@@ -1289,8 +1289,7 @@ fn fill_json(template: &str, target: &GatewayTarget) -> Option<String> {
 
 /// Rewrites the token strings of `current` that `template` marks with
 /// `{token}`, keeping everything else as it is. False when `current` is not
-/// hofund's: a string `template` fills from the gateway address differs, or
-/// a token string is missing.
+/// hofund's: a string `template` fills from the gateway address differs.
 fn refresh_json(
     template: &serde_json::Value,
     current: &mut serde_json::Value,
@@ -1311,9 +1310,10 @@ fn refresh_json(
             let Some(held) = current.as_object_mut() else {
                 return false;
             };
-            fields.iter().all(|(name, value)| match held.get_mut(name) {
-                Some(current) => refresh_json(value, current, target),
-                None => !value.to_string().contains("{token}"),
+            // A part the user removed stays removed.
+            fields.iter().all(|(name, value)| {
+                held.get_mut(name)
+                    .is_none_or(|current| refresh_json(value, current, target))
             })
         }
         _ => true,
