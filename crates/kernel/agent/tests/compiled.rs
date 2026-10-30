@@ -606,7 +606,7 @@ fn json_and_model_array_slots_write_raw_values() {
     let text = fs::read_to_string(home.join(".array").join("config.yaml")).expect("yaml");
     assert_eq!(
         text,
-        "flag: false\nmodels:\n  - id: a\n    limits:\n      context: 8\n    name: Hofund\n  - id: hidden\n    limits:\n      context: 8\n    name: Hofund\n  - id: b\n    limits:\n      context: 8\n    name: Hofund\n"
+        "flag: false\nmodels:\n  - id: a\n    name: Hofund\n    limits:\n      context: 8\n  - id: hidden\n    name: Hofund\n    limits:\n      context: 8\n  - id: b\n    name: Hofund\n    limits:\n      context: 8\n"
     );
 
     let home = scratch();

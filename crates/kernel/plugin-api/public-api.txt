@@ -329,6 +329,13 @@ Method::Get
 Method::Patch
 Method::Post
 Method::Put
+ModelField
+ModelField derives(Clone, Copy, Debug, PartialEq, Eq)
+ModelField::const fn id (key : & 'static str) -> Self
+ModelField::const fn json (key : & 'static str , text : & 'static str) -> Self
+ModelField::const fn key (& self) -> & 'static str
+ModelField::const fn literal (key : & 'static str , text : & 'static str) -> Self
+ModelField::const fn value (& self) -> ModelValue
 ModelList
 ModelList #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 ModelList::const fn auth_choice (& self) -> Option < AuthChoice >
@@ -375,6 +382,11 @@ ModelSpec::fn with_max_output (mut self , max_output : u64) -> Self
 ModelSpec::fn with_output_modalities (mut self , modalities : Vec < String >) -> Self
 ModelSpec::fn with_service_tiers (mut self , service_tiers : Vec < String >) -> Self
 ModelSpec::fn with_web_search (mut self , web_search : impl Into < String >) -> Self
+ModelValue
+ModelValue #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+ModelValue::Id
+ModelValue::Json
+ModelValue::Literal
 ObserveHandle
 ObserveHandle #[non_exhaustive] derives(Clone)
 ObserveHandle::fn observation (& self) -> QuotaObservation
@@ -614,7 +626,9 @@ SignInProof::fn token (token : impl Into < SecretString >) -> Self
 Slot
 Slot #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 Slot::CatalogModels
+Slot::Json
 Slot::Literal
+Slot::ModelArray
 Slot::ModelIfUnset
 Slot::ModelTier
 Slot::Origin

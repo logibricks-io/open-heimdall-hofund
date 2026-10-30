@@ -96,15 +96,14 @@ fn fixture_agents_preserve_files_sets_slots_and_key_files() {
     assert_eq!(yaml.model_key(), Some("model.default"));
     assert!(matches!(yaml.sets()[1].slot(), Slot::V1));
     assert!(matches!(yaml.sets()[2].slot(), Slot::Token));
+    static FIELDS: &[ModelField] = &[
+        ModelField::id("id"),
+        ModelField::literal("name", "Hofund"),
+        ModelField::json("reasoning", "true"),
+    ];
     assert_eq!(
         yaml.sets()[4].slot(),
-        &Slot::ModelArray {
-            fields: &[
-                ModelField::id("id"),
-                ModelField::literal("name", "Hofund"),
-                ModelField::json("reasoning", "true"),
-            ],
-        }
+        &Slot::ModelArray { fields: FIELDS }
     );
     assert_eq!(yaml.sets()[5].slot(), &Slot::Json("false"));
 }

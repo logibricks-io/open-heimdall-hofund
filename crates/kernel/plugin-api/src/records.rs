@@ -1477,9 +1477,9 @@ pub enum Slot {
     Json(&'static str),
     /// A JSON array with one object per distinct non-empty visible model.
     ///
-    /// Objects follow route order and hold `fields`; a JSON file stores
-    /// object keys sorted. The array is written as raw JSON, and this slot is
-    /// valid only in JSON and YAML files.
+    /// Objects follow route order and hold `fields` in declaration order.
+    /// The array is written as raw JSON, and this slot is valid only in JSON
+    /// and YAML files.
     #[doc(hidden)]
     ModelArray {
         /// The fields of each model object.

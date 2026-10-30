@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent descriptions can edit YAML files (G1): `kind = "yaml"` in an
+  `agent.toml` file entry. Edits re-emit the file, so comments and layout are
+  not kept; disconnecting restores the original bytes from the backup.
+- Two agent slots for JSON and YAML files (G2): `{ json = "<json>" }` writes a
+  fixed typed value such as `false`, and `{ model_array = { fields = [...] } }`
+  writes one object per distinct visible model, each field holding the model
+  id (`value = "id"`), a fixed string (`literal`), or a fixed JSON value
+  (`json`). A model array is a gateway slot, so a `route = "none"` agent
+  cannot use it.
 - Codex accounts on Codex's ChatGPT backend (S6d): a
   `POST /backend-api/codex/responses` for one of Codex's own models, say
   `gpt-5`, is served in process as `codex/gpt-5` when the gateway lists a
