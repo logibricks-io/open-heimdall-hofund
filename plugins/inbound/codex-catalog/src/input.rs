@@ -160,8 +160,8 @@ fn foreign_reasoning(item: &Value) -> bool {
     shown || text(item, "encrypted_content").is_empty()
 }
 
-/// Opens hofund's summaries as messages. For a hofund model a `compaction_trigger` becomes the compaction
-/// prompt; for Codex's own models a reasoning item written elsewhere is
+/// Opens hofund's summaries as messages. For a hofund model a
+/// `compaction_trigger` becomes the compaction prompt; for Codex's own models a reasoning item written elsewhere is
 /// dropped. Says whether anything changed and whether to compact.
 fn open_summaries(items: &mut Vec<Value>, hofund: bool) -> (bool, bool) {
     let mut changed = false;
