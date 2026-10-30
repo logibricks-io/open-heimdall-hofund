@@ -1624,6 +1624,13 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_session_carries_the_os_credential_store() {
+        // Building the store does not touch the OS store.
+        let session = format!("{:?}", super::agent_session());
+        assert!(session.contains("credential_store: true"), "{session}");
+    }
+
+    #[test]
     fn the_raw_endpoint_table_carries_the_preset_id() {
         let config = hofund_config::load(
             "[[providers]]\nid = \"mantle\"\npreset = \"bedrock-mantle\"\nprotocol = \"openai-chat\"\nbase_url = \"https://relay.example/v1\"\napi_key = \"test-key\"\n",

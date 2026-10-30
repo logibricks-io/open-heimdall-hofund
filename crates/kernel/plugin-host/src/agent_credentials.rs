@@ -38,11 +38,17 @@ const CONTENT_TYPE: &str = "text/plain; charset=utf8";
 /// go. Tests must use a fake store instead.
 #[must_use]
 pub fn native_credential_store() -> Arc<dyn CredentialStore> {
-    Arc::new(NativeCredentialStore { deadline: DEADLINE })
+    Arc::new(NativeCredentialStore::default())
 }
 
 struct NativeCredentialStore {
     deadline: Duration,
+}
+
+impl Default for NativeCredentialStore {
+    fn default() -> Self {
+        Self { deadline: DEADLINE }
+    }
 }
 
 impl CredentialStore for NativeCredentialStore {
@@ -443,8 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn building_the_native_store_does_not_touch_the_os() {
+    fn native_calls_give_up_after_ninety_seconds() {
+        // Building the store does not touch the OS store.
         let store = native_credential_store();
         assert_eq!(Arc::strong_count(&store), 1);
+        assert_eq!(
+            NativeCredentialStore::default().deadline,
+            Duration::from_secs(90)
+        );
     }
 }
