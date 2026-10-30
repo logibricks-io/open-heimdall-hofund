@@ -26,9 +26,18 @@ AccountsHandle::async fn remove (& self , id : & AccountId) -> Result < () , Plu
 AccountsHandle::async fn secret (& self , id : & AccountId) -> Result < Option < SecretString > , PluginError >
 AccountsHandle::async fn upsert (& self , account : Account , secret : SecretString) -> Result < () , PluginError >
 AccountsHandle::fn account (& self , id : AccountId , label : impl Into < String >) -> Result < Account , PluginError >
+AgentCredential
+AgentCredential #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentCredential::const fn account (& self) -> & 'static str
+AgentCredential::const fn file (& self) -> & 'static str
+AgentCredential::const fn from_static (file : & 'static str , url : & 'static str , account : & 'static str , label : & 'static str , windows_target : & 'static str ,) -> Self
+AgentCredential::const fn label (& self) -> & 'static str
+AgentCredential::const fn url (& self) -> & 'static str
+AgentCredential::const fn windows_target (& self) -> & 'static str
 AgentDescription
 AgentDescription #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 AgentDescription::const fn binary (& self) -> & 'static str
+AgentDescription::const fn credential (& self) -> Option < & AgentCredential >
 AgentDescription::const fn display_name (& self) -> & 'static str
 AgentDescription::const fn effort_file (& self) -> Option < & 'static str >
 AgentDescription::const fn effort_key (& self) -> Option < & 'static str >
@@ -42,6 +51,7 @@ AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: Surfac
 AgentDescription::const fn route (& self) -> AgentRoute
 AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
 AgentDescription::const fn visible (& self) -> Visible
+AgentDescription::const fn with_credential (mut self , credential : AgentCredential) -> Self
 AgentDescription::const fn with_effort_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_prefix (mut self , prefix : & 'static str) -> Self
@@ -146,6 +156,20 @@ CountOutcome
 CountOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 CountOutcome::Counted
 CountOutcome::Unsupported
+Credential
+Credential #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Hash)
+Credential::fn account (& self) -> & str
+Credential::fn label (& self) -> & str
+Credential::fn new (url : impl Into < String > , account : impl Into < String > , label : impl Into < String > , windows_target : impl Into < String > ,) -> Self
+Credential::fn url (& self) -> & str
+Credential::fn windows_target (& self) -> & str
+CredentialError
+CredentialError derives(Clone, Debug, PartialEq, Eq, Error)
+CredentialError::fn new (message : impl Into < String >) -> Self
+CredentialStore
+CredentialStore::fn delete (& self , item : & Credential) -> Result < () , CredentialError >
+CredentialStore::fn read (& self , item : & Credential) -> Result < Option < SecretString > , CredentialError >
+CredentialStore::fn write (& self , item : & Credential , secret : & str) -> Result < () , CredentialError >
 CredentialStyle
 CredentialStyle #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 CredentialStyle::ApiKey

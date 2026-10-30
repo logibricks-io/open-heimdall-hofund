@@ -256,6 +256,101 @@ impl ConnectionStatus {
     }
 }
 
+/// One item in the OS credential store, resolved for a gateway.
+///
+/// It names the item only. The secret travels separately, so this value is
+/// safe to log, compare and keep.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Credential {
+    url: String,
+    account: String,
+    label: String,
+    windows_target: String,
+}
+
+impl Credential {
+    /// An item.
+    #[must_use]
+    pub fn new(
+        url: impl Into<String>,
+        account: impl Into<String>,
+        label: impl Into<String>,
+        windows_target: impl Into<String>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            account: account.into(),
+            label: label.into(),
+            windows_target: windows_target.into(),
+        }
+    }
+
+    /// URL (server) the agent looks the item up by.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Account (user name) of the item.
+    #[must_use]
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    /// Label shown by stores that keep one.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Generic-credential target name on Windows.
+    #[must_use]
+    pub fn windows_target(&self) -> &str {
+        &self.windows_target
+    }
+}
+
+/// A credential store failure. The message never holds the secret.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct CredentialError(String);
+
+impl CredentialError {
+    /// An error with `message`, which must not hold the secret.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+/// The OS credential store, or a fake of it in tests.
+///
+/// Calls block. Implementations must not start child processes and must not
+/// put the secret in errors or logs.
+pub trait CredentialStore: Send + Sync {
+    /// The secret held by `item`, or `None` when there is no such item.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot be reached or read.
+    fn read(&self, item: &Credential) -> Result<Option<SecretString>, CredentialError>;
+
+    /// Creates `item` holding `secret`, or replaces its secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store refuses the write.
+    fn write(&self, item: &Credential, secret: &str) -> Result<(), CredentialError>;
+
+    /// Removes `item`. Removing a missing item succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store refuses the removal.
+    fn delete(&self, item: &Credential) -> Result<(), CredentialError>;
+}
+
 /// Context for a custom write. The engine fills this. The API does not read the home directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]

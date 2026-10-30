@@ -24,6 +24,18 @@ pub struct AgentToml {
     pub model: Option<KeyToml>,
     pub model_prefix: Option<String>,
     pub effort: Option<KeyToml>,
+    pub credential: Option<CredentialToml>,
+}
+
+/// An OS credential store item the agent reads hofund's key from.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialToml {
+    pub file: String,
+    pub url: String,
+    pub account: String,
+    pub label: String,
+    pub windows_target: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -522,6 +534,9 @@ fn validate(
             ));
         }
     }
+    if let Some(credential) = &agent.credential {
+        validate_credential(credential, agent, &file_ids, source)?;
+    }
     for (field, key) in [("model", &agent.model), ("effort", &agent.effort)] {
         if let Some(key) = key {
             if key.key.is_empty() {
@@ -647,6 +662,59 @@ fn validate_slot(slot: &SlotToml, source: &str, field: &str) -> Result<(), Strin
         }
         _ => Ok(()),
     }
+}
+
+/// Checks the `[credential]` table: a gateway agent, a known file, URL and
+/// target templates without `{token}`, and literal account and label.
+fn validate_credential(
+    credential: &CredentialToml,
+    agent: &AgentToml,
+    file_ids: &BTreeSet<&str>,
+    source: &str,
+) -> Result<(), String> {
+    if agent.route != "gateway" {
+        return Err(error(
+            source,
+            "credential",
+            "needs route `gateway`; route `none` stores no key",
+        ));
+    }
+    if !file_ids.contains(credential.file.as_str()) {
+        return Err(error(
+            source,
+            "credential.file",
+            format!("references unknown file id `{}`", credential.file),
+        ));
+    }
+    for (field, text) in [
+        ("credential.url", &credential.url),
+        ("credential.windows_target", &credential.windows_target),
+    ] {
+        validate_template(text, source, field)?;
+        if text.contains("{token}") {
+            return Err(error(
+                source,
+                field,
+                "must not hold `{token}`; the key goes in the item's secret",
+            ));
+        }
+    }
+    for (field, text) in [
+        ("credential.account", &credential.account),
+        ("credential.label", &credential.label),
+    ] {
+        if text.is_empty() {
+            return Err(error(source, field, "must not be empty"));
+        }
+        if text.contains(['{', '}']) {
+            return Err(error(
+                source,
+                field,
+                "is literal text and takes no placeholder",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Checks a template: every `{` opens `{origin}`, `{v1}`, or `{token}`, and
@@ -1057,6 +1125,16 @@ pub fn render(agent: &AgentToml) -> (String, String) {
     if let Some(effort) = &agent.effort {
         output.push_str(&format!(".with_effort_file({:?})", effort.file));
     }
+    if let Some(credential) = &agent.credential {
+        output.push_str(&format!(
+            ".with_credential(hofund_plugin_api::AgentCredential::from_static({:?}, {:?}, {:?}, {:?}, {:?}))",
+            credential.file,
+            credential.url,
+            credential.account,
+            credential.label,
+            credential.windows_target,
+        ));
+    }
     output.push_str(";\n");
     (static_name, output)
 }
@@ -1257,6 +1335,71 @@ key = "effort"
                 "model_prefix",
             );
         }
+    }
+
+    #[test]
+    fn credential_is_validated_and_rendered() {
+        let table = "\n[credential]\nfile = \"config\"\nurl = \"{v1}\"\naccount = \"Bearer\"\nlabel = \"app\"\nwindows_target = \"app:url={v1}\"\n";
+        let text = base() + table;
+        let agent = validate(&text).expect("credential");
+        let source = render(&agent).1;
+        assert!(
+            source.contains(".with_credential(hofund_plugin_api::AgentCredential::from_static(\"config\", \"{v1}\", \"Bearer\", \"app\", \"app:url={v1}\"))"),
+            "{source}"
+        );
+        assert!(
+            !render(&validate(&base()).expect("base"))
+                .1
+                .contains("with_credential")
+        );
+
+        reject(
+            text.replace("route = \"gateway\"", "route = \"none\""),
+            "needs route `gateway`",
+        );
+        reject(
+            text.replace("file = \"config\"\nurl", "file = \"other\"\nurl"),
+            "unknown file id `other`",
+        );
+        reject(
+            text.replace("url = \"{v1}\"", "url = \"{v1}?k={token}\""),
+            "must not hold `{token}`",
+        );
+        reject(
+            text.replace(
+                "windows_target = \"app:url={v1}\"",
+                "windows_target = \"{token}\"",
+            ),
+            "credential.windows_target",
+        );
+        reject(
+            text.replace("url = \"{v1}\"", "url = \"{v2}\""),
+            "credential.url",
+        );
+        reject(
+            text.replace("url = \"{v1}\"", "url = \"https://fixed\""),
+            "credential.url",
+        );
+        for (from, to, field) in [
+            (
+                "account = \"Bearer\"",
+                "account = \"\"",
+                "credential.account",
+            ),
+            ("label = \"app\"", "label = \"\"", "credential.label"),
+            (
+                "account = \"Bearer\"",
+                "account = \"{v1}\"",
+                "credential.account",
+            ),
+            ("label = \"app\"", "label = \"a}\"", "credential.label"),
+        ] {
+            reject(text.replace(from, to), field);
+        }
+        reject(
+            text.replace("label = \"app\"", "label = \"app\"\nextra = 1"),
+            "extra",
+        );
     }
 
     #[test]

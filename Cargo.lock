@@ -1669,7 +1669,9 @@ version = "0.1.0"
 dependencies = [
  "hofund-config",
  "hofund-plugin-api",
+ "secrecy",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "toml_edit 0.25.17+spec-1.1.0",
