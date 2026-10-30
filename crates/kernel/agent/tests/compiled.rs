@@ -1268,6 +1268,43 @@ static PAIR_SELF: AgentDescription = AgentDescription::from_static(
 )
 .with_model_file("settings");
 
+static PAIR_URL_SETS: &[AgentSet] = &[AgentSet::from_static(
+    "config",
+    "modelUrl",
+    Slot::ModelPair {
+        value: "{v1}",
+        unless: &[],
+    },
+)];
+static PAIR_URL: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("pair-url"),
+    "Pair Url",
+    "pair-url",
+    ARRAY_JSON_FILES,
+    PAIR_URL_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
+
+#[test]
+fn model_pair_fills_the_gateway_address() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".array").join("config.json");
+    seed(&path, "{\"modelUrl\":\"https://mine.test/v1\"}");
+    let target = target_with(&["a"]);
+    let agent = Compiled::new(&PAIR_URL);
+    agent.set_model(&session, &target, Some("a")).expect("set");
+    let json = read_json(&path);
+    assert_eq!(json["model"], "a");
+    assert_eq!(json["modelUrl"], "http://127.0.0.1:3425/v1");
+    agent.set_model(&session, &target, None).expect("clear");
+    assert_eq!(read_json(&path)["modelUrl"], "https://mine.test/v1");
+}
+
 #[test]
 fn template_fills_gateway_values_in_one_pass() {
     let home = scratch();

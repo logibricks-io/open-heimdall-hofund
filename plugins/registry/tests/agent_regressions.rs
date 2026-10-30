@@ -938,3 +938,45 @@ impl std::ops::Deref for Scratch {
 fn scratch() -> Scratch {
     Scratch(tempfile::tempdir().expect("scratch"))
 }
+
+#[test]
+fn shipped_qwen_pick_points_the_session_at_the_gateway_entry() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".qwen").join("settings.json");
+    let original = r#"{
+  "security": { "auth": { "selectedType": "qwen-oauth" } },
+  "model": { "name": "mine", "baseUrl": "https://mine.example.test/v1" },
+  "modelProviders": { "openai": [
+    { "baseUrl": "https://mine.example.test/v1", "envKey": "MY_KEY", "id": "route-a", "name": "mine" }
+  ] }
+}
+"#;
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, original).expect("seed");
+    let target = target();
+    let agent = adapter("qwen", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    let read = || -> serde_json::Value {
+        serde_json::from_slice(&fs::read(&path).expect("read")).expect("json")
+    };
+    assert_eq!(read()["security"]["auth"]["selectedType"], "qwen-oauth");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json = read();
+    // The user's entry of the same id comes first; the base URL picks hofund's.
+    assert_eq!(json["model"]["name"], "route-a");
+    assert_eq!(json["model"]["baseUrl"], "http://127.0.0.1:3425/v1");
+    assert_eq!(json["security"]["auth"]["selectedType"], "openai");
+    assert!(agent.status(&session, &target).expect("status").connected());
+    agent.set_model(&session, &target, None).expect("clear");
+    let json = read();
+    assert_eq!(json["model"]["baseUrl"], "https://mine.example.test/v1");
+    assert_eq!(json["security"]["auth"]["selectedType"], "qwen-oauth");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(
+        read(),
+        serde_json::from_str::<serde_json::Value>(original).expect("original")
+    );
+}

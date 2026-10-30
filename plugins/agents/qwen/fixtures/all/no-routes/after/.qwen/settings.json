@@ -1,0 +1,5 @@
+{
+  "env": {
+    "HOFUND_QWEN_API_KEY": "old-token"
+  }
+}

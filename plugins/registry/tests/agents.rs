@@ -18,7 +18,8 @@ fn production_agent_list_contains_migrated_agents() {
             "gemini-cli",
             "hermes",
             "opencode",
-            "pi"
+            "pi",
+            "qwen"
         ]
     );
     assert_eq!(
@@ -40,6 +41,7 @@ fn production_agent_list_contains_migrated_agents() {
         Some("hofund/")
     );
     assert_eq!(agent("codex").expect("codex").model_prefix(), None);
+    assert_eq!(agent("qwen").expect("qwen").model_prefix(), None);
     assert!(agent("missing").is_none());
 }
 
