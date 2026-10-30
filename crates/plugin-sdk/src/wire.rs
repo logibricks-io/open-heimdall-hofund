@@ -561,7 +561,7 @@ pub async fn forward(
     Ok(RawAnswer::new(status, content_type, answer))
 }
 
-/// Whether [`forward`] serves `target`: an OpenAI Chat or Responses target
+/// Whether [`forward`] serves `target`: an `OpenAI` Chat or Responses target
 /// with no signer and no method root.
 fn forwards(target: &Target) -> bool {
     let openai = matches!(
