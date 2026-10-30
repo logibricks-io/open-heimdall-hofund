@@ -39,6 +39,7 @@ mod events;
 mod membership;
 mod models;
 mod models_state;
+mod one_shot;
 mod registry;
 mod runtime;
 mod sign_in;
@@ -237,6 +238,7 @@ pub fn usage_report(path: &Path) -> Result<String, DaemonError> {
 }
 
 pub use control_local::ControlRuntime;
+pub use one_shot::{one_shot_stdio, serve_one_shot};
 
 /// Optional listeners for a daemon start.
 #[derive(Clone, Debug, Default)]

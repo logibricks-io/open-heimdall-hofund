@@ -3,17 +3,17 @@
 //! The binary parses arguments and calls the daemon. It does not route and it
 //! does not encode a protocol.
 
+mod commands;
+mod connect;
+mod local;
 mod serve;
 mod subscription;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use hofund_agent::{GatewayTarget, Session, catalog};
-use hofund_daemon::{
-    agent_descriptions, check, local_gateway, route_models, serve_blocking, token_rotate,
-    token_show, usage_report, user_config_path,
-};
+use hofund_config::user_config_path;
+use hofund_daemon::serve_blocking;
 use subscription::{SubscriptionCommand, SubscriptionFlags};
 
 fn main() -> ExitCode {
@@ -25,40 +25,64 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let result = match command {
+    match command {
         Command::Version => {
             println!("hofund {}", env!("CARGO_PKG_VERSION"));
-            return ExitCode::SUCCESS;
+            ExitCode::SUCCESS
         }
-        Command::Serve { in_process: true } => serve_blocking(&config),
+        Command::Serve { in_process: true } => {
+            finish(serve_blocking(&config).map(|()| String::new()))
+        }
         Command::Serve { in_process: false } => match serve::run(&config) {
             Ok(code) => std::process::exit(code),
             Err(message) => {
                 eprintln!("{message}");
-                return ExitCode::FAILURE;
+                ExitCode::FAILURE
             }
         },
         Command::Help(topic) => {
             println!("{}", help_text(topic));
-            return ExitCode::SUCCESS;
+            ExitCode::SUCCESS
         }
-        Command::Check => return finish(check_config(&config)),
-        Command::TokenShow => token_show(&config).map(|token| println!("{token}")),
-        Command::TokenRotate => return finish(rotate_token(&config)),
-        Command::Usage => usage_report(&config).map(|table| print!("{table}")),
-        Command::AgentList => return finish(print_agent_list()),
-        Command::AgentConnect { name, dry_run } => {
-            return agent_command(&name, |adapter| connect(adapter, &config, dry_run));
+        Command::TokenShow => finish(local::token_show(&config)),
+        Command::Subscription(command) => subscription::run(&config, command),
+        other => finish(run_control(&config, other)),
+    }
+}
+
+/// Runs a command that goes through the control plane.
+fn run_control(config: &Path, command: Command) -> Result<String, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("cannot start the async runtime: {error}"))?;
+    runtime.block_on(async {
+        match command {
+            Command::Check => commands::check(config).await,
+            Command::ConfigApply { source } => commands::apply(config, &source).await,
+            Command::ConfigReload => commands::reload(config).await,
+            Command::Status => commands::status(config).await,
+            Command::Shutdown => commands::shutdown(config).await,
+            Command::Healthcheck => commands::healthcheck(config).await,
+            Command::TokenRotate => commands::token_rotate(config).await,
+            Command::Usage => commands::usage(config)
+                .await
+                .map(|table| table.trim_end_matches('\n').to_owned()),
+            Command::AgentList => commands::agent_list(config).await,
+            Command::AgentConnect { name, dry_run } => {
+                commands::agent_connect(config, &name, dry_run).await
+            }
+            Command::AgentDisconnect { name, force } => {
+                commands::agent_disconnect(config, &name, force).await
+            }
+            Command::AgentStatus { name } => commands::agent_status(config, name.as_deref()).await,
+            Command::Version
+            | Command::Help(_)
+            | Command::Serve { .. }
+            | Command::TokenShow
+            | Command::Subscription(_) => Err("not a control command".to_owned()),
         }
-        Command::AgentDisconnect { name, force } => {
-            return agent_command(&name, |adapter| disconnect(adapter, force));
-        }
-        Command::AgentStatus => {
-            return finish(agent_status(&config));
-        }
-        Command::Subscription(command) => return subscription::run(&config, command),
-    };
-    finish(result)
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -70,6 +94,13 @@ enum Command {
         in_process: bool,
     },
     Check,
+    ConfigApply {
+        source: PathBuf,
+    },
+    ConfigReload,
+    Status,
+    Shutdown,
+    Healthcheck,
     TokenShow,
     TokenRotate,
     Usage,
@@ -82,7 +113,9 @@ enum Command {
         name: String,
         force: bool,
     },
-    AgentStatus,
+    AgentStatus {
+        name: Option<String>,
+    },
     Subscription(SubscriptionCommand),
 }
 
@@ -91,6 +124,11 @@ enum HelpTopic {
     Overview,
     Serve,
     ConfigCheck,
+    ConfigApply,
+    ConfigReload,
+    Status,
+    Shutdown,
+    Healthcheck,
     Token,
     TokenShow,
     TokenRotate,
@@ -166,6 +204,13 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
         ["serve"] => Command::Serve { in_process },
         ["config", "check"] => Command::Check,
+        ["config", "apply", source] => Command::ConfigApply {
+            source: PathBuf::from(source),
+        },
+        ["config", "reload"] => Command::ConfigReload,
+        ["status"] => Command::Status,
+        ["shutdown"] => Command::Shutdown,
+        ["healthcheck"] => Command::Healthcheck,
         ["token", "show"] => Command::TokenShow,
         ["token", "rotate"] => Command::TokenRotate,
         ["usage"] => Command::Usage,
@@ -178,7 +223,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             name: (*name).to_owned(),
             force,
         },
-        ["agent", "status"] => Command::AgentStatus,
+        ["agent", "status"] => Command::AgentStatus { name: None },
+        ["agent", "status", name] => Command::AgentStatus {
+            name: Some((*name).to_owned()),
+        },
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
@@ -206,7 +254,12 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
     let topic = match words {
         [] | ["version"] => HelpTopic::Overview,
         ["serve", ..] => HelpTopic::Serve,
+        ["config", "apply", ..] => HelpTopic::ConfigApply,
+        ["config", "reload", ..] => HelpTopic::ConfigReload,
         ["config", ..] => HelpTopic::ConfigCheck,
+        ["status", ..] => HelpTopic::Status,
+        ["shutdown", ..] => HelpTopic::Shutdown,
+        ["healthcheck", ..] => HelpTopic::Healthcheck,
         ["token", "show", ..] => HelpTopic::TokenShow,
         ["token", "rotate", ..] => HelpTopic::TokenRotate,
         ["token", ..] => HelpTopic::Token,
@@ -238,6 +291,11 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::Overview => OVERVIEW,
         HelpTopic::Serve => SERVE_HELP,
         HelpTopic::ConfigCheck => CHECK_HELP,
+        HelpTopic::ConfigApply => APPLY_HELP,
+        HelpTopic::ConfigReload => RELOAD_HELP,
+        HelpTopic::Status => STATUS_HELP,
+        HelpTopic::Shutdown => SHUTDOWN_HELP,
+        HelpTopic::Healthcheck => HEALTHCHECK_HELP,
         HelpTopic::Token => TOKEN_HELP,
         HelpTopic::TokenShow => TOKEN_SHOW_HELP,
         HelpTopic::TokenRotate => TOKEN_ROTATE_HELP,
@@ -269,19 +327,29 @@ The default config is hofund/hofund.toml under the platform config directory
 commands:
   version                         print the version
   serve                           bind the listen address and serve
-  config check                    load the config and build its providers
+  status                          print the daemon status, or a local report
+  shutdown                        stop a running daemon
+  healthcheck                     probe the model gateway's /health
+  config check                    validate the config and build its providers
+  config apply <file>             replace the config with <file>
+  config reload                   make a running daemon reread the config
   token show                      print the bearer token
   token rotate                    replace the bearer token
   usage                           print the usage table
   agent list                      list coding-agent adapters
   agent connect <name> [--dry-run]
   agent disconnect <name> [--force]
-  agent status
+  agent status [<name>]
   subscription list [--json]      list subscriptions and their accounts
   subscription sign-in <id> [--host HOST] [--label LABEL]
   subscription sign-out <id> <account>
   subscription refresh <id> [<account>]
   subscription quota [<id>] [--json]
+
+Commands that read or change runtime state talk to a running daemon. With
+no daemon they run hofundd once for the command, from hofund's directory or
+PATH. When a daemon holds the config's lock but does not answer within 5 s,
+the command fails instead.
 
 hofund <command> --help prints that command.
 examples/hofund.toml is a documented config with [[providers]] and [[routes]].
@@ -303,9 +371,51 @@ compatibility option and goes away in the next release.
 const CHECK_HELP: &str = "\
 usage: hofund config check [--config PATH]
 
-Load the config and build the providers it names. On success the command
-prints `config ok:` and the path it read. On failure the message starts
-with that path.
+Validate the config and build the providers it names, through the running
+daemon or one-shot hofundd. On success the command prints `config ok:` and
+the path it read. On failure the message starts with that path. When no
+daemon runs and hofundd is not installed, only the file's structure is
+checked, and the output says so.
+";
+
+const APPLY_HELP: &str = "\
+usage: hofund config apply <file> [--config PATH]
+
+Replace the config with the text of <file>. The write is refused when the
+config changed on disk since it was read. A running daemon applies what it
+can live and lists fields that need a restart.
+";
+
+const RELOAD_HELP: &str = "\
+usage: hofund config reload [--config PATH]
+
+Make a running daemon reread its config file. With no daemon running this
+prints `no daemon running; nothing to reload` and exits 0.
+";
+
+const STATUS_HELP: &str = "\
+usage: hofund status [--config PATH]
+
+Print the running daemon's pid, model address, config generation, and
+revisions. With no daemon running, print a local report: the config path
+and id, its disk revision, and the model address with its source
+(environment or config), marked `daemon not running`.
+";
+
+const SHUTDOWN_HELP: &str = "\
+usage: hofund shutdown [--config PATH]
+
+Ask the running daemon to finish in-flight requests and exit. With no daemon
+running this prints `no daemon running; nothing to shut down` and exits 0.
+";
+
+const HEALTHCHECK_HELP: &str = "\
+usage: hofund healthcheck [--config PATH]
+
+Exit 0 when a hofund model gateway answers GET /health at the model address
+within 3 s: HOFUND_ADDR when set, otherwise listen in the config. An
+unspecified host is probed on loopback. It needs no token and no daemon
+discovery, so a container HEALTHCHECK can run it.
 ";
 
 const TOKEN_HELP: &str = "\
@@ -336,19 +446,20 @@ const USAGE_HELP: &str = "\
 usage: hofund usage [--config PATH]
 
 Print one row per recorded request, with local time, plus a totals line.
+The newest rows are shown when there are too many to list.
 ";
 
 const AGENT_HELP: &str = "\
-usage: hofund agent list
+usage: hofund agent list [--config PATH]
        hofund agent connect <name> [--dry-run] [--config PATH]
-       hofund agent disconnect <name> [--force]
-       hofund agent status [--config PATH]
+       hofund agent disconnect <name> [--force] [--config PATH]
+       hofund agent status [<name>] [--config PATH]
 
 Adapters: claude-code, codex, gemini-cli, opencode.
 ";
 
 const AGENT_LIST_HELP: &str = "\
-usage: hofund agent list
+usage: hofund agent list [--config PATH]
 
 Print each adapter id, display name, and whether it is installed.
 ";
@@ -362,7 +473,7 @@ tool's configured model has no route, a warning is printed.
 ";
 
 const AGENT_DISCONNECT_HELP: &str = "\
-usage: hofund agent disconnect <name> [--force]
+usage: hofund agent disconnect <name> [--force] [--config PATH]
 
 Remove the keys connect wrote, on the files as they are now. Edits made
 while connected stay. --force restores the connect-time backup instead.
@@ -370,15 +481,20 @@ A second disconnect prints a note and exits 0.
 ";
 
 const AGENT_STATUS_HELP: &str = "\
-usage: hofund agent status [--config PATH]
+usage: hofund agent status [<name>] [--config PATH]
 
-Print whether each adapter is installed and whether its files match the
-current gateway token.
+Print each adapter's state (connected, disconnected, or drifted) and the
+model its files select. <name> limits the output to one adapter.
 ";
 
-fn finish<E: std::fmt::Display>(result: Result<(), E>) -> ExitCode {
+fn finish<E: std::fmt::Display>(result: Result<String, E>) -> ExitCode {
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(out) => {
+            if !out.is_empty() {
+                println!("{out}");
+            }
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("{error}");
             ExitCode::from(1)
@@ -386,272 +502,14 @@ fn finish<E: std::fmt::Display>(result: Result<(), E>) -> ExitCode {
     }
 }
 
-fn agent_catalog() -> Result<hofund_agent::Catalog, String> {
-    catalog(agent_descriptions()).map_err(|error| error.to_string())
-}
-
-fn agent_command(
-    name: &str,
-    run: impl FnOnce(&dyn hofund_agent::AgentAdapter) -> Result<(), String>,
-) -> ExitCode {
-    let catalog = match agent_catalog() {
-        Ok(catalog) => catalog,
-        Err(error) => return finish(Err(error)),
-    };
-    let Some(adapter) = catalog.find(name) else {
-        eprintln!("unknown agent `{name}`");
-        return ExitCode::from(2);
-    };
-    finish(run(adapter))
-}
-
-fn print_agent_list() -> Result<(), String> {
-    let catalog = agent_catalog()?;
-    let session = Session::from_process_env();
-    println!("id\tname\tinstalled");
-    for adapter in catalog.adapters() {
-        let installed = if adapter.detect(&session) {
-            "yes"
-        } else {
-            "no"
-        };
-        println!("{}\t{}\t{installed}", adapter.id(), adapter.display_name());
-    }
-    Ok(())
-}
-
-fn check_config(config: &Path) -> Result<(), String> {
-    match check(config) {
-        Ok(()) => {
-            println!("config ok: {}", config.display());
-            Ok(())
-        }
-        Err(error) => Err(format!("{}: {error}", config.display())),
-    }
-}
-
-fn rotate_token(config: &Path) -> Result<(), String> {
-    let catalog = agent_catalog()?;
-    let session = Session::from_process_env();
-    let local = local_gateway(config).map_err(|error| error.to_string())?;
-    let models = route_models(config).map_err(|error| error.to_string())?;
-    let previous = GatewayTarget::new(local.base_url.clone(), local.token, models.clone());
-    let mut connected = Vec::new();
-    let mut failed = Vec::new();
-    for adapter in catalog.adapters() {
-        match adapter.status(&session, &previous) {
-            Ok(status) if status.connected() => connected.push(adapter.id()),
-            Ok(_) => {}
-            Err(error) => failed.push((adapter.id(), error.to_string())),
-        }
-    }
-    let token = token_rotate(config).map_err(|error| error.to_string())?;
-    println!("{token}");
-    eprintln!("a running gateway reads the token file on the next request");
-    let updated = GatewayTarget::new(local.base_url, token, models);
-    for id in connected {
-        let Some(adapter) = catalog.find(id) else {
-            continue;
-        };
-        match adapter.refresh_token(&session, &updated) {
-            Ok(paths) => {
-                for path in paths {
-                    println!("{id}: updated {}", path.display());
-                }
-            }
-            Err(error) => failed.push((id, error.to_string())),
-        }
-    }
-    if failed.is_empty() {
-        return Ok(());
-    }
-    for (id, error) in &failed {
-        eprintln!("{id}: {error}");
-        eprintln!("run: hofund agent connect {id}");
-    }
-    Err("the token file was rotated; a connected agent still needs `hofund agent connect`".into())
-}
-
-fn connect(
-    adapter: &dyn hofund_agent::AgentAdapter,
-    config: &Path,
-    dry_run: bool,
-) -> Result<(), String> {
-    let session = Session::from_process_env();
-    let target = gateway_target(config)?;
-    let plan = if dry_run {
-        adapter.plan(&session, &target)
-    } else {
-        adapter.apply(&session, &target)
-    }
-    .map_err(|error| error.to_string())?;
-    if plan.changes().is_empty() {
-        println!("{}: already matches", adapter.id());
-    } else {
-        for change in plan.changes() {
-            if dry_run {
-                print!("{}", redact_diff(change.diff(), target.token()));
-            } else {
-                println!("{}: wrote {}", adapter.id(), change.path().display());
-            }
-        }
-    }
-    if let Some(note) = connect_models_note(adapter.id(), target.models().len()) {
-        println!("{note}");
-    }
-    warn_unrouted_model(adapter, &session, config)
-}
-
-fn connect_models_note(adapter_id: &str, model_count: usize) -> Option<String> {
-    (adapter_id == "opencode").then(|| opencode_models_note(model_count))
-}
-
-/// What `hofund agent connect opencode` prints about the models object.
-fn opencode_models_note(model_count: usize) -> String {
-    if model_count == 0 {
-        "opencode: models stays {}. The config has no routes, and this build does not invent a model catalog.".to_owned()
-    } else {
-        format!(
-            "opencode: models lists {model_count} route name(s), each with name and an empty variants object. Modalities, context limits, and reasoning levels are not invented."
-        )
-    }
-}
-
-fn gateway_target(config: &Path) -> Result<GatewayTarget, String> {
-    let local = local_gateway(config).map_err(|error| error.to_string())?;
-    let models = route_models(config).map_err(|error| error.to_string())?;
-    Ok(GatewayTarget::new(local.base_url, local.token, models))
-}
-
-fn redact_diff(diff: &str, token: &str) -> String {
-    if token.is_empty() {
-        diff.to_owned()
-    } else {
-        diff.replace(token, "[redacted]")
-    }
-}
-
-fn warn_unrouted_model(
-    adapter: &dyn hofund_agent::AgentAdapter,
-    session: &Session,
-    config: &Path,
-) -> Result<(), String> {
-    let Some(model) = adapter
-        .configured_model(session)
-        .map_err(|error| error.to_string())?
-    else {
-        return Ok(());
-    };
-    let routes = route_models(config).map_err(|error| error.to_string())?;
-    if !model_has_route(adapter.model_prefix(), &model, &routes) {
-        eprintln!(
-            "warning: {} model `{model}` has no route in {}",
-            adapter.id(),
-            config.display()
-        );
-    }
-    Ok(())
-}
-
-fn model_has_route(model_prefix: Option<&str>, model: &str, routes: &[String]) -> bool {
-    if let Some(prefix) = model_prefix {
-        return model
-            .strip_prefix(prefix)
-            .is_some_and(|model| routes.iter().any(|route| route == model));
-    }
-    routes.iter().any(|route| route == model)
-}
-
-fn disconnect(adapter: &dyn hofund_agent::AgentAdapter, force: bool) -> Result<(), String> {
-    let session = Session::from_process_env();
-    let outcome = adapter
-        .disconnect(&session, force)
-        .map_err(|error| error.to_string())?;
-    for warning in outcome.warnings() {
-        eprintln!("{warning}");
-    }
-    if outcome.changed() {
-        println!("{}: restored", adapter.id());
-    } else {
-        println!("{}: nothing to restore", adapter.id());
-    }
-    Ok(())
-}
-
-fn agent_status(config: &Path) -> Result<(), String> {
-    let catalog = agent_catalog()?;
-    let session = Session::from_process_env();
-    let target = gateway_target(config)?;
-    println!("id\tinstalled\tconnected");
-    for adapter in catalog.adapters() {
-        let status = adapter
-            .status(&session, &target)
-            .map_err(|error| error.to_string())?;
-        let installed = if status.installed() { "yes" } else { "no" };
-        let connected = if status.connected() { "yes" } else { "no" };
-        println!("{}\t{installed}\t{connected}", status.id());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        Command, HelpTopic, SubscriptionCommand, connect_models_note, help_text, help_topic,
-        model_has_route, opencode_models_note, parse, redact_diff,
-    };
+    use super::{Command, HelpTopic, SubscriptionCommand, help_text, help_topic, parse};
     use hofund_daemon::SignInOptions;
     use std::path::PathBuf;
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
-    }
-
-    #[test]
-    fn compiled_opencode_triggers_the_models_note() {
-        let catalog = hofund_agent::catalog(hofund_daemon::agent_descriptions())
-            .expect("compiled agent catalog");
-        let adapter = catalog.find("opencode").expect("compiled opencode");
-        for model_count in [0, 2] {
-            assert_eq!(
-                connect_models_note(adapter.id(), model_count),
-                Some(opencode_models_note(model_count))
-            );
-        }
-        for adapter_id in ["codex", "claude-code", "gemini-cli"] {
-            assert_eq!(connect_models_note(adapter_id, 2), None);
-        }
-    }
-
-    #[test]
-    fn route_matching_uses_the_compiled_model_prefix() {
-        let catalog = hofund_agent::catalog(hofund_daemon::agent_descriptions())
-            .expect("compiled agent catalog");
-        let opencode = catalog.find("opencode").expect("compiled opencode");
-        let codex = catalog.find("codex").expect("compiled codex");
-        let routes = vec!["route-a".to_owned()];
-        assert!(model_has_route(
-            opencode.model_prefix(),
-            "hofund/route-a",
-            &routes
-        ));
-        assert!(!model_has_route(
-            opencode.model_prefix(),
-            "other/route-a",
-            &routes
-        ));
-        // OpenCode spells selections as provider/model, so a bare model warns.
-        assert!(!model_has_route(
-            opencode.model_prefix(),
-            "route-a",
-            &routes
-        ));
-        assert!(!model_has_route(
-            codex.model_prefix(),
-            "hofund/route-a",
-            &routes
-        ));
-        assert!(model_has_route(codex.model_prefix(), "route-a", &routes));
     }
 
     #[test]
@@ -813,11 +671,55 @@ mod tests {
         );
         assert_eq!(
             parse(&words(&["agent", "status"])).expect("parse").1,
-            Command::AgentStatus
+            Command::AgentStatus { name: None }
         );
         assert_eq!(
+            parse(&words(&["agent", "status", "codex"]))
+                .expect("parse")
+                .1,
+            Command::AgentStatus {
+                name: Some("codex".to_owned())
+            }
+        );
+        assert_eq!(
+            parse(&words(&["config", "apply", "new.toml"]))
+                .expect("parse")
+                .1,
+            Command::ConfigApply {
+                source: PathBuf::from("new.toml")
+            }
+        );
+        assert_eq!(
+            parse(&words(&["config", "reload"])).expect("parse").1,
+            Command::ConfigReload
+        );
+        assert_eq!(
+            parse(&words(&["status"])).expect("parse").1,
+            Command::Status
+        );
+        assert_eq!(
+            parse(&words(&["shutdown"])).expect("parse").1,
+            Command::Shutdown
+        );
+        assert_eq!(
+            parse(&words(&["healthcheck"])).expect("parse").1,
+            Command::Healthcheck
+        );
+        assert!(parse(&words(&["config", "apply"])).is_err());
+        for (topic, needle) in [
+            (vec!["config", "apply"], "config apply <file>"),
+            (vec!["config", "reload"], "nothing to reload"),
+            (vec!["status"], "daemon not running"),
+            (vec!["shutdown"], "nothing to shut down"),
+            (vec!["healthcheck"], "within 3 s"),
+            (vec!["config", "check"], "structure"),
+        ] {
+            let help = help_text(help_topic(&topic).expect("topic"));
+            assert!(help.contains(needle), "{topic:?}: {help}");
+        }
+        assert_eq!(
             parse(&words(&[])).expect("parse").0,
-            hofund_daemon::user_config_path()
+            hofund_config::user_config_path()
         );
         assert_eq!(
             parse(&words(&["--help"])).expect("parse").1,
@@ -842,15 +744,5 @@ mod tests {
         assert!(parse(&words(&["nope"])).is_err());
         assert!(parse(&words(&["agent", "status", "--dry-run"])).is_err());
         assert!(parse(&words(&["serve", "--force"])).is_err());
-        assert_eq!(
-            redact_diff("token = \"local-token\"\n", "local-token"),
-            "token = \"[redacted]\"\n"
-        );
-        let note = opencode_models_note(0);
-        assert!(note.contains("models stays {}"));
-        assert!(note.contains("catalog"));
-        let listed = opencode_models_note(2);
-        assert!(listed.contains("2 route"));
-        assert!(listed.contains("variants"));
     }
 }

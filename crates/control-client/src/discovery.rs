@@ -199,6 +199,89 @@ pub(crate) async fn discover(
     probe(Client::tcp(addr, token)).await
 }
 
+/// A daemon lifetime lock that another process holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldLock {
+    /// The lock file.
+    pub path: PathBuf,
+    /// The holder's PID from the discovery file beside the lock, when one is
+    /// readable and names this config.
+    pub pid: Option<u32>,
+}
+
+/// The canonical config id used in discovery, lock, and socket names.
+///
+/// # Errors
+///
+/// Returns [`ClientError::Discovery`] when the path cannot be resolved.
+pub fn resolve_config_id(config_path: &Path) -> Result<String, ClientError> {
+    ConfigIdentity::resolve(config_path).map(|identity| identity.id)
+}
+
+/// Probes the daemon lifetime lock at every lookup location for
+/// `config_path` and returns the ones another process holds.
+///
+/// The probe opens existing lock files only. It never creates a lock file
+/// or a directory, so it is safe before a one-shot run.
+///
+/// # Errors
+///
+/// Returns [`ClientError::Discovery`] when the config path cannot be
+/// resolved, or a lock file exists but cannot be opened or probed.
+pub fn held_daemon_locks(
+    config_path: &Path,
+    runtime: &DiscoveryRuntime,
+) -> Result<Vec<HeldLock>, ClientError> {
+    let identity = ConfigIdentity::resolve(config_path)?;
+    let mut dirs = vec![
+        identity
+            .resolved_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(".hofund"),
+    ];
+    dirs.extend(runtime_dirs(runtime)?);
+    let mut held = Vec::new();
+    for dir in dirs {
+        let path = dir.join(format!("daemon-{}.lock", identity.id));
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(ClientError::Discovery(format!(
+                    "cannot open daemon lock {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        match file.try_lock_shared() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let pid = holder_pid(&dir, &identity.id);
+                held.push(HeldLock { path, pid });
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(ClientError::Discovery(format!(
+                    "cannot probe daemon lock {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(held)
+}
+
+fn holder_pid(dir: &Path, config_id: &str) -> Option<u32> {
+    #[derive(Deserialize)]
+    struct Holder {
+        pid: u32,
+        config_id: String,
+    }
+    let bytes = std::fs::read(dir.join(format!("control-{config_id}.json"))).ok()?;
+    let holder: Holder = serde_json::from_slice(&bytes).ok()?;
+    (holder.config_id == config_id).then_some(holder.pid)
+}
+
 fn discovery_endpoints(
     discovery: DiscoveryFile,
     discovery_path: &Path,

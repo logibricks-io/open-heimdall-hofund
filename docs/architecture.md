@@ -26,8 +26,8 @@ Sibling repositories:
 - [`logibricks-io/open-heimdall-kernel`](https://github.com/logibricks-io/open-heimdall-kernel) — a Rust gateway using hexagonal architecture
 
 The menu-bar app lives at `apps/desktop` (Tauri v2, package `hofund-desktop`).
-Nothing in `crates/` depends on it. It depends on the same crates as
-`hofund-cli`: `hofund-daemon` and `hofund-agent`.
+Nothing in `crates/` depends on it. It depends on `hofund-daemon` and
+`hofund-agent`.
 
 The daemon process lives at `apps/hofundd` (package `hofund-daemon-bin`,
 binary `hofundd`). It is the process composition root and the production
@@ -147,7 +147,10 @@ The HTTP spine is `ir ← codec ← provider`, then `gateway ← daemon ← cli`
 as "depends on". `gateway` depends on `plugin-api` for the raw body and
 `PluginError`. `agent` depends on `config` and `plugin-api`. `daemon`
 depends on `plugin-api` so it can adapt a provider into a router member.
-`desktop` sits beside `cli` and depends on the same two crates as `cli`.
+`desktop` sits beside `cli` and depends on `daemon` and `agent`. `cli`
+reaches the daemon through `control-client` and reads its config and token
+through `config` and `secrets`; it keeps a `daemon` edge only for
+`serve --in-process` and `subscription`.
 `plugin-api` depends on `ir`. `plugin-sdk` depends on `codec`, `ir`,
 `plugin-api`, and `quirks`. It uses `codec` for the Chat and Responses
 transport and `ir` to fold a stream into one response.
@@ -205,7 +208,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent` |
 | `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry` |
-| `hofund-cli` | `hofund-daemon`, `hofund-agent` |
+| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-daemon`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
 
@@ -275,7 +278,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `usage` | Request and token usage records. |
 | `daemon` | The daemon library. Wires config, secrets, the gateway, and the control plane around an injected `DaemonRegistry`. |
 | `hofundd` | The `hofundd` binary and process composition root. Links the plugin registry, owns the runtime, logging, signals, and drain. |
-| `cli` | The `hofund` binary. `hofund serve` runs `hofundd`; other commands delegate to the daemon library and to agent adapters. |
+| `cli` | The `hofund` binary. `hofund serve` runs `hofundd`. Runtime commands go to the running daemon over the control plane, or to one-shot `hofundd` when none runs. |
 | `desktop` | Menu-bar shell at `apps/desktop`. Renders status and calls the daemon and the agent adapters. |
 | `xtask` | Local workspace tasks and the architecture tests. |
 

@@ -1,9 +1,10 @@
-//! Typed TCP and local IPC client for the hofund control protocol.
+//! Typed TCP, local IPC, and one-shot client for the hofund control protocol.
 
 use std::fmt;
 use std::net::SocketAddr;
-#[cfg(unix)]
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::Duration;
 
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
@@ -22,9 +23,97 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
 mod discovery;
+mod model_health;
 
-pub use discovery::{DiscoveryOptions, DiscoveryRuntime};
+pub use discovery::{
+    DiscoveryOptions, DiscoveryRuntime, HeldLock, held_daemon_locks, resolve_config_id,
+};
 pub use hofund_control_proto;
+pub use model_health::{probe_address, probe_model_health};
+
+/// How long a failed one-shot `hofundd` may take to exit before it is killed.
+const ONE_SHOT_EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// The most one-shot standard error kept while waiting for its response.
+const ONE_SHOT_STDERR_LIMIT: usize = 16 * 1024;
+
+/// One-shot `hofundd` standard error: held until the response arrives, then
+/// either passed through to this process's standard error or, when the
+/// child failed before answering, returned as the failure reason.
+struct OneShotStderr {
+    state: std::sync::Arc<std::sync::Mutex<StderrState>>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+enum StderrState {
+    Holding(Vec<u8>),
+    Forwarding,
+}
+
+impl OneShotStderr {
+    fn start(mut stderr: tokio::process::ChildStderr) -> Self {
+        use std::io::Write as _;
+        use tokio::io::AsyncReadExt as _;
+        let state = std::sync::Arc::new(std::sync::Mutex::new(StderrState::Holding(Vec::new())));
+        let shared = std::sync::Arc::clone(&state);
+        let reader = tokio::spawn(async move {
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = match stderr.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => read,
+                };
+                let mut state = shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match &mut *state {
+                    StderrState::Holding(held) => {
+                        let room = ONE_SHOT_STDERR_LIMIT.saturating_sub(held.len());
+                        held.extend_from_slice(&chunk[..read.min(room)]);
+                    }
+                    StderrState::Forwarding => {
+                        let _ = std::io::stderr().write_all(&chunk[..read]);
+                    }
+                }
+            }
+        });
+        Self { state, reader }
+    }
+
+    /// Writes what was held and passes later output straight through.
+    fn forward(self) {
+        use std::io::Write as _;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let StderrState::Holding(held) = std::mem::replace(&mut *state, StderrState::Forwarding)
+        {
+            let _ = std::io::stderr().write_all(&held);
+        }
+    }
+
+    /// Waits briefly for the rest of the output and returns it as one line,
+    /// without the `hofundd: ` prefix, or `None` when there was none.
+    async fn finish(self) -> Option<String> {
+        let _ = tokio::time::timeout(ONE_SHOT_EXIT_WAIT, self.reader).await;
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let StderrState::Holding(held) = &*state else {
+            return None;
+        };
+        let text = String::from_utf8_lossy(held);
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .map(|line| line.strip_prefix("hofundd: ").unwrap_or(line))
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("; "))
+    }
+}
 
 /// The only Host value used over local IPC.
 pub const LOCAL_IPC_HOST: &str = "hofund-control";
@@ -41,6 +130,12 @@ pub(crate) enum Endpoint {
     Tcp(SocketAddr),
     #[cfg(unix)]
     Unix(PathBuf),
+    /// Starts `<exe> one-shot --config <config>` per request and speaks HTTP
+    /// on its standard input and output.
+    OneShot {
+        exe: PathBuf,
+        config: PathBuf,
+    },
 }
 
 #[derive(Clone)]
@@ -79,7 +174,9 @@ pub enum ClientError {
 }
 
 impl ClientError {
-    pub(crate) fn is_unavailable(&self) -> bool {
+    /// Whether nothing answered at the endpoint.
+    #[must_use]
+    pub fn is_unavailable(&self) -> bool {
         matches!(self, Self::ConnectionUnavailable(_))
     }
 }
@@ -121,6 +218,29 @@ impl Client {
     #[must_use]
     pub fn unix(path: impl Into<PathBuf>, token: impl Into<String>) -> Self {
         Self::from_endpoint(Endpoint::Unix(path.into()), token)
+    }
+
+    /// Creates a client that answers each request from a fresh one-shot
+    /// `hofundd` for `config`, for use when no daemon is running.
+    ///
+    /// The child is this process's own and trusts its standard input, so no
+    /// token is sent. Its standard error is passed through.
+    #[must_use]
+    pub fn one_shot(exe: impl Into<PathBuf>, config: impl Into<PathBuf>) -> Self {
+        Self::from_endpoint(
+            Endpoint::OneShot {
+                exe: exe.into(),
+                config: config.into(),
+            },
+            String::new(),
+        )
+    }
+
+    /// Reports whether this client starts one-shot `hofundd` processes
+    /// rather than talking to a running daemon.
+    #[must_use]
+    pub fn is_one_shot(&self) -> bool {
+        matches!(self.endpoint, Endpoint::OneShot { .. })
     }
 
     pub(crate) fn from_endpoint(endpoint: Endpoint, token: impl Into<String>) -> Self {
@@ -443,6 +563,74 @@ impl Client {
                     LOCAL_IPC_HOST.to_owned(),
                 )
                 .await
+            }
+            Endpoint::OneShot { exe, config } => {
+                self.open_one_shot(exe, config, method, path, body, last_event_id)
+                    .await
+            }
+        }
+    }
+
+    async fn open_one_shot(
+        &self,
+        exe: &std::path::Path,
+        config: &std::path::Path,
+        method: http::Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+        last_event_id: Option<&str>,
+    ) -> Result<http::Response<Incoming>, ClientError> {
+        let mut child = tokio::process::Command::new(exe)
+            .arg("one-shot")
+            .arg("--config")
+            .arg(config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| transport(&format!("cannot start {}", exe.display()), error))?;
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
+            return Err(ClientError::Transport(
+                "one-shot hofundd has no standard streams".to_owned(),
+            ));
+        };
+        let diagnostics = OneShotStderr::start(stderr);
+        let io = tokio::io::join(stdout, stdin);
+        let host = LOCAL_IPC_HOST.to_owned();
+        match self
+            .open_over(io, method, path, body, last_event_id, host)
+            .await
+        {
+            Ok(response) => {
+                // Pass the child's diagnostics through from here on. It
+                // exits once the response is read and the connection
+                // drops; reap it in the background.
+                diagnostics.forward();
+                tokio::spawn(async move {
+                    let _ = child.wait().await;
+                });
+                Ok(response)
+            }
+            Err(error) => {
+                let status = match tokio::time::timeout(ONE_SHOT_EXIT_WAIT, child.wait()).await {
+                    Ok(Ok(status)) => status.to_string(),
+                    Ok(Err(wait)) => format!("unknown status: {wait}"),
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        "still running; killed".to_owned()
+                    }
+                };
+                // A child that exits before answering explains why on
+                // standard error; that beats the transport error.
+                let reason = diagnostics
+                    .finish()
+                    .await
+                    .unwrap_or_else(|| error.to_string());
+                Err(ClientError::Transport(format!(
+                    "one-shot hofundd failed ({status}): {reason}"
+                )))
             }
         }
     }

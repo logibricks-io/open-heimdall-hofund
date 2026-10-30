@@ -16,14 +16,19 @@ name = "hofund"
 path = "src/main.rs"
 
 [dependencies]
-hofund-agent = { workspace = true }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+hofund-config = { workspace = true }
+hofund-control-client = { workspace = true }
 hofund-daemon = { workspace = true }
+hofund-secrets = { workspace = true }
+tokio = { version = "1.54.1", features = ["rt", "time"] }
 
 [target.'cfg(windows)'.dependencies]
 tokio = { version = "1.54.1", features = ["rt", "signal"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { version = "1.54.1", features = ["rt", "time", "test-util"] }
 
 [package.metadata.dist]
 dist = true
