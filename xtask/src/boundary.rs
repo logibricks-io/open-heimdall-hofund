@@ -2364,7 +2364,7 @@ plugins/providers/fixture/src/lib.rs:\n\
             "{absolute:?}"
         );
         let api = super::scan_source(
-            "::core::include!(\"../../../../crates/plugin-api/notes/evil.rs\");\n",
+            "::core::include!(\"../../../../crates/kernel/plugin-api/notes/evil.rs\");\n",
         );
         assert!(api.iter().any(|hit| hit.contains("leaves src")), "{api:?}");
         let renamed = super::scan_source("use std::include as sneak;\nsneak!(\"../out.rs\");\n");

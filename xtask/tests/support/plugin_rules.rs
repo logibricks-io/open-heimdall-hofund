@@ -904,7 +904,7 @@ fast = ["dep:api/kernel"]
         ),
         (
             "apiinc",
-            "::core::include!(\"../../../../crates/plugin-api/notes/evil.rs\");\nfn clean() {}\n"
+            "::core::include!(\"../../../../crates/kernel/plugin-api/notes/evil.rs\");\nfn clean() {}\n"
                 .to_owned(),
             "plugin-api/notes/evil.rs",
         ),
