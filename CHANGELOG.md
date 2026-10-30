@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Speech to text in the `retrieval` inbound plugin (S5):
+  `POST /v1/audio/transcriptions` and `POST /v1/audio/translations` take a
+  `multipart/form-data` form with a file and a `model` field and forward it,
+  byte for byte but for the `model` fields, to the providers of that model.
+  A body that is not such a form, or names no model, is a 400 before any
+  provider is called. Every retrieval answer now keeps the provider's
+  content type (JSON when it sends none), so `text`, `srt` and `vtt`
+  transcripts come back as they were sent. Gateway surfaces take bodies up
+  to 32 MiB (codec routes keep 8 MiB) and have 180 seconds instead of 60.
 - The `retrieval` inbound plugin (S4): `POST /v1/embeddings` and
   `POST /v1/rerank`, forwarded as they are to the providers of the model the
   body names. Members that do not serve the path (no OpenAI-style route, or a

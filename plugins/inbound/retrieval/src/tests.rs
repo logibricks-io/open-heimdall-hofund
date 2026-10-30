@@ -40,11 +40,15 @@ struct Gateway {
 
 impl Gateway {
     fn answering(status: u16, body: &str) -> Self {
+        Self::typed(status, Some("text/plain"), body)
+    }
+
+    fn typed(status: u16, kind: Option<&str>, body: &str) -> Self {
         Self {
             wire: "vendor-embed",
             answer: Ok(RawAnswer::new(
                 status,
-                Some("text/plain".to_owned()),
+                kind.map(str::to_owned),
                 body.as_bytes().to_vec(),
             )),
             seen: Mutex::new(Vec::new()),
@@ -77,16 +81,31 @@ impl Kernel for Gateway {
     }
 }
 
-fn post(path: &str, body: &str) -> HttpRequest {
+fn post(path: &str, kind: Option<&str>, body: &str) -> HttpRequest {
     let mut request = HttpRequest::new(Body::from_bytes(body.as_bytes().to_vec()));
     *request.uri_mut() = path.parse().expect("path");
+    if let Some(kind) = kind {
+        request
+            .headers_mut()
+            .insert("content-type", kind.parse().expect("content type"));
+    }
     request
 }
 
 /// What `POST path` with `body` answers: status, content type, and body.
 fn ask(gateway: &Gateway, path: &str, body: &str) -> (u16, String, String) {
+    ask_typed(gateway, path, None, body)
+}
+
+/// What `POST path` with `body` of type `kind` answers.
+fn ask_typed(
+    gateway: &Gateway,
+    path: &str,
+    kind: Option<&str>,
+    body: &str,
+) -> (u16, String, String) {
     block_on(async {
-        let response = serve(gateway, &post(path, body)).await;
+        let response = serve(gateway, &post(path, kind, body)).await;
         let status = response.status().as_u16();
         let kind = response
             .headers()
@@ -108,10 +127,10 @@ fn parsed(body: &str) -> Value {
 }
 
 #[test]
-fn routes_are_the_two_posts() {
+fn routes_are_the_four_posts() {
     let routes = Retrieval.routes();
     assert_eq!(Retrieval.id().as_str(), "retrieval");
-    assert_eq!(routes.len(), 2);
+    assert_eq!(routes.len(), 4);
     let pairs: Vec<_> = routes
         .iter()
         .map(|route: &RouteSpec| (route.method(), route.prefix()))
@@ -120,7 +139,9 @@ fn routes_are_the_two_posts() {
         pairs,
         [
             (Method::Post, "/v1/embeddings"),
-            (Method::Post, "/v1/rerank")
+            (Method::Post, "/v1/rerank"),
+            (Method::Post, "/v1/audio/transcriptions"),
+            (Method::Post, "/v1/audio/translations"),
         ]
     );
 }
@@ -134,7 +155,7 @@ fn an_embedding_goes_out_with_the_member_model_and_comes_back_as_sent() {
         r#"{"model":"embed","input":["a","b"],"dimensions":8}"#,
     );
     assert_eq!(status, 200);
-    assert_eq!(kind, "application/json");
+    assert_eq!(kind, "text/plain");
     assert_eq!(body, r#"{"data":[{"embedding":[0.5]}]}"#);
     let seen = gateway.seen();
     assert_eq!(seen.len(), 1);
@@ -163,7 +184,14 @@ fn a_rerank_goes_to_the_rerank_path_with_its_status() {
 #[test]
 fn a_deeper_path_is_not_found_and_nothing_is_forwarded() {
     let gateway = Gateway::answering(200, "{}");
-    for path in ["/v1/embeddings/x", "/v1/rerank/", "/v1/rerankx"] {
+    for path in [
+        "/v1/embeddings/x",
+        "/v1/rerank/",
+        "/v1/rerankx",
+        "/v1/audio/transcriptions/x",
+        "/v1/audio/translationsx",
+        "/v1/audio",
+    ] {
         let (status, _, body) = ask(&gateway, path, r#"{"model":"m"}"#);
         assert_eq!(
             (status, body.as_str()),
@@ -228,4 +256,87 @@ fn kernel_failures_keep_their_status_or_become_a_gateway_error() {
 fn a_status_below_400_is_not_passed_off_as_an_error_status() {
     let response = failure(&PluginError::status_error(200, "odd"));
     assert_eq!(response.status().as_u16(), 502);
+}
+
+#[test]
+fn an_answer_without_a_type_or_with_a_bad_one_is_json() {
+    for kind in [None, Some("bad\ntype")] {
+        let gateway = Gateway::typed(200, kind, "{}");
+        let (_, got, _) = ask(&gateway, "/v1/rerank", r#"{"model":"m"}"#);
+        assert_eq!(got, "application/json", "{kind:?}");
+    }
+}
+
+const FORM: &str = "multipart/form-data; boundary=cut";
+
+fn audio_form(model: &str) -> String {
+    format!(
+        "--cut\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\
+         Content-Type: audio/wav\r\n\r\nRIFF\r\n--cut\r\n\
+         Content-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--cut--\r\n"
+    )
+}
+
+#[test]
+fn speech_goes_out_as_the_form_with_the_member_model() {
+    for (route, upstream) in [
+        ("/v1/audio/transcriptions", "/audio/transcriptions"),
+        ("/v1/audio/translations", "/audio/translations"),
+    ] {
+        let gateway = Gateway::typed(200, Some("text/vtt"), "WEBVTT");
+        let (status, kind, body) = ask_typed(&gateway, route, Some(FORM), &audio_form(" whisper "));
+        assert_eq!(
+            (status, kind.as_str(), body.as_str()),
+            (200, "text/vtt", "WEBVTT")
+        );
+        let seen = gateway.seen();
+        assert_eq!(seen.len(), 1);
+        let (model, path, sent) = &seen[0];
+        assert_eq!((model.as_str(), path.as_str()), ("whisper", upstream));
+        assert_eq!(sent.content_type(), FORM);
+        assert_eq!(
+            std::str::from_utf8(sent.bytes()).expect("utf8"),
+            audio_form("vendor-embed")
+        );
+    }
+}
+
+#[test]
+fn a_form_already_naming_the_member_model_goes_out_unchanged() {
+    let gateway = Gateway::answering(200, "{}");
+    let form = audio_form(" vendor-embed\t");
+    ask_typed(&gateway, "/v1/audio/transcriptions", Some(FORM), &form);
+    assert_eq!(gateway.seen()[0].2.bytes().as_ref(), form.as_bytes());
+}
+
+#[test]
+fn a_bad_speech_form_is_refused_before_the_kernel() {
+    let gateway = Gateway::answering(200, "{}");
+    let not_form = "send the audio as multipart/form-data, as /v1/audio/transcriptions takes it: a file and a model";
+    let no_model = "name the model: send a model field with the audio file";
+    let empty = "--cut\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a\"\r\n\r\nx\r\n--cut--";
+    for (kind, body, message) in [
+        (None, audio_form("m"), not_form),
+        (Some("application/json"), audio_form("m"), not_form),
+        (
+            Some("multipart/form-data; boundary=other"),
+            audio_form("m"),
+            "the multipart form does not parse",
+        ),
+        (Some(FORM), audio_form("  "), no_model),
+        (Some(FORM), empty.to_owned(), no_model),
+    ] {
+        let (status, got, answer) = ask_typed(&gateway, "/v1/audio/translations", kind, &body);
+        assert_eq!(
+            (status, got.as_str()),
+            (400, "application/json"),
+            "{kind:?}"
+        );
+        assert_eq!(
+            parsed(&answer),
+            json!({"error": {"message": message, "type": "invalid_request_error"}}),
+            "{kind:?} {body}"
+        );
+    }
+    assert!(gateway.seen().is_empty());
 }
