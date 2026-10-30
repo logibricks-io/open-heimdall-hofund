@@ -1291,3 +1291,100 @@ fn shipped_kimi_pick_sets_default_model_and_disconnect_gives_it_back() {
     agent.disconnect(&session, false).expect("disconnect");
     assert_eq!(fs::read_to_string(&path).expect("read"), KIMI_CONFIG);
 }
+
+const GROK_CONFIG: &str = r#"[models]
+default = "grok-4.7"
+
+[model."my-local"]
+model = "llama3"
+base_url = "http://localhost:11434/v1"
+api_key = "local"
+
+[features]
+campaigns = true
+"#;
+
+#[test]
+fn shipped_grok_pick_turns_campaigns_off_and_clear_gives_them_back() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".grok").join("config.toml");
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, GROK_CONFIG).expect("seed");
+    let target = target();
+    let agent = adapter("grok", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    let read = || -> toml::Table {
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml")
+    };
+    let config = read();
+    assert_eq!(config["models"]["default"].as_str(), Some("grok-4.7"));
+    assert_eq!(config["features"]["campaigns"].as_bool(), Some(true));
+    let route = &config["model"]["hofund/route-a"];
+    assert_eq!(route["model"].as_str(), Some("route-a"));
+    assert_eq!(route["base_url"].as_str(), Some("http://127.0.0.1:3425/v1"));
+    assert_eq!(route["api_backend"].as_str(), Some("chat_completions"));
+    assert_eq!(
+        config["model"]["my-local"]["model"].as_str(),
+        Some("llama3")
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let config = read();
+    assert_eq!(config["models"]["default"].as_str(), Some("hofund/route-a"));
+    assert_eq!(config["features"]["campaigns"].as_bool(), Some(false));
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("hofund/route-a")
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    // Clearing drops the default (#433) and puts the user's campaigns back.
+    agent.set_model(&session, &target, None).expect("clear");
+    let config = read();
+    assert!(
+        config
+            .get("models")
+            .and_then(|m| m.get("default"))
+            .is_none()
+    );
+    assert_eq!(config["features"]["campaigns"].as_bool(), Some(true));
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    // The clear dropped the emptied [models] table, so disconnect writes it
+    // back at the end: the same settings, in another order.
+    assert_eq!(
+        read(),
+        toml::from_str::<toml::Table>(GROK_CONFIG).expect("toml")
+    );
+    agent.apply(&session, &target).expect("apply again");
+    agent.disconnect(&session, false).expect("disconnect again");
+    assert_eq!(
+        read(),
+        toml::from_str::<toml::Table>(GROK_CONFIG).expect("toml")
+    );
+}
+
+#[test]
+fn shipped_grok_pick_in_a_fresh_home_leaves_nothing_after_disconnect() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".grok").join("config.toml");
+    let target = target();
+    let agent = adapter("grok", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let config: toml::Table =
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml");
+    assert_eq!(config["features"]["campaigns"].as_bool(), Some(false));
+    agent.set_model(&session, &target, None).expect("clear");
+    let config: toml::Table =
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml");
+    assert!(!config.contains_key("features"));
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!path.exists());
+}

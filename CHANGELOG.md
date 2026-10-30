@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Grok Build agent (G13): `hofund agent connect grok` writes one
+  `[model."hofund/<route>"]` table per route (gateway `/v1`, hofund's key,
+  `api_backend = "chat_completions"`) to `~/.grok/config.toml` (or under an
+  absolute `GROK_HOME`), leaving the user's own model tables alone. A model
+  pick writes `[models] default` and turns xAI's remote campaigns off
+  (`[features] campaigns = false`), since a launch campaign would override the
+  default; clearing it drops the default (#433) and puts back the user's
+  campaigns setting. No catalog display names, context windows or reasoning
+  efforts yet (#447), and WSL homes are not wired (#448).
 - Kimi Code agent (G12): `hofund agent connect kimi` writes
   `[providers.hofund]` (type `kimi`, `base_url` with `/v1`, `api_key`) and
   one `[models."hofund/<route>"]` table per route (128000 context, tool

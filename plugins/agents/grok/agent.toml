@@ -1,0 +1,43 @@
+id = "grok"
+display_name = "Grok Build"
+binary = "grok"
+model_prefix = "hofund/"
+
+# Grok Build, xAI's grok CLI, keeps its settings in ~/.grok/config.toml on
+# every OS. GROK_HOME replaces ~/.grok. New sessions start on
+# [models] default; the user's own models are [model."<id>"] tables, each
+# with its own base_url and api_key (a table without a key would be sent
+# the user's xAI sign-in), and they join Grok's own models in its picker.
+[[file]]
+id = "config"
+kind = "toml"
+linux = "~/.grok/config.toml"
+macos = "~/.grok/config.toml"
+windows = "~/.grok/config.toml"
+env_override = "GROK_HOME"
+
+# One [model."hofund/<route>"] table per route, through the gateway's
+# OpenAI-compatible chat completions with hofund's key. Tables without the
+# prefix are the user's and stay as they are.
+[[set]]
+file = "config"
+key = "model"
+slot = { model_map = { prefix = "hofund/", fields = [
+    { key = "model", value = "id" },
+    { key = "name", value = "id" },
+    { key = "base_url", value = "v1" },
+    { key = "api_key", value = "token" },
+    { key = "api_backend", literal = "chat_completions" },
+] } }
+
+# A signed-in Grok applies remote "campaign" patches above config.toml, and a
+# launch campaign sets models.default, so a picked default would be ignored.
+# A pick turns campaigns off; clearing the model puts back the user's value.
+[[set]]
+file = "config"
+key = "features.campaigns"
+slot = { model_pair = { json = "false" } }
+
+[model]
+file = "config"
+key = "models.default"
