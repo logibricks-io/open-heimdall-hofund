@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Compaction for hofund's models on Codex's ChatGPT backend (S6c): a
+  `POST /backend-api/codex/responses` for a hofund model with a
+  `compaction_trigger` asks the model, in process and without tools, for a
+  summary with Codex's compaction prompt, and answers it as one `compaction`
+  item in a Responses stream. Sent back later, to any model, that item is
+  opened as a user message with Codex's summary prefix. A refused summary
+  request keeps its status; a failed, cut-short or empty reply is a 502 that
+  says why. For Codex's own models, `/responses` and `/responses/compact`
+  bodies have their input put right before they are relayed: call item ids
+  get the `tsc_` or `ctc_` prefix, a `call_id` over 64 bytes becomes its hex
+  SHA-256, item ids are made letters, digits, `_` and `-`, and reasoning
+  written elsewhere is dropped. A body with nothing to put right goes byte
+  for byte.
 - Codex's ChatGPT backend on the gateway (S6b): the `codex-catalog` plugin
   also serves `GET` and `POST /backend-api/codex`, so a Codex signed in to
   ChatGPT can point its built-in provider at the gateway and keep that
