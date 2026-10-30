@@ -85,11 +85,26 @@ pub(crate) fn command(daemon: &Path, config: &Path) -> Command {
 /// Returns a message when the daemon cannot be found or started, or when it
 /// stopped without an exit code.
 pub(crate) fn run(config: &Path) -> Result<i32, String> {
-    let exe = std::env::current_exe().ok();
+    let daemon = locate_installed()?;
+    replace(command(&daemon, config), &daemon)
+}
+
+/// Finds `hofundd` beside this executable or on `PATH`, for `hofund serve`
+/// and one-shot operations alike.
+///
+/// # Errors
+///
+/// Returns the actionable missing-binary message from [`locate`].
+pub(crate) fn locate_installed() -> Result<PathBuf, String> {
+    // Resolve symlinks: macOS reports the invoked path (for example under
+    // /var rather than /private/var, or a Homebrew bin link), and the
+    // daemon sits beside the real install.
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe));
     let exe_dir = exe.as_deref().and_then(Path::parent);
     let path = std::env::var_os("PATH");
-    let daemon = locate(exe_dir, path.as_deref())?;
-    replace(command(&daemon, config), &daemon)
+    locate(exe_dir, path.as_deref())
 }
 
 #[cfg(unix)]

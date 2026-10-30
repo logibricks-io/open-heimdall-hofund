@@ -9,7 +9,7 @@
 //! held, because a one-shot write could race the daemon.
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use hofund_control_client::{Client, ClientError, DiscoveryOptions, HeldLock, held_daemon_locks};
@@ -146,19 +146,7 @@ pub(crate) fn held_error(locks: &[HeldLock], wait: Duration) -> String {
 ///
 /// Returns the actionable missing-binary message from [`crate::serve::locate`].
 pub(crate) fn one_shot_client(config: &Path) -> Result<Client, String> {
-    locate_daemon().map(|exe| Client::one_shot(exe, config))
-}
-
-/// Finds `hofundd` by the same rule as `hofund serve`.
-///
-/// # Errors
-///
-/// Returns the actionable missing-binary message.
-pub(crate) fn locate_daemon() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().ok();
-    let exe_dir = exe.as_deref().and_then(Path::parent);
-    let path = std::env::var_os("PATH");
-    crate::serve::locate(exe_dir, path.as_deref())
+    crate::serve::locate_installed().map(|exe| Client::one_shot(exe, config))
 }
 
 /// The bearer token a running daemon would accept, read without creating

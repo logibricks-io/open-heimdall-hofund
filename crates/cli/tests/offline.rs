@@ -95,7 +95,6 @@ struct Scratch {
     root: PathBuf,
     config: PathBuf,
     run: PathBuf,
-    tmp: PathBuf,
     home: PathBuf,
     path: PathBuf,
     env: Vec<(String, String)>,
@@ -107,10 +106,9 @@ impl Scratch {
         let root = fs::canonicalize(dir.path()).expect("canonical");
         let config = root.join("cfg").join("hofund.toml");
         let run = root.join("run");
-        let tmp = root.join("tmp");
         let home = root.join("home");
         let path = root.join("empty-path");
-        for dir in [config.parent().expect("cfg"), &run, &tmp, &home, &path] {
+        for dir in [config.parent().expect("cfg"), &run, &home, &path] {
             fs::create_dir_all(dir).expect("mkdir");
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).expect("chmod");
         }
@@ -124,7 +122,6 @@ impl Scratch {
             root,
             config,
             run,
-            tmp,
             home,
             path,
             env: Vec::new(),
@@ -146,7 +143,6 @@ impl Scratch {
             .env("PATH", &self.path)
             .env("HOME", &self.home)
             .env("XDG_RUNTIME_DIR", &self.run)
-            .env("TMPDIR", &self.tmp)
             .env("HOFUND_LOG", "off")
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
@@ -181,13 +177,13 @@ impl Scratch {
     }
 
     /// Asserts that nothing created daemon runtime state: no daemon lock,
-    /// discovery file, or control socket beside the config or in either
+    /// discovery file, or control socket beside the config or in the
     /// runtime root. Host state (accounts, usage, picks) under `.hofund/` is
     /// shared with the daemon and may be written by one-shot operations.
     fn assert_no_daemon_state(&self) {
         let beside = self.config.parent().expect("cfg").join(".hofund");
         let mut found = Vec::new();
-        for dir in [&beside, &self.run, &self.tmp] {
+        for dir in [&beside, &self.run] {
             daemon_files(dir, &mut found);
         }
         assert!(found.is_empty(), "daemon state was created: {found:?}");

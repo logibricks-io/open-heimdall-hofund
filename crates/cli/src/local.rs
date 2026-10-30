@@ -83,7 +83,7 @@ mod tests {
             beside(Path::new("/etc/hofund/hofund.toml"), "token"),
             Path::new("/etc/hofund/token")
         );
-        let absolute = std::env::temp_dir().join("token");
+        let absolute = Path::new(env!("CARGO_MANIFEST_DIR")).join("token");
         assert_eq!(
             beside(
                 Path::new("/etc/hofund/hofund.toml"),
