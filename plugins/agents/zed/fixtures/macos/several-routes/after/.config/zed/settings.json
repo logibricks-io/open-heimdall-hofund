@@ -1,0 +1,35 @@
+{
+  "language_models": {
+    "openai_compatible": {
+      "hofund": {
+        "api_url": "http://127.0.0.1:3425/v1",
+        "available_models": [
+          {
+            "name": "route-a",
+            "display_name": "route-a",
+            "max_tokens": 128000,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false,
+              "chat_completions": true
+            }
+          },
+          {
+            "name": "route-b",
+            "display_name": "route-b",
+            "max_tokens": 128000,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false,
+              "chat_completions": true
+            }
+          }
+        ]
+      }
+    }
+  }
+}

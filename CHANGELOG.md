@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local persistence), without child processes and with a 90 s deadline per
   call. The daemon and the desktop app use it through
   `hofund_daemon::agent_session()`.
+- Zed agent (Z3): `hofund agent connect zed` writes the OpenAI-compatible
+  provider `language_models.openai_compatible.hofund` (gateway `/v1`, one
+  model per route with a 128000-token window and tool calling) to Zed's
+  `settings.json` (`~/.config/zed` on Linux and macOS,
+  `%APPDATA%\Zed` on Windows) and puts hofund's key in the OS credential
+  store where Zed looks it up by the provider URL. A pick writes
+  `agent.default_model` with provider `hofund`; clearing it puts back the
+  user's choice. Golden conformance now runs credential agents against an
+  in-memory store and checks the item through connect, refresh and both
+  disconnects. Not yet: XDG and APPDATA overrides (#411), catalog windows
+  and reasoning effort (#459), the restart notice (#460), keeping
+  JSONC comments while connected (#461).
 - Goose agent (G14): `hofund agent connect goose` writes hofund's own
   custom provider, `custom_providers/hofund.json` beside Goose's
   `config.yaml` (`~/.config/goose`, or `$XDG_CONFIG_HOME/goose` when it is

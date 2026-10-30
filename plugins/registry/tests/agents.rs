@@ -24,7 +24,8 @@ fn production_agent_list_contains_migrated_agents() {
             "opencode",
             "pi",
             "qwen",
-            "vscode"
+            "vscode",
+            "zed"
         ]
     );
     assert_eq!(
@@ -50,6 +51,14 @@ fn production_agent_list_contains_migrated_agents() {
     assert_eq!(agent("kimi").expect("kimi").model_prefix(), Some("hofund/"));
     assert_eq!(agent("grok").expect("grok").model_prefix(), Some("hofund/"));
     assert_eq!(agent("goose").expect("goose").model_prefix(), None);
+    let zed = agent("zed").expect("zed");
+    assert_eq!(zed.model_prefix(), None);
+    assert_eq!(zed.model_key(), Some("agent.default_model.model"));
+    let credential = zed.credential().expect("zed credential");
+    assert_eq!(credential.url(), "{v1}");
+    assert_eq!(credential.account(), "Bearer");
+    assert_eq!(credential.label(), "zed-github-account");
+    assert_eq!(credential.windows_target(), "zed:url={v1}");
     let vscode = agent("vscode").expect("vscode");
     assert_eq!(vscode.model_prefix(), None);
     assert_eq!(vscode.model_key(), Some("\"chat.defaultModel\""));

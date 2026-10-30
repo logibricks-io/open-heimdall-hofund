@@ -1,0 +1,25 @@
+{
+  "theme": "One Dark",
+  "buffer_font_size": 15,
+  "language_models": {
+    "openai_compatible": {
+      "Together": {
+        "api_url": "https://api.together.xyz/v1",
+        "available_models": [
+          {
+            "name": "my-model",
+            "display_name": "My Model",
+            "max_tokens": 32768
+          }
+        ]
+      }
+    }
+  },
+  "agent": {
+    "default_model": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4"
+    },
+    "always_allow_tool_actions": false
+  }
+}

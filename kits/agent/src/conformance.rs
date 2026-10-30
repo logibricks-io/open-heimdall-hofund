@@ -4,10 +4,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use hofund_agent::{AgentAdapter, Compiled, GatewayTarget, Plan, Session, TargetOs, resolve};
+use hofund_agent::{
+    AgentAdapter, CREDENTIAL_CHANGE_PREFIX, Compiled, FileChange, GatewayTarget, Plan, Session,
+    TargetOs, resolve,
+};
 use hofund_plugin_api::{AgentDescription, FileKind};
 use serde::Deserialize;
+
+use crate::MemoryCredentialStore;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -268,7 +274,7 @@ fn verify_shared_paths(description: &'static AgentDescription, case_dir: &Path, 
     let case = read_case(case_dir);
     let home = scratch.join("shared-home");
     fs::create_dir_all(&home).expect("conformance temp dir");
-    let session = session_for(&home, &case);
+    let session = session_for(&home, &case, None);
     let mut expected = None;
     for (_, os) in OPERATING_SYSTEMS {
         let paths = description
@@ -352,7 +358,12 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         copy_tree(&before_dir, &home);
     }
     let before = tree(&home);
-    let session = session_for(&home, &case);
+    // An agent that reads its key from the OS credential store gets an
+    // in-memory one: conformance never touches the real store.
+    let store = description
+        .credential()
+        .map(|_| Arc::new(MemoryCredentialStore::new()));
+    let session = session_for(&home, &case, store.as_ref());
     let target = GatewayTarget::new(&case.base_url, &case.token, case.routes.clone());
     let adapter = Compiled::new(description).with_os(os);
     let after_dir = case_dir.join("after");
@@ -368,8 +379,29 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
     let plan = adapter.plan(&session, &target).expect("plan");
     verify_plan(&label, &home, &plan, &before, &after);
     assert_eq!(tree(&home), before, "{label}: plan wrote files");
+    if let Some(store) = &store {
+        assert!(store.items().is_empty(), "{label}: plan wrote the store");
+    }
     let applied = adapter.apply(&session, &target).expect("apply");
     verify_plan(&label, &home, &applied, &before, &after);
+    if let Some(store) = &store {
+        verify_store(&label, &home, store, &case.token);
+        let paths = credential_paths(applied.changes());
+        assert_eq!(
+            paths,
+            credential_paths(plan.changes()),
+            "{label}: applied store items differ from the plan"
+        );
+        assert_eq!(
+            paths,
+            store
+                .items()
+                .iter()
+                .map(|item| PathBuf::from(format!("{CREDENTIAL_CHANGE_PREFIX}{}", item.url())))
+                .collect::<BTreeSet<_>>(),
+            "{label}: planned store items"
+        );
+    }
     let connected = adapter.status(&session, &target).expect("applied status");
     assert!(connected.connected(), "{label}: not connected after apply");
     assert_eq!(
@@ -414,10 +446,14 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         "{label}: second absent"
     );
     assert_eq!(managed_tree(&home), expected, "{label}: second apply files");
+    if let Some(store) = &store {
+        verify_store(&label, &home, store, &case.token);
+    }
 
     let force_home = scratch.join(format!("{os:?}-{}-force", case_name(case_dir)));
     fs::create_dir_all(&force_home).expect("conformance temp dir");
     copy_tree(&home, &force_home);
+    let force_store = store.as_ref().map(|store| Arc::new(store.fork()));
     let refreshed = target.clone().with_token(&case.refreshed_token);
     let updated = adapter
         .refresh_token(&session, &refreshed)
@@ -433,6 +469,14 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         changed_paths(&expected, &refreshed_expected),
         "{label}: refreshed paths"
     );
+    if let Some(store) = &store {
+        verify_store(&label, &home, store, &case.refreshed_token);
+        assert_eq!(
+            credential_path_set(&updated),
+            credential_paths(applied.changes()),
+            "{label}: refreshed store items"
+        );
+    }
     assert_eq!(
         marker_tree(&home, ".hofund.bak"),
         backups,
@@ -457,6 +501,9 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         !edited || !drift.warnings().is_empty(),
         "{label}: drift warning missing"
     );
+    if let Some(store) = &store {
+        verify_store_released(&label, &home, store);
+    }
     let drifted = managed_tree(&home);
     let gateway_values = gateway_values(&case);
     for (path, bytes) in &drifted {
@@ -497,7 +544,7 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         }
     }
 
-    let force_session = session_for(&force_home, &case);
+    let force_session = session_for(&force_home, &case, force_store.as_ref());
     let forced = adapter
         .disconnect(&force_session, true)
         .expect("forced disconnect");
@@ -510,6 +557,9 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         before,
         "{label}: forced restore was not exact"
     );
+    if let Some(store) = &force_store {
+        verify_store_released(&label, &force_home, store);
+    }
     let disconnected = adapter
         .status(&force_session, &target)
         .expect("forced disconnect status");
@@ -540,8 +590,11 @@ fn surviving_gateway_values<'a>(text: &str, values: &'a [String]) -> Vec<&'a str
         .collect()
 }
 
-fn session_for(home: &Path, case: &Case) -> Session {
+fn session_for(home: &Path, case: &Case, store: Option<&Arc<MemoryCredentialStore>>) -> Session {
     let mut session = Session::new(home);
+    if let Some(store) = store {
+        session = session.with_credential_store(store.clone());
+    }
     for (name, value) in &case.env {
         let value = value.replace("{tmp}", &home.to_string_lossy());
         session = session.with_env(name, value);
@@ -557,7 +610,7 @@ fn verify_plan(
     after: &BTreeMap<PathBuf, Vec<u8>>,
 ) {
     let mut planned = BTreeSet::new();
-    for change in plan.changes() {
+    for change in file_changes(plan) {
         let relative = change.path().strip_prefix(home).expect("plan path in home");
         planned.insert(relative.to_path_buf());
         assert_eq!(
@@ -587,8 +640,7 @@ fn expected_backups(
     plan: &Plan,
     before: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> BTreeMap<PathBuf, Vec<u8>> {
-    plan.changes()
-        .iter()
+    file_changes(plan)
         .filter(|change| before.contains_key(change.path().strip_prefix(home).expect("home")))
         .map(|change| {
             let relative = change.path().strip_prefix(home).expect("home");
@@ -602,8 +654,7 @@ fn expected_absent(
     plan: &Plan,
     before: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> BTreeMap<PathBuf, Vec<u8>> {
-    plan.changes()
-        .iter()
+    file_changes(plan)
         .filter(|change| !before.contains_key(change.path().strip_prefix(home).expect("home")))
         .map(|change| {
             let relative = change.path().strip_prefix(home).expect("home");
@@ -616,10 +667,75 @@ fn update_golden(home: &Path, after: &Path, plan: &Plan) {
     if after.exists() {
         fs::remove_dir_all(after).expect("remove old golden");
     }
-    for change in plan.changes() {
+    for change in file_changes(plan) {
         let relative = change.path().strip_prefix(home).expect("golden path");
         write(&after.join(relative), change.after());
     }
+}
+
+/// The changes to files; store items are checked against the store.
+fn file_changes(plan: &Plan) -> impl Iterator<Item = &FileChange> {
+    plan.changes()
+        .iter()
+        .filter(|change| !is_credential_path(change.path()))
+}
+
+fn is_credential_path(path: &Path) -> bool {
+    path.to_string_lossy().starts_with(CREDENTIAL_CHANGE_PREFIX)
+}
+
+fn credential_paths(changes: &[FileChange]) -> BTreeSet<PathBuf> {
+    credential_path_set(
+        &changes
+            .iter()
+            .map(|change| change.path().to_path_buf())
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn credential_path_set(paths: &[PathBuf]) -> BTreeSet<PathBuf> {
+    paths
+        .iter()
+        .filter(|path| is_credential_path(path))
+        .cloned()
+        .collect()
+}
+
+/// The store holds exactly one item, whose secret is `token`, and one record
+/// beside the managed file names it without the key.
+fn verify_store(label: &str, home: &Path, store: &MemoryCredentialStore, token: &str) {
+    let items = store.items();
+    assert_eq!(items.len(), 1, "{label}: store items");
+    assert_eq!(
+        store.secret(items[0].url(), items[0].account()).as_deref(),
+        Some(token),
+        "{label}: store secret"
+    );
+    let records = marker_tree(home, ".hofund.credential");
+    assert_eq!(records.len(), 1, "{label}: credential records");
+    for bytes in records.values() {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(
+            !text.contains(token),
+            "{label}: credential record holds the key"
+        );
+        assert!(
+            text.contains(items[0].url()),
+            "{label}: credential record names another item"
+        );
+    }
+}
+
+/// Disconnect removed the item and its record.
+fn verify_store_released(label: &str, home: &Path, store: &MemoryCredentialStore) {
+    assert!(
+        store.items().is_empty(),
+        "{label}: store item survived disconnect"
+    );
+    assert!(
+        marker_tree(home, ".hofund.credential").is_empty(),
+        "{label}: credential record survived disconnect"
+    );
 }
 
 fn add_user_edits(
@@ -715,9 +831,14 @@ fn managed_tree(home: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         .into_iter()
         .filter(|(path, _)| {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            ![".hofund.bak", ".hofund.absent", ".hofund.wrote"]
-                .iter()
-                .any(|suffix| name.ends_with(suffix))
+            ![
+                ".hofund.bak",
+                ".hofund.absent",
+                ".hofund.wrote",
+                ".hofund.credential",
+            ]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
         })
         .collect()
 }
@@ -746,6 +867,7 @@ fn overlay(
 fn relative_paths(home: &Path, paths: &[PathBuf]) -> BTreeSet<PathBuf> {
     paths
         .iter()
+        .filter(|path| !is_credential_path(path))
         .map(|path| path.strip_prefix(home).expect("updated path").to_path_buf())
         .collect()
 }
