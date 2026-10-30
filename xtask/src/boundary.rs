@@ -1104,6 +1104,28 @@ pub fn link_ids(workspace: &Path, package: &str) -> Result<BTreeSet<String>, Str
     Ok(closure(&meta, &root))
 }
 
+/// Names of the other workspace packages whose normal and build closure
+/// contains `package`: the packages that link it, directly or transitively.
+///
+/// # Errors
+///
+/// Returns an error when Cargo metadata fails or the package is not in the workspace.
+pub fn linkers_of(workspace: &Path, package: &str) -> Result<BTreeSet<String>, String> {
+    let meta = cargo_metadata(workspace)?;
+    let target = workspace_package_id(&meta, package, workspace)?;
+    let root = normalize(workspace);
+    let mut linkers = BTreeSet::new();
+    for (name, id, manifest) in &meta.ids_by_manifest {
+        if *id != target
+            && under_dir(Path::new(manifest), &root)
+            && closure(&meta, id).contains(&target)
+        {
+            linkers.insert(name.clone());
+        }
+    }
+    Ok(linkers)
+}
+
 /// The plugin's link closure must be the API and SDK closures, plus itself.
 ///
 /// # Errors

@@ -478,6 +478,20 @@ fn offline_agent_list_one_shot() {
     scratch.assert_no_daemon_state();
 }
 
+/// Subscription commands run in `hofundd subscription`, which links the
+/// registry the CLI no longer links.
+#[test]
+fn offline_subscription_commands_run_in_hofundd() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let listed = scratch.hofund(&["subscription", "list"]);
+    assert_eq!(listed.ok(), "subscription\tflow\taccount\tlabel\tstatus");
+    let json = scratch.hofund(&["subscription", "quota", "--json"]);
+    assert_eq!(json.ok(), "[]");
+    let missing = scratch.hofund(&["subscription", "sign-out", "nope", "a-1"]);
+    assert_eq!(missing.failed(), "no subscription `nope` in the config");
+    scratch.assert_no_daemon_state();
+}
+
 fn codex_config(scratch: &Scratch) -> PathBuf {
     scratch.home.join(".codex").join("config.toml")
 }

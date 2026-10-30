@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use hofund_config::user_config_path;
-use hofund_daemon::serve_blocking;
 use subscription::{SubscriptionCommand, SubscriptionFlags};
 
 fn main() -> ExitCode {
@@ -33,23 +32,26 @@ fn main() -> ExitCode {
             println!("hofund {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Command::Serve { in_process: true } => {
-            finish(serve_blocking(&config).map(|()| String::new()))
-        }
-        Command::Serve { in_process: false } => match serve::run(&config) {
-            Ok(code) => std::process::exit(code),
-            Err(message) => {
-                eprintln!("{message}");
-                ExitCode::FAILURE
-            }
-        },
+        Command::Serve => hand_over(serve::run(&config)),
         Command::Help(topic) => {
             println!("{}", help_text(topic));
             ExitCode::SUCCESS
         }
         Command::TokenShow => finish(local::token_show(&config)),
-        Command::Subscription(command) => subscription::run(&config, command),
+        Command::Subscription(command) => hand_over(subscription::run(&config, &command)),
         other => finish(run_control(&config, other)),
+    }
+}
+
+/// Leaves with the exit code of the `hofundd` that ran, or reports why none
+/// could run.
+fn hand_over(ran: Result<i32, String>) -> ExitCode {
+    match ran {
+        Ok(code) => std::process::exit(code),
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -99,7 +101,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::ModelShow { id } => provider::model_show(config, &id).await,
             Command::Version
             | Command::Help(_)
-            | Command::Serve { .. }
+            | Command::Serve
             | Command::TokenShow
             | Command::Subscription(_) => Err("not a control command".to_owned()),
         }
@@ -110,10 +112,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
 enum Command {
     Help(HelpTopic),
     Version,
-    /// `in_process` keeps the pre-daemon server; it goes away in the next release.
-    Serve {
-        in_process: bool,
-    },
+    Serve,
     Check,
     ConfigApply {
         source: PathBuf,
@@ -225,7 +224,6 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut config = None;
     let mut dry_run = false;
     let mut force = false;
-    let mut in_process = false;
     let mut requests = false;
     let mut help = false;
     let mut flags = SubscriptionFlags::default();
@@ -247,7 +245,6 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             }
             "--dry-run" => dry_run = true,
             "--force" => force = true,
-            "--in-process" => in_process = true,
             "--requests" => requests = true,
             "--json" => flags.json = true,
             "--host" => {
@@ -286,7 +283,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let subscription_flags = flags.json || flags.host.is_some() || flags.label.is_some();
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
-        ["serve"] => Command::Serve { in_process },
+        ["serve"] => Command::Serve,
         ["config", "check"] => Command::Check,
         ["config", "apply", source] => Command::ConfigApply {
             source: PathBuf::from(source),
@@ -398,9 +395,6 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     }
     if force && !matches!(command, Command::AgentDisconnect { .. }) {
         return Err("--force is only valid with agent disconnect".to_owned());
-    }
-    if in_process && !matches!(command, Command::Serve { .. }) {
-        return Err("--in-process is only valid with serve".to_owned());
     }
     if requests && !matches!(command, Command::EventsTail { .. }) {
         return Err("--requests is only valid with events tail".to_owned());
@@ -549,16 +543,13 @@ examples/hofund.toml is a documented config with [[providers]] and [[routes]].
 ";
 
 const SERVE_HELP: &str = "\
-usage: hofund serve [--config PATH] [--in-process]
+usage: hofund serve [--config PATH]
 
 Run hofundd, the daemon, on the config. hofundd binds the listen address in
 the config and serves until Ctrl-C. hofund looks for hofundd in its own
 directory first and on PATH second, and passes it --config with the resolved
 path. The default config path is the platform config directory. --config
 overrides it.
-
---in-process serves inside this process without hofundd. It is a temporary
-compatibility option and goes away in the next release.
 ";
 
 const CHECK_HELP: &str = "\
@@ -774,7 +765,6 @@ fn finish<E: std::fmt::Display>(result: Result<String, E>) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{Command, HelpTopic, SubscriptionCommand, help_text, help_topic, parse};
-    use hofund_daemon::SignInOptions;
     use std::path::PathBuf;
 
     fn words(values: &[&str]) -> Vec<String> {
@@ -782,23 +772,15 @@ mod tests {
     }
 
     #[test]
-    fn serve_runs_the_daemon_unless_in_process_is_given() {
+    fn serve_runs_the_daemon() {
         let parsed = parse(&words(&["serve", "--config", "/tmp/h.toml"])).expect("parse");
+        assert_eq!(parsed, (PathBuf::from("/tmp/h.toml"), Command::Serve));
         assert_eq!(
-            parsed,
-            (
-                PathBuf::from("/tmp/h.toml"),
-                Command::Serve { in_process: false }
-            )
-        );
-        let parsed = parse(&words(&["serve", "--in-process"])).expect("parse");
-        assert_eq!(parsed.1, Command::Serve { in_process: true });
-        assert_eq!(
-            parse(&words(&["usage", "--in-process"])),
-            Err("--in-process is only valid with serve".to_owned())
+            parse(&words(&["serve", "--in-process"])),
+            Err("unknown flag `--in-process`".to_owned())
         );
         let help = help_text(help_topic(&["serve"]).expect("topic"));
-        assert!(help.contains("[--in-process]"), "{help}");
+        assert!(!help.contains("--in-process"), "{help}");
         assert!(help.contains("hofundd"), "{help}");
     }
 
@@ -832,10 +814,8 @@ mod tests {
             ]),
             Ok(Command::Subscription(SubscriptionCommand::SignIn {
                 id: "codex-sub".to_owned(),
-                options: SignInOptions {
-                    host: Some("corp.example.test".to_owned()),
-                    label: Some("work".to_owned()),
-                },
+                host: Some("corp.example.test".to_owned()),
+                label: Some("work".to_owned()),
             }))
         );
         assert_eq!(

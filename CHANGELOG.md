@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hofundd subscription list`, `sign-in`, `sign-out`, `refresh`, and `quota`
+  (L8e). `hofund subscription` now runs them in `hofundd`, so the CLI no
+  longer links the daemon crate or the plugin registry.
+
 - `hofund provider add`, `set`, `key`, `rm` (aliases `remove`, `delete`),
   `refresh-every`, and `auto-include` (L8c). They edit the config with
   `toml_edit`, keeping comments, and apply it with its disk revision through
@@ -580,6 +584,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table. A value of the wrong type names the provider and the key.
 - `config check` verifies that an explicitly configured Vertex credentials file
   exists. Daemon startup no longer fails merely because that file is missing.
+
+### Removed
+
+- `hofund serve --in-process` (L8e). `hofund serve` always runs `hofundd`.
 
 ### Security
 

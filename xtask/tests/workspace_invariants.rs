@@ -57,12 +57,7 @@ const MEMBERS: &[&str] = &[
 fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &["hofund-config", "hofund-plugin-api"],
-        "hofund-cli" => &[
-            "hofund-config",
-            "hofund-control-client",
-            "hofund-daemon",
-            "hofund-secrets",
-        ],
+        "hofund-cli" => &["hofund-config", "hofund-control-client", "hofund-secrets"],
         "hofund-codec" => &["hofund-ir"],
         "hofund-config" => &[],
         "hofund-control-client" => &["hofund-control-proto"],
@@ -379,6 +374,25 @@ fn dependency_graph_matches_architecture() {
     ] {
         assert!(seen.contains(package), "missing package {package}");
     }
+}
+
+/// Packages that may link the plugin registry, directly or transitively,
+/// per `cargo metadata`. `hofundd` is the composition root. The desktop
+/// still embeds the daemon library, whose compatibility constructor names
+/// the registry; both leave this list with the desktop rework. The CLI
+/// never links it.
+const REGISTRY_LINKERS: &[&str] = &["hofund-daemon", "hofund-daemon-bin", "hofund-desktop"];
+
+#[test]
+fn only_hofundd_and_the_embedded_daemon_link_the_registry() {
+    let linkers = xtask::boundary::linkers_of(&workspace_root(), "hofund-plugin-registry")
+        .expect("cargo metadata");
+    let expected: BTreeSet<String> = REGISTRY_LINKERS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert_eq!(linkers, expected);
+    assert!(!linkers.contains("hofund-cli"));
 }
 
 #[test]

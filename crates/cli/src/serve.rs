@@ -50,9 +50,7 @@ pub(crate) fn locate(exe_dir: Option<&Path>, path: Option<&OsStr>) -> Result<Pat
         "cannot start the daemon: {name} is not {beside} and not on PATH.\n\
          Install the hofund-daemon-bin package into the same directory as hofund, \
          so hofund and {name} sit side by side. From a source checkout, run \
-         `cargo install --path apps/hofundd --locked`.\n\
-         `hofund serve --in-process` still serves without the daemon binary until \
-         the next release.",
+         `cargo install --path apps/hofundd --locked`.",
         name = name.to_string_lossy(),
     ))
 }
@@ -107,15 +105,21 @@ pub(crate) fn locate_installed() -> Result<PathBuf, String> {
     locate(exe_dir, path.as_deref())
 }
 
+/// Hands the terminal to `command`: `exec` on Unix, so this process becomes
+/// the daemon; elsewhere a child whose exit code is returned.
+///
+/// # Errors
+///
+/// Returns a message when the command cannot be started.
 #[cfg(unix)]
-fn replace(mut command: Command, daemon: &Path) -> Result<i32, String> {
+pub(crate) fn replace(mut command: Command, daemon: &Path) -> Result<i32, String> {
     use std::os::unix::process::CommandExt;
     let error = command.exec();
     Err(format!("cannot run {}: {error}", daemon.display()))
 }
 
 #[cfg(windows)]
-fn replace(command: Command, daemon: &Path) -> Result<i32, String> {
+pub(crate) fn replace(command: Command, daemon: &Path) -> Result<i32, String> {
     let _console = console::hold().map_err(|error| {
         format!(
             "cannot keep console events for {}: {error}",
@@ -126,7 +130,7 @@ fn replace(command: Command, daemon: &Path) -> Result<i32, String> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn replace(command: Command, daemon: &Path) -> Result<i32, String> {
+pub(crate) fn replace(command: Command, daemon: &Path) -> Result<i32, String> {
     wait(command, daemon)
 }
 
@@ -296,7 +300,6 @@ mod tests {
             error.contains("cargo install --path apps/hofundd --locked"),
             "{error}"
         );
-        assert!(error.contains("--in-process"), "{error}");
         let error = locate(None, None).expect_err("missing");
         assert!(error.contains("its directory is unknown"), "{error}");
         assert!(error.contains("not on PATH"), "{error}");

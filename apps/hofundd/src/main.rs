@@ -7,6 +7,7 @@
 
 mod logging;
 mod registry;
+mod subscription;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -26,12 +27,16 @@ hofundd — the hofund daemon
 
 Usage: hofundd [--config <path>]
        hofundd one-shot [--config <path>]
+       hofundd subscription [--config <path>] <command> [<args>...]
 
 Serves the configuration until a termination signal, with local control
 enabled. Without --config, HOFUND_CONFIG or the per-user default is used.
 
 `one-shot` answers control requests for the configuration on standard input
 and output without serving it; the hofund CLI uses it when no daemon runs.
+
+`subscription` runs one `hofund subscription` command (list, sign-in,
+sign-out, refresh, or quota); `hofundd subscription --help` lists the forms.
 
 Options:
   --config <path>  The configuration file
@@ -50,9 +55,17 @@ enum Command {
     Version,
     Serve(Option<PathBuf>),
     OneShot(Option<PathBuf>),
+    SubscriptionHelp,
+    Subscription(Option<PathBuf>, subscription::SubscriptionCommand),
 }
 
 fn parse(args: &[OsString]) -> Result<Command, String> {
+    if args.first().and_then(|word| word.to_str()) == Some("subscription") {
+        return Ok(match subscription::parse(&args[1..])? {
+            subscription::Parsed::Help => Command::SubscriptionHelp,
+            subscription::Parsed::Run(config, command) => Command::Subscription(config, command),
+        });
+    }
     let mut config = None;
     let one_shot = args.first().and_then(|word| word.to_str()) == Some("one-shot");
     let mut words = args.iter().skip(usize::from(one_shot));
@@ -104,6 +117,13 @@ fn main() -> ExitCode {
         }
         Ok(Command::Serve(config)) => serve(&config.unwrap_or_else(user_config_path)),
         Ok(Command::OneShot(config)) => one_shot(&config.unwrap_or_else(user_config_path)),
+        Ok(Command::SubscriptionHelp) => {
+            say(TolerantWriter(io::stdout()), subscription::USAGE.trim_end());
+            ExitCode::SUCCESS
+        }
+        Ok(Command::Subscription(config, command)) => {
+            subscription::run(&config.unwrap_or_else(user_config_path), command)
+        }
         Err(message) => {
             say(TolerantWriter(io::stderr()), &format!("hofundd: {message}"));
             ExitCode::from(2)
@@ -220,6 +240,17 @@ mod tests {
             parse(&args(&["one-shot", "--config", "/etc/hofund.toml"])),
             Ok(Command::OneShot(Some(PathBuf::from("/etc/hofund.toml"))))
         );
+        assert_eq!(
+            parse(&args(&["subscription", "--config", "/c.toml", "list"])),
+            Ok(Command::Subscription(
+                Some(PathBuf::from("/c.toml")),
+                subscription::SubscriptionCommand::List { json: false }
+            ))
+        );
+        assert_eq!(
+            parse(&args(&["subscription", "--help"])),
+            Ok(Command::SubscriptionHelp)
+        );
     }
 
     #[test]
@@ -235,6 +266,12 @@ mod tests {
         let error = parse(&args(&["--config", "a", "one-shot"])).expect_err("late one-shot");
         assert!(
             error.starts_with("unexpected argument `one-shot`"),
+            "{error}"
+        );
+        let error = parse(&args(&["--config", "a", "subscription", "list"]))
+            .expect_err("late subscription");
+        assert!(
+            error.starts_with("unexpected argument `subscription`"),
             "{error}"
         );
         let error = parse(&args(&["serve"])).expect_err("unknown word");

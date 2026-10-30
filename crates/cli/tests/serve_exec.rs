@@ -1,4 +1,5 @@
-//! `hofund serve` runs `hofundd` from a real install layout.
+//! `hofund serve` and `hofund subscription` run `hofundd` from a real
+//! install layout.
 //!
 //! Each test copies the built `hofund` into a scratch directory, because the
 //! CLI looks beside its own resolved executable. The fake `hofundd` is a
@@ -39,10 +40,15 @@ struct Run {
 }
 
 fn serve(cli: &Path, path: &Path, out: &Path, extra: &[&str]) -> Run {
+    let mut args = vec!["serve"];
+    args.extend(extra);
+    hofund(cli, path, out, &args)
+}
+
+fn hofund(cli: &Path, path: &Path, out: &Path, args: &[&str]) -> Run {
     let mut command = Command::new(cli);
     command
-        .arg("serve")
-        .args(extra)
+        .args(args)
         .env_clear()
         .env("PATH", path)
         .env("HOFUND_TEST_MARKER", "kept")
@@ -137,13 +143,50 @@ fn serve_execs_the_daemon_from_the_install_layout() {
     assert!(stderr.contains("not on PATH"), "{stderr}");
     assert!(stderr.contains("hofund-daemon-bin"), "{stderr}");
 
-    // --in-process keeps the old path and never starts hofundd.
-    let missing = root.join("missing.toml");
-    let missing = missing.to_str().expect("utf-8 path");
+    // --in-process is gone: a usage error, and hofundd never runs.
     let cli = paired.join("hofund");
-    let run = serve(&cli, &on_path, &out, &["--in-process", "--config", missing]);
-    assert_eq!(run.output.status.code(), Some(1), "{:?}", run.output);
+    let run = serve(&cli, &on_path, &out, &["--in-process"]);
+    assert_eq!(run.output.status.code(), Some(2), "{:?}", run.output);
     assert!(run.record.is_none(), "hofundd must not run");
     let stderr = String::from_utf8_lossy(&run.output.stderr);
-    assert!(stderr.starts_with("cannot read config"), "{stderr}");
+    assert_eq!(stderr, "unknown flag `--in-process`\n");
+
+    // Subscription commands become `hofundd subscription` in this process,
+    // with the flags before `--` and the words after it.
+    let run = hofund(
+        &cli,
+        &empty,
+        &out,
+        &[
+            "subscription",
+            "sign-in",
+            "--label",
+            "work",
+            "--config",
+            "/explicit/hofund.toml",
+            "--",
+            "-sub",
+        ],
+    );
+    assert_eq!(run.output.status.code(), Some(7), "{:?}", run.output);
+    let record = run.record.expect("fake hofundd ran");
+    assert_eq!(
+        record,
+        format!(
+            "pid={}\narg=subscription\narg=--config\narg=/explicit/hofund.toml\n\
+             arg=--label\narg=work\narg=--\narg=sign-in\narg=-sub\nmarker=kept\n\
+             config_env=/from/env.toml\nfrom=beside\n",
+            run.pid
+        )
+    );
+
+    // A malformed subscription line fails in the CLI; hofundd never runs.
+    let run = hofund(
+        &cli,
+        &empty,
+        &out,
+        &["subscription", "sign-out", "s", "--json"],
+    );
+    assert_eq!(run.output.status.code(), Some(2), "{:?}", run.output);
+    assert!(run.record.is_none(), "hofundd must not run");
 }

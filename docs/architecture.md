@@ -34,9 +34,10 @@ binary `hofundd`). It is the process composition root and the production
 registry link: it constructs its own `DaemonRegistry` over `plugin-registry`,
 passes it to `hofund_daemon::start_linked`, owns the async runtime, installs
 the log subscriber with its `log` bridge, enables local control, and maps the
-termination to the exit status. `hofund serve` runs it. The daemon crate keeps
-a compatibility `RegistryAdapter` for the in-process CLI and desktop paths
-until the CLI switch.
+termination to the exit status. `hofund serve` runs it, and `hofund
+subscription` runs `hofundd subscription`. The daemon crate keeps a
+compatibility `RegistryAdapter` for the desktop until its rework; the CLI
+does not link the daemon or the registry.
 
 ## Dependency direction
 
@@ -149,8 +150,10 @@ as "depends on". `gateway` depends on `plugin-api` for the raw body and
 depends on `plugin-api` so it can adapt a provider into a router member.
 `desktop` sits beside `cli` and depends on `daemon` and `agent`. `cli`
 reaches the daemon through `control-client` and reads its config and token
-through `config` and `secrets`; it keeps a `daemon` edge only for
-`serve --in-process` and `subscription`.
+through `config` and `secrets`, and runs `hofundd` for `serve`,
+`subscription`, and one-shot operations. It has no `daemon` edge; an
+`xtask` test checks with `cargo metadata` that only `hofundd`, the daemon
+crate, and the desktop link `plugin-registry`.
 `plugin-api` depends on `ir`. `plugin-sdk` depends on `codec`, `ir`,
 `plugin-api`, and `quirks`. It uses `codec` for the Chat and Responses
 transport and `ir` to fold a stream into one response.
