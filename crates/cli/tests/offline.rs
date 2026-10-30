@@ -884,13 +884,29 @@ impl Drop for Tail {
     }
 }
 
-/// Kills a daemon the test did not start itself, by pid, unless it was
-/// already shut down.
-struct DaemonPid(Option<String>);
+/// Kills the daemon a tail started for `scratch`, if it still runs when
+/// the test ends, pass or fail. Create it right after starting the tail so
+/// a failed assertion cannot leak the detached daemon. The pid is read from
+/// discovery at drop time; a daemon that shut down cleanly removed its
+/// discovery file, so nothing is killed and a reused pid is never hit.
+struct DaemonGuard(PathBuf);
 
-impl Drop for DaemonPid {
+impl DaemonGuard {
+    fn new(scratch: &Scratch) -> Self {
+        Self(discovery_file(scratch))
+    }
+
+    /// The pid in the discovery file, once the daemon has published it.
+    fn pid(&self) -> Option<String> {
+        let text = fs::read_to_string(&self.0).ok()?;
+        let found: serde_json::Value = serde_json::from_str(&text).ok()?;
+        found["pid"].as_u64().map(|pid| pid.to_string())
+    }
+}
+
+impl Drop for DaemonGuard {
     fn drop(&mut self) {
-        if let Some(pid) = self.0.take() {
+        if let Some(pid) = self.pid() {
             let _ = Command::new("kill")
                 .arg(pid)
                 .stdout(Stdio::null())
@@ -900,26 +916,19 @@ impl Drop for DaemonPid {
     }
 }
 
-/// The pid written in the running daemon's discovery file.
-fn discovered_pid(scratch: &Scratch) -> String {
-    let text = fs::read_to_string(discovery_file(scratch)).expect("discovery");
-    let found: serde_json::Value = serde_json::from_str(&text).expect("discovery json");
-    found["pid"].as_u64().expect("pid").to_string()
-}
-
 #[test]
 fn offline_events_tail_autostarts_and_retries() {
     let scratch = Scratch::new("127.0.0.1:0", ROUTED);
     let tail = Tail::start(&scratch);
+    let daemon = DaemonGuard::new(&scratch);
     // With no daemon the tail starts one and prints its snapshot first.
     assert_eq!(tail.next_event(), "snapshot");
-    let daemon = DaemonPid(Some(discovered_pid(&scratch)));
+    let pid = daemon.pid().expect("discovery pid");
     let status = scratch.hofund(&["status"]);
     assert!(
-        status.ok().starts_with(&format!(
-            "daemon running (pid {})",
-            daemon.0.as_deref().expect("pid")
-        )),
+        status
+            .ok()
+            .starts_with(&format!("daemon running (pid {pid})")),
         "{status:#?}"
     );
     let log = scratch
@@ -973,15 +982,15 @@ fn offline_events_tail_autostarts_and_retries() {
         assert!(started.elapsed() < DEADLINE, "the daemon never exited");
         std::thread::sleep(Duration::from_millis(100));
     }
-    drop(daemon);
+    assert_eq!(daemon.pid(), None, "discovery outlived the daemon");
 }
 
 #[test]
 fn events_tail_reports_where_the_started_daemon_writes() {
     let scratch = Scratch::new("127.0.0.1:0", ROUTED);
     let tail = Tail::start(&scratch);
+    let _daemon = DaemonGuard::new(&scratch);
     assert_eq!(tail.next_event(), "snapshot");
-    let _daemon = DaemonPid(Some(discovered_pid(&scratch)));
     assert_eq!(
         scratch.hofund(&["shutdown"]).ok(),
         "daemon is draining and will exit"
