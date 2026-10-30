@@ -1387,6 +1387,9 @@ fn offline_provider_set_one_shot() {
     let out = scratch.hofund(&["provider", "set", "chat", "models=a,b"]);
     assert_eq!(out.ok(), "picks: default -> a, b");
     assert_eq!(scratch.config_text(), config);
+    // An empty `models=` resets the picks to the default.
+    let out = scratch.hofund(&["provider", "set", "chat", "models="]);
+    assert_eq!(out.ok(), "picks: a, b -> default");
 
     let error = scratch
         .hofund(&["provider", "set", "ghost", "quirks=x"])
