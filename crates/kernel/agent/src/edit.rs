@@ -922,11 +922,9 @@ fn json_to_toml_item(value: &Value) -> Item {
     match value {
         Value::Object(object) => {
             let mut table = toml_edit::Table::new();
+            // A null entry becomes `Item::None`, which TOML leaves out.
             for (key, value) in object {
-                let item = json_to_toml_item(value);
-                if !item.is_none() {
-                    table.insert(key, item);
-                }
+                table.insert(key, json_to_toml_item(value));
             }
             table.set_implicit(!table.is_empty() && table.iter().all(|(_, item)| item.is_table()));
             Item::Table(table)
@@ -978,9 +976,7 @@ fn merge_toml_map(
             .get(key)
             .is_none();
         if missing {
-            if ours.is_empty() {
-                return Ok(());
-            }
+            // Implicit tables left empty are not written out.
             item[key] = implicit_table();
         }
         let child = item
@@ -992,7 +988,6 @@ fn merge_toml_map(
         }
         return merge_toml_map(child, rest, prefix, ours);
     }
-    let inline = item.is_inline_table();
     let Some(table) = item.as_table_like_mut() else {
         return Err(AgentError::message("the map is not a table".to_owned()));
     };
@@ -1005,14 +1000,8 @@ fn merge_toml_map(
         table.remove(name);
     }
     for (name, value) in ours {
-        let entry = if inline {
-            Item::Value(json_to_toml_value(value))
-        } else {
-            json_to_toml_item(value)
-        };
-        if !entry.is_none() {
-            table.insert(name, entry);
-        }
+        // An inline parent turns the table into an inline value.
+        table.insert(name, json_to_toml_item(value));
     }
     Ok(())
 }
@@ -1633,6 +1622,18 @@ mod tests {
         assert!(
             error.to_string().contains("inside an inline table"),
             "{error}"
+        );
+        let nulls = text(
+            FileKind::Toml,
+            None,
+            &[assign("l", r#"[{"k":null,"v":1}]"#, true)],
+        );
+        assert_eq!(nulls, "l = [{ v = 1 }]\n");
+        let special = "n = nan\n[[arr]]\nx = 1\n[[arr]]\ny = true\n";
+        assert_eq!(get(FileKind::Toml, special, "n").expect("nan"), None);
+        assert_eq!(
+            get(FileKind::Toml, special, "arr").expect("array of tables"),
+            Some(r#"[{"x":1},{"y":true}]"#.to_owned())
         );
         let inline = text(
             FileKind::Toml,

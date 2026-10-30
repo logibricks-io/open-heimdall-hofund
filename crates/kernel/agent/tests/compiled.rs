@@ -1003,6 +1003,26 @@ static MAP_TOML: AgentDescription = AgentDescription::from_static(
     AgentRoute::Gateway,
     &[],
 );
+static MAP_JSON_SETS: &[AgentSet] = &[AgentSet::from_static(
+    "config",
+    "models",
+    Slot::ModelMap {
+        prefix: "hof/",
+        fields: MAP_FIELDS,
+    },
+)];
+static MAP_JSON: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("map-json"),
+    "Map Json",
+    "map-json",
+    ARRAY_JSON_FILES,
+    MAP_JSON_SETS,
+    None,
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
 static MAP_WHOLE_SETS: &[AgentSet] = &[AgentSet::from_static(
     "config",
     "providers.compat.models",
@@ -1105,7 +1125,7 @@ fn model_map_adds_prefixed_toml_tables_and_restores_the_user_file() {
 fn model_map_with_an_empty_prefix_owns_the_whole_map() {
     let home = scratch();
     let session = Session::new(&*home);
-    let target = target_with(&["a", "b"]);
+    let target = target_with(&["a", "", "b", "a"]);
     let path = append_path(&home);
     let mine = serde_json::json!({"mine": {"model": "x"}});
     seed(
@@ -1137,10 +1157,15 @@ fn model_map_with_an_empty_prefix_owns_the_whole_map() {
             .changes()
             .is_empty()
     );
-    agent.disconnect(&session, false).expect("disconnect");
+    let mut edited = read_json(&path);
+    edited["note"] = serde_json::json!("mine");
+    fs::write(&path, edited.to_string()).expect("user edit");
+    let outcome = agent.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
     let value = read_json(&path);
     assert_eq!(value["providers"]["compat"]["models"], mine);
     assert_eq!(value["theme"], "dark");
+    assert_eq!(value["note"], "mine");
 
     let home = scratch();
     let session = Session::new(&*home);
@@ -1148,6 +1173,48 @@ fn model_map_with_an_empty_prefix_owns_the_whole_map() {
     agent.apply(&session, &target).expect("apply fresh");
     agent.disconnect(&session, false).expect("disconnect");
     assert!(!path.exists());
+}
+
+#[test]
+fn model_map_disconnect_drops_a_map_hofund_created() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a"]);
+    let path = append_path(&home);
+    seed(&path, "{\"theme\": \"dark\"}\n");
+    let agent = Compiled::new(&MAP_JSON);
+    agent.apply(&session, &target).expect("apply");
+    let mut edited = read_json(&path);
+    assert_eq!(
+        edited["models"]
+            .as_object()
+            .expect("map")
+            .keys()
+            .collect::<Vec<_>>(),
+        ["hof/a"]
+    );
+    edited["note"] = serde_json::json!("mine");
+    fs::write(&path, edited.to_string()).expect("user edit");
+    let outcome = agent.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    assert_eq!(
+        read_json(&path),
+        serde_json::json!({"theme": "dark", "note": "mine"})
+    );
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = append_path(&home);
+    seed(&path, "{\"models\": {\"mine\": 1}}\n");
+    agent.apply(&session, &target).expect("apply");
+    let mut edited = read_json(&path);
+    edited["models"]["later"] = serde_json::json!(2);
+    fs::write(&path, edited.to_string()).expect("user edit");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(
+        read_json(&path),
+        serde_json::json!({"models": {"mine": 1, "later": 2}})
+    );
 }
 
 fn codex_path(home: &Path) -> PathBuf {
