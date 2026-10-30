@@ -36,7 +36,7 @@ const SEALED_REASONING: &str = "gAAAA";
 #[test]
 fn the_mark_and_the_prompts_are_hofunds_and_codexs() {
     assert_eq!(MARK, "hofund1:");
-    assert_eq!(sealed("hi"), "hofund1:aGk=");
+    assert_eq!(sealed("hi"), "hofund1:hi");
     assert!(SUMMARY_PREFIX.starts_with("Another language model started to solve this problem"));
     assert!(SUMMARY_PREFIX.ends_with("to assist with your own analysis:"));
     assert!(COMPACT_PROMPT.starts_with("You are performing a CONTEXT CHECKPOINT COMPACTION."));
@@ -143,14 +143,14 @@ fn hofunds_summaries_are_opened_and_others_are_kept() {
     let input = json!([
         {"type": "compaction", "id": "cmp_1", "encrypted_content": sealed("first")},
         {"type": "compaction_summary", "encrypted_content": sealed("second")},
-        {"type": "compaction", "encrypted_content": "hofund1:!!"},
-        {"type": "compaction", "encrypted_content": format!("{MARK}/w==")},
+        {"type": "compaction", "encrypted_content": MARK},
         {"type": "compaction", "encrypted_content": "gAAAAnative"},
         {"type": "message", "id": "m", "role": "user"},
     ]);
     let expected = json!([
         opened("first"),
         opened("second"),
+        opened(""),
         {"type": "compaction", "encrypted_content": "gAAAAnative"},
         {"type": "message", "id": "m", "role": "user"},
     ]);

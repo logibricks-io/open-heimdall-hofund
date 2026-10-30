@@ -6,8 +6,6 @@
 //! ones it takes, and a summary hofund wrote when it compacted a hofund
 //! model's conversation is opened again as a message.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::sigv4::payload_hash;
 
@@ -29,9 +27,10 @@ const CALL_ID_MOST: usize = 64;
 const CALL_PREFIXES: [(&str, &str); 2] =
     [("tool_search_call", "tsc_"), ("custom_tool_call", "ctc_")];
 
-/// The `encrypted_content` a compaction carries `summary` in.
+/// The `encrypted_content` a compaction carries `summary` in: the mark,
+/// then the summary as it is. Codex keeps the field as an opaque string.
 pub(crate) fn sealed(summary: &str) -> String {
-    format!("{MARK}{}", STANDARD.encode(summary))
+    format!("{MARK}{summary}")
 }
 
 /// A body for one of Codex's own models, as the backend takes it, or
@@ -145,18 +144,6 @@ fn plain_item_ids(items: &mut Vec<Value>) -> bool {
     changed
 }
 
-/// The summary in `sealed`, or `None` when hofund did not write it, and
-/// `Some(None)` when it did and it cannot be read.
-fn summary(sealed: &str) -> Option<Option<String>> {
-    let data = sealed.strip_prefix(MARK)?;
-    Some(
-        STANDARD
-            .decode(data)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok()),
-    )
-}
-
 /// A user message of `text`.
 fn user_message(text: &str) -> Value {
     json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]})
@@ -173,8 +160,7 @@ fn foreign_reasoning(item: &Value) -> bool {
     shown || text(item, "encrypted_content").is_empty()
 }
 
-/// Opens hofund's summaries as messages, and drops one that cannot be
-/// read. For a hofund model a `compaction_trigger` becomes the compaction
+/// Opens hofund's summaries as messages. For a hofund model a `compaction_trigger` becomes the compaction
 /// prompt; for Codex's own models a reasoning item written elsewhere is
 /// dropped. Says whether anything changed and whether to compact.
 fn open_summaries(items: &mut Vec<Value>, hofund: bool) -> (bool, bool) {
@@ -184,13 +170,11 @@ fn open_summaries(items: &mut Vec<Value>, hofund: bool) -> (bool, bool) {
     for item in taken {
         match kind(&item) {
             "compaction" | "compaction_summary" => {
-                match summary(text(&item, "encrypted_content")) {
+                match text(&item, "encrypted_content").strip_prefix(MARK) {
                     None => items.push(item),
-                    Some(opened) => {
+                    Some(summary) => {
+                        items.push(user_message(&format!("{SUMMARY_PREFIX}\n{summary}")));
                         changed = true;
-                        if let Some(summary) = opened {
-                            items.push(user_message(&format!("{SUMMARY_PREFIX}\n{summary}")));
-                        }
                     }
                 }
             }

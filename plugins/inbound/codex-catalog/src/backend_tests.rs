@@ -736,8 +736,7 @@ fn a_hofund_models_compaction_is_its_summary_as_one_compaction_item() {
     let (status, kind, body) = compaction(&stub);
     assert_eq!((status, kind.as_str()), (200, "text/event-stream"));
     assert!(body.ends_with("\n\n"));
-    let item =
-        json!({"type": "compaction", "id": "cmp_7", "encrypted_content": "hofund1:U3VtbWFyeQ=="});
+    let item = json!({"type": "compaction", "id": "cmp_7", "encrypted_content": "hofund1:Summary"});
     assert_eq!(
         events(&body),
         [
