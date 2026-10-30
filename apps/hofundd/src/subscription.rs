@@ -87,7 +87,9 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
                 if config.is_some() {
                     return Err("--config is given more than once".to_owned());
                 }
-                config = Some(PathBuf::from(value("--config")?));
+                // A config path need not be UTF-8.
+                let path = args.next().ok_or("--config needs a value")?;
+                config = Some(PathBuf::from(path));
             }
             "--json" => json = true,
             "--host" => host = Some(value("--host")?),
@@ -331,6 +333,25 @@ mod tests {
     fn parsed(words: &[&str]) -> Result<Parsed, String> {
         let args: Vec<OsString> = words.iter().map(OsString::from).collect();
         parse(&args)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_path_need_not_be_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = OsString::from_vec(b"/c\xff.toml".to_vec());
+        let args = vec![OsString::from("--config"), path.clone(), "list".into()];
+        assert_eq!(
+            parse(&args),
+            Ok(Parsed::Run(
+                Some(PathBuf::from(path)),
+                SubscriptionCommand::List { json: false }
+            ))
+        );
+        assert_eq!(
+            parsed(&["--config"]),
+            Err("--config needs a value".to_owned())
+        );
     }
 
     #[test]
