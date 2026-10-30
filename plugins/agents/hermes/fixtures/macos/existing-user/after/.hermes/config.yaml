@@ -1,0 +1,18 @@
+model:
+  provider: openrouter
+  default: anthropic/claude-sonnet-4
+providers:
+  local:
+    base_url: "http://localhost:8080/v1"
+    models:
+      - qwen3
+  hofund:
+    name: hofund
+    base_url: "http://127.0.0.1:3425/v1"
+    api_key: old-token
+    api_mode: chat_completions
+    models:
+      - id: route-a
+toolsets:
+  - web
+  - terminal
