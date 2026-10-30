@@ -1,7 +1,7 @@
 # hofund coverage: upstream providers and presets
 
 - magpie source: https://github.com/yetone/magpie at `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947` (commit date 2026-10-25 16:19 SGT)
-- hofund checked: `62242e3a5674be349fffcf0f93e31844623ef889`, files `crates/provider/presets.toml`, `crates/provider/src/presets.rs`, `plugins/providers/azure/src/lib.rs` (the `azure` plugin), `plugins/providers/google-vertex/src` (the `google-vertex` plugin), and the adapters in `crates/provider/src` (anthropic, openai_compat, generative, mantle, sigv4), and `plugins/providers/bedrock/src` (the `bedrock` plugin)
+- hofund checked: `62242e3a5674be349fffcf0f93e31844623ef889`, files `crates/kernel/provider/presets.toml`, `crates/kernel/provider/src/presets.rs`, `plugins/providers/azure/src/lib.rs` (the `azure` plugin), `plugins/providers/google-vertex/src` (the `google-vertex` plugin), and the adapters in `crates/kernel/provider/src` (anthropic, openai_compat, generative, mantle, sigv4), and `plugins/providers/bedrock/src` (the `bedrock` plugin)
 - Date checked: 2026-10-25
 - Source of the list: the `PresetDef` table in `internal/provider/presets.go` (58 presets: 35 vendor, 18 relay, 4 local, 1 remote).
 - Auth: from `AuthHeaders` in `internal/provider/test.go` (line 457). Gemini protocol uses `x-goog-api-key`; Anthropic protocol uses `x-api-key` alone for anthropic.com and Bedrock, otherwise both headers unless the provider is set to one (`internal/provider/authheader.go`); everything else uses `Authorization: Bearer`.
@@ -126,4 +126,4 @@ Per agent (client side):
 - Responses item id stabilization (Copilot gives a new id per event; Codex needs one) (`itemids.go`).
 - Text-encoded tool calls (`textcalls.go`).
 - Codex: ChatGPT backend passthrough path (`codex_backend.go`).
-- Claude Code billing header line stripped when crossing protocols (hofund already has this: `crates/provider/src/billing.rs`).
+- Claude Code billing header line stripped when crossing protocols (hofund already has this: `crates/kernel/provider/src/billing.rs`).

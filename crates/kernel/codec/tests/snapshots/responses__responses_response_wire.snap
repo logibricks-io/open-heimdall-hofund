@@ -1,0 +1,57 @@
+---
+source: crates/kernel/codec/tests/responses.rs
+expression: stable_ids(&encoded)
+---
+{
+  "object": "response",
+  "id": "resp_1",
+  "model": "gpt-4.1",
+  "status": "completed",
+  "output": [
+    {
+      "type": "reasoning",
+      "content": [
+        {
+          "type": "reasoning_text",
+          "text": "thinking"
+        }
+      ],
+      "id": "id_0",
+      "status": "completed"
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Rain."
+        }
+      ],
+      "id": "id_1",
+      "status": "completed"
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_9",
+      "name": "get_weather",
+      "arguments": "{}",
+      "id": "id_2",
+      "status": "completed"
+    }
+  ],
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 4,
+    "total_tokens": 16,
+    "input_tokens_details": {
+      "cached_tokens": 2
+    },
+    "output_tokens_details": {
+      "reasoning_tokens": 3
+    }
+  },
+  "metadata": {
+    "k": "v"
+  }
+}

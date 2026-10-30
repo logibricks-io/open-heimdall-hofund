@@ -1,0 +1,65 @@
+---
+source: crates/kernel/codec/tests/generative.rs
+expression: pretty_value!(&response)
+---
+{
+  "id": "resp_1",
+  "model": "demo",
+  "message": {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "thinking",
+        "text": "checking",
+        "signature": "sig-think"
+      },
+      {
+        "type": "text",
+        "text": "Hello",
+        "extensions": {
+          "thoughtSignature": "sig-text"
+        }
+      },
+      {
+        "type": "tool_call",
+        "id": "call_1",
+        "name": "get_weather",
+        "arguments": {
+          "form": "json",
+          "value": {
+            "city": "Paris"
+          }
+        },
+        "extensions": {
+          "thoughtSignature": "sig-call"
+        }
+      }
+    ],
+    "extensions": {
+      "safetyRatings": [
+        {
+          "category": "HARM_CATEGORY_DANGEROUS",
+          "probability": "NEGLIGIBLE"
+        }
+      ]
+    }
+  },
+  "stop": {
+    "reason": "tool_use"
+  },
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 5,
+    "total_tokens": 15,
+    "cache_read_tokens": 1,
+    "reasoning_tokens": 2,
+    "extensions": {
+      "trafficType": "ON_DEMAND"
+    }
+  },
+  "extensions": {
+    "promptFeedback": {
+      "blockReason": "SAFETY"
+    }
+  }
+}

@@ -23,7 +23,7 @@ stage 1 has merged.
 2. **This document set.** The matrix, this roadmap, and the parity rule in
    `AGENTS.md` and `.cursor/rules/hofund.mdc`.
 3. **Model mapping.** Pull request #12. A route member names the upstream
-   model (`crates/config/src/lib.rs:98`). Clients may send the route name,
+   model (`crates/kernel/config/src/lib.rs:98`). Clients may send the route name,
    `provider/model`, or a bare wire name that exactly one hop serves.
    Reasoning effort is one IR enum mapped by each codec. `count_tokens` asks
    a Messages upstream and otherwise returns a character estimate with

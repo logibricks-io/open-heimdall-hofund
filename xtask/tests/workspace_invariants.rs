@@ -17,17 +17,17 @@ const MEMBERS: &[&str] = &[
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
-    "crates/agent",
-    "crates/codec",
-    "crates/config",
+    "crates/kernel/agent",
+    "crates/kernel/codec",
+    "crates/kernel/config",
     "crates/control-client",
     "crates/control-proto",
-    "crates/daemon",
-    "crates/gateway",
-    "crates/ir",
-    "crates/plugin-api",
-    "crates/plugin-host",
-    "crates/plugin-sdk",
+    "crates/kernel/daemon",
+    "crates/kernel/gateway",
+    "crates/kernel/ir",
+    "crates/kernel/plugin-api",
+    "crates/kernel/plugin-host",
+    "crates/kernel/plugin-sdk",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
     "plugins/inbound/echo",
@@ -45,14 +45,14 @@ const MEMBERS: &[&str] = &[
     "plugins/subscriptions/codex",
     "plugins/subscriptions/copilot",
     "plugins/subscriptions/gemini",
-    "crates/provider",
+    "crates/kernel/provider",
     "kits/agent",
     "kits/subscription",
     "kits/upstream",
-    "crates/quirks",
-    "crates/router",
-    "crates/secrets",
-    "crates/usage",
+    "crates/kernel/quirks",
+    "crates/kernel/router",
+    "crates/kernel/secrets",
+    "crates/kernel/usage",
     "xtask",
 ];
 
@@ -256,20 +256,20 @@ const VENDOR_NAMES: &[&str] = &[
 /// vendor code has moved to a plugin, and the scan then covers all of it.
 const VENDOR_SCAN_PENDING: &[&str] = &[
     // Agent integrations still compiled into the kernel.
-    "crates/agent",
+    "crates/kernel/agent",
     // Protocol codecs are named after the protocols they translate.
-    "crates/codec",
+    "crates/kernel/codec",
     // Old vendor keys still parse for one release (RFC 0001 row B2).
-    "crates/config",
+    "crates/kernel/config",
     // Daemon wiring for vendor plugins, sign-in, and model listing.
-    "crates/daemon",
+    "crates/kernel/daemon",
     // Protocol ids and the wire contract.
-    "crates/plugin-api",
-    "crates/plugin-host",
+    "crates/kernel/plugin-api",
+    "crates/kernel/plugin-host",
     // Shared transports: SigV4, OAuth helpers, and vendor error shapes.
-    "crates/plugin-sdk",
+    "crates/kernel/plugin-sdk",
     // The Anthropic, OpenAI-compatible, and Generative adapters.
-    "crates/provider",
+    "crates/kernel/provider",
 ];
 
 /// Repo-relative paths that may mention the upstream project this work was
@@ -702,14 +702,19 @@ fn compact(text: &str) -> String {
     text.split_whitespace().collect()
 }
 
-/// Every crate directory under `crates/`, as a repo-relative path.
+/// Every crate directory under `crates/` and `crates/kernel/`, as a
+/// repo-relative path.
 fn kernel_crate_dirs(root: &Path) -> Vec<String> {
-    let mut dirs: Vec<String> = fs::read_dir(root.join("crates"))
-        .expect("read crates")
-        .map(|entry| entry.expect("crates entry").path())
-        .filter(|path| path.join("Cargo.toml").is_file())
-        .map(|path| relative(root, &path))
-        .collect();
+    let mut dirs = Vec::new();
+    for parent in ["crates", "crates/kernel"] {
+        dirs.extend(
+            fs::read_dir(root.join(parent))
+                .expect("read crates")
+                .map(|entry| entry.expect("crates entry").path())
+                .filter(|path| path.join("Cargo.toml").is_file())
+                .map(|path| relative(root, &path)),
+        );
+    }
     dirs.sort();
     dirs
 }
@@ -738,7 +743,7 @@ fn vendor_lines(root: &Path, crate_dir: &str) -> Vec<String> {
 fn kernel_crates_do_not_name_vendors() {
     let root = workspace_root();
     let dirs = kernel_crate_dirs(&root);
-    for required in ["crates/gateway", "crates/router"] {
+    for required in ["crates/kernel/gateway", "crates/kernel/router"] {
         assert!(
             dirs.iter().any(|dir| dir == required),
             "{required} must stay scanned"
@@ -754,7 +759,7 @@ fn kernel_crates_do_not_name_vendors() {
         scanned.push(crate_dir.as_str());
         violations.extend(vendor_lines(&root, crate_dir));
     }
-    for required in ["crates/gateway", "crates/router"] {
+    for required in ["crates/kernel/gateway", "crates/kernel/router"] {
         assert!(scanned.contains(&required), "{required} was not scanned");
     }
     assert!(
@@ -825,9 +830,11 @@ fn kernel_scans_find_catalogs_and_vendor_names_in_crates_only() {
     write("crates/clean/Cargo.toml", "");
     write("crates/clean/src/lib.rs", "pub fn plain() {}\n");
     write("crates/loose/presets.toml", "");
+    write("crates/kernel/inner/Cargo.toml", "");
+    write("crates/kernel/inner/src/lib.rs", "pub fn plain() {}\n");
     assert_eq!(
         kernel_crate_dirs(root.path()),
-        ["crates/clean", "crates/listed"]
+        ["crates/clean", "crates/kernel/inner", "crates/listed"]
     );
     assert_eq!(
         kernel_preset_catalogs(root.path()),
@@ -844,7 +851,7 @@ fn kernel_scans_find_catalogs_and_vendor_names_in_crates_only() {
 fn router_does_not_name_plugin_host_types() {
     let root = workspace_root();
     let mut violations = Vec::new();
-    for path in rust_files(&root.join("crates/router")) {
+    for path in rust_files(&root.join("crates/kernel/router")) {
         let text = read_to_string(&path);
         for word in ["UpstreamProvider", "HostContext"] {
             if contains_word(&text, word) {
@@ -866,7 +873,7 @@ fn router_does_not_name_plugin_host_types() {
         "RawBody",
         "Request",
     ];
-    for path in rust_files(&root.join("crates/router/src")) {
+    for path in rust_files(&root.join("crates/kernel/router/src")) {
         let text = read_to_string(&path);
         for (is_pub, name) in plugin_api_use_names(&text) {
             let allowed = if is_pub { &reexports[..] } else { &imports[..] };

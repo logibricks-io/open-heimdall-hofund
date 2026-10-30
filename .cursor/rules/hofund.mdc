@@ -24,7 +24,7 @@ Spine, dependencies point downward only:
 `ir ← codec ← provider ← router ← gateway ← daemon ← cli`
 
 - `agent` depends only on `config`, never on `gateway`.
-- Vendor names must never appear in `crates/gateway` or `crates/router`.
+- Vendor names must never appear in `crates/kernel/gateway` or `crates/kernel/router`.
   Quirks live in `quirks` data and provider adapters. Protocol names belong
   in `codec`.
 - Only `gateway` may depend on axum, tower, or hyper.
