@@ -1,0 +1,21 @@
+{
+  "customModels": [
+    {
+      "model": "old-route",
+      "id": "custom:hofund/old-route",
+      "displayName": "old-route",
+      "baseUrl": "http://127.0.0.1:9999/v1",
+      "apiKey": "stale",
+      "provider": "generic-chat-completion-api",
+      "noImageSupport": true
+    },
+    {
+      "model": "mine",
+      "id": "custom:mine",
+      "displayName": "Mine",
+      "baseUrl": "https://example.test/v1",
+      "apiKey": "user-key",
+      "provider": "anthropic"
+    }
+  ]
+}

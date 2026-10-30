@@ -1,0 +1,16 @@
+{
+  "theme": "dark",
+  "sessionDefaultSettings": {
+    "model": "custom:My-Model-0",
+    "reasoningEffort": "high"
+  },
+  "customModels": [
+    {
+      "model": "my-model",
+      "displayName": "My Model",
+      "baseUrl": "https://example.test/v1",
+      "apiKey": "user-key",
+      "provider": "openai"
+    }
+  ]
+}

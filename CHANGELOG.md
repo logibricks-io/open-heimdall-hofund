@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Droid agent (G8): `hofund agent connect droid` appends one entry per route
+  to `customModels` in `~/.factory/settings.json` (or under an absolute
+  `FACTORY_HOME_OVERRIDE`), after the user's entries, each on Chat
+  Completions at the gateway's `/v1`. A model pick writes
+  `sessionDefaultSettings.model` as `custom:hofund/<route>`.
+
 - Agent descriptions can fill gateway values into text and pair a provider
   with the model (G6, #418): `slot = { template = "Bearer {token}" }` writes
   the text with `{origin}`, `{v1}`, and `{token}` filled in and is rewritten
@@ -568,6 +574,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response body. Token `Debug` is redacted.
 
 ### Changed
+
+- Disconnect now warns when it removes hofund's entries from a shared array
+  or map that were edited after connect (G8). Such entries are still removed
+  whole, token included.
 
 - The CLI crate (`hofund-cli`, binary `hofund`) moved from `crates/cli` to
   `apps/cli` (RFC 0001 row J). Install with
