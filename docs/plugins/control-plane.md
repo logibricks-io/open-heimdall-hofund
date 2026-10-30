@@ -26,20 +26,20 @@ The following wait for later pull requests:
 
 ### CLI and desktop paths
 
-`hofund` currently links `hofund-daemon` and `hofund-agent` directly (`crates/cli/Cargo.toml:18-20`). Its top-level dispatch calls `serve_blocking`, `check`, token and usage functions, or local agent adapters (`crates/cli/src/main.rs:15-50`). The command parser has no provider, model, status, healthcheck, or shutdown command (`crates/cli/src/main.rs:120-145`).
+`hofund` currently links `hofund-daemon` and `hofund-agent` directly (`apps/cli/Cargo.toml:18-20`). Its top-level dispatch calls `serve_blocking`, `check`, token and usage functions, or local agent adapters (`apps/cli/src/main.rs:15-50`). The command parser has no provider, model, status, healthcheck, or shutdown command (`apps/cli/src/main.rs:120-145`).
 
 | Command | Current path |
 | --- | --- |
-| `hofund serve` | `serve_blocking` builds a Tokio runtime and calls `serve` in the same process (`crates/cli/src/main.rs:24-30`; `crates/daemon/src/lib.rs:242-260`). |
-| `hofund config check` | `check` loads the file and builds every provider without binding a listener (`crates/cli/src/main.rs:343-351`; `crates/daemon/src/lib.rs:67-76`). |
+| `hofund serve` | `serve_blocking` builds a Tokio runtime and calls `serve` in the same process (`apps/cli/src/main.rs:24-30`; `crates/daemon/src/lib.rs:242-260`). |
+| `hofund config check` | `check` loads the file and builds every provider without binding a listener (`apps/cli/src/main.rs:343-351`; `crates/daemon/src/lib.rs:67-76`). |
 | `hofund token show` | `token_show` resolves the configured token path and calls `TokenFile::load_or_create` (`crates/daemon/src/lib.rs:79-95,263-266`). |
-| `hofund token rotate` | The CLI reads the local gateway and route models, rotates the file, then refreshes every connected agent and reports failures (`crates/cli/src/main.rs:353-393`). |
-| `hofund usage` | `usage_report` opens the configured SQLite ledger and renders its table (`crates/cli/src/main.rs:37`; `crates/daemon/src/lib.rs:157-166`). |
-| `hofund agent list` | The CLI builds a catalog from `agent_descriptions`, which the daemon obtains from the registry, and probes installation through local agent sessions (`crates/cli/src/main.rs:309-341`; `crates/daemon/src/lib.rs:141-145`). |
-| `hofund agent connect` | The CLI gets the gateway URL, token, and route models from the daemon, then calls the adapter's `plan` or `apply` locally (`crates/cli/src/main.rs:395-440`). |
-| `hofund agent disconnect` | The CLI calls the local adapter's `disconnect` (`crates/cli/src/main.rs:472-486`). |
-| `hofund agent status` | The CLI builds the same target and calls each local adapter's `status` (`crates/cli/src/main.rs:488-501`). |
-| Help and version | These are local text and package-version operations (`crates/cli/src/main.rs:24-33,120-127`). |
+| `hofund token rotate` | The CLI reads the local gateway and route models, rotates the file, then refreshes every connected agent and reports failures (`apps/cli/src/main.rs:353-393`). |
+| `hofund usage` | `usage_report` opens the configured SQLite ledger and renders its table (`apps/cli/src/main.rs:37`; `crates/daemon/src/lib.rs:157-166`). |
+| `hofund agent list` | The CLI builds a catalog from `agent_descriptions`, which the daemon obtains from the registry, and probes installation through local agent sessions (`apps/cli/src/main.rs:309-341`; `crates/daemon/src/lib.rs:141-145`). |
+| `hofund agent connect` | The CLI gets the gateway URL, token, and route models from the daemon, then calls the adapter's `plan` or `apply` locally (`apps/cli/src/main.rs:395-440`). |
+| `hofund agent disconnect` | The CLI calls the local adapter's `disconnect` (`apps/cli/src/main.rs:472-486`). |
+| `hofund agent status` | The CLI builds the same target and calls each local adapter's `status` (`apps/cli/src/main.rs:488-501`). |
+| Help and version | These are local text and package-version operations (`apps/cli/src/main.rs:24-33,120-127`). |
 
 The desktop has the same embedded composition root. `Control` stores an `Option<Running>` and calls `hofund_daemon::start` and `Running::shutdown` for Start and Stop (`apps/desktop/src-tauri/src/control.rs:143-190`). Agent changes and status call local adapters with daemon-derived targets, usage calls `usage_report`, and snapshots read the configured listener (`apps/desktop/src-tauri/src/control.rs:192-225,227-291`). Tauri commands and menu dispatch invoke those methods directly (`apps/desktop/src-tauri/src/lib.rs:135-175,187-251`). Open Config creates the file through `ensure_config_file` and launches the platform opener (`apps/desktop/src-tauri/src/open.rs:1-43`). The desktop manifest therefore links both `hofund-daemon` and `hofund-agent` (`apps/desktop/src-tauri/Cargo.toml:16-21`).
 
@@ -77,7 +77,7 @@ The design PR changes only the inspiration allowlist. The implementation pull re
 4. Add `hofund-control-proto` to the existing gateway and daemon lists. Remove `hofund-plugin-registry` from the daemon list in the registry-switch pull request. Do not add a registry edge to either control crate.
 5. At the CLI switch, set `"hofund-cli" => &["hofund-config", "hofund-control-client", "hofund-secrets"]`. `expected_deps` lists only workspace crates; `toml_edit` is an external dependency declared through `[workspace.dependencies]`. Config supports the explicitly labeled structural-only fallback when `hofundd` is absent, secrets supports local `token show`, and `toml_edit` supports format-preserving provider edits. Every full validation and runtime operation uses the client or one-shot `hofundd`; remove the daemon and agent edges. `toml_edit` 0.25.17 is already locked transitively but is not currently a declared workspace dependency (`Cargo.lock:4670-4683`).
 6. In the later desktop rework, not in L, set `"hofund-desktop" => &["hofund-control-client"]`. The client re-export supplies DTOs, so desktop needs no direct proto edge.
-7. In row J, replace the member path `crates/cli` with `apps/cli` and move it beside the other apps. Do not combine that move with L.
+7. In row J, replace the member path `crates/cli` with `apps/cli` and move it beside the other apps. Do not combine that move with L. (Done in J1.)
 
 `docs/architecture.md` must gain the same nodes, edges, and crate responsibilities in the pull request that introduces them. Its composition-root text must name `hofundd`, and its direct-registry rule must name only `hofund-daemon-bin` after L. The current design PR leaves that document unchanged because none of those edges exists yet.
 

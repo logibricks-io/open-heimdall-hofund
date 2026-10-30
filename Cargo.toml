@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
     "crates/agent",
-    "crates/cli",
     "crates/codec",
     "crates/config",
     "crates/control-client",
@@ -42,7 +42,7 @@ members = [
     "crates/usage",
     "xtask",
 ]
-default-members = ["crates/cli"]
+default-members = ["apps/cli"]
 
 [workspace.package]
 version = "0.1.0"
