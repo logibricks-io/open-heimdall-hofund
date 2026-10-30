@@ -8,7 +8,6 @@ mod control;
 mod open;
 
 use control::{Control, MenuEntry, Snapshot};
-use hofund_agent::Session;
 use hofund_daemon::user_config_path;
 use tauri::Emitter;
 use tauri::Manager;
@@ -43,7 +42,7 @@ pub fn run() -> Result<(), String> {
             let snapshot = {
                 let state = app.state::<AppState>();
                 let mut control = state.control.blocking_lock();
-                control.snapshot(&Session::from_process_env())
+                control.snapshot(&hofund_daemon::agent_session())
             };
             install_tray(app.handle(), &snapshot)?;
             if let Some(window) = app.get_webview_window("usage") {
@@ -135,7 +134,7 @@ fn append_entry(
 async fn dispatch(app: &tauri::AppHandle, id: &str) {
     let state = app.state::<AppState>();
     let mut control = state.control.lock().await;
-    let session = Session::from_process_env();
+    let session = hofund_daemon::agent_session();
     match id {
         "gateway-start" => {
             let _ = control.start().await;
@@ -190,7 +189,7 @@ async fn snapshot(
     state: tauri::State<'_, AppState>,
 ) -> Result<Snapshot, String> {
     let mut control = state.control.lock().await;
-    let snapshot = control.snapshot(&Session::from_process_env());
+    let snapshot = control.snapshot(&hofund_daemon::agent_session());
     drop(control);
     publish(&app, &snapshot)?;
     Ok(snapshot)
@@ -203,7 +202,7 @@ async fn start_gateway(
 ) -> Result<Snapshot, String> {
     let mut control = state.control.lock().await;
     let _ = control.start().await;
-    let snapshot = control.snapshot(&Session::from_process_env());
+    let snapshot = control.snapshot(&hofund_daemon::agent_session());
     drop(control);
     publish(&app, &snapshot)?;
     Ok(snapshot)
@@ -216,7 +215,7 @@ async fn stop_gateway(
 ) -> Result<Snapshot, String> {
     let mut control = state.control.lock().await;
     let _ = control.stop().await;
-    let snapshot = control.snapshot(&Session::from_process_env());
+    let snapshot = control.snapshot(&hofund_daemon::agent_session());
     drop(control);
     publish(&app, &snapshot)?;
     Ok(snapshot)
@@ -230,7 +229,7 @@ async fn set_agent(
     connect: bool,
 ) -> Result<Snapshot, String> {
     let mut control = state.control.lock().await;
-    let session = Session::from_process_env();
+    let session = hofund_daemon::agent_session();
     let _ = control.set_agent(&session, &id, connect);
     let snapshot = control.snapshot(&session);
     drop(control);

@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds hofund's key. A record beside the managed file keeps a SHA-256
   digest of the key, never the key. `hofund-kit-agent` adds
   `MemoryCredentialStore` for tests. Native OS backends follow in Z2.
+- Native credential stores (Z2): `hofund_plugin_host::native_credential_store()`
+  keeps agent keys in the macOS keychain (internet password by URL and
+  account), the Secret Service default collection (attributes `url` and
+  `username`) and Windows Credential Manager (generic credential by target,
+  local persistence), without child processes and with a 90 s deadline per
+  call. The daemon and the desktop app use it through
+  `hofund_daemon::agent_session()`.
 - Goose agent (G14): `hofund agent connect goose` writes hofund's own
   custom provider, `custom_providers/hofund.json` beside Goose's
   `config.yaml` (`~/.config/goose`, or `$XDG_CONFIG_HOME/goose` when it is
