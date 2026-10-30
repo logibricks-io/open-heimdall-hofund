@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{API_VERSION, ControlError, ControlErrorKind, FieldIssue, validate_revision};
+use crate::{
+    API_VERSION, ControlError, ControlErrorKind, FieldIssue, MAX_ID_BYTES, validate_revision,
+};
 
 /// Agent lifecycle action.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +14,8 @@ pub enum AgentAction {
     Connect,
     /// Disconnect an agent and restore managed state.
     Disconnect,
+    /// Set or clear the model an agent uses through the gateway.
+    SetModel,
     /// A newer peer supplied an unknown action.
     #[serde(other)]
     Unknown,
@@ -44,7 +48,7 @@ impl AgentPlanRequest {
     /// Rejects an action this version does not understand, so a typo can
     /// never decode into a request with a different meaning.
     pub(crate) fn validate(&self) -> Result<(), ControlError> {
-        if self.action != AgentAction::Unknown {
+        if matches!(self.action, AgentAction::Connect | AgentAction::Disconnect) {
             return Ok(());
         }
         let message = "unknown agent action; expected connect or disconnect";
@@ -114,6 +118,47 @@ impl AgentDisconnectRequest {
             validate_revision("expected_plan_revision", revision)?;
         }
         Ok(())
+    }
+}
+
+/// Agent model request: sets the model id, or clears it when `model` is
+/// `None`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct AgentModelRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Route model id to use, or `None` to return to the connect default.
+    pub model: Option<String>,
+}
+
+impl AgentModelRequest {
+    /// Constructs a version-current model request.
+    #[must_use]
+    pub fn new(model: Option<String>) -> Self {
+        Self {
+            version: API_VERSION,
+            model,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        let Some(model) = &self.model else {
+            return Ok(());
+        };
+        let (reason, message) = if model.is_empty() {
+            ("invalid", "a model id must not be empty")
+        } else if model.len() > MAX_ID_BYTES {
+            ("too_large", "a model id exceeds the 256-byte limit")
+        } else {
+            return Ok(());
+        };
+        let mut error = ControlError::new(ControlErrorKind::Unprocessable, message, "validate");
+        error
+            .details
+            .push(FieldIssue::new("model", reason, message));
+        Err(error)
     }
 }
 
@@ -250,6 +295,9 @@ pub struct AgentChangeResponse {
     pub changed_paths: Vec<String>,
     /// Nonfatal sanitized warnings.
     pub warnings: Vec<String>,
+    /// Model the agent uses after a set-model change, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl Default for AgentChangeResponse {
@@ -260,6 +308,7 @@ impl Default for AgentChangeResponse {
             action: AgentAction::Connect,
             changed_paths: Vec::new(),
             warnings: Vec::new(),
+            model: None,
         }
     }
 }

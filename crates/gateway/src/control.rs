@@ -21,12 +21,13 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, StreamExt};
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ConfigApplyRequest, ConfigResponse,
-    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
-    HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse,
-    PicksSetRequest, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UsageQuery, UsageResponse, decode_request,
+    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
+    ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_ID_BYTES,
+    MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
+    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, ReloadRequest,
+    RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, Topic, UsageQuery, UsageResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -190,6 +191,12 @@ pub trait ControlState: Send + Sync {
         id: String,
         request: AgentDisconnectRequest,
     ) -> ControlFuture<'_, AgentChangeResponse>;
+    /// Sets or clears the model an agent uses, connecting it when needed.
+    fn set_agent_model(
+        &self,
+        id: String,
+        request: AgentModelRequest,
+    ) -> ControlFuture<'_, AgentChangeResponse>;
     /// Reports usage for a period.
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
     /// Rotates the control and model bearer token.
@@ -319,6 +326,7 @@ impl Control {
             .route("/v1/hofund/agents/{id}/plan", post(plan_agent))
             .route("/v1/hofund/agents/{id}/connect", post(connect_agent))
             .route("/v1/hofund/agents/{id}/disconnect", post(disconnect_agent))
+            .route("/v1/hofund/agents/{id}/model", post(set_agent_model))
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
             .route("/v1/hofund/token/rotate", post(rotate_token))
             .route("/v1/hofund/shutdown", post(shutdown))
@@ -770,6 +778,22 @@ async fn disconnect_agent(
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.disconnect_agent(id, request).await)
+}
+
+async fn set_agent_model(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentModelRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.set_agent_model(id, request).await)
 }
 
 async fn usage(

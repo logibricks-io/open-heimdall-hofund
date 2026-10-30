@@ -2,11 +2,13 @@
 AgentAction #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
 AgentAction::Connect
 AgentAction::Disconnect
+AgentAction::SetModel
 AgentAction::Unknown #[serde(other)]
 AgentChangeResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 AgentChangeResponse.action
 AgentChangeResponse.agent
 AgentChangeResponse.changed_paths
+AgentChangeResponse.model
 AgentChangeResponse.version
 AgentChangeResponse.warnings
 AgentChangedEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
@@ -26,6 +28,10 @@ AgentDisconnectRequest::fn new (force : bool , expected_plan_revision : Option <
 AgentListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 AgentListResponse.agents
 AgentListResponse.version
+AgentModelRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AgentModelRequest.model
+AgentModelRequest.version
+AgentModelRequest::fn new (model : Option < String >) -> Self
 AgentPlanRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 AgentPlanRequest.action
 AgentPlanRequest.force

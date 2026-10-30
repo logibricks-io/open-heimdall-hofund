@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hofund agent set <agent> model=<id|default>` and
+  `POST /v1/hofund/agents/{id}/model` (L8e2). Setting a route model connects
+  the agent when needed; `model=default` drops the model hofund chose. The id
+  must be a route model the agent can see, or the call fails with 422.
+  `disconnect` still restores the agent's original model. `effort=` is not
+  supported yet.
 - `hofundd subscription list`, `sign-in`, `sign-out`, `refresh`, and `quota`
   (L8e). `hofund subscription` now runs them in `hofundd`, so the CLI no
   longer links the daemon crate or the plugin registry.

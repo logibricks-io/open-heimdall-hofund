@@ -12,9 +12,10 @@ use std::sync::Arc;
 use hofund_agent::{AgentAdapter, Catalog, ConfigFile, GatewayTarget, Session};
 use hofund_control_proto::{
     AgentAction, AgentChangeResponse, AgentChangedEvent, AgentConnectRequest,
-    AgentDisconnectRequest, AgentListResponse, AgentPlanRequest, AgentPlanResponse,
-    AgentRefreshResult, AgentState, AgentStatusEntry, AgentStatusResponse, AgentSummary,
-    ControlError, ControlErrorKind, EventPayload, FieldIssue, PlannedChange, TokenRotateResponse,
+    AgentDisconnectRequest, AgentListResponse, AgentModelRequest, AgentPlanRequest,
+    AgentPlanResponse, AgentRefreshResult, AgentState, AgentStatusEntry, AgentStatusResponse,
+    AgentSummary, ControlError, ControlErrorKind, EventPayload, FieldIssue, PlannedChange,
+    TokenRotateResponse,
 };
 use hofund_plugin_api::AgentDescription;
 use hofund_secrets::TokenFile;
@@ -343,6 +344,42 @@ impl AgentOps {
         Ok(response)
     }
 
+    /// Sets or clears the model `id` uses. Setting one connects the agent
+    /// when it is not connected yet; clearing one on a connected agent returns
+    /// it to the connect default.
+    pub(crate) async fn set_model(
+        &self,
+        id: String,
+        request: AgentModelRequest,
+    ) -> Result<AgentChangeResponse, ControlError> {
+        let parts = self.parts();
+        let response = self
+            .gated(move |catalog, session| {
+                let adapter = find(catalog, &id)?;
+                let token = parts.token()?;
+                let target = parts.target(token.clone());
+                let plan = adapter
+                    .set_model(session, &target, request.model.as_deref())
+                    .map_err(|error| agent_failure(adapter, &error, &[&token]))?;
+                let mut response = AgentChangeResponse::default();
+                response.agent = id;
+                response.action = AgentAction::SetModel;
+                response.changed_paths = plan
+                    .changes()
+                    .iter()
+                    .map(|change| change.path().display().to_string())
+                    .collect();
+                response.model = adapter
+                    .configured_model(session)
+                    .map_err(|error| agent_failure(adapter, &error, &[&token]))?
+                    .map(|model| scrub(&model, &[&token]));
+                Ok(response)
+            })
+            .await?;
+        self.emit_changed(&response);
+        Ok(response)
+    }
+
     pub(crate) async fn rotate_token(&self) -> Result<TokenRotateResponse, ControlError> {
         let parts = self.parts();
         let generation = self.token_generation.clone();
@@ -582,7 +619,13 @@ fn agent_failure(
     error: &hofund_agent::AgentError,
     tokens: &[&str],
 ) -> ControlError {
-    internal(scrub(&format!("{}: {error}", adapter.id()), tokens))
+    let message = scrub(&format!("{}: {error}", adapter.id()), tokens);
+    match error {
+        hofund_agent::AgentError::Rejected(_) => {
+            ControlError::new(ControlErrorKind::Unprocessable, message, "control")
+        }
+        _ => internal(message),
+    }
 }
 
 fn internal(message: String) -> ControlError {

@@ -19,10 +19,12 @@ macro_rules! dto {
 
 const JSON_SNAPSHOTS: &[&str] = &[
     "agent-change-response",
+    "agent-change-response-model",
     "agent-changed-event",
     "agent-connect-request",
     "agent-disconnect-request",
     "agent-list-response",
+    "agent-model-request",
     "agent-plan-request",
     "agent-plan-response",
     "agent-status-response",
@@ -67,6 +69,7 @@ const JSON_SNAPSHOTS: &[&str] = &[
 
 const RESPONSE_SNAPSHOTS: &[&str] = &[
     "agent-change-response",
+    "agent-change-response-model",
     "agent-changed-event",
     "agent-list-response",
     "agent-plan-response",
@@ -141,6 +144,10 @@ fn json_snapshots_round_trip() {
     snapshot(
         "agent-disconnect-request",
         &AgentDisconnectRequest::new(true, Some("plan-revision-2".to_owned())),
+    );
+    snapshot(
+        "agent-model-request",
+        &AgentModelRequest::new(Some("example-model".to_owned())),
     );
     snapshot("usage-query", &UsageQuery::new(UsagePeriod::Month));
     snapshot("token-rotate-request", &TokenRotateRequest::new());
@@ -270,6 +277,13 @@ fn json_snapshots_round_trip() {
     agent_change.changed_paths = vec!["/home/example/.agent/config.json".to_owned()];
     agent_change.warnings = vec!["example warning".to_owned()];
     snapshot("agent-change-response", &agent_change);
+
+    let mut model_change = AgentChangeResponse::default();
+    model_change.agent = "example-agent".to_owned();
+    model_change.action = AgentAction::SetModel;
+    model_change.changed_paths = vec!["/home/example/.agent/config.json".to_owned()];
+    model_change.model = Some("example-model".to_owned());
+    snapshot("agent-change-response-model", &model_change);
 
     let mut usage = UsageResponse::default();
     usage.period = UsagePeriod::Month;
@@ -608,6 +622,7 @@ fn body_requests_reject_unknown_fields() {
     reject_unknown::<AgentDisconnectRequest>(
         r#"{"version":1,"force":false,"expected_plan_revision":null,"future":true}"#,
     );
+    reject_unknown::<AgentModelRequest>(r#"{"version":1,"model":null,"future":true}"#);
     reject_unknown::<TokenRotateRequest>(r#"{"version":1,"future":true}"#);
     reject_unknown::<ShutdownRequest>(r#"{"version":1,"future":true}"#);
     let error = serde_json::from_str::<UsageQuery>(r#"{"period":"all","future":true}"#)
@@ -923,7 +938,9 @@ fn decode_response_snapshot(name: &str, body: &[u8]) {
         "agent-list-response" => decode::<AgentListResponse>(body),
         "agent-status-response" => decode::<AgentStatusResponse>(body),
         "agent-plan-response" => decode::<AgentPlanResponse>(body),
-        "agent-change-response" => decode::<AgentChangeResponse>(body),
+        "agent-change-response" | "agent-change-response-model" => {
+            decode::<AgentChangeResponse>(body);
+        }
         "usage-response" => decode::<UsageResponse>(body),
         "token-rotate-response" => decode::<TokenRotateResponse>(body),
         "shutdown-response" => decode::<ShutdownResponse>(body),
@@ -1050,6 +1067,36 @@ fn revision_fields_are_bounded_by_max_id_bytes() {
         serde_json::to_vec(&AgentDisconnectRequest::new(false, Some(over)))
             .expect("encode disconnect"),
     );
+}
+
+#[test]
+fn agent_model_requests_validate_the_model_id() {
+    let clear = decode_request::<AgentModelRequest>(API_VERSION, br#"{"version":1,"model":null}"#)
+        .expect("clear");
+    assert_eq!(clear.model, None);
+    let at = "m".repeat(256);
+    let body = serde_json::to_vec(&AgentModelRequest::new(Some(at.clone()))).expect("encode");
+    let set = decode_request::<AgentModelRequest>(API_VERSION, &body).expect("id at limit");
+    assert_eq!(set.model.as_deref(), Some(at.as_str()));
+    for (model, reason) in [(String::new(), "invalid"), ("m".repeat(257), "too_large")] {
+        let body = serde_json::to_vec(&AgentModelRequest::new(Some(model))).expect("encode");
+        let error = decode_request::<AgentModelRequest>(API_VERSION, &body).expect_err(reason);
+        assert_eq!(error.kind, ControlErrorKind::Unprocessable);
+        assert_eq!(error.details.len(), 1);
+        assert_eq!(error.details[0].field, "model");
+        assert_eq!(error.details[0].reason, reason);
+    }
+    let error = decode_request::<AgentPlanRequest>(
+        API_VERSION,
+        br#"{"version":1,"action":"set_model","force":false}"#,
+    )
+    .expect_err("set_model has no plan");
+    assert_eq!(error.details[0].reason, "unknown_variant");
+    let older: AgentChangeResponse = serde_json::from_str(
+        r#"{"version":1,"agent":"a","action":"connect","changed_paths":[],"warnings":[]}"#,
+    )
+    .expect("older response");
+    assert_eq!(older.model, None);
 }
 
 #[test]

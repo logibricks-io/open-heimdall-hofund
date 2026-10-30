@@ -7,12 +7,12 @@ use hofund_agent::Session;
 use hofund_config::Config;
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError, ControlErrorKind,
-    FieldIssue, HealthResponse, ModelEntry, ModelListResponse, PicksResponse, PicksSetRequest,
-    ProviderListResponse, ProviderSummary, ProviderTestRequest, ProviderTestResponse,
-    ProviderTestResult, RouteModel, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod,
-    UsageQuery, UsageResponse, UsageRow, UsageTotals,
+    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
+    ControlErrorKind, FieldIssue, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
+    PicksSetRequest, ProviderListResponse, ProviderSummary, ProviderTestRequest,
+    ProviderTestResponse, ProviderTestResult, RouteModel, RouteModelListResponse, ShutdownRequest,
+    ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -390,6 +390,14 @@ impl ControlState for DaemonControl {
                 .await
                 .map_err(Into::into)
         })
+    }
+
+    fn set_agent_model(
+        &self,
+        id: String,
+        request: AgentModelRequest,
+    ) -> ControlFuture<'_, AgentChangeResponse> {
+        Box::pin(async move { self.agents.set_model(id, request).await.map_err(Into::into) })
     }
 
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {

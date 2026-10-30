@@ -516,6 +516,321 @@ fn visible_models_and_route_none_filter_gateway_slots() {
     assert!(!models.contains_key("hidden"));
 }
 
+fn codex_path(home: &Path) -> PathBuf {
+    home.join(".codex").join("config.toml")
+}
+
+fn claude_path(home: &Path) -> PathBuf {
+    home.join(".claude").join("settings.json")
+}
+
+fn seed(path: &Path, text: &str) {
+    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    fs::write(path, text).expect("seed");
+}
+
+fn toml_value(path: &Path, key: &str) -> Option<String> {
+    let text = fs::read_to_string(path).expect("TOML file");
+    let document: toml_edit::DocumentMut = text.parse().expect("TOML");
+    document
+        .get(key)
+        .and_then(|item| item.as_str())
+        .map(str::to_owned)
+}
+
+#[test]
+fn set_model_connects_codex_and_disconnect_restores_the_original() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["m", "n"]);
+    let path = codex_path(&home);
+    seed(&path, "model = \"mine\"\n");
+    let codex = Compiled::new(&CODEX);
+    let plan = codex
+        .set_model(&session, &target, Some("n"))
+        .expect("set model");
+    assert_eq!(plan.changes().len(), 1);
+    assert_eq!(toml_value(&path, "model").as_deref(), Some("n"));
+    assert_eq!(
+        toml_value(&path, "model_provider").as_deref(),
+        Some("hofund")
+    );
+    assert_eq!(
+        codex.configured_model(&session).expect("model").as_deref(),
+        Some("n")
+    );
+    let again = codex
+        .set_model(&session, &target, Some("n"))
+        .expect("set again");
+    assert!(again.changes().is_empty());
+
+    let edited = format!("{}extra = 1\n", fs::read_to_string(&path).expect("read"));
+    fs::write(&path, edited).expect("user edit");
+    let outcome = codex.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    assert_eq!(toml_value(&path, "model").as_deref(), Some("mine"));
+    assert!(toml_value(&path, "model_provider").is_none());
+    assert!(
+        fs::read_to_string(&path)
+            .expect("read")
+            .contains("extra = 1")
+    );
+}
+
+#[test]
+fn codex_model_edits_after_a_plain_connect_stay_quiet() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["m", "n"]);
+    let path = codex_path(&home);
+    seed(&path, "model = \"mine\"\n");
+    let codex = Compiled::new(&CODEX);
+    codex.apply(&session, &target).expect("connect");
+    let edited = fs::read_to_string(&path)
+        .expect("read")
+        .replace("model = \"mine\"", "model = \"theirs\"");
+    fs::write(&path, edited).expect("user edit");
+    let outcome = codex.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    assert_eq!(toml_value(&path, "model").as_deref(), Some("theirs"));
+}
+
+#[test]
+fn codex_model_edited_after_set_is_kept_with_a_warning() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["m", "n"]);
+    let path = codex_path(&home);
+    seed(&path, "model = \"mine\"\n");
+    let codex = Compiled::new(&CODEX);
+    codex
+        .set_model(&session, &target, Some("m"))
+        .expect("set model");
+    let edited = fs::read_to_string(&path)
+        .expect("read")
+        .replace("model = \"m\"", "model = \"theirs\"");
+    fs::write(&path, edited).expect("user edit");
+    let outcome = codex.disconnect(&session, false).expect("disconnect");
+    assert_eq!(outcome.warnings().len(), 1, "{:?}", outcome.warnings());
+    assert!(
+        outcome.warnings()[0].contains("`model`"),
+        "{:?}",
+        outcome.warnings()
+    );
+    assert_eq!(toml_value(&path, "model").as_deref(), Some("theirs"));
+}
+
+#[test]
+fn set_model_moves_claude_tiers_and_rejects_unusable_models() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a", "b"]);
+    let path = claude_path(&home);
+    let claude = Compiled::new(&CLAUDE);
+    claude
+        .set_model(&session, &target, Some("b"))
+        .expect("set model");
+    let value = read_json(&path);
+    assert_eq!(value["model"], "b");
+    assert_eq!(value["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "b");
+    assert_eq!(value["env"]["ANTHROPIC_SMALL_FAST_MODEL"], "b");
+    assert!(value["env"].get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_none());
+    assert!(
+        claude
+            .status(&session, &target)
+            .expect("status")
+            .connected()
+    );
+    claude
+        .set_model(&session, &target, Some("a"))
+        .expect("switch model");
+    let value = read_json(&path);
+    assert_eq!(value["model"], "a");
+    assert_eq!(value["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "a");
+
+    let error = claude
+        .set_model(&session, &target, Some("zzz"))
+        .expect_err("unknown model");
+    assert!(error.to_string().contains("hofund model list"), "{error}");
+    assert_eq!(read_json(&path)["model"], "a");
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let error = Compiled::new(&ROUTE_NONE)
+        .set_model(&session, &target_with(&["shown", "hidden"]), Some("hidden"))
+        .expect_err("hidden model");
+    assert!(error.to_string().contains("`hidden`"), "{error}");
+    let error = Compiled::new(&VISIBLE_ONLY)
+        .set_model(&session, &target_with(&["shown"]), Some("shown"))
+        .expect_err("no model key");
+    assert_eq!(error.to_string(), "`visible-only` has no model setting");
+    assert!(!home.join(".route").exists());
+}
+
+#[test]
+fn clear_model_on_a_connected_agent_falls_back_and_disconnect_restores() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a", "b"]);
+    let path = claude_path(&home);
+    seed(&path, "{\"model\": \"orig\", \"theme\": \"dark\"}\n");
+    let claude = Compiled::new(&CLAUDE);
+    claude
+        .set_model(&session, &target, Some("b"))
+        .expect("set model");
+    let plan = claude.set_model(&session, &target, None).expect("clear");
+    assert_eq!(plan.changes().len(), 1);
+    let value = read_json(&path);
+    assert!(value.get("model").is_none(), "{value}");
+    assert!(
+        value["env"].get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none(),
+        "{value}"
+    );
+    assert!(value["env"].get("ANTHROPIC_AUTH_TOKEN").is_some());
+    assert!(claude.configured_model(&session).expect("model").is_none());
+
+    let mut edited = read_json(&path);
+    edited["note"] = serde_json::json!("mine");
+    fs::write(&path, edited.to_string()).expect("user edit");
+    let outcome = claude.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    let value = read_json(&path);
+    assert_eq!(value["model"], "orig");
+    assert_eq!(value["note"], "mine");
+    assert!(value.get("env").is_none(), "{value}");
+}
+
+#[test]
+fn clear_model_with_one_route_keeps_the_connect_default() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["only"]);
+    let path = claude_path(&home);
+    seed(&path, "{\"model\": \"orig\"}\n");
+    let claude = Compiled::new(&CLAUDE);
+    claude.apply(&session, &target).expect("connect");
+    assert_eq!(read_json(&path)["model"], "orig");
+    claude.set_model(&session, &target, None).expect("clear");
+    let value = read_json(&path);
+    assert_eq!(value["model"], "only");
+    assert_eq!(value["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "only");
+    assert!(
+        claude
+            .status(&session, &target)
+            .expect("status")
+            .connected()
+    );
+    let outcome = claude.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "{\"model\": \"orig\"}\n"
+    );
+}
+
+#[test]
+fn plain_connect_after_set_or_clear_keeps_restoring_the_original() {
+    for model in [Some("b"), None] {
+        let home = scratch();
+        let session = Session::new(&*home);
+        let target = target_with(&["a", "b"]);
+        let path = codex_path(&home);
+        seed(&path, "model = \"mine\"\n");
+        let codex = Compiled::new(&CODEX);
+        codex
+            .set_model(&session, &target, Some("a"))
+            .expect("set model");
+        codex.set_model(&session, &target, model).expect("change");
+        codex.apply(&session, &target).expect("reconnect");
+        assert_eq!(toml_value(&path, "model").as_deref(), model);
+        let edited = format!("{}extra = 1\n", fs::read_to_string(&path).expect("read"));
+        fs::write(&path, edited).expect("user edit");
+        let outcome = codex.disconnect(&session, false).expect("disconnect");
+        assert!(
+            outcome.warnings().is_empty(),
+            "{model:?}: {:?}",
+            outcome.warnings()
+        );
+        assert_eq!(
+            toml_value(&path, "model").as_deref(),
+            Some("mine"),
+            "{model:?}"
+        );
+    }
+}
+
+#[test]
+fn clear_model_on_a_disconnected_agent_only_removes_the_key() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a", "b"]);
+    let path = claude_path(&home);
+    let claude = Compiled::new(&CLAUDE);
+    let plan = claude.set_model(&session, &target, None).expect("no file");
+    assert!(plan.changes().is_empty());
+    assert!(!path.exists());
+
+    seed(
+        &path,
+        "{\"model\": \"x\", \"env\": {\"ANTHROPIC_DEFAULT_OPUS_MODEL\": \"y\"}}\n",
+    );
+    let plan = claude.set_model(&session, &target, None).expect("clear");
+    assert_eq!(plan.changes().len(), 1);
+    let value = read_json(&path);
+    assert!(value.get("model").is_none(), "{value}");
+    assert_eq!(value["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "y");
+    let siblings: Vec<_> = fs::read_dir(path.parent().expect("dir"))
+        .expect("list")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(siblings.len(), 1, "{siblings:?}");
+    let before = fs::read(&path).expect("read");
+    let plan = claude
+        .set_model(&session, &target, None)
+        .expect("clear again");
+    assert!(plan.changes().is_empty());
+    assert_eq!(fs::read(&path).expect("read"), before);
+    assert!(
+        !claude
+            .status(&session, &target)
+            .expect("status")
+            .connected()
+    );
+
+    let path = home.join(".gemini").join("settings.json");
+    seed(&path, "{\"model\": \"legacy\", \"theme\": \"t\"}\n");
+    Compiled::new(&GEMINI)
+        .set_model(&session, &target, None)
+        .expect("clear gemini");
+    let value = read_json(&path);
+    assert!(value.get("model").is_none(), "{value}");
+    assert_eq!(value["theme"], "t");
+}
+
+#[test]
+fn set_model_writes_prefixed_and_nested_keys() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a", "b"]);
+    Compiled::new(&OPENCODE)
+        .set_model(&session, &target, Some("b"))
+        .expect("opencode");
+    let value = read_json(&home.join(".config").join("opencode").join("opencode.json"));
+    assert_eq!(value["model"], "hofund/b");
+    assert!(value["provider"]["hofund"]["models"]["a"].is_object());
+
+    let path = home.join(".gemini").join("settings.json");
+    seed(&path, "{\"model\": \"legacy\"}\n");
+    let gemini = Compiled::new(&GEMINI);
+    gemini
+        .set_model(&session, &target, Some("a"))
+        .expect("gemini");
+    assert_eq!(read_json(&path)["model"]["name"], "a");
+    let outcome = gemini.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    assert_eq!(read_json(&path)["model"], "legacy");
+}
+
 fn assert_plan(
     default_plan: &hofund_agent::Plan,
     override_plan: &hofund_agent::Plan,

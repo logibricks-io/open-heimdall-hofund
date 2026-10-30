@@ -8,11 +8,11 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use hofund_control_proto::{
     API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
-    AgentListResponse, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
-    ControlErrorKind, HealthResponse, ModelListResponse, PicksResponse, PicksSetRequest,
-    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, RouteModelListResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UsageQuery, UsageResponse, decode_error_envelope,
+    AgentListResponse, AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    ControlError, ControlErrorKind, HealthResponse, ModelListResponse, PicksResponse,
+    PicksSetRequest, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
+    RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, UsageQuery, UsageResponse, decode_error_envelope,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -115,6 +115,14 @@ impl ControlState for State {
         &self,
         _id: String,
         _request: AgentDisconnectRequest,
+    ) -> ControlFuture<'_, AgentChangeResponse> {
+        unavailable()
+    }
+
+    fn set_agent_model(
+        &self,
+        _id: String,
+        _request: AgentModelRequest,
     ) -> ControlFuture<'_, AgentChangeResponse> {
         unavailable()
     }

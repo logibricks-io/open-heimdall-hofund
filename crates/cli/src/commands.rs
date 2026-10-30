@@ -10,9 +10,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use hofund_control_client::hofund_control_proto::{
-    AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentPlanRequest, AgentState,
-    ConfigApplyRequest, ConfigValidateRequest, FieldIssue, ReloadRequest, ShutdownRequest,
-    TokenRotateRequest, UsagePeriod, UsageQuery, UsageResponse,
+    AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentModelRequest, AgentPlanRequest,
+    AgentState, ConfigApplyRequest, ConfigValidateRequest, FieldIssue, ReloadRequest,
+    ShutdownRequest, TokenRotateRequest, UsagePeriod, UsageQuery, UsageResponse,
 };
 use hofund_control_client::{Client, ClientError, probe_model_health, resolve_config_id};
 
@@ -420,6 +420,28 @@ pub(crate) async fn agent_disconnect(
     } else {
         format!("{name}: restored")
     })
+}
+
+/// `hofund agent set <name> model=<id|default>`: the daemon (or one-shot)
+/// sets or clears the model and connects the agent when setting one.
+pub(crate) async fn agent_set(
+    config: &Path,
+    name: &str,
+    model: Option<&str>,
+) -> Result<String, String> {
+    let client = client(config).await?;
+    let response = client
+        .set_agent_model(name, AgentModelRequest::new(model.map(str::to_owned)))
+        .await
+        .map_err(failure)?;
+    for warning in &response.warnings {
+        eprintln!("{warning}");
+    }
+    let mut out = format!("{name}: model {}", model.unwrap_or("default"));
+    if response.changed_paths.is_empty() {
+        out.push_str(" (unchanged)");
+    }
+    Ok(out)
 }
 
 /// `hofund token rotate`: the daemon (or one-shot) rotates the token and

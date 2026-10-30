@@ -297,11 +297,19 @@ pub enum AgentError {
     /// A readable explanation, including the path when one is known.
     #[error("{0}")]
     Message(String),
+    /// The request does not fit this agent, such as a model it cannot use.
+    /// Retrying the same request cannot succeed.
+    #[error("{0}")]
+    Rejected(String),
 }
 
 impl AgentError {
     pub(crate) fn message(text: impl Into<String>) -> Self {
         Self::Message(text.into())
+    }
+
+    pub(crate) fn rejected(text: impl Into<String>) -> Self {
+        Self::Rejected(text.into())
     }
 }
 
@@ -382,6 +390,25 @@ pub trait AgentAdapter: Sync {
         session: &Session,
         target: &GatewayTarget,
     ) -> Result<Vec<PathBuf>, AgentError>;
+
+    /// Points the agent's model setting at `model`, a gateway route model.
+    ///
+    /// An agent that is not connected is connected first, as [`Self::apply`]
+    /// does, so the model is reachable. `None` drops the setting: a connected
+    /// agent gets what a plain connect picks (the sole route model, when there
+    /// is exactly one), and a disconnected one only loses the key. A later
+    /// [`Self::disconnect`] restores the pre-connect model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when the agent has no model setting, `model` is
+    /// not a route model it can use, or a file cannot be parsed or written.
+    fn set_model(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+        model: Option<&str>,
+    ) -> Result<Plan, AgentError>;
 
     /// The model string the tool stored, when that key exists and is a string.
     ///

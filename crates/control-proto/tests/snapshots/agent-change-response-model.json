@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "agent": "example-agent",
+  "action": "set_model",
+  "changed_paths": [
+    "/home/example/.agent/config.json"
+  ],
+  "warnings": [],
+  "model": "example-model"
+}
