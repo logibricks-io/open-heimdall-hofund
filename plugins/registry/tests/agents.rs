@@ -8,7 +8,10 @@ use hofund_plugin_registry::{agent, agents, fixture_agents};
 #[test]
 fn production_agent_list_contains_migrated_agents() {
     let ids: Vec<&str> = agents().iter().map(|agent| agent.id().as_str()).collect();
-    assert_eq!(ids, ["claude-code", "codex", "crush", "gemini-cli", "opencode"]);
+    assert_eq!(
+        ids,
+        ["claude-code", "codex", "crush", "gemini-cli", "opencode"]
+    );
     assert_eq!(
         agent("claude-code").expect("claude-code").id().as_str(),
         "claude-code"
