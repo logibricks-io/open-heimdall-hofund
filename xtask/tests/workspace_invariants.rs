@@ -728,11 +728,16 @@ fn kernel_crates_do_not_name_vendors() {
         assert!(!VENDOR_SCAN_PENDING.contains(&required), "{required}");
     }
     let mut violations = Vec::new();
+    let mut scanned = Vec::new();
     for crate_dir in &dirs {
         if VENDOR_SCAN_PENDING.contains(&crate_dir.as_str()) {
             continue;
         }
+        scanned.push(crate_dir.as_str());
         violations.extend(vendor_lines(&root, crate_dir));
+    }
+    for required in ["crates/gateway", "crates/router"] {
+        assert!(scanned.contains(&required), "{required} was not scanned");
     }
     assert!(
         violations.is_empty(),
@@ -764,22 +769,57 @@ fn vendor_scan_pending_crates_exist_and_still_name_vendors() {
     }
 }
 
-#[test]
-fn kernel_crates_ship_no_preset_catalog() {
-    let root = workspace_root();
+/// Every `presets.toml` inside a kernel crate, as a repo-relative path.
+fn kernel_preset_catalogs(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
-    for crate_dir in kernel_crate_dirs(&root) {
+    for crate_dir in kernel_crate_dirs(root) {
         for path in text_files(&root.join(&crate_dir)) {
             if path.file_name().and_then(|name| name.to_str()) == Some("presets.toml") {
-                found.push(relative(&root, &path));
+                found.push(relative(root, &path));
             }
         }
     }
+    found.sort();
+    found
+}
+
+#[test]
+fn kernel_crates_ship_no_preset_catalog() {
+    let found = kernel_preset_catalogs(&workspace_root());
     assert!(
         found.is_empty(),
         "preset rows belong in plugin fragments, not kernel crates:\n{}",
         found.join("\n")
     );
+}
+
+#[test]
+fn kernel_scans_find_catalogs_and_vendor_names_in_crates_only() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let write = |path: &str, text: &str| {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(path, text).expect("write");
+    };
+    write("crates/listed/Cargo.toml", "");
+    write("crates/listed/presets.toml", "");
+    write("crates/listed/src/lib.rs", "// talks to openrouter\n");
+    write("crates/clean/Cargo.toml", "");
+    write("crates/clean/src/lib.rs", "pub fn plain() {}\n");
+    write("crates/loose/presets.toml", "");
+    assert_eq!(
+        kernel_crate_dirs(root.path()),
+        ["crates/clean", "crates/listed"]
+    );
+    assert_eq!(
+        kernel_preset_catalogs(root.path()),
+        ["crates/listed/presets.toml"]
+    );
+    assert_eq!(
+        vendor_lines(root.path(), "crates/listed"),
+        ["crates/listed/src/lib.rs:1: openrouter"]
+    );
+    assert!(vendor_lines(root.path(), "crates/clean").is_empty());
 }
 
 #[test]
