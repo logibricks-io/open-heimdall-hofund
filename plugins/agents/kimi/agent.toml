@@ -18,7 +18,6 @@ linux = "~/.kimi-code/config.toml"
 macos = "~/.kimi-code/config.toml"
 windows = "~/.kimi-code/config.toml"
 env_override = "KIMI_CODE_HOME"
-env_replaces = "~/.kimi-code"
 
 # The gateway, spoken to as Kimi's own chat completions so thinking travels
 # both ways as reasoning_content. The keys are set in place, so any
