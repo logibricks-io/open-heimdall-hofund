@@ -1639,7 +1639,7 @@ fn shipped_zed_keeps_its_key_in_the_store_and_gives_the_user_model_back() {
         cleared["agent"]["default_model"],
         serde_json::json!({ "provider": "anthropic", "model": "claude-sonnet-4" })
     );
-    // Removing the store item by hand reads as not connected.
+    // Replacing the store item by hand reads as not connected.
     store.set(&items[0], "someone-else");
     assert!(!agent.status(&session, &target).expect("status").connected());
     store.set(&items[0], "local-token");
