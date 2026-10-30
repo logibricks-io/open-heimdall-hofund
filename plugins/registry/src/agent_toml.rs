@@ -1501,6 +1501,18 @@ key = "effort"
         );
         validate(&above_model.replace("value = \"hofund\"", "json = '{}'"))
             .expect("json pair above the model");
+        let env = with_slot("{ model_pair = { json = '\"x\"' } }")
+            .replace("kind = \"json\"", "kind = \"env\"")
+            .replace("config.json", "config.env");
+        reject(
+            env.clone(),
+            "set[0].slot: a json model_pair requires a JSON, YAML, or TOML file",
+        );
+        validate(&env.replace("json = '\"x\"'", "value = \"x\"")).expect("text pair in env");
+        reject(
+            with_slot("{ model_pair = { json = '[{\"k\": \"{token}\"}]' } }"),
+            "set[0].slot.model_pair.json: `{token}` must sit in an object's string, not in an array",
+        );
         let no_model = with_slot(pair).replace("[model]\nfile = \"config\"\nkey = \"model\"\n", "");
         reject(
             no_model,
