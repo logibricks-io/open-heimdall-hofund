@@ -259,15 +259,12 @@ async fn tags(kernel: &dyn Kernel) -> Result<HttpResponse, PluginError> {
     ))
 }
 
-/// The request body as a JSON object, or the reply refusing it.
-fn object(body: &[u8]) -> Result<Value, HttpResponse> {
+/// The request body as a JSON object, or why it is refused (a 400).
+fn object(body: &[u8]) -> Result<Value, String> {
     match json::from_slice::<Value>(body) {
         Ok(value @ Value::Object(_)) => Ok(value),
-        Ok(_) => Err(failure(
-            400,
-            "invalid request: the body is not a JSON object",
-        )),
-        Err(error) => Err(failure(400, &format!("invalid request: {error}"))),
+        Ok(_) => Err("invalid request: the body is not a JSON object".to_owned()),
+        Err(error) => Err(format!("invalid request: {error}")),
     }
 }
 
@@ -277,7 +274,7 @@ fn object(body: &[u8]) -> Result<Value, HttpResponse> {
 async fn show(kernel: &dyn Kernel, body: &[u8]) -> Result<HttpResponse, PluginError> {
     let request = match object(body) {
         Ok(request) => request,
-        Err(refused) => return Ok(refused),
+        Err(message) => return Ok(failure(400, &message)),
     };
     let mut name = text(&request, "model").trim();
     if name.is_empty() {
@@ -320,7 +317,7 @@ async fn chat(
     let start = Instant::now();
     let request = match object(body) {
         Ok(request) => request,
-        Err(refused) => return Ok(refused),
+        Err(message) => return Ok(failure(400, &message)),
     };
     let name = text(&request, "model").trim();
     if name.is_empty() {
