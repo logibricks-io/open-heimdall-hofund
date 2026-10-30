@@ -1,0 +1,16 @@
+[providers.hofund]
+type = "kimi"
+base_url = "http://127.0.0.1:3425/v1"
+api_key = "old-token"
+
+[models."hofund/route-a"]
+provider = "hofund"
+model = "route-a"
+max_context_size = 128000
+capabilities = ["tool_use"]
+
+[models."hofund/route-b"]
+provider = "hofund"
+model = "route-b"
+max_context_size = 128000
+capabilities = ["tool_use"]

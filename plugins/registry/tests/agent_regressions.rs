@@ -1232,3 +1232,62 @@ fn shipped_cline_writes_providers_only_for_a_pick() {
     assert!(!providers.exists());
     assert!(!dir.join("models.json").exists());
 }
+
+const KIMI_CONFIG: &str = r#"default_model = "kimi-code/kimi-for-coding"
+
+# mine
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+api_key = "user-key"
+
+[models."kimi-code/kimi-for-coding"]
+provider = "managed:kimi-code"
+model = "kimi-for-coding"
+max_context_size = 262144
+"#;
+
+#[test]
+fn shipped_kimi_pick_sets_default_model_and_disconnect_gives_it_back() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".kimi-code").join("config.toml");
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, KIMI_CONFIG).expect("seed");
+    let target = target();
+    let agent = adapter("kimi", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    let read = || -> toml::Table {
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml")
+    };
+    let config = read();
+    assert_eq!(
+        config["default_model"].as_str(),
+        Some("kimi-code/kimi-for-coding")
+    );
+    let route = &config["models"]["hofund/route-a"];
+    assert_eq!(route["provider"].as_str(), Some("hofund"));
+    assert_eq!(route["model"].as_str(), Some("route-a"));
+    assert_eq!(route["max_context_size"].as_integer(), Some(128000));
+    assert_eq!(
+        config["providers"]["hofund"]["base_url"].as_str(),
+        Some("http://127.0.0.1:3425/v1")
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    assert_eq!(read()["default_model"].as_str(), Some("hofund/route-a"));
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("hofund/route-a")
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    // Clearing drops the key (#433); disconnect puts back the user's.
+    agent.set_model(&session, &target, None).expect("clear");
+    assert!(!read().contains_key("default_model"));
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(fs::read_to_string(&path).expect("read"), KIMI_CONFIG);
+}

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Kimi Code agent (G12): `hofund agent connect kimi` writes
+  `[providers.hofund]` (type `kimi`, `base_url` with `/v1`, `api_key`) and
+  one `[models."hofund/<route>"]` table per route (128000 context, tool
+  use) to `~/.kimi-code/config.toml` (or under an absolute
+  `KIMI_CODE_HOME`), leaving the user's own providers and models alone. A
+  model pick writes `default_model`; clearing it drops the key (#433) and
+  disconnect puts back the user's. No
+  per-model catalog values yet (#441), a user comment right above `default_model` is lost when it is cleared (#444), and the older kimi-cli's `~/.kimi` is
+  not written (#442). The conformance kit's TOML user edit is now a
+  top-level key, so it no longer lands inside a table hofund owns.
+
 - Cline agent (G11): `hofund agent connect cline` lists each route as
   `hofund/<route>` under `providers.openai-compatible.models` in
   `~/.cline/data/settings/models.json` (or under an absolute `CLINE_DIR`),

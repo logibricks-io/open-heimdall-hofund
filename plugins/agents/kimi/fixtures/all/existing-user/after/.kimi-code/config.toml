@@ -1,0 +1,25 @@
+# my settings
+default_model = "kimi-code/kimi-for-coding"
+default_thinking = true
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+api_key = "user-key"
+
+[providers.hofund]
+type = "kimi"
+base_url = "http://127.0.0.1:3425/v1"
+api_key = "old-token"
+
+[models."kimi-code/kimi-for-coding"]
+provider = "managed:kimi-code"
+model = "kimi-for-coding"
+max_context_size = 262144
+capabilities = ["thinking", "image_in", "tool_use"]
+
+[models."hofund/route-a"]
+provider = "hofund"
+model = "route-a"
+max_context_size = 128000
+capabilities = ["tool_use"]
