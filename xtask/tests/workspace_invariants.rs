@@ -1,5 +1,5 @@
 //! Locks the workspace dependency graph and two source rules:
-//! gateway and router code must not name vendors, and the magpie name is not
+//! kernel crates must not name vendors, and the magpie name is not
 //! used as branding outside the acknowledgement files.
 
 use std::collections::BTreeSet;
@@ -204,7 +204,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
     })
 }
 
-/// Lowercase vendor and product names that must not appear in gateway or router
+/// Lowercase vendor and product names that must not appear in kernel crate
 /// sources. Protocol crates and provider adapters may name them.
 const VENDOR_NAMES: &[&str] = &[
     "anthropic",
@@ -232,6 +232,30 @@ const VENDOR_NAMES: &[&str] = &[
     "vertex",
     "xai",
     "zhipu",
+];
+
+/// Kernel crates that still name vendors, each for a reason that a later pull
+/// request removes. Every other crate under `crates/` is scanned. This is a
+/// list of whole crates, not of lines or words: a crate leaves it once its
+/// vendor code has moved to a plugin, and the scan then covers all of it.
+const VENDOR_SCAN_PENDING: &[&str] = &[
+    // Agent integrations still compiled into the kernel.
+    "crates/agent",
+    // CLI help and sign-in commands name agents and subscriptions.
+    "crates/cli",
+    // Protocol codecs are named after the protocols they translate.
+    "crates/codec",
+    // Old vendor keys still parse for one release (RFC 0001 row B2).
+    "crates/config",
+    // Daemon wiring for vendor plugins, sign-in, and model listing.
+    "crates/daemon",
+    // Protocol ids and the wire contract.
+    "crates/plugin-api",
+    "crates/plugin-host",
+    // Shared transports: SigV4, OAuth helpers, and vendor error shapes.
+    "crates/plugin-sdk",
+    // The Anthropic, OpenAI-compatible, and Generative adapters.
+    "crates/provider",
 ];
 
 /// Repo-relative paths that may mention the upstream project this work was
@@ -660,31 +684,101 @@ fn compact(text: &str) -> String {
     text.split_whitespace().collect()
 }
 
+/// Every crate directory under `crates/`, as a repo-relative path.
+fn kernel_crate_dirs(root: &Path) -> Vec<String> {
+    let mut dirs: Vec<String> = fs::read_dir(root.join("crates"))
+        .expect("read crates")
+        .map(|entry| entry.expect("crates entry").path())
+        .filter(|path| path.join("Cargo.toml").is_file())
+        .map(|path| relative(root, &path))
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+fn vendor_lines(root: &Path, crate_dir: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for path in rust_files(&root.join(crate_dir)) {
+        let text = read_to_string(&path);
+        for (index, line) in text.lines().enumerate() {
+            let hits = vendor_hits(line);
+            if hits.is_empty() {
+                continue;
+            }
+            lines.push(format!(
+                "{}:{}: {}",
+                relative(root, &path),
+                index + 1,
+                hits.join(", ")
+            ));
+        }
+    }
+    lines
+}
+
 #[test]
-fn gateway_and_router_do_not_name_vendors() {
+fn kernel_crates_do_not_name_vendors() {
     let root = workspace_root();
+    let dirs = kernel_crate_dirs(&root);
+    for required in ["crates/gateway", "crates/router"] {
+        assert!(
+            dirs.iter().any(|dir| dir == required),
+            "{required} must stay scanned"
+        );
+        assert!(!VENDOR_SCAN_PENDING.contains(&required), "{required}");
+    }
     let mut violations = Vec::new();
-    for crate_dir in ["crates/gateway", "crates/router"] {
-        for path in rust_files(&root.join(crate_dir)) {
-            let text = read_to_string(&path);
-            for (index, line) in text.lines().enumerate() {
-                let hits = vendor_hits(line);
-                if hits.is_empty() {
-                    continue;
-                }
-                violations.push(format!(
-                    "{}:{}: {}",
-                    relative(&root, &path),
-                    index + 1,
-                    hits.join(", ")
-                ));
+    for crate_dir in &dirs {
+        if VENDOR_SCAN_PENDING.contains(&crate_dir.as_str()) {
+            continue;
+        }
+        violations.extend(vendor_lines(&root, crate_dir));
+    }
+    assert!(
+        violations.is_empty(),
+        "vendor names belong in quirks data and provider plugins, not in kernel crates:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn vendor_scan_pending_crates_exist_and_still_name_vendors() {
+    let root = workspace_root();
+    let dirs = kernel_crate_dirs(&root);
+    let mut sorted = VENDOR_SCAN_PENDING.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted, VENDOR_SCAN_PENDING,
+        "keep the list sorted and unique"
+    );
+    for crate_dir in VENDOR_SCAN_PENDING {
+        assert!(
+            dirs.iter().any(|dir| dir == crate_dir),
+            "{crate_dir} is not a crate; drop it from VENDOR_SCAN_PENDING"
+        );
+        assert!(
+            !vendor_lines(&root, crate_dir).is_empty(),
+            "{crate_dir} no longer names a vendor; drop it from VENDOR_SCAN_PENDING"
+        );
+    }
+}
+
+#[test]
+fn kernel_crates_ship_no_preset_catalog() {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    for crate_dir in kernel_crate_dirs(&root) {
+        for path in text_files(&root.join(&crate_dir)) {
+            if path.file_name().and_then(|name| name.to_str()) == Some("presets.toml") {
+                found.push(relative(&root, &path));
             }
         }
     }
     assert!(
-        violations.is_empty(),
-        "vendor names belong in quirks data and provider adapters, not in gateway or router:\n{}",
-        violations.join("\n")
+        found.is_empty(),
+        "preset rows belong in plugin fragments, not kernel crates:\n{}",
+        found.join("\n")
     );
 }
 
