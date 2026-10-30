@@ -1,0 +1,34 @@
+[package]
+name = "hofund-daemon-bin"
+description = "The hofundd daemon process: the gateway, its control plane, and the plugin registry."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+autobins = false
+
+[[bin]]
+name = "hofundd"
+path = "src/main.rs"
+
+[dependencies]
+hofund-daemon = { workspace = true }
+hofund-plugin-api = { workspace = true }
+hofund-plugin-registry = { workspace = true }
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt", "std", "tracing-log"] }
+
+[dev-dependencies]
+log = "0.4.34"
+tempfile = { workspace = true }
+
+[package.metadata.dist]
+dist = true
+
+[lints]
+workspace = true

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hofundd` (`apps/hofundd`, package `hofund-daemon-bin`): the daemon
+  binary. It links the plugin registry, serves with local control on, and
+  logs through `tracing` with the `log` bridge; `HOFUND_LOG` sets the level
+  (default `info`). Releases ship it as its own archives and installers next
+  to the CLI's; install both into one directory (#277).
 - Remote gateway provider plugin (`plugins/providers/remote-gateway`, E13):
   preset `remote-gateway` now works. It forwards Chat, Responses, and
   Messages requests to another gateway in the protocol the client spoke,
@@ -405,6 +410,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `hofund serve` runs `hofundd`: the one beside `hofund` first, then the
+  first on `PATH`, with `--config` set to the resolved config path. On Unix
+  the CLI process becomes `hofundd`; on Windows the CLI waits and exits with
+  its code. `hofund serve --in-process` keeps the old in-process server for
+  one release.
 - A Chat, Responses, or Messages provider whose base is on a Bedrock host no
   longer uses the kernel adapter: a `bedrock-mantle.<region>.api.aws` base
   builds the `bedrock-mantle` plugin and a

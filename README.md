@@ -51,10 +51,13 @@ commands are `serve`, `config check`, `token show`, `token rotate`, `usage`,
 
 ## Install
 
-Build the `hofund` binary from this tree:
+Build the `hofund` CLI and the `hofundd` daemon from this tree. Install both
+into the same directory; `hofund serve` runs the `hofundd` beside it, or the
+first one on `PATH`:
 
 ```sh
 cargo install --path crates/cli --locked
+cargo install --path apps/hofundd --locked
 ```
 
 `cargo install --path` uses the lockfile in this repository. The crates stay

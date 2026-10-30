@@ -47,7 +47,8 @@ Targets cargo-dist accepts:
 
 cargo-dist 0.32 rejects `universal2-apple-darwin`. The release workflow adds
 that archive itself: after the two macOS builds finish, `universal-macos`
-runs `lipo`, writes `hofund-cli-universal2-apple-darwin.tar.gz`, and writes
+runs `lipo`, writes `hofund-cli-universal2-apple-darwin.tar.gz` and
+`hofund-daemon-bin-universal2-apple-darwin.tar.gz`, and writes for each
 a `.sha256` sidecar in the same `sha256sum` layout as the other archives.
 The shell and PowerShell installers still select one architecture. The
 universal archive is an extra asset on the GitHub release.
@@ -57,7 +58,21 @@ and tries to decode it, and its codesign invocation does not pass a
 timestamp. Signing is a later step in the workflow, and only when the secret
 group is non-empty.
 
-Installers are `hofund-cli-installer.sh` and `hofund-cli-installer.ps1`.
+Two packages ship: `hofund-cli` (the `hofund` binary) and
+`hofund-daemon-bin` (the `hofundd` binary). cargo-dist 0.32 builds each
+package as its own app with its own archives and installers, and it cannot
+put two packages' binaries into one archive. So every target has two
+archives, `hofund-cli-<target>` and `hofund-daemon-bin-<target>`, and two
+pairs of installers: `hofund-cli-installer.sh` and `hofund-cli-installer.ps1`,
+`hofund-daemon-bin-installer.sh` and `hofund-daemon-bin-installer.ps1`.
+Both installers use `install-path = "CARGO_HOME"`, so running both puts
+`hofund` and `hofundd` in the same directory, which is where `hofund serve`
+looks first. Someone unpacking archives by hand unpacks both into one
+directory. The release dry-run checks that layout: it unpacks both archives
+for each target it built into one directory, and on the runner's own target
+it runs `hofund serve` and checks that the `hofundd` beside it started
+(`.github/scripts/check-two-binary-archives.sh`).
+
 Each archive has a SHA-256 checksum, and the global job also writes
 `sha256.sum`.
 
@@ -78,7 +93,8 @@ these:
 
 - the `Install Linux host libraries` step (dist builds the whole workspace,
   including the menu-bar crate, and Linux needs those libraries to compile it)
-- the `Build artifacts` step calls `.github/scripts/repack-macos-cli.sh`
+- the `Build artifacts` step calls `.github/scripts/repack-macos-cli.sh`,
+  which signs both `hofund` and `hofundd`
 - the `Sign Windows archives` step calls `.github/scripts/sign-windows-cli.ps1`
 - the `universal-macos` job
 - `universal-macos` on the `host` job `needs` list, and in that job's `if`
@@ -164,7 +180,7 @@ Apple code signing for the CLI and the app bundle:
 | `CODESIGN_CERTIFICATE_PASSWORD` | Password for that `.p12` |
 | `CODESIGN_IDENTITY` | Signing identity, such as `Developer ID Application: Example (TEAMID)` |
 
-The CLI job signs each macOS `hofund` with `--options runtime --timestamp`,
+The CLI job signs each macOS `hofund` and `hofundd` with `--options runtime --timestamp`,
 rebuilds the `.tar.gz`, and rewrites that archive's `.sha256` plus the hash
 stored in `dist-manifest.json`. The installer job reads the manifest, so the
 published checksum is the hash of the signed bytes. The universal archive is
@@ -196,15 +212,19 @@ Windows Authenticode uses:
 
 Both jobs import the certificate and run `signtool` (`/fd SHA256`, RFC 3161
 timestamp). The desktop job signs the `.exe` and `.msi`, then writes
-`SHA256SUMS`. The CLI job signs `hofund.exe`, rebuilds the flat zip, and
-rewrites that zip's `.sha256` and the manifest hash before the installer job.
+`SHA256SUMS`. The CLI job signs every `.exe` in every Windows zip
+(`hofund.exe` and `hofundd.exe`), rebuilds each flat zip, and rewrites that
+zip's `.sha256` and the manifest hash before the installer job.
 
 ## Local build
 
 ```sh
 cargo install --path crates/cli --locked
+cargo install --path apps/hofundd --locked
 cargo build -p hofund-desktop
 ```
+
+`hofund serve` runs `hofundd`, so install both into the same directory.
 
 On Linux, install the libraries named above before building the menu-bar app.
 `cargo test --workspace` builds it too. The CI workflow installs those

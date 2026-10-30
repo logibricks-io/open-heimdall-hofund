@@ -3,6 +3,7 @@
 //! The binary parses arguments and calls the daemon. It does not route and it
 //! does not encode a protocol.
 
+mod serve;
 mod subscription;
 
 use std::path::{Path, PathBuf};
@@ -29,7 +30,14 @@ fn main() -> ExitCode {
             println!("hofund {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
-        Command::Serve => serve_blocking(&config),
+        Command::Serve { in_process: true } => serve_blocking(&config),
+        Command::Serve { in_process: false } => match serve::run(&config) {
+            Ok(code) => std::process::exit(code),
+            Err(message) => {
+                eprintln!("{message}");
+                return ExitCode::FAILURE;
+            }
+        },
         Command::Help(topic) => {
             println!("{}", help_text(topic));
             return ExitCode::SUCCESS;
@@ -57,14 +65,23 @@ fn main() -> ExitCode {
 enum Command {
     Help(HelpTopic),
     Version,
-    Serve,
+    /// `in_process` keeps the pre-daemon server; it goes away in the next release.
+    Serve {
+        in_process: bool,
+    },
     Check,
     TokenShow,
     TokenRotate,
     Usage,
     AgentList,
-    AgentConnect { name: String, dry_run: bool },
-    AgentDisconnect { name: String, force: bool },
+    AgentConnect {
+        name: String,
+        dry_run: bool,
+    },
+    AgentDisconnect {
+        name: String,
+        force: bool,
+    },
     AgentStatus,
     Subscription(SubscriptionCommand),
 }
@@ -95,6 +112,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut config = None;
     let mut dry_run = false;
     let mut force = false;
+    let mut in_process = false;
     let mut help = false;
     let mut flags = SubscriptionFlags::default();
     let mut words = Vec::new();
@@ -109,6 +127,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             }
             "--dry-run" => dry_run = true,
             "--force" => force = true,
+            "--in-process" => in_process = true,
             "--json" => flags.json = true,
             "--host" => {
                 let host = iter
@@ -145,7 +164,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let subscription_flags = flags.json || flags.host.is_some() || flags.label.is_some();
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
-        ["serve"] => Command::Serve,
+        ["serve"] => Command::Serve { in_process },
         ["config", "check"] => Command::Check,
         ["token", "show"] => Command::TokenShow,
         ["token", "rotate"] => Command::TokenRotate,
@@ -176,6 +195,9 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     }
     if force && !matches!(command, Command::AgentDisconnect { .. }) {
         return Err("--force is only valid with agent disconnect".to_owned());
+    }
+    if in_process && !matches!(command, Command::Serve { .. }) {
+        return Err("--in-process is only valid with serve".to_owned());
     }
     Ok((config, command))
 }
@@ -266,10 +288,16 @@ examples/hofund.toml is a documented config with [[providers]] and [[routes]].
 ";
 
 const SERVE_HELP: &str = "\
-usage: hofund serve [--config PATH]
+usage: hofund serve [--config PATH] [--in-process]
 
-Bind the listen address in the config and serve until Ctrl-C.
-The default config path is the platform config directory. --config overrides it.
+Run hofundd, the daemon, on the config. hofundd binds the listen address in
+the config and serves until Ctrl-C. hofund looks for hofundd in its own
+directory first and on PATH second, and passes it --config with the resolved
+path. The default config path is the platform config directory. --config
+overrides it.
+
+--in-process serves inside this process without hofundd. It is a temporary
+compatibility option and goes away in the next release.
 ";
 
 const CHECK_HELP: &str = "\
@@ -569,10 +597,11 @@ fn agent_status(config: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, HelpTopic, SubscriptionCommand, connect_models_note, model_has_route,
-        opencode_models_note, parse, redact_diff,
+        Command, HelpTopic, SubscriptionCommand, connect_models_note, help_text, help_topic,
+        model_has_route, opencode_models_note, parse, redact_diff,
     };
     use hofund_daemon::SignInOptions;
+    use std::path::PathBuf;
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -623,6 +652,27 @@ mod tests {
             &routes
         ));
         assert!(model_has_route(codex.model_prefix(), "route-a", &routes));
+    }
+
+    #[test]
+    fn serve_runs_the_daemon_unless_in_process_is_given() {
+        let parsed = parse(&words(&["serve", "--config", "/tmp/h.toml"])).expect("parse");
+        assert_eq!(
+            parsed,
+            (
+                PathBuf::from("/tmp/h.toml"),
+                Command::Serve { in_process: false }
+            )
+        );
+        let parsed = parse(&words(&["serve", "--in-process"])).expect("parse");
+        assert_eq!(parsed.1, Command::Serve { in_process: true });
+        assert_eq!(
+            parse(&words(&["usage", "--in-process"])),
+            Err("--in-process is only valid with serve".to_owned())
+        );
+        let help = help_text(help_topic(&["serve"]).expect("topic"));
+        assert!(help.contains("[--in-process]"), "{help}");
+        assert!(help.contains("hofundd"), "{help}");
     }
 
     fn subscription(values: &[&str]) -> Result<Command, String> {
