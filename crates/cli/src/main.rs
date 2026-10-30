@@ -7,6 +7,7 @@ mod commands;
 mod connect;
 mod local;
 mod provider;
+mod provider_edit;
 mod serve;
 mod subscription;
 
@@ -82,6 +83,16 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::ProviderTest { id, models } => provider::test(config, &id, &models).await,
             Command::ProviderRefresh { id } => provider::refresh(config, &id).await,
             Command::ProviderPicks { id, ids } => provider::picks(config, &id, &ids).await,
+            Command::ProviderAdd { id, pairs } => provider_edit::add(config, &id, &pairs).await,
+            Command::ProviderSet { id, pairs } => provider_edit::set(config, &id, &pairs).await,
+            Command::ProviderKey { id, key } => provider_edit::key(config, &id, &key).await,
+            Command::ProviderRemove { id } => provider_edit::remove(config, &id).await,
+            Command::ProviderRefreshEvery { id, interval } => {
+                provider_edit::refresh_every(config, &id, interval.as_deref()).await
+            }
+            Command::ProviderAutoInclude { id, rules } => {
+                provider_edit::auto_include(config, &id, &rules).await
+            }
             Command::ModelList => provider::model_list(config).await,
             Command::ModelShow { id } => provider::model_show(config, &id).await,
             Command::Version
@@ -141,6 +152,32 @@ enum Command {
     ProviderPicks {
         id: String,
         ids: Vec<String>,
+    },
+    /// `provider add <id> [<key>] [k=v...]`.
+    ProviderAdd {
+        id: String,
+        pairs: provider_edit::Pairs,
+    },
+    /// `provider set <id> k=v...`.
+    ProviderSet {
+        id: String,
+        pairs: provider_edit::Pairs,
+    },
+    ProviderKey {
+        id: String,
+        key: String,
+    },
+    /// `provider rm`, `remove`, and `delete`.
+    ProviderRemove {
+        id: String,
+    },
+    ProviderRefreshEvery {
+        id: String,
+        interval: Option<String>,
+    },
+    ProviderAutoInclude {
+        id: String,
+        rules: Vec<String>,
     },
     ModelList,
     ModelShow {
@@ -283,6 +320,49 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["provider", "models", id, ids @ ..] => Command::ProviderPicks {
             id: (*id).to_owned(),
             ids: owned(ids),
+        },
+        ["provider", "add", id, rest @ ..] => {
+            let (key, pairs) = match rest {
+                [key, pairs @ ..] if !key.contains('=') => (Some(*key), pairs),
+                pairs => (None, pairs),
+            };
+            let mut pairs = provider_edit::parse_pairs(pairs, "add")?;
+            if let Some(key) = key {
+                pairs.fields.insert(
+                    0,
+                    provider_edit::Field {
+                        key: provider_edit::FieldKey::ApiKey,
+                        value: key.to_owned(),
+                    },
+                );
+            }
+            Command::ProviderAdd {
+                id: (*id).to_owned(),
+                pairs,
+            }
+        }
+        ["provider", "set", id, pairs @ ..] if !pairs.is_empty() => Command::ProviderSet {
+            id: (*id).to_owned(),
+            pairs: provider_edit::parse_pairs(pairs, "set")?,
+        },
+        ["provider", "key", id, key] => Command::ProviderKey {
+            id: (*id).to_owned(),
+            key: (*key).to_owned(),
+        },
+        ["provider", "rm" | "remove" | "delete", id] => Command::ProviderRemove {
+            id: (*id).to_owned(),
+        },
+        ["provider", "refresh-every", id] => Command::ProviderRefreshEvery {
+            id: (*id).to_owned(),
+            interval: None,
+        },
+        ["provider", "refresh-every", id, interval] => Command::ProviderRefreshEvery {
+            id: (*id).to_owned(),
+            interval: Some((*interval).to_owned()),
+        },
+        ["provider", "auto-include", id, rules @ ..] => Command::ProviderAutoInclude {
+            id: (*id).to_owned(),
+            rules: owned(rules),
         },
         ["provider", verb @ ("refresh" | "fetch"), _, _, ..] => {
             return Err(format!(
@@ -430,6 +510,15 @@ commands:
   provider test <id> [<model>...] probe a provider's models
   provider refresh <id>           refetch a provider's model list (also fetch)
   provider models <id> [<ids>...] refetch with no ids; pick models with ids
+  provider add <id> [<key>] [k=v...]
+                                  add a provider to the config
+  provider set <id> k=v...        change a provider's config fields
+  provider key <id> <key>         set a provider's API key
+  provider rm <id>                remove a provider (also remove, delete)
+  provider refresh-every <id> [<interval>|off]
+                                  show or set the model-list refresh
+  provider auto-include <id> [<rule>...|none]
+                                  show or set the auto-include rules
   model list                      list the models routes serve
   model show <id>                 print one routed model
 
@@ -580,6 +669,12 @@ usage: hofund provider list [--config PATH]
        hofund provider test <id> [<model>...] [--config PATH]
        hofund provider refresh <id> [--config PATH]
        hofund provider models <id> [<ids>...] [--config PATH]
+       hofund provider add <id> [<key>] [k=v...] [--config PATH]
+       hofund provider set <id> k=v... [--config PATH]
+       hofund provider key <id> <key> [--config PATH]
+       hofund provider rm <id> [--config PATH]
+       hofund provider refresh-every <id> [<interval>|off] [--config PATH]
+       hofund provider auto-include <id> [<rule>...|none] [--config PATH]
 
 `list` prints each provider's id, kind, protocol, readiness, and model count.
 `show` prints one provider, its listed models (picked ones marked *), its
@@ -599,6 +694,19 @@ tries. Put `--` before an id that starts with `--`.
 Without a running daemon, picks and refetches run in one-shot hofundd under
 the provider's model-state lock, so concurrent commands do not lose edits.
 A pick edit that cannot be saved exits 1.
+
+`add`, `set`, `key`, `rm`, `refresh-every`, and `auto-include` edit the
+provider's [[providers]] entry in the config, keeping comments and layout,
+and apply it against the revision they read; when another writer changed
+the file first, the edit is rebuilt on a fresh read, up to three tries.
+Fields: preset, protocol, base_url (url), api_key (key), quirks,
+max_output_tokens, header.<name>, option.<name>, refresh, auto_include
+(comma-separated), and models.url. An empty value removes the field.
+`models=a,b` sets the picks as `models <id> a b` does. `id=` is refused:
+renaming a provider is not supported yet. `rm` does not move agents or
+routes off the provider; a route that still names it fails the apply.
+`add` does not fetch the model list; `refresh <id>` does. Without a
+running daemon, the edit applies in one-shot hofundd under the config lock.
 ";
 
 const MODEL_HELP: &str = "\
@@ -971,5 +1079,95 @@ mod tests {
             let help = help_text(help_topic(&topic).expect("topic"));
             assert!(help.contains(needle), "{topic:?}: {help}");
         }
+    }
+
+    #[test]
+    fn provider_edit_commands_parse() {
+        let pairs = |items: &[&str], verb| crate::provider_edit::parse_pairs(items, verb);
+        let mut with_key = pairs(&["url=http://x"], "add").expect("pairs");
+        with_key.fields.insert(
+            0,
+            crate::provider_edit::Field {
+                key: crate::provider_edit::FieldKey::ApiKey,
+                value: "sk".to_owned(),
+            },
+        );
+        assert_eq!(
+            command(&["provider", "add", "p", "sk", "url=http://x"]),
+            Ok(Command::ProviderAdd {
+                id: "p".to_owned(),
+                pairs: with_key,
+            })
+        );
+        assert_eq!(
+            command(&["provider", "add", "p", "preset=openai"]),
+            Ok(Command::ProviderAdd {
+                id: "p".to_owned(),
+                pairs: pairs(&["preset=openai"], "add").expect("pairs"),
+            })
+        );
+        assert_eq!(
+            command(&["provider", "add", "p"]),
+            Ok(Command::ProviderAdd {
+                id: "p".to_owned(),
+                pairs: pairs(&[], "add").expect("pairs"),
+            })
+        );
+        assert_eq!(
+            command(&["provider", "set", "p", "quirks=deepseek", "models=a,b"]),
+            Ok(Command::ProviderSet {
+                id: "p".to_owned(),
+                pairs: pairs(&["quirks=deepseek", "models=a,b"], "set").expect("pairs"),
+            })
+        );
+        assert!(command(&["provider", "set", "p"]).is_err());
+        assert_eq!(
+            command(&["provider", "set", "p", "models=a", "id=q"]),
+            Err(crate::provider_edit::RENAME_UNSUPPORTED.to_owned())
+        );
+        assert_eq!(
+            command(&["provider", "key", "p", "sk"]),
+            Ok(Command::ProviderKey {
+                id: "p".to_owned(),
+                key: "sk".to_owned(),
+            })
+        );
+        assert!(command(&["provider", "key", "p"]).is_err());
+        for verb in ["rm", "remove", "delete"] {
+            assert_eq!(
+                command(&["provider", verb, "p"]),
+                Ok(Command::ProviderRemove { id: "p".to_owned() }),
+                "{verb}"
+            );
+        }
+        assert_eq!(
+            command(&["provider", "refresh-every", "p"]),
+            Ok(Command::ProviderRefreshEvery {
+                id: "p".to_owned(),
+                interval: None,
+            })
+        );
+        assert_eq!(
+            command(&["provider", "refresh-every", "p", "6h"]),
+            Ok(Command::ProviderRefreshEvery {
+                id: "p".to_owned(),
+                interval: Some("6h".to_owned()),
+            })
+        );
+        assert!(command(&["provider", "refresh-every", "p", "6h", "x"]).is_err());
+        assert_eq!(
+            command(&["provider", "auto-include", "p", "gpt-", "re:o[0-9]"]),
+            Ok(Command::ProviderAutoInclude {
+                id: "p".to_owned(),
+                rules: words(&["gpt-", "re:o[0-9]"]),
+            })
+        );
+        assert_eq!(
+            command(&["provider", "auto-include", "p"]),
+            Ok(Command::ProviderAutoInclude {
+                id: "p".to_owned(),
+                rules: Vec::new(),
+            })
+        );
     }
 }

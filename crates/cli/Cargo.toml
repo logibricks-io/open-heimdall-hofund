@@ -22,6 +22,7 @@ hofund-control-client = { workspace = true }
 hofund-daemon = { workspace = true }
 hofund-secrets = { workspace = true }
 tokio = { version = "1.54.1", features = ["rt", "time"] }
+toml_edit = "0.25.17"
 
 [target.'cfg(windows)'.dependencies]
 tokio = { version = "1.54.1", features = ["rt", "signal"] }

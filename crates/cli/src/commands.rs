@@ -49,7 +49,7 @@ pub(crate) fn failure(error: ClientError) -> String {
     }
 }
 
-fn push_issues(out: &mut String, issues: &[FieldIssue]) {
+pub(crate) fn push_issues(out: &mut String, issues: &[FieldIssue]) {
     for issue in issues {
         out.push_str(&format!("\n  {}: {}", issue.field, issue.message));
     }
