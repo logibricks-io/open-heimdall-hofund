@@ -101,7 +101,8 @@ fn call(path: &str, body: &[u8]) -> Result<Forward, PluginError> {
         ));
     };
     let model = match object.get("model") {
-        Some(Value::String(model)) if !model.is_empty() => model.clone(),
+        // An empty name is refused by `Forward::new` with the same answer.
+        Some(Value::String(model)) => model.clone(),
         _ => return Err(PluginError::status_error(400, "model is required")),
     };
     Forward::new(model, path, move |model| Ok(with_model(&object, model)))

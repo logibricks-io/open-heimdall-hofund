@@ -538,11 +538,7 @@ pub async fn forward(
     path: &str,
     body: RawBody,
 ) -> Result<RawAnswer, PluginError> {
-    let openai = matches!(
-        target.protocol,
-        ProtocolId::OPENAI_CHAT | ProtocolId::OPENAI_RESPONSES
-    );
-    if !openai || target.signer.is_some() || target.method_root.is_some() {
+    if !forwards(target) {
         return Err(PluginError::unsupported(format!(
             "this upstream does not serve {path}"
         )));
@@ -563,6 +559,16 @@ pub async fn forward(
         .map(str::to_owned);
     let answer = read_capped(response.into_body(), FORWARD_CAP).await?;
     Ok(RawAnswer::new(status, content_type, answer))
+}
+
+/// Whether [`forward`] serves `target`: an OpenAI Chat or Responses target
+/// with no signer and no method root.
+fn forwards(target: &Target) -> bool {
+    let openai = matches!(
+        target.protocol,
+        ProtocolId::OPENAI_CHAT | ProtocolId::OPENAI_RESPONSES
+    );
+    openai && target.signer.is_none() && target.method_root.is_none()
 }
 
 /// All of `body`, or a decode error once it holds more than `cap` bytes.
@@ -2214,6 +2220,40 @@ mod tests {
                 assert_eq!(read(completion).await, STREAM.as_bytes());
                 assert_eq!(*seen.lock().expect("lock"), 2, "{size}");
             }
+        }
+    }
+
+    #[test]
+    fn only_plain_openai_targets_forward() {
+        let base = "https://api.example/v1";
+        for protocol in [ProtocolId::OPENAI_CHAT, ProtocolId::OPENAI_RESPONSES] {
+            assert!(
+                super::forwards(&Target::new(protocol, base)),
+                "{protocol:?}"
+            );
+            assert!(
+                !super::forwards(&Target::new(protocol, base).method_root("v1internal")),
+                "{protocol:?} with a method root"
+            );
+            let signer = AwsSigner::new(
+                "us-east-1",
+                "AKIDEXAMPLE",
+                secrecy::SecretString::from("secret".to_owned()),
+            );
+            assert!(
+                !super::forwards(&Target::new(protocol, base).signer(signer)),
+                "{protocol:?} with a signer"
+            );
+        }
+        for protocol in [
+            ProtocolId::ANTHROPIC_MESSAGES,
+            ProtocolId::GENERATIVE_LANGUAGE,
+            ProtocolId::BEDROCK_CONVERSE,
+        ] {
+            assert!(
+                !super::forwards(&Target::new(protocol, base)),
+                "{protocol:?}"
+            );
         }
     }
 
