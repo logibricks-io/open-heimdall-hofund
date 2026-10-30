@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use hofund_agent::{AgentAdapter, Compiled, GatewayTarget, Session, TargetOs, catalog, resolve};
 use hofund_plugin_api::{
-    AgentDescription, AgentFile, AgentRoute, AgentSet, FileKind, MatchNeedle, ModelField, PluginId,
-    Slot, TierId, Visible,
+    AgentDescription, AgentFile, AgentRoute, AgentSet, FileKind, MatchNeedle, ModelField,
+    OwnerTest, PluginId, Slot, TierId, Visible,
 };
 
 static CLAUDE_FILES: &[AgentFile] = &[AgentFile::from_static(
@@ -618,6 +618,355 @@ fn json_and_model_array_slots_write_raw_values() {
     let value = read_json(&home.join(".array").join("config.json"));
     assert_eq!(value["flag"], serde_json::json!(false));
     assert!(value.get("models").is_none());
+}
+
+static APPEND_OWNER: &[OwnerTest] = &[OwnerTest::prefix("id", "custom:hofund/")];
+static APPEND_FIELDS: &[ModelField] = &[
+    ModelField::id("model"),
+    ModelField::prefixed("id", "custom:hofund/"),
+    ModelField::literal("displayName", "Hofund"),
+    ModelField::v1("baseUrl"),
+    ModelField::origin("origin"),
+    ModelField::token("apiKey"),
+];
+static APPEND_SETS: &[AgentSet] = &[AgentSet::from_static(
+    "config",
+    "customModels",
+    Slot::Append {
+        owner: APPEND_OWNER,
+        each_model: true,
+        fields: APPEND_FIELDS,
+    },
+)];
+static APPEND_JSON: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("append-json"),
+    "Append Json",
+    "append-json",
+    ARRAY_JSON_FILES,
+    APPEND_SETS,
+    None,
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
+static APPEND_YAML: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("append-yaml"),
+    "Append Yaml",
+    "append-yaml",
+    ARRAY_YAML_FILES,
+    APPEND_SETS,
+    None,
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
+static APPEND_NONE: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("append-none"),
+    "Append None",
+    "append-none",
+    ARRAY_JSON_FILES,
+    APPEND_SETS,
+    None,
+    None,
+    Visible::All,
+    AgentRoute::None,
+    &[],
+);
+
+static GROUP_OWNER: &[OwnerTest] = &[
+    OwnerTest::equals("vendor", "custom"),
+    OwnerTest::equals("name", "hofund"),
+];
+// The nested `models` field uses the block form the registry renders.
+static GROUP_SETS: &[AgentSet] = &[AgentSet::from_static(
+    "groups",
+    ".",
+    Slot::Append {
+        owner: GROUP_OWNER,
+        each_model: false,
+        fields: &[
+            ModelField::literal("vendor", "custom"),
+            ModelField::literal("name", "hofund"),
+            ModelField::models("models", {
+                const FIELDS: &[ModelField] = &[ModelField::id("id"), ModelField::token("key")];
+                FIELDS
+            }),
+        ],
+    },
+)];
+static GROUP_FILES: &[AgentFile] = &[AgentFile::from_static(
+    "groups",
+    FileKind::Json,
+    "~/.group/models.json",
+    "~/.group/models.json",
+    "~/.group/models.json",
+    None,
+)];
+static GROUP_ROOT: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("group-root"),
+    "Group Root",
+    "group-root",
+    GROUP_FILES,
+    GROUP_SETS,
+    None,
+    None,
+    Visible::Only(&["a", "b"]),
+    AgentRoute::Gateway,
+    &[],
+);
+
+fn append_path(home: &Path) -> PathBuf {
+    home.join(".array").join("config.json")
+}
+
+fn ours(id: &str, token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": id,
+        "id": format!("custom:hofund/{id}"),
+        "displayName": "Hofund",
+        "baseUrl": "http://127.0.0.1:3425/v1",
+        "origin": "http://127.0.0.1:3425",
+        "apiKey": token,
+    })
+}
+
+#[test]
+fn append_keeps_user_entries_and_is_idempotent() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a", "b"]);
+    let path = append_path(&home);
+    let user = serde_json::json!({"id": "custom:mine/x", "model": "x"});
+    let stale = ours("old", "stale");
+    seed(
+        &path,
+        &serde_json::json!({"theme": "dark", "customModels": [stale, user]}).to_string(),
+    );
+    let agent = Compiled::new(&APPEND_JSON);
+    assert!(!agent.status(&session, &target).expect("status").connected());
+    let plan = agent.apply(&session, &target).expect("apply");
+    assert_eq!(plan.changes().len(), 1);
+    let value = read_json(&path);
+    assert_eq!(value["theme"], "dark");
+    assert_eq!(
+        value["customModels"],
+        serde_json::json!([user, ours("a", "local-token"), ours("b", "local-token")])
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    let before = fs::read(&path).expect("read");
+    let again = agent.apply(&session, &target).expect("apply again");
+    assert!(again.changes().is_empty());
+    assert_eq!(fs::read(&path).expect("read"), before);
+
+    let fewer = target_with(&["b"]);
+    assert!(!agent.status(&session, &fewer).expect("status").connected());
+    agent.apply(&session, &fewer).expect("apply fewer");
+    assert_eq!(
+        read_json(&path)["customModels"],
+        serde_json::json!([user, ours("b", "local-token")])
+    );
+
+    let outcome = agent.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    let value = read_json(&path);
+    assert_eq!(value["customModels"], serde_json::json!([stale, user]));
+    assert_eq!(value["theme"], "dark");
+}
+
+#[test]
+fn append_disconnect_keeps_entries_added_after_connect() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a"]);
+    let path = append_path(&home);
+    seed(&path, "{\"theme\": \"dark\"}\n");
+    let agent = Compiled::new(&APPEND_JSON);
+    agent.apply(&session, &target).expect("apply");
+    let mut edited = read_json(&path);
+    let added = serde_json::json!({"id": "custom:later/y"});
+    edited["customModels"]
+        .as_array_mut()
+        .expect("array")
+        .push(added.clone());
+    fs::write(&path, edited.to_string()).expect("user edit");
+    let outcome = agent.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    let value = read_json(&path);
+    assert_eq!(value["customModels"], serde_json::json!([added]));
+    assert_eq!(value["theme"], "dark");
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = append_path(&home);
+    seed(&path, "{\"theme\": \"dark\"}\n");
+    agent.apply(&session, &target).expect("apply");
+    let mut edited = read_json(&path);
+    edited["note"] = serde_json::json!("mine");
+    fs::write(&path, edited.to_string()).expect("user edit");
+    let outcome = agent.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    let value = read_json(&path);
+    assert!(value.get("customModels").is_none(), "{value}");
+    assert_eq!(value["note"], "mine");
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = append_path(&home);
+    seed(&path, "{\"customModels\": []}\n");
+    agent.apply(&session, &target).expect("apply");
+    let mut edited = read_json(&path);
+    edited["note"] = serde_json::json!("mine");
+    fs::write(&path, edited.to_string()).expect("user edit");
+    agent.disconnect(&session, false).expect("disconnect");
+    let value = read_json(&path);
+    assert_eq!(value["customModels"], serde_json::json!([]), "{value}");
+}
+
+#[test]
+fn append_without_a_file_creates_and_removes_it() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a"]);
+    let path = append_path(&home);
+    let agent = Compiled::new(&APPEND_JSON);
+    agent.apply(&session, &target).expect("apply");
+    assert_eq!(
+        read_json(&path)["customModels"],
+        serde_json::json!([ours("a", "local-token")])
+    );
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!path.exists());
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    Compiled::new(&APPEND_NONE)
+        .apply(&session, &target)
+        .expect("route none");
+    let path = append_path(&home);
+    assert!(
+        !path.exists() || read_json(&path).get("customModels").is_none(),
+        "{:?}",
+        fs::read_to_string(&path)
+    );
+}
+
+#[test]
+fn append_refresh_token_rewrites_only_our_entries() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a"]);
+    let path = append_path(&home);
+    let user = serde_json::json!({"id": "custom:mine/x", "apiKey": "user-key"});
+    seed(
+        &path,
+        &serde_json::json!({"customModels": [user]}).to_string(),
+    );
+    let agent = Compiled::new(&APPEND_JSON);
+    agent.apply(&session, &target).expect("apply");
+    let fresh = GatewayTarget::new(
+        "http://127.0.0.1:3425/",
+        "fresh-token",
+        vec!["a".to_owned()],
+    );
+    let updated = agent.refresh_token(&session, &fresh).expect("refresh");
+    assert_eq!(updated, vec![path.clone()]);
+    assert_eq!(
+        read_json(&path)["customModels"],
+        serde_json::json!([user, ours("a", "fresh-token")])
+    );
+    assert!(
+        agent
+            .refresh_token(&session, &fresh)
+            .expect("again")
+            .is_empty()
+    );
+    let outcome = agent.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    assert_eq!(
+        read_json(&path),
+        serde_json::json!({"customModels": [user]})
+    );
+}
+
+#[test]
+fn append_writes_yaml_sequences() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a"]);
+    let path = home.join(".array").join("config.yaml");
+    seed(&path, "customModels:\n  - id: mine\n");
+    let agent = Compiled::new(&APPEND_YAML);
+    agent.apply(&session, &target).expect("apply");
+    let text = fs::read_to_string(&path).expect("yaml");
+    assert!(
+        text.starts_with(
+            "customModels:\n  - id: mine\n  - model: a\n    id: \"custom:hofund/a\"\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        agent
+            .apply(&session, &target)
+            .expect("again")
+            .changes()
+            .is_empty()
+    );
+    fs::write(&path, format!("{text}note: x\n")).expect("user edit");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(
+        fs::read_to_string(&path).expect("yaml"),
+        "customModels:\n  - id: mine\nnote: x\n"
+    );
+}
+
+#[test]
+fn append_once_at_the_root_writes_one_group() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a", "hidden", "b"]);
+    let path = home.join(".group").join("models.json");
+    let user = serde_json::json!({"vendor": "custom", "name": "mine", "models": []});
+    seed(&path, &serde_json::json!([user]).to_string());
+    let agent = Compiled::new(&GROUP_ROOT);
+    agent.apply(&session, &target).expect("apply");
+    let group = serde_json::json!({
+        "vendor": "custom",
+        "name": "hofund",
+        "models": [{"id": "a", "key": "local-token"}, {"id": "b", "key": "local-token"}],
+    });
+    assert_eq!(read_json(&path), serde_json::json!([user, group]));
+    assert!(
+        agent
+            .apply(&session, &target)
+            .expect("again")
+            .changes()
+            .is_empty()
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+
+    let mut edited = read_json(&path);
+    edited.as_array_mut().expect("root").clear();
+    edited.as_array_mut().expect("root").push(group.clone());
+    fs::write(&path, edited.to_string()).expect("user edit");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(read_json(&path), serde_json::json!([]));
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".group").join("models.json");
+    agent.apply(&session, &target).expect("apply");
+    assert_eq!(read_json(&path), serde_json::json!([group]));
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!path.exists());
+
+    // A file hofund created and the user only reformatted is removed too.
+    agent.apply(&session, &target).expect("apply");
+    let pretty = serde_json::to_string_pretty(&read_json(&path)).expect("pretty");
+    fs::write(&path, pretty).expect("user reformat");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!path.exists());
 }
 
 fn codex_path(home: &Path) -> PathBuf {

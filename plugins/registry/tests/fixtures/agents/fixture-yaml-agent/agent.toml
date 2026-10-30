@@ -40,6 +40,11 @@ file = "config"
 key = "features.stream"
 slot = { json = "false" }
 
+[[set]]
+file = "config"
+key = "groups"
+slot = { append = { each = "once", owner = [ { key = "name", equals = "hofund" } ], fields = [ { key = "name", literal = "hofund" }, { key = "url", value = "v1" }, { key = "models", models = [ { key = "id", prefixed = "hofund/" }, { key = "key", value = "token" } ] } ] } }
+
 [model]
 file = "config"
 key = "model.default"

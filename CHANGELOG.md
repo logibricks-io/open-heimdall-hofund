@@ -34,6 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   id (`value = "id"`), a fixed string (`literal`), or a fixed JSON value
   (`json`). A model array is a gateway slot, so a `route = "none"` agent
   cannot use it.
+- Shared-array append slot for JSON and YAML files (G4):
+  `{ append = { each = "model" | "once", owner = [...], fields = [...] } }`
+  adds hofund's objects after the user's entries in an existing array (key
+  `"."` is the document root) instead of replacing the array. An entry is
+  hofund's when it is an object whose string fields pass every `owner` test
+  (`equals` or `prefix`); each test must hold for the written objects, so a
+  second connect replaces rather than duplicates them. Connect, token refresh,
+  and status touch only those entries; disconnect removes them, keeps every
+  other entry, including ones added after connect, and drops the key only
+  when it was absent before and no entry is left. Fields gain `value = "v1"`,
+  `"origin"`, and `"token"`, `prefixed = "<text>"` (the prefix and the model
+  id), and nested `models = [...]` (one object per model). Append is a
+  gateway slot.
 - Codex accounts on Codex's ChatGPT backend (S6d): a
   `POST /backend-api/codex/responses` for one of Codex's own models, say
   `gpt-5`, is served in process as `codex/gpt-5` when the gateway lists a

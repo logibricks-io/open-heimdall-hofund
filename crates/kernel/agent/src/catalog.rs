@@ -8,10 +8,12 @@ use std::path::{Path, PathBuf};
 
 use hofund_plugin_api::{
     AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, ModelField, ModelValue,
-    Slot as ApiSlot, Visible,
+    OwnerTest, Slot as ApiSlot, Visible,
 };
 
-use crate::edit::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
+use crate::edit::{
+    Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at, strip_owned,
+};
 use crate::store::{
     backup_once, clear_markers, created_here, delete_verified, marker_present, read_optional,
     remove_empty_parents, revert_path, unified_diff, write_atomic, write_verified,
@@ -426,6 +428,7 @@ impl Engine {
                     key: model.key,
                     value: self.prefixed(id),
                     raw_json: false,
+                    owner: None,
                 });
             }
             // Clear renders over the original text so the keys it keeps stay
@@ -562,7 +565,22 @@ impl Engine {
                     continue;
                 };
                 let current = get(kind, text, set.key).map_err(|error| annotate(&path, error))?;
-                if current.as_deref() != Some(expected.as_str()) {
+                let expected = match set.slot {
+                    ApiSlot::Append { owner, .. } => {
+                        let assignment = Assignment {
+                            key: set.key,
+                            value: expected,
+                            raw_json: true,
+                            owner: Some(owner),
+                        };
+                        let merged = render(kind, Some(text), &[assignment])
+                            .map_err(|error| annotate(&path, error))?;
+                        let merged = utf8(&path, &merged)?;
+                        get(kind, merged, set.key).map_err(|error| annotate(&path, error))?
+                    }
+                    _ => Some(expected),
+                };
+                if current != expected {
                     connected = false;
                     break;
                 }
@@ -599,6 +617,7 @@ impl Engine {
                 path,
                 location.kind,
                 self.owned_keys(location.file),
+                &self.append_keys(location.file),
                 self.tracked_key(location.file),
                 &preserve,
                 self.id,
@@ -615,7 +634,7 @@ impl Engine {
                 .sets
                 .iter()
                 .copied()
-                .filter(|set| matches!(set.slot, ApiSlot::Token))
+                .filter(|set| carries_token(&set.slot))
                 .collect();
             if token_sets.is_empty() {
                 continue;
@@ -719,8 +738,15 @@ impl Engine {
                     value,
                     raw_json: matches!(
                         set.slot,
-                        ApiSlot::CatalogModels | ApiSlot::Json(_) | ApiSlot::ModelArray { .. }
+                        ApiSlot::CatalogModels
+                            | ApiSlot::Json(_)
+                            | ApiSlot::ModelArray { .. }
+                            | ApiSlot::Append { .. }
                     ),
+                    owner: match set.slot {
+                        ApiSlot::Append { owner, .. } => Some(owner),
+                        _ => None,
+                    },
                 })
             })
             .collect()
@@ -767,7 +793,17 @@ impl Engine {
             }
             ApiSlot::CatalogModels if gateway => Some(catalog_models_json(&models)),
             ApiSlot::Json(text) => Some((*text).to_owned()),
-            ApiSlot::ModelArray { fields } if gateway => Some(model_array_json(&models, fields)),
+            ApiSlot::ModelArray { fields } if gateway => {
+                Some(model_array_json(&models, fields, target))
+            }
+            ApiSlot::Append {
+                each_model, fields, ..
+            } if gateway => Some(if *each_model {
+                model_array_json(&models, fields, target)
+            } else {
+                serde_json::Value::Array(vec![field_object(fields, None, &models, target)])
+                    .to_string()
+            }),
             _ => None,
         }
     }
@@ -807,6 +843,18 @@ impl Engine {
             .iter()
             .filter(|set| set.file == file)
             .map(|set| set.key)
+            .collect()
+    }
+
+    /// The keys of `file` holding arrays hofund shares with the user.
+    fn append_keys(&self, file: &str) -> Vec<(&'static str, &'static [OwnerTest])> {
+        self.sets
+            .iter()
+            .filter(|set| set.file == file)
+            .filter_map(|set| match set.slot {
+                ApiSlot::Append { owner, .. } => Some((set.key, owner)),
+                _ => None,
+            })
             .collect()
     }
 
@@ -949,28 +997,66 @@ fn catalog_models_json(models: &[String]) -> String {
 }
 
 /// One object per distinct non-empty model, in route order, holding `fields`.
-fn model_array_json(models: &[String], fields: &[ModelField]) -> String {
+fn model_array_json(models: &[String], fields: &[ModelField], target: &GatewayTarget) -> String {
+    model_items(models, fields, target).to_string()
+}
+
+fn model_items(
+    models: &[String],
+    fields: &[ModelField],
+    target: &GatewayTarget,
+) -> serde_json::Value {
     let mut seen = BTreeSet::new();
     let mut items = Vec::new();
     for id in models {
         if id.is_empty() || !seen.insert(id.as_str()) {
             continue;
         }
-        let mut entry = serde_json::Map::new();
-        for field in fields {
-            let value = match field.value() {
-                ModelValue::Id => serde_json::Value::String(id.clone()),
-                ModelValue::Literal(text) => serde_json::Value::String(text.to_owned()),
-                ModelValue::Json(text) => {
-                    serde_json::from_str(text).unwrap_or(serde_json::Value::Null)
-                }
-                _ => serde_json::Value::Null,
-            };
-            entry.insert(field.key().to_owned(), value);
-        }
-        items.push(serde_json::Value::Object(entry));
+        items.push(field_object(fields, Some(id), models, target));
     }
-    serde_json::Value::Array(items).to_string()
+    serde_json::Value::Array(items)
+}
+
+/// One object holding `fields`, for the model `id` when there is one.
+fn field_object(
+    fields: &[ModelField],
+    id: Option<&str>,
+    models: &[String],
+    target: &GatewayTarget,
+) -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    for field in fields {
+        let value = match field.value() {
+            ModelValue::Id => id.map_or(serde_json::Value::Null, |id| {
+                serde_json::Value::String(id.to_owned())
+            }),
+            ModelValue::Prefixed(prefix) => id.map_or(serde_json::Value::Null, |id| {
+                serde_json::Value::String(format!("{prefix}{id}"))
+            }),
+            ModelValue::Literal(text) => serde_json::Value::String(text.to_owned()),
+            ModelValue::Json(text) => serde_json::from_str(text).unwrap_or(serde_json::Value::Null),
+            ModelValue::V1 => {
+                serde_json::Value::String(format!("{}/v1", origin(target.base_url())))
+            }
+            ModelValue::Origin => serde_json::Value::String(origin(target.base_url())),
+            ModelValue::Token => serde_json::Value::String(target.token().to_owned()),
+            ModelValue::Models(fields) => model_items(models, fields, target),
+            _ => serde_json::Value::Null,
+        };
+        entry.insert(field.key().to_owned(), value);
+    }
+    serde_json::Value::Object(entry)
+}
+
+/// Whether a slot writes the bearer token, directly or inside its entries.
+fn carries_token(slot: &ApiSlot) -> bool {
+    match slot {
+        ApiSlot::Token => true,
+        ApiSlot::ModelArray { fields } | ApiSlot::Append { fields, .. } => {
+            fields.iter().any(|field| field.value().has_token())
+        }
+        _ => false,
+    }
 }
 
 fn origin(base_url: &str) -> String {
@@ -1020,6 +1106,7 @@ fn snapshot_wrote(
                 Some(Assignment {
                     key,
                     raw_json: is_json_value(&value),
+                    owner: None,
                     value,
                 })
             })
@@ -1082,6 +1169,7 @@ fn merge_owned_keys(
     path: &Path,
     kind: FileKind,
     keys: Vec<&'static str>,
+    appends: &[(&'static str, &'static [OwnerTest])],
     tracked: Option<&'static str>,
     preserve: &[PathBuf],
     id: &str,
@@ -1114,6 +1202,31 @@ fn merge_owned_keys(
     for key in keys.into_iter().chain(tracked) {
         let current_value =
             get(kind, current_text, key).map_err(|error| refused(id, path, &error.to_string()))?;
+        if let Some((_, owner)) = appends.iter().find(|(append, _)| *append == key) {
+            // Shared arrays lose only hofund's entries; the user's stay.
+            let kept = strip_owned(kind, current_text, key, owner)
+                .map_err(|error| refused(id, path, &error.to_string()))?;
+            let Some(kept) = kept.filter(|kept| Some(kept) != current_value.as_ref()) else {
+                continue;
+            };
+            let original = match backup_text {
+                Some(text) => {
+                    get(kind, text, key).map_err(|error| refused(id, path, &error.to_string()))?
+                }
+                None => None,
+            };
+            if kept == "[]" && original.is_none() && key != "." {
+                remove.push(key);
+            } else {
+                restore.push(Assignment {
+                    key,
+                    value: kept,
+                    raw_json: true,
+                    owner: None,
+                });
+            }
+            continue;
+        }
         let wrote_value =
             get(kind, wrote_text, key).map_err(|error| refused(id, path, &error.to_string()))?;
         let original = match backup_text {
@@ -1130,6 +1243,7 @@ fn merge_owned_keys(
                 Some(value) => restore.push(Assignment {
                     key,
                     raw_json: is_json_value(&value),
+                    owner: None,
                     value,
                 }),
                 None => remove.push(key),

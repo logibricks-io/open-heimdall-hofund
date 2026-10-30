@@ -2,7 +2,7 @@
 
 #![cfg(feature = "test-fixtures")]
 
-use hofund_plugin_api::{AgentRoute, FileKind, ModelField, Slot, Visible};
+use hofund_plugin_api::{AgentRoute, FileKind, ModelField, OwnerTest, Slot, Visible};
 use hofund_plugin_registry::{agent, agents, fixture_agents};
 
 #[test]
@@ -100,7 +100,7 @@ fn fixture_agents_preserve_files_sets_slots_and_key_files() {
     assert_eq!(yaml.files().len(), 1);
     assert_eq!(yaml.files()[0].kind(), FileKind::Yaml);
     assert_eq!(yaml.files()[0].env_override(), Some("FIXTURE_YAML_HOME"));
-    assert_eq!(yaml.sets().len(), 6);
+    assert_eq!(yaml.sets().len(), 7);
     assert_eq!(yaml.model_key(), Some("model.default"));
     assert!(matches!(yaml.sets()[1].slot(), Slot::V1));
     assert!(matches!(yaml.sets()[2].slot(), Slot::Token));
@@ -111,4 +111,22 @@ fn fixture_agents_preserve_files_sets_slots_and_key_files() {
     ];
     assert_eq!(yaml.sets()[4].slot(), &Slot::ModelArray { fields: FIELDS });
     assert_eq!(yaml.sets()[5].slot(), &Slot::Json("false"));
+    static GROUP_MODELS: &[ModelField] = &[
+        ModelField::prefixed("id", "hofund/"),
+        ModelField::token("key"),
+    ];
+    static GROUP: &[ModelField] = &[
+        ModelField::literal("name", "hofund"),
+        ModelField::v1("url"),
+        ModelField::models("models", GROUP_MODELS),
+    ];
+    static OWNER: &[OwnerTest] = &[OwnerTest::equals("name", "hofund")];
+    assert_eq!(
+        yaml.sets()[6].slot(),
+        &Slot::Append {
+            owner: OWNER,
+            each_model: false,
+            fields: GROUP,
+        }
+    );
 }
