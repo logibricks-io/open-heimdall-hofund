@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Qwen Code agent (G9): `hofund agent connect qwen` appends one entry per
+  route to `modelProviders.openai` in `~/.qwen/settings.json` (or under an
+  absolute `QWEN_HOME`), after the user's entries, each reading its key from
+  `env.HOFUND_QWEN_API_KEY` in the same file. A model pick writes
+  `model.name`, points `model.baseUrl` at the gateway's `/v1`, and sets
+  `security.auth.selectedType` to `openai`; clearing the model puts back the
+  user's values. Connect alone leaves the auth type alone, so a user on
+  another sign-in keeps it until they pick a hofund route.
+
+- `model_pair` values fill in `{origin}` and `{v1}` like `template` does.
+
 - Droid agent (G8): `hofund agent connect droid` appends one entry per route
   to `customModels` in `~/.factory/settings.json` (or under an absolute
   `FACTORY_HOME_OVERRIDE`), after the user's entries, each on Chat
