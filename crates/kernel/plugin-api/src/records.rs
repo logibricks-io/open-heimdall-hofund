@@ -1505,6 +1505,14 @@ pub enum Slot {
     /// and YAML files.
     #[doc(hidden)]
     Json(&'static str),
+    /// A fixed JSON value written only while at least one visible model is
+    /// listed, such as a flag that is wrong for an empty model list.
+    ///
+    /// The text is written as raw JSON, and this slot is valid only in JSON
+    /// and YAML files. With no visible model the write is skipped and a value
+    /// already in the file is left as it is.
+    #[doc(hidden)]
+    JsonWithModels(&'static str),
     /// A JSON array with one object per distinct non-empty visible model.
     ///
     /// Objects follow route order and hold `fields` in declaration order.
@@ -1839,6 +1847,7 @@ pub struct AgentFile {
     env_override: Option<&'static str>,
     create: bool,
     env_replaces: Option<&'static str>,
+    env_os: [bool; 3],
 }
 
 impl AgentFile {
@@ -1875,6 +1884,7 @@ impl AgentFile {
             env_override,
             create: true,
             env_replaces: None,
+            env_os: [true; 3],
         }
     }
 
@@ -1891,6 +1901,16 @@ impl AgentFile {
     #[must_use]
     pub const fn with_env_replaces(mut self, prefix: &'static str) -> Self {
         self.env_replaces = Some(prefix);
+        self
+    }
+
+    /// Sets the operating systems on which `env_override` is followed, in the
+    /// order Linux, macOS, Windows. On the others the variable is ignored and
+    /// the OS path template is used as written.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_env_os(mut self, linux: bool, macos: bool, windows: bool) -> Self {
+        self.env_os = [linux, macos, windows];
         self
     }
 
@@ -1935,6 +1955,13 @@ impl AgentFile {
     #[must_use]
     pub const fn create(&self) -> bool {
         self.create
+    }
+
+    /// Whether `env_override` is followed on Linux, macOS, and Windows, in
+    /// that order. Every OS follows it unless the description says otherwise.
+    #[must_use]
+    pub const fn env_os(&self) -> [bool; 3] {
+        self.env_os
     }
 
     /// Leading path-template prefix replaced by `env_override`.

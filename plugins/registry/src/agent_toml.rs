@@ -45,6 +45,7 @@ pub struct FileToml {
     pub windows: String,
     pub env_override: Option<String>,
     pub env_replaces: Option<String>,
+    pub env_os: Option<Vec<String>>,
     pub create: Option<bool>,
 }
 
@@ -135,6 +136,7 @@ pub struct OwnerToml {
 #[serde(deny_unknown_fields)]
 pub struct JsonSlot {
     pub json: String,
+    pub with_models: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -360,16 +362,60 @@ fn validate(
                 "invalid environment variable name",
             ));
         }
+        let followed = match &file.env_os {
+            None => vec![&file.linux, &file.macos, &file.windows],
+            Some(names) => {
+                if file.env_override.is_none() {
+                    return Err(error(
+                        source,
+                        format!("{field}.env_os"),
+                        "requires env_override",
+                    ));
+                }
+                let mut seen = BTreeSet::new();
+                let mut paths = Vec::new();
+                for name in names {
+                    let path = match name.as_str() {
+                        "linux" => &file.linux,
+                        "macos" => &file.macos,
+                        "windows" => &file.windows,
+                        _ => {
+                            return Err(error(
+                                source,
+                                format!("{field}.env_os"),
+                                format!("unknown OS `{name}`"),
+                            ));
+                        }
+                    };
+                    if !seen.insert(name.as_str()) {
+                        return Err(error(
+                            source,
+                            format!("{field}.env_os"),
+                            format!("duplicate OS `{name}`"),
+                        ));
+                    }
+                    paths.push(path);
+                }
+                if paths.is_empty() {
+                    return Err(error(
+                        source,
+                        format!("{field}.env_os"),
+                        "must name at least one OS",
+                    ));
+                }
+                paths
+            }
+        };
         if let Some(prefix) = &file.env_replaces
             && (!valid_path(prefix)
-                || ![&file.linux, &file.macos, &file.windows]
+                || !followed
                     .into_iter()
                     .all(|path| segment_prefix(path, prefix)))
         {
             return Err(error(
                 source,
                 format!("{field}.env_replaces"),
-                "must be a segment-boundary prefix of every OS path",
+                "must be a segment-boundary prefix of the path on every OS that follows env_override",
             ));
         }
     }
@@ -949,6 +995,15 @@ pub fn render(agent: &AgentToml) -> (String, String) {
         if let Some(prefix) = &file.env_replaces {
             output.push_str(&format!(".with_env_replaces({prefix:?})"));
         }
+        if let Some(names) = &file.env_os {
+            let on = |os: &str| names.iter().any(|name| name == os);
+            output.push_str(&format!(
+                ".with_env_os({}, {}, {})",
+                on("linux"),
+                on("macos"),
+                on("windows")
+            ));
+        }
         if file.create == Some(false) {
             output.push_str(".with_create(false)");
         }
@@ -1032,6 +1087,9 @@ fn render_slot(slot: &SlotToml) -> String {
                 "hofund_plugin_api::Slot::ModelTier {{ tier: hofund_plugin_api::TierId::from_static({:?}), when_model_matches: {needle} }}",
                 slot.model_tier.tier
             )
+        }
+        SlotToml::Json(slot) if slot.with_models == Some(true) => {
+            format!("hofund_plugin_api::Slot::JsonWithModels({:?})", slot.json)
         }
         SlotToml::Json(slot) => format!("hofund_plugin_api::Slot::Json({:?})", slot.json),
         SlotToml::ModelArray(slot) => format!(
@@ -1227,6 +1285,88 @@ key = "effort"
 
     fn with_slot(slot: &str) -> String {
         base().replace("slot = { literal = \"value\" }", &format!("slot = {slot}"))
+    }
+
+    #[test]
+    fn env_os_limits_the_override_and_its_prefix_check_to_named_systems() {
+        let windows = base().replacen(
+            "windows = \"~/.fixture/config.json\"",
+            "windows = \"~/AppData/Fixture/config.json\"",
+            1,
+        );
+        // Without env_os the Windows path must also start with env_replaces.
+        reject(windows.clone(), "every OS that follows env_override");
+        let limited = windows.replacen(
+            "env_replaces = \"~/.fixture\"",
+            "env_replaces = \"~/.fixture\"\nenv_os = [\"linux\", \"macos\"]",
+            1,
+        );
+        let source = render(&validate(&limited).expect("env_os")).1;
+        assert!(
+            source.contains(".with_env_replaces(\"~/.fixture\").with_env_os(true, true, false)"),
+            "{source}"
+        );
+        let windows_only = limited.replace("[\"linux\", \"macos\"]", "[\"windows\"]");
+        reject(windows_only, "every OS that follows env_override");
+        let linux_only = limited
+            .replace("[\"linux\", \"macos\"]", "[\"linux\"]")
+            .replacen(
+                "linux = \"~/.fixture/config.json\"",
+                "linux = \"~/.elsewhere/config.json\"",
+                1,
+            );
+        reject(linux_only, "every OS that follows env_override");
+        let source = render(&validate(&base()).expect("base")).1;
+        assert!(!source.contains("with_env_os"), "{source}");
+        for (list, needle) in [
+            ("[]", "must name at least one OS"),
+            ("[\"linux\", \"linux\"]", "duplicate OS `linux`"),
+            ("[\"freebsd\"]", "unknown OS `freebsd`"),
+        ] {
+            reject(
+                base().replacen(
+                    "env_replaces = \"~/.fixture\"",
+                    &format!("env_replaces = \"~/.fixture\"\nenv_os = {list}"),
+                    1,
+                ),
+                needle,
+            );
+        }
+        reject(
+            base().replacen(
+                "env_override = \"FIXTURE_HOME\"\nenv_replaces = \"~/.fixture\"",
+                "env_os = [\"linux\"]",
+                1,
+            ),
+            "env_os",
+        );
+    }
+
+    #[test]
+    fn json_slots_with_models_render_their_own_slot() {
+        let source = render(
+            &validate(&with_slot("{ json = \"false\", with_models = true }")).expect("with_models"),
+        )
+        .1;
+        assert!(
+            source.contains("hofund_plugin_api::Slot::JsonWithModels(\"false\")"),
+            "{source}"
+        );
+        let source = render(
+            &validate(&with_slot("{ json = \"false\", with_models = false }"))
+                .expect("without models"),
+        )
+        .1;
+        assert!(
+            source.contains("hofund_plugin_api::Slot::Json(\"false\")"),
+            "{source}"
+        );
+        reject(
+            with_slot("{ json = \"false\", with_models = true }")
+                .replace("kind = \"json\"", "kind = \"toml\"")
+                .replace("config.json", "config.toml"),
+            "require a JSON or YAML file",
+        );
     }
 
     #[test]

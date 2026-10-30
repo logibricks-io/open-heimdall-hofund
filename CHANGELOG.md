@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Goose agent (G14): `hofund agent connect goose` writes hofund's own
+  custom provider, `custom_providers/hofund.json` beside Goose's
+  `config.yaml` (`~/.config/goose`, or `$XDG_CONFIG_HOME/goose` when it is
+  absolute, on Linux and macOS; `%APPDATA%\Block\goose\config` on Windows,
+  where `XDG_CONFIG_HOME` is not followed): engine `openai`, gateway `/v1`,
+  hofund's key as the `Authorization` header, `skip_canonical_filtering`,
+  one `models[]` entry per route, and `dynamic_models: false` only while a
+  route is listed (Goose rejects an empty static list it may not
+  discover). Two deviations from the reference, by design: the provider
+  file is written at connect rather than only on a pick, so Goose lists
+  one more provider until disconnect removes it; and clearing the model
+  puts back the user's `active_provider` instead of deleting it. A pick
+  writes `active_provider: hofund` and `providers.hofund.{enabled,
+  configured, model}` (the bare route). User keys in `hofund.json` (extra
+  headers, `timeout_seconds`) are kept. Not yet: the legacy
+  `GOOSE_PROVIDER`/`GOOSE_MODEL` layout (#450), per-model reasoning and
+  `context_limit` (#451), `GOOSE_THINKING_EFFORT` (#452), a pick changed
+  in Goose (#453), WSL homes (#454), telling the pressly migration tool
+  apart (#455), and dropping a stale `dynamic_models` once every route is
+  gone (#456); YAML comments are lost on a pick (#414).
+- agent.toml: `[[file]] env_os = ["linux", "macos"]` limits `env_override`
+  to the named systems, and `env_replaces` is checked only against their
+  paths (part of #411); a `json` slot with `with_models = true` is written
+  only while at least one visible route is listed.
 - Grok Build agent (G13): `hofund agent connect grok` writes one
   `[model."hofund/<route>"]` table per route (gateway `/v1`, hofund's key,
   `api_backend = "chat_completions"`) to `~/.grok/config.toml` (or under an
