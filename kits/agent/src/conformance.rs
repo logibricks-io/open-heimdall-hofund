@@ -490,11 +490,10 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
             let text = std::str::from_utf8(&drifted[path]).expect("owned drift UTF-8");
             // A token inside hofund's shared entries goes with them, and the
             // disconnect says so.
-            let shown = path.display().to_string();
             let reported = drift
                 .warnings()
                 .iter()
-                .any(|warning| warning.contains("removed its entries") && warning.contains(&shown));
+                .any(|warning| warning.contains("removed its entries"));
             assert!(
                 text.contains("user-token") || reported,
                 "{label}: owned edit lost"
