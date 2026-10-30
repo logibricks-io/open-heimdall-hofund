@@ -147,7 +147,8 @@ fn parts(body: &[u8], boundary: &[u8]) -> Option<Vec<Part>> {
     }
 }
 
-/// The field name of a part's headers, and whether it is a file.
+/// The field name of a part's headers, and whether it is a file. A part
+/// whose disposition is not `form-data` has no name.
 fn disposition(headers: &[u8]) -> (Option<String>, bool) {
     let text = String::from_utf8_lossy(headers);
     let Some(value) = text.split("\r\n").find_map(|line| {
@@ -158,9 +159,17 @@ fn disposition(headers: &[u8]) -> (Option<String>, bool) {
     }) else {
         return (None, false);
     };
+    let mut params = value.split(';');
+    // Only a form-data part has a field name, as the reference reads it.
+    if !params
+        .next()
+        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("form-data"))
+    {
+        return (None, false);
+    }
     let mut name = None;
     let mut file = false;
-    for (key, value) in value.split(';').skip(1).filter_map(param) {
+    for (key, value) in params.filter_map(param) {
         let key = key.to_ascii_lowercase();
         if key == "name" {
             name = Some(value);
@@ -270,6 +279,7 @@ mod tests {
             b"--b\r\nA: 1\r\nq\r\n--b--",
             b"--bX\r\n\r\nq\r\n--b--",
             b"--b",
+            b"--b-\r\nA: 1\r\n\r\nq\r\n--b--",
         ] {
             assert_eq!(
                 parts(broken, b"b"),
@@ -291,6 +301,15 @@ mod tests {
         );
         assert_eq!(read("Content-Type: text/plain"), (None, false));
         assert_eq!(read("Content-Disposition: form-data"), (None, false));
+        assert_eq!(
+            read("Content-Disposition: attachment; name=model"),
+            (None, false)
+        );
+        assert_eq!(read("Content-Disposition: name=model"), (None, false));
+        assert_eq!(
+            read("Content-Disposition:  Form-Data ; name=model"),
+            (Some("model".to_owned()), false)
+        );
     }
 
     #[test]
