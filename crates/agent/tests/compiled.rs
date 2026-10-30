@@ -596,6 +596,26 @@ fn codex_model_edits_after_a_plain_connect_stay_quiet() {
 }
 
 #[test]
+fn codex_model_edit_survives_a_plain_reconnect() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["m", "n"]);
+    let path = codex_path(&home);
+    seed(&path, "model = \"mine\"\n");
+    let codex = Compiled::new(&CODEX);
+    codex.apply(&session, &target).expect("connect");
+    let edited = fs::read_to_string(&path)
+        .expect("read")
+        .replace("model = \"mine\"", "model = \"theirs\"");
+    fs::write(&path, edited).expect("user edit");
+    codex.apply(&session, &target).expect("reconnect");
+    assert_eq!(toml_value(&path, "model").as_deref(), Some("theirs"));
+    let outcome = codex.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    assert_eq!(toml_value(&path, "model").as_deref(), Some("theirs"));
+}
+
+#[test]
 fn codex_model_edited_after_set_is_kept_with_a_warning() {
     let home = scratch();
     let session = Session::new(&*home);
