@@ -11,7 +11,7 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["azure", "bedrock", "bedrock-mantle", "claude", "codex", "copilot", "echo", "gemini", "google-vertex", "relay"]
+default = ["azure", "bedrock", "bedrock-mantle", "claude", "codex", "copilot", "echo", "gemini", "google-vertex", "relay", "remote-gateway"]
 azure = ["dep:hofund-plugin-azure"]
 bedrock = ["dep:hofund-plugin-bedrock"]
 bedrock-mantle = ["dep:hofund-plugin-bedrock-mantle"]
@@ -22,6 +22,7 @@ echo = ["dep:hofund-plugin-echo"]
 gemini = ["dep:hofund-plugin-subscription-gemini"]
 google-vertex = ["dep:hofund-plugin-google-vertex"]
 relay = ["dep:hofund-plugin-relay"]
+remote-gateway = ["dep:hofund-plugin-remote-gateway"]
 test-fixtures = []
 
 [dependencies]
@@ -34,6 +35,7 @@ hofund-plugin-bedrock-mantle = { workspace = true, optional = true }
 hofund-plugin-echo = { workspace = true, optional = true }
 hofund-plugin-google-vertex = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }
+hofund-plugin-remote-gateway = { workspace = true, optional = true }
 hofund-plugin-subscription-claude = { workspace = true, optional = true }
 hofund-plugin-subscription-codex = { workspace = true, optional = true }
 hofund-plugin-subscription-copilot = { workspace = true, optional = true }

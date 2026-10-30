@@ -469,6 +469,7 @@ mod tests {
             "bedrock",
             "bedrock-mantle",
             "google-vertex",
+            "remote-gateway",
             "missing",
         ] {
             assert!(super::builtin::factory(id).is_none(), "{id}");

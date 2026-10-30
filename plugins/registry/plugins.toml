@@ -67,3 +67,10 @@ kind = "provider"
 path = "plugins/providers/relay"
 package = "hofund-plugin-relay"
 feature = "relay"
+
+[[plugin]]
+id = "remote-gateway"
+kind = "provider"
+path = "plugins/providers/remote-gateway"
+package = "hofund-plugin-remote-gateway"
+feature = "remote-gateway"
