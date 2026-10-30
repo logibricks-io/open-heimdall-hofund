@@ -132,7 +132,9 @@ impl Kernel for Host<'_> {
             None => http.send(request).await,
             Some(within) => hofund_plugin_sdk::timeout(within, http.send(request))
                 .await
-                .unwrap_or_else(|| Err(PluginError::timeout("the upstream did not answer in time"))),
+                .unwrap_or_else(|| {
+                    Err(PluginError::timeout("the upstream did not answer in time"))
+                }),
         }
     }
 }

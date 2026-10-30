@@ -183,7 +183,12 @@ fn outbound(
 }
 
 /// The request as it came, to the upstream, and the answer as it streams.
-async fn relay(kernel: &dyn Kernel, bases: Bases, rest: &str, request: HttpRequest) -> HttpResponse {
+async fn relay(
+    kernel: &dyn Kernel,
+    bases: Bases,
+    rest: &str,
+    request: HttpRequest,
+) -> HttpResponse {
     let base = base_for(bases, request.headers(), rest);
     let headers = relayed_headers(request.headers());
     let sent = match outbound(base, rest, &request, headers) {
@@ -228,7 +233,9 @@ async fn models(kernel: &dyn Kernel, bases: Bases, request: &HttpRequest) -> Htt
         .unwrap_or(0);
     let mut all = own;
     for (rank, id) in ours.iter().enumerate() {
-        let priority = usize::try_from(after).unwrap_or(usize::MAX).saturating_add(rank + 1);
+        let priority = usize::try_from(after)
+            .unwrap_or(usize::MAX)
+            .saturating_add(rank + 1);
         all.push(entry(id, priority));
     }
     json_response(200, json!({"models": all}).to_string())

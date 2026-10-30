@@ -1215,8 +1215,9 @@ fn without_own_token(expected: &str, parts: &mut axum::http::request::Parts) {
 
 /// Whether the query pair `pair` is `key=` with the gateway's token.
 fn is_own_key(expected: &str, pair: &str) -> bool {
-    pair.split_once('=')
-        .is_some_and(|(name, value)| name == "key" && tokens_match(expected, &percent_decode(value)))
+    pair.split_once('=').is_some_and(|(name, value)| {
+        name == "key" && tokens_match(expected, &percent_decode(value))
+    })
 }
 
 fn header_secret<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

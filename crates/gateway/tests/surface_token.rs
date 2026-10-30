@@ -109,7 +109,10 @@ async fn the_bearer_token_is_taken_out() {
 async fn the_api_key_token_goes_and_the_callers_bearer_stays() {
     let (_, headers) = sight(
         "/seen",
-        &[("x-api-key", "secret"), ("authorization", "Bearer upstream")],
+        &[
+            ("x-api-key", "secret"),
+            ("authorization", "Bearer upstream"),
+        ],
     )
     .await;
     assert_eq!(headers, vec![some("Bearer upstream"), None, None]);

@@ -136,7 +136,12 @@ impl Kernel for Stub {
     }
 }
 
-fn request(method: &str, target: &str, headers: &[(&'static str, &str)], body: &str) -> HttpRequest {
+fn request(
+    method: &str,
+    target: &str,
+    headers: &[(&'static str, &str)],
+    body: &str,
+) -> HttpRequest {
     let mut request = HttpRequest::new(Body::from_bytes(body.as_bytes().to_vec()));
     *request.method_mut() = method.parse().expect("method");
     *request.uri_mut() = target.parse().expect("target");
@@ -219,9 +224,8 @@ fn the_real_bases_are_the_chatgpt_backend_and_the_api() {
 fn the_backend_route_goes_to_the_backend_and_the_catalog_route_to_the_catalog() {
     let stub = Stub::default().sending(answer(204, ""));
     let backend = request("POST", "/backend-api/codex/responses", &[], "{}");
-    let (status, _, _) = block_on(async {
-        read(dispatch(&stub, "/backend-api/codex", backend).await).await
-    });
+    let (status, _, _) =
+        block_on(async { read(dispatch(&stub, "/backend-api/codex", backend).await).await });
     assert_eq!(status, 204);
     assert_eq!(
         stub.sent()[0].uri,
@@ -229,9 +233,8 @@ fn the_backend_route_goes_to_the_backend_and_the_catalog_route_to_the_catalog() 
     );
     let stub = Stub::default().listing(&["smith/forge"]);
     let catalog = request("GET", "/v1/codex/models", &[], "");
-    let (status, _, body) = block_on(async {
-        read(dispatch(&stub, "/v1/codex/models", catalog).await).await
-    });
+    let (status, _, body) =
+        block_on(async { read(dispatch(&stub, "/v1/codex/models", catalog).await).await });
     assert_eq!(status, 200);
     assert_eq!(slugs(&body), [("smith/forge".to_owned(), 1)]);
     assert!(stub.sent().is_empty());
@@ -488,7 +491,11 @@ fn only_a_post_to_responses_naming_a_slash_model_stays_in_process() {
         ("POST", "/backend-api/codex/responses", r#"{"model":7}"#),
         ("POST", "/backend-api/codex/responses", r#"{"input":"a/b"}"#),
         ("GET", "/backend-api/codex/responses", r#"{"model":"a/b"}"#),
-        ("POST", "/backend-api/codex/responses/x", r#"{"model":"a/b"}"#),
+        (
+            "POST",
+            "/backend-api/codex/responses/x",
+            r#"{"model":"a/b"}"#,
+        ),
         ("POST", "/backend-api/codex/memories", r#"{"model":"a/b"}"#),
     ];
     let stub = cases
@@ -496,7 +503,11 @@ fn only_a_post_to_responses_naming_a_slash_model_stays_in_process() {
         .fold(stub, |stub, _| stub.sending(answer(200, "relayed")));
     for (method, target, body) in cases {
         let (status, _, text) = ask(&stub, request(method, target, &[], body));
-        assert_eq!((status, text.as_str()), (200, "relayed"), "{method} {target}");
+        assert_eq!(
+            (status, text.as_str()),
+            (200, "relayed"),
+            "{method} {target}"
+        );
     }
     assert_eq!(stub.sent().len(), cases.len());
     assert!(stub.called().is_empty());
@@ -542,10 +553,7 @@ fn the_model_list_is_the_backends_then_hofunds() {
         ]
     );
     let value: Value = json::from_str(&body).expect("json");
-    assert_eq!(
-        value["models"][2]["description"],
-        "smith/forge via hofund"
-    );
+    assert_eq!(value["models"][2]["description"], "smith/forge via hofund");
     let sent = stub.sent();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].method, "GET");
@@ -554,7 +562,10 @@ fn the_model_list_is_the_backends_then_hofunds() {
         "https://backend.test/codex/models?client_version=0.150.0"
     );
     assert_eq!(sent[0].within, Some(LIST_WAIT));
-    assert_eq!(sent[0].header_names(), ["authorization", "chatgpt-account-id"]);
+    assert_eq!(
+        sent[0].header_names(),
+        ["authorization", "chatgpt-account-id"]
+    );
     assert!(sent[0].body.is_empty());
     let called = stub.called();
     assert_eq!(called.len(), 1);
@@ -592,7 +603,7 @@ fn no_list_from_the_backend_leaves_hofunds_models_alone() {
             Vec::new(),
             BodyStream::unfold(0_u8, |step| async move {
                 match step {
-                    0 => Some((Ok(br#"{"models":[{"slug":"gpt"#.to_vec().into()), 1)),
+                    0 => Some((Ok(br#"{"models":[{"slug":"gpt"#.to_vec()), 1)),
                     1 => Some((Err(PluginError::interrupted("cut")), 2)),
                     _ => None,
                 }
@@ -646,10 +657,7 @@ fn the_model_list_always_asks_the_chatgpt_backend() {
     let stub = Stub::default()
         .sending(answer(200, r#"{"models":[]}"#))
         .listing(&[]);
-    ask(
-        &stub,
-        models_request(&[("authorization", "Bearer sk-key")]),
-    );
+    ask(&stub, models_request(&[("authorization", "Bearer sk-key")]));
     assert_eq!(
         stub.sent()[0].uri,
         "https://backend.test/codex/models?client_version=0.150.0"
