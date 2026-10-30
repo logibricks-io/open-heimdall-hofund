@@ -54,6 +54,7 @@ AgentFactory::fn validate (& self , raw : & RawTable) -> Result < Self :: Config
 AgentFile
 AgentFile #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AgentFile::const fn create (& self) -> bool
+AgentFile::const fn env_os (& self) -> [bool ; 3]
 AgentFile::const fn env_override (& self) -> Option < & 'static str >
 AgentFile::const fn env_replaces (& self) -> Option < & 'static str >
 AgentFile::const fn from_static (id : & 'static str , kind : FileKind , linux : & 'static str , macos : & 'static str , windows : & 'static str , env_override : Option < & 'static str > ,) -> Self
@@ -63,6 +64,7 @@ AgentFile::const fn linux (& self) -> & 'static str
 AgentFile::const fn macos (& self) -> & 'static str
 AgentFile::const fn windows (& self) -> & 'static str
 AgentFile::const fn with_create (mut self , create : bool) -> Self
+AgentFile::const fn with_env_os (mut self , linux : bool , macos : bool , windows : bool) -> Self
 AgentFile::const fn with_env_replaces (mut self , prefix : & 'static str) -> Self
 AgentIntegration
 AgentIntegration::fn custom_write (& self , ctx : & WriteCtx , target : & GatewayTarget ,) -> Result < Option < Plan > , PluginError >
@@ -651,6 +653,7 @@ Slot #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 Slot::Append
 Slot::CatalogModels
 Slot::Json
+Slot::JsonWithModels
 Slot::Literal
 Slot::ModelArray
 Slot::ModelIfUnset
