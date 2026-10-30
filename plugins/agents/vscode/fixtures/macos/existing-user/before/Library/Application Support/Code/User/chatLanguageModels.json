@@ -1,0 +1,24 @@
+[
+  {
+    "name": "My Endpoint",
+    "vendor": "customendpoint",
+    "apiType": "chat-completions",
+    "models": [
+      {
+        "id": "my-model",
+        "name": "My Model",
+        "url": "https://models.example/v1/chat/completions",
+        "toolCalling": true
+      }
+    ]
+  },
+  {
+    "name": "hofund",
+    "vendor": "ollama",
+    "models": [
+      {
+        "id": "llama"
+      }
+    ]
+  }
+]

@@ -18,7 +18,8 @@ fn production_agent_list_contains_migrated_agents() {
             "gemini-cli",
             "hermes",
             "opencode",
-            "pi"
+            "pi",
+            "vscode"
         ]
     );
     assert_eq!(
@@ -40,6 +41,9 @@ fn production_agent_list_contains_migrated_agents() {
         Some("hofund/")
     );
     assert_eq!(agent("codex").expect("codex").model_prefix(), None);
+    let vscode = agent("vscode").expect("vscode");
+    assert_eq!(vscode.model_prefix(), None);
+    assert_eq!(vscode.model_key(), Some("\"chat.defaultModel\""));
     assert!(agent("missing").is_none());
 }
 

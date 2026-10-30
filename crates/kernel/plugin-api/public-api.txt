@@ -336,8 +336,10 @@ ModelField::const fn json (key : & 'static str , text : & 'static str) -> Self
 ModelField::const fn key (& self) -> & 'static str
 ModelField::const fn literal (key : & 'static str , text : & 'static str) -> Self
 ModelField::const fn models (key : & 'static str , fields : & 'static [Self]) -> Self
+ModelField::const fn object (key : & 'static str , fields : & 'static [Self]) -> Self
 ModelField::const fn origin (key : & 'static str) -> Self
 ModelField::const fn prefixed (key : & 'static str , prefix : & 'static str) -> Self
+ModelField::const fn template (key : & 'static str , text : & 'static str) -> Self
 ModelField::const fn token (key : & 'static str) -> Self
 ModelField::const fn v1 (key : & 'static str) -> Self
 ModelField::const fn value (& self) -> ModelValue
@@ -393,8 +395,10 @@ ModelValue::Id
 ModelValue::Json
 ModelValue::Literal
 ModelValue::Models
+ModelValue::Object
 ModelValue::Origin
 ModelValue::Prefixed
+ModelValue::Template
 ModelValue::Token
 ModelValue::V1
 ModelValue::fn has_token (& self) -> bool

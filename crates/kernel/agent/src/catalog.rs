@@ -432,6 +432,13 @@ impl Engine {
                     shared: None,
                 });
             }
+            // A file nothing is written to is left as it is: a missing one
+            // stays missing, so a settings file that holds only the model key
+            // is not created until a model is picked, and an existing one
+            // keeps its bytes (comments included) unless a clear drops keys.
+            if assignments.is_empty() && (before.is_none() || !matches!(choice, Choice::Clear)) {
+                continue;
+            }
             // Clear renders over the original text so the keys it keeps stay
             // in place, then drops the model keys no set wrote back.
             let mut after =
@@ -599,7 +606,12 @@ impl Engine {
                 continue;
             }
             let Some(bytes) = read_optional(&path)? else {
-                connected = false;
+                // Apply leaves a file missing when it would write nothing
+                // there, such as a settings file holding only the model key.
+                connected = !sets.iter().any(|set| {
+                    self.slot_value(set, kind, target, None, Choice::Keep)
+                        .is_some()
+                });
                 continue;
             };
             let text = utf8(&path, &bytes)?;
@@ -1144,6 +1156,8 @@ fn field_object(
             ModelValue::Origin => serde_json::Value::String(origin(target.base_url())),
             ModelValue::Token => serde_json::Value::String(target.token().to_owned()),
             ModelValue::Models(fields) => model_items(models, fields, target),
+            ModelValue::Template(text) => serde_json::Value::String(fill_template(text, target)),
+            ModelValue::Object(fields) => field_object(fields, id, models, target),
             _ => serde_json::Value::Null,
         };
         entry.insert(field.key().to_owned(), value);

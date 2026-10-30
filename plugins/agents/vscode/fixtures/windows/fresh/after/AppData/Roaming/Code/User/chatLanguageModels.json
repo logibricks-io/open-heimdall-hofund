@@ -1,0 +1,21 @@
+[
+  {
+    "name": "hofund",
+    "vendor": "customendpoint",
+    "apiType": "chat-completions",
+    "models": [
+      {
+        "id": "route-a",
+        "name": "route-a",
+        "url": "http://127.0.0.1:3425/v1/chat/completions",
+        "toolCalling": true,
+        "vision": false,
+        "contextWindow": 128000,
+        "maxOutputTokens": 8192,
+        "requestHeaders": {
+          "Authorization": "Bearer old-token"
+        }
+      }
+    ]
+  }
+]

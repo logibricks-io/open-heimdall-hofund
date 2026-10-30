@@ -1,0 +1,8 @@
+[
+  {
+    "name": "hofund",
+    "vendor": "customendpoint",
+    "apiType": "chat-completions",
+    "models": []
+  }
+]

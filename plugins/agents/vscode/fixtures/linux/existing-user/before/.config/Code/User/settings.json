@@ -1,0 +1,9 @@
+{
+  "editor.fontSize": 14,
+  "chat.defaultModel": "my-model",
+  "chat": {
+    "agent": {
+      "enabled": true
+    }
+  }
+}
