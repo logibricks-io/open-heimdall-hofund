@@ -1388,3 +1388,174 @@ fn shipped_grok_pick_in_a_fresh_home_leaves_nothing_after_disconnect() {
     agent.disconnect(&session, false).expect("disconnect");
     assert!(!path.exists());
 }
+
+const GOOSE_CONFIG: &str = "# my goose settings
+GOOSE_MODE: smart_approve
+active_provider: anthropic
+providers:
+  anthropic:
+    enabled: true
+    model: claude-sonnet-4-5
+    configured: true
+";
+
+fn goose_provider(root: &Path) -> serde_json::Value {
+    let path = root
+        .join("goose")
+        .join("custom_providers")
+        .join("hofund.json");
+    serde_json::from_str(&fs::read_to_string(path).expect("read provider")).expect("json")
+}
+
+#[test]
+fn shipped_goose_pick_makes_hofund_active_and_clear_gives_the_user_provider_back() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".config").join("goose").join("config.yaml");
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, GOOSE_CONFIG).expect("seed");
+    let target = target();
+    let agent = adapter("goose", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    // Connect writes only the provider file; the user's choice stays.
+    assert_eq!(fs::read_to_string(&path).expect("read"), GOOSE_CONFIG);
+    let provider = goose_provider(&home.join(".config"));
+    assert_eq!(provider["base_url"], "http://127.0.0.1:3425/v1");
+    assert_eq!(provider["headers"]["Authorization"], "Bearer local-token");
+    assert_eq!(provider["models"][0]["name"], "route-a");
+    assert_eq!(agent.configured_model(&session).expect("model"), None);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let picked = fs::read_to_string(&path).expect("read");
+    assert!(picked.contains("active_provider: hofund\n"), "{picked}");
+    // The YAML editor drops the user's comment (#414); the keys stay.
+    assert_eq!(
+        picked,
+        "GOOSE_MODE: smart_approve\nactive_provider: hofund\nproviders:\n  anthropic:\n    enabled: true\n    model: claude-sonnet-4-5\n    configured: true\n  hofund:\n    enabled: true\n    configured: true\n    model: route-a\n"
+    );
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("route-a")
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    // Clearing puts the user's provider back and drops hofund's entry.
+    agent.set_model(&session, &target, None).expect("clear");
+    let cleared = fs::read_to_string(&path).expect("read");
+    assert_eq!(cleared, GOOSE_CONFIG.replace("# my goose settings\n", ""));
+    assert_eq!(agent.configured_model(&session).expect("model"), None);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    let restored = fs::read_to_string(&path).expect("read");
+    assert_eq!(restored, GOOSE_CONFIG.replace("# my goose settings\n", ""));
+    assert!(
+        !home
+            .join(".config/goose/custom_providers/hofund.json")
+            .exists()
+    );
+}
+
+#[test]
+fn shipped_goose_pick_in_a_fresh_home_leaves_nothing_after_disconnect() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target();
+    let agent = adapter("goose", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let config = home.join(".config").join("goose").join("config.yaml");
+    let picked = fs::read_to_string(&config).expect("read");
+    assert!(picked.contains("active_provider: hofund"), "{picked}");
+    agent.set_model(&session, &target, None).expect("clear");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!home.join(".config").exists());
+}
+
+#[test]
+fn shipped_goose_follows_xdg_config_home_except_on_windows() {
+    for (value, unix_root) in [
+        (Some("absolute"), "xdg"),
+        (Some(""), ".config"),
+        (Some("relative/config"), ".config"),
+        (None, ".config"),
+    ] {
+        let home = scratch();
+        let session = match value {
+            Some("absolute") => {
+                Session::from_env_iter(&*home, [("XDG_CONFIG_HOME", home.join("xdg").as_os_str())])
+            }
+            Some(text) => {
+                Session::from_env_iter(&*home, [("XDG_CONFIG_HOME", std::ffi::OsStr::new(text))])
+            }
+            None => Session::new(&*home),
+        };
+        for os in OPERATING_SYSTEMS {
+            let root = if os == TargetOs::Windows {
+                "AppData/Roaming/Block/goose/config".to_owned()
+            } else {
+                format!("{unix_root}/goose")
+            };
+            let plan = adapter("goose", os)
+                .plan(&session, &target())
+                .expect("plan");
+            let paths = plan
+                .changes()
+                .iter()
+                .map(|change| {
+                    change
+                        .path()
+                        .strip_prefix(&*home)
+                        .expect("relative")
+                        .to_path_buf()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                paths,
+                [PathBuf::from(format!(
+                    "{root}/custom_providers/hofund.json"
+                ))],
+                "{value:?} on {os:?}"
+            );
+        }
+        // A pick writes config.yaml beside the provider file.
+        let agent = adapter("goose", TargetOs::Windows);
+        agent.apply(&session, &target()).expect("apply");
+        agent
+            .set_model(&session, &target(), Some("route-a"))
+            .expect("pick");
+        assert!(
+            home.join("AppData/Roaming/Block/goose/config/config.yaml")
+                .is_file()
+        );
+        assert!(!home.join("xdg").exists());
+        agent.disconnect(&session, false).expect("disconnect");
+        assert!(!home.join("AppData").exists());
+    }
+}
+
+#[test]
+fn shipped_goose_lets_goose_ask_the_gateway_only_when_no_route_is_listed() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let root = home.join(".config");
+    let agent = adapter("goose", TargetOs::Linux);
+    let empty = target_with(&[]);
+    agent.apply(&session, &empty).expect("apply without routes");
+    let provider = goose_provider(&root);
+    assert_eq!(provider["models"], serde_json::json!([]));
+    assert!(provider.get("dynamic_models").is_none());
+    assert!(agent.status(&session, &empty).expect("status").connected());
+    let one = target();
+    assert!(!agent.status(&session, &one).expect("status").connected());
+    agent.apply(&session, &one).expect("apply with a route");
+    let provider = goose_provider(&root);
+    assert_eq!(provider["dynamic_models"], serde_json::json!(false));
+    assert_eq!(provider["models"][0]["name"], "route-a");
+    assert!(agent.status(&session, &one).expect("status").connected());
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!root.exists());
+}

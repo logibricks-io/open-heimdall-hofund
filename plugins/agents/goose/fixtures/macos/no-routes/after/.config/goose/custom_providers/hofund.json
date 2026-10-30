@@ -1,0 +1,14 @@
+{
+  "name": "hofund",
+  "engine": "openai",
+  "display_name": "hofund",
+  "description": "Every hofund route, through its local gateway",
+  "api_key_env": "",
+  "base_url": "http://127.0.0.1:3425/v1",
+  "headers": {
+    "Authorization": "Bearer old-token"
+  },
+  "requires_auth": false,
+  "skip_canonical_filtering": true,
+  "models": []
+}

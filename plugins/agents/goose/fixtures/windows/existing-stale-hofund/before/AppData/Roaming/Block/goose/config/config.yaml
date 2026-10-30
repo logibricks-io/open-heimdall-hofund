@@ -1,0 +1,6 @@
+active_provider: hofund
+providers:
+  hofund:
+    enabled: true
+    model: route-a
+    configured: true

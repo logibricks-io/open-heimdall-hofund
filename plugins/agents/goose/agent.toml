@@ -1,0 +1,122 @@
+id = "goose"
+display_name = "Goose"
+binary = "goose"
+
+# Goose (Block's CLI and desktop app) keeps its settings in config.yaml:
+# ~/.config/goose on Linux and macOS, where XDG_CONFIG_HOME replaces
+# ~/.config, and %APPDATA%\Block\goose\config on Windows (taken here as
+# ~/AppData/Roaming/Block/goose/config), where XDG_CONFIG_HOME is not read.
+# Custom providers are JSON files in custom_providers beside config.yaml,
+# one per provider, named by its id; Goose loads them when it starts.
+# Source: block/goose crates/goose/src/config/base.rs, providers.rs, and
+# declarative_providers.rs.
+[[file]]
+id = "config"
+kind = "yaml"
+linux = "~/.config/goose/config.yaml"
+macos = "~/.config/goose/config.yaml"
+windows = "~/AppData/Roaming/Block/goose/config/config.yaml"
+env_override = "XDG_CONFIG_HOME"
+env_replaces = "~/.config"
+env_os = ["linux", "macos"]
+
+[[file]]
+id = "provider"
+kind = "json"
+linux = "~/.config/goose/custom_providers/hofund.json"
+macos = "~/.config/goose/custom_providers/hofund.json"
+windows = "~/AppData/Roaming/Block/goose/config/custom_providers/hofund.json"
+env_override = "XDG_CONFIG_HOME"
+env_replaces = "~/.config"
+env_os = ["linux", "macos"]
+
+# hofund's own provider file, spoken to as OpenAI chat completions. It is
+# written at connect, so Goose lists one more provider, and disconnect takes
+# it away. The key travels as the Authorization header, so no environment
+# variable is needed. skip_canonical_filtering keeps routes Goose's model
+# registry does not know.
+[[set]]
+file = "provider"
+key = "name"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "provider"
+key = "engine"
+slot = { literal = "openai" }
+
+[[set]]
+file = "provider"
+key = "display_name"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "provider"
+key = "description"
+slot = { literal = "Every hofund route, through its local gateway" }
+
+[[set]]
+file = "provider"
+key = "api_key_env"
+slot = { literal = "" }
+
+[[set]]
+file = "provider"
+key = "base_url"
+slot = "v1"
+
+[[set]]
+file = "provider"
+key = "headers.Authorization"
+slot = { template = "Bearer {token}" }
+
+[[set]]
+file = "provider"
+key = "requires_auth"
+slot = { json = "false" }
+
+[[set]]
+file = "provider"
+key = "skip_canonical_filtering"
+slot = { json = "true" }
+
+# One entry per route. This build has no catalog values per model, so no
+# context_limit is written (Goose then guesses from the name) and no route
+# is said to reason.
+[[set]]
+file = "provider"
+key = "models"
+slot = { model_array = { fields = [
+    { key = "name", value = "id" },
+    { key = "reasoning", json = "false" },
+] } }
+
+# dynamic_models false keeps Goose to the routes above. Goose refuses a
+# provider whose static list is empty and that may not ask the gateway, so
+# with no route the key is left out and Goose lists the gateway's /v1/models.
+[[set]]
+file = "provider"
+key = "dynamic_models"
+slot = { json = "false", with_models = true }
+
+# Goose uses active_provider and that provider's entry in the providers map.
+# A pick makes hofund the active provider; clearing the model puts back the
+# user's active_provider and drops hofund's entry.
+[[set]]
+file = "config"
+key = "active_provider"
+slot = { model_pair = { value = "hofund" } }
+
+[[set]]
+file = "config"
+key = "providers.hofund.enabled"
+slot = { model_pair = { json = "true" } }
+
+[[set]]
+file = "config"
+key = "providers.hofund.configured"
+slot = { model_pair = { json = "true" } }
+
+[model]
+file = "config"
+key = "providers.hofund.model"

@@ -347,6 +347,73 @@ fn path_resolution_selects_os_and_handles_environment_overrides() {
     );
 }
 
+static UNIX_OVERRIDE_FILE: AgentFile = AgentFile::from_static(
+    "config",
+    FileKind::Yaml,
+    "~/.config/example/config.yaml",
+    "~/.config/example/config.yaml",
+    "~/AppData/Roaming/Example/config.yaml",
+    Some("EXAMPLE_HOME"),
+)
+.with_env_replaces("~/.config")
+.with_env_os(true, true, false);
+static MACOS_OVERRIDE_FILE: AgentFile = AgentFile::from_static(
+    "config",
+    FileKind::Yaml,
+    "~/.config/example/config.yaml",
+    "~/.config/example/config.yaml",
+    "~/.config/example/config.yaml",
+    Some("EXAMPLE_HOME"),
+)
+.with_env_replaces("~/.config")
+.with_env_os(false, true, false);
+
+#[test]
+fn an_override_applies_only_on_the_systems_that_follow_it() {
+    let home = scratch();
+    let absolute = scratch();
+    assert_eq!(PATH_FILE.env_os(), [true; 3]);
+    assert_eq!(UNIX_OVERRIDE_FILE.env_os(), [true, true, false]);
+    let session = Session::new(&*home).with_env("EXAMPLE_HOME", &*absolute);
+    for os in [TargetOs::Linux, TargetOs::Macos] {
+        assert_eq!(
+            resolve(&UNIX_OVERRIDE_FILE, os, &session),
+            absolute.join("example").join("config.yaml")
+        );
+    }
+    assert_eq!(
+        resolve(&UNIX_OVERRIDE_FILE, TargetOs::Windows, &session),
+        home.join("AppData")
+            .join("Roaming")
+            .join("Example")
+            .join("config.yaml")
+    );
+    assert_eq!(
+        resolve(&PATH_FILE, TargetOs::Windows, &session),
+        absolute.join("config.json")
+    );
+    for (os, expected) in [
+        (
+            TargetOs::Linux,
+            home.join(".config").join("example").join("config.yaml"),
+        ),
+        (
+            TargetOs::Macos,
+            absolute.join("example").join("config.yaml"),
+        ),
+        (
+            TargetOs::Windows,
+            home.join(".config").join("example").join("config.yaml"),
+        ),
+    ] {
+        assert_eq!(
+            resolve(&MACOS_OVERRIDE_FILE, os, &session),
+            expected,
+            "{os:?}"
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum OverrideSource {
     NamedSetter,
@@ -618,6 +685,80 @@ fn json_and_model_array_slots_write_raw_values() {
     let value = read_json(&home.join(".array").join("config.json"));
     assert_eq!(value["flag"], serde_json::json!(false));
     assert!(value.get("models").is_none());
+}
+
+static WITH_MODELS_SETS: &[AgentSet] = &[
+    AgentSet::from_static("config", "dynamic", Slot::JsonWithModels("false")),
+    AgentSet::from_static(
+        "config",
+        "models",
+        Slot::ModelArray {
+            fields: ARRAY_FIELDS,
+        },
+    ),
+];
+static WITH_MODELS: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("with-models"),
+    "With Models",
+    "with-models",
+    ARRAY_JSON_FILES,
+    WITH_MODELS_SETS,
+    None,
+    None,
+    Visible::Only(&["a", "b"]),
+    AgentRoute::Gateway,
+    &[],
+);
+static WITH_MODELS_NONE: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("with-models-none"),
+    "With Models None",
+    "with-models-none",
+    ARRAY_JSON_FILES,
+    WITH_MODELS_SETS,
+    None,
+    None,
+    Visible::All,
+    AgentRoute::None,
+    &[],
+);
+
+#[test]
+fn json_with_models_is_written_only_beside_a_listed_model() {
+    for (description, routes, expected) in [
+        (
+            &WITH_MODELS,
+            &["a", "hidden"][..],
+            Some(serde_json::json!(false)),
+        ),
+        (&WITH_MODELS, &["", "hidden"][..], None),
+        (&WITH_MODELS, &[][..], None),
+        (&WITH_MODELS_NONE, &["a"][..], None),
+    ] {
+        let home = scratch();
+        let session = Session::new(&*home);
+        let target = target_with(routes);
+        let agent = Compiled::new(description);
+        agent.apply(&session, &target).expect("apply");
+        let path = home.join(".array").join("config.json");
+        let value = if path.exists() {
+            read_json(&path)
+        } else {
+            serde_json::json!({})
+        };
+        assert_eq!(value.get("dynamic").cloned(), expected, "{routes:?}");
+        assert!(agent.status(&session, &target).expect("status").connected());
+    }
+    // A key left from an earlier listing stays when no model is listed.
+    let home = scratch();
+    let session = Session::new(&*home);
+    let agent = Compiled::new(&WITH_MODELS);
+    agent.apply(&session, &target_with(&["a"])).expect("apply");
+    agent
+        .apply(&session, &target_with(&[]))
+        .expect("apply empty");
+    let value = read_json(&home.join(".array").join("config.json"));
+    assert_eq!(value["dynamic"], serde_json::json!(false));
+    assert_eq!(value["models"], serde_json::json!([]));
 }
 
 static APPEND_OWNER: &[OwnerTest] = &[OwnerTest::prefix("id", "custom:hofund/")];

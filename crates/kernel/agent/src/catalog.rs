@@ -143,7 +143,8 @@ fn builtin_adapter(_id: &str) -> Option<Box<dyn AgentAdapter>> {
 /// Resolves one compiled file location against a session.
 ///
 /// Empty and relative environment overrides are treated as unset, so the
-/// default template is used.
+/// default template is used; so is an override on an OS the file does not
+/// follow it on.
 #[must_use]
 pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
     let template = match os {
@@ -151,7 +152,13 @@ pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
         TargetOs::Macos => file.macos(),
         TargetOs::Windows => file.windows(),
     };
-    let override_value = file.env_override().and_then(|name| {
+    let [linux, macos, windows] = file.env_os();
+    let followed = match os {
+        TargetOs::Linux => linux,
+        TargetOs::Macos => macos,
+        TargetOs::Windows => windows,
+    };
+    let override_value = file.env_override().filter(|_| followed).and_then(|name| {
         session
             .env(name)
             .filter(|value| usable_override(value))
@@ -873,6 +880,7 @@ impl Engine {
                         set.slot,
                         ApiSlot::CatalogModels
                             | ApiSlot::Json(_)
+                            | ApiSlot::JsonWithModels(_)
                             | ApiSlot::ModelArray { .. }
                             | ApiSlot::Append { .. }
                             | ApiSlot::ModelMap { .. }
@@ -970,6 +978,9 @@ impl Engine {
             }
             ApiSlot::CatalogModels if gateway => Some(catalog_models_json(&models)),
             ApiSlot::Json(text) => Some((*text).to_owned()),
+            ApiSlot::JsonWithModels(text) if gateway && models.iter().any(|id| !id.is_empty()) => {
+                Some((*text).to_owned())
+            }
             ApiSlot::ModelArray { fields } if gateway => {
                 Some(model_array_json(&models, fields, target))
             }
