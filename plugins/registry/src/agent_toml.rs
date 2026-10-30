@@ -438,7 +438,11 @@ fn validate_model_array(array: &ModelArray, source: &str, field: &str) -> Result
     for (index, item) in array.fields.iter().enumerate() {
         let item_field = format!("{field}[{index}]");
         if item.key.is_empty() {
-            return Err(error(source, format!("{item_field}.key"), "must not be empty"));
+            return Err(error(
+                source,
+                format!("{item_field}.key"),
+                "must not be empty",
+            ));
         }
         if !keys.insert(item.key.as_str()) {
             return Err(error(
@@ -472,7 +476,9 @@ fn validate_model_array(array: &ModelArray, source: &str, field: &str) -> Result
 
 fn gateway_slot(slot: &SlotToml) -> bool {
     match slot {
-        SlotToml::Name(name) => matches!(name.as_str(), "origin" | "v1" | "token" | "catalog_models"),
+        SlotToml::Name(name) => {
+            matches!(name.as_str(), "origin" | "v1" | "token" | "catalog_models")
+        }
         SlotToml::ModelArray(_) => true,
         _ => false,
     }
@@ -807,7 +813,10 @@ key = "effort"
         );
 
         let cases = [
-            ("{ json = \"nope\" }", "set[0].slot.json: must be valid JSON"),
+            (
+                "{ json = \"nope\" }",
+                "set[0].slot.json: must be valid JSON",
+            ),
             (
                 "{ model_array = { fields = [] } }",
                 "set[0].slot.model_array.fields: must not be empty",

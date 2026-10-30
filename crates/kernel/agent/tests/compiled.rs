@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use hofund_agent::{AgentAdapter, Compiled, GatewayTarget, Session, TargetOs, catalog, resolve};
 use hofund_plugin_api::{
-    AgentDescription, AgentFile, AgentRoute, AgentSet, FileKind, MatchNeedle, ModelField,
-    PluginId, Slot, TierId, Visible,
+    AgentDescription, AgentFile, AgentRoute, AgentSet, FileKind, MatchNeedle, ModelField, PluginId,
+    Slot, TierId, Visible,
 };
 
 static CLAUDE_FILES: &[AgentFile] = &[AgentFile::from_static(
@@ -587,7 +587,8 @@ static ARRAY_NONE: AgentDescription = AgentDescription::from_static(
 #[test]
 fn json_and_model_array_slots_write_raw_values() {
     let target = target_with(&["a", "", "hidden", "b", "a"]);
-    let entry = |id: &str| serde_json::json!({"id": id, "name": "Hofund", "limits": {"context": 8}});
+    let entry =
+        |id: &str| serde_json::json!({"id": id, "name": "Hofund", "limits": {"context": 8}});
 
     let home = scratch();
     let session = Session::new(&*home);

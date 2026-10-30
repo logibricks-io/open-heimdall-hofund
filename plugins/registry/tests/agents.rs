@@ -101,9 +101,6 @@ fn fixture_agents_preserve_files_sets_slots_and_key_files() {
         ModelField::literal("name", "Hofund"),
         ModelField::json("reasoning", "true"),
     ];
-    assert_eq!(
-        yaml.sets()[4].slot(),
-        &Slot::ModelArray { fields: FIELDS }
-    );
+    assert_eq!(yaml.sets()[4].slot(), &Slot::ModelArray { fields: FIELDS });
     assert_eq!(yaml.sets()[5].slot(), &Slot::Json("false"));
 }
