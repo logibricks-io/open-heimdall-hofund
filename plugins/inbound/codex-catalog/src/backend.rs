@@ -4,7 +4,9 @@
 //! `<gateway>/backend-api/codex` and keep that sign-in. Its own models go on
 //! to the ChatGPT backend, their input put right for it first; hofund's
 //! models, the ids with a `/`, are served here, in process, as
-//! `/v1/responses`, and compacted here too. The gateway token never
+//! `/v1/responses`, and compacted here too. So is a turn for one of Codex's
+//! own models when the gateway lists it as `codex/<model>`: that turn runs on
+//! hofund's Codex accounts. The gateway token never
 //! reaches this code: the gateway takes it out first, so what is relayed is
 //! the caller's own sign-in.
 
@@ -33,6 +35,16 @@ const SUMMARY_CAP: usize = 16 * 1024 * 1024;
 /// The message a hofund model's compaction gets.
 pub(crate) const COMPACT_MESSAGE: &str =
     "/responses/compact is not supported for hofund models; use a compaction_trigger on /responses";
+
+/// The header that names one of hofund's Codex accounts.
+pub(crate) const ACCOUNT_HEADER: &str = "x-hofund-account";
+
+/// Where hofund's Codex accounts sit in the gateway's model list: a
+/// route named `codex/<model>` serves Codex's own `<model>`.
+pub(crate) const ACCOUNTS: &str = "codex/";
+
+/// What a relayed turn that names an account gets.
+pub(crate) const ACCOUNT_MESSAGE: &str = "names one of hofund's Codex accounts, and hofund has no codex/<model> route for this model, so the turn would go to the ChatGPT sign-in Codex holds";
 
 /// Where relayed calls go.
 #[derive(Clone, Copy, Debug)]
@@ -84,6 +96,12 @@ pub(crate) async fn serve(
     }
     let compact = rest == "/responses/compact";
     if !get && (compact || rest == "/responses") {
+        if !compact
+            && !api_key(request.headers())
+            && let Some(body) = account_model(kernel, request.body()).await
+        {
+            *request.body_mut() = Body::from(body);
+        }
         if is_hofund_model(request.body()) {
             if compact {
                 return error(400, COMPACT_MESSAGE);
@@ -96,6 +114,9 @@ pub(crate) async fn serve(
                 return summarise(kernel, &request).await;
             }
             return in_process(kernel, &request).await;
+        }
+        if request.headers().contains_key(ACCOUNT_HEADER) {
+            return error(400, &format!("{ACCOUNT_HEADER} {ACCOUNT_MESSAGE}"));
         }
         if let Some(body) = input::for_backend(request.body().bytes()) {
             *request.body_mut() = Body::from(body);
@@ -121,6 +142,23 @@ fn is_hofund_model(body: &Body) -> bool {
         .and_then(|value| value.get("model"))
         .and_then(Value::as_str)
         .is_some_and(|model| model.contains('/'))
+}
+
+/// The body as `codex/<model>` when it names Codex's own `<model>` and the
+/// gateway lists `codex/<model>`: that turn is served by hofund's Codex
+/// accounts. A list that cannot be had leaves the turn to the relay.
+async fn account_model(kernel: &dyn Kernel, body: &Body) -> Option<Vec<u8>> {
+    let mut value: Value = json::from_slice(body.bytes()).ok()?;
+    let model = value.get("model").and_then(Value::as_str)?;
+    if model.is_empty() || model.contains('/') {
+        return None;
+    }
+    let routed = format!("{ACCOUNTS}{model}");
+    if !ids(kernel).await.ok()?.contains(&routed) {
+        return None;
+    }
+    *value.get_mut("model")? = Value::String(routed);
+    Some(value.to_string().into_bytes())
 }
 
 /// An OpenAI-shaped error with `status`.
@@ -426,16 +464,20 @@ async fn read_up_to(mut stream: BodyStream, cap: usize) -> Option<Vec<u8>> {
 /// The base a relayed call to `rest` goes to: the API for an API key,
 /// except the model list, which only the ChatGPT backend has.
 fn base_for(bases: Bases, headers: &HeaderMap, rest: &str) -> &'static str {
-    let api_key = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().strip_prefix("Bearer "))
-        .is_some_and(|token| token.trim_start().starts_with("sk-"));
-    if api_key && rest != "/models" {
+    if api_key(headers) && rest != "/models" {
         bases.api
     } else {
         bases.chatgpt
     }
+}
+
+/// Whether the caller's bearer is an API key (`sk-`).
+fn api_key(headers: &HeaderMap) -> bool {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().strip_prefix("Bearer "))
+        .is_some_and(|token| token.trim_start().starts_with("sk-"))
 }
 
 /// `headers` less the ones a relay does not pass on, and the ones the
