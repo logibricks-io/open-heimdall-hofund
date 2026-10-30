@@ -2,7 +2,7 @@
 
 use hofund_plugin_api::ProtocolId;
 use hofund_plugin_registry::{builtin_protocols, find_preset, model_plan_of, select};
-use hofund_provider::{Credential, ModelPlan, Resolve, Wire, catalog_ids, credential_for, resolve};
+use hofund_provider::{Credential, ModelPlan, Wire, credential_for};
 
 const OVERRIDE: &str = "https://override.example.test/v1";
 
@@ -134,23 +134,11 @@ const ROWS: &[Row] = &[
 ];
 
 #[test]
-fn batch7_rows_live_with_default_wire_factories_and_left_catalog() {
-    let catalog = catalog_ids();
+fn batch7_rows_live_with_default_wire_factories() {
     for row in ROWS {
         let (preset, region) = find_preset(row.id).expect("compiled batch 7 row");
         assert_eq!(preset.plugin, row.plugin);
         assert_eq!(region, None);
-        assert!(!catalog.contains(&row.id), "{}", row.id);
-        let error = resolve(&Resolve {
-            id: row.id,
-            region: None,
-            wire: None,
-            base_url: "",
-            project: "",
-            location: "",
-        })
-        .expect_err("row left the built-in catalog");
-        assert_eq!(error.to_string(), format!("unknown preset `{}`", row.id));
     }
 }
 

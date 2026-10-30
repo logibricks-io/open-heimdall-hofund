@@ -239,6 +239,12 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 - `gateway` and `router` must not depend on `quirks`. They must not name a
   vendor or branch on vendor-specific behavior. Capability gaps and protocol
   deviations live in `quirks` data and in provider adapters.
+- The vendor-name scan (`kernel_crates_do_not_name_vendors` in
+  `xtask/tests/workspace_invariants.rs`) covers every crate under `crates/`
+  except those on `VENDOR_SCAN_PENDING`, which still hold vendor code. That
+  list names whole crates, never lines, and a crate that stops naming a vendor
+  must leave it. Preset rows live only in plugin fragments; a kernel crate may
+  not ship a `presets.toml`.
 - Protocol names (Anthropic Messages, OpenAI Chat Completions, OpenAI Responses,
   and the Generative Language API) belong in `codec`. Naming a protocol there
   is not permission to mention that vendor from `gateway` or `router`.

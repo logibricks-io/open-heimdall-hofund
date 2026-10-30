@@ -22,7 +22,7 @@ use hofund_plugin_host::HttpLimits;
 #[doc(hidden)]
 pub use hofund_gateway::BindHook;
 pub use hofund_gateway::Running;
-use hofund_provider::{Credential, Endpoint, Provider, Wire, resolve};
+use hofund_provider::{Credential, Endpoint, Provider, Wire};
 use hofund_quirks::named;
 use hofund_router::{Cooldowns, FailoverPolicy, Snapshot};
 use hofund_secrets::TokenFile;
@@ -1409,6 +1409,12 @@ fn compiled_credential(
     ))
 }
 
+/// Every preset row is a compiled fragment, so a preset id the registry does
+/// not know has no other source.
+fn unknown_preset(preset: &str) -> DaemonError {
+    DaemonError::new(format!("unknown preset `{preset}`"))
+}
+
 fn served_for(plugin: &str, protocols: &[ProtocolId]) -> Result<Vec<ProtocolId>, DaemonError> {
     if protocols.is_empty() {
         return Err(DaemonError::new(format!(
@@ -1469,7 +1475,7 @@ fn plan_using(
             &provider.base_url,
         )
         .map_err(show)?;
-        // Same as `resolve`: the credential follows the final base, so a
+        // The credential follows the final base, so a
         // `base_url` override applies its host rules.
         let credential = if builtin {
             hofund_provider::credential_for(compiled.id, selection.wire, &selection.base_url)
@@ -1484,21 +1490,7 @@ fn plan_using(
         });
     }
     if let Some(preset) = &provider.preset {
-        let resolved = resolve(&hofund_provider::Resolve {
-            id: preset,
-            region: option_present(provider, "region")?,
-            wire: selected.map(|(_, wire)| wire),
-            base_url: &provider.base_url,
-            project: option(provider, "project")?,
-            location: option(provider, "location")?,
-        })
-        .map_err(show)?;
-        return Ok(Planned {
-            protocol: registry::protocol_for(resolved.wire),
-            base_url: resolved.base_url,
-            wire: resolved.wire,
-            credential: resolved.credential,
-        });
+        return Err(unknown_preset(preset));
     }
     let wire = selected.map(|(_, wire)| wire).ok_or_else(|| {
         DaemonError::new(format!(

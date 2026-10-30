@@ -439,6 +439,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The vendor-name scan covers every kernel crate under `crates/` except a
+  short, checked list of crates that still hold vendor code (I). A crate on
+  that list fails the scan's own test once it stops naming a vendor, so the
+  list only shrinks. Kernel crates may not ship a `presets.toml`.
 - `hofund serve` runs `hofundd`: the one beside `hofund` first, then the
   first on `PATH`, with `--config` set to the resolved config path. On Unix
   the CLI process becomes `hofundd`; on Windows the CLI waits and exits with
@@ -593,6 +597,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The kernel preset catalog (I). `crates/provider/presets.toml` is gone, and
+  `hofund-provider` no longer exports `resolve`, `Resolve`, `Resolved`,
+  `PresetError`, `model_plan`, `catalog_ids`, or `catalog_commit`. Every
+  preset row is a compiled plugin fragment; the registry still lists the same
+  59 presets (the 58 reference presets plus the `relay` plugin's row) and four
+  aliases. A preset id no fragment owns still fails with
+  ``unknown preset `<id>` ``.
 - `hofund serve --in-process` (L8e). `hofund serve` always runs `hofundd`.
 
 ### Security

@@ -345,9 +345,9 @@ fn copied_fragment_row_resolves_identically() {
 }
 
 fn assert_wires_and_ids(presets: &[CompiledPreset], aliases: &[CompiledAlias]) {
-    let catalog: BTreeSet<&str> = hofund_provider::catalog_ids().into_iter().collect();
+    let mut ids = BTreeSet::new();
     for preset in presets {
-        assert!(!catalog.contains(preset.id), "duplicate {}", preset.id);
+        assert!(ids.insert(preset.id), "duplicate {}", preset.id);
         let served = if hofund_plugin_registry::builtin_factory_ids().contains(&preset.plugin) {
             hofund_plugin_registry::builtin_protocols()
         } else {
@@ -383,18 +383,18 @@ fn assert_wires_and_ids(presets: &[CompiledPreset], aliases: &[CompiledAlias]) {
         }
     }
     for alias in aliases {
-        assert!(!catalog.contains(alias.id), "duplicate {}", alias.id);
+        assert!(ids.insert(alias.id), "duplicate {}", alias.id);
     }
 }
 
 #[test]
-fn compiled_wires_are_served_and_ids_do_not_collide_with_the_catalog() {
+fn compiled_wires_are_served_and_ids_are_unique() {
     assert_wires_and_ids(compiled_presets(), compiled_aliases());
 }
 
 #[cfg(feature = "test-fixtures")]
 #[test]
-fn fixture_wires_are_served_and_ids_do_not_collide_with_the_catalog() {
+fn fixture_wires_are_served_and_ids_are_unique() {
     assert_wires_and_ids(fixture_presets(), fixture_aliases());
 }
 
@@ -607,7 +607,6 @@ fn the_remote_gateway_row_takes_the_callers_address_on_each_protocol() {
     assert_eq!(row.kind, "remote");
     assert_eq!(row.endpoint, "http://192.168.1.20:3425");
     assert!(!row.no_list);
-    assert!(!hofund_provider::catalog_ids().contains(&"remote-gateway"));
     let served = factory("remote-gateway")
         .expect("remote-gateway factory")
         .spec()
