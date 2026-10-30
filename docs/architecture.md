@@ -25,6 +25,11 @@ Sibling repositories:
 - [`logibricks-io/open-heimdall`](https://github.com/logibricks-io/open-heimdall) — the gate between your applications and intelligence
 - [`logibricks-io/open-heimdall-kernel`](https://github.com/logibricks-io/open-heimdall-kernel) — a Rust gateway using hexagonal architecture
 
+Kernel library crates live at `crates/kernel/<name>`. `crates/control-proto`
+and `crates/control-client` are shared by the kernel and the shells, so they
+stay beside it in `crates/`. The binaries are under `apps/`: `apps/cli`
+(`hofund`), `apps/hofundd` and `apps/desktop`.
+
 The menu-bar app lives at `apps/desktop` (Tauri v2, package `hofund-desktop`).
 Nothing in `crates/` depends on it. It depends on `hofund-daemon` and
 `hofund-agent`.
@@ -273,8 +278,9 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
   deviations live in `quirks` data and in provider adapters.
 - The vendor-name scan (`kernel_crates_do_not_name_vendors` in
   `xtask/tests/workspace_invariants.rs`) covers every crate under `crates/`
-  except those on `VENDOR_SCAN_PENDING`, which still hold vendor code. Shells
-  under `apps/` (the `hofund` CLI, `hofundd`, the desktop) are not scanned. That
+  and `crates/kernel/` except those on `VENDOR_SCAN_PENDING`, which still
+  hold vendor code. Shells under `apps/` (the `hofund` CLI, `hofundd`, the
+  desktop) are not scanned. That
   list names whole crates, never lines, and a crate that stops naming a vendor
   must leave it. Preset rows live only in plugin fragments; a kernel crate may
   not ship a `presets.toml`.
@@ -334,7 +340,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 keyed by stable `MemberId`, not a process-global counter. The daemon membership
 table owns one shared book and injects it into every published `Router`, so
 cooldowns and failure ladders survive `Snapshot::store`. The default policy in
-`crates/router/src/cooldown.rs` covers generic and rate-limit ladders,
+`crates/kernel/router/src/cooldown.rs` covers generic and rate-limit ladders,
 `Retry-After` hints, quota and credit rests, passive observations, and timed
 panic rests. Non-positive header hints are absent, and positive header hints
 are capped at one hour for every failure cause. A passive observation rests a

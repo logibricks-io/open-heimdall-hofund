@@ -68,7 +68,7 @@ Spine, each crate depending only downward:
 - `agent` depends on `config` and `plugin-api`. Never on `gateway`, `router`,
   `provider`, `codec`, or `daemon`. Only the three kits depend on
   `plugin-host`.
-- Vendor names must never appear in `crates/gateway` or `crates/router`.
+- Vendor names must never appear in `crates/kernel/gateway` or `crates/kernel/router`.
   Quirks live in `quirks` data and in provider adapters. Protocol names belong
   in `codec`.
 - Only `gateway` may depend on axum, tower, or hyper, and only when a task

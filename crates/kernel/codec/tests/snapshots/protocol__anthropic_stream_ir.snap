@@ -1,0 +1,115 @@
+---
+source: crates/kernel/codec/tests/protocol.rs
+expression: pretty_value!(&events)
+---
+[
+  {
+    "type": "message_start",
+    "id": "msg_1",
+    "model": "claude-sonnet-4-5",
+    "usage": {
+      "input_tokens": 25,
+      "output_tokens": 0
+    },
+    "extensions": {
+      "provider_meta": {
+        "region": "us"
+      }
+    }
+  },
+  {
+    "type": "content_block_start",
+    "index": 0,
+    "block": {
+      "type": "thinking"
+    }
+  },
+  {
+    "type": "thinking_delta",
+    "index": 0,
+    "text": "Check the tool."
+  },
+  {
+    "type": "signature_delta",
+    "index": 0,
+    "signature": "sig_1"
+  },
+  {
+    "type": "content_block_stop",
+    "index": 0
+  },
+  {
+    "type": "content_block_start",
+    "index": 1,
+    "block": {
+      "type": "text"
+    }
+  },
+  {
+    "type": "text_delta",
+    "index": 1,
+    "text": "I'll look that up."
+  },
+  {
+    "type": "content_block_stop",
+    "index": 1
+  },
+  {
+    "type": "content_block_start",
+    "index": 2,
+    "block": {
+      "type": "tool_call",
+      "id": "toolu_1",
+      "name": "get_weather"
+    }
+  },
+  {
+    "type": "tool_arguments_delta",
+    "index": 2,
+    "partial_json": "{\"city\":"
+  },
+  {
+    "type": "tool_arguments_delta",
+    "index": 2,
+    "partial_json": "\"Paris\"}"
+  },
+  {
+    "type": "content_block_stop",
+    "index": 2
+  },
+  {
+    "type": "content_block_start",
+    "index": 3,
+    "block": {
+      "type": "thinking",
+      "redacted": true,
+      "data": "redacted_blob"
+    }
+  },
+  {
+    "type": "content_block_stop",
+    "index": 3
+  },
+  {
+    "type": "message_delta",
+    "stop": {
+      "reason": "tool_use"
+    },
+    "usage": {
+      "output_tokens": 12
+    }
+  },
+  {
+    "type": "message_stop"
+  },
+  {
+    "type": "ping"
+  },
+  {
+    "type": "unknown",
+    "name": "citation",
+    "payload": {
+      "title": "Guide"
+    }
+  }
+]

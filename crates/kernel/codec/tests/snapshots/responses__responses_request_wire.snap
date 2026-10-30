@@ -1,0 +1,88 @@
+---
+source: crates/kernel/codec/tests/responses.rs
+expression: pretty_json(&encoded)
+---
+{
+  "model": "gpt-4.1",
+  "instructions": "Be brief.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Weather?"
+        },
+        {
+          "type": "input_image",
+          "image_url": "https://example.com/a.png",
+          "detail": "low"
+        }
+      ]
+    },
+    {
+      "content": [
+        {
+          "type": "reasoning_text",
+          "text": "look up"
+        }
+      ],
+      "encrypted_content": "seal",
+      "type": "reasoning"
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Checking."
+        }
+      ]
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_1",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Paris\"}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_1",
+      "output": "rain"
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Use metric."
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "get_weather",
+      "description": "Weather",
+      "parameters": {
+        "type": "object"
+      },
+      "strict": true
+    }
+  ],
+  "tool_choice": {
+    "type": "function",
+    "name": "get_weather"
+  },
+  "max_output_tokens": 128,
+  "temperature": 0.2,
+  "top_p": 0.9,
+  "store": true,
+  "metadata": {
+    "user": "u1"
+  }
+}

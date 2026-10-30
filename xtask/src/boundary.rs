@@ -1316,7 +1316,7 @@ fn target_root_errors(meta: &Metadata, package_dir: &Path) -> Vec<String> {
 /// each of the plugin's own targets is parsed. A listed file inside the
 /// package `src/` directory is lexed, whatever its extension. A file that will
 /// not lex is rejected. A plugin has no build script, so a listed path in the
-/// build directory, under `crates/plugin-api` or `crates/plugin-sdk`, or
+/// build directory, under `crates/kernel/plugin-api` or `crates/kernel/plugin-sdk`, or
 /// anywhere else outside `src/` is rejected. The workspace `Cargo.toml`,
 /// `Cargo.lock`, and `xtask/plugin-boundary/clippy.toml` are Clippy rebuild
 /// inputs and are ignored. Paths are classified without following symlinks.
@@ -1415,7 +1415,7 @@ enum Listed {
 
 /// A plugin target's dep-info may name files inside `src/`, or three Clippy
 /// rebuild inputs. Every other existing path, including the build directory
-/// and `crates/plugin-api` / `crates/plugin-sdk`, is outside `src/`.
+/// and `crates/kernel/plugin-api` / `crates/kernel/plugin-sdk`, is outside `src/`.
 fn classify_listed(path: &Path, package_dir: &Path, workspace: &Path) -> Listed {
     if is_rebuild_input(path, workspace) {
         return Listed::Ignored;
@@ -1978,7 +1978,8 @@ cc = "1"
         super::link_allowance(&workspace, "hofund-plugin-fixture").expect("fixture closure");
         let ids = super::link_ids(&workspace, "hofund-plugin-fixture").expect("ids");
         assert!(
-            ids.iter().any(|id| id.contains("crates/plugin-api#")),
+            ids.iter()
+                .any(|id| id.contains("crates/kernel/plugin-api#")),
             "the workspace api id is required, got {ids:?}"
         );
         // `quote` and `syn` stay reachable through `thiserror`'s proc-macro.
@@ -2250,7 +2251,7 @@ cc = "1"
         )
         .expect("manifest");
         std::fs::write(package.join("src/lib.rs"), "fn clean() {}\n").expect("lib");
-        let allowed = root.join("crates/plugin-api/sneak.txt");
+        let allowed = root.join("crates/kernel/plugin-api/sneak.txt");
         std::fs::create_dir_all(allowed.parent().expect("parent")).expect("api");
         std::fs::write(&allowed, "#[cfg(not(clippy))]\nfn sneak() {}\n").expect("allowed");
         let clippy_toml = root.join("xtask/plugin-boundary/clippy.toml");
@@ -2364,7 +2365,7 @@ plugins/providers/fixture/src/lib.rs:\n\
             "{absolute:?}"
         );
         let api = super::scan_source(
-            "::core::include!(\"../../../../crates/plugin-api/notes/evil.rs\");\n",
+            "::core::include!(\"../../../../crates/kernel/plugin-api/notes/evil.rs\");\n",
         );
         assert!(api.iter().any(|hit| hit.contains("leaves src")), "{api:?}");
         let renamed = super::scan_source("use std::include as sneak;\nsneak!(\"../out.rs\");\n");

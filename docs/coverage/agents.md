@@ -1,7 +1,7 @@
 # hofund coverage: coding-agent adapters
 
 - magpie source: https://github.com/yetone/magpie at `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947` (commit date 2026-10-25 16:19 SGT)
-- hofund checked: `logibricks-io/open-heimdall-hofund` at `62242e3a5674be349fffcf0f93e31844623ef889`, file `crates/agent/src/catalog.rs`
+- hofund checked: `logibricks-io/open-heimdall-hofund` at `62242e3a5674be349fffcf0f93e31844623ef889`, file `crates/kernel/agent/src/catalog.rs`
 - Date checked: 2026-10-25
 - Source of the list: `builtins(home, xdg)` in `internal/agent/agents.go` (65 entries; matches the README agent list).
 - Paths: Linux form with `~` = home unless noted; "same relative path" means `~` resolves to %USERPROFILE% on Windows. Env overrides in parentheses.

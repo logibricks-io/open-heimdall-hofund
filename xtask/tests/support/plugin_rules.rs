@@ -34,9 +34,9 @@ fn scratch() -> PathBuf {
 fn plugin_seam_matches_the_contract() {
     let root = workspace_root();
     for (name, relative_path) in [
-        ("hofund-plugin-api", "crates/plugin-api/src/lib.rs"),
-        ("hofund-plugin-sdk", "crates/plugin-sdk/src/lib.rs"),
-        ("hofund-plugin-host", "crates/plugin-host/src/lib.rs"),
+        ("hofund-plugin-api", "crates/kernel/plugin-api/src/lib.rs"),
+        ("hofund-plugin-sdk", "crates/kernel/plugin-sdk/src/lib.rs"),
+        ("hofund-plugin-host", "crates/kernel/plugin-host/src/lib.rs"),
     ] {
         let source = read_to_string(&root.join(relative_path));
         assert!(
@@ -48,8 +48,8 @@ fn plugin_seam_matches_the_contract() {
             "{name} must deny unreachable_pub in an inner attribute, not a comment"
         );
     }
-    let sdk = read_to_string(&root.join("crates/plugin-sdk/src/lib.rs"));
-    let api = read_to_string(&root.join("crates/plugin-api/src/lib.rs"));
+    let sdk = read_to_string(&root.join("crates/kernel/plugin-sdk/src/lib.rs"));
+    let api = read_to_string(&root.join("crates/kernel/plugin-api/src/lib.rs"));
     assert!(
         sdk.contains("pub use tracing"),
         "the SDK re-exports tracing so a plugin does not depend on it"
@@ -67,7 +67,8 @@ fn plugin_seam_matches_the_contract() {
         "hofund_plugin_api::kernel stays private, so a macro splice cannot name it"
     );
     assert!(
-        root.join("crates/plugin-api/public-api.txt").is_file(),
+        root.join("crates/kernel/plugin-api/public-api.txt")
+            .is_file(),
         "the public API snapshot is missing"
     );
 
@@ -116,8 +117,8 @@ fn plugin_seam_matches_the_contract() {
         if rel.starts_with("target/") {
             continue;
         }
-        let in_host_stack = rel.starts_with("crates/plugin-api/")
-            || rel.starts_with("crates/plugin-host/")
+        let in_host_stack = rel.starts_with("crates/kernel/plugin-api/")
+            || rel.starts_with("crates/kernel/plugin-host/")
             || rel.starts_with("kits/")
             || rel.starts_with("xtask/");
         if in_host_stack {
@@ -127,7 +128,7 @@ fn plugin_seam_matches_the_contract() {
             violations.push(format!("{rel} {hit}"));
         }
     }
-    for path in rust_files(&root.join("crates/router")) {
+    for path in rust_files(&root.join("crates/kernel/router")) {
         let text = read_to_string(&path);
         for word in ["UpstreamProvider", "HostContext", "Subscription"] {
             if super::contains_word(&text, word) {
@@ -904,7 +905,7 @@ fast = ["dep:api/kernel"]
         ),
         (
             "apiinc",
-            "::core::include!(\"../../../../crates/plugin-api/notes/evil.rs\");\nfn clean() {}\n"
+            "::core::include!(\"../../../../crates/kernel/plugin-api/notes/evil.rs\");\nfn clean() {}\n"
                 .to_owned(),
             "plugin-api/notes/evil.rs",
         ),

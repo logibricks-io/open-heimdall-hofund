@@ -1,0 +1,43 @@
+---
+source: crates/kernel/codec/tests/protocol.rs
+expression: pretty_json(&encoded)
+---
+{
+  "id": "chatcmpl-1",
+  "object": "chat.completion",
+  "model": "gpt-4o",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "I'll look that up.",
+        "reasoning_content": "Check the tool.",
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Paris\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 12,
+    "total_tokens": 37,
+    "prompt_tokens_details": {
+      "cached_tokens": 4
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 3
+    }
+  },
+  "system_fingerprint": "fp_1",
+  "created": 1710000000
+}
