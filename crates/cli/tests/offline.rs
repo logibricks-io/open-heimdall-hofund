@@ -102,7 +102,14 @@ struct Scratch {
 
 impl Scratch {
     fn new(listen: &str, extra: &str) -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
+        // Under /tmp so the control socket path stays within the Unix
+        // socket length limit (104 bytes on macOS, whose default temporary
+        // directory is long); a daemon that cannot bind it falls back to
+        // the fixed default TCP control address, which parallel tests share.
+        let dir = tempfile::Builder::new()
+            .prefix("hf")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         let root = fs::canonicalize(dir.path()).expect("canonical");
         let config = root.join("cfg").join("hofund.toml");
         let run = root.join("run");
