@@ -1,0 +1,9 @@
+providers:
+  hofund:
+    name: hofund
+    base_url: "http://127.0.0.1:3425/v1"
+    api_key: old-token
+    api_mode: chat_completions
+    models:
+      - id: route-a
+      - id: route-b

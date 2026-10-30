@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent descriptions can edit YAML files (G1): `kind = "yaml"` in an
   `agent.toml` file entry. Edits re-emit the file, so comments and layout are
   not kept; disconnecting restores the original bytes from the backup.
+- Hermes Agent (G3): `hofund agent connect hermes` writes `providers.hofund`
+  (name, `base_url` with `/v1`, `api_key`, `api_mode` `chat_completions`, and
+  one `models` row per route) to `~/.hermes/config.yaml`
+  (`%LOCALAPPDATA%\hermes\config.yaml` on Windows). It does not pick a model
+  or honor `HERMES_HOME` yet (#411, #412), and YAML comments are not kept
+  (#414).
 - Pi agent (G3): `hofund agent connect pi` writes `providers.hofund` (name,
   `baseUrl` with `/v1`, `api` `openai-completions`, `apiKey`, session affinity
   headers on, and one `models` entry per route) to `~/.pi/agent/models.json`,

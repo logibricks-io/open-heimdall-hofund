@@ -1,0 +1,12 @@
+# my hermes setup
+model:
+  provider: openrouter
+  default: anthropic/claude-sonnet-4
+providers:
+  local:
+    base_url: http://localhost:8080/v1
+    models:
+      - qwen3
+toolsets:
+  - web
+  - terminal
