@@ -68,6 +68,7 @@ struct FakeStore {
     writes: AtomicUsize,
     deletes: AtomicUsize,
     broken: AtomicBool,
+    locked_delete: AtomicBool,
 }
 
 impl FakeStore {
@@ -117,6 +118,9 @@ impl CredentialStore for FakeStore {
 
     fn delete(&self, item: &Credential) -> Result<(), CredentialError> {
         self.check()?;
+        if self.locked_delete.load(Ordering::SeqCst) {
+            return Err(CredentialError::new("delete denied"));
+        }
         self.deletes.fetch_add(1, Ordering::SeqCst);
         self.lock().remove(item.url());
         Ok(())
@@ -339,6 +343,47 @@ fn without_a_store_connect_fails_before_writing_files() {
     );
     let outcome = agent.disconnect(&session, false).expect("disconnect");
     assert!(!outcome.changed());
+
+    // A connection made where a store exists is not reported without one.
+    let store = Arc::new(FakeStore::default());
+    let with_store = Session::new(&*home).with_credential_store(store);
+    agent.apply(&with_store, &local()).expect("apply");
+    assert!(
+        agent
+            .status(&with_store, &local())
+            .expect("status")
+            .connected()
+    );
+    assert!(
+        !agent
+            .status(&session, &local())
+            .expect("status")
+            .connected()
+    );
+}
+
+#[test]
+fn a_store_that_refuses_the_delete_keeps_the_record_for_a_retry() {
+    let (home, store, session) = setup();
+    let agent = Compiled::new(&KEYED);
+    agent.apply(&session, &local()).expect("apply");
+    store.locked_delete.store(true, Ordering::SeqCst);
+    let outcome = agent.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.changed(), "files are still restored");
+    assert_eq!(outcome.warnings().len(), 1, "{:?}", outcome.warnings());
+    assert!(
+        outcome.warnings()[0].contains("delete denied"),
+        "{:?}",
+        outcome.warnings()
+    );
+    assert!(!settings(&home).exists());
+    assert!(record(&home).exists(), "kept for a retry");
+    assert_eq!(store.secret(URL).as_deref(), Some(TOKEN));
+
+    store.locked_delete.store(false, Ordering::SeqCst);
+    assert!(agent.disconnect(&session, false).expect("retry").changed());
+    assert_eq!(store.secret(URL), None);
+    assert!(!record(&home).exists());
 }
 
 #[test]
