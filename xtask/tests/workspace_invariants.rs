@@ -14,10 +14,10 @@ mod plugin_rules;
 /// Workspace-relative paths of every Cargo package, in the same order as the
 /// root `[workspace] members` list is asserted below.
 const MEMBERS: &[&str] = &[
+    "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
     "crates/agent",
-    "crates/cli",
     "crates/codec",
     "crates/config",
     "crates/control-client",
@@ -257,8 +257,6 @@ const VENDOR_NAMES: &[&str] = &[
 const VENDOR_SCAN_PENDING: &[&str] = &[
     // Agent integrations still compiled into the kernel.
     "crates/agent",
-    // CLI help and sign-in commands name agents and subscriptions.
-    "crates/cli",
     // Protocol codecs are named after the protocols they translate.
     "crates/codec",
     // Old vendor keys still parse for one release (RFC 0001 row B2).

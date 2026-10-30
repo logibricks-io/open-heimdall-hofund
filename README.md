@@ -56,7 +56,7 @@ into the same directory; `hofund serve` runs the `hofundd` beside it, or the
 first one on `PATH`:
 
 ```sh
-cargo install --path crates/cli --locked
+cargo install --path apps/cli --locked
 cargo install --path apps/hofundd --locked
 ```
 

@@ -273,7 +273,8 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
   deviations live in `quirks` data and in provider adapters.
 - The vendor-name scan (`kernel_crates_do_not_name_vendors` in
   `xtask/tests/workspace_invariants.rs`) covers every crate under `crates/`
-  except those on `VENDOR_SCAN_PENDING`, which still hold vendor code. That
+  except those on `VENDOR_SCAN_PENDING`, which still hold vendor code. Shells
+  under `apps/` (the `hofund` CLI, `hofundd`, the desktop) are not scanned. That
   list names whole crates, never lines, and a crate that stops naming a vendor
   must leave it. Preset rows live only in plugin fragments; a kernel crate may
   not ship a `presets.toml`.
@@ -323,7 +324,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `usage` | Request and token usage records. |
 | `daemon` | The daemon library. Wires config, secrets, the gateway, and the control plane around an injected `DaemonRegistry`. |
 | `hofundd` | The `hofundd` binary and process composition root. Links the plugin registry, owns the runtime, logging, signals, and drain. |
-| `cli` | The `hofund` binary. `hofund serve` runs `hofundd`. Runtime commands go to the running daemon over the control plane, or to one-shot `hofundd` when none runs. |
+| `cli` | The `hofund` binary at `apps/cli`, a shell like the desktop. `hofund serve` runs `hofundd`. Runtime commands go to the running daemon over the control plane, or to one-shot `hofundd` when none runs. |
 | `desktop` | Menu-bar shell at `apps/desktop`. Renders status and calls the daemon and the agent adapters. |
 | `xtask` | Local workspace tasks and the architecture tests. |
 

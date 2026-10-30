@@ -37,7 +37,7 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 在本仓库中构建 `hofund` 命令：
 
 ```sh
-cargo install --path crates/cli --locked
+cargo install --path apps/cli --locked
 cargo install --path apps/hofundd --locked
 ```
 

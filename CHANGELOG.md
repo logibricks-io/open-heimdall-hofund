@@ -516,6 +516,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The CLI crate (`hofund-cli`, binary `hofund`) moved from `crates/cli` to
+  `apps/cli` (RFC 0001 row J). Install with
+  `cargo install --path apps/cli --locked`. Nothing else changed.
 - The vendor-name scan covers every kernel crate under `crates/` except a
   short, checked list of crates that still hold vendor code (I). A crate on
   that list fails the scan's own test once it stops naming a vendor, so the

@@ -219,7 +219,7 @@ zip's `.sha256` and the manifest hash before the installer job.
 ## Local build
 
 ```sh
-cargo install --path crates/cli --locked
+cargo install --path apps/cli --locked
 cargo install --path apps/hofundd --locked
 cargo build -p hofund-desktop
 ```
