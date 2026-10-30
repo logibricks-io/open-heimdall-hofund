@@ -1,0 +1,32 @@
+{
+  "providers": {
+    "hofund": {
+      "name": "hofund",
+      "baseUrl": "http://127.0.0.1:3425/v1",
+      "api": "openai-completions",
+      "apiKey": "old-token",
+      "compat": {
+        "sendSessionAffinityHeaders": true,
+        "supportsDeveloperRole": false
+      },
+      "models": [
+        {
+          "id": "route-a",
+          "name": "route-a",
+          "reasoning": false
+        },
+        {
+          "id": "route-b",
+          "name": "route-b",
+          "reasoning": false
+        }
+      ],
+      "headers": {
+        "x-keep": "keep"
+      }
+    },
+    "other": {
+      "baseUrl": "https://other.example/v1"
+    }
+  }
+}
