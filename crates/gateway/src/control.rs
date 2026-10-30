@@ -28,13 +28,11 @@ use hofund_control_proto::{
     ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
     TokenRotateRequest, TokenRotateResponse, Topic, UsageQuery, UsageResponse, decode_request,
 };
-#[cfg(unix)]
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
-#[cfg(unix)]
 use tower::Service;
 
 use super::{GatewayError, Running, TokenState, tokens_match};
@@ -338,6 +336,48 @@ impl Control {
             // control error envelope.
             .layer(DefaultBodyLimit::disable())
             .layer(middleware::from_fn_with_state(state, pre_route))
+    }
+
+    /// Serves the control routes on one trusted connection until the peer
+    /// closes it.
+    ///
+    /// The peer is the process that started this one and owns both ends of
+    /// `io`, as with a one-shot `hofundd` on its standard input and output.
+    /// Each request is therefore sent with the current token in place of any
+    /// `Authorization` header it carried; the `hofund-control` host, origin,
+    /// content-type, and size checks still apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns the connection error when HTTP framing fails.
+    pub async fn serve_trusted<IO>(self, io: IO) -> std::io::Result<()>
+    where
+        IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let tokens = Arc::clone(&self.inner.tokens);
+        let router = self.router(None);
+        let service = hyper::service::service_fn(
+            move |request: axum::http::Request<hyper::body::Incoming>| {
+                let mut router = router.clone();
+                let bearer = header::HeaderValue::from_str(&format!("Bearer {}", tokens.current()));
+                async move {
+                    let mut request = request.map(Body::new);
+                    match bearer {
+                        Ok(bearer) => {
+                            request.headers_mut().insert(header::AUTHORIZATION, bearer);
+                        }
+                        Err(_) => {
+                            request.headers_mut().remove(header::AUTHORIZATION);
+                        }
+                    }
+                    router.call(request).await
+                }
+            },
+        );
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(io), service)
+            .await
+            .map_err(std::io::Error::other)
     }
 
     /// Binds a numeric loopback address and serves only control routes.

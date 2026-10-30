@@ -13,15 +13,19 @@ use tracing_subscriber::fmt::MakeWriter;
 /// The environment variable that sets the most detailed level written.
 pub(crate) const LOG_ENV: &str = "HOFUND_LOG";
 
-/// The level written when [`LOG_ENV`] is unset or empty.
-const DEFAULT_LEVEL: LevelFilter = LevelFilter::INFO;
+/// The level the daemon writes when [`LOG_ENV`] is unset or empty.
+pub(crate) const DEFAULT_LEVEL: LevelFilter = LevelFilter::INFO;
+
+/// The level `hofundd one-shot` writes when [`LOG_ENV`] is unset or empty, so
+/// a CLI command shows only warnings and errors.
+pub(crate) const ONE_SHOT_LEVEL: LevelFilter = LevelFilter::WARN;
 
 /// Reads the level from `value`: one of `off`, `error`, `warn`, `info`,
-/// `debug`, or `trace`, in any case. Unset or empty selects `info`. Anything
-/// else is an error that names the accepted values.
-pub(crate) fn level(value: Option<&str>) -> Result<LevelFilter, String> {
+/// `debug`, or `trace`, in any case. Unset or empty selects `default`.
+/// Anything else is an error that names the accepted values.
+pub(crate) fn level(value: Option<&str>, default: LevelFilter) -> Result<LevelFilter, String> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(DEFAULT_LEVEL);
+        return Ok(default);
     };
     value.parse::<LevelFilter>().map_err(|_| {
         format!("{LOG_ENV}={value} is not a level; use off, error, warn, info, debug, or trace")
@@ -91,14 +95,23 @@ mod tests {
     }
 
     #[test]
-    fn levels_parse_with_info_as_the_default() {
-        assert_eq!(level(None), Ok(LevelFilter::INFO));
-        assert_eq!(level(Some("")), Ok(LevelFilter::INFO));
-        assert_eq!(level(Some("  ")), Ok(LevelFilter::INFO));
-        assert_eq!(level(Some("warn")), Ok(LevelFilter::WARN));
-        assert_eq!(level(Some(" DEBUG ")), Ok(LevelFilter::DEBUG));
-        assert_eq!(level(Some("off")), Ok(LevelFilter::OFF));
-        let error = level(Some("loud")).expect_err("not a level");
+    fn levels_parse_with_the_given_default() {
+        assert_eq!(DEFAULT_LEVEL, LevelFilter::INFO);
+        assert_eq!(ONE_SHOT_LEVEL, LevelFilter::WARN);
+        assert_eq!(level(None, LevelFilter::INFO), Ok(LevelFilter::INFO));
+        assert_eq!(level(None, LevelFilter::WARN), Ok(LevelFilter::WARN));
+        assert_eq!(level(Some(""), LevelFilter::INFO), Ok(LevelFilter::INFO));
+        assert_eq!(level(Some("  "), LevelFilter::WARN), Ok(LevelFilter::WARN));
+        assert_eq!(
+            level(Some("warn"), LevelFilter::INFO),
+            Ok(LevelFilter::WARN)
+        );
+        assert_eq!(
+            level(Some(" DEBUG "), LevelFilter::WARN),
+            Ok(LevelFilter::DEBUG)
+        );
+        assert_eq!(level(Some("off"), LevelFilter::INFO), Ok(LevelFilter::OFF));
+        let error = level(Some("loud"), LevelFilter::INFO).expect_err("not a level");
         assert!(error.contains("HOFUND_LOG=loud"), "{error}");
         assert!(
             error.contains("off, error, warn, info, debug, or trace"),

@@ -57,7 +57,12 @@ const MEMBERS: &[&str] = &[
 fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &["hofund-config", "hofund-plugin-api"],
-        "hofund-cli" => &["hofund-agent", "hofund-daemon"],
+        "hofund-cli" => &[
+            "hofund-config",
+            "hofund-control-client",
+            "hofund-daemon",
+            "hofund-secrets",
+        ],
         "hofund-codec" => &["hofund-ir"],
         "hofund-config" => &[],
         "hofund-control-client" => &["hofund-control-proto"],

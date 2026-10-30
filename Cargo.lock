@@ -1661,8 +1661,11 @@ dependencies = [
 name = "hofund-cli"
 version = "0.1.0"
 dependencies = [
- "hofund-agent",
+ "chrono",
+ "hofund-config",
+ "hofund-control-client",
  "hofund-daemon",
+ "hofund-secrets",
  "tempfile",
  "tokio",
 ]

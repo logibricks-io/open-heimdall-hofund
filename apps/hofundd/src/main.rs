@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use tracing::level_filters::LevelFilter;
+
 use hofund_daemon::{
     DaemonError, StartOptions, Termination, TolerantWriter, finish, serve_until_signal,
     start_linked, user_config_path,
@@ -23,9 +25,13 @@ const USAGE: &str = "\
 hofundd — the hofund daemon
 
 Usage: hofundd [--config <path>]
+       hofundd one-shot [--config <path>]
 
 Serves the configuration until a termination signal, with local control
 enabled. Without --config, HOFUND_CONFIG or the per-user default is used.
+
+`one-shot` answers control requests for the configuration on standard input
+and output without serving it; the hofund CLI uses it when no daemon runs.
 
 Options:
   --config <path>  The configuration file
@@ -33,7 +39,8 @@ Options:
   -V, --version    Show the version
 
 Environment:
-  HOFUND_LOG       off, error, warn, info (default), debug, or trace
+  HOFUND_LOG       off, error, warn, info (default; warn for one-shot),
+                   debug, or trace
 ";
 
 /// What the command line asks for.
@@ -42,11 +49,13 @@ enum Command {
     Help,
     Version,
     Serve(Option<PathBuf>),
+    OneShot(Option<PathBuf>),
 }
 
 fn parse(args: &[OsString]) -> Result<Command, String> {
     let mut config = None;
-    let mut words = args.iter();
+    let one_shot = args.first().and_then(|word| word.to_str()) == Some("one-shot");
+    let mut words = args.iter().skip(usize::from(one_shot));
     while let Some(word) = words.next() {
         match word.to_str() {
             Some("-h" | "--help") => return Ok(Command::Help),
@@ -68,7 +77,11 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
             }
         }
     }
-    Ok(Command::Serve(config))
+    Ok(if one_shot {
+        Command::OneShot(config)
+    } else {
+        Command::Serve(config)
+    })
 }
 
 fn say(mut sink: impl Write, line: &str) {
@@ -90,6 +103,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Command::Serve(config)) => serve(&config.unwrap_or_else(user_config_path)),
+        Ok(Command::OneShot(config)) => one_shot(&config.unwrap_or_else(user_config_path)),
         Err(message) => {
             say(TolerantWriter(io::stderr()), &format!("hofundd: {message}"));
             ExitCode::from(2)
@@ -97,13 +111,18 @@ fn main() -> ExitCode {
     }
 }
 
-fn serve(path: &Path) -> ExitCode {
-    let stderr = || TolerantWriter(io::stderr());
-    let level = match logging::level(std::env::var(logging::LOG_ENV).ok().as_deref()) {
+fn stderr() -> TolerantWriter<io::Stderr> {
+    TolerantWriter(io::stderr())
+}
+
+/// Installs logging at `HOFUND_LOG` (or `default`) and builds the runtime,
+/// or returns the exit code for a failure already reported.
+fn prepare(default: LevelFilter) -> Result<tokio::runtime::Runtime, ExitCode> {
+    let level = match logging::level(std::env::var(logging::LOG_ENV).ok().as_deref(), default) {
         Ok(level) => level,
         Err(message) => {
             say(stderr(), &format!("hofundd: {message}"));
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
     };
     if let Err(message) = logging::install(level, logging::Stderr) {
@@ -111,20 +130,43 @@ fn serve(path: &Path) -> ExitCode {
             stderr(),
             &format!("hofundd: cannot install logging: {message}"),
         );
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
+        .map_err(|error| {
             say(
                 stderr(),
                 &format!("hofundd: cannot start the runtime: {error}"),
             );
-            return ExitCode::FAILURE;
+            ExitCode::FAILURE
+        })
+}
+
+fn one_shot(path: &Path) -> ExitCode {
+    let runtime = match prepare(logging::ONE_SHOT_LEVEL) {
+        Ok(runtime) => runtime,
+        Err(code) => return code,
+    };
+    let answered = runtime.block_on(hofund_daemon::one_shot_stdio(
+        path,
+        Arc::new(registry::LinkedRegistry),
+    ));
+    drop(runtime);
+    match answered {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            say(stderr(), &format!("hofundd: {error}"));
+            ExitCode::FAILURE
         }
+    }
+}
+
+fn serve(path: &Path) -> ExitCode {
+    let runtime = match prepare(logging::DEFAULT_LEVEL) {
+        Ok(runtime) => runtime,
+        Err(code) => return code,
     };
     let served = runtime.block_on(async {
         let options = StartOptions {
@@ -173,6 +215,11 @@ mod tests {
         assert_eq!(parse(&args(&["-h"])), Ok(Command::Help));
         assert_eq!(parse(&args(&["--version"])), Ok(Command::Version));
         assert_eq!(parse(&args(&["-V"])), Ok(Command::Version));
+        assert_eq!(parse(&args(&["one-shot"])), Ok(Command::OneShot(None)));
+        assert_eq!(
+            parse(&args(&["one-shot", "--config", "/etc/hofund.toml"])),
+            Ok(Command::OneShot(Some(PathBuf::from("/etc/hofund.toml"))))
+        );
     }
 
     #[test]
@@ -184,6 +231,11 @@ mod tests {
         assert_eq!(
             parse(&args(&["--config", "a", "--config", "b"])),
             Err("--config is given more than once".to_owned())
+        );
+        let error = parse(&args(&["--config", "a", "one-shot"])).expect_err("late one-shot");
+        assert!(
+            error.starts_with("unexpected argument `one-shot`"),
+            "{error}"
         );
         let error = parse(&args(&["serve"])).expect_err("unknown word");
         assert!(error.starts_with("unexpected argument `serve`"), "{error}");

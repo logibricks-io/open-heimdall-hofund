@@ -151,9 +151,7 @@ impl ControlSession {
     /// Configuration sidecar lock used when the directory beside the file
     /// cannot hold one (read-only or not writable).
     pub(crate) fn config_lock_fallback(&self, runtime: &ControlRuntime) -> Option<PathBuf> {
-        prepare_runtime_dir(runtime)
-            .ok()
-            .map(|directory| directory.join(format!("config-{}.lock", self.identity.id)))
+        config_lock_fallback(&self.identity, runtime)
     }
 
     #[cfg(unix)]
@@ -230,6 +228,18 @@ impl Drop for ControlSession {
             let _ = std::fs::remove_file(&self.discovery_path);
         }
     }
+}
+
+/// Configuration sidecar lock in the first runtime directory, used when the
+/// directory beside the config cannot hold one. One-shot operations use it
+/// without a daemon session.
+pub(crate) fn config_lock_fallback(
+    identity: &ConfigIdentity,
+    runtime: &ControlRuntime,
+) -> Option<PathBuf> {
+    prepare_runtime_dir(runtime)
+        .ok()
+        .map(|directory| directory.join(format!("config-{}.lock", identity.id)))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
