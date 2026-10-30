@@ -12,8 +12,8 @@ use hofund_plugin_api::{
 };
 
 use crate::edit::{
-    Assignment, FileKind, Shared, get, is_empty_document, is_empty_json, remove_keys, render,
-    string_at, strip_owned,
+    Assignment, FileKind, Shared, get, is_empty_document, is_empty_json, owned_part, remove_keys,
+    render, string_at, strip_owned,
 };
 use crate::store::{
     backup_once, clear_markers, created_here, delete_verified, marker_present, read_optional,
@@ -1339,6 +1339,17 @@ fn merge_owned_keys(
             let Some(kept) = kept.filter(|kept| Some(kept) != current_value.as_ref()) else {
                 continue;
             };
+            // Entries are removed whole, so an edited one is reported.
+            let ours = |text| {
+                owned_part(kind, text, key, shared)
+                    .map_err(|error| refused(id, path, &error.to_string()))
+            };
+            if ours(current_text)? != ours(wrote_text)? {
+                warnings.push(format!(
+                    "warning: {id} removed its entries from `{key}` in {}; they no longer match the values hofund wrote",
+                    path.display()
+                ));
+            }
             let original = match backup_text {
                 Some(text) => {
                     get(kind, text, key).map_err(|error| refused(id, path, &error.to_string()))?

@@ -449,8 +449,12 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         .disconnect(&session, false)
         .expect("drift disconnect");
     assert!(drift.changed(), "{label}: drift disconnect changed nothing");
+    // The edit changed a value hofund wrote only where its token was.
+    let edited = refreshed_expected
+        .values()
+        .any(|bytes| String::from_utf8_lossy(bytes).contains(&case.refreshed_token));
     assert!(
-        !drift.warnings().is_empty(),
+        !edited || !drift.warnings().is_empty(),
         "{label}: drift warning missing"
     );
     let drifted = managed_tree(&home);
@@ -484,7 +488,12 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         let before_text = std::str::from_utf8(before_bytes).expect("refresh UTF-8");
         if before_text.contains(&case.refreshed_token) {
             let text = std::str::from_utf8(&drifted[path]).expect("owned drift UTF-8");
-            assert!(text.contains("user-token"), "{label}: owned edit lost");
+            // A token inside hofund's shared entries goes with them, and the
+            // disconnect says so.
+            assert!(
+                text.contains("user-token") || reports_removed_entries(drift.warnings()),
+                "{label}: owned edit lost"
+            );
         }
     }
 
@@ -802,6 +811,13 @@ fn scratch() -> Scratch {
     Scratch(tempfile::tempdir().expect("conformance temp dir"))
 }
 
+/// Whether a disconnect said it removed hofund's edited shared entries.
+fn reports_removed_entries(warnings: &[String]) -> bool {
+    warnings
+        .iter()
+        .any(|warning| warning.contains("removed its entries"))
+}
+
 #[cfg(test)]
 mod tests {
     use hofund_plugin_api::{
@@ -809,8 +825,8 @@ mod tests {
     };
 
     use super::{
-        BTreeMap, Case, TargetOs, fs, gateway_values, golden_layout, run_case, scratch,
-        surviving_gateway_values, updating_goldens_value, write,
+        BTreeMap, Case, TargetOs, fs, gateway_values, golden_layout, reports_removed_entries,
+        run_case, scratch, surviving_gateway_values, updating_goldens_value, write,
     };
 
     static OS_FILES: [AgentFile; 1] = [AgentFile::from_static(
@@ -1020,6 +1036,14 @@ refreshed_token = "refreshed-token"
                 expected
             );
         }
+    }
+
+    #[test]
+    fn only_the_removed_entries_warning_explains_a_lost_token() {
+        let other = vec!["warning: x changed since connect".to_owned()];
+        assert!(!reports_removed_entries(&other));
+        let removed = vec!["warning: x removed its entries from `k` in f".to_owned()];
+        assert!(reports_removed_entries(&removed));
     }
 
     #[test]

@@ -131,6 +131,29 @@ pub(crate) fn strip_owned(
     key: &str,
     shared: Shared,
 ) -> Result<Option<String>, AgentError> {
+    split_owned(kind, text, key, shared, false)
+}
+
+/// hofund's entries of the array or map at `key`, as JSON text.
+///
+/// `None` when the key is absent. File kinds as for [`strip_owned`].
+pub(crate) fn owned_part(
+    kind: FileKind,
+    text: &str,
+    key: &str,
+    shared: Shared,
+) -> Result<Option<String>, AgentError> {
+    split_owned(kind, text, key, shared, true)
+}
+
+/// The user's entries, or hofund's when `ours`, of a shared value.
+fn split_owned(
+    kind: FileKind,
+    text: &str,
+    key: &str,
+    shared: Shared,
+    ours: bool,
+) -> Result<Option<String>, AgentError> {
     let path = split_key(key);
     let existing = match (kind, shared) {
         (FileKind::Json, _) => json_child(&json_root(text)?, &path).cloned(),
@@ -146,9 +169,9 @@ pub(crate) fn strip_owned(
     };
     let kept = match shared {
         Shared::Array(owner) => {
-            kept_entries(existing.as_ref(), path.is_empty(), key, owner)?.map(Value::Array)
+            kept_entries(existing.as_ref(), path.is_empty(), key, owner, ours)?.map(Value::Array)
         }
-        Shared::Map(prefix) => kept_map(existing.as_ref(), key, prefix)?.map(Value::Object),
+        Shared::Map(prefix) => kept_map(existing.as_ref(), key, prefix, ours)?.map(Value::Object),
     };
     Ok(kept.map(|kept| kept.to_string()))
 }
@@ -158,7 +181,8 @@ pub(crate) fn is_empty_json(text: &str) -> bool {
     matches!(text.trim(), "[]" | "{}")
 }
 
-/// The user's entries of an existing array value, in order.
+/// The user's entries of an existing array value, or hofund's when `ours`,
+/// in order.
 ///
 /// `None` when there is no array yet. An empty object root counts as no
 /// array, so a missing root-array file can be created.
@@ -167,6 +191,7 @@ fn kept_entries(
     root: bool,
     key: &str,
     owner: &[OwnerTest],
+    ours: bool,
 ) -> Result<Option<Vec<Value>>, AgentError> {
     match existing {
         None | Some(Value::Null) => Ok(None),
@@ -174,7 +199,7 @@ fn kept_entries(
         Some(Value::Array(items)) => Ok(Some(
             items
                 .iter()
-                .filter(|item| !owned(item, owner))
+                .filter(|item| owned(item, owner) == ours)
                 .cloned()
                 .collect(),
         )),
@@ -212,7 +237,7 @@ fn merged(
             assignment.key
         )));
     };
-    let kept = kept_entries(existing, root, assignment.key, owner)?;
+    let kept = kept_entries(existing, root, assignment.key, owner, false)?;
     if kept.is_none() && ours.is_empty() {
         return Ok(None);
     }
@@ -221,20 +246,22 @@ fn merged(
     Ok(Some(Value::Array(items)))
 }
 
-/// The user's entries of an existing map value, in order.
+/// The user's entries of an existing map value, or hofund's when `ours`, in
+/// order.
 ///
 /// `None` when there is no map yet.
 fn kept_map(
     existing: Option<&Value>,
     key: &str,
     prefix: &str,
+    ours: bool,
 ) -> Result<Option<Map<String, Value>>, AgentError> {
     match existing {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Object(object)) => Ok(Some(
             object
                 .iter()
-                .filter(|(name, _)| !name.starts_with(prefix))
+                .filter(|(name, _)| name.starts_with(prefix) == ours)
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
         )),
@@ -264,7 +291,7 @@ fn merged_map(
     prefix: &str,
 ) -> Result<Option<Value>, AgentError> {
     let ours = our_entries(assignment)?;
-    let kept = kept_map(existing, assignment.key, prefix)?;
+    let kept = kept_map(existing, assignment.key, prefix, false)?;
     if kept.is_none() && ours.is_empty() {
         return Ok(None);
     }
@@ -1338,8 +1365,8 @@ fn loosen_json(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Assignment, FileKind, Shared, get, is_empty_document, remove_keys, render, string_at,
-        strip_owned,
+        Assignment, FileKind, Shared, get, is_empty_document, owned_part, remove_keys, render,
+        string_at, strip_owned,
     };
     use hofund_plugin_api::OwnerTest;
 
@@ -1388,6 +1415,23 @@ mod tests {
         let emptied = text(FileKind::Json, Some(&first), &[append("list", "[]")]);
         let value: serde_json::Value = serde_json::from_str(&emptied).expect("json");
         assert_eq!(value["list"].as_array().expect("list").len(), 4);
+    }
+
+    #[test]
+    fn owned_part_keeps_only_hofund_entries() {
+        let list = r#"{"list":[{"id":"u"},{"id":"hof/a","kind":"gw"}],"m":{"x":1,"hof/b":2}}"#;
+        assert_eq!(
+            owned_part(FileKind::Json, list, "list", Shared::Array(OWNER)).expect("array"),
+            Some(r#"[{"id":"hof/a","kind":"gw"}]"#.to_owned())
+        );
+        assert_eq!(
+            owned_part(FileKind::Json, list, "m", Shared::Map("hof/")).expect("map"),
+            Some(r#"{"hof/b":2}"#.to_owned())
+        );
+        assert_eq!(
+            owned_part(FileKind::Json, list, "absent", Shared::Map("hof/")).expect("absent"),
+            None
+        );
     }
 
     #[test]
