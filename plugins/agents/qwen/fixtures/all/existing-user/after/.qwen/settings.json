@@ -1,0 +1,34 @@
+{
+  "ui": {
+    "theme": "GitHub"
+  },
+  "env": {
+    "DASHSCOPE_API_KEY": "user-key",
+    "HOFUND_QWEN_API_KEY": "old-token"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "qwen-oauth"
+    }
+  },
+  "model": {
+    "name": "qwen3-coder-plus",
+    "baseUrl": "https://dashscope.example.test/v1"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "baseUrl": "https://dashscope.example.test/v1",
+        "envKey": "DASHSCOPE_API_KEY",
+        "id": "qwen3-coder-plus",
+        "name": "Qwen3 Coder Plus"
+      },
+      {
+        "baseUrl": "http://127.0.0.1:3425/v1",
+        "envKey": "HOFUND_QWEN_API_KEY",
+        "id": "route-a",
+        "name": "route-a"
+      }
+    ]
+  }
+}
