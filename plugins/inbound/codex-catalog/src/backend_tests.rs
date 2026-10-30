@@ -8,7 +8,9 @@ use hofund_plugin_api::{Body, BodyStream, PluginError};
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{HttpRequest, HttpResponse, async_trait, text_response};
 
-use super::backend::{BASES, Bases, COMPACT_MESSAGE, LIST_WAIT, PREFIX};
+use super::backend::{
+    ACCOUNT_HEADER, ACCOUNT_MESSAGE, ACCOUNTS, BASES, Bases, COMPACT_MESSAGE, LIST_WAIT, PREFIX,
+};
 use super::tests::block_on;
 use super::{Kernel, dispatch};
 
@@ -260,11 +262,13 @@ fn a_websocket_upgrade_is_refused_at_once() {
 
 #[test]
 fn codexs_own_model_is_relayed_as_it_came_less_the_hop_headers() {
-    let stub = Stub::default().sending(Ok((
-        200,
-        vec![("content-type", "text/event-stream")],
-        BodyStream::from_bytes(b"data: one\n\n".to_vec()),
-    )));
+    let stub = Stub::default()
+        .listing(&["gpt-5", "codex/gpt-4", "x/codex/gpt-5"])
+        .sending(Ok((
+            200,
+            vec![("content-type", "text/event-stream")],
+            BodyStream::from_bytes(b"data: one\n\n".to_vec()),
+        )));
     let body = r#"{"model":"gpt-5","stream":true}"#;
     let (status, kind, text) = ask(
         &stub,
@@ -310,7 +314,9 @@ fn codexs_own_model_is_relayed_as_it_came_less_the_hop_headers() {
             pair("x-keep", "yes"),
         ]
     );
-    assert!(stub.called().is_empty());
+    let called = stub.called();
+    assert_eq!(called.len(), 1);
+    assert_eq!(called[0].uri, "/v1/models");
 }
 
 #[test]
@@ -993,6 +999,7 @@ fn a_summary_reply_that_cannot_be_read_is_no_summary() {
 #[test]
 fn codexs_own_models_get_their_input_put_right_and_their_trigger_relayed() {
     let stub = Stub::default()
+        .listing(&[])
         .sending(answer(200, "relayed"))
         .sending(answer(200, "compacted"));
     let body = json!({
@@ -1022,7 +1029,11 @@ fn codexs_own_models_get_their_input_put_right_and_their_trigger_relayed() {
         assert_eq!(value["input"][1]["type"], "message");
         assert_eq!(value["input"][2], json!({"type": "compaction_trigger"}));
     }
-    assert!(stub.called().is_empty());
+    assert_eq!(
+        stub.called().len(),
+        1,
+        "only /responses looks for an account"
+    );
     let get = Stub::default().sending(answer(200, "got"));
     let (_, _, text) = ask(
         &get,
@@ -1055,4 +1066,162 @@ fn a_hofund_model_gets_its_summaries_opened() {
     assert_eq!(value["input"][0]["role"], "user");
     assert_eq!(value.get("stream"), None);
     assert_eq!(called[0].headers, [pair("accept", "text/event-stream")]);
+}
+
+fn turn(model: &str) -> String {
+    json!({"model": model, "stream": true, "input": [
+        {"type": "compaction", "encrypted_content": super::input::sealed("before")},
+    ]})
+    .to_string()
+}
+
+#[test]
+fn codexs_own_model_with_a_codex_route_is_served_by_hofunds_accounts() {
+    assert_eq!(ACCOUNTS, "codex/");
+    let stub = Stub::default()
+        .listing(&["smith/forge", "codex/gpt-5"])
+        .calling(answer(200, "ours"));
+    let (status, _, text) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[
+                ("authorization", "Bearer chatgpt"),
+                ("content-type", "application/json"),
+                (ACCOUNT_HEADER, "work"),
+            ],
+            &turn("gpt-5"),
+        ),
+    );
+    assert_eq!((status, text.as_str()), (200, "ours"));
+    let called = stub.called();
+    assert_eq!(called.len(), 2);
+    assert_eq!(called[0].uri, "/v1/models");
+    assert_eq!(called[1].uri, "/v1/responses");
+    let value: Value = json::from_slice(&called[1].body).expect("json");
+    assert_eq!(value["model"], "codex/gpt-5");
+    assert_eq!(value["stream"], true);
+    assert_eq!(value["input"][0]["type"], "message", "{value}");
+    assert!(stub.sent().is_empty());
+}
+
+#[test]
+fn codexs_own_model_with_a_codex_route_compacts_in_process() {
+    let summary =
+        json!({"id": "resp_9", "status": "completed", "output": [{"type": "message", "content": [
+            {"type": "output_text", "text": "kept"},
+        ]}]})
+        .to_string();
+    let stub = Stub::default()
+        .listing(&["codex/gpt-5"])
+        .calling(answer(200, summary));
+    let (status, _, body) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[("content-type", "application/json")],
+            &trigger("gpt-5"),
+        ),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(&super::input::sealed("kept")), "{body}");
+    let called = stub.called();
+    assert_eq!(called.len(), 2);
+    let value: Value = json::from_slice(&called[1].body).expect("json");
+    assert_eq!(value["model"], "codex/gpt-5");
+}
+
+#[test]
+fn an_api_key_and_a_compaction_never_look_for_an_account() {
+    let stub = Stub::default()
+        .sending(answer(200, "api"))
+        .sending(answer(200, "compacted"));
+    let (_, _, text) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[("authorization", "Bearer sk-1")],
+            r#"{"model":"gpt-5"}"#,
+        ),
+    );
+    assert_eq!(text, "api");
+    let (_, _, text) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses/compact",
+            &[],
+            r#"{"model":"gpt-5"}"#,
+        ),
+    );
+    assert_eq!(text, "compacted");
+    assert!(stub.called().is_empty());
+}
+
+#[test]
+fn a_model_list_that_cannot_be_had_leaves_the_turn_to_the_relay() {
+    let stub = Stub::default()
+        .calling(Err(PluginError::connect("down")))
+        .calling(answer(500, "{}"))
+        .sending(answer(200, "relayed"))
+        .sending(answer(200, "relayed"))
+        .sending(answer(200, "relayed"));
+    for body in [
+        r#"{"model":"gpt-5"}"#,
+        r#"{"model":"gpt-5"}"#,
+        r#"{"model":""}"#,
+    ] {
+        let (_, _, text) = ask(
+            &stub,
+            request("POST", "/backend-api/codex/responses", &[], body),
+        );
+        assert_eq!(text, "relayed");
+    }
+    assert_eq!(stub.called().len(), 2, "an empty model looks for nothing");
+    assert_eq!(stub.sent()[0].body, br#"{"model":"gpt-5"}"#);
+}
+
+#[test]
+fn a_relayed_turn_that_names_an_account_is_refused() {
+    let stub = Stub::default()
+        .listing(&["codex/gpt-4"])
+        .sending(answer(200, "relayed"));
+    let (status, kind, body) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses/compact",
+            &[(ACCOUNT_HEADER, "work")],
+            r#"{"model":"gpt-5"}"#,
+        ),
+    );
+    assert_eq!((status, kind.as_str()), (400, "application/json"));
+    assert_eq!(
+        message(&body),
+        format!("x-hofund-account {ACCOUNT_MESSAGE}")
+    );
+    let (status, _, _) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[(ACCOUNT_HEADER, "work")],
+            r#"{"model":"gpt-5"}"#,
+        ),
+    );
+    assert_eq!(status, 400);
+    assert!(stub.sent().is_empty());
+    let (status, _, _) = ask(
+        &stub,
+        request(
+            "GET",
+            "/backend-api/codex/wham/usage",
+            &[(ACCOUNT_HEADER, "work")],
+            "",
+        ),
+    );
+    assert_eq!(status, 200, "only a turn is refused");
 }

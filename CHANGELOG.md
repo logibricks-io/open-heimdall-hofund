@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Codex accounts on Codex's ChatGPT backend (S6d): a
+  `POST /backend-api/codex/responses` for one of Codex's own models, say
+  `gpt-5`, is served in process as `codex/gpt-5` when the gateway lists a
+  `codex/gpt-5` route, so the turn runs on hofund's Codex subscriptions and
+  compacts like a hofund model's. An `sk-` bearer, `/responses/compact`, and a
+  model list that cannot be had leave the turn to the relay. A relayed turn
+  that carries `x-hofund-account` is a 400 instead of going out on Codex's own
+  sign-in.
 - Compaction for hofund's models on Codex's ChatGPT backend (S6c): a
   `POST /backend-api/codex/responses` for a hofund model with a
   `compaction_trigger` asks the model, in process and without tools, for a
