@@ -55,7 +55,7 @@ use hofund_codec::{
 };
 use hofund_plugin_api::{
     BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle, PluginError,
-    ProtocolId, Request, Role, SecretString, StreamEvent,
+    ProtocolId, RawAnswer, RawBody, Request, Role, SecretString, StreamEvent,
 };
 use secrecy::ExposeSecret;
 
@@ -512,6 +512,72 @@ pub async fn send(
         unwrap: target.unwrap.clone(),
         watch: None,
     })
+}
+
+/// The most of a forwarded answer [`forward`] reads: 256 MiB.
+pub const FORWARD_CAP: usize = 256 << 20;
+
+/// Posts `body` to `path` under an OpenAI-style target's base URL and returns
+/// a `2xx` answer unchanged.
+///
+/// The call carries the target's credential and headers and the body's own
+/// `Content-Type`. Only Chat Completions and Responses targets have such a
+/// base; on any other protocol, a signed target, or one that posts to a
+/// method root, the call is `unsupported`. `path` is one
+/// [`Forward::new`](hofund_plugin_api::Forward::new) accepted.
+///
+/// # Errors
+///
+/// Returns `unsupported` as above, [`PluginError`] when the call fails, the
+/// same status error as [`execute`] outside `2xx`, or a decode error when the
+/// answer is larger than [`FORWARD_CAP`].
+pub async fn forward(
+    http: &HttpHandle,
+    target: &Target,
+    secret: Option<&SecretString>,
+    path: &str,
+    body: RawBody,
+) -> Result<RawAnswer, PluginError> {
+    let openai = matches!(
+        target.protocol,
+        ProtocolId::OPENAI_CHAT | ProtocolId::OPENAI_RESPONSES
+    );
+    if !openai || target.signer.is_some() || target.method_root.is_some() {
+        return Err(PluginError::unsupported(format!(
+            "this upstream does not serve {path}"
+        )));
+    }
+    let url = format!("{}{path}", target.base_url.trim_end_matches('/'));
+    let call = call(target, &OpenAiChat, secret, url)?
+        .replace_header("content-type", body.content_type(), false)
+        .bytes(body.bytes());
+    let response = call.open_raw(http, ATTEMPTS).await?;
+    if !response.status().is_success() {
+        return Err(status_error(response).await);
+    }
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let answer = read_capped(response.into_body(), FORWARD_CAP).await?;
+    Ok(RawAnswer::new(status, content_type, answer))
+}
+
+/// All of `body`, or a decode error once it holds more than `cap` bytes.
+async fn read_capped(mut body: BodyStream, cap: usize) -> Result<Vec<u8>, PluginError> {
+    let mut out = Vec::new();
+    while let Some(chunk) = body.next_chunk().await {
+        let chunk = chunk?;
+        if out.len() + chunk.len() > cap {
+            return Err(PluginError::decode(format!(
+                "the answer is larger than {cap} bytes"
+            )));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 /// Counts the input tokens of `request` on a Messages or Generative Language
@@ -2149,5 +2215,27 @@ mod tests {
                 assert_eq!(*seen.lock().expect("lock"), 2, "{size}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_answer_is_read_whole_up_to_its_cap() {
+        let pieces = || {
+            hofund_plugin_api::BodyStream::from_stream(futures_util::stream::iter(
+                ["ab", "cd", "e"].map(|piece| Ok(bytes::Bytes::from_static(piece.as_bytes()))),
+            ))
+        };
+        assert_eq!(
+            super::read_capped(pieces(), 5).await.expect("whole"),
+            b"abcde"
+        );
+        let error = super::read_capped(pieces(), 4).await.expect_err("capped");
+        assert_eq!(error.kind(), PluginErrorKind::Decode);
+        assert_eq!(error.message(), "the answer is larger than 4 bytes");
+        let failing = hofund_plugin_api::BodyStream::from_stream(futures_util::stream::iter([
+            Ok(bytes::Bytes::from_static(b"a")),
+            Err(hofund_plugin_api::PluginError::interrupted("reset")),
+        ]));
+        let error = super::read_capped(failing, 8).await.expect_err("reset");
+        assert_eq!(error.message(), "reset");
     }
 }

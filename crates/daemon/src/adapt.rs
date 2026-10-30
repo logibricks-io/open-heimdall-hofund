@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use hofund_plugin_api::{
     Completion as PluginCompletion, CountOutcome as PluginCount, PluginError, PluginErrorKind,
-    ProtocolId, Request, UpstreamProvider,
+    ProtocolId, RawAnswer, RawBody, Request, UpstreamProvider,
 };
 use hofund_provider::{Completion, CountOutcome, Provider, ProviderError};
 
@@ -71,6 +71,10 @@ impl Provider for ProviderAdapter {
             .map_err(provider_error)?;
         Ok(provider_completion(completion))
     }
+
+    async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, ProviderError> {
+        self.inner.forward(path, body).await.map_err(provider_error)
+    }
 }
 
 fn protocol(inbound: &str) -> Result<ProtocolId, ProviderError> {
@@ -127,7 +131,8 @@ mod tests {
 
     use async_trait::async_trait;
     use hofund_plugin_api::{
-        BodyStream, Completion, CountOutcome, PluginError, ProtocolId, Request, UpstreamProvider,
+        BodyStream, Completion, CountOutcome, PluginError, ProtocolId, RawAnswer, RawBody, Request,
+        UpstreamProvider,
     };
     use hofund_provider::{Provider, ProviderErrorKind};
 
@@ -180,6 +185,51 @@ mod tests {
             panic!("protocol");
         };
         assert_eq!(error.kind, ProviderErrorKind::Decode);
+    }
+
+    struct Forwards;
+
+    #[async_trait]
+    impl UpstreamProvider for Forwards {
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound: ProtocolId,
+        ) -> Result<Completion, PluginError> {
+            Err(PluginError::internal("not a chat"))
+        }
+
+        async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, PluginError> {
+            if path == "/missing" {
+                return Err(PluginError::status_error(404, "no such path"));
+            }
+            Ok(RawAnswer::new(
+                200,
+                Some(body.content_type().to_owned()),
+                format!("{path}:{}", String::from_utf8_lossy(body.bytes())),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_adapter_forwards_or_says_the_upstream_does_not() {
+        let body = || RawBody::new("application/json", b"{}".to_vec());
+        let adapter = ProviderAdapter::new("vendor", Arc::new(Forwards));
+        let answer = adapter
+            .forward("/embeddings", body())
+            .await
+            .expect("answer");
+        assert_eq!(answer.body().as_ref(), b"/embeddings:{}");
+        assert_eq!(answer.content_type(), Some("application/json"));
+        let error = adapter.forward("/missing", body()).await.unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Status);
+        assert_eq!(error.status, Some(404));
+        let error = ProviderAdapter::new("echo", Arc::new(Echo))
+            .forward("/embeddings", body())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Unsupported);
+        assert_eq!(error.message, "this upstream does not serve /embeddings");
     }
 
     // Kinds that do not cool a member must survive the plugin-provider round trip.

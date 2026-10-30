@@ -1,0 +1,10 @@
+id = "retrieval"
+kind = "inbound"
+
+[[route]]
+method = "POST"
+prefix = "/v1/embeddings"
+
+[[route]]
+method = "POST"
+prefix = "/v1/rerank"

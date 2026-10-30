@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `retrieval` inbound plugin (S4): `POST /v1/embeddings` and
+  `POST /v1/rerank`, forwarded as they are to the providers of the model the
+  body names. Members that do not serve the path (no OpenAI-style route, or a
+  404, 405 or 501) are skipped in route order; the answer keeps its status,
+  and each call writes a usage row with the input tokens the answer reports.
+  Adds `Forward`, `RawBody` and `RawAnswer` to the plugin API,
+  `GatewayHandle::forward`, `UpstreamProvider::forward` (unsupported by
+  default) and plugin-sdk `wire::forward`.
 - The `codex-catalog` inbound plugin (S3): `GET /v1/codex/models`, the
   model catalog a Codex whose model provider is this gateway reads from its
   `model_catalog_url`. Each model `/v1/models` lists becomes a `models.json`

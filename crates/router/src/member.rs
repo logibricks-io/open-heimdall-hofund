@@ -5,7 +5,9 @@
 //! upstream trait.
 
 use async_trait::async_trait;
-use hofund_plugin_api::{Completion, CountOutcome, MemberId, PluginError, Request};
+use hofund_plugin_api::{
+    Completion, CountOutcome, MemberId, PluginError, RawAnswer, RawBody, Request,
+};
 
 /// One upstream the router may call.
 ///
@@ -59,5 +61,20 @@ pub trait Member: Send + Sync {
     ) -> Result<CountOutcome, PluginError> {
         let _ = (request, inbound);
         Ok(CountOutcome::Unsupported)
+    }
+
+    /// Posts `body` to `path` under the upstream's base URL.
+    ///
+    /// The default is `unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the upstream does not serve `path` or the
+    /// call fails.
+    async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, PluginError> {
+        let _ = body;
+        Err(PluginError::unsupported(format!(
+            "this member does not serve {path}"
+        )))
     }
 }

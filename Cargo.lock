@@ -2001,6 +2001,7 @@ dependencies = [
  "hofund-plugin-registry",
  "hofund-plugin-relay",
  "hofund-plugin-remote-gateway",
+ "hofund-plugin-retrieval",
  "hofund-plugin-sdk",
  "hofund-plugin-subscription-claude",
  "hofund-plugin-subscription-codex",
@@ -2034,6 +2035,14 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-retrieval"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
 ]
 
 [[package]]

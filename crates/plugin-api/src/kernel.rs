@@ -20,6 +20,7 @@ use futures_util::future::BoxFuture;
 
 use crate::body::{Body, BodyStream};
 use crate::error::PluginError;
+use crate::forward::{Forward, RawAnswer};
 use crate::id::{AccountId, PluginKey};
 use crate::records::{Account, QuotaObservation};
 use secrecy::{ExposeSecret, SecretString};
@@ -366,4 +367,17 @@ pub trait GatewayBackend: Send + Sync {
         &self,
         request: http::Request<Body>,
     ) -> Result<http::Response<BodyStream>, PluginError>;
+
+    /// Routes `call` by its model and forwards it to the chosen member.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when no member answers it. The default is
+    /// `unsupported`.
+    async fn forward(&self, call: Forward) -> Result<RawAnswer, PluginError> {
+        let _ = call;
+        Err(PluginError::unsupported(
+            "this gateway does not forward calls",
+        ))
+    }
 }

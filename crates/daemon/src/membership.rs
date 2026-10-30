@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use futures_util::{FutureExt, Stream, StreamExt};
 use hofund_plugin_api::{
     BodyStream, Completion, CountOutcome, MemberId, MemberKey, PluginError, PresetId,
-    QuotaObservation, Request,
+    QuotaObservation, RawAnswer, RawBody, Request,
 };
 use hofund_plugin_host::ObserveBackend;
 use hofund_provider::{
@@ -75,11 +75,13 @@ struct ProviderCall {
 enum Job {
     Execute(Request, String),
     Count(Request, String),
+    Forward(String, RawBody),
 }
 
 enum Out {
     Execute(Completion),
     Count(CountOutcome),
+    Forward(RawAnswer),
 }
 
 #[derive(Clone)]
@@ -338,6 +340,7 @@ impl Member for LiveMember {
         match stack.call(Job::Execute(request, inbound.to_owned())).await {
             Ok(Out::Execute(completion)) => Ok(completion),
             Ok(Out::Count(_)) => Err(PluginError::internal("member returned a count")),
+            Ok(Out::Forward(_)) => Err(PluginError::internal("member returned an answer")),
             Err(error) => Err(error),
         }
     }
@@ -351,6 +354,17 @@ impl Member for LiveMember {
         match stack.call(Job::Count(request, inbound.to_owned())).await {
             Ok(Out::Count(outcome)) => Ok(outcome),
             Ok(Out::Execute(_)) => Err(PluginError::internal("member returned a completion")),
+            Ok(Out::Forward(_)) => Err(PluginError::internal("member returned an answer")),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, PluginError> {
+        let mut stack = self.stack.clone();
+        match stack.call(Job::Forward(path.to_owned(), body)).await {
+            Ok(Out::Forward(answer)) => Ok(answer),
+            Ok(Out::Execute(_)) => Err(PluginError::internal("member returned a completion")),
+            Ok(Out::Count(_)) => Err(PluginError::internal("member returned a count")),
             Err(error) => Err(error),
         }
     }
@@ -411,18 +425,17 @@ where
         let id = self.id.clone();
         let cooldowns = Arc::clone(&self.cooldowns);
         let revision = cooldowns.revision(&id);
-        let is_count = matches!(job, Job::Count(..));
+        // A count or a forwarded call is a side call: it is never a served
+        // chat, and an endpoint it does not have says nothing about the member.
+        let is_side = matches!(job, Job::Count(..) | Job::Forward(..));
         Box::pin(async move {
             match inner.call(job).await {
                 Ok(Out::Execute(completion)) => Ok(Out::Execute(record_completion(
                     completion, id, cooldowns, revision,
                 ))),
-                Ok(out @ Out::Count(_)) => {
-                    // A count is never a served request.
-                    Ok(out)
-                }
+                Ok(out @ (Out::Count(_) | Out::Forward(_))) => Ok(out),
                 Err(error) => {
-                    if !is_count || count_cools(&error) {
+                    if !is_side || count_cools(&error) {
                         cooldowns.record_failure(&id, &error);
                     }
                     Err(error)
@@ -495,6 +508,10 @@ impl Service<Job> for ProviderCall {
                         .await
                         .map_err(into_plugin)?;
                     Ok(Out::Count(map_count(outcome)))
+                }
+                Job::Forward(path, body) => {
+                    let answer = provider.forward(&path, body).await.map_err(into_plugin)?;
+                    Ok(Out::Forward(answer))
                 }
             }
         })
@@ -771,7 +788,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use hofund_plugin_api::Request;
+    use hofund_plugin_api::{RawAnswer, RawBody, Request};
     use hofund_provider::{Completion, Provider, ProviderError};
     use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy};
 
@@ -1652,6 +1669,126 @@ mod tests {
                 .cooling(&super::member_id("count"))
                 .expect("transport rest");
             assert_eq!(cooling.cause(), hofund_router::CooldownCause::Failure);
+        }
+    }
+
+    struct Forwards {
+        answer: std::sync::Mutex<Option<Result<RawAnswer, ProviderError>>>,
+        seen: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl Provider for Forwards {
+        fn id(&self) -> &str {
+            "forward"
+        }
+
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<Completion, ProviderError> {
+            Ok(raw_ok())
+        }
+
+        async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, ProviderError> {
+            self.seen.lock().expect("seen").push((
+                path.to_owned(),
+                String::from_utf8(body.bytes().to_vec()).expect("utf8"),
+            ));
+            self.answer
+                .lock()
+                .expect("forward answer")
+                .take()
+                .expect("one forward")
+        }
+    }
+
+    async fn run_forward(
+        answer: Result<RawAnswer, ProviderError>,
+        book: Arc<Cooldowns>,
+    ) -> (
+        Result<hofund_router::Forwarded, hofund_router::RouterError>,
+        Vec<(String, String)>,
+    ) {
+        let provider = Arc::new(Forwards {
+            answer: std::sync::Mutex::new(Some(answer)),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let built = BTreeMap::from([(
+            "forward".to_owned(),
+            built_member("forward", Arc::clone(&provider) as Arc<dyn Provider>),
+        )]);
+        let snapshot =
+            open(&built, route(&["forward"]), FailoverPolicy::default(), book).expect("snapshot");
+        let call = hofund_router::Forward::new("demo", "/embeddings", |model| {
+            Ok(RawBody::new("application/json", format!("m={model}")))
+        })
+        .expect("call");
+        let result = snapshot.load().forward(&call).await;
+        let seen = provider.seen.lock().expect("seen").clone();
+        (result, seen)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_forward_reaches_the_provider_and_does_not_clear_a_rest() {
+        let book = cooldowns();
+        let id = super::member_id("forward");
+        let _ = book.record_failure(
+            &id,
+            &hofund_plugin_api::PluginError::status_error(429, "slow")
+                .with_retry_after(Duration::from_secs(120)),
+        );
+        let before = book.cooling(&id);
+
+        let (result, seen) = run_forward(
+            Ok(RawAnswer::new(200, None, b"{}".to_vec())),
+            Arc::clone(&book),
+        )
+        .await;
+
+        let forwarded = result.expect("forwarded");
+        assert_eq!(forwarded.upstream_id, "forward");
+        assert_eq!(forwarded.answer.body().as_ref(), b"{}");
+        assert_eq!(seen, [("/embeddings".to_owned(), "m=demo".to_owned())]);
+        assert_eq!(book.cooling(&id), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_forward_that_is_not_served_or_fails_on_the_server_does_not_cool() {
+        for error in [
+            ProviderError::unsupported("no embeddings"),
+            ProviderError::status(404, "not found"),
+            ProviderError::status(503, "unavailable"),
+        ] {
+            let book = cooldowns();
+
+            let (result, _) = run_forward(Err(error), Arc::clone(&book)).await;
+
+            assert!(result.is_err());
+            assert_eq!(book.cooling(&super::member_id("forward")), None);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limited_or_unreachable_forward_cools_the_member() {
+        for (error, cause) in [
+            (
+                ProviderError::status(429, "slow"),
+                hofund_router::CooldownCause::RateLimit,
+            ),
+            (
+                ProviderError::connect("refused"),
+                hofund_router::CooldownCause::Failure,
+            ),
+        ] {
+            let book = cooldowns();
+
+            let (result, _) = run_forward(Err(error), Arc::clone(&book)).await;
+
+            assert!(result.is_err());
+            let cooling = book.cooling(&super::member_id("forward")).expect("rest");
+            assert_eq!(cooling.cause(), cause);
         }
     }
 

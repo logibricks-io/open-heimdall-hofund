@@ -69,6 +69,7 @@ flowchart BT
   pluginOllama["plugin-ollama<br/>inbound"]
   pluginMuse["plugin-muse<br/>inbound"]
   pluginCodexCatalog["plugin-codex-catalog<br/>inbound"]
+  pluginRetrieval["plugin-retrieval<br/>inbound"]
   pluginCodex["plugin-subscription-codex<br/>subscription"]
   pluginClaude["plugin-subscription-claude<br/>subscription"]
   pluginCopilot["plugin-subscription-copilot<br/>subscription"]
@@ -99,6 +100,7 @@ flowchart BT
   pluginRegistry --> pluginOllama
   pluginRegistry --> pluginMuse
   pluginRegistry --> pluginCodexCatalog
+  pluginRegistry --> pluginRetrieval
   pluginRegistry --> pluginCodex
   pluginRegistry --> pluginClaude
   pluginRegistry --> pluginCopilot
@@ -115,6 +117,8 @@ flowchart BT
   pluginMuse --> pluginSdk
   pluginCodexCatalog --> pluginApi
   pluginCodexCatalog --> pluginSdk
+  pluginRetrieval --> pluginApi
+  pluginRetrieval --> pluginSdk
   pluginCodex --> pluginApi
   pluginCodex --> pluginSdk
   pluginClaude --> pluginApi
@@ -211,7 +215,8 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-muse` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-ollama` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-relay`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-gemini`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-retrieval` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-gemini`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
@@ -292,6 +297,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-ollama` | The Ollama API (`/api/version`, `/api/tags`, `/api/show`, `/api/chat`, `/api/generate`) for clients that take an Ollama server. Lists the gateway's models and runs chats on its Chat Completions route in process. |
 | `plugin-muse` | Muse Code's model list (`GET /muse-code/models`): the gateway's models with the `metadata["muse-code"]` Muse needs to show them. Read in process. |
 | `plugin-codex-catalog` | Codex's model catalog (`GET /v1/codex/models`, its `model_catalog_url`): the gateway's models as `models.json` entries, cut to the 1 MiB Codex reads. Read in process. |
+| `plugin-retrieval` | Embeddings and rerank (`POST /v1/embeddings`, `POST /v1/rerank`): the body is forwarded unchanged but for the model name to the first provider of the model that serves the path, and the answer comes back as sent. |
 | `plugin-subscription-codex` | ChatGPT (Codex) subscription: browser sign-in, token refresh, and the Responses upstream. |
 | `plugin-subscription-claude` | Claude Code subscription: sign-in and refresh by running the `claude` command line in a private config directory. |
 | `plugin-subscription-copilot` | GitHub Copilot subscription, on github.com or a `<name>.ghe.com` enterprise host: device sign-in, session tokens, quota, the account model list, and per-model Chat Completions, Responses and Messages routing. |

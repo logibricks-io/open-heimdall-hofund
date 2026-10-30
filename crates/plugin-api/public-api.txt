@@ -194,9 +194,16 @@ FileKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 FileKind::Env
 FileKind::Json
 FileKind::Toml
+Forward
+Forward #[non_exhaustive] derives(Clone)
+Forward::fn body_for (& self , model : & str) -> Result < RawBody , PluginError >
+Forward::fn model (& self) -> & str
+Forward::fn new (model : impl Into < String > , path : impl Into < String > , body : impl Fn (& str) -> Result < RawBody , PluginError > + Send + Sync + 'static ,) -> Result < Self , PluginError >
+Forward::fn path (& self) -> & str
 GatewayHandle
 GatewayHandle #[non_exhaustive] derives(Clone)
 GatewayHandle::async fn call (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
+GatewayHandle::async fn forward (& self , call : Forward) -> Result < RawAnswer , PluginError >
 GatewayHandle::const fn is_available (& self) -> bool
 GatewayTarget
 GatewayTarget #[non_exhaustive] derives(Clone)
@@ -509,6 +516,17 @@ QuotaWindow::fn name (& self) -> & str
 QuotaWindow::fn new (name : impl Into < String > , used : u64 , limit : Option < u64 > , resets_at : Option < SystemTime > ,) -> Result < Self , PluginError >
 QuotaWindow::fn scope_model (& self) -> Option < & str >
 QuotaWindow::fn with_scope_model (mut self , model : impl Into < String >) -> Self
+RawAnswer
+RawAnswer #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+RawAnswer::const fn body (& self) -> & Bytes
+RawAnswer::const fn status (& self) -> u16
+RawAnswer::fn content_type (& self) -> Option < & str >
+RawAnswer::fn new (status : u16 , content_type : Option < String > , body : impl Into < Bytes >) -> Self
+RawBody
+RawBody #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+RawBody::const fn bytes (& self) -> & Bytes
+RawBody::fn content_type (& self) -> & str
+RawBody::fn new (content_type : impl Into < String > , bytes : impl Into < Bytes >) -> Self
 RawTable
 RawTable #[non_exhaustive] derives(Clone, Default, PartialEq, Eq)
 RawTable::fn get (& self , key : & str) -> Option < & RawValue >
@@ -663,6 +681,7 @@ UpstreamFactory::fn validate (& self , raw : & RawTable) -> Result < Self :: Con
 UpstreamProvider
 UpstreamProvider::async fn count_input (& self , request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
 UpstreamProvider::async fn execute (& self , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
+UpstreamProvider::async fn forward (& self , path : & str , body : RawBody) -> Result < RawAnswer , PluginError >
 UpstreamProvider::async fn health (& self) -> Result < () , PluginError >
 UpstreamProvider::async fn list_models (& self , query : & ListQuery) -> Result < ModelList , PluginError >
 UpstreamProvider::async fn probe (& self , query : & ProbeQuery) -> Result < ProbeReport , PluginError >
@@ -707,6 +726,7 @@ kernel::DirBackend::fn cache_dir (& self , plugin : & PluginKey) -> Result < Pat
 kernel::DirBackend::fn state_dir (& self , plugin : & PluginKey) -> Result < PathBuf , PluginError >
 kernel::GatewayBackend
 kernel::GatewayBackend::async fn call (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
+kernel::GatewayBackend::async fn forward (& self , call : Forward) -> Result < RawAnswer , PluginError >
 kernel::HttpBackend
 kernel::HttpBackend::async fn send (& self , request : HttpRequest < Body > ,) -> Result < HttpResponse < BodyStream > , PluginError >
 kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >

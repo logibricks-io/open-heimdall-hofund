@@ -222,6 +222,14 @@ impl UpstreamProvider for Direct {
         self.bridged.list_models(query).await
     }
 
+    async fn forward(
+        &self,
+        path: &str,
+        body: hofund_plugin_api::RawBody,
+    ) -> Result<hofund_plugin_api::RawAnswer, PluginError> {
+        wire::forward(&self.http, &self.target, self.secret.as_ref(), path, body).await
+    }
+
     async fn probe(
         &self,
         query: &hofund_plugin_api::ProbeQuery,

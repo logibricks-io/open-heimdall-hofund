@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime};
 use crate::SecretString;
 use crate::body::{Body, BodyStream};
 use crate::error::PluginError;
+use crate::forward::{Forward, RawAnswer};
 #[cfg(feature = "kernel")]
 use crate::id::PluginKind;
 use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
@@ -883,6 +884,20 @@ impl GatewayHandle {
     ) -> Result<http::Response<BodyStream>, PluginError> {
         match &self.inner {
             Some(inner) => inner.call(request).await,
+            None => Err(PluginError::unsupported("this host has no gateway")),
+        }
+    }
+
+    /// Routes `call` by its model and forwards it, unchanged but for the
+    /// model id, to the first member whose provider serves the path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when no member answers it, the status of the
+    /// last member's refusal, or `unsupported` when this host has no gateway.
+    pub async fn forward(&self, call: Forward) -> Result<RawAnswer, PluginError> {
+        match &self.inner {
+            Some(inner) => inner.forward(call).await,
             None => Err(PluginError::unsupported("this host has no gateway")),
         }
     }
