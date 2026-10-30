@@ -29,7 +29,9 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 
 use axum::response::Response;
 use axum::routing::{get, post};
-use endpoints::{GENERATIVE_CATCHALL, inject_target, match_count, match_generate, query_key};
+use endpoints::{
+    GENERATIVE_CATCHALL, inject_target, match_count, match_generate, percent_decode, query_key,
+};
 use futures_util::{Stream, StreamExt};
 use hofund_codec::{Codec, StreamEncoder};
 use hofund_ir::{Request as ModelRequest, StreamEvent};
@@ -832,7 +834,8 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
     else {
         return text_response(StatusCode::NOT_FOUND, "not found");
     };
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
+    without_own_token(&current_token(&app), &mut parts);
     let bytes = match axum::body::to_bytes(body, SURFACE_BODY_LIMIT).await {
         Ok(bytes) => bytes,
         Err(_) => return text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
@@ -1171,6 +1174,49 @@ fn authorized(expected: &str, headers: &HeaderMap, uri: &Uri) -> bool {
         matched |= tokens_match(expected, &token);
     }
     saw && matched
+}
+
+/// Takes the gateway's own token out of `parts` before a surface sees them.
+///
+/// A surface may relay the request as it came, so each presented secret that
+/// matches the token goes: the bearer, `x-api-key`, `x-goog-api-key`, and any
+/// `key` query pair. A credential that does not match is the caller's own
+/// and stays, in its place.
+fn without_own_token(expected: &str, parts: &mut axum::http::request::Parts) {
+    if bearer(&parts.headers).is_some_and(|token| tokens_match(expected, token)) {
+        parts.headers.remove(header::AUTHORIZATION);
+    }
+    for name in ["x-api-key", "x-goog-api-key"] {
+        if header_secret(&parts.headers, name).is_some_and(|token| tokens_match(expected, token)) {
+            parts.headers.remove(name);
+        }
+    }
+    let Some(query) = parts.uri.query() else {
+        return;
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !is_own_key(expected, pair))
+        .collect();
+    if kept.len() == query.split('&').count() {
+        return;
+    }
+    let path = parts.uri.path();
+    let target = if kept.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{}", kept.join("&"))
+    };
+    // What is left of a valid query is a valid query.
+    if let Ok(uri) = target.parse() {
+        parts.uri = uri;
+    }
+}
+
+/// Whether the query pair `pair` is `key=` with the gateway's token.
+fn is_own_key(expected: &str, pair: &str) -> bool {
+    pair.split_once('=')
+        .is_some_and(|(name, value)| name == "key" && tokens_match(expected, &percent_decode(value)))
 }
 
 fn header_secret<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

@@ -1,4 +1,5 @@
-//! Codex's model catalog on the gateway's own address.
+//! Codex's model catalog, and its ChatGPT backend, on the gateway's own
+//! address.
 //!
 //! A Codex whose model provider is this gateway (`base_url` ending `/v1`)
 //! reads its model picker from `model_catalog_url`, `GET /v1/codex/models`.
@@ -13,8 +14,15 @@
 //! most [`MOST`] bytes of a catalog and loads none of it past that, so the
 //! entries that would go past are left out, the last first, and the
 //! `x-hofund-left-out` header says how many.
+//!
+//! The same surface serves `/backend-api/codex`, for a Codex that keeps its
+//! ChatGPT sign-in: see the `backend` module. It lives here because it lists
+//! hofund's models with the same catalog entries, and the registry takes
+//! one surface per plugin.
 
 #![deny(missing_docs)]
+
+use std::time::Duration;
 
 use hofund_plugin_api::{
     Body, BodyStream, GatewayHandle, InboundSurface, Method, PluginError, RouteSpec, SurfaceHost,
@@ -23,7 +31,7 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{Contribution, HttpRequest, HttpResponse, async_trait, text_response};
 
-/// Registers the Codex catalog surface.
+/// Registers the Codex surface: the catalog and the backend.
 #[must_use]
 pub fn contribute() -> Contribution {
     Contribution::new().surface(CodexCatalog)
@@ -36,6 +44,8 @@ pub use instructions::BASE_INSTRUCTIONS;
 
 mod instructions;
 
+mod backend;
+
 /// The header that says how many models were left out to fit [`MOST`].
 pub const LEFT_OUT_HEADER: &str = "x-hofund-left-out";
 
@@ -47,9 +57,13 @@ const HEAD: &str = r#"{"models":["#;
 const TAIL: &str = "]}\n";
 
 static ID: SurfaceId = SurfaceId::from_static("codex-catalog");
-static ROUTES: [RouteSpec; 1] = [RouteSpec::from_static(Method::Get, CATALOG_PATH)];
+static ROUTES: [RouteSpec; 3] = [
+    RouteSpec::from_static(Method::Get, CATALOG_PATH),
+    RouteSpec::from_static(Method::Get, backend::PREFIX),
+    RouteSpec::from_static(Method::Post, backend::PREFIX),
+];
 
-/// The Codex catalog surface.
+/// The Codex surface: the catalog, and the ChatGPT backend under `/backend-api/codex`.
 #[derive(Clone, Copy, Debug)]
 pub struct CodexCatalog;
 
@@ -65,24 +79,61 @@ impl InboundSurface for CodexCatalog {
 
     async fn handle(
         &self,
-        _route: &RouteSpec,
+        route: &RouteSpec,
         request: HttpRequest,
         host: &SurfaceHost,
     ) -> Result<HttpResponse, PluginError> {
-        Ok(serve(host.gateway(), &request).await)
+        Ok(dispatch(&Host(host), route.prefix(), request).await)
     }
 }
 
-/// What the surface asks of the gateway, so tests can stand in for it.
-#[async_trait]
-trait Kernel: Send + Sync {
-    async fn call(&self, request: HttpRequest) -> Result<HttpResponse, PluginError>;
+/// Answers `request`, which came in on the route with `prefix`.
+async fn dispatch(kernel: &dyn Kernel, prefix: &str, request: HttpRequest) -> HttpResponse {
+    if prefix == backend::PREFIX {
+        return backend::serve(kernel, backend::BASES, request).await;
+    }
+    serve(kernel, &request).await
 }
 
+/// What the surface asks of the kernel, so tests can stand in for it.
 #[async_trait]
-impl Kernel for GatewayHandle {
+trait Kernel: Send + Sync {
+    /// A call to the gateway's own routes, in process.
+    async fn call(&self, request: HttpRequest) -> Result<HttpResponse, PluginError>;
+
+    /// A call out on the kernel's pooled client, given up after `within`.
+    async fn send(
+        &self,
+        request: HttpRequest,
+        within: Option<Duration>,
+    ) -> Result<HttpResponse, PluginError>;
+}
+
+/// The kernel as the surface host gives it.
+struct Host<'a>(&'a SurfaceHost);
+
+#[async_trait]
+impl Kernel for Host<'_> {
     async fn call(&self, request: HttpRequest) -> Result<HttpResponse, PluginError> {
-        Self::call(self, request).await
+        GatewayHandle::call(self.0.gateway(), request).await
+    }
+
+    async fn send(
+        &self,
+        request: HttpRequest,
+        within: Option<Duration>,
+    ) -> Result<HttpResponse, PluginError> {
+        let Some(http) = self.0.http() else {
+            return Err(PluginError::unsupported(
+                "this gateway gives surfaces no outbound HTTP",
+            ));
+        };
+        match within {
+            None => http.send(request).await,
+            Some(within) => hofund_plugin_sdk::timeout(within, http.send(request))
+                .await
+                .unwrap_or_else(|| Err(PluginError::timeout("the upstream did not answer in time"))),
+        }
     }
 }
 
@@ -103,15 +154,18 @@ async fn serve(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
             }
             response
         }
-        Err(error) => {
-            let status = error
-                .status()
-                .filter(|status| *status >= 400)
-                .unwrap_or(502);
-            let body = json!({"error": {"message": error.message(), "type": "hofund_error"}});
-            json_response(status, body.to_string())
-        }
+        Err(error) => error_response(&error),
     }
+}
+
+/// `error` as a JSON reply: its own status when that is a failure, else 502.
+fn error_response(error: &PluginError) -> HttpResponse {
+    let status = error
+        .status()
+        .filter(|status| *status >= 400)
+        .unwrap_or(502);
+    let body = json!({"error": {"message": error.message(), "type": "hofund_error"}});
+    json_response(status, body.to_string())
 }
 
 /// `body` as a JSON reply.
@@ -235,3 +289,6 @@ fn failure_message(body: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod backend_tests;

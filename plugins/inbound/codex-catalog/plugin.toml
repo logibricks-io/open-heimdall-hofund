@@ -4,3 +4,11 @@ kind = "inbound"
 [[route]]
 method = "GET"
 prefix = "/v1/codex/models"
+
+[[route]]
+method = "GET"
+prefix = "/backend-api/codex"
+
+[[route]]
+method = "POST"
+prefix = "/backend-api/codex"

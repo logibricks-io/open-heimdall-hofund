@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Codex's ChatGPT backend on the gateway (S6b): the `codex-catalog` plugin
+  also serves `GET` and `POST /backend-api/codex`, so a Codex signed in to
+  ChatGPT can point its built-in provider at the gateway and keep that
+  sign-in. `GET /models` is the backend's list for that sign-in followed by
+  the gateway's models (3 s wait; a 401 or 403 comes back as sent). A
+  `POST /responses` naming a model with a `/` runs in process as
+  `/v1/responses`, and `/responses/compact` for one is a 400. Everything else
+  is relayed unchanged but for hop-by-hop headers, `Host` and
+  `Accept-Encoding`, to the ChatGPT backend, or to the API for an `sk-` key.
+  A websocket upgrade is a 426.
 - `SurfaceHost::http()` (S6a): an inbound surface can relay a client's
   request on the kernel's pooled client, with the client's own credential.
   The daemon gives surfaces a pool with its connect and idle-read limits;
@@ -654,6 +664,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- An inbound surface never sees the gateway token (S6b). Before a surface
+  runs, the gateway removes each presented credential that matches it: the
+  bearer, `x-api-key`, `x-goog-api-key`, and any `key` query pair. A
+  credential that does not match is the caller's own and stays.
 - Model-list redaction masks only whole secret tokens of at least eight characters,
   strips URL userinfo, and removes every URL query value through one shared helper.
   This applies to every URL in an error message, including pagination URLs and

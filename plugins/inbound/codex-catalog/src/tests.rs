@@ -13,7 +13,7 @@ use super::{
 };
 
 /// Runs `future` on this thread. Everything here is ready at once.
-fn block_on<F: Future>(future: F) -> F::Output {
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     struct Unpark(std::thread::Thread);
     impl Wake for Unpark {
         fn wake(self: Arc<Self>) {
@@ -69,6 +69,14 @@ impl Kernel for Gateway {
         *response.body_mut() = BodyStream::from_bytes(self.body.clone());
         Ok(response)
     }
+
+    async fn send(
+        &self,
+        _request: HttpRequest,
+        _within: Option<std::time::Duration>,
+    ) -> Result<HttpResponse, PluginError> {
+        Err(PluginError::unsupported("the catalog sends nothing out"))
+    }
 }
 
 fn get(path: &str) -> HttpRequest {
@@ -114,7 +122,14 @@ fn the_route_is_codexs() {
         .iter()
         .map(|route| (route.method(), route.prefix()))
         .collect();
-    assert_eq!(routes, [(Method::Get, "/v1/codex/models")]);
+    assert_eq!(
+        routes,
+        [
+            (Method::Get, "/v1/codex/models"),
+            (Method::Get, "/backend-api/codex"),
+            (Method::Post, "/backend-api/codex"),
+        ]
+    );
     let _ = super::contribute();
 }
 
