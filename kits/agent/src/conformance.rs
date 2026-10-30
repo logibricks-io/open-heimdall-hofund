@@ -677,7 +677,11 @@ fn toml_with_user_key(text: &str) -> String {
         }
         at += part.len();
     }
-    let gap = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+    let gap = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
     format!("{text}{gap}{line}")
 }
 
