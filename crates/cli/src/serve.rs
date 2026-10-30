@@ -85,7 +85,12 @@ pub(crate) fn command(daemon: &Path, config: &Path) -> Command {
 /// Returns a message when the daemon cannot be found or started, or when it
 /// stopped without an exit code.
 pub(crate) fn run(config: &Path) -> Result<i32, String> {
-    let exe = std::env::current_exe().ok();
+    // Resolve symlinks: macOS reports the invoked path (for example under
+    // /var rather than /private/var, or a Homebrew bin link), and the
+    // daemon sits beside the real install.
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe));
     let exe_dir = exe.as_deref().and_then(Path::parent);
     let path = std::env::var_os("PATH");
     let daemon = locate(exe_dir, path.as_deref())?;

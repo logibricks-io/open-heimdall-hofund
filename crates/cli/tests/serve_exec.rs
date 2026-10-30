@@ -114,6 +114,16 @@ fn serve_execs_the_daemon_from_the_install_layout() {
     );
     assert!(record.ends_with("from=path\n"), "{record}");
 
+    // A symlinked CLI looks beside the real executable, not the link.
+    let linked = root.join("linked");
+    fs::create_dir_all(&linked).expect("mkdir");
+    let link = linked.join("hofund");
+    std::os::unix::fs::symlink(paired.join("hofund"), &link).expect("symlink");
+    let run = serve(&link, &empty, &out, &["--config", "/explicit/hofund.toml"]);
+    assert_eq!(run.output.status.code(), Some(7), "{:?}", run.output);
+    let record = run.record.expect("fake hofundd ran");
+    assert!(record.ends_with("from=beside\n"), "{record}");
+
     // Neither place: an actionable error and exit 1.
     let run = serve(&cli, &empty, &out, &["--config", "/explicit/hofund.toml"]);
     assert_eq!(run.output.status.code(), Some(1), "{:?}", run.output);
