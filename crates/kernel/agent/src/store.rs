@@ -68,6 +68,11 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AgentError> 
     replace_file(&temporary, path)
 }
 
+/// Where connect records the credential store item it wrote for `path`.
+pub(crate) fn credential_record(path: &Path) -> PathBuf {
+    sibling(path, ".hofund.credential")
+}
+
 /// Whether connect saved a backup or an absent marker beside `path`.
 pub(crate) fn marker_present(path: &Path) -> bool {
     sibling(path, ".hofund.bak").is_file() || sibling(path, ".hofund.absent").is_file()

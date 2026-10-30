@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent keys in the OS credential store (Z1): an agent descriptor may
+  declare a `[credential]` item (URL and Windows target templates, literal
+  account and label). The engine stores hofund's key there through a
+  `CredentialStore` passed to the `Session`, before the config files are
+  written; it is idempotent, rewritten on token refresh, reported as drift
+  when missing or replaced, and removed on disconnect only while it still
+  holds hofund's key. A record beside the managed file keeps a SHA-256
+  digest of the key, never the key. `hofund-kit-agent` adds
+  `MemoryCredentialStore` for tests. Native OS backends follow in Z2.
 - Goose agent (G14): `hofund agent connect goose` writes hofund's own
   custom provider, `custom_providers/hofund.json` beside Goose's
   `config.yaml` (`~/.config/goose`, or `$XDG_CONFIG_HOME/goose` when it is

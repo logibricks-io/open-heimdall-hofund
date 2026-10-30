@@ -5,12 +5,14 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hofund_plugin_api::{
-    AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, ModelField, ModelValue,
-    Slot as ApiSlot, Visible,
+    AgentCredential, AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, ModelField,
+    ModelValue, Slot as ApiSlot, Visible,
 };
 
+use crate::credential::EngineCredential;
 use crate::edit::{
     Assignment, FileKind, Shared, get, is_empty_document, is_empty_json, owned_part, remove_keys,
     render, string_at, strip_owned,
@@ -20,8 +22,8 @@ use crate::store::{
     remove_empty_parents, revert_path, unified_diff, write_atomic, write_verified,
 };
 use crate::{
-    AgentAdapter, AgentError, ConfigFile, ConnectionStatus, FileChange, GatewayTarget, Plan,
-    Session, TargetOs,
+    AgentAdapter, AgentError, ConfigFile, ConnectionStatus, CredentialStore, FileChange,
+    GatewayTarget, Plan, Session, TargetOs,
 };
 use crate::{DisconnectOutcome, usable_override};
 
@@ -213,6 +215,8 @@ struct Engine {
     model_prefix: Option<&'static str>,
     visible: Visible,
     route: AgentRoute,
+    credential: Option<AgentCredential>,
+    credential_store: Option<Arc<dyn CredentialStore>>,
 }
 
 /// What an apply does with the agent's model setting.
@@ -296,7 +300,29 @@ impl Engine {
             model_prefix: description.model_prefix(),
             visible: description.visible(),
             route: description.route(),
+            credential: description.credential().copied(),
+            credential_store: session.credential_store().cloned(),
         })
+    }
+
+    /// The credential store item hofund's key goes in, when the agent reads
+    /// it there and receives the gateway.
+    fn credential(&self) -> Result<Option<EngineCredential<'_>>, AgentError> {
+        let Some(spec) = self.credential.as_ref() else {
+            return Ok(None);
+        };
+        if self.route != AgentRoute::Gateway {
+            return Ok(None);
+        }
+        let location = self.choose(spec.file()).ok_or_else(|| {
+            AgentError::message(format!("`{}` has no config location", spec.file()))
+        })?;
+        Ok(Some(EngineCredential::new(
+            self.id,
+            spec,
+            &location.path,
+            self.credential_store.as_ref(),
+        )))
     }
 
     fn detect(&self, session: &Session) -> bool {
@@ -320,7 +346,11 @@ impl Engine {
     }
 
     fn plan(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
-        Ok(plan_of(&self.render_all(target, Choice::Keep)?))
+        let plan = plan_of(&self.render_all(target, Choice::Keep)?);
+        let Some(credential) = self.credential()? else {
+            return Ok(plan);
+        };
+        Ok(with_change(plan, credential.planned(target)?))
     }
 
     fn apply(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
@@ -330,6 +360,12 @@ impl Engine {
     fn apply_with(&self, target: &GatewayTarget, choice: Choice<'_>) -> Result<Plan, AgentError> {
         let rendered = self.render_all(target, choice)?;
         let plan = plan_of(&rendered);
+        // The item goes in before any file names the gateway, so the agent
+        // never reads a gateway URL without a key; an item alone is inert.
+        let stored = match self.credential()? {
+            Some(credential) => credential.put(target)?,
+            None => None,
+        };
         for change in plan.changes() {
             backup_once(change.path())?;
         }
@@ -341,7 +377,7 @@ impl Engine {
                 snapshot_wrote(&file.path, file.kind, &file.assignments, &file.pinned)?;
             }
         }
-        Ok(plan)
+        Ok(with_change(plan, stored))
     }
 
     fn set_model(&self, target: &GatewayTarget, model: Option<&str>) -> Result<Plan, AgentError> {
@@ -590,6 +626,9 @@ impl Engine {
 
     fn revert(&self) -> Result<(), AgentError> {
         let mut restored = false;
+        if let Some(credential) = self.credential()? {
+            restored = credential.release(false)?.0;
+        }
         for location in &self.locations {
             if revert_path(&location.path)? {
                 restored = true;
@@ -659,6 +698,9 @@ impl Engine {
                 }
             }
         }
+        if connected && let Some(credential) = self.credential()? {
+            connected = credential.connected(target)?;
+        }
         Ok(ConnectionStatus::new(
             self.id,
             self.display_name,
@@ -672,6 +714,13 @@ impl Engine {
         let mut changed = false;
         let mut warnings = Vec::new();
         let preserve = preserve_dirs(session);
+        // The record sits beside a managed file, so it goes first; a parent
+        // directory can then be removed when the file leaves it empty.
+        if let Some(credential) = self.credential()? {
+            let (released, notes) = credential.release(force)?;
+            changed |= released;
+            warnings.extend(notes);
+        }
         for location in &self.locations {
             let path = &location.path;
             if !marker_present(path) {
@@ -739,6 +788,9 @@ impl Engine {
                 refresh_wrote(&chosen.path, chosen.kind, &assignments)?;
                 updated.push(chosen.path);
             }
+        }
+        if let Some(credential) = self.credential()? {
+            updated.extend(credential.refresh(target)?);
         }
         Ok(updated)
     }
@@ -1333,7 +1385,7 @@ fn refresh_json(
 
 /// `text` with `{origin}`, `{v1}`, and `{token}` replaced in one pass, so a
 /// filled value is never read as a placeholder.
-fn fill_template(text: &str, target: &GatewayTarget) -> String {
+pub(crate) fn fill_template(text: &str, target: &GatewayTarget) -> String {
     let origin = origin(target.base_url());
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -1358,6 +1410,16 @@ fn fill_template(text: &str, target: &GatewayTarget) -> String {
 
 fn origin(base_url: &str) -> String {
     base_url.trim_end_matches('/').to_owned()
+}
+
+/// `plan` with `change` appended, when there is one.
+fn with_change(plan: Plan, change: Option<FileChange>) -> Plan {
+    let Some(change) = change else {
+        return plan;
+    };
+    let mut changes = plan.changes().to_vec();
+    changes.push(change);
+    Plan::new(changes)
 }
 
 fn plan_of(rendered: &[Rendered]) -> Plan {

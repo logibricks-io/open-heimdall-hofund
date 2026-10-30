@@ -2035,6 +2035,108 @@ pub struct AgentDescription {
     visible: Visible,
     route: AgentRoute,
     requires: &'static [crate::id::SurfaceId],
+    credential: Option<AgentCredential>,
+}
+
+/// Where an agent reads hofund's key from the OS credential store instead of
+/// a file.
+///
+/// `url` and `windows_target` are templates over `{origin}` and `{v1}`; they
+/// never hold the token. `file` names the managed file the item belongs to:
+/// the engine keeps its record of what it stored beside that file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AgentCredential {
+    file: &'static str,
+    url: &'static str,
+    account: &'static str,
+    label: &'static str,
+    windows_target: &'static str,
+}
+
+impl AgentCredential {
+    /// A credential. Generated code calls this.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a field is empty or a template names `{token}`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_static(
+        file: &'static str,
+        url: &'static str,
+        account: &'static str,
+        label: &'static str,
+        windows_target: &'static str,
+    ) -> Self {
+        assert!(!file.is_empty(), "credential file is empty");
+        assert!(!url.is_empty(), "credential url is empty");
+        assert!(!account.is_empty(), "credential account is empty");
+        assert!(!label.is_empty(), "credential label is empty");
+        assert!(
+            !windows_target.is_empty(),
+            "credential windows_target is empty"
+        );
+        assert!(!names_token(url), "credential url names the token");
+        assert!(
+            !names_token(windows_target),
+            "credential windows_target names the token"
+        );
+        Self {
+            file,
+            url,
+            account,
+            label,
+            windows_target,
+        }
+    }
+
+    /// The managed file this item belongs to.
+    #[must_use]
+    pub const fn file(&self) -> &'static str {
+        self.file
+    }
+
+    /// Template of the URL the agent looks the key up by.
+    #[must_use]
+    pub const fn url(&self) -> &'static str {
+        self.url
+    }
+
+    /// Account (user name) of the item.
+    #[must_use]
+    pub const fn account(&self) -> &'static str {
+        self.account
+    }
+
+    /// Label shown by the store, where it has one.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        self.label
+    }
+
+    /// Template of the generic-credential target name on Windows.
+    #[must_use]
+    pub const fn windows_target(&self) -> &'static str {
+        self.windows_target
+    }
+}
+
+const fn names_token(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let needle = b"{token}";
+    let mut start = 0;
+    while start + needle.len() <= bytes.len() {
+        let mut index = 0;
+        while index < needle.len() && bytes[start + index] == needle[index] {
+            index += 1;
+        }
+        if index == needle.len() {
+            return true;
+        }
+        start += 1;
+    }
+    false
 }
 
 impl AgentDescription {
@@ -2083,7 +2185,16 @@ impl AgentDescription {
             visible,
             route,
             requires,
+            credential: None,
         }
+    }
+
+    /// Stores hofund's key in the OS credential store, as `credential` says.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_credential(mut self, credential: AgentCredential) -> Self {
+        self.credential = Some(credential);
+        self
     }
 
     /// Sets the logical file containing the model key.
@@ -2190,6 +2301,12 @@ impl AgentDescription {
     pub const fn requires(&self) -> &'static [crate::id::SurfaceId] {
         self.requires
     }
+
+    /// The OS credential store item holding hofund's key, if any.
+    #[must_use]
+    pub const fn credential(&self) -> Option<&AgentCredential> {
+        self.credential.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -2203,6 +2320,42 @@ mod tests {
     };
     use crate::ListKind;
     use crate::id::{AccountId, PluginId, ProtocolId};
+
+    #[test]
+    fn credential_templates_never_name_the_token() {
+        let spec = super::AgentCredential::from_static("f", "{v1}", "Bearer", "label", "t:{v1}");
+        assert_eq!(
+            (
+                spec.file(),
+                spec.url(),
+                spec.account(),
+                spec.label(),
+                spec.windows_target()
+            ),
+            ("f", "{v1}", "Bearer", "label", "t:{v1}")
+        );
+        assert!(super::names_token("{token}"));
+        assert!(super::names_token("a{token}b"));
+        assert!(!super::names_token("{toke}"));
+        assert!(!super::names_token("{tokenx"));
+        assert!(!super::names_token(""));
+        for fields in [
+            ["", "{v1}", "a", "l", "t"],
+            ["f", "", "a", "l", "t"],
+            ["f", "{v1}", "", "l", "t"],
+            ["f", "{v1}", "a", "", "t"],
+            ["f", "{v1}", "a", "l", ""],
+            ["f", "{v1}/{token}", "a", "l", "t"],
+            ["f", "{v1}", "a", "l", "t={token}"],
+        ] {
+            let built = std::panic::catch_unwind(|| {
+                super::AgentCredential::from_static(
+                    fields[0], fields[1], fields[2], fields[3], fields[4],
+                )
+            });
+            assert!(built.is_err(), "{fields:?}");
+        }
+    }
 
     #[test]
     fn model_metadata_round_trips_and_unknown_values_stay_empty() {

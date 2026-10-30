@@ -44,20 +44,23 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // Referenced so this crate's manifest dependency is compiled, not merely declared.
 use hofund_config as _;
 
 pub use hofund_plugin_api::{
-    AgentFactory, AgentIntegration, ConnectionStatus, DisconnectOutcome, DynAgentFactory,
-    FileChange, GatewayTarget, Plan,
+    AgentFactory, AgentIntegration, ConnectionStatus, Credential, CredentialError, CredentialStore,
+    DisconnectOutcome, DynAgentFactory, FileChange, GatewayTarget, Plan,
 };
 
 mod catalog;
+mod credential;
 mod edit;
 mod store;
 
 pub use catalog::{Catalog, Compiled, catalog, resolve};
+pub use credential::CREDENTIAL_CHANGE_PREFIX;
 
 /// The operating system path template selected by a compiled adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +106,7 @@ pub struct Session {
     codex_home: Option<PathBuf>,
     gemini_cli_home: Option<PathBuf>,
     xdg_config_home: Option<PathBuf>,
+    credential_store: Option<Arc<dyn CredentialStore>>,
 }
 
 impl std::fmt::Debug for Session {
@@ -116,6 +120,7 @@ impl std::fmt::Debug for Session {
             .field("codex_home", &self.codex_home)
             .field("gemini_cli_home", &self.gemini_cli_home)
             .field("xdg_config_home", &self.xdg_config_home)
+            .field("credential_store", &self.credential_store.is_some())
             .finish()
     }
 }
@@ -133,6 +138,7 @@ impl Session {
             codex_home: None,
             gemini_cli_home: None,
             xdg_config_home: None,
+            credential_store: None,
         }
     }
 
@@ -264,6 +270,18 @@ impl Session {
         let path = path.into();
         self.set_env(OsStr::new("XDG_CONFIG_HOME"), path.as_os_str());
         self
+    }
+
+    /// Uses `store` for agents that read hofund's key from the OS credential
+    /// store. Without one, connecting such an agent fails.
+    #[must_use]
+    pub fn with_credential_store(mut self, store: Arc<dyn CredentialStore>) -> Self {
+        self.credential_store = Some(store);
+        self
+    }
+
+    pub(crate) fn credential_store(&self) -> Option<&Arc<dyn CredentialStore>> {
+        self.credential_store.as_ref()
     }
 }
 
