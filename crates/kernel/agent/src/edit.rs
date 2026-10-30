@@ -21,9 +21,30 @@ pub(crate) struct Assignment {
     pub value: String,
     /// When set, `value` is JSON text and is written as that value, not as a string.
     pub raw_json: bool,
-    /// When set, `value` is a JSON array of hofund's entries, merged into the
-    /// array at `key`: entries passing these tests are replaced, others kept.
-    pub owner: Option<&'static [OwnerTest]>,
+    /// When set, `value` holds only hofund's entries, merged into the array
+    /// or map at `key`: hofund's existing entries are replaced, others kept.
+    pub shared: Option<Shared>,
+}
+
+/// How hofund's entries are told apart in a value shared with the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Shared {
+    /// An array: `value` is a JSON array, and an entry is hofund's when it is
+    /// an object passing every test.
+    Array(&'static [OwnerTest]),
+    /// A map: `value` is a JSON object, and an entry is hofund's when its
+    /// name starts with the prefix.
+    Map(&'static str),
+}
+
+impl Shared {
+    /// The value holding none of hofund's entries, as JSON text.
+    pub(crate) const fn empty(self) -> &'static str {
+        match self {
+            Self::Array(_) => "[]",
+            Self::Map(_) => "{}",
+        }
+    }
 }
 
 pub(crate) fn render(
@@ -57,7 +78,7 @@ pub(crate) fn string_at(
 ) -> Result<Option<String>, AgentError> {
     match kind {
         FileKind::Json => json_string(&json_root(text)?, key),
-        FileKind::Toml => Ok(toml_get(&parse_toml(text)?, key)),
+        FileKind::Toml => Ok(toml_string(&parse_toml(text)?, key)),
         FileKind::Env => Ok(env_get(text, key)),
         FileKind::Yaml => Ok(yaml_string(&yaml_root(text)?, key)),
     }
@@ -100,29 +121,41 @@ pub(crate) fn is_empty_document(kind: FileKind, bytes: &[u8]) -> Result<bool, Ag
     }
 }
 
-/// The array at `key` without hofund's entries, as JSON text.
+/// The array or map at `key` without hofund's entries, as JSON text.
 ///
-/// `None` when the key is absent. Only JSON and YAML files hold arrays.
+/// `None` when the key is absent. Env files hold neither; TOML files hold
+/// maps only.
 pub(crate) fn strip_owned(
     kind: FileKind,
     text: &str,
     key: &str,
-    owner: &[OwnerTest],
+    shared: Shared,
 ) -> Result<Option<String>, AgentError> {
     let path = split_key(key);
-    let existing = match kind {
-        FileKind::Json => json_child(&json_root(text)?, &path).cloned(),
-        FileKind::Yaml => yaml_child(&yaml_root(text)?, &path).map(yaml_to_json),
-        FileKind::Toml | FileKind::Env => {
+    let existing = match (kind, shared) {
+        (FileKind::Json, _) => json_child(&json_root(text)?, &path).cloned(),
+        (FileKind::Yaml, _) => yaml_child(&yaml_root(text)?, &path).map(yaml_to_json),
+        (FileKind::Toml, Shared::Map(_)) => {
+            toml_child(parse_toml(text)?.as_item(), &path).map(toml_to_json)
+        }
+        (FileKind::Toml, Shared::Array(_)) | (FileKind::Env, _) => {
             return Err(AgentError::message(format!(
-                "`{key}` cannot hold an array in this file kind"
+                "`{key}` cannot hold shared entries in this file kind"
             )));
         }
     };
-    match kept_entries(existing.as_ref(), path.is_empty(), key, owner)? {
-        Some(kept) => Ok(Some(Value::Array(kept).to_string())),
-        None => Ok(None),
-    }
+    let kept = match shared {
+        Shared::Array(owner) => {
+            kept_entries(existing.as_ref(), path.is_empty(), key, owner)?.map(Value::Array)
+        }
+        Shared::Map(prefix) => kept_map(existing.as_ref(), key, prefix)?.map(Value::Object),
+    };
+    Ok(kept.map(|kept| kept.to_string()))
+}
+
+/// Whether JSON text is an empty array or object.
+pub(crate) fn is_empty_json(text: &str) -> bool {
+    matches!(text.trim(), "[]" | "{}")
 }
 
 /// The user's entries of an existing array value, in order.
@@ -188,6 +221,71 @@ fn merged(
     Ok(Some(Value::Array(items)))
 }
 
+/// The user's entries of an existing map value, in order.
+///
+/// `None` when there is no map yet.
+fn kept_map(
+    existing: Option<&Value>,
+    key: &str,
+    prefix: &str,
+) -> Result<Option<Map<String, Value>>, AgentError> {
+    match existing {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(object)) => Ok(Some(
+            object
+                .iter()
+                .filter(|(name, _)| !name.starts_with(prefix))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        )),
+        Some(_) => Err(AgentError::message(format!("`{key}` is not a map"))),
+    }
+}
+
+/// hofund's map entries from an assignment's JSON text.
+fn our_entries(assignment: &Assignment) -> Result<Map<String, Value>, AgentError> {
+    let ours: Value = serde_json::from_str(&assignment.value).map_err(|error| {
+        AgentError::message(format!("`{}` is not JSON: {error}", assignment.key))
+    })?;
+    match ours {
+        Value::Object(ours) => Ok(ours),
+        _ => Err(AgentError::message(format!(
+            "`{}` entries are not an object",
+            assignment.key
+        ))),
+    }
+}
+
+/// The user's map entries followed by hofund's, or `None` to leave the key
+/// out.
+fn merged_map(
+    existing: Option<&Value>,
+    assignment: &Assignment,
+    prefix: &str,
+) -> Result<Option<Value>, AgentError> {
+    let ours = our_entries(assignment)?;
+    let kept = kept_map(existing, assignment.key, prefix)?;
+    if kept.is_none() && ours.is_empty() {
+        return Ok(None);
+    }
+    let mut entries = kept.unwrap_or_default();
+    entries.extend(ours);
+    Ok(Some(Value::Object(entries)))
+}
+
+/// Merges hofund's entries into an existing JSON or YAML value.
+fn merged_shared(
+    existing: Option<&Value>,
+    root: bool,
+    assignment: &Assignment,
+    shared: Shared,
+) -> Result<Option<Value>, AgentError> {
+    match shared {
+        Shared::Array(owner) => merged(existing, root, assignment, owner),
+        Shared::Map(prefix) => merged_map(existing, assignment, prefix),
+    }
+}
+
 fn json_child<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut cursor = value;
     for part in path {
@@ -217,9 +315,9 @@ fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, Age
             continue;
         }
         let path = split_key(assignment.key);
-        if let Some(owner) = assignment.owner {
+        if let Some(shared) = assignment.shared {
             let existing = json_child(&root, &path);
-            let Some(value) = merged(existing, path.is_empty(), assignment, owner)? else {
+            let Some(value) = merged_shared(existing, path.is_empty(), assignment, shared)? else {
                 continue;
             };
             if path.is_empty() {
@@ -247,11 +345,33 @@ fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, Age
 fn render_toml(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
     let mut document = parse_toml(original)?;
     for assignment in assignments {
-        set_toml(
-            document.as_item_mut(),
-            &split_key(assignment.key),
-            &assignment.value,
-        )?;
+        let path = split_key(assignment.key);
+        match assignment.shared {
+            Some(Shared::Map(prefix)) => {
+                let ours = our_entries(assignment)?;
+                merge_toml_map(document.as_item_mut(), &path, prefix, &ours)?;
+            }
+            Some(Shared::Array(_)) => {
+                return Err(AgentError::message(format!(
+                    "`{}` cannot hold a shared array in a TOML file",
+                    assignment.key
+                )));
+            }
+            None if assignment.raw_json => {
+                let value: Value = serde_json::from_str(&assignment.value).map_err(|error| {
+                    AgentError::message(format!("`{}` is not JSON: {error}", assignment.key))
+                })?;
+                if path.is_empty() {
+                    let Item::Table(table) = json_to_toml_item(&value) else {
+                        return Err(AgentError::message("root is not a table".to_owned()));
+                    };
+                    *document.as_table_mut() = table;
+                } else {
+                    set_toml_item(document.as_item_mut(), &path, json_to_toml_item(&value))?;
+                }
+            }
+            None => set_toml(document.as_item_mut(), &path, &assignment.value)?,
+        }
     }
     let mut text = document.to_string();
     if !text.ends_with('\n') {
@@ -508,9 +628,11 @@ fn render_yaml(original: &str, assignments: &[Assignment]) -> Result<String, Age
     let mut root = yaml_root(original)?;
     for assignment in assignments {
         let path = split_key(assignment.key);
-        if let Some(owner) = assignment.owner {
+        if let Some(shared) = assignment.shared {
             let existing = yaml_child(&root, &path).map(yaml_to_json);
-            let Some(value) = merged(existing.as_ref(), path.is_empty(), assignment, owner)? else {
+            let Some(value) =
+                merged_shared(existing.as_ref(), path.is_empty(), assignment, shared)?
+            else {
                 continue;
             };
             if path.is_empty() {
@@ -724,8 +846,175 @@ fn parse_toml(text: &str) -> Result<DocumentMut, AgentError> {
         .map_err(|error| AgentError::message(format!("TOML: {error}")))
 }
 
-fn toml_get(document: &DocumentMut, key: &str) -> Option<String> {
+/// The string at `key`, when that value is a string.
+fn toml_string(document: &DocumentMut, key: &str) -> Option<String> {
     lookup(document.as_item(), &split_key(key)).map(ToOwned::to_owned)
+}
+
+/// The value at `key`: a string as itself, anything else as JSON text.
+fn toml_get(document: &DocumentMut, key: &str) -> Option<String> {
+    let item = toml_child(document.as_item(), &split_key(key))?;
+    if let Some(text) = item.as_str() {
+        return Some(text.to_owned());
+    }
+    let value = toml_to_json(item);
+    (!value.is_null()).then(|| value.to_string())
+}
+
+fn toml_child<'a>(item: &'a Item, path: &[&str]) -> Option<&'a Item> {
+    let mut cursor = item;
+    for part in path {
+        cursor = cursor.as_table_like()?.get(part)?;
+    }
+    Some(cursor)
+}
+
+fn toml_to_json(item: &Item) -> Value {
+    match item {
+        Item::None => Value::Null,
+        Item::Value(value) => toml_value_to_json(value),
+        Item::Table(table) => Value::Object(
+            table
+                .iter()
+                .map(|(key, item)| (key.to_owned(), toml_to_json(item)))
+                .collect(),
+        ),
+        Item::ArrayOfTables(tables) => Value::Array(
+            tables
+                .iter()
+                .map(|table| {
+                    Value::Object(
+                        table
+                            .iter()
+                            .map(|(key, item)| (key.to_owned(), toml_to_json(item)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn toml_value_to_json(value: &toml_edit::Value) -> Value {
+    match value {
+        toml_edit::Value::String(text) => Value::String(text.value().clone()),
+        toml_edit::Value::Integer(number) => Value::from(*number.value()),
+        toml_edit::Value::Float(number) => {
+            serde_json::Number::from_f64(*number.value()).map_or(Value::Null, Value::Number)
+        }
+        toml_edit::Value::Boolean(flag) => Value::Bool(*flag.value()),
+        toml_edit::Value::Datetime(time) => Value::String(time.value().to_string()),
+        toml_edit::Value::Array(items) => {
+            Value::Array(items.iter().map(toml_value_to_json).collect())
+        }
+        toml_edit::Value::InlineTable(table) => Value::Object(
+            table
+                .iter()
+                .map(|(key, value)| (key.to_owned(), toml_value_to_json(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// A JSON value as a TOML item: objects become tables, a table holding only
+/// tables stays implicit, and null becomes no item.
+fn json_to_toml_item(value: &Value) -> Item {
+    match value {
+        Value::Object(object) => {
+            let mut table = toml_edit::Table::new();
+            for (key, value) in object {
+                let item = json_to_toml_item(value);
+                if !item.is_none() {
+                    table.insert(key, item);
+                }
+            }
+            table.set_implicit(!table.is_empty() && table.iter().all(|(_, item)| item.is_table()));
+            Item::Table(table)
+        }
+        Value::Null => Item::None,
+        other => Item::Value(json_to_toml_value(other)),
+    }
+}
+
+/// A JSON value as an inline TOML value. Null becomes an empty string, since
+/// TOML has no null.
+fn json_to_toml_value(value: &Value) -> toml_edit::Value {
+    match value {
+        Value::Null => toml_edit::Value::from(""),
+        Value::Bool(flag) => toml_edit::Value::from(*flag),
+        Value::Number(number) => number.as_i64().map_or_else(
+            || toml_edit::Value::from(number.as_f64().unwrap_or_default()),
+            toml_edit::Value::from,
+        ),
+        Value::String(text) => toml_edit::Value::from(text.as_str()),
+        Value::Array(items) => {
+            toml_edit::Value::Array(items.iter().map(json_to_toml_value).collect())
+        }
+        Value::Object(object) => {
+            let mut table = toml_edit::InlineTable::new();
+            for (key, value) in object {
+                if !value.is_null() {
+                    table.insert(key, json_to_toml_value(value));
+                }
+            }
+            toml_edit::Value::InlineTable(table)
+        }
+    }
+}
+
+/// Drops the entries of the table at `path` whose names start with `prefix`
+/// and adds `ours` after the rest. A missing table is created only when
+/// there is something to add.
+fn merge_toml_map(
+    item: &mut Item,
+    path: &[&str],
+    prefix: &str,
+    ours: &Map<String, Value>,
+) -> Result<(), AgentError> {
+    if let Some((key, rest)) = path.split_first() {
+        let missing = item
+            .as_table_like()
+            .ok_or_else(|| AgentError::message(format!("`{key}` is not under a table")))?
+            .get(key)
+            .is_none();
+        if missing {
+            if ours.is_empty() {
+                return Ok(());
+            }
+            item[key] = implicit_table();
+        }
+        let child = item
+            .as_table_like_mut()
+            .and_then(|table| table.get_mut(key))
+            .expect("child");
+        if !child.is_table_like() {
+            return Err(AgentError::message(format!("`{key}` is not a table")));
+        }
+        return merge_toml_map(child, rest, prefix, ours);
+    }
+    let inline = item.is_inline_table();
+    let Some(table) = item.as_table_like_mut() else {
+        return Err(AgentError::message("the map is not a table".to_owned()));
+    };
+    let owned: Vec<String> = table
+        .iter()
+        .map(|(name, _)| name.to_owned())
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    for name in &owned {
+        table.remove(name);
+    }
+    for (name, value) in ours {
+        let entry = if inline {
+            Item::Value(json_to_toml_value(value))
+        } else {
+            json_to_toml_item(value)
+        };
+        if !entry.is_none() {
+            table.insert(name, entry);
+        }
+    }
+    Ok(())
 }
 
 fn lookup<'a>(item: &'a Item, path: &[&str]) -> Option<&'a str> {
@@ -838,6 +1127,37 @@ fn set_toml(item: &mut Item, path: &[&str], text: &str) -> Result<(), AgentError
         return Err(AgentError::message(format!("`{key}` is not a table")));
     }
     set_toml(child, rest, text)
+}
+
+/// Writes `written` at `path`, creating implicit parent tables.
+fn set_toml_item(item: &mut Item, path: &[&str], written: Item) -> Result<(), AgentError> {
+    let Some((key, rest)) = path.split_first() else {
+        return Err(AgentError::message("empty TOML key"));
+    };
+    let inline = item.is_inline_table();
+    let Some(table) = item.as_table_like_mut() else {
+        return Err(AgentError::message(format!("`{key}` is not under a table")));
+    };
+    if rest.is_empty() {
+        let written = match written {
+            Item::Table(_) if inline => {
+                return Err(AgentError::message(format!(
+                    "`{key}` cannot hold a table inside an inline table"
+                )));
+            }
+            written => written,
+        };
+        table.insert(key, written);
+        return Ok(());
+    }
+    if table.get(key).is_none() {
+        table.insert(key, implicit_table());
+    }
+    let child = table.get_mut(key).expect("child");
+    if !child.is_table_like() {
+        return Err(AgentError::message(format!("`{key}` is not a table")));
+    }
+    set_toml_item(child, rest, written)
 }
 
 fn implicit_table() -> Item {
@@ -1028,7 +1348,8 @@ fn loosen_json(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at, strip_owned,
+        Assignment, FileKind, Shared, get, is_empty_document, remove_keys, render, string_at,
+        strip_owned,
     };
     use hofund_plugin_api::OwnerTest;
 
@@ -1042,7 +1363,7 @@ mod tests {
             key,
             value: value.to_owned(),
             raw_json: true,
-            owner: Some(OWNER),
+            shared: Some(Shared::Array(OWNER)),
         }
     }
 
@@ -1096,7 +1417,7 @@ mod tests {
             serde_json::json!([{"id":"u"},{"id":"hof/a","kind":"gw"}])
         );
         assert_eq!(
-            strip_owned(FileKind::Json, &kept, ".", OWNER).expect("strip"),
+            strip_owned(FileKind::Json, &kept, ".", Shared::Array(OWNER)).expect("strip"),
             Some(r#"[{"id":"u"}]"#.to_owned())
         );
         assert!(is_empty_document(FileKind::Json, b"[]").expect("empty"));
@@ -1121,11 +1442,11 @@ mod tests {
             yaml
         );
         assert_eq!(
-            strip_owned(FileKind::Yaml, &yaml, "list", OWNER).expect("strip"),
+            strip_owned(FileKind::Yaml, &yaml, "list", Shared::Array(OWNER)).expect("strip"),
             Some(r#"[{"id":"u"}]"#.to_owned())
         );
         assert_eq!(
-            strip_owned(FileKind::Yaml, "k: 1\n", "list", OWNER).expect("absent"),
+            strip_owned(FileKind::Yaml, "k: 1\n", "list", Shared::Array(OWNER)).expect("absent"),
             None
         );
     }
@@ -1140,7 +1461,8 @@ mod tests {
         ] {
             let error = render(kind, Some(original), &[append(key, ours)]).expect_err("shape");
             assert!(error.to_string().contains("is not an array"), "{error}");
-            let error = strip_owned(kind, original, key, OWNER).expect_err("strip shape");
+            let error =
+                strip_owned(kind, original, key, Shared::Array(OWNER)).expect_err("strip shape");
             assert!(error.to_string().contains("is not an array"), "{error}");
         }
         let error = render(FileKind::Json, None, &[append("list", "{}")]).expect_err("object");
@@ -1148,9 +1470,9 @@ mod tests {
         let error = render(FileKind::Json, None, &[append("list", "[")]).expect_err("json");
         assert!(error.to_string().contains("is not JSON"), "{error}");
         for kind in [FileKind::Toml, FileKind::Env] {
-            let error = strip_owned(kind, "", "list", OWNER).expect_err("kind");
+            let error = strip_owned(kind, "", "list", Shared::Array(OWNER)).expect_err("kind");
             assert!(
-                error.to_string().contains("cannot hold an array"),
+                error.to_string().contains("cannot hold shared entries"),
                 "{error}"
             );
         }
@@ -1159,11 +1481,174 @@ mod tests {
                 FileKind::Json,
                 r#"{"l":[{"id":"hof/a","kind":"gw"}]}"#,
                 "l",
-                &[]
+                Shared::Array(&[])
             )
             .expect("no owner"),
             Some(r#"[{"id":"hof/a","kind":"gw"}]"#.to_owned())
         );
+    }
+
+    fn map(key: &'static str, value: &str) -> Assignment {
+        Assignment {
+            key,
+            value: value.to_owned(),
+            raw_json: true,
+            shared: Some(Shared::Map("hof/")),
+        }
+    }
+
+    const OURS: &str = r#"{"hof/a.1":{"model":"a.1","size":128000,"tools":["t"]},"hof/b":{"model":"b","on":true}}"#;
+
+    #[test]
+    fn map_merges_after_user_entries_in_json_and_yaml() {
+        let original = r#"{"m":{"mine":{"x":1},"hof/old":{"model":"old"}},"k":2}"#;
+        let once = text(FileKind::Json, Some(original), &[map("m", OURS)]);
+        let value: serde_json::Value = serde_json::from_str(&once).expect("json");
+        let names: Vec<&String> = value["m"].as_object().expect("map").keys().collect();
+        assert_eq!(names, ["mine", "hof/a.1", "hof/b"]);
+        assert_eq!(value["m"]["hof/a.1"]["size"], 128_000);
+        assert_eq!(value["k"], 2);
+        assert_eq!(text(FileKind::Json, Some(&once), &[map("m", OURS)]), once);
+        assert_eq!(
+            strip_owned(FileKind::Json, &once, "m", Shared::Map("hof/")).expect("strip"),
+            Some(r#"{"mine":{"x":1}}"#.to_owned())
+        );
+        let cleared = text(FileKind::Json, Some(&once), &[map("m", "{}")]);
+        assert_eq!(
+            get(FileKind::Json, &cleared, "m").expect("get"),
+            Some(r#"{"mine":{"x":1}}"#.to_owned())
+        );
+        assert_eq!(text(FileKind::Json, None, &[map("m", "{}")]), "{}\n");
+
+        let yaml = text(FileKind::Yaml, Some("m:\n  mine: 1\n"), &[map("m", OURS)]);
+        assert_eq!(text(FileKind::Yaml, Some(&yaml), &[map("m", OURS)]), yaml);
+        assert_eq!(
+            strip_owned(FileKind::Yaml, &yaml, "m", Shared::Map("hof/")).expect("strip"),
+            Some(r#"{"mine":1}"#.to_owned())
+        );
+        assert!(yaml.contains("hof/a.1:"), "{yaml}");
+        assert_eq!(
+            strip_owned(FileKind::Yaml, "k: 1\n", "m", Shared::Map("hof/")).expect("absent"),
+            None
+        );
+        let root = text(FileKind::Json, Some(r#"{"mine":1}"#), &[map(".", OURS)]);
+        assert_eq!(
+            strip_owned(FileKind::Json, &root, ".", Shared::Map("hof/")).expect("root"),
+            Some(r#"{"mine":1}"#.to_owned())
+        );
+    }
+
+    #[test]
+    fn map_writes_typed_toml_tables_and_keeps_the_rest() {
+        let original = "# top\ndefault = \"mine\"\n\n[m.mine]\nmodel = \"x\" # keep\n\n[m.\"hof/old\"]\nmodel = \"old\"\n";
+        let once = text(FileKind::Toml, Some(original), &[map("m", OURS)]);
+        assert_eq!(
+            once,
+            "# top\ndefault = \"mine\"\n\n[m.mine]\nmodel = \"x\" # keep\n\n[m.\"hof/a.1\"]\nmodel = \"a.1\"\nsize = 128000\ntools = [\"t\"]\n\n[m.\"hof/b\"]\nmodel = \"b\"\non = true\n"
+        );
+        assert_eq!(text(FileKind::Toml, Some(&once), &[map("m", OURS)]), once);
+        assert_eq!(
+            get(FileKind::Toml, &once, "m").expect("get"),
+            Some(
+                r#"{"mine":{"model":"x"},"hof/a.1":{"model":"a.1","size":128000,"tools":["t"]},"hof/b":{"model":"b","on":true}}"#
+                    .to_owned()
+            )
+        );
+        assert_eq!(string_at(FileKind::Toml, &once, "m").expect("string"), None);
+        assert_eq!(
+            strip_owned(FileKind::Toml, &once, "m", Shared::Map("hof/")).expect("strip"),
+            Some(r#"{"mine":{"model":"x"}}"#.to_owned())
+        );
+        let cleared = text(FileKind::Toml, Some(&once), &[map("m", "{}")]);
+        assert_eq!(
+            cleared,
+            "# top\ndefault = \"mine\"\n\n[m.mine]\nmodel = \"x\" # keep\n"
+        );
+        assert_eq!(text(FileKind::Toml, None, &[map("m", "{}")]), "\n");
+        let fresh = text(FileKind::Toml, None, &[map("p.m", OURS)]);
+        assert!(fresh.starts_with("[p.m.\"hof/a.1\"]\n"), "{fresh}");
+        let inline = text(
+            FileKind::Toml,
+            Some("m = { mine = 1 }\n"),
+            &[map("m", OURS)],
+        );
+        assert_eq!(
+            inline,
+            "m = { mine = 1 , \"hof/a.1\" = { model = \"a.1\", size = 128000, tools = [\"t\"] }, \"hof/b\" = { model = \"b\", on = true } }\n"
+        );
+        let error = render(FileKind::Toml, Some("m = 1\n"), &[map("m", OURS)]).expect_err("shape");
+        assert!(error.to_string().contains("`m` is not a table"), "{error}");
+        let error = render(FileKind::Toml, None, &[map("m", "[]")]).expect_err("entries");
+        assert!(error.to_string().contains("not an object"), "{error}");
+        let error = render(FileKind::Toml, None, &[append("m", "[]")]).expect_err("array in toml");
+        assert!(error.to_string().contains("shared array"), "{error}");
+        let error =
+            render(FileKind::Json, Some(r#"{"m":[]}"#), &[map("m", OURS)]).expect_err("json shape");
+        assert!(error.to_string().contains("`m` is not a map"), "{error}");
+    }
+
+    #[test]
+    fn toml_raw_json_keeps_types_and_reads_back_as_json() {
+        let written = text(
+            FileKind::Toml,
+            Some("a = 1\n"),
+            &[
+                assign("t.n", "5", true),
+                assign("t.f", "1.5", true),
+                assign("t.l", r#"[1,{"k":"v"}]"#, true),
+                assign("t.o", r#"{"x":{"y":"z"},"gone":null}"#, true),
+                assign("t.s", "plain", false),
+            ],
+        );
+        assert_eq!(
+            written,
+            "a = 1\n\n[t]\nn = 5\nf = 1.5\nl = [1, { k = \"v\" }]\ns = \"plain\"\n\n[t.o.x]\ny = \"z\"\n"
+        );
+        assert_eq!(
+            get(FileKind::Toml, &written, "t.o").expect("get"),
+            Some(r#"{"x":{"y":"z"}}"#.to_owned())
+        );
+        assert_eq!(
+            get(FileKind::Toml, &written, "t.n").expect("get"),
+            Some("5".to_owned())
+        );
+        assert_eq!(
+            get(FileKind::Toml, &written, "t.s").expect("get"),
+            Some("plain".to_owned())
+        );
+        let root = text(
+            FileKind::Toml,
+            Some("a = 1\n"),
+            &[assign(".", r#"{"b":true}"#, true)],
+        );
+        assert_eq!(root, "b = true\n");
+        let error = render(FileKind::Toml, None, &[assign(".", "3", true)]).expect_err("root");
+        assert!(error.to_string().contains("root is not a table"), "{error}");
+        let error = render(
+            FileKind::Toml,
+            Some("t = { a = 1 }\n"),
+            &[assign("t.o", r#"{"x":1}"#, true)],
+        )
+        .expect_err("inline");
+        assert!(
+            error.to_string().contains("inside an inline table"),
+            "{error}"
+        );
+        let inline = text(
+            FileKind::Toml,
+            Some("t = { a = 1 }\n"),
+            &[assign("t.l", "[2]", true)],
+        );
+        assert_eq!(inline, "t = { a = 1 , l = [2] }\n");
+        let error = render(
+            FileKind::Toml,
+            Some("t = 1\n"),
+            &[assign("t.l", "[2]", true)],
+        )
+        .expect_err("leaf");
+        assert!(error.to_string().contains("`t` is not a table"), "{error}");
+        let error = render(FileKind::Toml, None, &[assign("t", "{", true)]).expect_err("json");
+        assert!(error.to_string().contains("is not JSON"), "{error}");
     }
 
     fn assign(key: &'static str, value: &str, raw_json: bool) -> Assignment {
@@ -1171,7 +1656,7 @@ mod tests {
             key,
             value: value.to_owned(),
             raw_json,
-            owner: None,
+            shared: None,
         }
     }
 
@@ -1338,7 +1823,7 @@ mod tests {
             key: "env.ANTHROPIC_BASE_URL",
             value: "http://127.0.0.1:3425".to_owned(),
             raw_json: false,
-            owner: None,
+            shared: None,
         }];
         let bytes = render(FileKind::Json, Some(original), &assignments).expect("render");
         let text = String::from_utf8(bytes).expect("utf8");
@@ -1361,7 +1846,7 @@ mod tests {
             key: "model_provider",
             value: "hofund".to_owned(),
             raw_json: false,
-            owner: None,
+            shared: None,
         }];
         let bytes = render(FileKind::Toml, Some(original), &assignments).expect("render");
         let text = String::from_utf8(bytes).expect("utf8");
@@ -1386,19 +1871,19 @@ mod tests {
                 key: "GEMINI_API_KEY",
                 value: "local-token".to_owned(),
                 raw_json: false,
-                owner: None,
+                shared: None,
             },
             Assignment {
                 key: "GOOGLE_GEMINI_BASE_URL",
                 value: "http://127.0.0.1:3425".to_owned(),
                 raw_json: false,
-                owner: None,
+                shared: None,
             },
             Assignment {
                 key: "ODD",
                 value: "a b#c".to_owned(),
                 raw_json: false,
-                owner: None,
+                shared: None,
             },
         ];
         let bytes = render(FileKind::Env, Some(original), &assignments).expect("render");
@@ -1460,13 +1945,13 @@ experimental_bearer_token = \"local-token\"
                 key: "security.auth.selectedType",
                 value: "gemini-api-key".to_owned(),
                 raw_json: false,
-                owner: None,
+                shared: None,
             },
             Assignment {
                 key: "model.name",
                 value: "user-model".to_owned(),
                 raw_json: false,
-                owner: None,
+                shared: None,
             },
         ];
         let connected = render(FileKind::Json, Some(original), &connect).expect("connect");
@@ -1487,7 +1972,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: original_model,
             raw_json: true,
-            owner: None,
+            shared: None,
         }];
         let restored = render(FileKind::Json, Some(&edited), &restore).expect("restore");
         let restored = String::from_utf8(restored).expect("restored UTF-8");
@@ -1512,7 +1997,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: "hofund-model".to_owned(),
             raw_json: false,
-            owner: None,
+            shared: None,
         }];
         let connected = render(FileKind::Json, Some(original), &connect).expect("connect");
         let connected = String::from_utf8(connected).expect("connected UTF-8");
@@ -1537,7 +2022,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: original_model,
             raw_json: false,
-            owner: None,
+            shared: None,
         }];
         let restored = render(FileKind::Json, Some(&edited), &restore).expect("restore");
         let restored: serde_json::Value = serde_json::from_slice(&restored).expect("restored JSON");
@@ -1582,7 +2067,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: original_model,
             raw_json: true,
-            owner: None,
+            shared: None,
         }];
         let error = render(FileKind::Json, Some(current), &restore)
             .expect_err("extra model key")
@@ -1600,7 +2085,7 @@ experimental_bearer_token = \"local-token\"
             key: "model.name",
             value: r#"{"name":"x","extra":1}"#.to_owned(),
             raw_json: true,
-            owner: None,
+            shared: None,
         }];
         let rendered = render(FileKind::Json, Some(original), &restore).expect("render");
         let rendered: serde_json::Value = serde_json::from_slice(&rendered).expect("rendered JSON");

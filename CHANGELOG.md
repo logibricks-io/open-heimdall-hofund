@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent descriptions can write a model map (G5, #417): `slot = { model_map =
+  { prefix, fields } }` writes one entry per visible route model, named
+  prefix plus model id, into a JSON, YAML, or TOML map. Entries without the
+  prefix are the user's and are kept; an empty prefix owns the whole map and
+  disconnect restores the original. TOML entries are written as typed tables.
 - Agent descriptions can edit YAML files (G1): `kind = "yaml"` in an
   `agent.toml` file entry. Edits re-emit the file, so comments and layout are
   not kept; disconnecting restores the original bytes from the backup.

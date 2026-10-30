@@ -969,6 +969,187 @@ fn append_once_at_the_root_writes_one_group() {
     assert!(!path.exists());
 }
 
+static MAP_FIELDS: &[ModelField] = &[
+    ModelField::id("model"),
+    ModelField::json("max_context_size", "128000"),
+    ModelField::v1("base_url"),
+    ModelField::token("api_key"),
+];
+static MAP_TOML_SETS: &[AgentSet] = &[AgentSet::from_static(
+    "config",
+    "models",
+    Slot::ModelMap {
+        prefix: "hof/",
+        fields: MAP_FIELDS,
+    },
+)];
+static MAP_TOML_FILES: &[AgentFile] = &[AgentFile::from_static(
+    "config",
+    FileKind::Toml,
+    "~/.map/config.toml",
+    "~/.map/config.toml",
+    "~/.map/config.toml",
+    None,
+)];
+static MAP_TOML: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("map-toml"),
+    "Map Toml",
+    "map-toml",
+    MAP_TOML_FILES,
+    MAP_TOML_SETS,
+    None,
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
+static MAP_WHOLE_SETS: &[AgentSet] = &[AgentSet::from_static(
+    "config",
+    "providers.compat.models",
+    Slot::ModelMap {
+        prefix: "",
+        fields: MAP_FIELDS,
+    },
+)];
+static MAP_WHOLE: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("map-whole"),
+    "Map Whole",
+    "map-whole",
+    ARRAY_JSON_FILES,
+    MAP_WHOLE_SETS,
+    None,
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
+
+fn map_entry(id: &str, token: &str) -> String {
+    format!(
+        "model = \"{id}\"\nmax_context_size = 128000\nbase_url = \"http://127.0.0.1:3425/v1\"\napi_key = \"{token}\"\n"
+    )
+}
+
+#[test]
+fn model_map_adds_prefixed_toml_tables_and_restores_the_user_file() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a.1", "b"]);
+    let path = home.join(".map").join("config.toml");
+    let original = "# mine\ndefault_model = \"mine\"\n\n[models.mine]\nmodel = \"x\" # keep\n\n[models.\"hof/old\"]\nmodel = \"old\"\n";
+    seed(&path, original);
+    let agent = Compiled::new(&MAP_TOML);
+    assert!(!agent.status(&session, &target).expect("status").connected());
+    agent.apply(&session, &target).expect("apply");
+    let text = fs::read_to_string(&path).expect("toml");
+    assert_eq!(
+        text,
+        format!(
+            "# mine\ndefault_model = \"mine\"\n\n[models.mine]\nmodel = \"x\" # keep\n\n[models.\"hof/a.1\"]\n{}\n[models.\"hof/b\"]\n{}",
+            map_entry("a.1", "local-token"),
+            map_entry("b", "local-token")
+        )
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    assert!(
+        agent
+            .apply(&session, &target)
+            .expect("again")
+            .changes()
+            .is_empty()
+    );
+    let fewer = target_with(&["b"]);
+    assert!(!agent.status(&session, &fewer).expect("status").connected());
+
+    let fresh = GatewayTarget::new(
+        "http://127.0.0.1:3425/",
+        "fresh-token",
+        vec!["a.1".to_owned(), "b".to_owned()],
+    );
+    assert_eq!(
+        agent.refresh_token(&session, &fresh).expect("refresh"),
+        vec![path.clone()]
+    );
+    let text = fs::read_to_string(&path).expect("toml");
+    assert!(text.contains(&map_entry("b", "fresh-token")), "{text}");
+    assert!(!text.contains("local-token"), "{text}");
+    assert!(
+        agent
+            .refresh_token(&session, &fresh)
+            .expect("again")
+            .is_empty()
+    );
+
+    fs::write(&path, format!("{text}\n[extra]\nnote = 1\n")).expect("user edit");
+    let outcome = agent.disconnect(&session, false).expect("disconnect");
+    assert!(outcome.warnings().is_empty(), "{:?}", outcome.warnings());
+    assert_eq!(
+        fs::read_to_string(&path).expect("toml"),
+        "# mine\ndefault_model = \"mine\"\n\n[models.mine]\nmodel = \"x\" # keep\n\n[extra]\nnote = 1\n"
+    );
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".map").join("config.toml");
+    agent.apply(&session, &target).expect("apply fresh");
+    assert!(
+        fs::read_to_string(&path)
+            .expect("toml")
+            .starts_with("[models.\"hof/a.1\"]\n")
+    );
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!path.exists());
+}
+
+#[test]
+fn model_map_with_an_empty_prefix_owns_the_whole_map() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a", "b"]);
+    let path = append_path(&home);
+    let mine = serde_json::json!({"mine": {"model": "x"}});
+    seed(
+        &path,
+        &serde_json::json!({"theme": "dark", "providers": {"compat": {"models": mine, "name": "n"}}})
+            .to_string(),
+    );
+    let agent = Compiled::new(&MAP_WHOLE);
+    agent.apply(&session, &target).expect("apply");
+    let entry = |id: &str| {
+        serde_json::json!({
+            "model": id,
+            "max_context_size": 128000,
+            "base_url": "http://127.0.0.1:3425/v1",
+            "api_key": "local-token",
+        })
+    };
+    let value = read_json(&path);
+    assert_eq!(
+        value["providers"]["compat"]["models"],
+        serde_json::json!({"a": entry("a"), "b": entry("b")})
+    );
+    assert_eq!(value["providers"]["compat"]["name"], "n");
+    assert!(agent.status(&session, &target).expect("status").connected());
+    assert!(
+        agent
+            .apply(&session, &target)
+            .expect("again")
+            .changes()
+            .is_empty()
+    );
+    agent.disconnect(&session, false).expect("disconnect");
+    let value = read_json(&path);
+    assert_eq!(value["providers"]["compat"]["models"], mine);
+    assert_eq!(value["theme"], "dark");
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = append_path(&home);
+    agent.apply(&session, &target).expect("apply fresh");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!path.exists());
+}
+
 fn codex_path(home: &Path) -> PathBuf {
     home.join(".codex").join("config.toml")
 }
