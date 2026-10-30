@@ -34,6 +34,13 @@ package = "hofund-plugin-subscription-codex"
 feature = "codex"
 
 [[plugin]]
+id = "codex-catalog"
+kind = "inbound"
+path = "plugins/inbound/codex-catalog"
+package = "hofund-plugin-codex-catalog"
+feature = "codex-catalog"
+
+[[plugin]]
 id = "copilot"
 kind = "subscription"
 path = "plugins/subscriptions/copilot"
@@ -60,13 +67,6 @@ kind = "provider"
 path = "plugins/providers/google-vertex"
 package = "hofund-plugin-google-vertex"
 feature = "google-vertex"
-
-[[plugin]]
-id = "codex-catalog"
-kind = "inbound"
-path = "plugins/inbound/codex-catalog"
-package = "hofund-plugin-codex-catalog"
-feature = "codex-catalog"
 
 [[plugin]]
 id = "muse"
