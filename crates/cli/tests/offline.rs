@@ -567,7 +567,14 @@ fn explicit_control_endpoint_never_falls_back_to_one_shot() {
     assert!(out.failed().starts_with("HOFUND_CONTROL:"), "{out:#?}");
     // One-shot would have created the token and the usage store.
     assert!(!scratch.config.parent().expect("cfg").join("token").exists());
-    assert!(!scratch.config.parent().expect("cfg").join(".hofund").exists());
+    assert!(
+        !scratch
+            .config
+            .parent()
+            .expect("cfg")
+            .join(".hofund")
+            .exists()
+    );
     scratch.assert_no_daemon_state();
 }
 
