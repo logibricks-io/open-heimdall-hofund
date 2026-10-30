@@ -1,0 +1,58 @@
+id = "kimi"
+display_name = "Kimi Code"
+binary = "kimi"
+model_prefix = "hofund/"
+
+# Kimi Code keeps its settings in ~/.kimi-code/config.toml on every OS.
+# KIMI_CODE_HOME replaces ~/.kimi-code. Sessions start on default_model, a
+# key of the [models."<key>"] tables, each naming a [providers.<name>] table
+# and the model to ask it for. Kimi refuses a config whose default_model or a
+# model's provider is missing; one write puts in all three at once.
+# The older Python kimi-cli kept the same shape in ~/.kimi, but it has no
+# tool_use capability and Kimi Code stops reading ~/.kimi once it has copied
+# it over, so hofund does not write there.
+[[file]]
+id = "config"
+kind = "toml"
+linux = "~/.kimi-code/config.toml"
+macos = "~/.kimi-code/config.toml"
+windows = "~/.kimi-code/config.toml"
+env_override = "KIMI_CODE_HOME"
+env_replaces = "~/.kimi-code"
+
+# The gateway, spoken to as Kimi's own chat completions so thinking travels
+# both ways as reasoning_content. The keys are set in place, so any
+# custom_headers or env the user adds to the table stays.
+[[set]]
+file = "config"
+key = "providers.hofund.type"
+slot = { literal = "kimi" }
+
+[[set]]
+file = "config"
+key = "providers.hofund.base_url"
+slot = "v1"
+
+[[set]]
+file = "config"
+key = "providers.hofund.api_key"
+slot = "token"
+
+# One model table per route, keyed hofund/<route>, so the routes join Kimi's
+# /model picker. Tables without the prefix are the user's and are kept. Kimi
+# needs a context size to compact against; this build has no catalog value
+# per model, so every table says 128000, the size Kimi is told of a model
+# whose context is not known. Every table says it calls tools.
+[[set]]
+file = "config"
+key = "models"
+slot = { model_map = { prefix = "hofund/", fields = [
+    { key = "provider", literal = "hofund" },
+    { key = "model", value = "id" },
+    { key = "max_context_size", json = "128000" },
+    { key = "capabilities", json = "[\"tool_use\"]" },
+] } }
+
+[model]
+file = "config"
+key = "default_model"

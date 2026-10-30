@@ -18,6 +18,7 @@ fn production_agent_list_contains_migrated_agents() {
             "droid",
             "gemini-cli",
             "hermes",
+            "kimi",
             "opencode",
             "pi",
             "qwen",
@@ -44,6 +45,7 @@ fn production_agent_list_contains_migrated_agents() {
     );
     assert_eq!(agent("codex").expect("codex").model_prefix(), None);
     assert_eq!(agent("qwen").expect("qwen").model_prefix(), None);
+    assert_eq!(agent("kimi").expect("kimi").model_prefix(), Some("hofund/"));
     let vscode = agent("vscode").expect("vscode");
     assert_eq!(vscode.model_prefix(), None);
     assert_eq!(vscode.model_key(), Some("\"chat.defaultModel\""));

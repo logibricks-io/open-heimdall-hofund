@@ -657,13 +657,28 @@ fn add_user_edits(
                 bytes.push(b'\n');
                 String::from_utf8(bytes).expect("JSON UTF-8")
             }
-            FileKind::Toml => format!("{text}user_added = \"keep\"\n"),
+            FileKind::Toml => toml_with_user_key(&text),
             FileKind::Env => format!("{text}user_added=keep\n"),
             FileKind::Yaml => format!("{text}user_added: keep\n"),
             _ => panic!("unsupported fixture file kind"),
         };
         write(&home.join(relative), text.as_bytes());
     }
+}
+
+/// `text` with the user's own top-level key, put before the first table so
+/// it does not land inside a table hofund owns.
+fn toml_with_user_key(text: &str) -> String {
+    let line = "user_added = \"keep\"\n";
+    let mut at = 0;
+    for part in text.split_inclusive('\n') {
+        if part.trim_start().starts_with('[') {
+            return format!("{}{line}{}", &text[..at], &text[at..]);
+        }
+        at += part.len();
+    }
+    let gap = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+    format!("{text}{gap}{line}")
 }
 
 fn replace_token(
@@ -832,8 +847,25 @@ mod tests {
 
     use super::{
         BTreeMap, Case, TargetOs, fs, gateway_values, golden_layout, reports_removed_entries,
-        run_case, scratch, surviving_gateway_values, updating_goldens_value, write,
+        run_case, scratch, surviving_gateway_values, toml_with_user_key, updating_goldens_value,
+        write,
     };
+
+    #[test]
+    fn toml_user_key_goes_before_the_first_table() {
+        let key = "user_added = \"keep\"\n";
+        assert_eq!(
+            toml_with_user_key("a = 1\n  [t]\nb = 2\n"),
+            format!("a = 1\n{key}  [t]\nb = 2\n")
+        );
+        assert_eq!(
+            toml_with_user_key("[t]\nb = 2\n"),
+            format!("{key}[t]\nb = 2\n")
+        );
+        assert_eq!(toml_with_user_key("a = 1\n"), format!("a = 1\n{key}"));
+        assert_eq!(toml_with_user_key("a = 1"), format!("a = 1\n{key}"));
+        assert_eq!(toml_with_user_key(""), key);
+    }
 
     static OS_FILES: [AgentFile; 1] = [AgentFile::from_static(
         "env",
