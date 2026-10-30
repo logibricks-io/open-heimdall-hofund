@@ -1907,6 +1907,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-codex-catalog"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+]
+
+[[package]]
 name = "hofund-plugin-echo"
 version = "0.1.0"
 dependencies = [
@@ -1985,6 +1993,7 @@ dependencies = [
  "hofund-plugin-azure",
  "hofund-plugin-bedrock",
  "hofund-plugin-bedrock-mantle",
+ "hofund-plugin-codex-catalog",
  "hofund-plugin-echo",
  "hofund-plugin-google-vertex",
  "hofund-plugin-muse",

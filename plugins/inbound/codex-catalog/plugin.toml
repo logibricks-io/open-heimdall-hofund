@@ -1,0 +1,6 @@
+id = "codex-catalog"
+kind = "inbound"
+
+[[route]]
+method = "GET"
+prefix = "/v1/codex/models"
