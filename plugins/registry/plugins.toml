@@ -95,3 +95,10 @@ kind = "provider"
 path = "plugins/providers/remote-gateway"
 package = "hofund-plugin-remote-gateway"
 feature = "remote-gateway"
+
+[[plugin]]
+id = "retrieval"
+kind = "inbound"
+path = "plugins/inbound/retrieval"
+package = "hofund-plugin-retrieval"
+feature = "retrieval"

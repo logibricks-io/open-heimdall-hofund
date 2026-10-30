@@ -690,6 +690,103 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             BodyStream::from_stream(stream),
         ))
     }
+
+    async fn forward(
+        &self,
+        call: hofund_plugin_api::Forward,
+    ) -> Result<hofund_plugin_api::RawAnswer, PluginError> {
+        let Some(app) = self.app.upgrade() else {
+            return Err(PluginError::cancelled("the gateway is shutting down"));
+        };
+        let started = Instant::now();
+        let mut track = RequestTrack::begin(
+            &app,
+            RequestStart {
+                request_id: next_request_id(),
+                route: call.model().to_owned(),
+                inbound_protocol: call.path().to_owned(),
+                started_at_ms: unix_ms_now(),
+            },
+        );
+        let router = app.snapshot.load();
+        let usage = |upstream: &str| UsageMeta {
+            model: call.model().to_owned(),
+            upstream: upstream.to_owned(),
+            started,
+            input: None,
+            output: None,
+        };
+        match router.forward(&call).await {
+            Ok(forwarded) => {
+                let answer = forwarded.answer;
+                let status =
+                    StatusCode::from_u16(answer.status()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let (input, output) = forwarded_tokens(answer.body());
+                write_usage(
+                    &app.usage,
+                    &usage(&forwarded.upstream_id),
+                    Some((input, output)),
+                    status,
+                );
+                track.end_with(
+                    Some(forwarded.upstream_id),
+                    status.as_u16(),
+                    input.and_then(|value| u64::try_from(value).ok()),
+                    output.and_then(|value| u64::try_from(value).ok()),
+                );
+                Ok(answer)
+            }
+            Err(error) => {
+                let (upstream, error) = match error {
+                    RouterError::NoRoute { .. } => (
+                        String::new(),
+                        PluginError::status_error(404, error.to_string()),
+                    ),
+                    RouterError::Ambiguous { .. } => (
+                        String::new(),
+                        PluginError::status_error(400, error.to_string()),
+                    ),
+                    RouterError::Upstream { upstream_id, error }
+                        if error.kind() == PluginErrorKind::Unsupported =>
+                    {
+                        let message = format!(
+                            "no provider of model `{}` serves {}",
+                            call.model(),
+                            call.path()
+                        );
+                        (upstream_id, PluginError::status_error(404, message))
+                    }
+                    RouterError::Upstream { upstream_id, error } => (upstream_id, error),
+                };
+                let status = status_of(&error);
+                write_usage(&app.usage, &usage(&upstream), None, status);
+                let member = (!upstream.is_empty()).then_some(upstream);
+                track.end_with(member, status.as_u16(), None, None);
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Input and output tokens in a forwarded JSON answer, read the way the
+/// reference reads them: `usage.prompt_tokens`, `usage.input_tokens`,
+/// `usage.total_tokens`, or `meta.billed_units.input_tokens` for input, and
+/// `usage.output_tokens` for output.
+fn forwarded_tokens(body: &[u8]) -> (Option<i64>, Option<i64>) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return (None, None);
+    };
+    let count = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_i64)
+            .filter(|tokens| *tokens > 0)
+    };
+    let input = count("/usage/prompt_tokens")
+        .or_else(|| count("/usage/input_tokens"))
+        .or_else(|| count("/usage/total_tokens"))
+        .or_else(|| count("/meta/billed_units/input_tokens"));
+    (input, count("/usage/output_tokens"))
 }
 
 async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Response {
@@ -1642,5 +1739,35 @@ mod request_event_tests {
         let ends = spy.ends.lock().expect("lock");
         assert_eq!(ends.len(), 1);
         assert_eq!(ends[0].status, 500);
+    }
+}
+
+#[cfg(test)]
+mod forwarded_token_tests {
+    use super::forwarded_tokens;
+
+    #[test]
+    fn tokens_are_read_from_the_first_field_that_has_a_positive_count() {
+        let read = |text: &str| forwarded_tokens(text.as_bytes());
+        assert_eq!(
+            read(r#"{"usage":{"prompt_tokens":3,"input_tokens":4,"total_tokens":5}}"#),
+            (Some(3), None)
+        );
+        assert_eq!(
+            read(r#"{"usage":{"prompt_tokens":0,"input_tokens":4,"output_tokens":9}}"#),
+            (Some(4), Some(9))
+        );
+        assert_eq!(
+            read(r#"{"usage":{"input_tokens":0,"total_tokens":5}}"#),
+            (Some(5), None)
+        );
+        assert_eq!(
+            read(r#"{"usage":{"total_tokens":0},"meta":{"billed_units":{"input_tokens":6}}}"#),
+            (Some(6), None)
+        );
+        assert_eq!(read(r#"{"usage":{"output_tokens":0}}"#), (None, None));
+        assert_eq!(read(r#"{"usage":{"prompt_tokens":-1}}"#), (None, None));
+        assert_eq!(read("not json"), (None, None));
+        assert_eq!(read("{}"), (None, None));
     }
 }

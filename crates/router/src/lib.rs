@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 use hofund_ir::{StreamEvent, estimate_input_tokens};
-use hofund_plugin_api::{BodyStream, CountOutcome, PluginErrorKind};
+use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
 use tracing::Instrument;
 
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling};
@@ -331,6 +331,65 @@ impl Router {
         }
     }
 
+    /// Forwards `call` to the members of its model in routing order.
+    ///
+    /// Each member gets the body built for the model name it expects. A
+    /// member that does not serve the path, which is `unsupported` or a
+    /// `404`, `405` or `501`, passes the call to the next one, as does a
+    /// failure the policy retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouterError::NoRoute`] or [`RouterError::Ambiguous`] for the
+    /// same model names as [`Self::dispatch`]. Returns [`RouterError::Upstream`]
+    /// with the last member's error when none answered, or at once when the
+    /// body cannot be built or a member fails in a way that is not retried.
+    pub async fn forward(&self, call: &Forward) -> Result<Forwarded, RouterError> {
+        let mut resolved = self.resolve(call.model())?;
+        if let Some(cooldowns) = &self.cooldowns {
+            resolved.hops = order_hops(resolved.hops, cooldowns);
+        }
+        let mut last = None;
+        for (index, hop) in resolved.hops.iter().enumerate() {
+            let upstream_model = hop
+                .wire_model
+                .clone()
+                .unwrap_or_else(|| resolved.bare.clone());
+            let upstream_id = hop.member.route_id().to_owned();
+            let body = call
+                .body_for(&upstream_model)
+                .map_err(|error| RouterError::Upstream {
+                    upstream_id: upstream_id.clone(),
+                    error,
+                })?;
+            let span = member_span(hop, index, "forward");
+            let started = Instant::now();
+            let result = hop
+                .member
+                .forward(call.path(), body)
+                .instrument(span.clone())
+                .await;
+            record_call(&span, &result_status(result.as_ref().err()), started);
+            match result {
+                Ok(answer) => {
+                    return Ok(Forwarded {
+                        upstream_id,
+                        upstream_model,
+                        answer,
+                    });
+                }
+                Err(error) if not_served(&error) || self.policy.allows(&error) => {
+                    last = Some((upstream_id, error));
+                }
+                Err(error) => return Err(RouterError::Upstream { upstream_id, error }),
+            }
+        }
+        match last {
+            Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
+            None => Err(self.missing(call.model())),
+        }
+    }
+
     fn resolve(&self, asked: &str) -> Result<Resolved, RouterError> {
         if let Some(hops) = self.routes.get(asked).filter(|hops| !hops.is_empty()) {
             return Ok(Resolved {
@@ -410,6 +469,25 @@ pub struct Routed {
     /// The completion. A stream or raw body has already produced its first
     /// chunk, or ended empty. A failure before that is not returned here.
     pub completion: Completion,
+}
+
+/// A forwarded call a member answered.
+#[derive(Debug)]
+pub struct Forwarded {
+    /// Id of the provider that answered.
+    pub upstream_id: String,
+    /// Model name that provider was sent.
+    pub upstream_model: String,
+    /// The provider's answer.
+    pub answer: RawAnswer,
+}
+
+/// Whether `error` says the member has no such endpoint, rather than that the
+/// call failed there.
+fn not_served(error: &PluginError) -> bool {
+    error.kind() == PluginErrorKind::Unsupported
+        || (error.kind() == PluginErrorKind::Status
+            && matches!(error.status(), Some(404 | 405 | 501)))
 }
 
 /// Why a dispatch did not produce a completion.

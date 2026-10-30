@@ -25,6 +25,7 @@ mod body;
 mod completion;
 mod config;
 mod error;
+mod forward;
 mod host;
 mod id;
 mod inbound;
@@ -56,6 +57,7 @@ pub use body::{Body, BodyStream};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
 pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfig};
 pub use error::{PluginError, PluginErrorKind};
+pub use forward::{Forward, RawAnswer, RawBody};
 pub use hofund_ir::{ContentPart, Request, Response, Role, StreamEvent};
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, BindBlocked, ClockHandle, DirHandle, GatewayHandle,

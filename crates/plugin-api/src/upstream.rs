@@ -9,6 +9,7 @@ use hofund_ir::Request;
 use crate::completion::{Completion, CountOutcome, ProbeReport};
 use crate::config::{BuildError, ConfigError, RawTable, Schema, ValidConfig};
 use crate::error::PluginError;
+use crate::forward::{RawAnswer, RawBody};
 use crate::host::HostContext;
 use crate::id::{PluginId, ProtocolId};
 use crate::records::{ListQuery, ModelList, ProbeQuery, QuotaQuery, QuotaWindow};
@@ -409,6 +410,23 @@ pub trait UpstreamProvider: Send + Sync + 'static {
     ) -> Result<CountOutcome, PluginError> {
         let _ = (request, inbound);
         Ok(CountOutcome::Unsupported)
+    }
+
+    /// Posts `body` to `path` under this upstream's OpenAI-style base URL and
+    /// returns the answer unchanged. `path` is already checked by
+    /// [`crate::Forward::new`].
+    ///
+    /// The default is `unsupported`, which moves the call to the next member.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the upstream cannot be reached or answers
+    /// with a status outside `2xx`.
+    async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, PluginError> {
+        let _ = body;
+        Err(PluginError::unsupported(format!(
+            "this upstream does not serve {path}"
+        )))
     }
 
     /// Lists models.

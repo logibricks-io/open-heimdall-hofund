@@ -16,6 +16,7 @@ members = [
     "crates/plugin-host",
     "crates/plugin-sdk",
     "plugins/inbound/codex-catalog",
+    "plugins/inbound/retrieval",
     "plugins/inbound/echo",
     "plugins/inbound/muse",
     "plugins/inbound/ollama",
@@ -75,6 +76,7 @@ hofund-plugin-google-vertex = { version = "0.1.0", path = "plugins/providers/goo
 hofund-plugin-host = { version = "0.1.0", path = "crates/plugin-host" }
 hofund-plugin-echo = { version = "0.1.0", path = "plugins/inbound/echo" }
 hofund-plugin-codex-catalog = { version = "0.1.0", path = "plugins/inbound/codex-catalog" }
+hofund-plugin-retrieval = { version = "0.1.0", path = "plugins/inbound/retrieval" }
 hofund-plugin-muse = { version = "0.1.0", path = "plugins/inbound/muse" }
 hofund-plugin-ollama = { version = "0.1.0", path = "plugins/inbound/ollama" }
 hofund-plugin-registry = { version = "0.1.0", path = "plugins/registry" }

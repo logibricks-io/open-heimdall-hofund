@@ -11,7 +11,7 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["azure", "bedrock", "bedrock-mantle", "claude", "codex", "copilot", "echo", "gemini", "google-vertex", "codex-catalog", "muse", "ollama", "relay", "remote-gateway"]
+default = ["azure", "bedrock", "bedrock-mantle", "claude", "codex", "copilot", "echo", "gemini", "google-vertex", "codex-catalog", "muse", "ollama", "relay", "remote-gateway", "retrieval"]
 azure = ["dep:hofund-plugin-azure"]
 bedrock = ["dep:hofund-plugin-bedrock"]
 bedrock-mantle = ["dep:hofund-plugin-bedrock-mantle"]
@@ -22,6 +22,7 @@ echo = ["dep:hofund-plugin-echo"]
 gemini = ["dep:hofund-plugin-subscription-gemini"]
 google-vertex = ["dep:hofund-plugin-google-vertex"]
 codex-catalog = ["dep:hofund-plugin-codex-catalog"]
+retrieval = ["dep:hofund-plugin-retrieval"]
 muse = ["dep:hofund-plugin-muse"]
 ollama = ["dep:hofund-plugin-ollama"]
 relay = ["dep:hofund-plugin-relay"]
@@ -38,6 +39,7 @@ hofund-plugin-bedrock-mantle = { workspace = true, optional = true }
 hofund-plugin-echo = { workspace = true, optional = true }
 hofund-plugin-google-vertex = { workspace = true, optional = true }
 hofund-plugin-codex-catalog = { workspace = true, optional = true }
+hofund-plugin-retrieval = { workspace = true, optional = true }
 hofund-plugin-muse = { workspace = true, optional = true }
 hofund-plugin-ollama = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }

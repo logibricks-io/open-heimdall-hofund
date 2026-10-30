@@ -31,6 +31,7 @@ const page::PAGE_LIMIT
 const probe::ERROR_CAP
 const probe::PROBE_WAIT
 const probe::STREAM_CAP
+const wire::FORWARD_CAP
 cursor_pages
 form_body
 gemini_models
@@ -210,6 +211,7 @@ wire::Unwrap
 wire::Watch
 wire::async fn count_input (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , mut request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
 wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
+wire::async fn forward (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , path : & str , body : RawBody ,) -> Result < RawAnswer , PluginError >
 wire::async fn send (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Sent , PluginError >
 wire::fn converse_call (target : & Target , model : & str , stream : bool , body : Vec < u8 > ,) -> Result < (String , Call) , PluginError >
 wire::fn model_segment (model : & str) -> Result < String , PluginError >

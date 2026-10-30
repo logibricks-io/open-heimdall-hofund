@@ -104,6 +104,26 @@ pub trait Provider: Send + Sync {
         inbound_protocol: &str,
     ) -> Result<Completion, ProviderError>;
 
+    /// Posts `body` to `path` under this adapter's base URL and returns the
+    /// answer unchanged.
+    ///
+    /// The default is `unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when this adapter does not serve `path` or
+    /// the call fails.
+    async fn forward(
+        &self,
+        path: &str,
+        body: hofund_plugin_api::RawBody,
+    ) -> Result<hofund_plugin_api::RawAnswer, ProviderError> {
+        let _ = body;
+        Err(ProviderError::unsupported(format!(
+            "this upstream does not serve {path}"
+        )))
+    }
+
     /// Lists models on this adapter's configured wire.
     ///
     /// # Errors
