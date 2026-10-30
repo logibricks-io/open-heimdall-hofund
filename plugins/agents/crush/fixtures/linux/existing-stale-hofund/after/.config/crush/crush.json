@@ -1,0 +1,39 @@
+{
+  "models": {
+    "large": {
+      "provider": "hofund",
+      "model": "stale-route"
+    }
+  },
+  "providers": {
+    "hofund": {
+      "type": "openai",
+      "name": "hofund",
+      "base_url": "http://127.0.0.1:3425/v1",
+      "api_key": "old-token",
+      "models": [
+        {
+          "id": "route-a",
+          "name": "route-a",
+          "context_window": 200000,
+          "default_max_tokens": 16384,
+          "can_reason": false
+        },
+        {
+          "id": "route-b",
+          "name": "route-b",
+          "context_window": 200000,
+          "default_max_tokens": 16384,
+          "can_reason": false
+        }
+      ],
+      "extra_headers": {
+        "x-keep": "keep"
+      }
+    },
+    "other": {
+      "type": "openai",
+      "base_url": "https://other.example/v1"
+    }
+  }
+}

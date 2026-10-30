@@ -1,0 +1,43 @@
+{
+  "$schema": "https://charm.land/crush.json",
+  "models": {
+    "large": {
+      "provider": "anthropic",
+      "model": "user-large",
+      "max_tokens": 8000
+    },
+    "small": {
+      "provider": "anthropic",
+      "model": "user-small"
+    }
+  },
+  "providers": {
+    "anthropic": {
+      "api_key": "$ANTHROPIC_API_KEY"
+    },
+    "hofund": {
+      "type": "openai",
+      "name": "hofund",
+      "base_url": "http://127.0.0.1:3425/v1",
+      "api_key": "old-token",
+      "models": [
+        {
+          "id": "route-a",
+          "name": "route-a",
+          "context_window": 200000,
+          "default_max_tokens": 16384,
+          "can_reason": false
+        }
+      ]
+    }
+  },
+  "mcp": {
+    "files": {
+      "type": "stdio",
+      "command": "files-mcp"
+    }
+  },
+  "options": {
+    "debug": true
+  }
+}

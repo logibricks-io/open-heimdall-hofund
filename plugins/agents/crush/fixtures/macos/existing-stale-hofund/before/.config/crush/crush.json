@@ -1,0 +1,16 @@
+{
+  "models": {
+    "large": { "provider": "hofund", "model": "stale-route" }
+  },
+  "providers": {
+    "hofund": {
+      "type": "openai-compat",
+      "name": "stale",
+      "base_url": "https://stale.example/v1",
+      "api_key": "stale-token",
+      "models": [ { "id": "stale-route", "name": "stale-route", "context_window": 1 } ],
+      "extra_headers": { "x-keep": "keep" }
+    },
+    "other": { "type": "openai", "base_url": "https://other.example/v1" }
+  }
+}
