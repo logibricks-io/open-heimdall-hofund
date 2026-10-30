@@ -660,7 +660,8 @@ SurfaceHost
 SurfaceHost #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SurfaceHost::const fn auth (& self) -> AuthResult
 SurfaceHost::const fn gateway (& self) -> & GatewayHandle
-SurfaceHost::fn from_parts (members : Vec < MemberId > , protocols : Vec < ProtocolId > , auth : AuthResult , gateway : Option < Arc < dyn GatewayBackend > > ,) -> Self
+SurfaceHost::const fn http (& self) -> Option < & HttpHandle >
+SurfaceHost::fn from_parts (members : Vec < MemberId > , protocols : Vec < ProtocolId > , auth : AuthResult , gateway : Option < Arc < dyn GatewayBackend > > , http : Option < Arc < dyn HttpBackend > > ,) -> Self
 SurfaceHost::fn members (& self) -> & [MemberId]
 SurfaceHost::fn protocols (& self) -> & [ProtocolId]
 SurfaceId

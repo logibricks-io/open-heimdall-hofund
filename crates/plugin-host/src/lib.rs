@@ -30,8 +30,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{
-    AccountBackend, ClockBackend, DirBackend, HttpBackend, HttpRequest, HttpResponse, Job,
-    LoopbackBackend, PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
+    AccountBackend, ClockBackend, DirBackend, HttpRequest, HttpResponse, Job, LoopbackBackend,
+    PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use hofund_plugin_api::{
     AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,
@@ -39,7 +39,7 @@ use hofund_plugin_api::{
 };
 
 pub use accounts::{AccountStorageKind, AccountStore, StoreError};
-pub use hofund_plugin_api::kernel::{GatewayBackend, ObserveBackend};
+pub use hofund_plugin_api::kernel::{GatewayBackend, HttpBackend, ObserveBackend};
 pub use loopback::LoopbackRegistry;
 pub use pool::{HttpLimits, HttpProfile, PooledHttp};
 pub use scripted::{PipedScript, PipedSpawn};
@@ -136,7 +136,7 @@ pub fn surface_host(
     protocols: Vec<ProtocolId>,
     accepted: bool,
 ) -> SurfaceHost {
-    SurfaceHost::from_parts(members, protocols, AuthResult::new(accepted), None)
+    SurfaceHost::from_parts(members, protocols, AuthResult::new(accepted), None, None)
 }
 
 /// Builds a [`SurfaceHost`] whose gateway handle runs `gateway`.
@@ -147,7 +147,32 @@ pub fn surface_host_with_gateway(
     accepted: bool,
     gateway: Arc<dyn GatewayBackend>,
 ) -> SurfaceHost {
-    SurfaceHost::from_parts(members, protocols, AuthResult::new(accepted), Some(gateway))
+    SurfaceHost::from_parts(
+        members,
+        protocols,
+        AuthResult::new(accepted),
+        Some(gateway),
+        None,
+    )
+}
+
+/// Builds a [`SurfaceHost`] whose gateway handle runs `gateway` and whose
+/// HTTP handle sends on `http`, the kernel's pooled client.
+#[must_use]
+pub fn surface_host_with_http(
+    members: Vec<MemberId>,
+    protocols: Vec<ProtocolId>,
+    accepted: bool,
+    gateway: Arc<dyn GatewayBackend>,
+    http: Arc<dyn HttpBackend>,
+) -> SurfaceHost {
+    SurfaceHost::from_parts(
+        members,
+        protocols,
+        AuthResult::new(accepted),
+        Some(gateway),
+        Some(http),
+    )
 }
 
 /// A provider-scoped [`HostContext`] for one configured provider.
@@ -1346,6 +1371,63 @@ mod tests {
         );
         assert!(host.auth().accepted());
         let _ = SystemClock.monotonic();
+    }
+
+    #[tokio::test]
+    async fn a_surface_host_sends_on_the_http_it_was_given() {
+        struct NoGateway;
+        #[async_trait::async_trait]
+        impl super::GatewayBackend for NoGateway {
+            async fn call(
+                &self,
+                _request: super::HttpRequest<super::Body>,
+            ) -> Result<super::HttpResponse<super::BodyStream>, super::PluginError> {
+                Err(super::PluginError::unsupported("none"))
+            }
+        }
+        let bare = surface_host(Vec::new(), Vec::new(), true);
+        assert!(bare.http().is_none());
+        let gateway: std::sync::Arc<dyn super::GatewayBackend> = std::sync::Arc::new(NoGateway);
+        let joined = super::surface_host_with_gateway(
+            Vec::new(),
+            Vec::new(),
+            true,
+            std::sync::Arc::clone(&gateway),
+        );
+        assert!(joined.http().is_none());
+        let recording = std::sync::Arc::new(super::RecordingHttp::default());
+        recording.enqueue("sent");
+        let host = super::surface_host_with_http(
+            Vec::new(),
+            Vec::new(),
+            false,
+            gateway,
+            std::sync::Arc::clone(&recording) as std::sync::Arc<dyn super::HttpBackend>,
+        );
+        assert!(!host.auth().accepted());
+        assert!(host.gateway().is_available());
+        let handle = host.http().expect("http");
+        assert_eq!(handle, host.clone().http().expect("clone"));
+        assert_eq!(format!("{handle:?}"), "HttpHandle { .. }");
+        let other = super::surface_host_with_http(
+            Vec::new(),
+            Vec::new(),
+            false,
+            std::sync::Arc::new(NoGateway),
+            std::sync::Arc::new(super::RecordingHttp::default()),
+        );
+        assert_ne!(handle, other.http().expect("other"));
+        let request = super::HttpRequest::builder()
+            .uri("https://upstream.test/x")
+            .body(super::Body::from_bytes(b"in".to_vec()))
+            .expect("request");
+        let mut response = handle.send(request).await.expect("send");
+        let chunk = response.body_mut().next_chunk().await.expect("chunk");
+        assert_eq!(chunk.expect("bytes").as_ref(), b"sent");
+        let calls = recording.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].uri(), "https://upstream.test/x");
+        assert_eq!(calls[0].body(), b"in");
     }
 
     #[tokio::test]

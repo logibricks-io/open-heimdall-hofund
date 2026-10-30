@@ -639,7 +639,7 @@ Each row is one of: plugin kind, kernel layer, kernel service, or a later RFC. T
 
 #### InboundSurface
 
-The plugin does not bind a socket and does not depend on `axum` or `hyper` (rule 9). It declares paths and handles a request the gateway has already accepted. `RouteSpec` is the HTTP method plus a path prefix. `SurfaceHost` is a concrete type in the API, constructed only in `hofund-plugin-host`. It exposes the current router snapshot, the codecs, and the auth result for this request. `SurfaceHost::gateway()` runs the gateway's codec routes and model lists in process with the gateway's own credential (S0); surface routes are not reachable from it.
+The plugin does not bind a socket and does not depend on `axum` or `hyper` (rule 9). It declares paths and handles a request the gateway has already accepted. `RouteSpec` is the HTTP method plus a path prefix. `SurfaceHost` is a concrete type in the API, constructed only in `hofund-plugin-host`. It exposes the current router snapshot, the codecs, and the auth result for this request. `SurfaceHost::gateway()` runs the gateway's codec routes and model lists in process with the gateway's own credential (S0); surface routes are not reachable from it. `SurfaceHost::http()` is the kernel's pooled client, for a surface that relays a client's request with the client's own credential (S6a); the surface removes the gateway token first.
 
 ```rust
 /// Proposed. Not compiled by this pull request.

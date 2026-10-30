@@ -190,6 +190,13 @@ routes and model lists in process (S0). A surface that translates a client's
 API calls a codec route there instead of opening a socket. The call presents
 the gateway token, whatever credential the surface set, and cannot reach a
 surface route, so surfaces cannot call each other.
+A surface that relays a client's request, with the client's own credential, to
+the service the client was built for uses `SurfaceHost::http()` (S6a): the
+kernel's pooled client, with the daemon's connect and idle-read limits. The
+gateway token may come in `x-api-key` beside the client's own bearer, because
+one matching secret is enough; the surface drops the gateway token before it
+relays. A gateway built without `Gateway::with_surface_http` gives surfaces no
+handle.
 The subscription kit depends only on `plugin-host`. The agent kit also depends
 on `agent` for the shared engine and `plugin-api` for descriptions. The upstream
 kit depends on `plugin-api` for the factory contract. The kits are not on the

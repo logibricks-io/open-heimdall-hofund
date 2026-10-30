@@ -36,6 +36,7 @@ use hofund_ir::{Request as ModelRequest, StreamEvent};
 use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
 };
+use hofund_plugin_host::HttpBackend;
 use hofund_router::{Completion, RouterError, Snapshot};
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
@@ -64,6 +65,7 @@ struct Inner {
     surfaces: Vec<Arc<dyn InboundSurface>>,
     /// Optional request-topic emitter. Absent when control is off.
     request_events: Option<Arc<dyn RequestEvents>>,
+    surface_http: Option<Arc<dyn HttpBackend>>,
     /// Shared in-flight counter surfaced on control status and snapshots.
     in_flight: Arc<AtomicU64>,
 }
@@ -355,6 +357,7 @@ impl Gateway {
                 usage,
                 surfaces: Vec::new(),
                 request_events: None,
+                surface_http: None,
                 in_flight: Arc::new(AtomicU64::new(0)),
             }),
         }
@@ -370,6 +373,17 @@ impl Gateway {
         Arc::get_mut(&mut self.inner)
             .expect("gateway is not shared yet")
             .surfaces = surfaces;
+        self
+    }
+
+    /// Gives inbound surfaces outbound HTTP on `http`, the kernel's pooled
+    /// client. Without it a surface's [`hofund_plugin_api::SurfaceHost::http`]
+    /// is `None`.
+    #[must_use]
+    pub fn with_surface_http(mut self, http: Arc<dyn HttpBackend>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .surface_http = Some(http);
         self
     }
 
@@ -825,14 +839,21 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
     };
     let inbound =
         axum::http::Request::from_parts(parts, hofund_plugin_api::Body::from_bytes(bytes));
-    let host = hofund_plugin_host::surface_host_with_gateway(
-        app.snapshot.load().member_ids(),
-        protocols_of(&app.codecs),
-        true,
-        Arc::new(InProcess {
-            app: Arc::downgrade(&app),
-        }),
-    );
+    let gateway = Arc::new(InProcess {
+        app: Arc::downgrade(&app),
+    });
+    let members = app.snapshot.load().member_ids();
+    let protocols = protocols_of(&app.codecs);
+    let host = match &app.surface_http {
+        Some(http) => hofund_plugin_host::surface_host_with_http(
+            members,
+            protocols,
+            true,
+            gateway,
+            Arc::clone(http),
+        ),
+        None => hofund_plugin_host::surface_host_with_gateway(members, protocols, true, gateway),
+    };
     let plugin_id = surface.id().as_str().to_owned();
     let span = tracing::info_span!(
         "inbound",
