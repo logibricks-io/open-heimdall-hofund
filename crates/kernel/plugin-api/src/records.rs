@@ -1465,14 +1465,19 @@ pub enum Slot {
     /// visible route while this key and every `unless` key in the file have
     /// no non-empty string. When the model is cleared it goes back to the
     /// value the file had before connect, or is dropped when it had none.
+    /// While the model key names a route, a token refresh rewrites a value
+    /// that holds `{token}`.
     #[doc(hidden)]
     ModelPair {
-        /// The text written. `{origin}` and `{v1}` are filled in as for
-        /// [`Slot::Template`]; the token is not, since a refresh does not
-        /// rewrite this value.
+        /// The text written, with `{origin}`, `{v1}`, and `{token}` filled
+        /// in as for [`Slot::Template`].
         value: &'static str,
         /// Keys whose non-empty string means the user picked a provider.
         unless: &'static [&'static str],
+        /// When set, `value` is JSON written as a typed value, such as `1`
+        /// or a whole object, with the placeholders filled in inside its
+        /// strings; any value already at the key then counts as a pick.
+        json: bool,
     },
     /// A tier environment variable.
     ///

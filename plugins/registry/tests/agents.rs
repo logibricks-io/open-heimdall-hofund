@@ -12,6 +12,7 @@ fn production_agent_list_contains_migrated_agents() {
         ids,
         [
             "claude-code",
+            "cline",
             "codex",
             "crush",
             "droid",
@@ -46,6 +47,12 @@ fn production_agent_list_contains_migrated_agents() {
     let vscode = agent("vscode").expect("vscode");
     assert_eq!(vscode.model_prefix(), None);
     assert_eq!(vscode.model_key(), Some("\"chat.defaultModel\""));
+    let cline = agent("cline").expect("cline");
+    assert_eq!(cline.model_prefix(), None);
+    assert_eq!(
+        cline.model_key(),
+        Some("providers.openai-compatible.settings.model")
+    );
     assert!(agent("missing").is_none());
 }
 

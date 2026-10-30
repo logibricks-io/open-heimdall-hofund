@@ -1,0 +1,75 @@
+id = "cline"
+display_name = "Cline"
+binary = "cline"
+
+# Cline keeps provider settings in ~/.cline/data/settings/providers.json and
+# its custom model list in models.json beside it, on every OS. CLINE_DIR
+# replaces ~/.cline. CLINE_DATA_DIR, which moves the data folder on its own,
+# is not followed.
+# Source: cline/cline sdk/packages/core/src/services/storage/
+# provider-settings-manager.ts (StoredProviderSettingsSchema) and
+# services/providers/local-provider-registry.ts (models file envelope).
+[[file]]
+id = "providers"
+kind = "json"
+linux = "~/.cline/data/settings/providers.json"
+macos = "~/.cline/data/settings/providers.json"
+windows = "~/.cline/data/settings/providers.json"
+env_override = "CLINE_DIR"
+env_replaces = "~/.cline"
+
+[[file]]
+id = "models"
+kind = "json"
+linux = "~/.cline/data/settings/models.json"
+macos = "~/.cline/data/settings/models.json"
+windows = "~/.cline/data/settings/models.json"
+env_override = "CLINE_DIR"
+env_replaces = "~/.cline"
+
+# Cline reads a models file only with version 1; any other file is an empty
+# registry.
+[[set]]
+file = "models"
+key = "version"
+slot = { json = "1" }
+
+# The routes join Cline's built-in openai-compatible provider. An entry is
+# hofund's when its name starts with hofund/; Cline takes the model id from
+# the entry's id field. No provider block is written, so the user's own
+# openai-compatible name and address stay as they are.
+[[set]]
+file = "models"
+key = "providers.openai-compatible.models"
+slot = { model_map = { prefix = "hofund/", fields = [
+    { key = "id", value = "id" },
+    { key = "name", value = "id" },
+    { key = "capabilities", json = '["streaming","tools"]' },
+] } }
+
+# Cline drops the whole providers file when it lacks version 1 or when one
+# entry lacks updatedAt, which would sign the user out of every provider. So
+# version is written only with a pick, and the openai-compatible entry is
+# written whole: clearing the model puts back the user's entry, or drops it.
+[[set]]
+file = "providers"
+key = "version"
+slot = { model_pair = { json = "1" } }
+
+[[set]]
+file = "providers"
+key = "lastUsedProvider"
+slot = { model_pair = { value = "openai-compatible" } }
+
+# The token sits in the entry; a token refresh rewrites it while the model is
+# a route and the entry still points at this gateway.
+[[set]]
+file = "providers"
+key = "providers.openai-compatible"
+slot = { model_pair = { json = '''
+{"settings":{"provider":"openai-compatible","apiKey":"{token}","baseUrl":"{v1}","headers":{"User-Agent":"cline"}},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"}
+''' } }
+
+[model]
+file = "providers"
+key = "providers.openai-compatible.settings.model"

@@ -1070,3 +1070,165 @@ fn shipped_qwen_pick_points_the_session_at_the_gateway_entry() {
         serde_json::from_str::<serde_json::Value>(original).expect("original")
     );
 }
+
+const CLINE_PROVIDERS: &str = r#"{
+  "version": 1,
+  "lastUsedProvider": "anthropic",
+  "providers": {
+    "anthropic": {
+      "settings": { "provider": "anthropic", "apiKey": "user-anthropic-key", "model": "claude-sonnet-4-5" },
+      "updatedAt": "2026-03-01T10:00:00.000Z",
+      "tokenSource": "manual"
+    },
+    "openai-compatible": {
+      "settings": { "provider": "openai-compatible", "apiKey": "user-key", "model": "my-model", "baseUrl": "http://localhost:8000/v1" },
+      "updatedAt": "2026-03-02T10:00:00.000Z",
+      "tokenSource": "manual"
+    }
+  }
+}
+"#;
+
+#[test]
+fn shipped_cline_pick_takes_over_openai_compatible_and_clear_gives_it_back() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let dir = home.join(".cline").join("data").join("settings");
+    let providers = dir.join("providers.json");
+    write(&providers, CLINE_PROVIDERS);
+    let target = target();
+    let agent = adapter("cline", TargetOs::Linux);
+    let read = || -> serde_json::Value {
+        serde_json::from_slice(&fs::read(&providers).expect("read")).expect("json")
+    };
+    let original = read();
+    agent.apply(&session, &target).expect("apply");
+    assert_eq!(read(), original);
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("my-model")
+    );
+    // The user's own model of a route's name points elsewhere: a refresh
+    // leaves their entry alone.
+    agent.refresh_token(&session, &target).expect("refresh");
+    assert_eq!(read(), original);
+
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json = read();
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["lastUsedProvider"], "openai-compatible");
+    assert_eq!(
+        json["providers"]["anthropic"],
+        original["providers"]["anthropic"]
+    );
+    let entry = &json["providers"]["openai-compatible"];
+    assert_eq!(
+        entry["settings"],
+        serde_json::json!({
+            "provider": "openai-compatible",
+            "apiKey": target.token(),
+            "baseUrl": "http://127.0.0.1:3425/v1",
+            "headers": { "User-Agent": "cline" },
+            "model": "route-a"
+        })
+    );
+    assert_eq!(entry["updatedAt"], "2026-01-01T00:00:00.000Z");
+    assert_eq!(entry["tokenSource"], "manual");
+    assert!(agent.status(&session, &target).expect("status").connected());
+    // A second connect keeps the pick as it is.
+    let picked = read();
+    agent.apply(&session, &target).expect("apply again");
+    assert_eq!(read(), picked);
+
+    // A key the user adds inside the entry survives a refresh, which only
+    // swaps the token.
+    let mut edited = read();
+    edited["providers"]["openai-compatible"]["settings"]["reasoning"] =
+        serde_json::json!({ "effort": "high" });
+    write(&providers, &edited.to_string());
+    let fresh = GatewayTarget::new(
+        "http://127.0.0.1:3425/",
+        "fresh-token",
+        vec!["route-a".to_owned()],
+    );
+    agent.refresh_token(&session, &fresh).expect("refresh");
+    let mut expected = edited.clone();
+    expected["providers"]["openai-compatible"]["settings"]["apiKey"] =
+        serde_json::json!("fresh-token");
+    assert_eq!(read(), expected);
+
+    // Once the entry points elsewhere it is the user's again.
+    let mut moved = read();
+    moved["providers"]["openai-compatible"]["settings"]["baseUrl"] =
+        serde_json::json!("http://localhost:9000/v1");
+    write(&providers, &moved.to_string());
+    let later = GatewayTarget::new(
+        "http://127.0.0.1:3425/",
+        "later-token",
+        vec!["route-a".to_owned()],
+    );
+    agent.refresh_token(&session, &later).expect("refresh");
+    assert_eq!(read(), moved);
+
+    // So it is once the user picks a model that is not a route.
+    let mut own = expected.clone();
+    own["providers"]["openai-compatible"]["settings"]["model"] = serde_json::json!("my-model");
+    write(&providers, &own.to_string());
+    agent.refresh_token(&session, &later).expect("refresh");
+    assert_eq!(read(), own);
+
+    // An entry without a key is not hofund's either; a refresh adds none.
+    let mut keyless = expected.clone();
+    keyless["providers"]["openai-compatible"]["settings"]
+        .as_object_mut()
+        .expect("settings")
+        .remove("apiKey");
+    write(&providers, &keyless.to_string());
+    agent.refresh_token(&session, &later).expect("refresh");
+    assert_eq!(read(), keyless);
+    write(&providers, &expected.to_string());
+
+    agent.set_model(&session, &target, None).expect("clear");
+    assert_eq!(read(), original);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(read(), original);
+    assert!(!dir.join("models.json").exists());
+}
+
+#[test]
+fn shipped_cline_writes_providers_only_for_a_pick() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let dir = home.join(".cline").join("data").join("settings");
+    let providers = dir.join("providers.json");
+    let target = target();
+    let agent = adapter("cline", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    assert!(dir.join("models.json").is_file());
+    assert!(!providers.exists());
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&providers).expect("read")).expect("json");
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["lastUsedProvider"], "openai-compatible");
+    assert_eq!(
+        json["providers"]["openai-compatible"]["settings"]["model"],
+        "route-a"
+    );
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&providers).expect("read")).expect("json");
+    assert_eq!(json.get("version"), None);
+    assert_eq!(json.get("lastUsedProvider"), None);
+    assert_eq!(json, serde_json::json!({}));
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!providers.exists());
+    assert!(!dir.join("models.json").exists());
+}

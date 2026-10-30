@@ -1087,6 +1087,7 @@ static PAIR_SETS: &[AgentSet] = &[
         Slot::ModelPair {
             value: "hofund",
             unless: &["legacy", "other"],
+            json: false,
         },
     ),
     AgentSet::from_static("config", "model", Slot::model_if_unset(None)),
@@ -1121,6 +1122,7 @@ static PAIR_ELSEWHERE_SETS: &[AgentSet] = &[AgentSet::from_static(
     Slot::ModelPair {
         value: "hofund",
         unless: &[],
+        json: false,
     },
 )];
 static PAIR_ELSEWHERE: AgentDescription = AgentDescription::from_static(
@@ -1157,6 +1159,7 @@ static PAIR_UNOWNED_SETS: &[AgentSet] = &[
         Slot::ModelPair {
             value: "hofund",
             unless: &[],
+            json: false,
         },
     ),
     AgentSet::from_static("config", "fallback", Slot::model_if_unset(None)),
@@ -1180,6 +1183,7 @@ static PAIR_FROM_SETS: &[AgentSet] = &[
         Slot::ModelPair {
             value: "hofund",
             unless: &[],
+            json: false,
         },
     ),
     AgentSet::from_static("config", "model", Slot::model_if_unset(Some("old"))),
@@ -1228,6 +1232,7 @@ static PAIR_SPLIT_SETS: &[AgentSet] = &[
         Slot::ModelPair {
             value: "hofund",
             unless: &[],
+            json: false,
         },
     ),
     AgentSet::from_static("env", "model", Slot::model_if_unset(None)),
@@ -1252,6 +1257,7 @@ static PAIR_SELF_SETS: &[AgentSet] = &[AgentSet::from_static(
     Slot::ModelPair {
         value: "hofund",
         unless: &[],
+        json: false,
     },
 )];
 static PAIR_SELF: AgentDescription = AgentDescription::from_static(
@@ -1274,6 +1280,7 @@ static PAIR_URL_SETS: &[AgentSet] = &[AgentSet::from_static(
     Slot::ModelPair {
         value: "{v1}",
         unless: &[],
+        json: false,
     },
 )];
 static PAIR_URL: AgentDescription = AgentDescription::from_static(

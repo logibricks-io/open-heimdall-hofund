@@ -451,9 +451,17 @@ impl Engine {
                     .collect();
                 // A pair goes back to the pick the user had before connect.
                 let picked = self.picked_before(&path, kind, &leftover)?;
+                // A key inside a restored pair came back with it.
                 let leftover: Vec<&'static str> = leftover
                     .into_iter()
-                    .filter(|key| !picked.iter().any(|assignment| assignment.key == *key))
+                    .filter(|key| {
+                        !picked.iter().any(|assignment| {
+                            assignment.key == *key
+                                || key
+                                    .strip_prefix(assignment.key)
+                                    .is_some_and(|rest| rest.starts_with('.'))
+                        })
+                    })
                     .collect();
                 let written = utf8(&path, &after)?.to_owned();
                 let written = render(kind, Some(&written), &picked)
@@ -542,7 +550,7 @@ impl Engine {
             {
                 picked.push(Assignment {
                     key: set.key,
-                    raw_json: is_json_value(&value),
+                    raw_json: typed(kind, backup, set.key, &value),
                     shared: None,
                     value,
                 });
@@ -701,8 +709,22 @@ impl Engine {
                 continue;
             };
             let text = utf8(&chosen.path, &before)?;
-            let assignments =
+            let mut assignments =
                 self.assignments_for(&token_sets, chosen.kind, target, Some(text), Choice::Keep);
+            for set in &token_sets {
+                if assignments
+                    .iter()
+                    .any(|assignment| assignment.key == set.key)
+                {
+                    continue;
+                }
+                if let Some(assignment) = self
+                    .refreshed_pair(set, chosen.kind, target, text)
+                    .map_err(|error| annotate(&chosen.path, error))?
+                {
+                    assignments.push(assignment);
+                }
+            }
             let after = render(chosen.kind, Some(text), &assignments)
                 .map_err(|error| annotate(&chosen.path, error))?;
             if before != after {
@@ -712,6 +734,59 @@ impl Engine {
             }
         }
         Ok(updated)
+    }
+
+    /// The new value of a pair that holds the token while the model key in
+    /// its file names a route, so the agent keeps reaching the gateway.
+    fn refreshed_pair(
+        &self,
+        set: &EngineSet,
+        kind: FileKind,
+        target: &GatewayTarget,
+        text: &str,
+    ) -> Result<Option<Assignment>, AgentError> {
+        let ApiSlot::ModelPair { value, json, .. } = set.slot else {
+            return Ok(None);
+        };
+        if self.route != AgentRoute::Gateway {
+            return Ok(None);
+        }
+        let Some(model) = self.model.filter(|model| model.file == set.file) else {
+            return Ok(None);
+        };
+        let Some(main) = string_value(kind, text, model.key) else {
+            return Ok(None);
+        };
+        if !self
+            .models(target)
+            .iter()
+            .any(|id| *id == main || self.prefixed(id) == main)
+        {
+            return Ok(None);
+        }
+        let Some(current) = get(kind, text, set.key)? else {
+            return Ok(None);
+        };
+        let value = if json {
+            let (Ok(template), Ok(mut current)) = (
+                serde_json::from_str(value),
+                serde_json::from_str::<serde_json::Value>(&current),
+            ) else {
+                return Ok(None);
+            };
+            if !refresh_json(&template, &mut current, target) {
+                return Ok(None);
+            }
+            current.to_string()
+        } else {
+            fill_template(value, target)
+        };
+        Ok(Some(Assignment {
+            key: set.key,
+            value,
+            raw_json: json,
+            shared: None,
+        }))
     }
 
     fn configured_model(&self) -> Result<Option<String>, AgentError> {
@@ -801,6 +876,7 @@ impl Engine {
                             | ApiSlot::ModelArray { .. }
                             | ApiSlot::Append { .. }
                             | ApiSlot::ModelMap { .. }
+                            | ApiSlot::ModelPair { json: true, .. }
                     ),
                     shared: shared_of(&set.slot),
                 })
@@ -828,11 +904,22 @@ impl Engine {
             ApiSlot::Token if gateway => Some(target.token().to_owned()),
             ApiSlot::Literal(text) => Some((*text).to_owned()),
             ApiSlot::Template(text) if gateway => Some(fill_template(text, target)),
-            ApiSlot::ModelPair { value, unless } if gateway => {
+            ApiSlot::ModelPair {
+                value,
+                unless,
+                json,
+            } if gateway => {
                 let model = self.model.filter(|model| model.file == set.file)?;
                 if chosen.is_none() {
                     let picked = |key| existing.and_then(|text| string_value(kind, text, key));
-                    if picked(set.key).is_some() || unless.iter().any(|key| picked(key).is_some()) {
+                    // A typed value may be a number or an object, so any
+                    // value at the key counts as the user's.
+                    let held = if *json {
+                        existing.and_then(|text| get(kind, text, set.key).ok().flatten())
+                    } else {
+                        picked(set.key)
+                    };
+                    if held.is_some() || unless.iter().any(|key| picked(key).is_some()) {
                         return None;
                     }
                     // The model the file holds after this write: the one
@@ -855,7 +942,11 @@ impl Engine {
                         return None;
                     }
                 }
-                Some(fill_template(value, target))
+                if *json {
+                    fill_json(value, target)
+                } else {
+                    Some(fill_template(value, target))
+                }
             }
             ApiSlot::ModelIfUnset { from } => match chosen {
                 Some(id) if self.model.is_some_and(|model| model.key == set.key) => {
@@ -1173,7 +1264,59 @@ fn carries_token(slot: &ApiSlot) -> bool {
         ApiSlot::ModelArray { fields }
         | ApiSlot::Append { fields, .. }
         | ApiSlot::ModelMap { fields, .. } => fields.iter().any(|field| field.value().has_token()),
+        ApiSlot::ModelPair { value, .. } => value.contains("{token}"),
         _ => false,
+    }
+}
+
+/// The JSON text `template` with the placeholders filled in inside its
+/// strings, so a filled value is always escaped; `None` when it is not JSON.
+fn fill_json(template: &str, target: &GatewayTarget) -> Option<String> {
+    fn fill(value: &mut serde_json::Value, target: &GatewayTarget) {
+        match value {
+            serde_json::Value::String(text) => *text = fill_template(text, target),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|item| fill(item, target)),
+            serde_json::Value::Object(fields) => {
+                fields.values_mut().for_each(|item| fill(item, target));
+            }
+            _ => {}
+        }
+    }
+    let mut value = serde_json::from_str(template).ok()?;
+    fill(&mut value, target);
+    serde_json::to_string(&value).ok()
+}
+
+/// Rewrites the token strings of `current` that `template` marks with
+/// `{token}`, keeping everything else as it is. False when `current` is not
+/// hofund's: a string `template` fills from the gateway address differs.
+fn refresh_json(
+    template: &serde_json::Value,
+    current: &mut serde_json::Value,
+    target: &GatewayTarget,
+) -> bool {
+    match template {
+        serde_json::Value::String(text) if text.contains("{token}") => match current {
+            serde_json::Value::String(held) => {
+                *held = fill_template(text, target);
+                true
+            }
+            _ => false,
+        },
+        serde_json::Value::String(text) if text.contains("{origin}") || text.contains("{v1}") => {
+            current.as_str() == Some(fill_template(text, target).as_str())
+        }
+        serde_json::Value::Object(fields) => {
+            let Some(held) = current.as_object_mut() else {
+                return false;
+            };
+            // A part the user removed stays removed.
+            fields.iter().all(|(name, value)| {
+                held.get_mut(name)
+                    .is_none_or(|current| refresh_json(value, current, target))
+            })
+        }
+        _ => true,
     }
 }
 
@@ -1268,6 +1411,16 @@ fn snapshot_wrote(
 }
 
 /// Whether a value read back with `get` is JSON text rather than a string.
+/// Whether `value`, read at `key` in `text`, goes back as JSON: a number,
+/// flag, or object returns as one, not as text.
+fn typed(kind: FileKind, text: &str, key: &str, value: &str) -> bool {
+    match string_at(kind, text, key) {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(_) => is_json_value(value),
+    }
+}
+
 fn is_json_value(value: &str) -> bool {
     let value = value.trim_start();
     value.starts_with('{') || value.starts_with('[')
@@ -1396,14 +1549,14 @@ fn merge_owned_keys(
             continue;
         }
         if current_value == wrote_value {
-            match original {
-                Some(value) => restore.push(Assignment {
+            match (original, backup_text) {
+                (Some(value), Some(text)) => restore.push(Assignment {
                     key,
-                    raw_json: is_json_value(&value),
+                    raw_json: typed(kind, text, key, &value),
                     shared: None,
                     value,
                 }),
-                None => remove.push(key),
+                _ => remove.push(key),
             }
         } else {
             warnings.push(format!(

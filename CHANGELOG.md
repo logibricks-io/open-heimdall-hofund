@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Cline agent (G11): `hofund agent connect cline` lists each route as
+  `hofund/<route>` under `providers.openai-compatible.models` in
+  `~/.cline/data/settings/models.json` (or under an absolute `CLINE_DIR`),
+  leaving the user's own models alone. A model pick writes hofund's whole
+  `openai-compatible` entry in `providers.json` (gateway `/v1`, token, model,
+  `updatedAt`) and sets `lastUsedProvider`; clearing the model or
+  disconnecting puts back the user's entry and provider. A token refresh
+  rewrites only the key, and only while the entry still points at the
+  gateway. No VS Code extension settings (#437), fixed model capabilities
+  and no reasoning effort (#438), and `CLINE_DATA_DIR` is not followed (#439).
+- Agent descriptions can write a `model_pair` as a typed JSON value
+  (`json = '...'`) and may put `{token}` in it; a token refresh rewrites a
+  pair that holds `{token}` while the picked model is a route. Clearing the
+  model or disconnecting now restores a number, flag, or object the user had
+  as that type, and a file hofund created and a clear emptied is removed on
+  disconnect.
 - VS Code agent (G10): `hofund agent connect vscode` appends one
   `customendpoint` group named `hofund` to `chatLanguageModels.json` beside
   the default profile's `settings.json` (VS Code Stable only), each route at
