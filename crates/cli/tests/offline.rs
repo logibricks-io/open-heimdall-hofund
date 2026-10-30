@@ -1469,3 +1469,321 @@ fn offline_model_show_one_shot() {
     assert_eq!(out.failed(), "unknown model `ghost`: no route serves it");
     scratch.assert_no_daemon_state();
 }
+
+/// A provider entry with comments the config edits must keep.
+const COMMENTED: &str = "# providers below\n[[providers]]\nid = \"chat\" # the main one\n\
+protocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"provider-key\"\n\
+[providers.models]\nrefresh = \"off\" # by hand\n[[routes]]\nmodel = \"m\"\nupstreams = [\"chat\"]\n";
+
+const SPARE: [&str; 6] = [
+    "provider",
+    "add",
+    "spare",
+    "spare-secret-key",
+    "protocol=openai-chat",
+    "base_url=http://127.0.0.1:9/v1",
+];
+
+#[test]
+fn offline_provider_add_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let out = scratch.hofund(&SPARE);
+    let text = out.ok();
+    assert!(
+        text.starts_with("added provider `spare` (revision "),
+        "{text}"
+    );
+    assert!(!text.contains("spare-secret-key"), "{text}");
+    // The new entry follows the last provider, before the routes.
+    let config = scratch.config_text();
+    let spare = "[[providers]]\nid = \"spare\"\napi_key = \"spare-secret-key\"\n\
+protocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\n";
+    assert_eq!(
+        config,
+        format!(
+            "listen = \"127.0.0.1:0\"\ntoken_file = \"token\"\n{}",
+            ROUTED.replace("[[routes]]", &format!("\n{spare}[[routes]]"))
+        )
+    );
+    let listed = scratch.hofund(&["provider", "list"]);
+    assert!(listed.ok().contains("\nspare\t"), "{listed:#?}");
+
+    // A second add of the same id is refused and writes nothing.
+    let error = scratch.hofund(&SPARE).failed().to_owned();
+    assert_eq!(
+        error,
+        "provider `spare` already exists; hofund provider set spare k=v... edits it"
+    );
+    assert_eq!(scratch.config_text(), config);
+
+    // An add the daemon rejects leaves the file alone.
+    let out = scratch.hofund(&["provider", "add", "bad", "quirks=deepseek"]);
+    assert!(
+        out.failed()
+            .contains("provider `bad` needs a protocol or a preset"),
+        "{out:#?}"
+    );
+    assert_eq!(scratch.config_text(), config);
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_provider_set_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", COMMENTED);
+    let out = scratch.hofund(&[
+        "provider",
+        "set",
+        "chat",
+        "max_output_tokens=2048",
+        "header.X-Trace=on",
+    ]);
+    assert!(
+        out.ok().starts_with("saved provider `chat` (revision "),
+        "{out:#?}"
+    );
+    let config = scratch.config_text();
+    assert!(
+        config.contains("id = \"chat\" # the main one\n"),
+        "{config}"
+    );
+    assert!(config.contains("max_output_tokens = 2048\n"), "{config}");
+    assert!(
+        config.contains("[providers.headers]\nX-Trace = \"on\"\n"),
+        "{config}"
+    );
+    assert!(config.contains("# providers below\n"), "{config}");
+    assert!(config.contains("refresh = \"off\" # by hand\n"), "{config}");
+
+    // An empty value removes the field, and its section when emptied.
+    let out = scratch.hofund(&["provider", "set", "chat", "header.X-Trace="]);
+    assert!(out.ok().starts_with("saved provider `chat`"), "{out:#?}");
+    let config = scratch.config_text();
+    assert!(!config.contains("headers"), "{config}");
+
+    // Asking for what is already there sends nothing.
+    let out = scratch.hofund(&["provider", "set", "chat", "max_output_tokens=2048"]);
+    assert_eq!(out.ok(), "provider `chat` unchanged");
+    assert_eq!(scratch.config_text(), config);
+
+    // `models=` edits the picks, not the file.
+    let out = scratch.hofund(&["provider", "set", "chat", "models=a,b"]);
+    assert_eq!(out.ok(), "picks: default -> a, b");
+    assert_eq!(scratch.config_text(), config);
+    // An empty `models=` resets the picks to the default.
+    let out = scratch.hofund(&["provider", "set", "chat", "models="]);
+    assert_eq!(out.ok(), "picks: a, b -> default");
+
+    let error = scratch
+        .hofund(&["provider", "set", "ghost", "quirks=x"])
+        .failed()
+        .to_owned();
+    assert_eq!(error, "unknown provider `ghost`");
+    let out = scratch.hofund(&["provider", "set", "chat", "name=x"]);
+    assert_eq!(out.code, Some(2), "{out:#?}");
+    assert!(
+        out.stderr.starts_with("unknown provider field `name`"),
+        "{out:#?}"
+    );
+    assert_eq!(scratch.config_text(), config);
+    scratch.assert_no_daemon_state();
+}
+
+/// Asserts that every `id=` form of `provider set` fails before any I/O.
+fn assert_rename_rejected(scratch: &Scratch) {
+    let config = scratch.config_text();
+    for args in [
+        &["provider", "set", "chat", "id=renamed"][..],
+        &["provider", "set", "chat", "models=a", "id=renamed"],
+        &[
+            "provider",
+            "set",
+            "chat",
+            "max_output_tokens=9",
+            "ID=renamed",
+        ],
+    ] {
+        let out = scratch.hofund(args);
+        assert_eq!(out.code, Some(2), "{args:?}: {out:#?}");
+        assert_eq!(
+            out.stderr.trim_end(),
+            "renaming a provider is not supported yet; see feature-parity row 11.6"
+        );
+        assert_eq!(out.stdout, "");
+    }
+    assert_eq!(scratch.config_text(), config);
+    assert!(!models_dir(scratch).exists(), "host state was written");
+}
+
+#[test]
+fn provider_set_id_is_rejected_until_rename_lands() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    assert_rename_rejected(&scratch);
+    scratch.assert_no_daemon_state();
+
+    // The same with a daemon running, which then takes a real edit.
+    let scratch = Scratch::new(&format!("127.0.0.1:{}", free_port()), ROUTED);
+    let mut daemon_command = scratch.command(hofundd(), &[]);
+    daemon_command.stdout(Stdio::null()).stderr(Stdio::null());
+    let mut daemon = Daemon(Some(spawn(&mut daemon_command)));
+    let started = Instant::now();
+    while scratch.hofund_with(hofund(), &["healthcheck"]).code != Some(0) {
+        assert!(started.elapsed() < DEADLINE, "daemon never answered");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_rename_rejected(&scratch);
+    let out = scratch.hofund(&["provider", "set", "chat", "max_output_tokens=9"]);
+    assert!(out.ok().starts_with("saved provider `chat`"), "{out:#?}");
+    assert!(scratch.config_text().contains("max_output_tokens = 9\n"));
+    scratch.hofund(&["shutdown"]).ok();
+    let child = daemon.0.take().expect("daemon");
+    let exited = finish(child, DEADLINE);
+    assert!(exited.status.success(), "{exited:?}");
+}
+
+#[test]
+fn offline_provider_key_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", COMMENTED);
+    let out = scratch.hofund(&["provider", "key", "chat", "chat-new-key"]);
+    let text = out.ok();
+    assert!(
+        text.starts_with("saved the key of provider `chat` (revision "),
+        "{text}"
+    );
+    assert!(!text.contains("chat-new-key"), "{text}");
+    let config = scratch.config_text();
+    assert!(config.contains("api_key = \"chat-new-key\"\n"), "{config}");
+    assert!(!config.contains("provider-key"), "{config}");
+    assert!(
+        config.contains("id = \"chat\" # the main one\n"),
+        "{config}"
+    );
+    let error = scratch
+        .hofund(&["provider", "key", "ghost", "k"])
+        .failed()
+        .to_owned();
+    assert_eq!(error, "unknown provider `ghost`");
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_provider_rm_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let before = scratch.config_text();
+    scratch.hofund(&SPARE).ok();
+    for verb in ["rm", "remove", "delete"] {
+        if verb != "rm" {
+            scratch.hofund(&SPARE).ok();
+        }
+        let out = scratch.hofund(&["provider", verb, "spare"]);
+        assert!(
+            out.ok().starts_with("removed provider `spare` (revision "),
+            "{verb}: {out:#?}"
+        );
+        assert_eq!(scratch.config_text(), before, "{verb}");
+    }
+
+    // A provider a route still names stays: no agent or route is moved.
+    let out = scratch.hofund(&["provider", "rm", "chat"]);
+    assert!(out.failed().contains("chat"), "{out:#?}");
+    assert_eq!(scratch.config_text(), before);
+    let error = scratch
+        .hofund(&["provider", "rm", "ghost"])
+        .failed()
+        .to_owned();
+    assert_eq!(error, "unknown provider `ghost`");
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_provider_refresh_every_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", COMMENTED);
+    let out = scratch.hofund(&["provider", "refresh-every", "chat"]);
+    assert_eq!(
+        out.ok(),
+        "chat: its model list is fetched only when asked (hofund provider refresh chat)"
+    );
+    let out = scratch.hofund(&["provider", "refresh-every", "chat", "6h"]);
+    let text = out.ok();
+    assert!(
+        text.starts_with("saved provider `chat` (revision "),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("\nchat: the daemon refetches its model list every 6h"),
+        "{text}"
+    );
+    let config = scratch.config_text();
+    assert!(config.contains("refresh = \"6h\" # by hand\n"), "{config}");
+
+    // An interval the config refuses writes nothing.
+    let out = scratch.hofund(&["provider", "refresh-every", "chat", "1s"]);
+    assert_eq!(out.code, Some(1), "{out:#?}");
+    assert_eq!(scratch.config_text(), config);
+
+    let out = scratch.hofund(&["provider", "refresh-every", "chat", "off"]);
+    assert!(
+        out.ok().ends_with(
+            "\nchat: its model list is fetched only when asked (hofund provider refresh chat)"
+        ),
+        "{out:#?}"
+    );
+    assert!(
+        scratch
+            .config_text()
+            .contains("refresh = \"off\" # by hand\n")
+    );
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_provider_auto_include_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", COMMENTED);
+    let out = scratch.hofund(&["provider", "auto-include", "chat"]);
+    assert_eq!(
+        out.ok(),
+        "chat: no auto-include rules; a newly listed model is picked only by hand"
+    );
+    let out = scratch.hofund(&[
+        "provider",
+        "auto-include",
+        "chat",
+        "gpt-*",
+        "re:o[0-9]{1,2}",
+    ]);
+    let text = out.ok();
+    assert!(
+        text.starts_with("saved provider `chat` (revision "),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(
+            "\nchat: a newly listed model is picked when one of these matches its id: gpt-* re:o[0-9]{1,2}"
+        ),
+        "{text}"
+    );
+    let config = scratch.config_text();
+    assert!(
+        config.contains("auto_include = [\"gpt-*\", \"re:o[0-9]{1,2}\"]\n"),
+        "{config}"
+    );
+
+    // A rule the config refuses writes nothing.
+    let out = scratch.hofund(&["provider", "auto-include", "chat", "re:("]);
+    assert_eq!(out.code, Some(1), "{out:#?}");
+    assert_eq!(scratch.config_text(), config);
+
+    let out = scratch.hofund(&["provider", "auto-include", "chat", "none"]);
+    assert!(
+        out.ok().ends_with(
+            "\nchat: no auto-include rules; a newly listed model is picked only by hand"
+        ),
+        "{out:#?}"
+    );
+    assert!(!scratch.config_text().contains("auto_include"));
+    assert!(
+        scratch
+            .config_text()
+            .contains("refresh = \"off\" # by hand\n")
+    );
+    scratch.assert_no_daemon_state();
+}

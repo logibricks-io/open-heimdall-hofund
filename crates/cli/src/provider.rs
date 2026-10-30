@@ -85,7 +85,7 @@ fn render_show(
     out
 }
 
-fn picks_text(picks: &[String]) -> String {
+pub(crate) fn picks_text(picks: &[String]) -> String {
     if picks.is_empty() {
         "default".to_owned()
     } else {

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hofund provider add`, `set`, `key`, `rm` (aliases `remove`, `delete`),
+  `refresh-every`, and `auto-include` (L8c). They edit the config with
+  `toml_edit`, keeping comments, and apply it with its disk revision through
+  the running daemon or one-shot `hofundd`, retrying a stale revision up to
+  three times. `provider set <id> id=...` is refused before any edit; renaming
+  waits for feature-parity row 11.6. `add` refuses an existing id and does not
+  fetch models; `rm` does not reseat agents.
 - `hofund events tail [--requests]` (L8d): prints daemon events as JSON
   lines. With no daemon running it starts `hofundd` in the background,
   logging to `.hofund/daemon-<config-id>.log` beside the config; that daemon
