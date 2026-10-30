@@ -726,7 +726,7 @@ fn a_hofund_models_compaction_is_its_summary_as_one_compaction_item() {
         "id": "resp_7",
         "status": "completed",
         "output": [
-            {"type": "reasoning", "summary": []},
+            {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "hidden"}]},
             {"type": "message", "content": [{"type": "output_text", "text": "Sum"}, {"type": "output_text", "text": "mary"}]},
             {"type": "message", "content": [{"type": "refusal"}]},
         ],
@@ -804,6 +804,34 @@ fn a_summary_streamed_back_is_read_from_its_items() {
         super::input::sealed("streamed")
     );
     assert_eq!(done.get("usage"), None);
+}
+
+#[test]
+fn a_summary_streamed_whole_keeps_the_id_it_was_given() {
+    let stream = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_a\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"\",\"output\":[{\"type\":\"message\",\"content\":[{\"text\":\"whole\"}]}]}}\n\n",
+    );
+    let stub = Stub::default().calling(answer(200, stream));
+    let (status, _, body) = compaction(&stub);
+    assert_eq!(status, 200);
+    let item = &events(&body)[1].1["item"];
+    assert_eq!(item["id"], "cmp_a");
+    assert_eq!(item["encrypted_content"], super::input::sealed("whole"));
+}
+
+#[test]
+fn a_compaction_stream_is_not_cached() {
+    let response = super::backend::compaction_stream("resp_1", "s", &Value::Null);
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(header("cache-control").as_deref(), Some("no-cache"));
+    assert_eq!(header("content-type").as_deref(), Some("text/event-stream"));
 }
 
 #[test]
@@ -944,8 +972,9 @@ fn a_summary_reply_that_cannot_be_read_is_no_summary() {
         message(&body),
         "compaction: the summary reply could not be read"
     );
-    let mut fits = vec![b' '; 16 * 1024 * 1024 - 64];
-    fits.extend_from_slice(br#"{"output":[{"type":"message","content":[{"text":"s"}]}]}"#);
+    let reply = br#"{"output":[{"type":"message","content":[{"text":"s"}]}]}"#;
+    let mut fits = vec![b' '; 16 * 1024 * 1024 - reply.len()];
+    fits.extend_from_slice(reply);
     let stub = Stub::default().calling(answer(200, fits));
     assert_eq!(compaction(&stub).0, 200);
     let stub = Stub::default().calling(Ok((

@@ -200,7 +200,7 @@ async fn summarise(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
 }
 
 /// The compaction stream: created, the item added and done, completed.
-fn compaction_stream(id: &str, summary: &str, usage: &Value) -> HttpResponse {
+pub(crate) fn compaction_stream(id: &str, summary: &str, usage: &Value) -> HttpResponse {
     let item = json!({
         "type": "compaction",
         "id": format!("cmp_{}", id.strip_prefix("resp_").unwrap_or(id)),
