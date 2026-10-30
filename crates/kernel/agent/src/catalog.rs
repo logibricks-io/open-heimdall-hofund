@@ -855,7 +855,7 @@ impl Engine {
                         return None;
                     }
                 }
-                Some((*value).to_owned())
+                Some(fill_template(value, target))
             }
             ApiSlot::ModelIfUnset { from } => match chosen {
                 Some(id) if self.model.is_some_and(|model| model.key == set.key) => {

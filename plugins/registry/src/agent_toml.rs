@@ -531,6 +531,16 @@ fn validate_slot(slot: &SlotToml, source: &str, field: &str) -> Result<(), Strin
             if model_pair.value.is_empty() {
                 return Err(error(source, format!("{field}.value"), "must not be empty"));
             }
+            if model_pair.value.contains("{token}") {
+                return Err(error(
+                    source,
+                    format!("{field}.value"),
+                    "`{token}` is not allowed; a refresh does not rewrite this value",
+                ));
+            }
+            if model_pair.value.contains(['{', '}']) {
+                validate_template(&model_pair.value, source, &format!("{field}.value"))?;
+            }
             let mut keys = BTreeSet::new();
             for (index, key) in model_pair.unless.iter().enumerate() {
                 if key.is_empty() {
@@ -1320,6 +1330,22 @@ key = "effort"
         reject(
             with_slot("{ model_pair = { value = \"\" } }"),
             "set[0].slot.model_pair.value: must not be empty",
+        );
+        let source = render(
+            &validate(&with_slot("{ model_pair = { value = \"{v1}\" } }")).expect("v1 pair"),
+        )
+        .1;
+        assert!(
+            source.contains("hofund_plugin_api::Slot::ModelPair { value: \"{v1}\", unless: &[] }"),
+            "{source}"
+        );
+        reject(
+            with_slot("{ model_pair = { value = \"Bearer {token}\" } }"),
+            "set[0].slot.model_pair.value: `{token}` is not allowed; a refresh does not rewrite this value",
+        );
+        reject(
+            with_slot("{ model_pair = { value = \"{nope}\" } }"),
+            "set[0].slot.model_pair.value: unknown placeholder; expected `{origin}`, `{v1}`, or `{token}`",
         );
         reject(
             with_slot("{ model_pair = { value = \"h\", unless = [\"a\", \"\"] } }"),

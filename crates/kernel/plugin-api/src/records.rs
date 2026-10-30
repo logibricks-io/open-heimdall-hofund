@@ -1467,7 +1467,9 @@ pub enum Slot {
     /// value the file had before connect, or is dropped when it had none.
     #[doc(hidden)]
     ModelPair {
-        /// The text written.
+        /// The text written. `{origin}` and `{v1}` are filled in as for
+        /// [`Slot::Template`]; the token is not, since a refresh does not
+        /// rewrite this value.
         value: &'static str,
         /// Keys whose non-empty string means the user picked a provider.
         unless: &'static [&'static str],

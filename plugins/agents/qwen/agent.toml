@@ -1,0 +1,60 @@
+id = "qwen"
+display_name = "Qwen Code"
+binary = "qwen"
+
+# Qwen Code keeps its settings in ~/.qwen/settings.json on every OS.
+# QWEN_HOME replaces ~/.qwen.
+# Source: QwenLM/qwen-code docs/users/configuration/settings.md
+# (modelProviders, model.name, model.baseUrl, security.auth.selectedType, env).
+[[file]]
+id = "settings"
+kind = "json"
+linux = "~/.qwen/settings.json"
+macos = "~/.qwen/settings.json"
+windows = "~/.qwen/settings.json"
+env_override = "QWEN_HOME"
+env_replaces = "~/.qwen"
+
+# The key lives in the file's own env object under a Qwen-specific name, so a
+# shell variable of a generic name does not shadow it. Every hofund provider
+# entry names it as envKey.
+[[set]]
+file = "settings"
+key = "env.HOFUND_QWEN_API_KEY"
+slot = "token"
+
+# modelProviders.openai is the user's own model list. hofund appends one
+# entry per route after the user's entries, so their ids keep their places.
+# An entry is hofund's when its envKey is HOFUND_QWEN_API_KEY. Fields are in
+# the alphabetical order Qwen Code writes.
+[[set]]
+file = "settings"
+key = "modelProviders.openai"
+slot = { append = { each = "model", owner = [
+    { key = "envKey", equals = "HOFUND_QWEN_API_KEY" },
+], fields = [
+    { key = "baseUrl", value = "v1" },
+    { key = "envKey", literal = "HOFUND_QWEN_API_KEY" },
+    { key = "id", value = "id" },
+    { key = "name", value = "id" },
+] } }
+
+# openai skips the /auth prompt on start. It is written with a pick of a
+# route, so a user on Qwen OAuth keeps it until they pick hofund; clearing the
+# model puts back the user's value.
+[[set]]
+file = "settings"
+key = "security.auth.selectedType"
+slot = { model_pair = { value = "openai" } }
+
+# Sessions start on model.name. model.baseUrl tells two entries of one id
+# apart, so a pick also points it at the gateway; clearing the model puts
+# back the user's value.
+[[set]]
+file = "settings"
+key = "model.baseUrl"
+slot = { model_pair = { value = "{v1}" } }
+
+[model]
+file = "settings"
+key = "model.name"
