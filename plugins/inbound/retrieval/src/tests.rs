@@ -198,7 +198,8 @@ fn a_body_without_a_model_is_refused_before_the_kernel() {
 
 #[test]
 fn kernel_failures_keep_their_status_or_become_a_gateway_error() {
-    let cases: [(fn() -> PluginError, u16, &str); 4] = [
+    type Case = (fn() -> PluginError, u16, &'static str);
+    let cases: [Case; 4] = [
         (
             || PluginError::status_error(404, "no provider"),
             404,

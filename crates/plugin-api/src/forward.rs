@@ -180,6 +180,10 @@ impl RawAnswer {
 mod tests {
     use super::{Forward, PATH_CAP, RawAnswer, RawBody};
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "a forward body builder returns a Result"
+    )]
     fn echo(model: &str) -> Result<RawBody, crate::PluginError> {
         Ok(RawBody::new("application/json", model.to_owned()))
     }

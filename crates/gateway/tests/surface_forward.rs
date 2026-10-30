@@ -97,10 +97,13 @@ impl InboundSurface for Forwarder {
     }
 }
 
+/// The member, status, and input and output tokens of a finished request.
+type Ended = (Option<String>, u16, Option<u64>, Option<u64>);
+
 #[derive(Default)]
 struct Events {
     started: Mutex<Vec<(String, String)>>,
-    finished: Mutex<Vec<(Option<String>, u16, Option<u64>, Option<u64>)>>,
+    finished: Mutex<Vec<Ended>>,
 }
 
 impl RequestEvents for Events {

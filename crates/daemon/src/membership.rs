@@ -1721,7 +1721,7 @@ mod tests {
         )]);
         let snapshot =
             open(&built, route(&["forward"]), FailoverPolicy::default(), book).expect("snapshot");
-        let call = hofund_router::Forward::new("demo", "/embeddings", |model| {
+        let call = hofund_plugin_api::Forward::new("demo", "/embeddings", |model| {
             Ok(RawBody::new("application/json", format!("m={model}")))
         })
         .expect("call");

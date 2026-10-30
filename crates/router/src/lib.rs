@@ -17,8 +17,7 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 use hofund_ir::{StreamEvent, estimate_input_tokens};
-use hofund_plugin_api::{BodyStream, CountOutcome, PluginErrorKind};
-pub use hofund_plugin_api::{Forward, RawAnswer, RawBody};
+use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
 use tracing::Instrument;
 
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling};
