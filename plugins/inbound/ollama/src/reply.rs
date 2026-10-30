@@ -85,6 +85,10 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
+/// The most tool calls one reply keeps. A call indexed past it is dropped,
+/// so a stream's `index` cannot make the writer allocate without bound.
+pub(crate) const MAX_CALLS: usize = 128;
+
 /// One tool call as the stream builds it.
 #[derive(Default)]
 struct ToolCall {
@@ -272,6 +276,9 @@ impl Writer {
                 .and_then(Value::as_u64)
                 .and_then(|index| usize::try_from(index).ok())
                 .unwrap_or(self.calls.len());
+            if at >= MAX_CALLS {
+                continue;
+            }
             if self.calls.len() <= at {
                 self.calls.resize_with(at + 1, ToolCall::default);
             }

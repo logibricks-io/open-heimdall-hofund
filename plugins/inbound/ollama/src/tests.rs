@@ -9,7 +9,7 @@ use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{HttpRequest, HttpResponse, async_trait, text_response};
 
 use super::{ERROR_CAP, Kernel, Ollama, read_capped, resolve, serve};
-use crate::reply::{Writer, failure_message};
+use crate::reply::{MAX_CALLS, Writer, failure_message};
 
 /// Runs `future` on this thread. Everything here is ready or woken at once.
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -756,6 +756,22 @@ fn a_writer_ends_once() {
             .is_empty()
     );
     assert!(writer.finish(start).is_empty());
+}
+
+#[test]
+fn a_tool_call_index_past_the_cap_is_dropped() {
+    let start = Instant::now();
+    let mut writer = Writer::new("seer", false, false, false, true, start);
+    let last = MAX_CALLS - 1;
+    let chunk = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{last},\"function\":{{\"name\":\"kept\"}}}},{{\"index\":{MAX_CALLS},\"function\":{{\"name\":\"dropped\"}}}},{{\"index\":18446744073709551615,\"function\":{{\"name\":\"huge\"}}}}]}}}}]}}\n"
+    );
+    assert!(writer.feed(chunk.as_bytes(), start).is_empty());
+    let reply = one(&String::from_utf8(writer.finish(start)).expect("utf-8"));
+    let calls = reply["message"]["tool_calls"].as_array().expect("calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["function"]["name"], "kept");
+    assert_eq!(calls[0]["function"]["index"], last);
 }
 
 #[test]
