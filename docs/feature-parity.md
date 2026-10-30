@@ -46,14 +46,14 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | Status | Rows |
 | --- | --- |
 | Done | 30 |
-| Partial | 32 |
+| Partial | 33 |
 | Missing | 93 |
-| Total counted | 155 |
+| Total counted | 156 |
 | Not planned (not counted) | 1 |
 
 | Stage | Counted rows |
 | --- | --- |
-| core | 78 |
+| core | 79 |
 | auxiliary | 77 |
 
 ### Where hofund is already better
@@ -124,6 +124,7 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | 1.19 | Tool-call repair: text tool calls, undeclared tools, tool loop guard | `internal/gateway/textcalls.go`, `undeclared_tools.go`, `loop_guard.go`, `tool_loop.go` | auxiliary | Missing | none | Add as opt-in quirk rules, with metrics for how often each one fires. |
 | 1.20 | Bare model ids and `provider/model` names | `internal/gateway/unknown_model.go`; `internal/provider/bare.go`; `ref.md:1924` | core | Done | `crates/router/src/lib.rs:141` (`dispatch`), `:238` (`resolve`), `:286` (`Ambiguous`) | The exact route name wins. `provider/model` selects that hop. A bare wire name works only when exactly one hop has it. Several hops is HTTP 400 and names the candidates. An unknown name is HTTP 404. |
 | 1.21 | CORS for browser clients | `internal/gateway/cors.go` | auxiliary | Missing | none | Off by default. Allow listed origins only. |
+| 1.22 | Codex ChatGPT backend `/backend-api/codex` (Codex keeps its ChatGPT sign-in; hofund's models join its list) | `internal/gateway/codex_backend.go`; [agents.md](coverage/agents.md) line 109 | core | Partial | `plugins/inbound/codex-catalog/src/backend.rs` (`serve`, `models`, `relay`, `in_process`, `relayed_headers`, `base_for`); `crates/gateway/src/lib.rs` (`without_own_token`). Tests: `plugins/inbound/codex-catalog/src/backend_tests.rs`, `crates/gateway/tests/surface_token.rs` | The `codex-catalog` plugin also serves `GET` and `POST /backend-api/codex`. A websocket upgrade is a 426, so Codex falls back to HTTP. `GET /models` asks `https://chatgpt.com/backend-api/codex/models` with the caller's sign-in, waits up to 3 s, reads up to 16 MiB, and answers its `models` followed by one catalog entry per model `/v1/models` lists, ranked after the backend's highest priority; a 401 or 403 is passed back as it came. `POST /responses` naming a model with a `/` runs in process as `/v1/responses`; `/responses/compact` for such a model is a 400. Everything else is relayed, body and query unchanged, to the ChatGPT backend (or `https://api.openai.com/v1` when the bearer is an `sk-` key), less hop-by-hop headers, `Host` and `Accept-Encoding`, and streams back. The gateway takes its own token out of every request before a surface sees it, so only the caller's own credential is relayed. Gaps: no model-list cache or ETag, no item-id normalisation or compaction for hofund models (S6c), no Codex subscription accounts, disabled-native 403 or account header (S6d); titles, summaries, subagent picks, overload retry and trace masking are follow-ups. |
 
 ### 2. Upstream providers and models
 

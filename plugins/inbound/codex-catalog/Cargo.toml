@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-codex-catalog"
-description = "Inbound plugin. Serves Codex its model catalog on the gateway's own address."
+description = "Inbound plugin. Serves Codex its model catalog and its ChatGPT backend on the gateway's own address."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
