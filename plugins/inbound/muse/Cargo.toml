@@ -1,0 +1,18 @@
+[package]
+name = "hofund-plugin-muse"
+description = "Inbound plugin. Serves Muse Code its model list on the gateway's own address."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-plugin-api = { workspace = true }
+hofund-plugin-sdk = { workspace = true }
+
+[lints]
+workspace = true

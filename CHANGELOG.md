@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `muse` inbound plugin (S2): `GET /muse-code/models`, the model list
+  Muse Code asks for before a session. Each model `/v1/models` lists becomes
+  a row with `metadata["muse-code"]`. Until the kernel has a model catalog,
+  every model is told a 128000-token window, 32000-token replies, text in
+  and out, and tool calls.
 - The `ollama` inbound plugin (S1): `GET /api/version`, `GET /api/tags`,
   `POST /api/show`, `POST /api/chat`, and `POST /api/generate`, for clients
   that take an Ollama server. Chats run on the gateway's Chat Completions
