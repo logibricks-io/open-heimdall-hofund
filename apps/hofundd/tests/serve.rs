@@ -27,8 +27,41 @@ fn scratch() -> tempfile::TempDir {
         .expect("scratch")
 }
 
+/// Runs a short-lived `hofundd` and fails, rather than hangs, when it keeps
+/// running for a minute.
 fn run(command: &mut Command) -> Output {
-    command.output().expect("run hofundd")
+    let out = tempfile::tempfile().expect("stdout file");
+    let err = tempfile::tempfile().expect("stderr file");
+    let mut child = command
+        .stdout(out.try_clone().expect("stdout clone"))
+        .stderr(err.try_clone().expect("stderr clone"))
+        .spawn()
+        .expect("run hofundd");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("hofundd did not exit within 60 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    Output {
+        status,
+        stdout: read_all(out),
+        stderr: read_all(err),
+    }
+}
+
+fn read_all(mut file: std::fs::File) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    file.seek(SeekFrom::Start(0)).expect("seek");
+    file.read_to_end(&mut bytes).expect("read");
+    bytes
 }
 
 fn stderr(output: &Output) -> String {
