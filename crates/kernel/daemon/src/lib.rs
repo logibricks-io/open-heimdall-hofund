@@ -216,6 +216,14 @@ pub fn agent_descriptions() -> &'static [&'static AgentDescription] {
     RegistryAdapter.agents()
 }
 
+/// The session agent work in this process uses: the process environment and
+/// the OS credential store, for agents that read hofund's key there.
+#[must_use]
+pub fn agent_session() -> hofund_agent::Session {
+    hofund_agent::Session::from_process_env()
+        .with_credential_store(hofund_plugin_host::native_credential_store())
+}
+
 /// Model names declared in `path`'s routes.
 ///
 /// # Errors

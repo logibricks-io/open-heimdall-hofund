@@ -16,6 +16,7 @@
 
 mod account_secrets;
 mod accounts;
+mod agent_credentials;
 mod loopback;
 mod piped;
 mod pool;
@@ -39,6 +40,7 @@ use hofund_plugin_api::{
 };
 
 pub use accounts::{AccountStorageKind, AccountStore, StoreError};
+pub use agent_credentials::native_credential_store;
 pub use hofund_plugin_api::kernel::{GatewayBackend, HttpBackend, ObserveBackend};
 pub use loopback::LoopbackRegistry;
 pub use pool::{HttpLimits, HttpProfile, PooledHttp};
