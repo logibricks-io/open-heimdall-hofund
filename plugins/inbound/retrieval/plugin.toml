@@ -8,3 +8,11 @@ prefix = "/v1/embeddings"
 [[route]]
 method = "POST"
 prefix = "/v1/rerank"
+
+[[route]]
+method = "POST"
+prefix = "/v1/audio/transcriptions"
+
+[[route]]
+method = "POST"
+prefix = "/v1/audio/translations"

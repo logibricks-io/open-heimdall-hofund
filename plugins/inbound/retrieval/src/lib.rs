@@ -1,13 +1,19 @@
-//! Embeddings and reranking on the gateway's own address.
+//! Embeddings, reranking, and speech to text on the gateway's own address.
 //!
 //! `POST /v1/embeddings` and `POST /v1/rerank` take a JSON object that names
-//! a `model`. The kernel routes it like a chat and forwards the body to each
-//! provider of the model in turn, with `model` set to that provider's own id,
-//! posting it to the same path under the provider's OpenAI-style base URL. A
-//! provider that serves no such endpoint, is out of quota, or fails passes the
-//! call on to the next. The first answer comes back as the provider sent it.
+//! a `model`. `POST /v1/audio/transcriptions` and
+//! `POST /v1/audio/translations` take a `multipart/form-data` form with a
+//! file and a `model` field. The kernel routes the model like a chat and
+//! forwards the body to each provider of the model in turn, with the model
+//! set to that provider's own id, posting it to the same path under the
+//! provider's OpenAI-style base URL. A form goes out byte for byte as sent
+//! but for its `model` fields. A provider that serves no such endpoint, is
+//! out of quota, or fails passes the call on to the next. The first answer
+//! comes back as the provider sent it, with its content type.
 
 #![deny(missing_docs)]
+
+mod form;
 
 use hofund_plugin_api::{
     BodyStream, Forward, GatewayHandle, InboundSurface, Method, PluginError, PluginErrorKind,
@@ -24,12 +30,16 @@ pub fn contribute() -> Contribution {
 
 const EMBEDDINGS: &str = "/v1/embeddings";
 const RERANK: &str = "/v1/rerank";
+const TRANSCRIPTIONS: &str = "/v1/audio/transcriptions";
+const TRANSLATIONS: &str = "/v1/audio/translations";
 const JSON: &str = "application/json";
 
 static ID: SurfaceId = SurfaceId::from_static("retrieval");
-static ROUTES: [RouteSpec; 2] = [
+static ROUTES: [RouteSpec; 4] = [
     RouteSpec::from_static(Method::Post, EMBEDDINGS),
     RouteSpec::from_static(Method::Post, RERANK),
+    RouteSpec::from_static(Method::Post, TRANSCRIPTIONS),
+    RouteSpec::from_static(Method::Post, TRANSLATIONS),
 ];
 
 /// The retrieval surface.
@@ -72,12 +82,15 @@ impl Kernel for GatewayHandle {
 /// Answers `request`. The routes match a deeper path too; none is served.
 async fn serve(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
     let path = request.uri().path();
-    let upstream_path = match path {
-        EMBEDDINGS => "/embeddings",
-        RERANK => "/rerank",
+    let body = request.body().bytes();
+    let call = match path {
+        EMBEDDINGS => call("/embeddings", body),
+        RERANK => call("/rerank", body),
+        TRANSCRIPTIONS => audio_call("/audio/transcriptions", request),
+        TRANSLATIONS => audio_call("/audio/translations", request),
         _ => return text_response(404, "404 page not found"),
     };
-    let call = match call(upstream_path, request.body().bytes()) {
+    let call = match call {
         Ok(call) => call,
         Err(error) => return failure(&error),
     };
@@ -85,11 +98,30 @@ async fn serve(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
         Ok(answer) => {
             let mut response = text_response(answer.status(), "");
             *response.body_mut() = BodyStream::from_bytes(answer.body().clone());
-            set_json(&mut response);
+            set_type(&mut response, answer.content_type().unwrap_or(JSON));
             response
         }
         Err(error) => failure(&error),
     }
+}
+
+/// The call for a speech-to-text form, which must name a model.
+fn audio_call(path: &str, request: &HttpRequest) -> Result<Forward, PluginError> {
+    let content_type = request
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let form = form::AudioForm::read(content_type, request.body())
+        .map_err(|message| PluginError::status_error(400, message))?;
+    if form.model().is_empty() {
+        return Err(PluginError::status_error(
+            400,
+            "name the model: send a model field with the audio file",
+        ));
+    }
+    let model = form.model().to_owned();
+    Forward::new(model, path, move |model| Ok(form.for_model(model)))
 }
 
 /// The call for `body`, which must be a JSON object naming a model.
@@ -129,12 +161,13 @@ fn failure(error: &PluginError) -> HttpResponse {
     };
     let body = json!({"error": {"message": error.message(), "type": kind}});
     let mut response = text_response(status, body.to_string());
-    set_json(&mut response);
+    set_type(&mut response, JSON);
     response
 }
 
-fn set_json(response: &mut HttpResponse) {
-    if let Ok(value) = JSON.parse() {
+/// Sets the content type, or JSON when `kind` is not a header value.
+fn set_type(response: &mut HttpResponse, kind: &str) {
+    if let Ok(value) = kind.parse().or_else(|_| JSON.parse()) {
         response.headers_mut().insert("content-type", value);
     }
 }
