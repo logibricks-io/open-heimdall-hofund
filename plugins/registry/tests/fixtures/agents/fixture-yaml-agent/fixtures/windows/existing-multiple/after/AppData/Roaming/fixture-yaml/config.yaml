@@ -8,3 +8,12 @@ providers:
   hofund:
     base_url: "http://127.0.0.1:3425/v1"
     api_key: old-token
+    models:
+      - id: route-a
+        name: Hofund
+        reasoning: true
+      - id: route-b
+        name: Hofund
+        reasoning: true
+features:
+  stream: false

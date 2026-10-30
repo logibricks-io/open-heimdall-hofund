@@ -30,6 +30,16 @@ file = "config"
 key = "model.default"
 slot = { model_if_unset = {} }
 
+[[set]]
+file = "config"
+key = "providers.hofund.models"
+slot = { model_array = { fields = [ { key = "id", value = "id" }, { key = "name", literal = "Hofund" }, { key = "reasoning", json = "true" } ] } }
+
+[[set]]
+file = "config"
+key = "features.stream"
+slot = { json = "false" }
+
 [model]
 file = "config"
 key = "model.default"

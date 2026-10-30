@@ -7,7 +7,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use hofund_plugin_api::{
-    AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, Slot as ApiSlot, Visible,
+    AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, ModelField, ModelValue,
+    Slot as ApiSlot, Visible,
 };
 
 use crate::edit::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
@@ -716,7 +717,10 @@ impl Engine {
                 Some(Assignment {
                     key: set.key,
                     value,
-                    raw_json: matches!(set.slot, ApiSlot::CatalogModels),
+                    raw_json: matches!(
+                        set.slot,
+                        ApiSlot::CatalogModels | ApiSlot::Json(_) | ApiSlot::ModelArray { .. }
+                    ),
                 })
             })
             .collect()
@@ -762,6 +766,8 @@ impl Engine {
                 Some(main)
             }
             ApiSlot::CatalogModels if gateway => Some(catalog_models_json(&models)),
+            ApiSlot::Json(text) => Some((*text).to_owned()),
+            ApiSlot::ModelArray { fields } if gateway => Some(model_array_json(&models, fields)),
             _ => None,
         }
     }
@@ -940,6 +946,31 @@ fn catalog_models_json(models: &[String]) -> String {
         root.insert(id.clone(), serde_json::Value::Object(entry));
     }
     serde_json::Value::Object(root).to_string()
+}
+
+/// One object per distinct non-empty model, in route order, holding `fields`.
+fn model_array_json(models: &[String], fields: &[ModelField]) -> String {
+    let mut seen = BTreeSet::new();
+    let mut items = Vec::new();
+    for id in models {
+        if id.is_empty() || !seen.insert(id.as_str()) {
+            continue;
+        }
+        let mut entry = serde_json::Map::new();
+        for field in fields {
+            let value = match field.value() {
+                ModelValue::Id => serde_json::Value::String(id.clone()),
+                ModelValue::Literal(text) => serde_json::Value::String(text.to_owned()),
+                ModelValue::Json(text) => {
+                    serde_json::from_str(text).unwrap_or(serde_json::Value::Null)
+                }
+                _ => serde_json::Value::Null,
+            };
+            entry.insert(field.key().to_owned(), value);
+        }
+        items.push(serde_json::Value::Object(entry));
+    }
+    serde_json::Value::Array(items).to_string()
 }
 
 fn origin(base_url: &str) -> String {
