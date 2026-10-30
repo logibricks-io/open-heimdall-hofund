@@ -1171,6 +1171,13 @@ fn shipped_cline_pick_takes_over_openai_compatible_and_clear_gives_it_back() {
     );
     agent.refresh_token(&session, &later).expect("refresh");
     assert_eq!(read(), moved);
+
+    // So it is once the user picks a model that is not a route.
+    let mut own = expected.clone();
+    own["providers"]["openai-compatible"]["settings"]["model"] = serde_json::json!("my-model");
+    write(&providers, &own.to_string());
+    agent.refresh_token(&session, &later).expect("refresh");
+    assert_eq!(read(), own);
     write(&providers, &expected.to_string());
 
     agent.set_model(&session, &target, None).expect("clear");
