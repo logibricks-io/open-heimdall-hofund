@@ -16,12 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `value` beside the model key whenever the model is set to a route, and on
   connect when the model is a route and neither this key nor an `unless`
   key is set; clearing the model drops it.
-<<<<<<< HEAD
 - Clearing the model of an agent whose description pairs a provider with it
   now puts back the provider the user had picked before connect, instead of
   dropping it (G7). Cline uses this to hand `lastUsedProvider` back.
-=======
->>>>>>> origin/main
 - Agent descriptions can write a model map (G5, #417): `slot = { model_map =
   { prefix, fields } }` writes one entry per visible route model, named
   prefix plus model id, into a JSON, YAML, or TOML map. Entries without the
