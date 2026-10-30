@@ -6,8 +6,9 @@
 //! the CLI. It never takes the daemon lock, binds a listener, writes
 //! discovery, or starts the watcher and background loops. Config writes still
 //! take the `<resolved-config>.lock` sidecar lock (or its runtime fallback)
-//! and recheck the expected revision, so they are safe beside other one-shot
-//! processes.
+//! and recheck the expected revision, and model host-state writes (picks,
+//! refresh) take the per-provider `<state-file>.lock` and reread the state
+//! under it, so they are safe beside other one-shot processes.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -84,6 +85,7 @@ async fn state(
     let runtime = runtime::Runtime::new(Arc::clone(&registry), path, None);
     let mut models_host = ModelsHost::new(config.connect_timeout, config.read_timeout)
         .with_state_root(beside(path, ".hofund"))
+        .with_shared_state(control_local::runtime_lock_dir(&control_runtime))
         .with_registry(Arc::clone(&registry));
     let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
     runtime.refresh_subscriptions().await;

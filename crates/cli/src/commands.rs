@@ -29,7 +29,7 @@ pub(crate) const RELOAD_NOOP: &str = "no daemon running; nothing to reload";
 pub(crate) const SHUTDOWN_NOOP: &str = "no daemon running; nothing to shut down";
 
 /// The client for a command that works without a daemon through one-shot.
-async fn client(config: &Path) -> Result<Client, String> {
+pub(crate) async fn client(config: &Path) -> Result<Client, String> {
     match select(config).await? {
         Target::Daemon(client) => Ok(client),
         Target::NoDaemon => one_shot_client(config),

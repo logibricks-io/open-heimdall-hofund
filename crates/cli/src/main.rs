@@ -6,6 +6,7 @@
 mod commands;
 mod connect;
 mod local;
+mod provider;
 mod serve;
 mod subscription;
 
@@ -76,6 +77,13 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
                 commands::agent_disconnect(config, &name, force).await
             }
             Command::AgentStatus { name } => commands::agent_status(config, name.as_deref()).await,
+            Command::ProviderList => provider::list(config).await,
+            Command::ProviderShow { id } => provider::show(config, &id).await,
+            Command::ProviderTest { id, models } => provider::test(config, &id, &models).await,
+            Command::ProviderRefresh { id } => provider::refresh(config, &id).await,
+            Command::ProviderPicks { id, ids } => provider::picks(config, &id, &ids).await,
+            Command::ModelList => provider::model_list(config).await,
+            Command::ModelShow { id } => provider::model_show(config, &id).await,
             Command::Version
             | Command::Help(_)
             | Command::Serve { .. }
@@ -117,6 +125,27 @@ enum Command {
         name: Option<String>,
     },
     Subscription(SubscriptionCommand),
+    ProviderList,
+    ProviderShow {
+        id: String,
+    },
+    ProviderTest {
+        id: String,
+        models: Vec<String>,
+    },
+    /// `provider refresh`, `provider fetch`, and `provider models <id>`.
+    ProviderRefresh {
+        id: String,
+    },
+    /// `provider models <id> <ids...>`.
+    ProviderPicks {
+        id: String,
+        ids: Vec<String>,
+    },
+    ModelList,
+    ModelShow {
+        id: String,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -144,6 +173,8 @@ enum HelpTopic {
     SubscriptionSignOut,
     SubscriptionRefresh,
     SubscriptionQuota,
+    Provider,
+    Model,
 }
 
 fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
@@ -154,9 +185,15 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut help = false;
     let mut flags = SubscriptionFlags::default();
     let mut words = Vec::new();
+    let mut operands_only = false;
     let mut iter = arguments.iter();
     while let Some(argument) = iter.next() {
+        if operands_only {
+            words.push(argument.as_str());
+            continue;
+        }
         match argument.as_str() {
+            "--" => operands_only = true,
             "--config" => {
                 let path = iter
                     .next()
@@ -181,6 +218,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             }
             "-h" | "--help" => help = true,
             "--version" | "-V" => words.push(argument.as_str()),
+            other if pick_change(&words, other) => words.push(other),
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`"));
             }
@@ -231,6 +269,33 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
         },
+        ["provider", "list"] => Command::ProviderList,
+        ["provider", "show", id] => Command::ProviderShow {
+            id: (*id).to_owned(),
+        },
+        ["provider", "test", id, models @ ..] => Command::ProviderTest {
+            id: (*id).to_owned(),
+            models: owned(models),
+        },
+        ["provider", "models" | "refresh" | "fetch", id] => Command::ProviderRefresh {
+            id: (*id).to_owned(),
+        },
+        ["provider", "models", id, ids @ ..] => Command::ProviderPicks {
+            id: (*id).to_owned(),
+            ids: owned(ids),
+        },
+        ["provider", verb @ ("refresh" | "fetch"), _, _, ..] => {
+            return Err(format!(
+                "hofund provider {verb} <id> fetches its list; \
+                 hofund provider models <id> <ids...> picks from it"
+            ));
+        }
+        ["provider", ..] => return Err(help_text(HelpTopic::Provider)),
+        ["model", "list"] => Command::ModelList,
+        ["model", "show", id] => Command::ModelShow {
+            id: (*id).to_owned(),
+        },
+        ["model", ..] => return Err(help_text(HelpTopic::Model)),
         _ => return Err(help_text(HelpTopic::Overview)),
     };
     if subscription_flags && !matches!(command, Command::Subscription(_)) {
@@ -248,6 +313,17 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         return Err("--in-process is only valid with serve".to_owned());
     }
     Ok((config, command))
+}
+
+/// Whether `argument` is a `-id` pick change (or a sole `-` reset) after
+/// `provider models <id>`, where it is an operand rather than a flag.
+/// Double-dash arguments stay flags.
+fn pick_change(words: &[&str], argument: &str) -> bool {
+    matches!(words, ["provider", "models", _, ..]) && !argument.starts_with("--")
+}
+
+fn owned(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
 }
 
 fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
@@ -275,6 +351,8 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["subscription", "refresh", ..] => HelpTopic::SubscriptionRefresh,
         ["subscription", "quota", ..] => HelpTopic::SubscriptionQuota,
         ["subscription", ..] => HelpTopic::Subscription,
+        ["provider", ..] => HelpTopic::Provider,
+        ["model", ..] => HelpTopic::Model,
         _ => {
             return Err(format!(
                 "{}\nunknown command `{}`",
@@ -311,6 +389,8 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::SubscriptionSignOut => subscription::SIGN_OUT_HELP,
         HelpTopic::SubscriptionRefresh => subscription::REFRESH_HELP,
         HelpTopic::SubscriptionQuota => subscription::QUOTA_HELP,
+        HelpTopic::Provider => PROVIDER_HELP,
+        HelpTopic::Model => MODEL_HELP,
     };
     body.to_owned()
 }
@@ -345,6 +425,13 @@ commands:
   subscription sign-out <id> <account>
   subscription refresh <id> [<account>]
   subscription quota [<id>] [--json]
+  provider list                   list providers
+  provider show <id>              print a provider, its listed models and picks
+  provider test <id> [<model>...] probe a provider's models
+  provider refresh <id>           refetch a provider's model list (also fetch)
+  provider models <id> [<ids>...] refetch with no ids; pick models with ids
+  model list                      list the models routes serve
+  model show <id>                 print one routed model
 
 Commands that read or change runtime state talk to a running daemon. With
 no daemon they run hofundd once for the command, from hofund's directory or
@@ -485,6 +572,42 @@ usage: hofund agent status [<name>] [--config PATH]
 
 Print each adapter's state (connected, disconnected, or drifted) and the
 model its files select. <name> limits the output to one adapter.
+";
+
+const PROVIDER_HELP: &str = "\
+usage: hofund provider list [--config PATH]
+       hofund provider show <id> [--config PATH]
+       hofund provider test <id> [<model>...] [--config PATH]
+       hofund provider refresh <id> [--config PATH]
+       hofund provider models <id> [<ids>...] [--config PATH]
+
+`list` prints each provider's id, kind, protocol, readiness, and model count.
+`show` prints one provider, its listed models (picked ones marked *), its
+picks, and picks gone from the list. `test` probes the provider's picked
+models, or the named ones, and exits 1 when any probe fails.
+
+`refresh` (or `fetch`, or `models <id>` with no ids) refetches the model
+list. Picks gone from the list are dropped, new models matching the
+provider's auto-include rules are picked, and both are printed.
+
+`models <id> <ids>...` sets the picks. Give either the whole list
+(`a b c`) or only changes (`+a -b`), not both. A sole `all` or `-` resets
+to the provider's defaults. Changes apply to the newest picks: when another
+writer changed them first, the edit is rebuilt on a fresh read, up to three
+tries. Put `--` before an id that starts with `--`.
+
+Without a running daemon, picks and refetches run in one-shot hofundd under
+the provider's model-state lock, so concurrent commands do not lose edits.
+A pick edit that cannot be saved exits 1.
+";
+
+const MODEL_HELP: &str = "\
+usage: hofund model list [--config PATH]
+       hofund model show <id> [--config PATH]
+
+`list` prints the model ids clients can request: route names and the
+provider/model ids routes serve. `show` prints one of them, or fails when no
+route serves it.
 ";
 
 fn finish<E: std::fmt::Display>(result: Result<String, E>) -> ExitCode {
@@ -744,5 +867,109 @@ mod tests {
         assert!(parse(&words(&["nope"])).is_err());
         assert!(parse(&words(&["agent", "status", "--dry-run"])).is_err());
         assert!(parse(&words(&["serve", "--force"])).is_err());
+    }
+
+    fn command(values: &[&str]) -> Result<Command, String> {
+        parse(&words(values)).map(|(_, command)| command)
+    }
+
+    #[test]
+    fn provider_and_model_commands_parse() {
+        assert_eq!(command(&["provider", "list"]), Ok(Command::ProviderList));
+        assert_eq!(
+            command(&["provider", "show", "p"]),
+            Ok(Command::ProviderShow { id: "p".to_owned() })
+        );
+        assert_eq!(
+            command(&["provider", "test", "p"]),
+            Ok(Command::ProviderTest {
+                id: "p".to_owned(),
+                models: Vec::new(),
+            })
+        );
+        assert_eq!(
+            command(&["provider", "test", "p", "a", "b"]),
+            Ok(Command::ProviderTest {
+                id: "p".to_owned(),
+                models: words(&["a", "b"]),
+            })
+        );
+        for verb in ["models", "refresh", "fetch"] {
+            assert_eq!(
+                command(&["provider", verb, "p"]),
+                Ok(Command::ProviderRefresh { id: "p".to_owned() }),
+                "{verb}"
+            );
+        }
+        for verb in ["refresh", "fetch"] {
+            let error = command(&["provider", verb, "p", "a"]).expect_err(verb);
+            assert_eq!(
+                error,
+                format!(
+                    "hofund provider {verb} <id> fetches its list; \
+                     hofund provider models <id> <ids...> picks from it"
+                )
+            );
+        }
+        assert_eq!(
+            command(&["provider", "models", "p", "+a", "-b", "--config", "c.toml"]),
+            Ok(Command::ProviderPicks {
+                id: "p".to_owned(),
+                ids: words(&["+a", "-b"]),
+            })
+        );
+        assert_eq!(
+            parse(&words(&[
+                "provider", "models", "p", "-", "--config", "c.toml"
+            ]))
+            .expect("parse")
+            .0,
+            PathBuf::from("c.toml")
+        );
+        assert_eq!(
+            command(&["provider", "models", "p", "-"]),
+            Ok(Command::ProviderPicks {
+                id: "p".to_owned(),
+                ids: words(&["-"]),
+            })
+        );
+        assert_eq!(
+            command(&["provider", "models", "p", "--", "--odd", "-x"]),
+            Ok(Command::ProviderPicks {
+                id: "p".to_owned(),
+                ids: words(&["--odd", "-x"]),
+            })
+        );
+        // A dash argument before the provider id is still a flag.
+        assert!(command(&["provider", "models", "-b"]).is_err());
+        assert!(command(&["provider", "show", "p", "-b"]).is_err());
+        assert!(command(&["provider", "models", "p", "--odd"]).is_err());
+        assert_eq!(
+            command(&["provider", "models", "p", "-h"]),
+            Ok(Command::Help(HelpTopic::Provider))
+        );
+        assert_eq!(command(&["model", "list"]), Ok(Command::ModelList));
+        assert_eq!(
+            command(&["model", "show", "chat/a"]),
+            Ok(Command::ModelShow {
+                id: "chat/a".to_owned()
+            })
+        );
+        assert!(command(&["provider"]).is_err());
+        assert!(command(&["provider", "show"]).is_err());
+        assert!(command(&["model"]).is_err());
+        assert!(command(&["model", "show", "a", "b"]).is_err());
+        assert_eq!(
+            command(&["help", "model"]),
+            Ok(Command::Help(HelpTopic::Model))
+        );
+        for (topic, needle) in [
+            (vec!["provider"], "not both"),
+            (vec!["provider", "models"], "three"),
+            (vec!["model"], "route"),
+        ] {
+            let help = help_text(help_topic(&topic).expect("topic"));
+            assert!(help.contains(needle), "{topic:?}: {help}");
+        }
     }
 }

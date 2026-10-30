@@ -1666,6 +1666,7 @@ dependencies = [
  "hofund-control-client",
  "hofund-daemon",
  "hofund-secrets",
+ "http",
  "tempfile",
  "tokio",
 ]
