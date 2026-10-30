@@ -1667,6 +1667,7 @@ dependencies = [
  "hofund-daemon",
  "hofund-secrets",
  "http",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml_edit 0.25.17+spec-1.1.0",

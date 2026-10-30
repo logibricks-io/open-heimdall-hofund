@@ -5,6 +5,7 @@
 
 mod commands;
 mod connect;
+mod events;
 mod local;
 mod provider;
 mod provider_edit;
@@ -65,6 +66,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::ConfigReload => commands::reload(config).await,
             Command::Status => commands::status(config).await,
             Command::Shutdown => commands::shutdown(config).await,
+            Command::EventsTail { requests } => events::tail(config, requests).await,
             Command::Healthcheck => commands::healthcheck(config).await,
             Command::TokenRotate => commands::token_rotate(config).await,
             Command::Usage => commands::usage(config)
@@ -120,6 +122,10 @@ enum Command {
     Status,
     Shutdown,
     Healthcheck,
+    /// `events tail`; `requests` adds the requests topic.
+    EventsTail {
+        requests: bool,
+    },
     TokenShow,
     TokenRotate,
     Usage,
@@ -195,6 +201,7 @@ enum HelpTopic {
     Status,
     Shutdown,
     Healthcheck,
+    EventsTail,
     Token,
     TokenShow,
     TokenRotate,
@@ -219,6 +226,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut dry_run = false;
     let mut force = false;
     let mut in_process = false;
+    let mut requests = false;
     let mut help = false;
     let mut flags = SubscriptionFlags::default();
     let mut words = Vec::new();
@@ -240,6 +248,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             "--dry-run" => dry_run = true,
             "--force" => force = true,
             "--in-process" => in_process = true,
+            "--requests" => requests = true,
             "--json" => flags.json = true,
             "--host" => {
                 let host = iter
@@ -286,6 +295,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["status"] => Command::Status,
         ["shutdown"] => Command::Shutdown,
         ["healthcheck"] => Command::Healthcheck,
+        ["events", "tail"] => Command::EventsTail { requests },
         ["token", "show"] => Command::TokenShow,
         ["token", "rotate"] => Command::TokenRotate,
         ["usage"] => Command::Usage,
@@ -392,6 +402,9 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     if in_process && !matches!(command, Command::Serve { .. }) {
         return Err("--in-process is only valid with serve".to_owned());
     }
+    if requests && !matches!(command, Command::EventsTail { .. }) {
+        return Err("--requests is only valid with events tail".to_owned());
+    }
     Ok((config, command))
 }
 
@@ -416,6 +429,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["status", ..] => HelpTopic::Status,
         ["shutdown", ..] => HelpTopic::Shutdown,
         ["healthcheck", ..] => HelpTopic::Healthcheck,
+        ["events", ..] => HelpTopic::EventsTail,
         ["token", "show", ..] => HelpTopic::TokenShow,
         ["token", "rotate", ..] => HelpTopic::TokenRotate,
         ["token", ..] => HelpTopic::Token,
@@ -454,6 +468,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::Status => STATUS_HELP,
         HelpTopic::Shutdown => SHUTDOWN_HELP,
         HelpTopic::Healthcheck => HEALTHCHECK_HELP,
+        HelpTopic::EventsTail => EVENTS_TAIL_HELP,
         HelpTopic::Token => TOKEN_HELP,
         HelpTopic::TokenShow => TOKEN_SHOW_HELP,
         HelpTopic::TokenRotate => TOKEN_ROTATE_HELP,
@@ -490,6 +505,7 @@ commands:
   status                          print the daemon status, or a local report
   shutdown                        stop a running daemon
   healthcheck                     probe the model gateway's /health
+  events tail [--requests]        print daemon events, starting a daemon if none runs
   config check                    validate the config and build its providers
   config apply <file>             replace the config with <file>
   config reload                   make a running daemon reread the config
@@ -525,7 +541,8 @@ commands:
 Commands that read or change runtime state talk to a running daemon. With
 no daemon they run hofundd once for the command, from hofund's directory or
 PATH. When a daemon holds the config's lock but does not answer within 5 s,
-the command fails instead.
+the command fails instead. events tail is the exception: it starts a
+background daemon that keeps running after it exits.
 
 hofund <command> --help prints that command.
 examples/hofund.toml is a documented config with [[providers]] and [[routes]].
@@ -583,6 +600,27 @@ usage: hofund shutdown [--config PATH]
 
 Ask the running daemon to finish in-flight requests and exit. With no daemon
 running this prints `no daemon running; nothing to shut down` and exits 0.
+";
+
+const EVENTS_TAIL_HELP: &str = "\
+usage: hofund events tail [--requests] [--config PATH]
+
+Print the running daemon's events, one JSON object per line, until the
+daemon shuts down or the output is closed. The first event is a snapshot of
+the daemon's state. --requests adds the requests topic to the control topic.
+
+With no daemon running, events tail starts hofundd in the background, from
+hofund's directory or PATH, with this environment. Its output is appended to
+.hofund/daemon-<config-id>.log beside the config. The daemon keeps running
+after events tail exits; hofund shutdown stops it. events tail waits up to
+10 s for the daemon to answer and otherwise says it may still be starting.
+With HOFUND_CONTROL set, or when a daemon holds the config's lock but does
+not answer within 5 s, it fails instead of starting one.
+
+When the stream ends, for example after hofund token rotate, events tail
+reconnects and resumes after the last event it printed. A shutdown_started
+event ends it with exit code 0. A daemon that goes away without one ends it
+with an error.
 ";
 
 const HEALTHCHECK_HELP: &str = "\
@@ -936,6 +974,27 @@ mod tests {
             parse(&words(&["healthcheck"])).expect("parse").1,
             Command::Healthcheck
         );
+        assert_eq!(
+            parse(&words(&["events", "tail"])).expect("parse").1,
+            Command::EventsTail { requests: false }
+        );
+        assert_eq!(
+            parse(&words(&["events", "tail", "--requests"]))
+                .expect("parse")
+                .1,
+            Command::EventsTail { requests: true }
+        );
+        assert_eq!(
+            parse(&words(&["status", "--requests"])),
+            Err("--requests is only valid with events tail".to_owned())
+        );
+        assert!(parse(&words(&["events"])).is_err());
+        assert_eq!(
+            parse(&words(&["events", "tail", "--help"]))
+                .expect("parse")
+                .1,
+            Command::Help(HelpTopic::EventsTail)
+        );
         assert!(parse(&words(&["config", "apply"])).is_err());
         for (topic, needle) in [
             (vec!["config", "apply"], "config apply <file>"),
@@ -943,6 +1002,8 @@ mod tests {
             (vec!["status"], "daemon not running"),
             (vec!["shutdown"], "nothing to shut down"),
             (vec!["healthcheck"], "within 3 s"),
+            (vec!["events", "tail"], "keeps running"),
+            (vec![], "events tail [--requests]"),
             (vec!["config", "check"], "structure"),
         ] {
             let help = help_text(help_topic(&topic).expect("topic"));

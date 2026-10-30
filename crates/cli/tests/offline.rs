@@ -827,6 +827,197 @@ fn cli_waits_for_discovery_when_daemon_lock_held() {
     assert!(exited.status.success(), "{exited:?}");
 }
 
+/// A running `hofund events tail`: its stdout lines arrive on a channel.
+/// Dropping it kills the tail.
+struct Tail {
+    child: Option<Child>,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+impl Tail {
+    fn start(scratch: &Scratch) -> Self {
+        hofundd();
+        let mut child = spawn(&mut scratch.command(hofund(), &["events", "tail"]));
+        let stdout = child.stdout.take().expect("stdout");
+        let (send, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child: Some(child),
+            lines,
+        }
+    }
+
+    /// The next event's name, waiting up to the deadline.
+    #[track_caller]
+    fn next_event(&self) -> String {
+        let line = self
+            .lines
+            .recv_timeout(DEADLINE)
+            .expect("an event line before the deadline");
+        let event: serde_json::Value = serde_json::from_str(&line).expect("one JSON event");
+        event["payload"]["event"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no event name in {line}"))
+            .to_owned()
+    }
+
+    /// Waits for the tail to exit and returns its output.
+    fn finish(mut self) -> Output {
+        finish(self.child.take().expect("tail"), DEADLINE)
+    }
+}
+
+impl Drop for Tail {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Kills the daemon a tail started for `scratch`, if it still runs when
+/// the test ends, pass or fail. Create it right after starting the tail so
+/// a failed assertion cannot leak the detached daemon. The pid is read from
+/// discovery at drop time; a daemon that shut down cleanly removed its
+/// discovery file, so nothing is killed and a reused pid is never hit.
+struct DaemonGuard(PathBuf);
+
+impl DaemonGuard {
+    fn new(scratch: &Scratch) -> Self {
+        Self(discovery_file(scratch))
+    }
+
+    /// The pid in the discovery file, once the daemon has published it.
+    fn pid(&self) -> Option<String> {
+        let text = fs::read_to_string(&self.0).ok()?;
+        let found: serde_json::Value = serde_json::from_str(&text).ok()?;
+        found["pid"].as_u64().map(|pid| pid.to_string())
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid() {
+            let _ = Command::new("kill")
+                .arg(pid)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+#[test]
+fn offline_events_tail_autostarts_and_retries() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let tail = Tail::start(&scratch);
+    let daemon = DaemonGuard::new(&scratch);
+    // With no daemon the tail starts one and prints its snapshot first.
+    assert_eq!(tail.next_event(), "snapshot");
+    let pid = daemon.pid().expect("discovery pid");
+    let status = scratch.hofund(&["status"]);
+    assert!(
+        status
+            .ok()
+            .starts_with(&format!("daemon running (pid {pid})")),
+        "{status:#?}"
+    );
+    let log = scratch
+        .config
+        .parent()
+        .expect("cfg")
+        .join(".hofund")
+        .join(format!("daemon-{}.log", scratch.config_id()));
+    assert!(log.is_file(), "{} missing", log.display());
+    assert_eq!(
+        fs::metadata(&log).expect("log").permissions().mode() & 0o777,
+        0o600
+    );
+
+    // A token rotation ends the stream; the tail rereads the token,
+    // reconnects, and resumes after the last event without a new snapshot.
+    scratch.hofund(&["token", "rotate"]).ok();
+    assert_eq!(tail.next_event(), "token_rotated");
+    scratch.hofund(&["config", "reload"]).ok();
+    assert_eq!(tail.next_event(), "config_reloaded");
+
+    // The daemon outlives the tail that started it.
+    drop(tail);
+    assert!(
+        scratch
+            .hofund(&["status"])
+            .ok()
+            .starts_with("daemon running (pid ")
+    );
+
+    // A second tail finds the running daemon instead of starting another,
+    // and a shutdown ends it with success.
+    let second = Tail::start(&scratch);
+    assert_eq!(second.next_event(), "snapshot");
+    assert_eq!(
+        scratch.hofund(&["shutdown"]).ok(),
+        "daemon is draining and will exit"
+    );
+    assert_eq!(second.next_event(), "shutdown_started");
+    let exited = second.finish();
+    assert!(exited.status.success(), "{exited:?}");
+    let stderr = String::from_utf8_lossy(&exited.stderr);
+    assert!(!stderr.contains("started hofundd"), "{stderr}");
+
+    let started = Instant::now();
+    while !scratch
+        .hofund(&["status"])
+        .ok()
+        .starts_with("daemon not running")
+    {
+        assert!(started.elapsed() < DEADLINE, "the daemon never exited");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(daemon.pid(), None, "discovery outlived the daemon");
+}
+
+#[test]
+fn events_tail_reports_where_the_started_daemon_writes() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let tail = Tail::start(&scratch);
+    let _daemon = DaemonGuard::new(&scratch);
+    assert_eq!(tail.next_event(), "snapshot");
+    assert_eq!(
+        scratch.hofund(&["shutdown"]).ok(),
+        "daemon is draining and will exit"
+    );
+    assert_eq!(tail.next_event(), "shutdown_started");
+    let exited = tail.finish();
+    assert!(exited.status.success(), "{exited:?}");
+    let stderr = String::from_utf8_lossy(&exited.stderr);
+    assert!(stderr.contains("started hofundd (pid "), "{stderr}");
+    assert!(stderr.contains(".hofund/daemon-"), "{stderr}");
+    assert!(stderr.contains("hofund shutdown stops it"), "{stderr}");
+}
+
+#[test]
+fn events_tail_without_hofundd_fails() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    // A copy of hofund alone, with no hofundd beside it or on PATH.
+    let alone = scratch.root.join("alone");
+    fs::create_dir_all(&alone).expect("mkdir");
+    let exe = alone.join("hofund");
+    fs::copy(hofund(), &exe).expect("copy");
+    let out = scratch.hofund_with(&exe, &["events", "tail"]);
+    assert!(out.failed().contains("hofundd"), "{out:#?}");
+    assert!(out.stdout.is_empty(), "{out:#?}");
+    scratch.assert_no_daemon_state();
+}
+
 /// A mock OpenAI-compatible upstream: `GET /v1/models` lists `models`, and
 /// `POST /v1/chat/completions` answers 200 unless the requested model id
 /// starts with `bad`, which gets a 500. Each request line is recorded.
