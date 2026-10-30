@@ -1,14 +1,11 @@
-//! The `hofund subscription` commands: argument shapes, help, and the text
-//! tables. The work happens in `hofund-daemon`.
+//! The `hofund subscription` commands: argument shapes and help. The work
+//! happens in `hofundd subscription`, which links the plugin registry; this
+//! module hands it a canonical command line and leaves with its exit code.
 
+use std::ffi::OsString;
 use std::path::Path;
-use std::process::ExitCode;
 
-use hofund_daemon::{
-    QuotaListing, SignInOptions, SubscriptionListing, quota_json, subscription_list,
-    subscription_quota, subscription_refresh, subscription_sign_in, subscription_sign_out,
-    subscriptions_json,
-};
+use crate::serve;
 
 /// One parsed `hofund subscription` command.
 #[derive(Debug, PartialEq, Eq)]
@@ -16,7 +13,11 @@ pub enum SubscriptionCommand {
     /// `subscription list [--json]`
     List { json: bool },
     /// `subscription sign-in <id> [--host H] [--label L]`
-    SignIn { id: String, options: SignInOptions },
+    SignIn {
+        id: String,
+        host: Option<String>,
+        label: Option<String>,
+    },
     /// `subscription sign-out <id> <account>`
     SignOut { id: String, account: String },
     /// `subscription refresh <id> [<account>]`
@@ -44,10 +45,8 @@ pub fn parse(
         ["list"] => SubscriptionCommand::List { json: flags.json },
         ["sign-in", id] => SubscriptionCommand::SignIn {
             id: owned(id),
-            options: SignInOptions {
-                host: flags.host.clone(),
-                label: flags.label.clone(),
-            },
+            host: flags.host.clone(),
+            label: flags.label.clone(),
         },
         ["sign-out", id, account] => SubscriptionCommand::SignOut {
             id: owned(id),
@@ -89,120 +88,61 @@ pub fn parse(
     Some(Ok(command))
 }
 
-/// Runs one subscription command and returns the process exit code:
-/// 0 on success, 1 on failure, 130 when a sign-in was interrupted.
-pub fn run(config: &Path, command: SubscriptionCommand) -> ExitCode {
-    let result = match command {
-        SubscriptionCommand::List { json } => subscription_list(config).map(|listings| {
-            if json {
-                println!("{}", subscriptions_json(&listings));
-            } else {
-                print!("{}", list_table(&listings));
+/// The `hofundd` arguments for `command` on `config`:
+/// `subscription --config <config>`, the flags, `--`, then the command words,
+/// so an id or account that starts with `-` stays an operand.
+pub fn daemon_args(config: &Path, command: &SubscriptionCommand) -> Vec<OsString> {
+    let mut flags: Vec<&str> = Vec::new();
+    let mut words: Vec<&str> = Vec::new();
+    match command {
+        SubscriptionCommand::List { json } => {
+            words.push("list");
+            if *json {
+                flags.push("--json");
             }
-        }),
-        SubscriptionCommand::SignIn { id, options } => {
-            return match subscription_sign_in(config, &id, &options) {
-                Ok(account) => {
-                    println!("{id}: signed in as {account}");
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    ExitCode::from(error.exit_code())
-                }
-            };
+        }
+        SubscriptionCommand::SignIn { id, host, label } => {
+            words.extend(["sign-in", id.as_str()]);
+            if let Some(host) = host {
+                flags.extend(["--host", host.as_str()]);
+            }
+            if let Some(label) = label {
+                flags.extend(["--label", label.as_str()]);
+            }
         }
         SubscriptionCommand::SignOut { id, account } => {
-            subscription_sign_out(config, &id, &account)
-                .map(|()| println!("{id}: signed out {account}"))
+            words.extend(["sign-out", id.as_str(), account.as_str()]);
         }
         SubscriptionCommand::Refresh { id, account } => {
-            subscription_refresh(config, &id, account.as_deref()).map(|refreshed| {
-                for account in refreshed {
-                    println!("{id}: refreshed {account}");
-                }
-            })
+            words.extend(["refresh", id.as_str()]);
+            words.extend(account.as_deref());
         }
         SubscriptionCommand::Quota { id, json } => {
-            subscription_quota(config, id.as_deref()).map(|listings| {
-                if json {
-                    println!("{}", quota_json(&listings));
-                } else {
-                    print!("{}", quota_table(&listings));
-                }
-            })
-        }
-    };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("{error}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-/// The `subscription list` table: one row per account, and one `-` row for
-/// a subscription with no account.
-pub fn list_table(listings: &[SubscriptionListing]) -> String {
-    let mut table = String::from("subscription\tflow\taccount\tlabel\tstatus\n");
-    for listing in listings {
-        if listing.accounts.is_empty() {
-            table.push_str(&format!(
-                "{}\t{}\t-\t-\tno account\n",
-                listing.id, listing.flow
-            ));
-        }
-        for account in &listing.accounts {
-            let status = account.needs_sign_in.as_ref().map_or_else(
-                || "ready".to_owned(),
-                |reason| format!("needs sign-in: {reason}"),
-            );
-            table.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{status}\n",
-                listing.id, listing.flow, account.id, account.label
-            ));
-        }
-    }
-    table
-}
-
-/// The `subscription quota` table: one row per window, or an error row.
-pub fn quota_table(listings: &[QuotaListing]) -> String {
-    let mut table =
-        String::from("subscription\taccount\twindow\tused\tlimit\tresets in\tblocking\n");
-    for listing in listings {
-        match &listing.windows {
-            Ok(windows) if windows.is_empty() => table.push_str(&format!(
-                "{}\t{}\t-\t-\t-\t-\t-\n",
-                listing.subscription, listing.account
-            )),
-            Ok(windows) => {
-                for window in windows {
-                    let limit = window
-                        .limit
-                        .map_or_else(|| "-".to_owned(), |limit| limit.to_string());
-                    let resets = window
-                        .resets_in_secs
-                        .map_or_else(|| "-".to_owned(), |secs| format!("{secs}s"));
-                    let name = window.scope_model.as_ref().map_or_else(
-                        || window.name.clone(),
-                        |model| format!("{} ({model})", window.name),
-                    );
-                    let blocking = if window.blocking { "yes" } else { "no" };
-                    table.push_str(&format!(
-                        "{}\t{}\t{name}\t{}\t{limit}\t{resets}\t{blocking}\n",
-                        listing.subscription, listing.account, window.used
-                    ));
-                }
+            words.push("quota");
+            words.extend(id.as_deref());
+            if *json {
+                flags.push("--json");
             }
-            Err(error) => table.push_str(&format!(
-                "{}\t{}\terror: {error}\n",
-                listing.subscription, listing.account
-            )),
         }
     }
-    table
+    let mut args: Vec<OsString> = vec!["subscription".into(), "--config".into(), config.into()];
+    args.extend(flags.into_iter().map(OsString::from));
+    args.push("--".into());
+    args.extend(words.into_iter().map(OsString::from));
+    args
+}
+
+/// Runs `command` through `hofundd subscription` and returns the exit code
+/// to leave with: hofundd's own (0, 1, or 130 for an interrupted sign-in).
+///
+/// # Errors
+///
+/// Returns a message when `hofundd` cannot be found or started.
+pub fn run(config: &Path, command: &SubscriptionCommand) -> Result<i32, String> {
+    let daemon = serve::locate_installed()?;
+    let mut process = std::process::Command::new(&daemon);
+    process.args(daemon_args(config, command));
+    serve::replace(process, &daemon)
 }
 
 pub const SUBSCRIPTION_HELP: &str = "\
@@ -254,72 +194,92 @@ subscription. --json prints the same as JSON.
 
 #[cfg(test)]
 mod tests {
-    use hofund_daemon::{AccountListing, QuotaLine, QuotaListing, SubscriptionListing};
+    use std::ffi::OsString;
+    use std::path::Path;
 
-    use super::{list_table, quota_table};
+    use super::{SubscriptionCommand, daemon_args};
 
-    #[test]
-    fn list_table_rows() {
-        let listings = vec![
-            SubscriptionListing {
-                id: "codex-sub".to_owned(),
-                name: "Codex".to_owned(),
-                flow: "pkce",
-                accounts: vec![
-                    AccountListing {
-                        id: "a-1".to_owned(),
-                        label: "work".to_owned(),
-                        needs_sign_in: None,
-                    },
-                    AccountListing {
-                        id: "a-2".to_owned(),
-                        label: "home".to_owned(),
-                        needs_sign_in: Some("token expired".to_owned()),
-                    },
-                ],
-            },
-            SubscriptionListing {
-                id: "empty".to_owned(),
-                name: "Empty".to_owned(),
-                flow: "device",
-                accounts: Vec::new(),
-            },
-        ];
-        assert_eq!(
-            list_table(&listings),
-            "subscription\tflow\taccount\tlabel\tstatus\n\
-             codex-sub\tpkce\ta-1\twork\tready\n\
-             codex-sub\tpkce\ta-2\thome\tneeds sign-in: token expired\n\
-             empty\tdevice\t-\t-\tno account\n"
-        );
+    fn args(command: &SubscriptionCommand) -> Vec<String> {
+        daemon_args(Path::new("/c.toml"), command)
+            .into_iter()
+            .map(|arg: OsString| arg.into_string().expect("utf-8"))
+            .collect()
+    }
+
+    fn expect(tail: &[&str]) -> Vec<String> {
+        ["subscription", "--config", "/c.toml"]
+            .iter()
+            .chain(tail)
+            .map(|word| (*word).to_owned())
+            .collect()
     }
 
     #[test]
-    fn quota_table_rows() {
-        let listings = vec![
-            QuotaListing {
-                subscription: "s".to_owned(),
-                account: "a".to_owned(),
-                windows: Ok(vec![QuotaLine {
-                    name: "weekly".to_owned(),
-                    used: 4,
-                    limit: Some(10),
-                    resets_in_secs: Some(60),
-                    blocking: true,
-                    scope_model: Some("m".to_owned()),
-                }]),
-            },
-            QuotaListing {
-                subscription: "s".to_owned(),
-                account: "b".to_owned(),
-                windows: Err("offline".to_owned()),
-            },
+    fn every_command_becomes_flags_then_words() {
+        let id = || "s".to_owned();
+        let cases = [
+            (
+                SubscriptionCommand::List { json: false },
+                expect(&["--", "list"]),
+            ),
+            (
+                SubscriptionCommand::List { json: true },
+                expect(&["--json", "--", "list"]),
+            ),
+            (
+                SubscriptionCommand::SignIn {
+                    id: id(),
+                    host: None,
+                    label: None,
+                },
+                expect(&["--", "sign-in", "s"]),
+            ),
+            (
+                SubscriptionCommand::SignIn {
+                    id: id(),
+                    host: Some("h".to_owned()),
+                    label: Some("l".to_owned()),
+                },
+                expect(&["--host", "h", "--label", "l", "--", "sign-in", "s"]),
+            ),
+            (
+                SubscriptionCommand::SignOut {
+                    id: id(),
+                    account: "-a".to_owned(),
+                },
+                expect(&["--", "sign-out", "s", "-a"]),
+            ),
+            (
+                SubscriptionCommand::Refresh {
+                    id: id(),
+                    account: None,
+                },
+                expect(&["--", "refresh", "s"]),
+            ),
+            (
+                SubscriptionCommand::Refresh {
+                    id: id(),
+                    account: Some("a".to_owned()),
+                },
+                expect(&["--", "refresh", "s", "a"]),
+            ),
+            (
+                SubscriptionCommand::Quota {
+                    id: None,
+                    json: false,
+                },
+                expect(&["--", "quota"]),
+            ),
+            (
+                SubscriptionCommand::Quota {
+                    id: Some("s".to_owned()),
+                    json: true,
+                },
+                expect(&["--json", "--", "quota", "s"]),
+            ),
         ];
-        assert_eq!(
-            quota_table(&listings),
-            "subscription\taccount\twindow\tused\tlimit\tresets in\tblocking\n\
-             s\ta\tweekly (m)\t4\t10\t60s\tyes\n\
-             s\tb\terror: offline\n"
-        );
+        for (command, expected) in cases {
+            assert_eq!(args(&command), expected, "{command:?}");
+        }
     }
 }

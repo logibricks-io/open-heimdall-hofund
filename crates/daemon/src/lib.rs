@@ -314,7 +314,7 @@ pub async fn start_with_options(
 ///
 /// `hofundd` uses this entry point with the registry it links, so the
 /// production registry link lives in that binary. The other start functions
-/// use the compatibility [`RegistryAdapter`] until the CLI switch.
+/// use the compatibility [`RegistryAdapter`] until the desktop rework.
 ///
 /// # Errors
 ///

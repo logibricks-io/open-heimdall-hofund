@@ -1664,7 +1664,6 @@ dependencies = [
  "chrono",
  "hofund-config",
  "hofund-control-client",
- "hofund-daemon",
  "hofund-secrets",
  "http",
  "serde_json",
