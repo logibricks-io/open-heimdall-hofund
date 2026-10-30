@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `ollama` inbound plugin (S1): `GET /api/version`, `GET /api/tags`,
+  `POST /api/show`, `POST /api/chat`, and `POST /api/generate`, for clients
+  that take an Ollama server. Chats run on the gateway's Chat Completions
+  route in process and come back as Ollama NDJSON, or as one object when
+  `stream` is false. `BodyStream::unfold` and
+  `hofund_plugin_sdk::time::format_rfc3339` support it.
 - `SurfaceHost::gateway()` (S0): an inbound surface runs the gateway's codec
   routes and model lists in process, for example a translated chat on
   `POST /v1/chat/completions`. The call is authenticated with the gateway

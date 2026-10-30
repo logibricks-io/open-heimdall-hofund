@@ -89,6 +89,25 @@ impl BodyStream {
         }
     }
 
+    /// The chunks `next` yields from `state`, until it returns `None`.
+    ///
+    /// For a plugin that turns one stream into another without naming a
+    /// stream crate: `next` takes the state and returns the next chunk with
+    /// the state to continue from. Once it returns `None`, the stream stays
+    /// ended.
+    #[must_use]
+    pub fn unfold<T, F, Fut>(state: T, next: F) -> Self
+    where
+        T: Send + 'static,
+        F: FnMut(T) -> Fut + Send + 'static,
+        Fut: Future<Output = Option<(Result<Vec<u8>, PluginError>, T)>> + Send + 'static,
+    {
+        let stream = futures_util::stream::unfold(state, next)
+            .map(|chunk| chunk.map(Bytes::from))
+            .fuse();
+        Self::from_stream(stream)
+    }
+
     /// One chunk, then end.
     #[must_use]
     pub fn from_bytes(bytes: impl Into<Bytes>) -> Self {
@@ -121,5 +140,33 @@ impl BodyStream {
 impl fmt::Debug for BodyStream {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("BodyStream")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unfold_yields_each_chunk_then_ends() {
+        let mut stream = BodyStream::unfold(0_u8, |count| async move {
+            match count {
+                0 | 1 => Some((Ok(vec![b'a' + count]), count + 1)),
+                2 => Some((Err(PluginError::internal("broken")), 3)),
+                _ => None,
+            }
+        });
+        assert_eq!(
+            stream.next_chunk().await.unwrap().unwrap(),
+            Bytes::from_static(b"a")
+        );
+        assert_eq!(
+            stream.next_chunk().await.unwrap().unwrap(),
+            Bytes::from_static(b"b")
+        );
+        let error = stream.next_chunk().await.unwrap().unwrap_err();
+        assert_eq!(error.message(), "broken");
+        assert!(stream.next_chunk().await.is_none());
+        assert!(stream.next_chunk().await.is_none());
     }
 }

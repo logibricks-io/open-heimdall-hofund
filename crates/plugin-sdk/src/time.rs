@@ -42,6 +42,43 @@ pub fn parse_rfc3339(text: &str) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
 }
 
+/// `instant` as RFC 3339 UTC with nanoseconds, `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`.
+/// A time before 1970 is written as the epoch.
+#[must_use]
+pub fn format_rfc3339(instant: SystemTime) -> String {
+    let since = instant.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let seconds = since.as_secs();
+    let days = i64::try_from(seconds / 86_400).unwrap_or(i64::MAX / 2);
+    let (year, month, day) = civil_from_days(days);
+    let time = seconds % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:09}Z",
+        time / 3_600,
+        (time % 3_600) / 60,
+        time % 60,
+        since.subsec_nanos()
+    )
+}
+
+/// The proleptic Gregorian date `days` after 1970-01-01.
+const fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
+}
+
 /// The zone offset in seconds east of UTC.
 fn offset(zone: &str) -> Option<i64> {
     if zone == "Z" || zone == "z" {
@@ -106,7 +143,25 @@ fn days_from_civil(year: u32, month: u32, day: u32) -> Option<i64> {
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use super::parse_rfc3339;
+    use super::{format_rfc3339, parse_rfc3339};
+
+    #[test]
+    fn times_format_as_rfc3339_and_read_back() {
+        let cases = [
+            (0, 0, "1970-01-01T00:00:00.000000000Z"),
+            (951_868_800, 0, "2000-03-01T00:00:00.000000000Z"),
+            (1_709_209_815, 5, "2024-02-29T12:30:15.000000005Z"),
+            (1_793_491_199, 999_999_999, "2026-10-31T23:59:59.999999999Z"),
+            (4_107_542_400, 120_000_000, "2100-03-01T00:00:00.120000000Z"),
+        ];
+        for (seconds, nanos, text) in cases {
+            let instant = UNIX_EPOCH + Duration::new(seconds, nanos);
+            assert_eq!(format_rfc3339(instant), text);
+            assert_eq!(parse_rfc3339(text), at(seconds), "{text}");
+        }
+        let before = UNIX_EPOCH - Duration::from_secs(1);
+        assert_eq!(format_rfc3339(before), "1970-01-01T00:00:00.000000000Z");
+    }
 
     #[expect(
         clippy::unnecessary_wraps,

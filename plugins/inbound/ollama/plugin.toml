@@ -1,0 +1,22 @@
+id = "ollama"
+kind = "inbound"
+
+[[route]]
+method = "GET"
+prefix = "/api/version"
+
+[[route]]
+method = "GET"
+prefix = "/api/tags"
+
+[[route]]
+method = "POST"
+prefix = "/api/show"
+
+[[route]]
+method = "POST"
+prefix = "/api/chat"
+
+[[route]]
+method = "POST"
+prefix = "/api/generate"
