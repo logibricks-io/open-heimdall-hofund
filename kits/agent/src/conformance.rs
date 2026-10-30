@@ -449,8 +449,12 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         .disconnect(&session, false)
         .expect("drift disconnect");
     assert!(drift.changed(), "{label}: drift disconnect changed nothing");
+    // The edit changed a value hofund wrote only where its token was.
+    let edited = refreshed_expected
+        .values()
+        .any(|bytes| String::from_utf8_lossy(bytes).contains(&case.refreshed_token));
     assert!(
-        !drift.warnings().is_empty(),
+        !edited || !drift.warnings().is_empty(),
         "{label}: drift warning missing"
     );
     let drifted = managed_tree(&home);
@@ -484,7 +488,17 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         let before_text = std::str::from_utf8(before_bytes).expect("refresh UTF-8");
         if before_text.contains(&case.refreshed_token) {
             let text = std::str::from_utf8(&drifted[path]).expect("owned drift UTF-8");
-            assert!(text.contains("user-token"), "{label}: owned edit lost");
+            // A token inside hofund's shared entries goes with them, and the
+            // disconnect says so.
+            let shown = path.display().to_string();
+            let reported = drift
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("removed its entries") && warning.contains(&shown));
+            assert!(
+                text.contains("user-token") || reported,
+                "{label}: owned edit lost"
+            );
         }
     }
 

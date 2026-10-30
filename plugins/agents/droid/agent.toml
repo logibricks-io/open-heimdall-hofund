@@ -1,0 +1,45 @@
+id = "droid"
+display_name = "Droid"
+binary = "droid"
+model_prefix = "custom:hofund/"
+
+# Droid keeps its settings in ~/.factory/settings.json on every OS.
+# FACTORY_HOME_OVERRIDE replaces the home directory, so the file is
+# $FACTORY_HOME_OVERRIDE/.factory/settings.json. Source: Factory docs,
+# https://docs.factory.ai/cli/configuration/settings and
+# https://docs.factory.ai/cli/byok/overview (customModels).
+[[file]]
+id = "settings"
+kind = "json"
+linux = "~/.factory/settings.json"
+macos = "~/.factory/settings.json"
+windows = "~/.factory/settings.json"
+env_override = "FACTORY_HOME_OVERRIDE"
+env_replaces = "~"
+
+# customModels is the user's own (BYOK) model list. hofund appends one entry
+# per route after the user's entries, so their ids keep their places. An
+# entry is hofund's when its id starts with custom:hofund/. Each entry speaks
+# Chat Completions to the gateway's /v1. This build has no catalog values per
+# model, so no context or output limit is written and every entry says it
+# takes no images (Droid assumes that for Chat Completions models anyway).
+[[set]]
+file = "settings"
+key = "customModels"
+slot = { append = { each = "model", owner = [
+    { key = "id", prefix = "custom:hofund/" },
+], fields = [
+    { key = "model", value = "id" },
+    { key = "id", prefixed = "custom:hofund/" },
+    { key = "displayName", value = "id" },
+    { key = "baseUrl", value = "v1" },
+    { key = "apiKey", value = "token" },
+    { key = "provider", literal = "generic-chat-completion-api" },
+    { key = "noImageSupport", json = "true" },
+] } }
+
+# Droid picks a custom model as custom:<id>, and new sessions start on
+# sessionDefaultSettings.model.
+[model]
+file = "settings"
+key = "sessionDefaultSettings.model"

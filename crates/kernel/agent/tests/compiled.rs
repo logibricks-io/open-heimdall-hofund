@@ -776,6 +776,32 @@ fn append_keeps_user_entries_and_is_idempotent() {
 }
 
 #[test]
+fn append_disconnect_reports_an_edited_hofund_entry() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target_with(&["a"]);
+    let path = append_path(&home);
+    seed(&path, "{\"theme\": \"dark\"}\n");
+    let agent = Compiled::new(&APPEND_JSON);
+    agent.apply(&session, &target).expect("apply");
+    let mut edited = read_json(&path);
+    edited["customModels"][0]["apiKey"] = serde_json::json!("user-token");
+    edited["theme"] = serde_json::json!("light");
+    fs::write(&path, edited.to_string()).expect("user edit");
+    let outcome = agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(outcome.warnings().len(), 1, "{:?}", outcome.warnings());
+    let warning = &outcome.warnings()[0];
+    assert!(
+        warning.contains("removed its entries from `customModels`"),
+        "{warning}"
+    );
+    assert!(warning.contains("config.json"), "{warning}");
+    let value = read_json(&path);
+    assert!(value.get("customModels").is_none(), "{value}");
+    assert_eq!(value["theme"], "light");
+}
+
+#[test]
 fn append_disconnect_keeps_entries_added_after_connect() {
     let home = scratch();
     let session = Session::new(&*home);
