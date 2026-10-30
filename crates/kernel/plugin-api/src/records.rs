@@ -1463,8 +1463,8 @@ pub enum Slot {
     /// `value` is written when the model is set to a route, and when connect
     /// leaves the description's model key, in the same logical file, on a
     /// visible route while this key and every `unless` key in the file have
-    /// no non-empty string. It is dropped with the model when the model is
-    /// cleared.
+    /// no non-empty string. When the model is cleared it goes back to the
+    /// value the file had before connect, or is dropped when it had none.
     #[doc(hidden)]
     ModelPair {
         /// The text written.
