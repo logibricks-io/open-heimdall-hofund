@@ -432,12 +432,8 @@ fn emit_yaml(root: &Yaml) -> Result<String, AgentError> {
     YamlEmitter::new(&mut text)
         .dump(root)
         .map_err(|error| AgentError::message(format!("YAML: {error}")))?;
-    let mut text = text
-        .strip_prefix("---\n")
-        .or_else(|| text.strip_prefix("---"))
-        .unwrap_or(&text)
-        .trim_start_matches(' ')
-        .to_owned();
+    // The emitter always opens with a document marker.
+    let mut text = text.strip_prefix("---\n").unwrap_or(&text).to_owned();
     if !text.ends_with('\n') {
         text.push('\n');
     }
@@ -1051,6 +1047,9 @@ mod tests {
             String::from_utf8(bytes).expect("utf8"),
             "model:\n  provider: x\n"
         );
+        let bytes = render(FileKind::Yaml, Some("~\n"), &[assign("a", "x", false)])
+            .expect("null root becomes a mapping");
+        assert_eq!(String::from_utf8(bytes).expect("utf8"), "a: x\n");
         let bytes = render(FileKind::Yaml, Some(""), &[]).expect("empty");
         assert_eq!(String::from_utf8(bytes).expect("utf8"), "{}\n");
     }
