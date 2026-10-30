@@ -15,6 +15,7 @@ fn production_agent_list_contains_migrated_agents() {
             "codex",
             "crush",
             "gemini-cli",
+            "hermes",
             "opencode",
             "pi"
         ]

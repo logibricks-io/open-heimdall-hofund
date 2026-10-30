@@ -1,0 +1,55 @@
+id = "hermes"
+display_name = "Hermes Agent"
+binary = "hermes"
+
+# Hermes Agent keeps its settings in config.yaml under its home folder:
+# ~/.hermes on Linux and macOS, %LOCALAPPDATA%\hermes on Windows (taken here
+# as ~/AppData/Local/hermes). Source: hermes_constants.py
+# _platform_default_hermes_home.
+#
+# HERMES_HOME moves that folder, but the default is not the same folder on
+# every OS, and env_replaces must be a prefix of every OS path, so the
+# adapter does not honor HERMES_HOME yet (#411).
+[[file]]
+id = "config"
+kind = "yaml"
+linux = "~/.hermes/config.yaml"
+macos = "~/.hermes/config.yaml"
+windows = "~/AppData/Local/hermes/config.yaml"
+
+# providers.hofund is a custom provider spoken to as OpenAI chat completions.
+# Hermes keeps the other keys of the entry (key_cmd, extra_headers,
+# request_timeout_seconds and so on) and they survive here too.
+# Source: hermes_cli/config_providers.py _KNOWN_PROVIDER_KEYS.
+[[set]]
+file = "config"
+key = "providers.hofund.name"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "config"
+key = "providers.hofund.base_url"
+slot = "v1"
+
+[[set]]
+file = "config"
+key = "providers.hofund.api_key"
+slot = "token"
+
+[[set]]
+file = "config"
+key = "providers.hofund.api_mode"
+slot = { literal = "chat_completions" }
+
+# models lists one { id } row per route; Hermes turns the rows into its model
+# map (_normalize_provider_models).
+[[set]]
+file = "config"
+key = "providers.hofund.models"
+slot = { model_array = { fields = [{ key = "id", value = "id" }] } }
+
+# The model Hermes starts on is the pair model.provider and model.default.
+# The engine writes one key per model setting, and writing either alone could
+# leave the pair naming a model its provider does not have, so this adapter
+# does not pick a model (#412). The hofund routes appear in Hermes's /model
+# picker.
