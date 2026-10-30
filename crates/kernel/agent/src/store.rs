@@ -18,7 +18,9 @@ pub(crate) fn backup_once(path: &Path) -> Result<(), AgentError> {
     let backup = sibling(path, ".hofund.bak");
     let absent = sibling(path, ".hofund.absent");
     if path.is_file() {
-        if !backup.exists() {
+        // A file hofund created keeps its absent marker; hofund's own bytes
+        // are never the backup.
+        if !backup.exists() && !absent.exists() {
             let bytes = fs::read(path).map_err(|error| io(path, error))?;
             write_atomic(&backup, &bytes)?;
         }

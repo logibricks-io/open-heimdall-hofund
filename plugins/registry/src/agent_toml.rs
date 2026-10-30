@@ -86,7 +86,12 @@ pub struct ModelPairSlot {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelPairToml {
-    pub value: String,
+    /// The text written; exactly one of `value` and `json` is set.
+    #[serde(default)]
+    pub value: Option<String>,
+    /// JSON written as a typed value, with placeholders inside its strings.
+    #[serde(default)]
+    pub json: Option<String>,
     #[serde(default)]
     pub unless: Vec<String>,
 }
@@ -438,6 +443,31 @@ fn validate(
                 "model_pair must sit beside the model key, not on it",
             ));
         }
+        if let SlotToml::ModelPair(ModelPairSlot { model_pair }) = &set.slot
+            && model_pair.json.is_none()
+            && agent.model.as_ref().is_some_and(|model| {
+                model
+                    .key
+                    .strip_prefix(set.key.as_str())
+                    .is_some_and(|rest| rest.starts_with('.'))
+            })
+        {
+            return Err(error(
+                source,
+                format!("{field}.key"),
+                "a text model_pair must not hold the model key; use `json` for an object",
+            ));
+        }
+        if let SlotToml::ModelPair(ModelPairSlot { model_pair }) = &set.slot
+            && model_pair.json.is_some()
+            && !matches!(file.kind.as_str(), "json" | "yaml" | "toml")
+        {
+            return Err(error(
+                source,
+                format!("{field}.slot"),
+                "a json model_pair requires a JSON, YAML, or TOML file",
+            ));
+        }
         if agent.route == "none" && gateway_slot(&set.slot) {
             return Err(error(
                 source,
@@ -528,18 +558,27 @@ fn validate_slot(slot: &SlotToml, source: &str, field: &str) -> Result<(), Strin
         }
         SlotToml::ModelPair(ModelPairSlot { model_pair }) => {
             let field = format!("{field}.slot.model_pair");
-            if model_pair.value.is_empty() {
-                return Err(error(source, format!("{field}.value"), "must not be empty"));
-            }
-            if model_pair.value.contains("{token}") {
-                return Err(error(
-                    source,
-                    format!("{field}.value"),
-                    "`{token}` is not allowed; a refresh does not rewrite this value",
-                ));
-            }
-            if model_pair.value.contains(['{', '}']) {
-                validate_template(&model_pair.value, source, &format!("{field}.value"))?;
+            match (&model_pair.value, &model_pair.json) {
+                (Some(value), None) => {
+                    if value.is_empty() {
+                        return Err(error(source, format!("{field}.value"), "must not be empty"));
+                    }
+                    if value.contains(['{', '}']) {
+                        validate_template(value, source, &format!("{field}.value"))?;
+                    }
+                }
+                (None, Some(json)) => {
+                    let parsed: serde_json::Value = serde_json::from_str(json)
+                        .map_err(|_| error(source, format!("{field}.json"), "must be JSON"))?;
+                    validate_pair_json(&parsed, false, source, &format!("{field}.json"))?;
+                }
+                _ => {
+                    return Err(error(
+                        source,
+                        field,
+                        "needs exactly one of `value` and `json`",
+                    ));
+                }
             }
             let mut keys = BTreeSet::new();
             for (index, key) in model_pair.unless.iter().enumerate() {
@@ -602,6 +641,39 @@ fn validate_template(text: &str, source: &str, field: &str) -> Result<(), String
         ));
     }
     Ok(())
+}
+
+/// Checks the strings of a json `model_pair`: each is a template when it
+/// holds a brace, and the token sits only in an object's string, where a
+/// refresh can find it.
+fn validate_pair_json(
+    value: &serde_json::Value,
+    in_array: bool,
+    source: &str,
+    field: &str,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(text) => {
+            if text.contains(['{', '}']) {
+                validate_template(text, source, field)?;
+            }
+            if in_array && text.contains("{token}") {
+                return Err(error(
+                    source,
+                    field,
+                    "`{token}` must sit in an object's string, not in an array",
+                ));
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .try_for_each(|item| validate_pair_json(item, true, source, field)),
+        serde_json::Value::Object(fields) => fields
+            .values()
+            .try_for_each(|item| validate_pair_json(item, in_array, source, field)),
+        _ => Ok(()),
+    }
 }
 
 /// Checks the quoting of a dotted key: a `"` may only open a part at the
@@ -999,8 +1071,14 @@ fn render_slot(slot: &SlotToml) -> String {
             format!("hofund_plugin_api::Slot::Template({:?})", slot.template)
         }
         SlotToml::ModelPair(slot) => format!(
-            "hofund_plugin_api::Slot::ModelPair {{ value: {:?}, unless: &{:?} }}",
-            slot.model_pair.value, slot.model_pair.unless
+            "hofund_plugin_api::Slot::ModelPair {{ value: {:?}, unless: &{:?}, json: {} }}",
+            slot.model_pair
+                .json
+                .as_deref()
+                .or(slot.model_pair.value.as_deref())
+                .unwrap_or_default(),
+            slot.model_pair.unless,
+            slot.model_pair.json.is_some()
         ),
     }
 }
@@ -1313,14 +1391,16 @@ key = "effort"
         let pair = "{ model_pair = { value = \"hofund\", unless = [\"GOOSE_PROVIDER\", \"b\"] } }";
         let source = render(&validate(&with_slot(pair)).expect("pair")).1;
         assert!(
-            source.contains("hofund_plugin_api::Slot::ModelPair { value: \"hofund\", unless: &[\"GOOSE_PROVIDER\", \"b\"] }"),
+            source.contains("hofund_plugin_api::Slot::ModelPair { value: \"hofund\", unless: &[\"GOOSE_PROVIDER\", \"b\"], json: false }"),
             "{source}"
         );
         let source =
             render(&validate(&with_slot("{ model_pair = { value = \"h\" } }")).expect("no unless"))
                 .1;
         assert!(
-            source.contains("hofund_plugin_api::Slot::ModelPair { value: \"h\", unless: &[] }"),
+            source.contains(
+                "hofund_plugin_api::Slot::ModelPair { value: \"h\", unless: &[], json: false }"
+            ),
             "{source}"
         );
         reject(
@@ -1336,12 +1416,51 @@ key = "effort"
         )
         .1;
         assert!(
-            source.contains("hofund_plugin_api::Slot::ModelPair { value: \"{v1}\", unless: &[] }"),
+            source.contains(
+                "hofund_plugin_api::Slot::ModelPair { value: \"{v1}\", unless: &[], json: false }"
+            ),
+            "{source}"
+        );
+        let source = render(
+            &validate(&with_slot(
+                "{ model_pair = { value = \"Bearer {token}\" } }",
+            ))
+            .expect("token pair"),
+        )
+        .1;
+        assert!(
+            source.contains(
+                "hofund_plugin_api::Slot::ModelPair { value: \"Bearer {token}\", unless: &[], json: false }"
+            ),
+            "{source}"
+        );
+        let object = "{ model_pair = { json = '{\"a\": {\"key\": \"{token}\", \"url\": \"{v1}\"}, \"n\": [1]}' } }";
+        let source = render(&validate(&with_slot(object)).expect("json pair")).1;
+        assert!(
+            source.contains(
+                "hofund_plugin_api::Slot::ModelPair { value: \"{\\\"a\\\": {\\\"key\\\": \\\"{token}\\\", \\\"url\\\": \\\"{v1}\\\"}, \\\"n\\\": [1]}\", unless: &[], json: true }"
+            ),
             "{source}"
         );
         reject(
-            with_slot("{ model_pair = { value = \"Bearer {token}\" } }"),
-            "set[0].slot.model_pair.value: `{token}` is not allowed; a refresh does not rewrite this value",
+            with_slot("{ model_pair = { json = '{\"a\": [\"{token}\"]}' } }"),
+            "set[0].slot.model_pair.json: `{token}` must sit in an object's string, not in an array",
+        );
+        reject(
+            with_slot("{ model_pair = { json = '{\"a\": \"{nope}\"}' } }"),
+            "set[0].slot.model_pair.json: unknown placeholder; expected `{origin}`, `{v1}`, or `{token}`",
+        );
+        reject(
+            with_slot("{ model_pair = { json = '{a' } }"),
+            "set[0].slot.model_pair.json: must be JSON",
+        );
+        reject(
+            with_slot("{ model_pair = { json = '1', value = \"h\" } }"),
+            "set[0].slot.model_pair: needs exactly one of `value` and `json`",
+        );
+        reject(
+            with_slot("{ model_pair = { unless = [] } }"),
+            "set[0].slot.model_pair: needs exactly one of `value` and `json`",
         );
         reject(
             with_slot("{ model_pair = { value = \"{nope}\" } }"),
@@ -1369,6 +1488,19 @@ key = "effort"
             on_model,
             "set[0].key: model_pair must sit beside the model key, not on it",
         );
+        let above_model = with_slot(pair)
+            .replacen("key = \"literal\"", "key = \"settings\"", 1)
+            .replacen(
+                "file = \"config\"\nkey = \"model\"",
+                "file = \"config\"\nkey = \"settings.model\"",
+                1,
+            );
+        reject(
+            above_model.clone(),
+            "set[0].key: a text model_pair must not hold the model key; use `json` for an object",
+        );
+        validate(&above_model.replace("value = \"hofund\"", "json = '{}'"))
+            .expect("json pair above the model");
         let no_model = with_slot(pair).replace("[model]\nfile = \"config\"\nkey = \"model\"\n", "");
         reject(
             no_model,
