@@ -110,7 +110,10 @@ async fn a_surface_relays_on_the_pooled_client_with_the_callers_credential() {
     // The gateway token in x-api-key is enough; the bearer is the caller's own.
     let (status, body) = send(
         app,
-        &[("x-api-key", "secret"), ("authorization", "Bearer upstream")],
+        &[
+            ("x-api-key", "secret"),
+            ("authorization", "Bearer upstream"),
+        ],
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);

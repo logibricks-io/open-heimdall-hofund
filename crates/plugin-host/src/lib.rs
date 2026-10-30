@@ -30,8 +30,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{
-    AccountBackend, ClockBackend, DirBackend, HttpRequest, HttpResponse, Job,
-    LoopbackBackend, PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
+    AccountBackend, ClockBackend, DirBackend, HttpRequest, HttpResponse, Job, LoopbackBackend,
+    PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use hofund_plugin_api::{
     AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,

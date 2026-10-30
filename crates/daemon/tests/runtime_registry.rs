@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use hofund_daemon::{DaemonRegistry, start_with_registry};
 use hofund_plugin_api::{
     AgentDescription, BodyStream, BuildError, Completion, ConfigError, CredentialStyle,
-    DynUpstreamFactory, HostContext, InboundSurface, ListKind, PluginError, PluginId, ProtocolId,
-    Method, RawTable, RawValue, Request, RouteSpec, Schema, SurfaceHost, SurfaceId,
+    DynUpstreamFactory, HostContext, InboundSurface, ListKind, Method, PluginError, PluginId,
+    ProtocolId, RawTable, RawValue, Request, RouteSpec, Schema, SurfaceHost, SurfaceId,
     UpstreamFactory, UpstreamProvider, UpstreamSpec, ValidConfig,
 };
 use hofund_plugin_sdk::{Call, HttpRequest, HttpResponse};
