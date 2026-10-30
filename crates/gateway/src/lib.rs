@@ -390,27 +390,7 @@ impl Gateway {
     /// a Generative Language codec is registered, the process binds the
     /// catch-all generate route and the model list instead.
     pub fn into_router(self) -> axum::Router {
-        let mut routes = axum::Router::new()
-            .route("/health", get(health))
-            .route("/v1/models", get(models));
-        let generative = self.inner.codecs.contains_key(GENERATIVE_UNARY)
-            || self.inner.codecs.contains_key(GENERATIVE_STREAM);
-        let paths: Vec<String> = self.inner.codecs.keys().cloned().collect();
-        let messages = paths.iter().any(|path| path == "/v1/messages");
-        for path in paths {
-            if path.contains('{') {
-                continue;
-            }
-            routes = routes.route(&path, post(complete));
-        }
-        if messages {
-            routes = routes.route("/v1/messages/count_tokens", post(complete));
-        }
-        if generative {
-            routes = routes
-                .route(GENERATIVE_CATCHALL, post(complete))
-                .route(GENERATIVE_LIST, get(generative_models));
-        }
+        let mut routes = codec_routes(&self.inner);
         if !self.inner.surfaces.is_empty() {
             routes = routes.fallback(dispatch_surface);
         }
@@ -646,6 +626,72 @@ impl Drop for Running {
     }
 }
 
+/// `/health`, the model lists and every codec route. Surfaces are not here,
+/// so the in-process gateway a surface calls cannot reach another surface.
+fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
+    let mut routes = axum::Router::new()
+        .route("/health", get(health))
+        .route("/v1/models", get(models));
+    let generative =
+        inner.codecs.contains_key(GENERATIVE_UNARY) || inner.codecs.contains_key(GENERATIVE_STREAM);
+    let paths: Vec<String> = inner.codecs.keys().cloned().collect();
+    let messages = paths.iter().any(|path| path == "/v1/messages");
+    for path in paths {
+        if path.contains('{') {
+            continue;
+        }
+        routes = routes.route(&path, post(complete));
+    }
+    if messages {
+        routes = routes.route("/v1/messages/count_tokens", post(complete));
+    }
+    if generative {
+        routes = routes
+            .route(GENERATIVE_CATCHALL, post(complete))
+            .route(GENERATIVE_LIST, get(generative_models));
+    }
+    routes
+}
+
+/// The gateway's codec routes, run in process for an inbound surface.
+///
+/// The request presents the current gateway token as its bearer. Any other
+/// credential the surface sets is ignored: one matching secret is enough for
+/// `authorized`, so it can neither help nor hurt.
+struct InProcess {
+    app: std::sync::Weak<Inner>,
+}
+
+#[async_trait::async_trait]
+impl hofund_plugin_host::GatewayBackend for InProcess {
+    async fn call(
+        &self,
+        request: axum::http::Request<hofund_plugin_api::Body>,
+    ) -> Result<axum::http::Response<BodyStream>, PluginError> {
+        let Some(app) = self.app.upgrade() else {
+            return Err(PluginError::cancelled("the gateway is shutting down"));
+        };
+        let (mut parts, body) = request.into_parts();
+        let bearer =
+            axum::http::HeaderValue::try_from(format!("Bearer {}", current_token(&app)))
+                .map_err(|_| PluginError::internal("the gateway token is not a header value"))?;
+        parts.headers.insert(header::AUTHORIZATION, bearer);
+        let request = Request::from_parts(parts, Body::from(body.bytes().clone()));
+        let router = codec_routes(&app).with_state(Arc::clone(&app));
+        let response = tower::ServiceExt::oneshot(router, request)
+            .await
+            .unwrap_or_else(|never| match never {});
+        let (parts, body) = response.into_parts();
+        let stream = body
+            .into_data_stream()
+            .map(|chunk| chunk.map_err(|error| PluginError::transport(error.to_string())));
+        Ok(axum::http::Response::from_parts(
+            parts,
+            BodyStream::from_stream(stream),
+        ))
+    }
+}
+
 async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
@@ -677,10 +723,13 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
     };
     let inbound =
         axum::http::Request::from_parts(parts, hofund_plugin_api::Body::from_bytes(bytes));
-    let host = hofund_plugin_host::surface_host(
+    let host = hofund_plugin_host::surface_host_with_gateway(
         app.snapshot.load().member_ids(),
         protocols_of(&app.codecs),
         true,
+        Arc::new(InProcess {
+            app: Arc::downgrade(&app),
+        }),
     );
     let plugin_id = surface.id().as_str().to_owned();
     let span = tracing::info_span!(

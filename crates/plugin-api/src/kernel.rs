@@ -351,3 +351,19 @@ pub trait ObserveBackend: Send + Sync {
     /// Returns [`PluginError`] when the kernel rejects it.
     fn observe(&self, observation: QuotaObservation) -> Result<(), PluginError>;
 }
+
+/// The gateway's own codec routes, run in process for an inbound surface.
+#[async_trait]
+#[doc(hidden)]
+pub trait GatewayBackend: Send + Sync {
+    /// Runs `request` on a codec route or the model list, already
+    /// authenticated. Any other path answers `404`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the request cannot be run.
+    async fn call(
+        &self,
+        request: http::Request<Body>,
+    ) -> Result<http::Response<BodyStream>, PluginError>;
+}

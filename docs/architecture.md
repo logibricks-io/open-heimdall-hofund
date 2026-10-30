@@ -168,7 +168,12 @@ adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.
 `plugin-sdk` for the bounded pager used by an exact configured model-list URL.
 It depends on `agent` so the control plane can plan, connect, and disconnect
 agent configs and refresh them after a token rotation.
-`gateway` depends on `plugin-host` so it can build a `SurfaceHost`.
+`gateway` depends on `plugin-host` so it can build a `SurfaceHost`. Each
+surface request gets `SurfaceHost::gateway()`, which runs the gateway's codec
+routes and model lists in process (S0). A surface that translates a client's
+API calls a codec route there instead of opening a socket. The call presents
+the gateway token, whatever credential the surface set, and cannot reach a
+surface route, so surfaces cannot call each other.
 The subscription kit depends only on `plugin-host`. The agent kit also depends
 on `agent` for the shared engine and `plugin-api` for descriptions. The upstream
 kit depends on `plugin-api` for the factory contract. The kits are not on the
