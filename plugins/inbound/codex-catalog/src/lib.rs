@@ -46,6 +46,8 @@ mod instructions;
 
 mod backend;
 
+mod input;
+
 /// The header that says how many models were left out to fit [`MOST`].
 pub const LEFT_OUT_HEADER: &str = "x-hofund-left-out";
 
@@ -294,3 +296,6 @@ mod tests;
 
 #[cfg(test)]
 mod backend_tests;
+
+#[cfg(test)]
+mod input_tests;

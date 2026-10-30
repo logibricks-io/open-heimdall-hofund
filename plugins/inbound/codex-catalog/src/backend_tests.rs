@@ -679,3 +679,352 @@ fn the_model_list_always_asks_the_chatgpt_backend() {
         "https://backend.test/codex/models?client_version=0.150.0"
     );
 }
+
+fn trigger(model: &str) -> String {
+    json!({
+        "model": model,
+        "stream": true,
+        "tools": [{"type": "function", "name": "shell"}],
+        "input": [{"type": "message", "role": "user", "content": []}, {"type": "compaction_trigger"}],
+    })
+    .to_string()
+}
+
+fn compaction(stub: &Stub) -> (u16, String, String) {
+    ask(
+        stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[
+                ("content-type", "application/json"),
+                ("accept", "text/event-stream"),
+                ("authorization", "Bearer chatgpt"),
+            ],
+            &trigger("smith/forge"),
+        ),
+    )
+}
+
+/// The events of a stream as `(event, data)`.
+fn events(body: &str) -> Vec<(String, Value)> {
+    body.split("\n\n")
+        .filter(|event| !event.is_empty())
+        .map(|event| {
+            let (name, data) = event.split_once('\n').expect("two lines");
+            (
+                name.strip_prefix("event: ").expect("event").to_owned(),
+                json::from_str(data.strip_prefix("data: ").expect("data")).expect("json"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_hofund_models_compaction_is_its_summary_as_one_compaction_item() {
+    let reply = json!({
+        "id": "resp_7",
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": []},
+            {"type": "message", "content": [{"type": "output_text", "text": "Sum"}, {"type": "output_text", "text": "mary"}]},
+            {"type": "message", "content": [{"type": "refusal"}]},
+        ],
+        "usage": {"input_tokens": 3},
+    });
+    let stub = Stub::default().calling(answer(200, reply.to_string()));
+    let (status, kind, body) = compaction(&stub);
+    assert_eq!((status, kind.as_str()), (200, "text/event-stream"));
+    assert!(body.ends_with("\n\n"));
+    let item =
+        json!({"type": "compaction", "id": "cmp_7", "encrypted_content": "hofund1:U3VtbWFyeQ=="});
+    assert_eq!(
+        events(&body),
+        [
+            (
+                "response.created".to_owned(),
+                json!({"type": "response.created", "response": {"id": "resp_7", "object": "response", "status": "in_progress", "output": []}})
+            ),
+            (
+                "response.output_item.added".to_owned(),
+                json!({"type": "response.output_item.added", "output_index": 0, "item": item})
+            ),
+            (
+                "response.output_item.done".to_owned(),
+                json!({"type": "response.output_item.done", "output_index": 0, "item": item})
+            ),
+            (
+                "response.completed".to_owned(),
+                json!({"type": "response.completed", "response": {"id": "resp_7", "object": "response", "status": "completed", "output": [item], "usage": {"input_tokens": 3}}})
+            ),
+        ]
+    );
+    let called = stub.called();
+    assert_eq!(called.len(), 1);
+    assert_eq!(
+        (called[0].method.as_str(), called[0].uri.as_str()),
+        ("POST", "/v1/responses")
+    );
+    assert_eq!(
+        called[0].headers,
+        [
+            pair("accept", "application/json"),
+            pair("content-type", "application/json")
+        ]
+    );
+    let asked: Value = json::from_slice(&called[0].body).expect("json");
+    assert_eq!(asked["stream"], false);
+    assert_eq!(asked["tools"], json!([]));
+    assert_eq!(
+        asked["input"][1]["content"][0]["text"],
+        super::input::COMPACT_PROMPT
+    );
+    assert!(stub.sent().is_empty());
+}
+
+#[test]
+fn a_summary_streamed_back_is_read_from_its_items() {
+    let stream = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_s\"}}\n\n",
+        "data: not json\n\n",
+        ": a comment\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"streamed\"}]}}\n\n",
+        "data:{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n",
+    );
+    let stub = Stub::default().calling(answer(200, stream));
+    let (status, _, body) = compaction(&stub);
+    assert_eq!(status, 200);
+    let events = events(&body);
+    assert_eq!(events.len(), 4);
+    let done = &events[3].1["response"];
+    assert_eq!(done["id"], "resp_s");
+    assert_eq!(done["output"][0]["id"], "cmp_s");
+    assert_eq!(
+        done["output"][0]["encrypted_content"],
+        super::input::sealed("streamed")
+    );
+    assert_eq!(done.get("usage"), None);
+}
+
+#[test]
+fn a_summary_without_an_id_gets_one() {
+    let reply = json!({"output": [{"type": "message", "content": [{"text": "s"}]}]});
+    let stub = Stub::default().calling(answer(200, reply.to_string()));
+    let (status, _, body) = compaction(&stub);
+    assert_eq!(status, 200);
+    let events = events(&body);
+    let id = events[0].1["response"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nanos = id.strip_prefix("resp_hofund_").expect("made up");
+    assert!(nanos.parse::<u128>().expect("nanos") > 0);
+    assert_eq!(events[1].1["item"]["id"], format!("cmp_hofund_{nanos}"));
+}
+
+#[test]
+fn a_summary_cut_short_is_no_summary() {
+    for (reply, why) in [
+        (
+            json!({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "output": [{"type": "message", "content": [{"text": "half"}]}]}).to_string(),
+            "max_output_tokens",
+        ),
+        (json!({"status": "incomplete"}).to_string(), "unknown"),
+        (
+            "data: {\"type\":\"response.incomplete\",\"response\":{}}\n\n".to_owned(),
+            "unknown",
+        ),
+    ] {
+        let stub = Stub::default().calling(answer(200, reply));
+        let (status, _, body) = compaction(&stub);
+        assert_eq!(status, 502);
+        assert_eq!(
+            message(&body),
+            format!("compaction: the summary was cut short ({why}), so there is no summary")
+        );
+    }
+}
+
+#[test]
+fn a_reply_without_a_summary_says_what_it_held() {
+    for (output, held) in [
+        (json!([]), " (it answered with nothing)"),
+        (
+            json!([
+                {"type": "function_call", "name": "shell"},
+                {"type": "reasoning", "name": ""},
+                {"type": "function_call", "name": "shell"},
+                {"name": "x"},
+                {"type": ""},
+                {"type": "message", "content": [{"text": "  \n"}]},
+            ]),
+            " (it answered with function_call shell, reasoning, an untyped item x, an untyped item, message)",
+        ),
+    ] {
+        let reply = json!({"id": "resp_1", "status": "completed", "output": output});
+        let stub = Stub::default().calling(answer(200, reply.to_string()));
+        let (status, _, body) = compaction(&stub);
+        assert_eq!(status, 502);
+        assert_eq!(
+            message(&body),
+            format!("compaction: the model wrote no summary{held}")
+        );
+    }
+}
+
+#[test]
+fn a_refused_summary_request_says_who_refused_it_and_why() {
+    for (status, reply, said) in [
+        (429, r#"{"error":{"message":"slow down"}}"#, "slow down"),
+        (
+            400,
+            r#"{"error":{"message":" "}}"#,
+            r#"{"error":{"message":" "}}"#,
+        ),
+        (503, " busy \n", "busy"),
+        (500, "", "nothing more"),
+    ] {
+        let stub = Stub::default().calling(answer(status, reply));
+        let (got, _, body) = compaction(&stub);
+        assert_eq!(got, status);
+        assert_eq!(
+            message(&body),
+            format!("compaction: hofund answered the summary request {status}: {said}")
+        );
+    }
+    let stub = Stub::default().calling(answer(399, "{}"));
+    assert_eq!(compaction(&stub).0, 502);
+    let stub = Stub::default().calling(Err(PluginError::status_error(404, "no such model")));
+    let (status, _, body) = compaction(&stub);
+    assert_eq!((status, message(&body).as_str()), (404, "no such model"));
+}
+
+#[test]
+fn a_failed_summary_stream_says_what_failed() {
+    for (event, why) in [
+        (
+            json!({"type": "response.failed", "response": {"error": {"message": "boom"}}, "message": "other"}),
+            "boom",
+        ),
+        (json!({"type": "error", "message": "plain"}), "plain"),
+        (
+            json!({"type": "error", "message": "", "error": {"message": "nested"}}),
+            "nested",
+        ),
+        (
+            json!({"type": "response.failed", "response": {"error": {"message": ""}}}),
+            "the model failed",
+        ),
+    ] {
+        let stream = format!("data: {event}\n\ndata: {{\"type\":\"response.completed\"}}\n\n");
+        let stub = Stub::default().calling(answer(200, stream));
+        let (status, _, body) = compaction(&stub);
+        assert_eq!(status, 502);
+        assert_eq!(
+            message(&body),
+            format!("compaction: {why}, so there is no summary")
+        );
+    }
+}
+
+#[test]
+fn a_summary_reply_that_cannot_be_read_is_no_summary() {
+    let stub = Stub::default().calling(answer(200, " {oops"));
+    let (status, _, body) = compaction(&stub);
+    assert_eq!(status, 502);
+    assert_eq!(
+        message(&body),
+        "compaction: the summary reply is not JSON, so there is no summary"
+    );
+    let big = vec![b' '; 16 * 1024 * 1024 + 1];
+    let stub = Stub::default().calling(answer(200, big));
+    let (status, _, body) = compaction(&stub);
+    assert_eq!(status, 502);
+    assert_eq!(
+        message(&body),
+        "compaction: the summary reply could not be read"
+    );
+    let mut fits = vec![b' '; 16 * 1024 * 1024 - 64];
+    fits.extend_from_slice(br#"{"output":[{"type":"message","content":[{"text":"s"}]}]}"#);
+    let stub = Stub::default().calling(answer(200, fits));
+    assert_eq!(compaction(&stub).0, 200);
+    let stub = Stub::default().calling(Ok((
+        200,
+        Vec::new(),
+        BodyStream::unfold(true, |first| async move {
+            first.then(|| (Err(PluginError::internal("cut")), false))
+        }),
+    )));
+    assert_eq!(
+        message(&compaction(&stub).2),
+        "compaction: the summary reply could not be read"
+    );
+}
+
+#[test]
+fn codexs_own_models_get_their_input_put_right_and_their_trigger_relayed() {
+    let stub = Stub::default()
+        .sending(answer(200, "relayed"))
+        .sending(answer(200, "compacted"));
+    let body = json!({
+        "model": "gpt-5",
+        "input": [
+            {"type": "custom_tool_call", "id": "fc_1"},
+            {"type": "compaction", "encrypted_content": super::input::sealed("s")},
+            {"type": "compaction_trigger"},
+        ],
+    })
+    .to_string();
+    for (path, said) in [
+        ("/responses", "relayed"),
+        ("/responses/compact", "compacted"),
+    ] {
+        let (status, _, text) = ask(
+            &stub,
+            request("POST", &format!("/backend-api/codex{path}"), &[], &body),
+        );
+        assert_eq!((status, text.as_str()), (200, said));
+    }
+    let sent = stub.sent();
+    assert_eq!(sent.len(), 2);
+    for seen in &sent {
+        let value: Value = json::from_slice(&seen.body).expect("json");
+        assert_eq!(value["input"][0]["id"], "ctc_1");
+        assert_eq!(value["input"][1]["type"], "message");
+        assert_eq!(value["input"][2], json!({"type": "compaction_trigger"}));
+    }
+    assert!(stub.called().is_empty());
+    let get = Stub::default().sending(answer(200, "got"));
+    let (_, _, text) = ask(
+        &get,
+        request("GET", "/backend-api/codex/responses", &[], &body),
+    );
+    assert_eq!(text, "got");
+    assert_eq!(get.sent()[0].body, body.as_bytes());
+}
+
+#[test]
+fn a_hofund_model_gets_its_summaries_opened() {
+    let stub = Stub::default().calling(answer(200, "ok"));
+    let body = json!({
+        "model": "smith/forge",
+        "input": [{"type": "compaction", "encrypted_content": super::input::sealed("s")}],
+    })
+    .to_string();
+    let (status, _, text) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[("accept", "text/event-stream")],
+            &body,
+        ),
+    );
+    assert_eq!((status, text.as_str()), (200, "ok"));
+    let called = stub.called();
+    let value: Value = json::from_slice(&called[0].body).expect("json");
+    assert_eq!(value["input"][0]["role"], "user");
+    assert_eq!(value.get("stream"), None);
+    assert_eq!(called[0].headers, [pair("accept", "text/event-stream")]);
+}

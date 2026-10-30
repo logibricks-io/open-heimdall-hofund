@@ -1910,6 +1910,7 @@ dependencies = [
 name = "hofund-plugin-codex-catalog"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
 ]
