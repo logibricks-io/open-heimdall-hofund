@@ -8,7 +8,7 @@ use hofund_plugin_api::{Body, BodyStream, InboundSurface, Method, PluginError};
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{HttpRequest, HttpResponse, async_trait, text_response};
 
-use super::{Kernel, Ollama, serve};
+use super::{ERROR_CAP, Kernel, Ollama, read_capped, resolve, serve};
 use crate::reply::{Writer, failure_message};
 
 /// Runs `future` on this thread. Everything here is ready or woken at once.
@@ -777,4 +777,35 @@ fn failure_messages_take_the_most_specific_text() {
     );
     assert_eq!(failure_message(429, b" \n"), "Too Many Requests");
     assert_eq!(failure_message(418, b""), "request failed");
+}
+
+#[test]
+fn a_name_is_its_own_id_before_its_latest_tag_is_dropped() {
+    let ids = vec![
+        "seer".to_owned(),
+        "sage:latest".to_owned(),
+        "sage".to_owned(),
+    ];
+    assert_eq!(resolve(&ids, "seer:latest"), "seer");
+    assert_eq!(resolve(&ids, "seer"), "seer");
+    assert_eq!(resolve(&ids, "sage:latest"), "sage:latest");
+    assert_eq!(resolve(&ids, "sage"), "sage");
+    assert_eq!(resolve(&ids, "gone:latest"), "gone:latest");
+}
+
+#[test]
+fn a_failed_reply_is_read_up_to_the_cap() {
+    let big = "e".repeat(ERROR_CAP + 10);
+    let read = block_on(read_capped(chunked(
+        vec!["ab", &big],
+        Some(PluginError::internal("never read")),
+    )));
+    let read = read.expect("the cap stops before the broken tail");
+    assert_eq!(read.len(), ERROR_CAP);
+    assert!(read.starts_with(b"abee"));
+    let broken = block_on(read_capped(chunked(
+        vec!["ab"],
+        Some(PluginError::internal("broken")),
+    )));
+    assert_eq!(broken.unwrap_err().message(), "broken");
 }
