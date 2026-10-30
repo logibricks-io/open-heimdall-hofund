@@ -45,7 +45,7 @@ use tracing::Instrument;
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
 /// The largest body a surface takes: room for a speech-to-text upload, which
-/// OpenAI caps at 25 MB.
+/// the common speech-to-text APIs cap at 25 MB.
 const SURFACE_BODY_LIMIT: usize = 32 * 1024 * 1024;
 /// How long a surface call may take: a forwarded transcription of a long
 /// recording takes minutes.
