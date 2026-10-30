@@ -230,6 +230,12 @@ impl Drop for ControlSession {
     }
 }
 
+/// The first runtime directory, for lock files that cannot sit beside the
+/// state they guard. One-shot model-state locks fall back to it.
+pub(crate) fn runtime_lock_dir(runtime: &ControlRuntime) -> Option<PathBuf> {
+    prepare_runtime_dir(runtime).ok()
+}
+
 /// Configuration sidecar lock in the first runtime directory, used when the
 /// directory beside the config cannot hold one. One-shot operations use it
 /// without a daemon session.

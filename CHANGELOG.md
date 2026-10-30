@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hofund provider list`, `show`, `test`, `refresh` (alias `fetch`), and
+  `models`, and `hofund model list` and `show` (L8b). They use the running
+  daemon or, with none, one-shot `hofundd`. Pick edits retry a stale
+  revision up to three times; one-shot pick edits and refetches take the
+  per-provider model state lock, and a pick edit that cannot be saved exits
+  nonzero without printing a revision.
 - `hofundd` (`apps/hofundd`, package `hofund-daemon-bin`): the daemon
   binary. It links the plugin registry, serves with local control on, and
   logs through `tracing` with the `log` bridge; `HOFUND_LOG` sets the level

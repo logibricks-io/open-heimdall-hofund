@@ -16,6 +16,12 @@ pub(super) struct StateStore {
     root: Option<PathBuf>,
     states: HashMap<String, ProviderState>,
     mismatched: HashSet<String>,
+    /// Set for a one-shot process: every write takes the per-provider state
+    /// lock and rereads the file under it. The inner value is the runtime
+    /// directory for the lock when the state directory cannot hold one.
+    shared: Option<Option<PathBuf>>,
+    /// The provider whose state lock this store holds now.
+    held: Option<String>,
 }
 
 impl StateStore {
@@ -24,6 +30,58 @@ impl StateStore {
             root,
             ..Self::default()
         }
+    }
+
+    /// Makes every write take the per-provider `<state-file>.lock` and
+    /// reread the state under it, for a process that shares the state files
+    /// with other writers. `fallback` is the runtime directory used when the
+    /// state directory is read-only.
+    pub(super) fn shared(mut self, fallback: Option<PathBuf>) -> Self {
+        self.shared = Some(fallback);
+        self
+    }
+
+    /// Runs `body` holding the state lock of `id`, after dropping the cached
+    /// state so `body` reads the file as it is now.
+    ///
+    /// Without [`Self::shared`] (or a state root) no lock is taken and the
+    /// cache is kept. Calls nested inside `body` for the same provider reuse
+    /// the held lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Lock`] when the lock file cannot be opened or
+    /// locked; `body` is not run then.
+    pub(super) fn exclusive<R>(
+        &mut self,
+        id: &str,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> Result<R, StateError> {
+        let (Some(root), Some(fallback)) = (&self.root, &self.shared) else {
+            return Ok(body(self));
+        };
+        if self.held.as_deref() == Some(id) {
+            return Ok(body(self));
+        }
+        let primary = lock_path(root, id);
+        if let Some(directory) = primary.parent() {
+            let _ = create_private_dir(directory);
+        }
+        let fallback = fallback
+            .as_ref()
+            .map(|directory| directory.join(format!("models-{}.lock", filename(id))));
+        let lock = super::config_write::SidecarLock::acquire(&primary, fallback.as_deref())
+            .map_err(|error| {
+                tracing::warn!(provider.id = id, %error, "could not lock model state");
+                StateError::Lock(error)
+            })?;
+        self.states.remove(id);
+        self.mismatched.remove(id);
+        self.held = Some(id.to_owned());
+        let result = body(self);
+        self.held = None;
+        drop(lock);
+        Ok(result)
     }
 
     pub(super) fn get(&mut self, id: &str) -> &ProviderState {
@@ -47,6 +105,14 @@ impl StateStore {
         id: &str,
         change: impl FnOnce(&mut ProviderState),
     ) -> Result<(), StateError> {
+        self.exclusive(id, |store| store.update_saved_held(id, change))?
+    }
+
+    fn update_saved_held(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut ProviderState),
+    ) -> Result<(), StateError> {
         self.load(id);
         if let Some(state) = self.states.get_mut(id) {
             change(state);
@@ -57,6 +123,14 @@ impl StateStore {
     /// Applies `change` and saves it, or restores the previous in-memory
     /// state and returns the error when the file cannot be written.
     pub(super) fn try_update(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut ProviderState),
+    ) -> Result<(), StateError> {
+        self.exclusive(id, |store| store.try_update_held(id, change))?
+    }
+
+    fn try_update_held(
         &mut self,
         id: &str,
         change: impl FnOnce(&mut ProviderState),
@@ -116,6 +190,8 @@ pub(super) enum StateError {
     Mismatched,
     /// Writing the file failed.
     Save(io::Error),
+    /// The per-provider state lock could not be taken.
+    Lock(io::Error),
 }
 
 impl std::fmt::Display for StateError {
@@ -125,6 +201,7 @@ impl std::fmt::Display for StateError {
                 formatter.write_str("the existing model state file belongs to another provider id")
             }
             Self::Save(error) => write!(formatter, "could not save model state: {error}"),
+            Self::Lock(error) => write!(formatter, "could not lock model state: {error}"),
         }
     }
 }
@@ -360,19 +437,7 @@ fn save_state(root: &Path, state: &ProviderState) -> io::Result<()> {
     let directory = path
         .parent()
         .unwrap_or_else(|| unreachable!("the state path always has a parent"));
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(directory)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
-    }
+    create_private_dir(directory)?;
     let bytes = encode_state(state)?;
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = directory.join(format!(
@@ -406,6 +471,30 @@ fn save_state(root: &Path, state: &ProviderState) -> io::Result<()> {
     result
 }
 
+fn create_private_dir(directory: &Path) -> io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// The per-provider state lock: `<state-file>.lock` beside the state file.
+fn lock_path(root: &Path, id: &str) -> PathBuf {
+    let mut name = filename(id);
+    name.push_str(".lock");
+    state_path(root, id).with_file_name(name)
+}
+
 fn state_path(root: &Path, id: &str) -> PathBuf {
     root.join("host").join("models").join(filename(id))
 }
@@ -433,7 +522,9 @@ mod tests {
 
     use hofund_plugin_api::ModelSpec;
 
-    use super::{ProviderState, StateStore, filename, models, rows, state_path};
+    use super::{
+        ProviderState, StateError, StateStore, filename, lock_path, models, rows, state_path,
+    };
 
     struct Scratch(tempfile::TempDir);
 
@@ -685,5 +776,125 @@ mod tests {
             b"keep"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shared_store_rereads_the_file_under_the_state_lock() {
+        let root = temp_root("shared-reread");
+        let mut first = StateStore::new(Some(root.to_path_buf())).shared(None);
+        let mut second = StateStore::new(Some(root.to_path_buf())).shared(None);
+        assert!(first.get("p").picks.is_empty());
+        second
+            .try_update("p", |state| state.picks = vec!["a".to_owned()])
+            .expect("second saves");
+        first
+            .try_update("p", |state| state.picks.push("b".to_owned()))
+            .expect("first saves");
+        assert_eq!(first.get("p").picks, ["a", "b"]);
+        assert!(lock_path(&root, "p").is_file());
+        assert_eq!(
+            lock_path(&root, "p").parent(),
+            state_path(&root, "p").parent()
+        );
+    }
+
+    #[test]
+    fn private_store_keeps_its_cache_and_takes_no_lock() {
+        let root = temp_root("private-cache");
+        let mut first = StateStore::new(Some(root.to_path_buf()));
+        let mut second = StateStore::new(Some(root.to_path_buf()));
+        assert!(first.get("p").picks.is_empty());
+        second
+            .try_update("p", |state| state.picks = vec!["a".to_owned()])
+            .expect("second saves");
+        first
+            .try_update("p", |state| state.picks.push("b".to_owned()))
+            .expect("first saves");
+        assert_eq!(first.get("p").picks, ["b"]);
+        assert!(!lock_path(&root, "p").exists());
+    }
+
+    #[test]
+    fn nested_exclusive_reuses_the_held_lock() {
+        let root = temp_root("nested");
+        let mut store = StateStore::new(Some(root.to_path_buf())).shared(None);
+        let saved = store
+            .exclusive("p", |store| {
+                store.try_update("p", |state| state.picks = vec!["a".to_owned()])
+            })
+            .expect("locked");
+        saved.expect("saved");
+        assert_eq!(store.get("p").picks, ["a"]);
+    }
+
+    #[test]
+    fn held_state_lock_blocks_another_writer() {
+        let root = temp_root("blocks");
+        let lock = lock_path(&root, "p");
+        std::fs::create_dir_all(lock.parent().expect("parent")).expect("directory");
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock)
+            .expect("lock file");
+        holder.lock().expect("held");
+        let path = root.to_path_buf();
+        let (done, finished) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut store = StateStore::new(Some(path)).shared(None);
+            let saved = store.try_update("p", |state| state.picks = vec!["a".to_owned()]);
+            let _ = done.send(());
+            saved
+        });
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "the writer must wait for the held lock"
+        );
+        drop(holder);
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the writer finishes once the lock is released");
+        writer.join().expect("writer thread").expect("saved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_state_dir_locks_in_the_runtime_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root("read-only");
+        let runtime = temp_root("read-only-runtime");
+        std::fs::set_permissions(&*root, std::fs::Permissions::from_mode(0o500))
+            .expect("read-only root");
+        if std::fs::create_dir(root.join("probe")).is_ok() {
+            // Running as root: permissions do not apply.
+            return;
+        }
+        let mut store =
+            StateStore::new(Some(root.to_path_buf())).shared(Some(runtime.to_path_buf()));
+        let saved = store.try_update("p", |state| state.picks = vec!["a".to_owned()]);
+        std::fs::set_permissions(&*root, std::fs::Permissions::from_mode(0o700))
+            .expect("writable again");
+        assert!(matches!(saved, Err(StateError::Save(_))), "{saved:?}");
+        assert!(
+            runtime
+                .join(format!("models-{}.lock", filename("p")))
+                .is_file()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unopenable_state_lock_fails_without_writing() {
+        let root = temp_root("no-lock");
+        let lock = lock_path(&root, "p");
+        std::fs::create_dir_all(&lock).expect("a directory where the lock goes");
+        let mut store = StateStore::new(Some(root.to_path_buf())).shared(None);
+        let saved = store.try_update("p", |state| state.picks = vec!["a".to_owned()]);
+        assert!(matches!(saved, Err(StateError::Lock(_))), "{saved:?}");
+        assert!(!state_path(&root, "p").exists());
     }
 }

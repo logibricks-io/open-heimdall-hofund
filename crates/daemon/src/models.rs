@@ -406,6 +406,24 @@ impl ModelsHost {
         self
     }
 
+    /// Shares the state files with other processes: every state write takes
+    /// the per-provider `<state-file>.lock` and rereads the file under it.
+    /// `fallback` is the runtime directory for the lock when the state
+    /// directory is read-only. One-shot `hofundd` sets this; a daemon, which
+    /// holds the daemon lock, is the only writer and does not.
+    #[must_use]
+    pub(crate) fn with_shared_state(self, fallback: Option<std::path::PathBuf>) -> Self {
+        let store = self
+            .state
+            .into_inner()
+            .unwrap_or_else(|error| error.into_inner())
+            .shared(fallback);
+        Self {
+            state: Mutex::new(store),
+            ..self
+        }
+    }
+
     /// Reuses the configured daemon instance when its exact built base still matches.
     ///
     /// A missing entry or a different current base falls back to a fresh list/probe build.
@@ -480,8 +498,10 @@ impl ModelsHost {
     /// Changes a provider's picks and saves them.
     ///
     /// The lock is held from reading the revision through the save, so a
-    /// concurrent edit cannot slip between the check and the write. A failed
-    /// save leaves memory as it was.
+    /// concurrent edit cannot slip between the check and the write. With
+    /// [`Self::with_shared_state`] that lock is also the per-provider state
+    /// file lock, and the revision is checked against the file reread under
+    /// it. A failed save leaves memory as it was.
     pub(crate) fn edit_picks(
         &self,
         provider_id: &str,
@@ -489,27 +509,31 @@ impl ModelsHost {
         form: PicksForm,
     ) -> Result<(Picks, String), PicksError> {
         let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let state = store.get(provider_id);
-        if let Some(expected) = expected
-            && super::models_state::revision(state) != expected
-        {
-            return Err(PicksError::Stale);
-        }
-        let listed = super::models_state::models(&state.list);
-        let next = next_picks(provider_id, &state.picks, &listed, form)?;
-        let picked_from = listed
-            .iter()
-            .map(|model| model.id().to_owned())
-            .collect::<Vec<_>>();
         store
-            .try_update(provider_id, |state| {
-                state.delisted.retain(|id| !next.contains(id));
-                state.picks = next;
-                state.picked_from = picked_from;
+            .exclusive(provider_id, |store| {
+                let state = store.get(provider_id);
+                if let Some(expected) = expected
+                    && super::models_state::revision(state) != expected
+                {
+                    return Err(PicksError::Stale);
+                }
+                let listed = super::models_state::models(&state.list);
+                let next = next_picks(provider_id, &state.picks, &listed, form)?;
+                let picked_from = listed
+                    .iter()
+                    .map(|model| model.id().to_owned())
+                    .collect::<Vec<_>>();
+                store
+                    .try_update(provider_id, |state| {
+                        state.delisted.retain(|id| !next.contains(id));
+                        state.picks = next;
+                        state.picked_from = picked_from;
+                    })
+                    .map_err(PicksError::Save)?;
+                let state = store.get(provider_id);
+                Ok((picks_of(state), super::models_state::revision(state)))
             })
-            .map_err(PicksError::Save)?;
-        let state = store.get(provider_id);
-        Ok((picks_of(state), super::models_state::revision(state)))
+            .map_err(PicksError::Save)?
     }
 
     /// Reads cached models without building a provider or contacting an upstream.

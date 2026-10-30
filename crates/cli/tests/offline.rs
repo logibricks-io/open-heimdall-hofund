@@ -819,3 +819,464 @@ fn cli_waits_for_discovery_when_daemon_lock_held() {
     let exited = finish(daemon.0.take().expect("daemon"), DEADLINE);
     assert!(exited.status.success(), "{exited:?}");
 }
+
+/// A mock OpenAI-compatible upstream: `GET /v1/models` lists `models`, and
+/// `POST /v1/chat/completions` answers 200 unless the requested model id
+/// starts with `bad`, which gets a 500. Each request line is recorded.
+struct Upstream {
+    addr: SocketAddr,
+    models: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Upstream {
+    fn start(models: &[&str]) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let models = std::sync::Arc::new(std::sync::Mutex::new(
+            models.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+        ));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (list, log) = (models.clone(), seen.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let (list, log) = (list.clone(), log.clone());
+                std::thread::spawn(move || answer(stream, &list, &log));
+            }
+        });
+        Self { addr, models, seen }
+    }
+
+    fn set_models(&self, models: &[&str]) {
+        *self.models.lock().expect("models") = models.iter().map(|id| (*id).to_owned()).collect();
+    }
+
+    fn seen(&self) -> Vec<String> {
+        self.seen.lock().expect("seen").clone()
+    }
+
+    /// A config whose provider `chat` points here and never refreshes on
+    /// its own.
+    fn config(&self, auto_include: &str) -> String {
+        format!(
+            "[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\n\
+             base_url = \"http://{}/v1\"\napi_key = \"provider-key\"\n\
+             [providers.models]\nrefresh = \"off\"\nauto_include = [{auto_include}]\n\
+             [[routes]]\nmodel = \"m\"\nupstreams = [\"chat\"]\n",
+            self.addr
+        )
+    }
+}
+
+fn answer(
+    mut stream: std::net::TcpStream,
+    models: &std::sync::Mutex<Vec<String>>,
+    seen: &std::sync::Mutex<Vec<String>>,
+) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut request = Vec::new();
+    let mut buf = [0_u8; 4096];
+    let head_end = loop {
+        if let Some(at) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break at + 4;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(read) => request.extend_from_slice(&buf[..read]),
+        }
+    };
+    let head = String::from_utf8_lossy(&request[..head_end]).into_owned();
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    while request.len() < head_end + length {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => request.extend_from_slice(&buf[..read]),
+        }
+    }
+    let body = String::from_utf8_lossy(&request[head_end..]).into_owned();
+    let line = head.lines().next().unwrap_or_default().to_owned();
+    seen.lock().expect("seen").push(line.clone());
+    let (status, reply) = if line.starts_with("GET /v1/models") {
+        let data = models
+            .lock()
+            .expect("models")
+            .iter()
+            .map(|id| format!("{{\"id\":\"{id}\",\"object\":\"model\"}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        (
+            "200 OK",
+            format!("{{\"object\":\"list\",\"data\":[{data}]}}"),
+        )
+    } else if body.replace(' ', "").contains("\"model\":\"bad") {
+        (
+            "500 Internal Server Error",
+            "{\"error\":{\"message\":\"model unavailable\"}}".to_owned(),
+        )
+    } else {
+        ("200 OK", "{\"choices\":[]}".to_owned())
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+        reply.len()
+    );
+}
+
+/// The directory holding the per-provider model state files.
+fn models_dir(scratch: &Scratch) -> PathBuf {
+    scratch
+        .config
+        .parent()
+        .expect("cfg")
+        .join(".hofund/host/models")
+}
+
+/// The state file of provider `chat`, once something has saved it.
+fn chat_state(scratch: &Scratch) -> PathBuf {
+    let dir = models_dir(scratch);
+    let found = fs::read_dir(&dir)
+        .unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| {
+            let name = path.file_name().expect("name").to_string_lossy();
+            name.starts_with("chat-") && name.ends_with(".json")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(found.len(), 1, "{found:?}");
+    found[0].clone()
+}
+
+/// Holds the state lock of `chat`, as another writer would.
+fn hold_chat_lock(scratch: &Scratch) -> fs::File {
+    let mut name = chat_state(scratch).into_os_string();
+    name.push(".lock");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(PathBuf::from(name))
+        .expect("lock file");
+    lock.lock().expect("lock");
+    lock
+}
+
+/// Starts `hofund` with `args` while the state lock is held, checks it is
+/// still waiting, then releases the lock and returns its run.
+fn run_past_held_lock(scratch: &Scratch, args: &[&str]) -> Run {
+    hofundd();
+    let lock = hold_chat_lock(scratch);
+    let before = fs::read(chat_state(scratch)).expect("state");
+    let started = Instant::now();
+    let mut child = spawn(&mut scratch.command(hofund(), args));
+    std::thread::sleep(Duration::from_secs(2));
+    let waiting = child.try_wait().expect("try_wait").is_none();
+    let unchanged = fs::read(chat_state(scratch)).expect("state") == before;
+    drop(lock);
+    let output = finish(child, DEADLINE);
+    let run = Run {
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        elapsed: started.elapsed(),
+    };
+    assert!(
+        waiting,
+        "{args:?} did not wait for the state lock: {run:#?}"
+    );
+    assert!(
+        unchanged,
+        "{args:?} wrote state under another holder's lock"
+    );
+    run
+}
+
+#[test]
+fn offline_provider_list_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let out = scratch.hofund(&["provider", "list"]);
+    let lines = out.ok().lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "id\tkind\tprotocol\tready\tmodels");
+    assert_eq!(lines.len(), 2, "{out:#?}");
+    let row = lines[1].split('\t').collect::<Vec<_>>();
+    assert_eq!(row[0], "chat");
+    assert_eq!(row[2], "openai-chat");
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_provider_show_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let out = scratch.hofund(&["provider", "show", "chat"]);
+    let text = out.ok();
+    assert!(text.starts_with("id: chat\n"), "{text}");
+    assert!(text.contains("\nprotocol: openai-chat\n"), "{text}");
+    assert!(text.contains("\npicks: default"), "{text}");
+    let error = scratch
+        .hofund(&["provider", "show", "ghost"])
+        .failed()
+        .to_owned();
+    assert_eq!(error, "unknown provider `ghost`");
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_provider_test_one_shot() {
+    let upstream = Upstream::start(&["good", "bad-one"]);
+    let scratch = Scratch::new("127.0.0.1:0", &upstream.config(""));
+    let out = scratch.hofund(&["provider", "test", "chat", "good"]);
+    let text = out.ok();
+    assert!(text.starts_with("ok\tgood\t"), "{text}");
+    assert!(text.ends_with(" ms"), "{text}");
+
+    let out = scratch.hofund(&["provider", "test", "chat", "good", "bad-one"]);
+    assert_eq!(out.failed(), "chat: 1 of 2 probes failed");
+    let lines = out.stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "{out:#?}");
+    assert!(lines[0].starts_with("ok\tgood\t"), "{out:#?}");
+    assert!(lines[1].starts_with("fail\tbad-one\t500 "), "{out:#?}");
+    let probes = upstream
+        .seen()
+        .into_iter()
+        .filter(|line| line.starts_with("POST /v1/chat/completions"))
+        .count();
+    assert_eq!(probes, 3);
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_provider_models_one_shot() {
+    let upstream = Upstream::start(&["a", "b"]);
+    let scratch = Scratch::new("127.0.0.1:0", &upstream.config(""));
+    let out = scratch.hofund(&["provider", "models", "chat"]);
+    let text = out.ok();
+    assert!(text.starts_with("2 models from chat\nid: chat\n"), "{text}");
+    assert!(text.contains("\nlisted: 2\n"), "{text}");
+    assert_eq!(
+        upstream
+            .seen()
+            .iter()
+            .filter(|line| line.starts_with("GET /v1/models"))
+            .count(),
+        1
+    );
+    // The refetch saved the list in host state, under the state lock.
+    assert!(
+        fs::read_to_string(chat_state(&scratch))
+            .expect("state")
+            .contains("\"b\"")
+    );
+
+    upstream.set_models(&["a", "b", "c"]);
+    let out = run_past_held_lock(&scratch, &["provider", "models", "chat"]);
+    assert!(out.ok().starts_with("3 models from chat\n"), "{out:#?}");
+    assert!(
+        fs::read_to_string(chat_state(&scratch))
+            .expect("state")
+            .contains("\"c\"")
+    );
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_provider_refresh_one_shot() {
+    let upstream = Upstream::start(&["a", "b"]);
+    let scratch = Scratch::new("127.0.0.1:0", &upstream.config("\"new-*\""));
+    scratch.hofund(&["provider", "fetch", "chat"]).ok();
+    let out = scratch.hofund(&["provider", "models", "chat", "a", "b"]);
+    assert!(
+        out.ok().starts_with("picks: default -> a, b\nrevision: "),
+        "{out:#?}"
+    );
+
+    upstream.set_models(&["b", "new-x", "other"]);
+    let out = scratch.hofund(&["provider", "refresh", "chat"]);
+    let text = out.ok();
+    assert!(
+        text.starts_with(
+            "3 models from chat\n\
+             + newly listed, taken by its auto-include rules: new-x\n\
+             ! gone from its list, so no longer picked: a\n\
+             id: chat\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("\npicks: new-x, b\n"), "{text}");
+    assert!(text.contains("\n  * new-x"), "{text}");
+    assert!(text.contains("\n    other"), "{text}");
+
+    let error = scratch.hofund(&["provider", "refresh", "chat", "x"]);
+    assert_eq!(error.code, Some(2), "{error:#?}");
+    assert!(
+        error
+            .stderr
+            .contains("hofund provider models <id> <ids...> picks from it")
+    );
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn one_shot_model_refresh_uses_host_state_lock() {
+    let upstream = Upstream::start(&["a"]);
+    let scratch = Scratch::new("127.0.0.1:0", &upstream.config(""));
+    scratch.hofund(&["provider", "refresh", "chat"]).ok();
+    upstream.set_models(&["a", "b"]);
+    let out = run_past_held_lock(&scratch, &["provider", "refresh", "chat"]);
+    assert!(out.ok().starts_with("2 models from chat\n"), "{out:#?}");
+    upstream.set_models(&["a", "b", "c"]);
+    let out = run_past_held_lock(&scratch, &["provider", "models", "chat"]);
+    assert!(out.ok().starts_with("3 models from chat\n"), "{out:#?}");
+    assert!(
+        fs::read_to_string(chat_state(&scratch))
+            .expect("state")
+            .contains("\"c\"")
+    );
+}
+
+#[test]
+fn offline_provider_picks_one_shot_writes_host_state_under_lock() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let out = scratch.hofund(&["provider", "models", "chat", "a", "b"]);
+    assert!(
+        out.ok().starts_with("picks: default -> a, b\nrevision: "),
+        "{out:#?}"
+    );
+    assert!(
+        fs::read_to_string(chat_state(&scratch))
+            .expect("state")
+            .contains("\"a\"")
+    );
+
+    let out = run_past_held_lock(&scratch, &["provider", "models", "chat", "-a", "+c"]);
+    assert!(
+        out.ok().starts_with("picks: a, b -> b, c\nrevision: "),
+        "{out:#?}"
+    );
+    let show = scratch.hofund(&["provider", "show", "chat"]);
+    assert!(show.ok().contains("\npicks: b, c"), "{show:#?}");
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn provider_picks_edit_forms_match_reference() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let picks = |args: &[&str]| {
+        let mut full = vec!["provider", "models", "chat"];
+        full.extend_from_slice(args);
+        scratch.hofund(&full)
+    };
+    assert!(
+        picks(&["a", "b", "c"])
+            .ok()
+            .starts_with("picks: default -> a, b, c\n")
+    );
+    assert!(picks(&["-b"]).ok().starts_with("picks: a, b, c -> a, c\n"));
+    assert!(
+        picks(&["+d", "+a"])
+            .ok()
+            .starts_with("picks: a, c -> a, c, d\n")
+    );
+    assert!(
+        picks(&["x", "y"])
+            .ok()
+            .starts_with("picks: a, c, d -> x, y\n")
+    );
+    let mixed = picks(&["z", "+w"]);
+    assert!(mixed.failed().contains("+id or -id"), "{mixed:#?}");
+    let missing = picks(&["-zz"]);
+    assert!(!missing.failed().is_empty(), "{missing:#?}");
+    let empty = picks(&["-x", "-y"]);
+    assert!(!empty.failed().is_empty(), "{empty:#?}");
+    assert!(empty.stdout.is_empty(), "{empty:#?}");
+    assert!(picks(&["-"]).ok().starts_with("picks: x, y -> default\n"));
+    assert!(picks(&["x"]).ok().starts_with("picks: default -> x\n"));
+    assert!(picks(&["all"]).ok().starts_with("picks: x -> default\n"));
+}
+
+#[test]
+fn concurrent_one_shot_picks_serialize_on_state_lock() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    scratch.hofund(&["provider", "models", "chat", "a"]).ok();
+    // Three writers: each loses at most two races, within the three tries.
+    let children = ["+x", "+y", "+z"].map(|change| {
+        spawn(&mut scratch.command(hofund(), &["provider", "models", "chat", change]))
+    });
+    for child in children {
+        let output = finish(child, DEADLINE);
+        assert!(output.status.success(), "{output:?}");
+    }
+    let show = scratch.hofund(&["provider", "show", "chat"]);
+    let picks = show
+        .ok()
+        .lines()
+        .find_map(|line| line.strip_prefix("picks: "))
+        .expect("picks line")
+        .split(", ")
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(picks, ["a", "x", "y", "z"].map(str::to_owned).into());
+}
+
+#[test]
+fn offline_provider_picks_save_failure_exits_nonzero() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    // The state directory cannot be created, so neither the state file nor
+    // its lock can be written beside the config.
+    let host = models_dir(&scratch).parent().expect("host").to_path_buf();
+    fs::create_dir_all(&host).expect("host dir");
+    fs::set_permissions(&host, fs::Permissions::from_mode(0o500)).expect("chmod");
+    if fs::create_dir(host.join("probe")).is_ok() {
+        // Permissions do not bind this user (root); nothing to test.
+        return;
+    }
+    let out = scratch.hofund(&["provider", "models", "chat", "a"]);
+    let entries = fs::read_dir(&host).expect("host dir").count();
+    fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).expect("chmod back");
+    let error = out.failed();
+    assert!(error.contains("were not saved"), "{out:#?}");
+    assert!(out.stdout.is_empty(), "{out:#?}");
+    assert_eq!(entries, 0);
+    // The lock fell back to the runtime directory.
+    let fallback = fs::read_dir(scratch.run.join("hofund"))
+        .expect("runtime dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with("models-chat-") && name.ends_with(".json.lock"))
+        .count();
+    assert_eq!(fallback, 1);
+}
+
+#[test]
+fn offline_model_list_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let out = scratch.hofund(&["model", "list"]);
+    assert!(out.ok().lines().any(|line| line == "m"), "{out:#?}");
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
+fn offline_model_show_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    assert_eq!(
+        scratch.hofund(&["model", "show", "m"]).ok(),
+        "model: m\nrouted: yes"
+    );
+    let out = scratch.hofund(&["model", "show", "ghost"]);
+    assert_eq!(out.failed(), "unknown model `ghost`: no route serves it");
+    scratch.assert_no_daemon_state();
+}
