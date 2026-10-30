@@ -559,6 +559,19 @@ fn offline_healthcheck_fails_without_daemon() {
 }
 
 #[test]
+fn explicit_control_endpoint_never_falls_back_to_one_shot() {
+    let port = free_port();
+    let scratch = Scratch::new(&format!("127.0.0.1:{}", free_port()), ROUTED)
+        .with_env("HOFUND_CONTROL", &format!("127.0.0.1:{port}"));
+    let out = scratch.hofund(&["usage"]);
+    assert!(out.failed().starts_with("HOFUND_CONTROL:"), "{out:#?}");
+    // One-shot would have created the token and the usage store.
+    assert!(!scratch.config.parent().expect("cfg").join("token").exists());
+    assert!(!scratch.config.parent().expect("cfg").join(".hofund").exists());
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
 fn healthcheck_probes_model_gateway_not_control() {
     let gateway = fake_health("{\"status\":\"ok\",\"service\":\"hofund\"}");
     let scratch =
