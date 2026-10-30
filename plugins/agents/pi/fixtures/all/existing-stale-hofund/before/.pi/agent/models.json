@@ -1,0 +1,14 @@
+{
+  "providers": {
+    "hofund": {
+      "name": "stale",
+      "baseUrl": "https://stale.example/v1",
+      "api": "openai-responses",
+      "apiKey": "stale-token",
+      "compat": { "sendSessionAffinityHeaders": false, "supportsDeveloperRole": false },
+      "models": [{ "id": "stale-route", "contextWindow": 1 }],
+      "headers": { "x-keep": "keep" }
+    },
+    "other": { "baseUrl": "https://other.example/v1" }
+  }
+}

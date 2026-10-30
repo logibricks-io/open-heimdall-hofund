@@ -1,0 +1,30 @@
+{
+  "providers": {
+    "ollama": {
+      "baseUrl": "http://localhost:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "models": [
+        {
+          "id": "llama3.1:8b"
+        }
+      ]
+    },
+    "hofund": {
+      "name": "hofund",
+      "baseUrl": "http://127.0.0.1:3425/v1",
+      "api": "openai-completions",
+      "apiKey": "old-token",
+      "compat": {
+        "sendSessionAffinityHeaders": true
+      },
+      "models": [
+        {
+          "id": "route-a",
+          "name": "route-a",
+          "reasoning": false
+        }
+      ]
+    }
+  }
+}

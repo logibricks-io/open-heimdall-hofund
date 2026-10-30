@@ -10,7 +10,7 @@ fn production_agent_list_contains_migrated_agents() {
     let ids: Vec<&str> = agents().iter().map(|agent| agent.id().as_str()).collect();
     assert_eq!(
         ids,
-        ["claude-code", "codex", "crush", "gemini-cli", "opencode"]
+        ["claude-code", "codex", "crush", "gemini-cli", "opencode", "pi"]
     );
     assert_eq!(
         agent("claude-code").expect("claude-code").id().as_str(),

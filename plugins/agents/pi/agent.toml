@@ -1,0 +1,60 @@
+id = "pi"
+display_name = "Pi"
+binary = "pi"
+
+# Pi keeps its custom providers in ~/.pi/agent/models.json on every OS.
+# PI_CODING_AGENT_DIR replaces ~/.pi/agent when it is an absolute path.
+# Source: https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/models.md
+[[file]]
+id = "models"
+kind = "json"
+linux = "~/.pi/agent/models.json"
+macos = "~/.pi/agent/models.json"
+windows = "~/.pi/agent/models.json"
+env_override = "PI_CODING_AGENT_DIR"
+env_replaces = "~/.pi/agent"
+
+# The provider entry is providers.hofund on the OpenAI Chat Completions API.
+[[set]]
+file = "models"
+key = "providers.hofund.name"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "models"
+key = "providers.hofund.baseUrl"
+slot = "v1"
+
+[[set]]
+file = "models"
+key = "providers.hofund.api"
+slot = { literal = "openai-completions" }
+
+[[set]]
+file = "models"
+key = "providers.hofund.apiKey"
+slot = "token"
+
+# Pi sends the session affinity headers only when asked to; the gateway uses
+# them to group a session's turns.
+[[set]]
+file = "models"
+key = "providers.hofund.compat.sendSessionAffinityHeaders"
+slot = { json = "true" }
+
+# models has one entry per route. This build has no catalog values per model,
+# so each entry names the route and says the model does not reason; Pi then
+# uses its default context window and output limit.
+[[set]]
+file = "models"
+key = "providers.hofund.models"
+slot = { model_array = { fields = [
+    { key = "id", value = "id" },
+    { key = "name", value = "id" },
+    { key = "reasoning", json = "false" },
+] } }
+
+# The model Pi starts on is the settings.json pair defaultProvider and
+# defaultModel. The engine writes one key per model setting, so this adapter
+# does not pick a model: writing defaultModel alone could pair a hofund route
+# with another provider. Pick hofund in Pi's /model picker after connecting.
