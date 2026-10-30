@@ -1559,3 +1559,147 @@ fn shipped_goose_lets_goose_ask_the_gateway_only_when_no_route_is_listed() {
     agent.disconnect(&session, false).expect("disconnect");
     assert!(!root.exists());
 }
+
+const ZED_SETTINGS: &str = r#"// Zed settings
+{
+  "theme": "One Dark", // keep this note
+  "agent": {
+    "default_model": { "provider": "anthropic", "model": "claude-sonnet-4" }
+  }
+}
+"#;
+
+fn zed_store_session(
+    home: &Path,
+) -> (
+    Session,
+    std::sync::Arc<hofund_kit_agent::MemoryCredentialStore>,
+) {
+    let store = std::sync::Arc::new(hofund_kit_agent::MemoryCredentialStore::new());
+    let shared: std::sync::Arc<dyn hofund_plugin_api::CredentialStore> = store.clone();
+    (Session::new(home).with_credential_store(shared), store)
+}
+
+#[test]
+fn shipped_zed_keeps_its_key_in_the_store_and_gives_the_user_model_back() {
+    let home = scratch();
+    let (session, store) = zed_store_session(&home);
+    let path = home.join(".config").join("zed").join("settings.json");
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, ZED_SETTINGS).expect("seed");
+    let target = target();
+    let agent = adapter("zed", TargetOs::Linux);
+    let plan = agent.plan(&session, &target).expect("plan");
+    assert!(
+        plan.changes()
+            .iter()
+            .any(|change| change.path() == Path::new("credential store: http://127.0.0.1:3425/v1")),
+        "{plan:?}"
+    );
+    agent.apply(&session, &target).expect("apply");
+    let applied = fs::read_to_string(&path).expect("read");
+    assert!(!applied.contains("local-token"), "{applied}");
+    // The JSON editor reads the comments but does not keep them while
+    // connected (#145); an exact disconnect brings them back.
+    assert!(!applied.contains("// keep this note"), "{applied}");
+    let items = store.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].url(), "http://127.0.0.1:3425/v1");
+    assert_eq!(items[0].account(), "Bearer");
+    assert_eq!(items[0].label(), "zed-github-account");
+    assert_eq!(
+        items[0].windows_target(),
+        "zed:url=http://127.0.0.1:3425/v1"
+    );
+    assert_eq!(
+        store
+            .secret("http://127.0.0.1:3425/v1", "Bearer")
+            .as_deref(),
+        Some("local-token")
+    );
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("claude-sonnet-4")
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let picked: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+    assert_eq!(
+        picked["agent"]["default_model"],
+        serde_json::json!({ "provider": "hofund", "model": "route-a" })
+    );
+    agent.set_model(&session, &target, None).expect("clear");
+    // Zed reads default_model only whole, so clearing puts back the user's
+    // object rather than leaving a provider with no model.
+    let cleared: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+    assert_eq!(
+        cleared["agent"]["default_model"],
+        serde_json::json!({ "provider": "anthropic", "model": "claude-sonnet-4" })
+    );
+    // Removing the store item by hand reads as not connected.
+    store.set(&items[0], "someone-else");
+    assert!(!agent.status(&session, &target).expect("status").connected());
+    store.set(&items[0], "local-token");
+    assert!(agent.status(&session, &target).expect("status").connected());
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(fs::read_to_string(&path).expect("read"), ZED_SETTINGS);
+    assert!(store.items().is_empty());
+}
+
+#[test]
+fn shipped_zed_without_a_store_refuses_to_connect_and_writes_nothing() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let agent = adapter("zed", TargetOs::Linux);
+    let error = agent.apply(&session, &target()).expect_err("no store");
+    assert!(error.to_string().contains("OS credential store"), "{error}");
+    assert!(!home.join(".config").exists());
+}
+
+#[test]
+fn shipped_zed_settings_live_under_appdata_on_windows() {
+    let home = scratch();
+    let (session, store) = zed_store_session(&home);
+    let agent = adapter("zed", TargetOs::Windows);
+    agent.apply(&session, &target()).expect("apply");
+    assert!(
+        home.join("AppData/Roaming/Zed/settings.json").is_file(),
+        "settings not written under AppData"
+    );
+    assert_eq!(
+        store.items()[0].windows_target(),
+        "zed:url=http://127.0.0.1:3425/v1"
+    );
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!home.join("AppData").exists());
+}
+
+#[test]
+fn shipped_zed_clear_in_a_fresh_home_drops_the_whole_default_model() {
+    let home = scratch();
+    let (session, store) = zed_store_session(&home);
+    let path = home.join(".config").join("zed").join("settings.json");
+    let target = target();
+    let agent = adapter("zed", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("route-a")
+    );
+    agent.set_model(&session, &target, None).expect("clear");
+    let cleared: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+    assert_eq!(cleared.get("agent"), None, "{cleared}");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!home.join(".config").exists());
+    assert!(store.items().is_empty());
+}
