@@ -1,0 +1,59 @@
+id = "crush"
+display_name = "Crush"
+binary = "crush"
+
+# Crush reads its global config from ~/.config/crush/crush.json on Linux and
+# macOS and from %LOCALAPPDATA%\crush\crush.json on Windows. This adapter
+# edits those default paths only: XDG_CONFIG_HOME and a relocated
+# LOCALAPPDATA are not followed, because one file entry cannot name a
+# different override variable per OS. Source:
+# https://github.com/charmbracelet/crush (Configuration).
+[[file]]
+id = "config"
+kind = "json"
+linux = "~/.config/crush/crush.json"
+macos = "~/.config/crush/crush.json"
+windows = "~/AppData/Local/crush/crush.json"
+
+# The provider entry is providers.hofund with type openai, base_url (which
+# includes /v1), api_key, and models.
+[[set]]
+file = "config"
+key = "providers.hofund.type"
+slot = { literal = "openai" }
+
+[[set]]
+file = "config"
+key = "providers.hofund.name"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "config"
+key = "providers.hofund.base_url"
+slot = "v1"
+
+[[set]]
+file = "config"
+key = "providers.hofund.api_key"
+slot = "token"
+
+# models is an array with one object per route. This build has no catalog
+# values per model, so every entry uses the route id as its name, a
+# 200000-token context window, and 16384 default max tokens; without
+# default_max_tokens Crush caps every reply at 16384 tokens anyway.
+# can_reason is false because reasoning support is not known per route.
+[[set]]
+file = "config"
+key = "providers.hofund.models"
+slot = { model_array = { fields = [
+    { key = "id", value = "id" },
+    { key = "name", value = "id" },
+    { key = "context_window", json = "200000" },
+    { key = "default_max_tokens", json = "16384" },
+    { key = "can_reason", json = "false" },
+] } }
+
+# The model Crush uses is models.large, an object holding provider and model.
+# The engine writes one key per model setting, so this adapter does not pick
+# a model: writing models.large.model alone would leave provider pointing at
+# another provider. Pick hofund in Crush's model picker after connecting.

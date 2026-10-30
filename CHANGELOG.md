@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent descriptions can edit YAML files (G1): `kind = "yaml"` in an
   `agent.toml` file entry. Edits re-emit the file, so comments and layout are
   not kept; disconnecting restores the original bytes from the backup.
+- Crush agent (G3): `hofund agent connect crush` writes `providers.hofund`
+  (type `openai`, `base_url` with `/v1`, `api_key`, and one `models` entry per
+  route) to `~/.config/crush/crush.json`, or
+  `%LOCALAPPDATA%\crush\crush.json` on Windows. It does not pick a model;
+  choose hofund in Crush's model picker.
 - Two agent slots for JSON and YAML files (G2): `{ json = "<json>" }` writes a
   fixed typed value such as `false`, and `{ model_array = { fields = [...] } }`
   writes one object per distinct visible model, each field holding the model
