@@ -32,8 +32,9 @@ pub fn contribute() -> Contribution {
 /// The most of a catalog Codex reads; past it the whole list fails to load.
 pub const MOST: usize = 1 << 20;
 
-/// The instructions every entry gives Codex's model.
-pub const BASE_INSTRUCTIONS: &str = include_str!("base_instructions.md");
+pub use instructions::BASE_INSTRUCTIONS;
+
+mod instructions;
 
 /// The header that says how many models were left out to fit [`MOST`].
 pub const LEFT_OUT_HEADER: &str = "x-hofund-left-out";
