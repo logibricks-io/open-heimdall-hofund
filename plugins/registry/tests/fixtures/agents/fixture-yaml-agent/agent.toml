@@ -1,0 +1,35 @@
+id = "fixture-yaml-agent"
+display_name = "Fixture YAML Agent"
+binary = "fixture-yaml"
+
+[[file]]
+id = "config"
+kind = "yaml"
+linux = "~/.config/fixture-yaml/config.yaml"
+macos = "~/Library/Application Support/fixture-yaml/config.yaml"
+windows = "~/AppData/Roaming/fixture-yaml/config.yaml"
+env_override = "FIXTURE_YAML_HOME"
+
+[[set]]
+file = "config"
+key = "model.provider"
+slot = { literal = "hofund" }
+
+[[set]]
+file = "config"
+key = "providers.hofund.base_url"
+slot = "v1"
+
+[[set]]
+file = "config"
+key = "providers.hofund.api_key"
+slot = "token"
+
+[[set]]
+file = "config"
+key = "model.default"
+slot = { model_if_unset = {} }
+
+[model]
+file = "config"
+key = "model.default"

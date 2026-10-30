@@ -240,6 +240,7 @@ impl Engine {
                     ApiFileKind::Json => FileKind::Json,
                     ApiFileKind::Toml => FileKind::Toml,
                     ApiFileKind::Env => FileKind::Env,
+                    ApiFileKind::Yaml => FileKind::Yaml,
                     _ => {
                         return Err(AgentError::message(format!(
                             "agent `{}` file `{}` has an unsupported file kind",
@@ -1505,7 +1506,11 @@ mod tests {
     fn real_fixture_trees_pass_layout_validation() {
         let agents = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../plugins/registry/tests/fixtures/agents");
-        for id in ["fixture-toml-agent", "fixture-json-agent"] {
+        for id in [
+            "fixture-toml-agent",
+            "fixture-json-agent",
+            "fixture-yaml-agent",
+        ] {
             golden_layout(id, &agents.join(id).join("fixtures"))
                 .unwrap_or_else(|error| panic!("{id}: {error}"));
         }

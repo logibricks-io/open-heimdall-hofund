@@ -1,7 +1,8 @@
-//! JSON, TOML, and env-file edits that keep unrelated keys.
+//! JSON, TOML, YAML, and env-file edits that keep unrelated keys.
 
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item};
+use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 
 use crate::AgentError;
 
@@ -10,6 +11,7 @@ pub(crate) enum FileKind {
     Json,
     Toml,
     Env,
+    Yaml,
 }
 
 pub(crate) struct Assignment {
@@ -28,6 +30,7 @@ pub(crate) fn render(
         FileKind::Json => render_json(original.unwrap_or(""), assignments)?,
         FileKind::Toml => render_toml(original.unwrap_or(""), assignments)?,
         FileKind::Env => render_env(original.unwrap_or(""), assignments),
+        FileKind::Yaml => render_yaml(original.unwrap_or(""), assignments)?,
     };
     Ok(text.into_bytes())
 }
@@ -37,6 +40,7 @@ pub(crate) fn get(kind: FileKind, text: &str, key: &str) -> Result<Option<String
         FileKind::Json => json_get(&json_root(text)?, key),
         FileKind::Toml => Ok(toml_get(&parse_toml(text)?, key)),
         FileKind::Env => Ok(env_get(text, key)),
+        FileKind::Yaml => Ok(yaml_get(&yaml_root(text)?, key)),
     }
 }
 
@@ -50,6 +54,7 @@ pub(crate) fn string_at(
         FileKind::Json => json_string(&json_root(text)?, key),
         FileKind::Toml => Ok(toml_get(&parse_toml(text)?, key)),
         FileKind::Env => Ok(env_get(text, key)),
+        FileKind::Yaml => Ok(yaml_string(&yaml_root(text)?, key)),
     }
 }
 
@@ -63,6 +68,7 @@ pub(crate) fn remove_keys(
         FileKind::Json => remove_json(original, keys)?,
         FileKind::Toml => remove_toml(original, keys)?,
         FileKind::Env => remove_env(original, keys),
+        FileKind::Yaml => remove_yaml(original, keys)?,
     };
     Ok(text.into_bytes())
 }
@@ -79,6 +85,10 @@ pub(crate) fn is_empty_document(kind: FileKind, bytes: &[u8]) -> Result<bool, Ag
         FileKind::Env => Ok(!split_lines(text)
             .iter()
             .any(|line| parse_assignment(line).is_some())),
+        FileKind::Yaml => Ok(match yaml_root(text)? {
+            Yaml::Hash(hash) => hash.is_empty(),
+            _ => false,
+        }),
     }
 }
 
@@ -370,6 +380,205 @@ fn set_json(
         object.insert((*key).to_owned(), Value::Object(Map::new()));
     }
     set_json(object.get_mut(*key).expect("child"), rest, text, raw_json)
+}
+
+fn render_yaml(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
+    let mut root = yaml_root(original)?;
+    for assignment in assignments {
+        let value = if assignment.raw_json {
+            let value: Value = serde_json::from_str(&assignment.value).map_err(|error| {
+                AgentError::message(format!("`{}` is not JSON: {error}", assignment.key))
+            })?;
+            json_to_yaml(&value)
+        } else {
+            Yaml::String(assignment.value.clone())
+        };
+        set_yaml(&mut root, &split_key(assignment.key), value)?;
+    }
+    emit_yaml(&root)
+}
+
+fn remove_yaml(original: &str, keys: &[&str]) -> Result<String, AgentError> {
+    let mut root = yaml_root(original)?;
+    for key in keys {
+        unset_yaml(&mut root, &split_key(key))?;
+    }
+    emit_yaml(&root)
+}
+
+/// Parses one YAML document. An empty file is an empty mapping.
+fn yaml_root(text: &str) -> Result<Yaml, AgentError> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut documents = YamlLoader::load_from_str(text)
+        .map_err(|error| AgentError::message(format!("YAML: {error}")))?;
+    match documents.len() {
+        0 => Ok(Yaml::Hash(yaml_rust2::yaml::Hash::new())),
+        1 => {
+            let root = documents.remove(0);
+            Ok(if root.is_null() {
+                Yaml::Hash(yaml_rust2::yaml::Hash::new())
+            } else {
+                root
+            })
+        }
+        _ => Err(AgentError::message(
+            "YAML: the file has more than one document; keep one document before connecting",
+        )),
+    }
+}
+
+fn emit_yaml(root: &Yaml) -> Result<String, AgentError> {
+    let mut text = String::new();
+    YamlEmitter::new(&mut text)
+        .dump(root)
+        .map_err(|error| AgentError::message(format!("YAML: {error}")))?;
+    let mut text = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---"))
+        .unwrap_or(&text)
+        .trim_start_matches(' ')
+        .to_owned();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+fn yaml_key(key: &str) -> Yaml {
+    Yaml::String(key.to_owned())
+}
+
+fn yaml_child<'a>(value: &'a Yaml, path: &[&str]) -> Option<&'a Yaml> {
+    let mut cursor = value;
+    for part in path {
+        cursor = match cursor {
+            Yaml::Hash(hash) => hash.get(&yaml_key(part))?,
+            _ => return None,
+        };
+    }
+    Some(cursor)
+}
+
+fn yaml_string(value: &Yaml, key: &str) -> Option<String> {
+    match yaml_child(value, &split_key(key))? {
+        Yaml::String(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// The value at `key`: a string as itself, anything else as JSON text.
+fn yaml_get(value: &Yaml, key: &str) -> Option<String> {
+    match yaml_child(value, &split_key(key))? {
+        Yaml::String(text) => Some(text.clone()),
+        Yaml::Null | Yaml::BadValue => None,
+        other => Some(yaml_to_json(other).to_string()),
+    }
+}
+
+fn set_yaml(value: &mut Yaml, path: &[&str], written: Yaml) -> Result<(), AgentError> {
+    let Some((key, rest)) = path.split_first() else {
+        return Err(AgentError::message("empty YAML key"));
+    };
+    let Yaml::Hash(hash) = value else {
+        return Err(AgentError::message("YAML value is not a mapping"));
+    };
+    if rest.is_empty() {
+        // Replacing in place keeps the key where the user put it.
+        match hash.get_mut(&yaml_key(key)) {
+            Some(slot) => *slot = written,
+            None => {
+                hash.insert(yaml_key(key), written);
+            }
+        }
+        return Ok(());
+    }
+    // `entry` would move an existing key to the end, so look it up first.
+    let name = yaml_key(key);
+    if !hash.contains_key(&name) {
+        hash.insert(name.clone(), Yaml::Hash(yaml_rust2::yaml::Hash::new()));
+    }
+    let Some(child) = hash.get_mut(&name) else {
+        return Err(AgentError::message(format!("`{key}` is missing")));
+    };
+    if child.is_null() {
+        *child = Yaml::Hash(yaml_rust2::yaml::Hash::new());
+    }
+    if !child.is_hash() {
+        return Err(AgentError::message(format!("`{key}` is not a mapping")));
+    }
+    set_yaml(child, rest, written)
+}
+
+fn unset_yaml(value: &mut Yaml, path: &[&str]) -> Result<(), AgentError> {
+    let Some((key, rest)) = path.split_first() else {
+        return Err(AgentError::message("empty YAML key"));
+    };
+    let Yaml::Hash(hash) = value else {
+        return Err(AgentError::message("YAML value is not a mapping"));
+    };
+    let key = yaml_key(key);
+    if rest.is_empty() {
+        hash.remove(&key);
+        return Ok(());
+    }
+    let Some(child) = hash.get_mut(&key) else {
+        return Ok(());
+    };
+    if !child.is_hash() {
+        return Err(AgentError::message(format!(
+            "`{}` is not a mapping",
+            key.as_str().unwrap_or_default()
+        )));
+    }
+    unset_yaml(child, rest)?;
+    if matches!(child, Yaml::Hash(inner) if inner.is_empty()) {
+        hash.remove(&key);
+    }
+    Ok(())
+}
+
+fn json_to_yaml(value: &Value) -> Yaml {
+    match value {
+        Value::Null => Yaml::Null,
+        Value::Bool(flag) => Yaml::Boolean(*flag),
+        Value::Number(number) => number
+            .as_i64()
+            .map_or_else(|| Yaml::Real(number.to_string()), Yaml::Integer),
+        Value::String(text) => Yaml::String(text.clone()),
+        Value::Array(items) => Yaml::Array(items.iter().map(json_to_yaml).collect()),
+        Value::Object(object) => Yaml::Hash(
+            object
+                .iter()
+                .map(|(key, value)| (yaml_key(key), json_to_yaml(value)))
+                .collect(),
+        ),
+    }
+}
+
+fn yaml_to_json(value: &Yaml) -> Value {
+    match value {
+        Yaml::Real(text) => text
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map_or_else(|| Value::String(text.clone()), Value::Number),
+        Yaml::Integer(number) => Value::from(*number),
+        Yaml::String(text) => Value::String(text.clone()),
+        Yaml::Boolean(flag) => Value::Bool(*flag),
+        Yaml::Array(items) => Value::Array(items.iter().map(yaml_to_json).collect()),
+        Yaml::Hash(hash) => Value::Object(
+            hash.iter()
+                .map(|(key, value)| {
+                    let key = match key {
+                        Yaml::String(text) => text.clone(),
+                        other => yaml_to_json(other).to_string(),
+                    };
+                    (key, yaml_to_json(value))
+                })
+                .collect(),
+        ),
+        Yaml::Alias(_) | Yaml::Null | Yaml::BadValue => Value::Null,
+    }
 }
 
 fn parse_toml(text: &str) -> Result<DocumentMut, AgentError> {
@@ -683,7 +892,168 @@ fn loosen_json(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Assignment, FileKind, get, is_empty_document, remove_keys, render};
+    use super::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
+
+    fn assign(key: &'static str, value: &str, raw_json: bool) -> Assignment {
+        Assignment {
+            key,
+            value: value.to_owned(),
+            raw_json,
+        }
+    }
+
+    #[test]
+    fn yaml_writes_into_existing_parents_in_place() {
+        let original = "a:\n  x: 1\nb: 2\n";
+        let assignments = [assign("a.z", "3", false), assign("a.x", "4", false)];
+        let bytes = render(FileKind::Yaml, Some(original), &assignments).expect("render");
+        assert_eq!(
+            String::from_utf8(bytes).expect("utf8"),
+            "a:\n  x: \"4\"\n  z: \"3\"\nb: 2\n"
+        );
+    }
+
+    #[test]
+    fn yaml_keeps_unrelated_keys_and_is_stable() {
+        let original = "# a comment\nGOOSE_PROVIDER: openai\nextensions:\n  dev:\n    enabled: true\n    timeout: 300\nratio: 1.50\n";
+        let assignments = [
+            assign("GOOSE_PROVIDER", "hofund", false),
+            assign("model.provider", "hofund", false),
+        ];
+        let bytes = render(FileKind::Yaml, Some(original), &assignments).expect("render");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert!(!text.starts_with("---"), "{text}");
+        assert!(text.ends_with('\n'));
+        assert_eq!(
+            get(FileKind::Yaml, &text, "GOOSE_PROVIDER").expect("get"),
+            Some("hofund".to_owned())
+        );
+        assert_eq!(
+            get(FileKind::Yaml, &text, "model.provider").expect("get"),
+            Some("hofund".to_owned())
+        );
+        assert_eq!(
+            get(FileKind::Yaml, &text, "extensions.dev.enabled").expect("get"),
+            Some("true".to_owned())
+        );
+        assert_eq!(
+            get(FileKind::Yaml, &text, "extensions.dev.timeout").expect("get"),
+            Some("300".to_owned())
+        );
+        assert!(text.contains("ratio: 1.50"), "{text}");
+        assert_eq!(
+            string_at(FileKind::Yaml, &text, "extensions.dev.enabled").expect("string"),
+            None
+        );
+        let order: Vec<&str> = text.lines().filter(|line| !line.starts_with(' ')).collect();
+        assert_eq!(
+            order,
+            [
+                "GOOSE_PROVIDER: hofund",
+                "extensions:",
+                "ratio: 1.50",
+                "model:"
+            ]
+        );
+        let again = render(FileKind::Yaml, Some(&text), &assignments).expect("again");
+        assert_eq!(again, text.into_bytes());
+    }
+
+    #[test]
+    fn yaml_writes_raw_json_as_yaml_values() {
+        let assignments = [assign(
+            "providers.hofund",
+            r#"{"base_url":"http://127.0.0.1:1/v1","models":["a","b"],"limit":2,"rate":0.5,"off":false,"none":null}"#,
+            true,
+        )];
+        let bytes = render(FileKind::Yaml, None, &assignments).expect("render");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert_eq!(
+            get(FileKind::Yaml, &text, "providers.hofund").expect("get"),
+            Some(
+                r#"{"base_url":"http://127.0.0.1:1/v1","models":["a","b"],"limit":2,"rate":0.5,"off":false,"none":null}"#
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            get(FileKind::Yaml, &text, "providers.hofund.none").expect("get"),
+            None
+        );
+        let error = render(FileKind::Yaml, None, &[assign("x", "{", true)]).expect_err("bad json");
+        assert!(error.to_string().contains("`x` is not JSON"), "{error}");
+    }
+
+    #[test]
+    fn yaml_removal_drops_empty_parents_only() {
+        let original = "model:\n  provider: hofund\n  default: m\nproviders:\n  hofund:\n    url: u\nkeep: 1\n";
+        let bytes = remove_keys(
+            FileKind::Yaml,
+            original,
+            &[
+                "model.provider",
+                "providers.hofund.url",
+                "absent.key",
+                "keep.deeper",
+            ],
+        )
+        .expect_err("keep is a scalar")
+        .to_string();
+        assert!(bytes.contains("`keep` is not a mapping"), "{bytes}");
+        let bytes = remove_keys(
+            FileKind::Yaml,
+            original,
+            &["model.provider", "providers.hofund.url", "absent.key"],
+        )
+        .expect("remove");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert_eq!(text, "model:\n  default: m\nkeep: 1\n");
+        assert!(!is_empty_document(FileKind::Yaml, text.as_bytes()).expect("empty"));
+        let bytes = remove_keys(FileKind::Yaml, &text, &["model.default", "keep"]).expect("remove");
+        assert!(is_empty_document(FileKind::Yaml, &bytes).expect("empty"));
+        assert!(is_empty_document(FileKind::Yaml, b"# only a comment\n").expect("empty"));
+        assert!(!is_empty_document(FileKind::Yaml, b"- a\n").expect("list"));
+    }
+
+    #[test]
+    fn yaml_rejects_shapes_it_cannot_edit() {
+        let error = render(
+            FileKind::Yaml,
+            Some("a: 1\n---\nb: 2\n"),
+            &[assign("a", "x", false)],
+        )
+        .expect_err("two documents");
+        assert!(
+            error.to_string().contains("more than one document"),
+            "{error}"
+        );
+        let error = render(FileKind::Yaml, Some("- a\n"), &[assign("a", "x", false)])
+            .expect_err("list root");
+        assert!(error.to_string().contains("not a mapping"), "{error}");
+        let error = render(
+            FileKind::Yaml,
+            Some("model: m\n"),
+            &[assign("model.provider", "x", false)],
+        )
+        .expect_err("scalar parent");
+        assert!(
+            error.to_string().contains("`model` is not a mapping"),
+            "{error}"
+        );
+        let error = render(FileKind::Yaml, Some("a: [\n"), &[]).expect_err("syntax");
+        assert!(error.to_string().starts_with("YAML: "), "{error}");
+        let bytes = render(
+            FileKind::Yaml,
+            Some("\u{feff}model:\n"),
+            &[assign("model.provider", "x", false)],
+        )
+        .expect("null parent becomes a mapping");
+        assert_eq!(
+            String::from_utf8(bytes).expect("utf8"),
+            "model:\n  provider: x\n"
+        );
+        let bytes = render(FileKind::Yaml, Some(""), &[]).expect("empty");
+        assert_eq!(String::from_utf8(bytes).expect("utf8"), "{}\n");
+    }
 
     #[test]
     fn json_keeps_unrelated_keys_and_accepts_jsonc() {

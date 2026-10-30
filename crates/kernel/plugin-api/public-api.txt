@@ -194,6 +194,7 @@ FileKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 FileKind::Env
 FileKind::Json
 FileKind::Toml
+FileKind::Yaml
 Forward
 Forward #[non_exhaustive] derives(Clone)
 Forward::fn body_for (& self , model : & str) -> Result < RawBody , PluginError >
