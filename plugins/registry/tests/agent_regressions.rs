@@ -1178,6 +1178,16 @@ fn shipped_cline_pick_takes_over_openai_compatible_and_clear_gives_it_back() {
     write(&providers, &own.to_string());
     agent.refresh_token(&session, &later).expect("refresh");
     assert_eq!(read(), own);
+
+    // An entry without a key is not hofund's either; a refresh adds none.
+    let mut keyless = expected.clone();
+    keyless["providers"]["openai-compatible"]["settings"]
+        .as_object_mut()
+        .expect("settings")
+        .remove("apiKey");
+    write(&providers, &keyless.to_string());
+    agent.refresh_token(&session, &later).expect("refresh");
+    assert_eq!(read(), keyless);
     write(&providers, &expected.to_string());
 
     agent.set_model(&session, &target, None).expect("clear");
