@@ -1469,6 +1469,85 @@ pub enum Slot {
     /// object is written as raw JSON, and this slot is valid only in JSON files.
     #[doc(hidden)]
     CatalogModels,
+    /// A fixed JSON value, such as `false`, `3`, or an object.
+    ///
+    /// The text is written as raw JSON, and this slot is valid only in JSON
+    /// and YAML files.
+    #[doc(hidden)]
+    Json(&'static str),
+    /// A JSON array with one object per distinct non-empty visible model.
+    ///
+    /// Objects follow route order and hold `fields`; a JSON file stores
+    /// object keys sorted. The array is written as raw JSON, and this slot is
+    /// valid only in JSON and YAML files.
+    #[doc(hidden)]
+    ModelArray {
+        /// The fields of each model object.
+        fields: &'static [ModelField],
+    },
+}
+
+/// One field of each object a [`Slot::ModelArray`] writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelField {
+    key: &'static str,
+    value: ModelValue,
+}
+
+impl ModelField {
+    /// A field holding the model id.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn id(key: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Id,
+        }
+    }
+
+    /// A field holding a fixed string.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn literal(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Literal(text),
+        }
+    }
+
+    /// A field holding fixed JSON text.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn json(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Json(text),
+        }
+    }
+
+    /// The object key.
+    #[must_use]
+    pub const fn key(&self) -> &'static str {
+        self.key
+    }
+
+    /// The value written under the key.
+    #[must_use]
+    pub const fn value(&self) -> ModelValue {
+        self.value
+    }
+}
+
+/// What a [`ModelField`] writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ModelValue {
+    /// The model id.
+    Id,
+    /// A fixed string.
+    Literal(&'static str),
+    /// Fixed JSON text.
+    Json(&'static str),
 }
 
 impl Slot {

@@ -63,6 +63,35 @@ pub enum SlotToml {
     Literal(LiteralSlot),
     ModelIfUnset(ModelIfUnsetSlot),
     ModelTier(ModelTierSlot),
+    Json(JsonSlot),
+    ModelArray(ModelArraySlot),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JsonSlot {
+    pub json: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelArraySlot {
+    pub model_array: ModelArray,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelArray {
+    pub fields: Vec<ModelFieldToml>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFieldToml {
+    pub key: String,
+    pub value: Option<String>,
+    pub literal: Option<String>,
+    pub json: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -306,6 +335,15 @@ fn validate(
                 "catalog_models requires a JSON file",
             ));
         }
+        if matches!(&set.slot, SlotToml::Json(_) | SlotToml::ModelArray(_))
+            && !matches!(file.kind.as_str(), "json" | "yaml")
+        {
+            return Err(error(
+                source,
+                format!("{field}.slot"),
+                "json and model_array require a JSON or YAML file",
+            ));
+        }
         validate_slot(&set.slot, source, &field)?;
         if agent.route == "none" && gateway_slot(&set.slot) {
             return Err(error(
@@ -377,15 +415,67 @@ fn validate_slot(slot: &SlotToml, source: &str, field: &str) -> Result<(), Strin
             }
             Ok(())
         }
+        SlotToml::Json(slot) => valid_json(&slot.json, source, &format!("{field}.slot.json")),
+        SlotToml::ModelArray(ModelArraySlot { model_array }) => {
+            validate_model_array(model_array, source, field)
+        }
         _ => Ok(()),
     }
 }
 
+fn valid_json(text: &str, source: &str, field: &str) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .map(|_| ())
+        .map_err(|_| error(source, field, "must be valid JSON"))
+}
+
+fn validate_model_array(array: &ModelArray, source: &str, field: &str) -> Result<(), String> {
+    let field = format!("{field}.slot.model_array.fields");
+    if array.fields.is_empty() {
+        return Err(error(source, field, "must not be empty"));
+    }
+    let mut keys = BTreeSet::new();
+    for (index, item) in array.fields.iter().enumerate() {
+        let item_field = format!("{field}[{index}]");
+        if item.key.is_empty() {
+            return Err(error(source, format!("{item_field}.key"), "must not be empty"));
+        }
+        if !keys.insert(item.key.as_str()) {
+            return Err(error(
+                source,
+                format!("{item_field}.key"),
+                "duplicates another field",
+            ));
+        }
+        match (&item.value, &item.literal, &item.json) {
+            (Some(value), None, None) if value == "id" => {}
+            (Some(_), None, None) => {
+                return Err(error(
+                    source,
+                    format!("{item_field}.value"),
+                    "unknown value; expected `id`",
+                ));
+            }
+            (None, Some(_), None) => {}
+            (None, None, Some(text)) => valid_json(text, source, &format!("{item_field}.json"))?,
+            _ => {
+                return Err(error(
+                    source,
+                    item_field,
+                    "needs exactly one of value, literal, or json",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn gateway_slot(slot: &SlotToml) -> bool {
-    matches!(
-        slot,
-        SlotToml::Name(name) if matches!(name.as_str(), "origin" | "v1" | "token" | "catalog_models")
-    )
+    match slot {
+        SlotToml::Name(name) => matches!(name.as_str(), "origin" | "v1" | "token" | "catalog_models"),
+        SlotToml::ModelArray(_) => true,
+        _ => false,
+    }
 }
 
 fn valid_id(id: &str) -> bool {
@@ -555,6 +645,29 @@ fn render_slot(slot: &SlotToml) -> String {
                 slot.model_tier.tier
             )
         }
+        SlotToml::Json(slot) => format!("hofund_plugin_api::Slot::Json({:?})", slot.json),
+        SlotToml::ModelArray(slot) => {
+            let fields: Vec<String> = slot
+                .model_array
+                .fields
+                .iter()
+                .map(|item| match (&item.literal, &item.json) {
+                    (Some(text), _) => format!(
+                        "hofund_plugin_api::ModelField::literal({:?}, {text:?})",
+                        item.key
+                    ),
+                    (None, Some(text)) => format!(
+                        "hofund_plugin_api::ModelField::json({:?}, {text:?})",
+                        item.key
+                    ),
+                    (None, None) => format!("hofund_plugin_api::ModelField::id({:?})", item.key),
+                })
+                .collect();
+            format!(
+                "hofund_plugin_api::Slot::ModelArray {{ fields: &[{}] }}",
+                fields.join(", ")
+            )
+        }
     }
 }
 
@@ -658,6 +771,83 @@ key = "effort"
         .expect("valid yaml agent");
         assert!(agent.files.iter().all(|file| file.kind == "yaml"));
         assert!(render(&agent).1.contains("FileKind::Yaml"));
+    }
+
+    fn with_slot(slot: &str) -> String {
+        base().replace("slot = { literal = \"value\" }", &format!("slot = {slot}"))
+    }
+
+    #[test]
+    fn json_and_model_array_slots_are_validated_and_rendered() {
+        let array = "{ model_array = { fields = [ { key = \"id\", value = \"id\" }, { key = \"name\", literal = \"Hofund\" }, { key = \"reasoning\", json = \"true\" } ] } }";
+        let source = render(&validate(&with_slot(array)).expect("model array")).1;
+        assert!(
+            source.contains(
+                "hofund_plugin_api::Slot::ModelArray { fields: &[hofund_plugin_api::ModelField::id(\"id\"), hofund_plugin_api::ModelField::literal(\"name\", \"Hofund\"), hofund_plugin_api::ModelField::json(\"reasoning\", \"true\")] }"
+            ),
+            "{source}"
+        );
+        let json = with_slot("{ json = \"{\\\"a\\\": [1]}\" }");
+        let source = render(&validate(&json).expect("json slot")).1;
+        assert!(
+            source.contains("hofund_plugin_api::Slot::Json(\"{\\\"a\\\": [1]}\")"),
+            "{source}"
+        );
+        let yaml = with_slot("{ json = \"false\" }")
+            .replace("kind = \"json\"", "kind = \"yaml\"")
+            .replace("config.json", "config.yaml");
+        validate(&yaml).expect("json slot in yaml");
+        let toml = with_slot("{ json = \"false\" }")
+            .replace("kind = \"json\"", "kind = \"toml\"")
+            .replace("config.json", "config.toml");
+        reject(toml.clone(), "require a JSON or YAML file");
+        reject(
+            toml.replace("{ json = \"false\" }", array),
+            "require a JSON or YAML file",
+        );
+
+        let cases = [
+            ("{ json = \"nope\" }", "set[0].slot.json: must be valid JSON"),
+            (
+                "{ model_array = { fields = [] } }",
+                "set[0].slot.model_array.fields: must not be empty",
+            ),
+            (
+                "{ model_array = { fields = [ { key = \"\", value = \"id\" } ] } }",
+                "fields[0].key: must not be empty",
+            ),
+            (
+                "{ model_array = { fields = [ { key = \"a\", value = \"id\" }, { key = \"a\", literal = \"x\" } ] } }",
+                "fields[1].key: duplicates another field",
+            ),
+            (
+                "{ model_array = { fields = [ { key = \"a\", value = \"name\" } ] } }",
+                "fields[0].value: unknown value",
+            ),
+            (
+                "{ model_array = { fields = [ { key = \"a\", json = \"{\" } ] } }",
+                "fields[0].json: must be valid JSON",
+            ),
+            (
+                "{ model_array = { fields = [ { key = \"a\" } ] } }",
+                "fields[0]: needs exactly one",
+            ),
+            (
+                "{ model_array = { fields = [ { key = \"a\", value = \"id\", literal = \"x\" } ] } }",
+                "fields[0]: needs exactly one",
+            ),
+            (
+                "{ model_array = { fields = [ { key = \"a\", literal = \"x\", json = \"1\" } ] } }",
+                "fields[0]: needs exactly one",
+            ),
+        ];
+        for (slot, needle) in cases {
+            reject(with_slot(slot), needle);
+        }
+
+        let none = |slot: &str| with_slot(slot).replace("route = \"gateway\"", "route = \"none\"");
+        reject(none(array), "route `none`");
+        validate(&none("{ json = \"false\" }")).expect("json is not a gateway slot");
     }
 
     #[test]

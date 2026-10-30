@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use hofund_agent::{AgentAdapter, Compiled, GatewayTarget, Session, TargetOs, catalog, resolve};
 use hofund_plugin_api::{
-    AgentDescription, AgentFile, AgentRoute, AgentSet, FileKind, MatchNeedle, PluginId, Slot,
-    TierId, Visible,
+    AgentDescription, AgentFile, AgentRoute, AgentSet, FileKind, MatchNeedle, ModelField,
+    PluginId, Slot, TierId, Visible,
 };
 
 static CLAUDE_FILES: &[AgentFile] = &[AgentFile::from_static(
@@ -514,6 +514,109 @@ fn visible_models_and_route_none_filter_gateway_slots() {
     assert_eq!(models.len(), 1);
     assert_eq!(models["shown"]["name"], "shown");
     assert!(!models.contains_key("hidden"));
+}
+
+static ARRAY_FIELDS: &[ModelField] = &[
+    ModelField::id("id"),
+    ModelField::literal("name", "Hofund"),
+    ModelField::json("limits", "{\"context\": 8}"),
+];
+static ARRAY_SETS: &[AgentSet] = &[
+    AgentSet::from_static("config", "flag", Slot::Json("false")),
+    AgentSet::from_static(
+        "config",
+        "models",
+        Slot::ModelArray {
+            fields: ARRAY_FIELDS,
+        },
+    ),
+];
+static ARRAY_JSON_FILES: &[AgentFile] = &[AgentFile::from_static(
+    "config",
+    FileKind::Json,
+    "~/.array/config.json",
+    "~/.array/config.json",
+    "~/.array/config.json",
+    None,
+)];
+static ARRAY_YAML_FILES: &[AgentFile] = &[AgentFile::from_static(
+    "config",
+    FileKind::Yaml,
+    "~/.array/config.yaml",
+    "~/.array/config.yaml",
+    "~/.array/config.yaml",
+    None,
+)];
+static ARRAY_JSON: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("array-json"),
+    "Array Json",
+    "array-json",
+    ARRAY_JSON_FILES,
+    ARRAY_SETS,
+    None,
+    None,
+    Visible::Only(&["a", "", "b"]),
+    AgentRoute::Gateway,
+    &[],
+);
+static ARRAY_YAML: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("array-yaml"),
+    "Array Yaml",
+    "array-yaml",
+    ARRAY_YAML_FILES,
+    ARRAY_SETS,
+    None,
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+);
+static ARRAY_NONE: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("array-none"),
+    "Array None",
+    "array-none",
+    ARRAY_JSON_FILES,
+    ARRAY_SETS,
+    None,
+    None,
+    Visible::All,
+    AgentRoute::None,
+    &[],
+);
+
+#[test]
+fn json_and_model_array_slots_write_raw_values() {
+    let target = target_with(&["a", "", "hidden", "b", "a"]);
+    let entry = |id: &str| serde_json::json!({"id": id, "name": "Hofund", "limits": {"context": 8}});
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    Compiled::new(&ARRAY_JSON)
+        .apply(&session, &target)
+        .expect("json apply");
+    let value = read_json(&home.join(".array").join("config.json"));
+    assert_eq!(value["flag"], serde_json::json!(false));
+    assert_eq!(value["models"], serde_json::json!([entry("a"), entry("b")]));
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    Compiled::new(&ARRAY_YAML)
+        .apply(&session, &target)
+        .expect("yaml apply");
+    let text = fs::read_to_string(home.join(".array").join("config.yaml")).expect("yaml");
+    assert_eq!(
+        text,
+        "flag: false\nmodels:\n  - id: a\n    limits:\n      context: 8\n    name: Hofund\n  - id: hidden\n    limits:\n      context: 8\n    name: Hofund\n  - id: b\n    limits:\n      context: 8\n    name: Hofund\n"
+    );
+
+    let home = scratch();
+    let session = Session::new(&*home);
+    Compiled::new(&ARRAY_NONE)
+        .apply(&session, &target)
+        .expect("route none apply");
+    let value = read_json(&home.join(".array").join("config.json"));
+    assert_eq!(value["flag"], serde_json::json!(false));
+    assert!(value.get("models").is_none());
 }
 
 fn codex_path(home: &Path) -> PathBuf {

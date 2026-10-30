@@ -2,7 +2,7 @@
 
 #![cfg(feature = "test-fixtures")]
 
-use hofund_plugin_api::{AgentRoute, FileKind, Slot, Visible};
+use hofund_plugin_api::{AgentRoute, FileKind, ModelField, Slot, Visible};
 use hofund_plugin_registry::{agent, agents, fixture_agents};
 
 #[test]
@@ -92,8 +92,19 @@ fn fixture_agents_preserve_files_sets_slots_and_key_files() {
     assert_eq!(yaml.files().len(), 1);
     assert_eq!(yaml.files()[0].kind(), FileKind::Yaml);
     assert_eq!(yaml.files()[0].env_override(), Some("FIXTURE_YAML_HOME"));
-    assert_eq!(yaml.sets().len(), 4);
+    assert_eq!(yaml.sets().len(), 6);
     assert_eq!(yaml.model_key(), Some("model.default"));
     assert!(matches!(yaml.sets()[1].slot(), Slot::V1));
     assert!(matches!(yaml.sets()[2].slot(), Slot::Token));
+    assert_eq!(
+        yaml.sets()[4].slot(),
+        &Slot::ModelArray {
+            fields: &[
+                ModelField::id("id"),
+                ModelField::literal("name", "Hofund"),
+                ModelField::json("reasoning", "true"),
+            ],
+        }
+    );
+    assert_eq!(yaml.sets()[5].slot(), &Slot::Json("false"));
 }

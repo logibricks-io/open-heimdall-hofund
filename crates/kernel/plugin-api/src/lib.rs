@@ -72,7 +72,8 @@ pub use id::{
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use records::{
     Account, AccountStatus, AgentDescription, AgentFile, AgentRoute, AgentSet, AuthChoice,
-    BinaryName, DeviceFlow, FileKind, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
+    BinaryName, DeviceFlow, FileKind, ListQuery, MatchNeedle, ModelField, ModelList, ModelSpec,
+    ModelValue, ProbeQuery,
     QuotaObservation, QuotaQuery, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow,
     SignInFlowKind, SignInProof, Slot, SubscriptionSpec, Visible,
 };
