@@ -1500,7 +1500,7 @@ pub enum AgentRoute {
     None,
 }
 
-/// File format a description can name. YAML is a later kernel change.
+/// File format a description can name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FileKind {
@@ -1510,6 +1510,8 @@ pub enum FileKind {
     Json,
     /// A dotenv file containing `KEY=VALUE` assignments.
     Env,
+    /// YAML with one document whose root is a mapping.
+    Yaml,
 }
 
 /// One ordered candidate location for a logical agent file.

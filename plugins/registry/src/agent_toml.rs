@@ -225,7 +225,7 @@ fn validate(
                 "is only allowed with multiple locations for the same file id",
             ));
         }
-        if !matches!(file.kind.as_str(), "toml" | "json" | "env") {
+        if !matches!(file.kind.as_str(), "toml" | "json" | "env" | "yaml") {
             return Err(error(
                 source,
                 format!("{field}.kind"),
@@ -457,6 +457,7 @@ pub fn render(agent: &AgentToml) -> (String, String) {
             "toml" => "Toml",
             "json" => "Json",
             "env" => "Env",
+            "yaml" => "Yaml",
             _ => unreachable!("validated file kind"),
         };
         output.push_str(&format!(
@@ -648,6 +649,18 @@ key = "effort"
     }
 
     #[test]
+    fn yaml_files_are_accepted_and_rendered() {
+        let agent = validate(
+            &base()
+                .replace("kind = \"json\"", "kind = \"yaml\"")
+                .replace("config.json", "config.yaml"),
+        )
+        .expect("valid yaml agent");
+        assert!(agent.files.iter().all(|file| file.kind == "yaml"));
+        assert!(render(&agent).1.contains("FileKind::Yaml"));
+    }
+
+    #[test]
     fn create_is_rejected_for_a_single_location() {
         let candidate = "create = false\n[[file]]\nid = \"config\"\nkind = \"json\"\nlinux = \"~/.fixture/config.json\"\nmacos = \"~/.fixture/config.json\"\nwindows = \"~/.fixture/config.json\"\n";
         let single = base().replace(candidate, "create = false\n");
@@ -696,7 +709,7 @@ key = "effort"
             base().replace("binary = \"fixture\"", "binary = \"bin/fixture\""),
             "binary",
         );
-        reject(base().replace("kind = \"json\"", "kind = \"yaml\""), "kind");
+        reject(base().replace("kind = \"json\"", "kind = \"ini\""), "kind");
         reject(
             base().replace("~/.fixture/config.json", "/tmp/config.json"),
             "linux",

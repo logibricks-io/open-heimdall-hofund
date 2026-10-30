@@ -401,7 +401,7 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
     let second = adapter.apply(&session, &target).expect("second apply");
     assert!(
         second.is_empty(),
-        "{label}: second apply was not idempotent"
+        "{label}: second apply was not idempotent: {second:?}"
     );
     assert_eq!(
         marker_tree(&home, ".hofund.bak"),
@@ -644,6 +644,7 @@ fn add_user_edits(
             }
             FileKind::Toml => format!("{text}user_added = \"keep\"\n"),
             FileKind::Env => format!("{text}user_added=keep\n"),
+            FileKind::Yaml => format!("{text}user_added: keep\n"),
             _ => panic!("unsupported fixture file kind"),
         };
         write(&home.join(relative), text.as_bytes());
@@ -970,7 +971,11 @@ mod tests {
     fn real_fixture_trees_pass_layout_validation() {
         let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../plugins/registry/tests/fixtures/agents");
-        for id in ["fixture-toml-agent", "fixture-json-agent"] {
+        for id in [
+            "fixture-toml-agent",
+            "fixture-json-agent",
+            "fixture-yaml-agent",
+        ] {
             golden_layout(&OS_DESCRIPTION, &agents.join(id).join("fixtures"))
                 .unwrap_or_else(|error| panic!("{id}: {error}"));
         }

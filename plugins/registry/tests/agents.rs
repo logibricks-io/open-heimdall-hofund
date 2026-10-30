@@ -36,7 +36,7 @@ fn production_agent_list_contains_migrated_agents() {
 #[test]
 fn fixture_agents_preserve_files_sets_slots_and_key_files() {
     let fixtures = fixture_agents();
-    assert_eq!(fixtures.len(), 2);
+    assert_eq!(fixtures.len(), 3);
     assert_eq!(fixtures[0].id().as_str(), "fixture-json-agent");
     assert_eq!(fixtures[1].id().as_str(), "fixture-toml-agent");
     assert_eq!(agent("fixture-json-agent"), None);
@@ -86,4 +86,14 @@ fn fixture_agents_preserve_files_sets_slots_and_key_files() {
     assert_eq!(toml.effort_key(), Some("model_reasoning_effort"));
     assert!(matches!(toml.sets()[2].slot(), Slot::V1));
     assert!(matches!(toml.sets()[4].slot(), Slot::Token));
+
+    let yaml = fixtures[2];
+    assert_eq!(yaml.id().as_str(), "fixture-yaml-agent");
+    assert_eq!(yaml.files().len(), 1);
+    assert_eq!(yaml.files()[0].kind(), FileKind::Yaml);
+    assert_eq!(yaml.files()[0].env_override(), Some("FIXTURE_YAML_HOME"));
+    assert_eq!(yaml.sets().len(), 4);
+    assert_eq!(yaml.model_key(), Some("model.default"));
+    assert!(matches!(yaml.sets()[1].slot(), Slot::V1));
+    assert!(matches!(yaml.sets()[2].slot(), Slot::Token));
 }
