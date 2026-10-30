@@ -44,7 +44,12 @@ use tokio::sync::{oneshot, watch};
 use tracing::Instrument;
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
-const SURFACE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The largest body a surface takes: room for a speech-to-text upload, which
+/// OpenAI caps at 25 MB.
+const SURFACE_BODY_LIMIT: usize = 32 * 1024 * 1024;
+/// How long a surface call may take: a forwarded transcription of a long
+/// recording takes minutes.
+const SURFACE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The HTTP server and the state it shares across requests.
 pub struct Gateway {
@@ -814,7 +819,7 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
         return text_response(StatusCode::NOT_FOUND, "not found");
     };
     let (parts, body) = request.into_parts();
-    let bytes = match axum::body::to_bytes(body, BODY_LIMIT).await {
+    let bytes = match axum::body::to_bytes(body, SURFACE_BODY_LIMIT).await {
         Ok(bytes) => bytes,
         Err(_) => return text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
     };
