@@ -348,6 +348,22 @@ fn an_api_key_goes_to_the_api() {
 }
 
 #[test]
+fn a_relayed_model_list_with_an_api_key_stays_on_the_backend() {
+    let stub = Stub::default().sending(answer(200, "ok"));
+    let (status, _, _) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/models",
+            &[("authorization", "Bearer sk-proj-1")],
+            "{}",
+        ),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(stub.sent()[0].uri, "https://backend.test/codex/models");
+}
+
+#[test]
 fn a_bearer_that_is_not_an_api_key_stays_on_the_backend() {
     let stub = Stub::default()
         .sending(answer(200, "ok"))
