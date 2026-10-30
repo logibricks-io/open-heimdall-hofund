@@ -804,10 +804,7 @@ fn providers(
     cooldowns: Option<Arc<Cooldowns>>,
     registry: &Arc<dyn DaemonRegistry>,
 ) -> Result<Built, DaemonError> {
-    let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
-    if let Some(max_idle_per_host) = max_idle_per_host {
-        limits = limits.with_max_idle_per_host(max_idle_per_host);
-    }
+    let limits = http_limits(config, max_idle_per_host);
     let timeouts = (config.connect_timeout, config.read_timeout);
     let mut built = BTreeMap::new();
     let mut instances = HashMap::new();
@@ -1560,11 +1557,19 @@ fn expected_protocols() -> String {
 /// The pooled client inbound surfaces relay on, with the configured
 /// connect and idle-read limits.
 fn surface_http(config: &Config, max_idle_per_host: Option<usize>) -> Arc<dyn HttpBackend> {
+    Arc::new(PooledHttp::with_limits(
+        HttpProfile::direct(),
+        http_limits(config, max_idle_per_host),
+    ))
+}
+
+/// The connect, idle-read and idle-pool limits every pooled client uses.
+fn http_limits(config: &Config, max_idle_per_host: Option<usize>) -> HttpLimits {
     let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
     if let Some(max_idle_per_host) = max_idle_per_host {
         limits = limits.with_max_idle_per_host(max_idle_per_host);
     }
-    Arc::new(PooledHttp::with_limits(HttpProfile::direct(), limits))
+    limits
 }
 
 fn warn(config: &Config) {

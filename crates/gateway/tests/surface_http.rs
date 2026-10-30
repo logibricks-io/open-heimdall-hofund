@@ -20,8 +20,8 @@ static ID: SurfaceId = SurfaceId::from_static("outbound");
 static ROUTES: [RouteSpec; 1] = [RouteSpec::from_static(Method::Post, "/outbound")];
 
 /// Sends the inbound body to `https://upstream.test/echo` with the caller's
-/// own `authorization`, and keeps the header it saw. Answers 501 when the host
-/// has no HTTP handle.
+/// own `authorization`, and keeps the header it saw. Answers 403 when the
+/// host says the caller was not accepted and 501 when it has no HTTP handle.
 #[derive(Default)]
 struct Outbound {
     seen: Mutex<Vec<Option<String>>>,
@@ -50,6 +50,12 @@ impl InboundSurface for Outbound {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         self.seen.lock().expect("seen").push(caller.clone());
+        if !host.auth().accepted() {
+            return Ok(axum::http::Response::builder()
+                .status(403)
+                .body(BodyStream::from_bytes(b"not accepted".to_vec()))
+                .expect("response"));
+        }
         let Some(http) = host.http() else {
             return Ok(axum::http::Response::builder()
                 .status(501)
