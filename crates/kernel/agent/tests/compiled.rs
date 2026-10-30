@@ -1372,11 +1372,17 @@ fn model_pair_is_set_and_cleared_with_the_model() {
     );
     agent.set_model(&session, &two, None).expect("clear");
     let json = read_json(&path);
-    assert!(
-        json.get("model").is_none() && json.get("provider").is_none(),
-        "{json}"
-    );
+    // Clear drops the model and puts back the provider picked before connect.
+    assert!(json.get("model").is_none(), "{json}");
+    assert_eq!(json["provider"], "openai");
     assert_eq!(json["legacy"], "openai");
+    assert!(
+        agent
+            .apply(&session, &two)
+            .expect("after clear")
+            .changes()
+            .is_empty()
+    );
     agent
         .set_model(&session, &two, Some("a"))
         .expect("set again");
@@ -1389,6 +1395,7 @@ fn model_pair_is_set_and_cleared_with_the_model() {
     let home = scratch();
     let session = Session::new(&*home);
     let one = target_with(&["a"]);
+    seed(&path_in(&home), "{\"provider\":\"openai\"}");
     agent.set_model(&session, &one, Some("a")).expect("set one");
     agent.set_model(&session, &one, None).expect("clear one");
     let json = read_json(&path_in(&home));

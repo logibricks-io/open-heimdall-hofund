@@ -442,8 +442,16 @@ impl Engine {
                     .into_iter()
                     .filter(|key| !assignments.iter().any(|assignment| assignment.key == *key))
                     .collect();
+                // A pair goes back to the pick the user had before connect.
+                let picked = self.picked_before(&path, kind, &leftover)?;
+                let leftover: Vec<&'static str> = leftover
+                    .into_iter()
+                    .filter(|key| !picked.iter().any(|assignment| assignment.key == *key))
+                    .collect();
                 let written = utf8(&path, &after)?.to_owned();
-                after = remove_keys(kind, &written, &leftover)
+                let written = render(kind, Some(&written), &picked)
+                    .map_err(|error| annotate(&path, error))?;
+                after = remove_keys(kind, utf8(&path, &written)?, &leftover)
                     .map_err(|error| annotate(&path, error))?;
             }
             let pinned = match model {
@@ -503,6 +511,37 @@ impl Engine {
                 Ok((key, value))
             })
             .collect()
+    }
+
+    /// The pre-connect values of the pair keys among `keys`, read from the
+    /// connect backup. A key the backup lacks is not listed.
+    fn picked_before(
+        &self,
+        path: &Path,
+        kind: FileKind,
+        keys: &[&'static str],
+    ) -> Result<Vec<Assignment>, AgentError> {
+        let Some(backup) = read_optional(&sibling_bak(path))? else {
+            return Ok(Vec::new());
+        };
+        let backup = utf8(path, &backup)?;
+        let mut picked = Vec::new();
+        for set in &self.sets {
+            if !matches!(set.slot, ApiSlot::ModelPair { .. }) || !keys.contains(&set.key) {
+                continue;
+            }
+            if let Some(value) =
+                get(kind, backup, set.key).map_err(|error| annotate(path, error))?
+            {
+                picked.push(Assignment {
+                    key: set.key,
+                    raw_json: is_json_value(&value),
+                    shared: None,
+                    value,
+                });
+            }
+        }
+        Ok(picked)
     }
 
     /// The model key and the tier keys that follow it in the model file.
