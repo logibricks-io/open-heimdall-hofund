@@ -67,7 +67,8 @@ fn plugin_seam_matches_the_contract() {
         "hofund_plugin_api::kernel stays private, so a macro splice cannot name it"
     );
     assert!(
-        root.join("crates/kernel/plugin-api/public-api.txt").is_file(),
+        root.join("crates/kernel/plugin-api/public-api.txt")
+            .is_file(),
         "the public API snapshot is missing"
     );
 

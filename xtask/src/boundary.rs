@@ -1978,7 +1978,8 @@ cc = "1"
         super::link_allowance(&workspace, "hofund-plugin-fixture").expect("fixture closure");
         let ids = super::link_ids(&workspace, "hofund-plugin-fixture").expect("ids");
         assert!(
-            ids.iter().any(|id| id.contains("crates/kernel/plugin-api#")),
+            ids.iter()
+                .any(|id| id.contains("crates/kernel/plugin-api#")),
             "the workspace api id is required, got {ids:?}"
         );
         // `quote` and `syn` stay reachable through `thiserror`'s proc-macro.
