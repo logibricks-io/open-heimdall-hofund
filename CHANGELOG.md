@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `codex-catalog` inbound plugin (S3): `GET /v1/codex/models`, the
+  model catalog a Codex whose model provider is this gateway reads from its
+  `model_catalog_url`. Each model `/v1/models` lists becomes a `models.json`
+  entry with its own base instructions, text input, no effort levels, and
+  Codex's default window. Entries past the 1 MiB Codex reads are left out,
+  the last first, and `x-hofund-left-out` says how many.
 - The `muse` inbound plugin (S2): `GET /muse-code/models`, the model list
   Muse Code asks for before a session. Each model `/v1/models` lists becomes
   a row with `metadata["muse-code"]`. Until the kernel has a model catalog,

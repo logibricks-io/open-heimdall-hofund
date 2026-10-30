@@ -34,6 +34,13 @@ package = "hofund-plugin-subscription-codex"
 feature = "codex"
 
 [[plugin]]
+id = "codex-catalog"
+kind = "inbound"
+path = "plugins/inbound/codex-catalog"
+package = "hofund-plugin-codex-catalog"
+feature = "codex-catalog"
+
+[[plugin]]
 id = "copilot"
 kind = "subscription"
 path = "plugins/subscriptions/copilot"
