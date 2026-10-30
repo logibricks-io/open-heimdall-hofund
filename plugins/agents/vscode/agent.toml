@@ -1,0 +1,65 @@
+id = "vscode"
+display_name = "VS Code"
+binary = "code"
+
+# VS Code's chat takes models of other vendors through its Custom Endpoint
+# provider (VS Code Stable 1.122 and later; no GitHub sign-in needed). The
+# models are groups in chatLanguageModels.json, a JSONC array beside the
+# default profile's settings.json in the User folder: ~/.config/Code/User on
+# Linux, ~/Library/Application Support/Code/User on macOS, and
+# %APPDATA%\Code\User on Windows (taken here as ~/AppData/Roaming/Code/User).
+# VS Code reads the file again when it changes. This adapter edits the
+# default profile of VS Code Stable only: other profiles, Insiders, VSCodium,
+# XDG_CONFIG_HOME, and a relocated APPDATA are not followed yet. Source:
+# https://code.visualstudio.com/docs/copilot/customization/language-models
+[[file]]
+id = "models"
+kind = "json"
+linux = "~/.config/Code/User/chatLanguageModels.json"
+macos = "~/Library/Application Support/Code/User/chatLanguageModels.json"
+windows = "~/AppData/Roaming/Code/User/chatLanguageModels.json"
+
+[[file]]
+id = "settings"
+kind = "json"
+linux = "~/.config/Code/User/settings.json"
+macos = "~/Library/Application Support/Code/User/settings.json"
+windows = "~/AppData/Roaming/Code/User/settings.json"
+
+# hofund appends one group to the root array, after the user's groups: vendor
+# customendpoint, named hofund, listing every route at the gateway's
+# /v1/chat/completions with tool calling on (agent mode lists only models
+# that call tools). A group's API key cannot be written in the file (VS Code
+# keeps it in its secret storage), so each model sends hofund's token as its
+# Authorization header, which stands in for the key. This build has no
+# catalog values per model, so every model gets VS Code's usual 128000-token
+# window, 8192 output tokens, and no images.
+[[set]]
+file = "models"
+key = "."
+slot = { append = { each = "once", owner = [
+    { key = "vendor", equals = "customendpoint" },
+    { key = "name", equals = "hofund" },
+], fields = [
+    { key = "name", literal = "hofund" },
+    { key = "vendor", literal = "customendpoint" },
+    { key = "apiType", literal = "chat-completions" },
+    { key = "models", models = [
+        { key = "id", value = "id" },
+        { key = "name", value = "id" },
+        { key = "url", template = "{v1}/chat/completions" },
+        { key = "toolCalling", json = "true" },
+        { key = "vision", json = "false" },
+        { key = "contextWindow", json = "128000" },
+        { key = "maxOutputTokens", json = "8192" },
+        { key = "requestHeaders", object = [
+            { key = "Authorization", template = "Bearer {token}" },
+        ] },
+    ] },
+] } }
+
+# A new chat starts on chat.defaultModel, one settings key with a dot in its
+# name, holding the model id.
+[model]
+file = "settings"
+key = '"chat.defaultModel"'

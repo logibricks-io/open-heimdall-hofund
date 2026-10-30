@@ -940,6 +940,96 @@ fn scratch() -> Scratch {
 }
 
 #[test]
+fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let dir = home.join(".config").join("Code").join("User");
+    let models = dir.join("chatLanguageModels.json");
+    let settings = dir.join("settings.json");
+    // VS Code writes JSONC: comments and trailing commas are allowed.
+    let models_text =
+        "[\n  // mine\n  { \"vendor\": \"ollama\", \"name\": \"local\", \"models\": [] },\n]\n";
+    let settings_text = "{\n  \"chat.defaultModel\": \"mine\",\n  \"chat\": { \"agent\": { \"enabled\": true } },\n}\n";
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(&models, models_text).expect("seed models");
+    fs::write(&settings, settings_text).expect("seed settings");
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    let read = |path: &Path| -> serde_json::Value {
+        serde_json::from_slice(&fs::read(path).expect("read")).expect("json")
+    };
+    let groups = read(&models);
+    assert_eq!(groups[0]["name"], "local");
+    assert_eq!(groups[1]["name"], "hofund");
+    assert_eq!(
+        groups[1]["models"][0]["requestHeaders"]["Authorization"],
+        format!("Bearer {}", target.token())
+    );
+    assert_eq!(
+        fs::read_to_string(&settings).expect("settings"),
+        settings_text
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json = read(&settings);
+    assert_eq!(json["chat.defaultModel"], "route-a");
+    assert_eq!(
+        json["chat"],
+        serde_json::json!({ "agent": { "enabled": true } })
+    );
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("route-a")
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    agent.set_model(&session, &target, None).expect("clear");
+    let json = read(&settings);
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(
+        json["chat"],
+        serde_json::json!({ "agent": { "enabled": true } })
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    // The models file comes back byte for byte; settings gets the user's
+    // default model back beside their other keys.
+    assert_eq!(fs::read_to_string(&models).expect("models"), models_text);
+    let json = read(&settings);
+    assert_eq!(json["chat.defaultModel"], "mine");
+    assert_eq!(
+        json["chat"],
+        serde_json::json!({ "agent": { "enabled": true } })
+    );
+}
+
+#[test]
+fn shipped_vscode_creates_settings_only_for_a_pick() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let dir = home.join(".config").join("Code").join("User");
+    let settings = dir.join("settings.json");
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    assert!(dir.join("chatLanguageModels.json").is_file());
+    assert!(!settings.exists());
+    assert!(agent.status(&session, &target).expect("status").connected());
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json["chat.defaultModel"], "route-a");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!settings.exists());
+    assert!(!dir.join("chatLanguageModels.json").exists());
+}
+
+#[test]
 fn shipped_qwen_pick_points_the_session_at_the_gateway_entry() {
     let home = scratch();
     let session = Session::new(&*home);

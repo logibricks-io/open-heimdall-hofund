@@ -1,0 +1,31 @@
+[
+  {
+    "name": "hofund",
+    "vendor": "customendpoint",
+    "apiType": "responses",
+    "keep": "user-note",
+    "models": [
+      {
+        "id": "stale-route",
+        "name": "stale-route",
+        "url": "https://stale.example/v1/chat/completions",
+        "requestHeaders": {
+          "Authorization": "Bearer stale-token"
+        }
+      }
+    ]
+  },
+  {
+    "name": "My Endpoint",
+    "vendor": "customendpoint",
+    "apiType": "chat-completions",
+    "models": [
+      {
+        "id": "my-model",
+        "name": "My Model",
+        "url": "https://models.example/v1/chat/completions",
+        "toolCalling": true
+      }
+    ]
+  }
+]

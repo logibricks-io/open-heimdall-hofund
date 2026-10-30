@@ -153,6 +153,8 @@ pub struct ModelFieldToml {
     pub json: Option<String>,
     pub prefixed: Option<String>,
     pub models: Option<Vec<ModelFieldToml>>,
+    pub template: Option<String>,
+    pub object: Option<Vec<ModelFieldToml>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -373,6 +375,7 @@ fn validate(
         if set.key.is_empty() {
             return Err(error(source, format!("{field}.key"), "must not be empty"));
         }
+        valid_key(&set.key, source, &format!("{field}.key"))?;
         let Some(file) = agent.files.iter().find(|file| file.id == set.file) else {
             return Err(error(
                 source,
@@ -448,6 +451,7 @@ fn validate(
             if key.key.is_empty() {
                 return Err(error(source, format!("{field}.key"), "must not be empty"));
             }
+            valid_key(&key.key, source, &format!("{field}.key"))?;
             if !file_ids.contains(key.file.as_str()) {
                 return Err(error(
                     source,
@@ -600,6 +604,36 @@ fn validate_template(text: &str, source: &str, field: &str) -> Result<(), String
     Ok(())
 }
 
+/// Checks the quoting of a dotted key: a `"` may only open a part at the
+/// start or after a `.`, and must close it before the next `.` or the end, so
+/// `"chat.defaultModel"` names one key holding a dot.
+fn valid_key(key: &str, source: &str, field: &str) -> Result<(), String> {
+    let mut rest = key;
+    while !rest.is_empty() {
+        let (part, tail) = if let Some(quoted) = rest.strip_prefix('"') {
+            let Some(end) = quoted.find('"') else {
+                return Err(error(source, field, "has a `\"` that is never closed"));
+            };
+            let tail = &quoted[end + 1..];
+            if !(tail.is_empty() || tail.starts_with('.')) {
+                return Err(error(source, field, "a quoted part must end at a `.`"));
+            }
+            (&quoted[..end], tail.strip_prefix('.').unwrap_or(tail))
+        } else {
+            let (part, tail) = rest.split_once('.').unwrap_or((rest, ""));
+            if part.contains('"') {
+                return Err(error(source, field, "a `\"` may only start a part"));
+            }
+            (part, tail)
+        };
+        if part.is_empty() && !(key == "." && tail.is_empty()) {
+            return Err(error(source, field, "has an empty part"));
+        }
+        rest = tail;
+    }
+    Ok(())
+}
+
 fn valid_json(text: &str, source: &str, field: &str) -> Result<(), String> {
     serde_json::from_str::<serde_json::Value>(text)
         .map(|_| ())
@@ -634,14 +668,24 @@ fn validate_fields(
                 "duplicates another field",
             ));
         }
-        match (
-            &item.value,
-            &item.literal,
-            &item.json,
-            &item.prefixed,
-            &item.models,
-        ) {
-            (Some(value), None, None, None, None) => match value.as_str() {
+        let given = [
+            item.value.is_some(),
+            item.literal.is_some(),
+            item.json.is_some(),
+            item.prefixed.is_some(),
+            item.models.is_some(),
+            item.template.is_some(),
+            item.object.is_some(),
+        ];
+        if given.iter().filter(|given| **given).count() != 1 {
+            return Err(error(
+                source,
+                item_field,
+                "needs exactly one of value, literal, json, prefixed, models, template, or object",
+            ));
+        }
+        if let Some(value) = &item.value {
+            match value.as_str() {
                 "id" if per_model => {}
                 "v1" | "origin" | "token" => {}
                 "id" => {
@@ -658,29 +702,21 @@ fn validate_fields(
                         "unknown value; expected `id`, `v1`, `origin`, or `token`",
                     ));
                 }
-            },
-            (None, Some(_), None, None, None) => {}
-            (None, None, Some(text), None, None) => {
-                valid_json(text, source, &format!("{item_field}.json"))?;
             }
-            (None, None, None, Some(_), None) if per_model => {}
-            (None, None, None, Some(_), None) => {
-                return Err(error(
-                    source,
-                    format!("{item_field}.prefixed"),
-                    "needs one object per model",
-                ));
-            }
-            (None, None, None, None, Some(nested)) => {
-                validate_fields(nested, true, source, &format!("{item_field}.models"))?;
-            }
-            _ => {
-                return Err(error(
-                    source,
-                    item_field,
-                    "needs exactly one of value, literal, json, prefixed, or models",
-                ));
-            }
+        } else if let Some(text) = &item.json {
+            valid_json(text, source, &format!("{item_field}.json"))?;
+        } else if item.prefixed.is_some() && !per_model {
+            return Err(error(
+                source,
+                format!("{item_field}.prefixed"),
+                "needs one object per model",
+            ));
+        } else if let Some(nested) = &item.models {
+            validate_fields(nested, true, source, &format!("{item_field}.models"))?;
+        } else if let Some(text) = &item.template {
+            validate_template(text, source, &format!("{item_field}.template"))?;
+        } else if let Some(nested) = &item.object {
+            validate_fields(nested, per_model, source, &format!("{item_field}.object"))?;
         }
     }
     Ok(())
@@ -975,29 +1011,34 @@ fn render_fields(fields: &[ModelFieldToml]) -> String {
         .iter()
         .map(|item| {
             let key = &item.key;
-            match (&item.value, &item.literal, &item.json, &item.prefixed, &item.models) {
-                (_, Some(text), ..) => {
-                    format!("hofund_plugin_api::ModelField::literal({key:?}, {text:?})")
-                }
-                (_, None, Some(text), ..) => {
-                    format!("hofund_plugin_api::ModelField::json({key:?}, {text:?})")
-                }
-                (_, None, None, Some(prefix), _) => {
-                    format!("hofund_plugin_api::ModelField::prefixed({key:?}, {prefix:?})")
-                }
-                (_, None, None, None, Some(nested)) => format!(
+            if let Some(text) = &item.literal {
+                format!("hofund_plugin_api::ModelField::literal({key:?}, {text:?})")
+            } else if let Some(text) = &item.json {
+                format!("hofund_plugin_api::ModelField::json({key:?}, {text:?})")
+            } else if let Some(prefix) = &item.prefixed {
+                format!("hofund_plugin_api::ModelField::prefixed({key:?}, {prefix:?})")
+            } else if let Some(nested) = &item.models {
+                format!(
                     "hofund_plugin_api::ModelField::models({key:?}, {{ const FIELDS: &[hofund_plugin_api::ModelField] = &[{}]; FIELDS }})",
                     render_fields(nested)
-                ),
-                (value, None, None, None, None) => format!(
+                )
+            } else if let Some(text) = &item.template {
+                format!("hofund_plugin_api::ModelField::template({key:?}, {text:?})")
+            } else if let Some(nested) = &item.object {
+                format!(
+                    "hofund_plugin_api::ModelField::object({key:?}, {{ const FIELDS: &[hofund_plugin_api::ModelField] = &[{}]; FIELDS }})",
+                    render_fields(nested)
+                )
+            } else {
+                format!(
                     "hofund_plugin_api::ModelField::{}({key:?})",
-                    match value.as_deref() {
+                    match item.value.as_deref() {
                         Some("v1") => "v1",
                         Some("origin") => "origin",
                         Some("token") => "token",
                         _ => "id",
                     }
-                ),
+                )
             }
         })
         .collect();
@@ -1336,6 +1377,54 @@ key = "effort"
     }
 
     #[test]
+    fn template_and_object_fields_are_validated_and_rendered() {
+        let once = "{ append = { each = \"once\", owner = [ { key = \"name\", equals = \"hofund\" } ], fields = [ { key = \"name\", literal = \"hofund\" }, { key = \"models\", models = [ { key = \"url\", template = \"{v1}/chat\" }, { key = \"headers\", object = [ { key = \"id\", value = \"id\" }, { key = \"Authorization\", template = \"Bearer {token}\" } ] } ] } ] } }";
+        let source = render(&validate(&with_slot(once)).expect("template and object")).1;
+        assert!(
+            source.contains(
+                "hofund_plugin_api::ModelField::template(\"url\", \"{v1}/chat\"), hofund_plugin_api::ModelField::object(\"headers\", { const FIELDS: &[hofund_plugin_api::ModelField] = &[hofund_plugin_api::ModelField::id(\"id\"), hofund_plugin_api::ModelField::template(\"Authorization\", \"Bearer {token}\")]; FIELDS })"
+            ),
+            "{source}"
+        );
+        let slot = |fields: &str| {
+            with_slot(&format!(
+                "{{ append = {{ each = \"once\", owner = [ {{ key = \"name\", equals = \"hofund\" }} ], fields = [ {{ key = \"name\", literal = \"hofund\" }}, {fields} ] }} }}"
+            ))
+        };
+        reject(
+            slot("{ key = \"u\", template = \"{model}\" }"),
+            "fields[1].template",
+        );
+        reject(
+            slot("{ key = \"o\", object = [] }"),
+            "fields[1].object: must not be empty",
+        );
+        reject(
+            slot("{ key = \"o\", object = [ { key = \"m\", value = \"id\" } ] }"),
+            "fields[1].object[0].value: `id` needs one object per model",
+        );
+        reject(
+            slot("{ key = \"o\", template = \"{v1}\", literal = \"x\" }"),
+            "fields[1]: needs exactly one of",
+        );
+    }
+
+    #[test]
+    fn quoted_key_parts_are_validated() {
+        let key = |key: &str| base().replace("key = \"model\"", &format!("key = '{key}'"));
+        validate(&key("\"chat.defaultModel\"")).expect("quoted part");
+        validate(&key("a.\"b.c\".d")).expect("quoted middle part");
+        reject(key("\"open"), "model.key: has a `\"` that is never closed");
+        reject(key("\"a\"b"), "model.key: a quoted part must end at a `.`");
+        reject(key("a\"b\""), "model.key: a `\"` may only start a part");
+        reject(key("a..b"), "model.key: has an empty part");
+        reject(key("\"\""), "model.key: has an empty part");
+        let set = base().replace("key = \"literal\"", "key = 'x.\"y'");
+        reject(set, "set[0].key: has a `\"` that is never closed");
+        validate(&with_slot("{ append = { each = \"once\", owner = [ { key = \"name\", equals = \"hofund\" } ], fields = [ { key = \"name\", literal = \"hofund\" } ] } }").replace("key = \"literal\"", "key = \".\"")).expect("root key");
+    }
+
+    #[test]
     fn append_slots_are_validated_and_rendered() {
         let each = "{ append = { each = \"model\", owner = [ { key = \"id\", prefix = \"custom:hofund/\" } ], fields = [ { key = \"model\", value = \"id\" }, { key = \"id\", prefixed = \"custom:hofund/\" }, { key = \"baseUrl\", value = \"v1\" }, { key = \"apiKey\", value = \"token\" } ] } }";
         let source = render(&validate(&with_slot(each)).expect("append each")).1;
@@ -1495,7 +1584,7 @@ key = "effort"
                     owner,
                     "fields = [ { key = \"name\", literal = \"hofund\", prefixed = \"x\" } ]",
                 ),
-                "fields[0]: needs exactly one of value, literal, json, prefixed, or models",
+                "fields[0]: needs exactly one of value, literal, json, prefixed, models, template, or object",
             ),
         ];
         for (text, needle) in cases {

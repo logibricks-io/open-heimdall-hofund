@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- VS Code agent (G10): `hofund agent connect vscode` appends one
+  `customendpoint` group named `hofund` to `chatLanguageModels.json` beside
+  the default profile's `settings.json` (VS Code Stable only), each route at
+  the gateway's `/v1/chat/completions` with the token as its `Authorization`
+  header. A model pick writes `chat.defaultModel` as the route id; clearing
+  the model drops it (#433) and disconnect puts back the user's value.
+- Agent descriptions can write gateway text and nested objects inside model
+  entries (`{ key, template }`, `{ key, object = [...] }`), and a key part
+  may be quoted to hold a dot (`'"chat.defaultModel"'`). A file nothing is
+  written to is now left as it is, and a missing one is not created.
+
 - Qwen Code agent (G9): `hofund agent connect qwen` appends one entry per
   route to `modelProviders.openai` in `~/.qwen/settings.json` (or under an
   absolute `QWEN_HOME`), after the user's entries, each reading its key from

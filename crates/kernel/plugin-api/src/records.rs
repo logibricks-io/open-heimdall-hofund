@@ -1687,6 +1687,27 @@ impl ModelField {
         }
     }
 
+    /// A field holding text with `{origin}`, `{v1}`, and `{token}` filled
+    /// in, as for [`Slot::Template`].
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn template(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Template(text),
+        }
+    }
+
+    /// A field holding one object of `fields`, for the same model.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn object(key: &'static str, fields: &'static [Self]) -> Self {
+        Self {
+            key,
+            value: ModelValue::Object(fields),
+        }
+    }
+
     /// A field holding an array with one object of `fields` per model.
     #[doc(hidden)]
     #[must_use]
@@ -1730,6 +1751,10 @@ pub enum ModelValue {
     Prefixed(&'static str),
     /// An array with one object of these fields per model.
     Models(&'static [ModelField]),
+    /// Text with `{origin}`, `{v1}`, and `{token}` filled in.
+    Template(&'static str),
+    /// One object of these fields, for the same model.
+    Object(&'static [ModelField]),
 }
 
 impl ModelValue {
@@ -1738,7 +1763,10 @@ impl ModelValue {
     pub fn has_token(&self) -> bool {
         match self {
             Self::Token => true,
-            Self::Models(fields) => fields.iter().any(|field| field.value.has_token()),
+            Self::Template(text) => text.contains("{token}"),
+            Self::Models(fields) | Self::Object(fields) => {
+                fields.iter().any(|field| field.value.has_token())
+            }
             _ => false,
         }
     }

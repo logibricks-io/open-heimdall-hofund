@@ -643,10 +643,16 @@ fn add_user_edits(
         text = match kind {
             FileKind::Json => {
                 let mut value: serde_json::Value = serde_json::from_str(&text).expect("edit JSON");
-                value.as_object_mut().expect("JSON root").insert(
-                    "user_added".to_owned(),
-                    serde_json::Value::String("keep".to_owned()),
-                );
+                let added = serde_json::Value::String("keep".to_owned());
+                // A root array gets the user's own object appended.
+                if let Some(items) = value.as_array_mut() {
+                    items.push(serde_json::json!({ "user_added": added }));
+                } else {
+                    value
+                        .as_object_mut()
+                        .expect("JSON root")
+                        .insert("user_added".to_owned(), added);
+                }
                 let mut bytes = serde_json::to_vec_pretty(&value).expect("render JSON");
                 bytes.push(b'\n');
                 String::from_utf8(bytes).expect("JSON UTF-8")

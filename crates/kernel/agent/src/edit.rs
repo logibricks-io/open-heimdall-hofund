@@ -1183,8 +1183,25 @@ fn implicit_table() -> Item {
     Item::Table(table)
 }
 
+/// The parts of a dotted key. A part in double quotes is taken whole, dots
+/// included, so `"chat.defaultModel"` names one key.
 fn split_key(key: &str) -> Vec<&str> {
-    key.split('.').filter(|part| !part.is_empty()).collect()
+    let mut parts = Vec::new();
+    let mut rest = key;
+    while !rest.is_empty() {
+        if let Some(quoted) = rest.strip_prefix('"')
+            && let Some(end) = quoted.find('"')
+        {
+            parts.push(&quoted[..end]);
+            rest = quoted[end + 1..].trim_start_matches('.');
+            continue;
+        }
+        let (part, tail) = rest.split_once('.').unwrap_or((rest, ""));
+        parts.push(part);
+        rest = tail;
+    }
+    parts.retain(|part| !part.is_empty());
+    parts
 }
 
 fn split_lines(text: &str) -> Vec<String> {
@@ -1386,6 +1403,39 @@ mod tests {
 
     fn text(kind: FileKind, original: Option<&str>, assignments: &[Assignment]) -> String {
         String::from_utf8(render(kind, original, assignments).expect("render")).expect("utf8")
+    }
+
+    #[test]
+    fn quoted_key_parts_keep_their_dots() {
+        assert_eq!(
+            super::split_key("chat.defaultModel"),
+            ["chat", "defaultModel"]
+        );
+        assert_eq!(
+            super::split_key("\"chat.defaultModel\""),
+            ["chat.defaultModel"]
+        );
+        assert_eq!(super::split_key("a.\"b.c\".d"), ["a", "b.c", "d"]);
+        assert_eq!(super::split_key("."), Vec::<&str>::new());
+        let written = text(
+            FileKind::Json,
+            Some("{\"chat\":{\"x\":1}}"),
+            &[Assignment {
+                key: "\"chat.defaultModel\"",
+                value: "m".to_owned(),
+                raw_json: false,
+                shared: None,
+            }],
+        );
+        let value: serde_json::Value = serde_json::from_str(&written).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({"chat":{"x":1},"chat.defaultModel":"m"})
+        );
+        assert_eq!(
+            super::string_at(FileKind::Json, &written, "\"chat.defaultModel\"").expect("read"),
+            Some("m".to_owned())
+        );
     }
 
     #[test]
