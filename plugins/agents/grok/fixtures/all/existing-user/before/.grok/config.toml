@@ -1,0 +1,14 @@
+# my settings
+[models]
+default = "grok-4.7"
+default_reasoning_effort = "high"
+
+[model."my-local"]
+model = "llama3"
+name = "Llama 3"
+base_url = "http://localhost:11434/v1"
+api_key = "local"
+api_backend = "chat_completions"
+
+[features]
+campaigns = true

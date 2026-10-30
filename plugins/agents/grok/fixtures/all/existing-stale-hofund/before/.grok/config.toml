@@ -1,0 +1,12 @@
+[models]
+default = "hofund/route-a"
+
+[model."hofund/route-a"]
+model = "route-a"
+name = "route-a"
+base_url = "http://127.0.0.1:9999/v1"
+api_key = "stale-token"
+api_backend = "chat_completions"
+
+[features]
+campaigns = false
