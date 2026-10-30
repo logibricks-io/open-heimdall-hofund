@@ -323,7 +323,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         },
         ["provider", "add", id, rest @ ..] => {
             let (key, pairs) = match rest {
-                [key, pairs @ ..] if !key.contains('=') => (Some(*key), pairs),
+                [key, pairs @ ..] if !provider_edit::is_pair(key) => (Some(*key), pairs),
                 pairs => (None, pairs),
             };
             let mut pairs = provider_edit::parse_pairs(pairs, "add")?;
@@ -1097,6 +1097,22 @@ mod tests {
             Ok(Command::ProviderAdd {
                 id: "p".to_owned(),
                 pairs: with_key,
+            })
+        );
+        // A key with base64 padding is still the key, not a pair.
+        let mut padded = pairs(&["url=http://x"], "add").expect("pairs");
+        padded.fields.insert(
+            0,
+            crate::provider_edit::Field {
+                key: crate::provider_edit::FieldKey::ApiKey,
+                value: "c2stYWJj==".to_owned(),
+            },
+        );
+        assert_eq!(
+            command(&["provider", "add", "p", "c2stYWJj==", "url=http://x"]),
+            Ok(Command::ProviderAdd {
+                id: "p".to_owned(),
+                pairs: padded,
             })
         );
         assert_eq!(

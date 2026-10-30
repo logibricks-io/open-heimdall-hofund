@@ -66,6 +66,43 @@ const FIELDS: &str = "preset, protocol, base_url (url), api_key (key), quirks, \
 max_output_tokens, header.<name>, option.<name>, refresh, auto_include, \
 models.url, models";
 
+/// What the key of a `k=v` pair names.
+enum Name {
+    Id,
+    Models,
+    Field(FieldKey),
+}
+
+fn name(key: &str) -> Option<Name> {
+    let key = key.trim();
+    let field = match key.to_ascii_lowercase().as_str() {
+        "id" => return Some(Name::Id),
+        "models" => return Some(Name::Models),
+        "preset" => FieldKey::Preset,
+        "protocol" => FieldKey::Protocol,
+        "base_url" | "url" => FieldKey::BaseUrl,
+        "api_key" | "key" => FieldKey::ApiKey,
+        "quirks" => FieldKey::Quirks,
+        "max_output_tokens" => FieldKey::MaxOutputTokens,
+        "refresh" | "models.refresh" => FieldKey::Refresh,
+        "auto_include" | "auto-include" | "models.auto_include" => FieldKey::AutoInclude,
+        "models.url" => FieldKey::ModelsUrl,
+        _ => match named(key, &["header.", "headers."]) {
+            Some(name) => FieldKey::Header(name),
+            None => FieldKey::Option(named(key, &["option.", "options."])?),
+        },
+    };
+    Some(Name::Field(field))
+}
+
+/// Whether `arg` is a `k=v` pair whose key names a field. `provider add`
+/// takes any other first argument as the API key, so a key holding `=`
+/// (base64 padding) is not mistaken for a pair or echoed in an error.
+pub(crate) fn is_pair(arg: &str) -> bool {
+    arg.split_once('=')
+        .is_some_and(|(key, _)| name(key).is_some())
+}
+
 /// Parses `k=v` pairs. `id=` is refused: `set` cannot rename, and `add`
 /// takes the id as its first argument.
 pub(crate) fn parse_pairs(pairs: &[&str], verb: &str) -> Result<Pairs, String> {
@@ -74,35 +111,18 @@ pub(crate) fn parse_pairs(pairs: &[&str], verb: &str) -> Result<Pairs, String> {
         let Some((key, value)) = pair.split_once('=') else {
             return Err(format!("expected key=value, got `{pair}`"));
         };
-        let lower = key.trim().to_ascii_lowercase();
         let value = value.trim().to_owned();
-        let key = match lower.as_str() {
-            "id" if verb == "set" => return Err(RENAME_UNSUPPORTED.to_owned()),
-            "id" => {
+        let key = match name(key) {
+            Some(Name::Id) if verb == "set" => return Err(RENAME_UNSUPPORTED.to_owned()),
+            Some(Name::Id) => {
                 return Err("the provider id is the first argument of provider add".to_owned());
             }
-            "models" => {
+            Some(Name::Models) => {
                 parsed.models = Some(split_list(&value));
                 continue;
             }
-            "preset" => FieldKey::Preset,
-            "protocol" => FieldKey::Protocol,
-            "base_url" | "url" => FieldKey::BaseUrl,
-            "api_key" | "key" => FieldKey::ApiKey,
-            "quirks" => FieldKey::Quirks,
-            "max_output_tokens" => FieldKey::MaxOutputTokens,
-            "refresh" | "models.refresh" => FieldKey::Refresh,
-            "auto_include" | "auto-include" | "models.auto_include" => FieldKey::AutoInclude,
-            "models.url" => FieldKey::ModelsUrl,
-            _ => match named(key.trim(), &["header.", "headers."]) {
-                Some(name) => FieldKey::Header(name),
-                None => match named(key.trim(), &["option.", "options."]) {
-                    Some(name) => FieldKey::Option(name),
-                    None => {
-                        return Err(format!("unknown provider field `{key}`; fields: {FIELDS}"));
-                    }
-                },
-            },
+            Some(Name::Field(key)) => key,
+            None => return Err(format!("unknown provider field `{key}`; fields: {FIELDS}")),
         };
         if key == FieldKey::MaxOutputTokens
             && !value.is_empty()
