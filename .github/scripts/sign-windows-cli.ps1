@@ -1,4 +1,4 @@
-# Sign hofund.exe inside the Windows zip, then rebuild the zip and its checksum.
+# Sign every .exe (hofund.exe, hofundd.exe) inside each Windows zip, then rebuild the zip and its checksum.
 # An empty certificate group skips. A certificate the platform rejects fails the job.
 
 $ErrorActionPreference = 'Stop'

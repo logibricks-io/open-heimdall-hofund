@@ -3,9 +3,9 @@
 //! `hofundd` links the registry itself and passes its own [`DaemonRegistry`]
 //! to [`crate::start_linked`]. The compatibility adapter here serves the
 //! in-process CLI and desktop paths until the CLI switch, and keeps the
-//! daemon's remaining direct registry dependency in this one module. Registry-owned plain data and pure selection
-//! functions are also re-exported here so the later registry switch has one
-//! edge to replace.
+//! daemon's remaining direct registry dependency in this one module.
+//! Registry-owned plain data and pure selection functions are also
+//! re-exported here so the later registry switch has one edge to replace.
 
 use std::sync::Arc;
 

@@ -180,7 +180,7 @@ Apple code signing for the CLI and the app bundle:
 | `CODESIGN_CERTIFICATE_PASSWORD` | Password for that `.p12` |
 | `CODESIGN_IDENTITY` | Signing identity, such as `Developer ID Application: Example (TEAMID)` |
 
-The CLI job signs each macOS `hofund` with `--options runtime --timestamp`,
+The CLI job signs each macOS `hofund` and `hofundd` with `--options runtime --timestamp`,
 rebuilds the `.tar.gz`, and rewrites that archive's `.sha256` plus the hash
 stored in `dist-manifest.json`. The installer job reads the manifest, so the
 published checksum is the hash of the signed bytes. The universal archive is
@@ -212,9 +212,9 @@ Windows Authenticode uses:
 
 Both jobs import the certificate and run `signtool` (`/fd SHA256`, RFC 3161
 timestamp). The desktop job signs the `.exe` and `.msi`, then writes
-`SHA256SUMS`. The CLI job signs every `.exe` in every Windows zip (`hofund.exe` and
-`hofundd.exe`), rebuilds each flat zip, and
-rewrites that zip's `.sha256` and the manifest hash before the installer job.
+`SHA256SUMS`. The CLI job signs every `.exe` in every Windows zip
+(`hofund.exe` and `hofundd.exe`), rebuilds each flat zip, and rewrites that
+zip's `.sha256` and the manifest hash before the installer job.
 
 ## Local build
 
