@@ -4,7 +4,8 @@ binary = "pi"
 
 # Pi keeps its custom providers in ~/.pi/agent/models.json on every OS.
 # PI_CODING_AGENT_DIR replaces ~/.pi/agent when it is an absolute path.
-# Source: https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/models.md
+# Source: pi-mono packages/coding-agent/docs/configuration.md (agent directory)
+# and docs/models-configuration.md (provider and compat fields).
 [[file]]
 id = "models"
 kind = "json"
@@ -35,8 +36,8 @@ file = "models"
 key = "providers.hofund.apiKey"
 slot = "token"
 
-# Pi sends the session affinity headers only when asked to; the gateway uses
-# them to group a session's turns.
+# Pi sends the session affinity header only when asked to (the default is off
+# outside OpenRouter); the gateway uses it to keep a session's turns together.
 [[set]]
 file = "models"
 key = "providers.hofund.compat.sendSessionAffinityHeaders"
