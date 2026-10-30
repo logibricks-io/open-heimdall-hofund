@@ -47,11 +47,7 @@ const POLL: Duration = Duration::from_millis(100);
 /// Returns a message when no daemon can be reached or started, or when the
 /// daemon goes away without announcing a shutdown.
 pub(crate) async fn tail(config: &Path, requests: bool) -> Result<String, String> {
-    let topics: &[Topic] = if requests {
-        &[Topic::Control, Topic::Requests]
-    } else {
-        &[Topic::Control]
-    };
+    let topics = topics(requests);
     let mut client = match connect::select(config).await? {
         Target::Daemon(client) => client,
         Target::NoDaemon => autostart(config).await?,
@@ -89,6 +85,15 @@ pub(crate) async fn tail(config: &Path, requests: bool) -> Result<String, String
                     RECONNECT_WAIT.as_secs()
                 )
             })?;
+    }
+}
+
+/// The subscribed topics: always control, plus requests with `--requests`.
+fn topics(requests: bool) -> &'static [Topic] {
+    if requests {
+        &[Topic::Control, Topic::Requests]
+    } else {
+        &[Topic::Control]
     }
 }
 
@@ -257,8 +262,8 @@ fn detach(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{WaitError, wait_for, write_event};
-    use hofund_control_client::hofund_control_proto::EventEnvelope;
+    use super::{WaitError, topics, wait_for, write_event};
+    use hofund_control_client::hofund_control_proto::{EventEnvelope, Topic};
     use hofund_control_client::{Client, ClientError};
     use std::cell::Cell;
     use std::time::Duration;
@@ -352,6 +357,12 @@ mod tests {
         let waited = runtime.block_on(async { tokio::time::Instant::now() }) - started;
         assert_eq!(waited, Duration::from_millis(250));
         assert_eq!(calls.get(), 4);
+    }
+
+    #[test]
+    fn requests_adds_the_requests_topic_to_control() {
+        assert_eq!(topics(false), &[Topic::Control]);
+        assert_eq!(topics(true), &[Topic::Control, Topic::Requests]);
     }
 
     #[test]
