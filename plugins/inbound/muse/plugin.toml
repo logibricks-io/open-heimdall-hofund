@@ -1,0 +1,6 @@
+id = "muse"
+kind = "inbound"
+
+[[route]]
+method = "GET"
+prefix = "/muse-code/models"
