@@ -17,7 +17,7 @@ use hofund_plugin_api::{
     AgentDescription, BuildContext, DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue,
     UpstreamProvider,
 };
-use hofund_plugin_host::HttpLimits;
+use hofund_plugin_host::{HttpBackend, HttpLimits, HttpProfile, PooledHttp};
 
 #[doc(hidden)]
 pub use hofund_gateway::BindHook;
@@ -432,7 +432,8 @@ async fn start_inner(
         inbound_codecs(),
         Arc::clone(&usage),
     )
-    .with_surfaces(registry.surfaces());
+    .with_surfaces(registry.surfaces())
+    .with_surface_http(surface_http(&config, max_idle_per_host));
     if let Some(bus) = &control_bus {
         gateway = gateway.with_request_events(
             Arc::new(events::RequestBridge::new(Arc::clone(bus))),
@@ -1554,6 +1555,16 @@ fn expected_protocols() -> String {
         return (*last).to_owned();
     }
     format!("{}, or {last}", rest.join(", "))
+}
+
+/// The pooled client inbound surfaces relay on, with the configured
+/// connect and idle-read limits.
+fn surface_http(config: &Config, max_idle_per_host: Option<usize>) -> Arc<dyn HttpBackend> {
+    let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
+    if let Some(max_idle_per_host) = max_idle_per_host {
+        limits = limits.with_max_idle_per_host(max_idle_per_host);
+    }
+    Arc::new(PooledHttp::with_limits(HttpProfile::direct(), limits))
 }
 
 fn warn(config: &Config) {

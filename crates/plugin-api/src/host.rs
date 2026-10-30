@@ -67,6 +67,20 @@ impl HttpHandle {
     }
 }
 
+impl fmt::Debug for HttpHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpHandle").finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for HttpHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for HttpHandle {}
+
 /// A view of this plugin's secrets. Cloning the handle does not clone a secret.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -937,6 +951,7 @@ pub struct SurfaceHost {
     protocols: Vec<ProtocolId>,
     auth: AuthResult,
     gateway: GatewayHandle,
+    http: Option<HttpHandle>,
 }
 
 impl SurfaceHost {
@@ -949,12 +964,14 @@ impl SurfaceHost {
         protocols: Vec<ProtocolId>,
         auth: AuthResult,
         gateway: Option<Arc<dyn GatewayBackend>>,
+        http: Option<Arc<dyn HttpBackend>>,
     ) -> Self {
         Self {
             members,
             protocols,
             auth,
             gateway: GatewayHandle { inner: gateway },
+            http: http.map(|inner| HttpHandle { inner }),
         }
     }
 
@@ -980,6 +997,17 @@ impl SurfaceHost {
     #[must_use]
     pub const fn gateway(&self) -> &GatewayHandle {
         &self.gateway
+    }
+
+    /// Outbound HTTP on the kernel's pooled client, for a surface that relays
+    /// a client's request, with the client's own credential, to the service
+    /// the client was built for. `None` when this host has no pool.
+    ///
+    /// The surface removes the gateway's token from what it relays. The
+    /// kernel does not add or log a credential on this path.
+    #[must_use]
+    pub const fn http(&self) -> Option<&HttpHandle> {
+        self.http.as_ref()
     }
 }
 
