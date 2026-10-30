@@ -107,6 +107,7 @@ BodyStream::async fn next_chunk (& mut self) -> Option < Result < Bytes , Plugin
 BodyStream::fn from_bytes (bytes : impl Into < Bytes >) -> Self
 BodyStream::fn from_stream (stream : impl Stream < Item = Result < Bytes , PluginError > > + Send + 'static ,) -> Self
 BodyStream::fn resume (chunk : Bytes , rest : Self) -> Self
+BodyStream::fn unfold < T , F , Fut > (state : T , next : F) -> Self where T : Send + 'static , F : FnMut (T) -> Fut + Send + 'static , Fut : Future < Output = Option < (Result < Vec < u8 > , PluginError > , T) > > + Send + 'static ,
 BuildContext
 BuildContext #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 BuildContext::const fn new (protocol : ProtocolId) -> Self

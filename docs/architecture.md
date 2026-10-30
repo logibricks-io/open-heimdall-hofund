@@ -66,6 +66,7 @@ flowchart BT
   pluginRegistry["plugin-registry<br/>composition"]
   pluginRelay["plugin-relay<br/>provider"]
   pluginEcho["plugin-echo<br/>inbound"]
+  pluginOllama["plugin-ollama<br/>inbound"]
   pluginCodex["plugin-subscription-codex<br/>subscription"]
   pluginClaude["plugin-subscription-claude<br/>subscription"]
   pluginCopilot["plugin-subscription-copilot<br/>subscription"]
@@ -93,6 +94,7 @@ flowchart BT
   pluginRegistry --> pluginSdk
   pluginRegistry --> pluginRelay
   pluginRegistry --> pluginEcho
+  pluginRegistry --> pluginOllama
   pluginRegistry --> pluginCodex
   pluginRegistry --> pluginClaude
   pluginRegistry --> pluginCopilot
@@ -103,6 +105,8 @@ flowchart BT
   pluginRelay --> pluginSdk
   pluginEcho --> pluginApi
   pluginEcho --> pluginSdk
+  pluginOllama --> pluginApi
+  pluginOllama --> pluginSdk
   pluginCodex --> pluginApi
   pluginCodex --> pluginSdk
   pluginClaude --> pluginApi
@@ -195,8 +199,9 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-sdk` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-ollama` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-relay`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-gemini`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-echo`, `hofund-plugin-ollama`, `hofund-plugin-relay`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-gemini`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
@@ -274,6 +279,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` serves the built-in Chat, Responses, Messages, and Generative adapters. |
 | `plugin-relay` | Sample upstream plugin. The kit dependency is tests only. |
 | `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
+| `plugin-ollama` | The Ollama API (`/api/version`, `/api/tags`, `/api/show`, `/api/chat`, `/api/generate`) for clients that take an Ollama server. Lists the gateway's models and runs chats on its Chat Completions route in process. |
 | `plugin-subscription-codex` | ChatGPT (Codex) subscription: browser sign-in, token refresh, and the Responses upstream. |
 | `plugin-subscription-claude` | Claude Code subscription: sign-in and refresh by running the `claude` command line in a private config directory. |
 | `plugin-subscription-copilot` | GitHub Copilot subscription, on github.com or a `<name>.ghe.com` enterprise host: device sign-in, session tokens, quota, the account model list, and per-model Chat Completions, Responses and Messages routing. |

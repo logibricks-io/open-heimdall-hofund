@@ -161,6 +161,7 @@ sigv4::fn payload_hash (payload : & [u8]) -> String
 sigv4::fn sign (input : & SignInput < '_ >) -> Result < Signature , SignError >
 string_items
 text_response
+time::fn format_rfc3339 (instant : SystemTime) -> String
 time::fn parse_rfc3339 (text : & str) -> Option < SystemTime >
 tracing
 transport::Call derives(Clone)

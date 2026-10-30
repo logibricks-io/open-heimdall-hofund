@@ -1,0 +1,18 @@
+[package]
+name = "hofund-plugin-ollama"
+description = "Inbound plugin. Serves the Ollama API on the gateway's own address."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-plugin-api = { workspace = true }
+hofund-plugin-sdk = { workspace = true }
+
+[lints]
+workspace = true

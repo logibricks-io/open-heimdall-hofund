@@ -16,10 +16,12 @@ use crate::error::PluginError;
 #[cfg(feature = "kernel")]
 use crate::id::PluginKind;
 use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
+#[cfg(feature = "kernel")]
+use crate::kernel::NoLoopback;
 use crate::kernel::{
     AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, GatewayBackend, HttpBackend,
-    LoopbackBackend, NoLoopback, ObserveBackend, PipedChildBackend, ProcessBackend,
-    SchedulerBackend, SecretsBackend,
+    LoopbackBackend, ObserveBackend, PipedChildBackend, ProcessBackend, SchedulerBackend,
+    SecretsBackend,
 };
 use crate::records::{Account, QuotaObservation, SignInCtx};
 use bytes::Bytes;

@@ -1958,6 +1958,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-ollama"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+]
+
+[[package]]
 name = "hofund-plugin-registry"
 version = "0.1.0"
 dependencies = [
@@ -1971,6 +1979,7 @@ dependencies = [
  "hofund-plugin-bedrock-mantle",
  "hofund-plugin-echo",
  "hofund-plugin-google-vertex",
+ "hofund-plugin-ollama",
  "hofund-plugin-registry",
  "hofund-plugin-relay",
  "hofund-plugin-remote-gateway",

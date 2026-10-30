@@ -16,6 +16,7 @@ members = [
     "crates/plugin-host",
     "crates/plugin-sdk",
     "plugins/inbound/echo",
+    "plugins/inbound/ollama",
     "plugins/providers/azure",
     "plugins/providers/bedrock",
     "plugins/providers/bedrock-mantle",
@@ -71,6 +72,7 @@ hofund-plugin-bedrock-mantle = { version = "0.1.0", path = "plugins/providers/be
 hofund-plugin-google-vertex = { version = "0.1.0", path = "plugins/providers/google-vertex" }
 hofund-plugin-host = { version = "0.1.0", path = "crates/plugin-host" }
 hofund-plugin-echo = { version = "0.1.0", path = "plugins/inbound/echo" }
+hofund-plugin-ollama = { version = "0.1.0", path = "plugins/inbound/ollama" }
 hofund-plugin-registry = { version = "0.1.0", path = "plugins/registry" }
 hofund-plugin-relay = { version = "0.1.0", path = "plugins/providers/relay" }
 hofund-plugin-remote-gateway = { version = "0.1.0", path = "plugins/providers/remote-gateway" }
