@@ -14,6 +14,7 @@ fn production_agent_list_contains_migrated_agents() {
             "claude-code",
             "codex",
             "crush",
+            "droid",
             "gemini-cli",
             "hermes",
             "opencode",
@@ -25,6 +26,7 @@ fn production_agent_list_contains_migrated_agents() {
         "claude-code"
     );
     assert_eq!(agent("codex").expect("codex").id().as_str(), "codex");
+    assert_eq!(agent("droid").expect("droid").id().as_str(), "droid");
     assert_eq!(
         agent("gemini-cli").expect("gemini-cli").id().as_str(),
         "gemini-cli"
