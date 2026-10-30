@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SurfaceHost::http()` (S6a): an inbound surface can relay a client's
+  request on the kernel's pooled client, with the client's own credential.
+  The daemon gives surfaces a pool with its connect and idle-read limits;
+  `Gateway::with_surface_http` sets it, and plugin-host adds
+  `surface_host_with_http`. Without it the handle is `None`. `HttpHandle` is
+  now `Debug` and `Eq` (same pool).
 - The `retrieval` inbound plugin (S4): `POST /v1/embeddings` and
   `POST /v1/rerank`, forwarded as they are to the providers of the model the
   body names. Members that do not serve the path (no OpenAI-style route, or a
