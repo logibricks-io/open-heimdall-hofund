@@ -34,10 +34,10 @@
 //!   JSON `error.message` or `message`, or the trimmed body cut to 512
 //!   characters.
 //! - Across protocols, a stream decodes into events and a unary body into a
-//!   response, both without extensions. A stream whose first event is an
-//!   upstream failure becomes status 502.
+//!   response, both without extensions. An upstream failure takes the status
+//!   its words imply, or 502 when they imply none.
 //! - On the same protocol the body is relayed as raw bytes. A stream is read
-//!   until its first event so an in-band failure is still an error.
+//!   until its first content event so an in-band failure is still an error.
 //! - [`send`] stops before the body: [`Sent::headers`] reads the reply
 //!   headers, [`Sent::watch`] shows the stream's `data:` lines within a byte
 //!   limit to a callback while passing the bytes through unchanged, and
@@ -60,7 +60,10 @@ use hofund_plugin_api::{
 use secrecy::ExposeSecret;
 
 use crate::sigv4::{self, AwsSigner};
-use crate::transport::{Call, HttpResponse, is_quota_error, parse_retry_after_headers, read_body};
+use crate::transport::{
+    Call, HttpResponse, carried_error, is_credit_error, is_quota_error, parse_retry_after_headers,
+    read_body, retry_after_from_body, status_for_error,
+};
 
 /// Attempts per call. Only a connect failure is retried.
 const ATTEMPTS: u8 = 2;
@@ -124,6 +127,7 @@ pub struct Target {
     rewrite: Option<Rewrite>,
     method_root: Option<&'static str>,
     unwrap: Option<Unwrap>,
+    allocation_quota_rate: bool,
 }
 
 impl Target {
@@ -142,7 +146,15 @@ impl Target {
             rewrite: None,
             method_root: None,
             unwrap: None,
+            allocation_quota_rate: false,
         }
+    }
+
+    /// Treats this target's allocated-quota wording as a short rate limit.
+    #[must_use]
+    pub const fn allocation_quota_rate(mut self, enabled: bool) -> Self {
+        self.allocation_quota_rate = enabled;
+        self
     }
 
     /// Where the secret is written.
@@ -229,6 +241,7 @@ impl fmt::Debug for Target {
             .field("rewrite", &self.rewrite.is_some())
             .field("method_root", &self.method_root)
             .field("unwrap", &self.unwrap.is_some())
+            .field("allocation_quota_rate", &self.allocation_quota_rate)
             .finish()
     }
 }
@@ -264,6 +277,7 @@ pub struct Sent {
     streaming: bool,
     unwrap: Option<Unwrap>,
     watch: Option<(usize, Watch)>,
+    allocation_quota_rate: bool,
 }
 
 impl fmt::Debug for Sent {
@@ -276,6 +290,7 @@ impl fmt::Debug for Sent {
             .field("streaming", &self.streaming)
             .field("unwrap", &self.unwrap.is_some())
             .field("watch", &self.watch.as_ref().map(|(limit, _)| *limit))
+            .field("allocation_quota_rate", &self.allocation_quota_rate)
             .finish()
     }
 }
@@ -285,15 +300,16 @@ impl Sent {
     ///
     /// # Errors
     ///
-    /// Returns [`PluginError`] when the body cannot be read or decoded, or a
-    /// stream's first event is an upstream failure.
+    /// Returns [`PluginError`] when the body cannot be read or decoded, or the
+    /// stream reports an upstream failure.
     pub async fn complete(self) -> Result<Completion, PluginError> {
         let (codec, cross_protocol, streaming) = (self.codec, self.cross_protocol, self.streaming);
+        let allocation_quota_rate = self.allocation_quota_rate;
         let body = self.into_body();
         if cross_protocol {
-            decoded(body, codec, streaming).await
+            decoded(body, codec, streaming, allocation_quota_rate).await
         } else {
-            raw(body, codec, streaming).await
+            raw(body, codec, streaming, allocation_quota_rate).await
         }
     }
 
@@ -313,9 +329,9 @@ impl Sent {
 
     /// Reads a stream to its end and folds its events into one response,
     /// whatever protocol the client spoke: for a client that asked for one
-    /// reply from an upstream that only streams. An upstream failure
-    /// anywhere in the stream is status 502. A unary body is read as
-    /// [`Sent::complete`] reads it.
+    /// reply from an upstream that only streams. An upstream failure takes
+    /// the status its words imply, or 502 when they imply none. A unary body
+    /// is read as [`Sent::complete`] reads it.
     ///
     /// # Errors
     ///
@@ -502,7 +518,7 @@ pub async fn send(
     };
     let response = call.open_raw(http, ATTEMPTS).await?;
     if !response.status().is_success() {
-        return Err(status_error(response).await);
+        return Err(status_error(response, target.allocation_quota_rate).await);
     }
     Ok(Sent {
         response,
@@ -511,6 +527,7 @@ pub async fn send(
         streaming,
         unwrap: target.unwrap.clone(),
         watch: None,
+        allocation_quota_rate: target.allocation_quota_rate,
     })
 }
 
@@ -549,7 +566,7 @@ pub async fn forward(
         .bytes(body.bytes());
     let response = call.open_raw(http, ATTEMPTS).await?;
     if !response.status().is_success() {
-        return Err(status_error(response).await);
+        return Err(status_error(response, target.allocation_quota_rate).await);
     }
     let status = response.status().as_u16();
     let content_type = response
@@ -968,7 +985,7 @@ fn classify_count(
             .ok_or_else(|| PluginError::decode(format!("count response has no {field}")))?;
         return Ok(CountOutcome::Counted(tokens));
     }
-    Err(status_failure(status, retry_after, bytes))
+    Err(status_failure(status, retry_after, bytes, false))
 }
 
 /// Whether a 400 says the count endpoint itself is missing. A rejection of
@@ -984,26 +1001,35 @@ fn endpoint_unsupported(bytes: &[u8]) -> bool {
         || message.contains("do not support")
 }
 
-async fn status_error(response: HttpResponse) -> PluginError {
+async fn status_error(response: HttpResponse, allocation_quota_rate: bool) -> PluginError {
     let (status, retry_after, body) = match read_body(response).await {
         Ok(read) => read,
         Err(error) => return error,
     };
-    status_failure(status, retry_after, &body)
+    status_failure(status, retry_after, &body, allocation_quota_rate)
 }
 
 fn status_failure(
     status: u16,
     retry_after: Option<std::time::Duration>,
     body: &[u8],
+    allocation_quota_rate: bool,
 ) -> PluginError {
     let message = message_from(body);
-    let error = if is_quota_error(status, body) {
-        PluginError::quota(message)
+    let error = if allocation_quota_rate && crate::transport::is_allocation_quota_rate(status, body)
+    {
+        PluginError::status_error(status, message)
+    } else if is_credit_error(status, body) {
+        PluginError::credit_status(status, message)
+    } else if is_quota_error(status, body) {
+        PluginError::quota_status(status, message)
     } else {
         PluginError::status_error(status, message)
     };
-    match retry_after.or_else(|| retry_delay(body)) {
+    match retry_after
+        .or_else(|| retry_delay(body))
+        .or_else(|| retry_after_from_body(body))
+    {
         Some(after) => error.with_retry_after(after),
         None => error,
     }
@@ -1143,6 +1169,7 @@ async fn decoded(
     body: BodyStream,
     codec: &dyn Codec,
     streaming: bool,
+    allocation_quota_rate: bool,
 ) -> Result<Completion, PluginError> {
     if streaming {
         let events = Events {
@@ -1150,7 +1177,6 @@ async fn decoded(
             decoder: codec.stream_decoder(),
             pending: VecDeque::new(),
             finished: false,
-            yielded: false,
         };
         return Ok(Completion::Stream(Box::pin(futures_util::stream::unfold(
             events,
@@ -1158,6 +1184,9 @@ async fn decoded(
         ))));
     }
     let bytes = collect(body).await?;
+    if let Some(error) = carried_error(&bytes, allocation_quota_rate) {
+        return Err(error);
+    }
     let mut response = codec
         .decode_response(&bytes)
         .map_err(|error| PluginError::decode(error.to_string()))?;
@@ -1169,9 +1198,13 @@ async fn raw(
     mut body: BodyStream,
     codec: &dyn Codec,
     streaming: bool,
+    allocation_quota_rate: bool,
 ) -> Result<Completion, PluginError> {
     if !streaming {
         let bytes = collect(body).await?;
+        if let Some(error) = carried_error(&bytes, allocation_quota_rate) {
+            return Err(error);
+        }
         return Ok(Completion::Raw(BodyStream::from_bytes(bytes)));
     }
     let mut decoder = codec.stream_decoder();
@@ -1183,19 +1216,29 @@ async fn raw(
             break;
         };
         buffered.push(chunk);
-        let Some(first) = events.first() else {
-            continue;
-        };
-        if let Some(error) = failure_of(first) {
+        if let Some(error) = events.iter().find_map(failure_of) {
             return Err(error);
         }
-        break;
+        if events.iter().any(stream_commits) {
+            break;
+        }
     }
     let mut stream = body;
     for chunk in buffered.into_iter().rev() {
         stream = BodyStream::resume(chunk, stream);
     }
     Ok(Completion::Raw(stream))
+}
+
+fn stream_commits(event: &StreamEvent) -> bool {
+    match event {
+        StreamEvent::MessageStart(_)
+        | StreamEvent::ContentBlockStart(_)
+        | StreamEvent::ContentBlockStop(_)
+        | StreamEvent::Ping(_) => false,
+        StreamEvent::MessageDelta(delta) => delta.stop.is_some(),
+        _ => true,
+    }
 }
 
 /// Pull-based decode of a cross-protocol event stream. The next chunk is read
@@ -1205,7 +1248,6 @@ struct Events {
     decoder: Box<dyn StreamDecoder>,
     pending: VecDeque<Result<StreamEvent, PluginError>>,
     finished: bool,
-    yielded: bool,
 }
 
 impl Events {
@@ -1245,8 +1287,7 @@ impl Events {
     fn take_pending(&mut self) -> Option<Result<StreamEvent, PluginError>> {
         loop {
             let mut item = self.pending.pop_front()?;
-            if !self.yielded
-                && let Ok(event) = &item
+            if let Ok(event) = &item
                 && let Some(error) = failure_of(event)
             {
                 self.pending.clear();
@@ -1259,16 +1300,22 @@ impl Events {
                 }
                 event.strip_extensions();
             }
-            if item.is_ok() {
-                self.yielded = true;
-            }
             return Some(item);
         }
     }
 }
 
-/// An upstream failure reported as the first event is status 502.
 fn failure_of(event: &StreamEvent) -> Option<PluginError> {
+    if let StreamEvent::MessageDelta(delta) = event
+        && delta.stop.as_ref().is_some_and(|stop| {
+            matches!(&stop.reason, hofund_ir::StopReason::Other(reason) if reason == "error")
+        })
+    {
+        return Some(
+            PluginError::status_error(502, "the reply ended with finish_reason \"error\"")
+                .without_cooldown(),
+        );
+    }
     let StreamEvent::Unknown(unknown) = event else {
         return None;
     };
@@ -1280,7 +1327,15 @@ fn failure_of(event: &StreamEvent) -> Option<PluginError> {
         .into_iter()
         .find_map(|path| pointer(&unknown.payload, path))
         .unwrap_or_else(|| "upstream stream failed".to_owned());
-    Some(PluginError::status_error(502, message))
+    let body = serde_json::to_vec(&unknown.payload).unwrap_or_default();
+    let status = status_for_error(&body);
+    if is_credit_error(status, &body) {
+        Some(PluginError::credit_status(status, message))
+    } else if is_quota_error(status, &body) {
+        Some(PluginError::quota_status(status, message))
+    } else {
+        Some(PluginError::status_error(status, message))
+    }
 }
 
 fn pointer(value: &serde_json::Value, path: &str) -> Option<String> {
@@ -1548,13 +1603,35 @@ mod tests {
         let event: StreamEvent = serde_json::from_value(serde_json::json!({
             "type": "unknown",
             "name": "error",
-            "payload": {"error": {"message": "overloaded"}}
+            "payload": {"error": {"message": "boom"}}
         }))
         .expect("event");
         let error = failure_of(&event).expect("failure");
         assert_eq!(error.kind(), PluginErrorKind::Status);
         assert_eq!(error.status(), Some(502));
-        assert_eq!(error.message(), "overloaded");
+        assert_eq!(error.message(), "boom");
+    }
+
+    #[test]
+    fn a8_translated_error_uses_the_status_from_its_words() {
+        let event: StreamEvent = serde_json::from_value(serde_json::json!({
+            "type": "unknown",
+            "name": "error",
+            "payload": {"error": {"message": "Rate limit reached on tokens per min (TPM)"}}
+        }))
+        .expect("event");
+        let error = failure_of(&event).expect("rate");
+        assert_eq!(error.status(), Some(429));
+        assert!(!error.is_credit());
+        let event: StreamEvent = serde_json::from_value(serde_json::json!({
+            "type": "unknown",
+            "name": "response.failed",
+            "payload": {"response": {"error": {"message": "no funds", "code": "insufficient_quota"}}}
+        }))
+        .expect("event");
+        let error = failure_of(&event).expect("credit");
+        assert_eq!(error.status(), Some(429));
+        assert!(error.is_credit());
     }
 
     #[test]
@@ -2063,13 +2140,17 @@ mod tests {
         }
         assert_eq!(super::retry_delay(b"[]"), None);
         assert_eq!(super::retry_delay(b"{}"), None);
-        let error = super::status_failure(429, None, one.as_bytes());
+        let error = super::status_failure(429, None, one.as_bytes(), false);
         assert_eq!(
             error.retry_after(),
             Some(std::time::Duration::from_millis(3500))
         );
-        let header =
-            super::status_failure(429, Some(std::time::Duration::from_secs(7)), one.as_bytes());
+        let header = super::status_failure(
+            429,
+            Some(std::time::Duration::from_secs(7)),
+            one.as_bytes(),
+            false,
+        );
         assert_eq!(
             header.retry_after(),
             Some(std::time::Duration::from_secs(7))
@@ -2116,6 +2197,7 @@ mod tests {
                 streaming: true,
                 unwrap: None,
                 watch: None,
+                allocation_quota_rate: false,
             }
         }
 

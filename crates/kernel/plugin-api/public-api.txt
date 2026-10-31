@@ -454,14 +454,18 @@ Plan::fn is_empty (& self) -> bool
 Plan::fn new (changes : Vec < FileChange >) -> Self
 PluginError
 PluginError #[non_exhaustive] derives(Debug, Error)
+PluginError::const fn cools (& self) -> bool
+PluginError::const fn is_credit (& self) -> bool
 PluginError::const fn kind (& self) -> PluginErrorKind
 PluginError::const fn retry_after (& self) -> Option < Duration >
 PluginError::const fn status (& self) -> Option < u16 >
+PluginError::const fn without_cooldown (mut self) -> Self
 PluginError::fn auth (message : impl Into < String >) -> Self
 PluginError::fn cancelled (message : impl Into < String >) -> Self
 PluginError::fn cause (& self) -> Option < & (dyn Error + 'static) >
 PluginError::fn config (message : impl Into < String >) -> Self
 PluginError::fn connect (message : impl Into < String >) -> Self
+PluginError::fn credit_status (status : u16 , message : impl Into < String >) -> Self
 PluginError::fn decode (message : impl Into < String >) -> Self
 PluginError::fn internal (message : impl Into < String >) -> Self
 PluginError::fn interrupted (message : impl Into < String >) -> Self

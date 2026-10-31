@@ -113,6 +113,7 @@ pub fn openai_compat(
     let quirks = endpoint.quirks;
     let secret =
         (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
+    let allocation_quota_rate = matches!(endpoint.preset.as_deref(), Some("qwen" | "qwen-cn"));
     let adapter = Arc::new(OpenAiCompat::new(protocol, endpoint).map_err(build_error)?);
     let bridged = Bridged {
         inner: adapter.clone(),
@@ -127,7 +128,8 @@ pub fn openai_compat(
         target: Target::new(wire, base)
             .credential(style)
             .headers(headers)
-            .quirks(quirks),
+            .quirks(quirks)
+            .allocation_quota_rate(allocation_quota_rate),
         secret,
         counts: false,
         bridged,
@@ -606,6 +608,10 @@ fn build_error(error: ProviderError) -> BuildError {
 
 fn plugin_error(error: ProviderError) -> PluginError {
     let retry_after = error.retry_after;
+    let credit = error.is_credit();
+    let cooldown = error.cools();
+    let status = error.status;
+    let credit_message = credit.then(|| error.message.clone());
     let mut converted = match error.kind {
         hofund_provider::ProviderErrorKind::Connect => PluginError::connect(error.message),
         hofund_provider::ProviderErrorKind::Timeout => PluginError::timeout(error.message),
@@ -617,12 +623,21 @@ fn plugin_error(error: ProviderError) -> PluginError {
         hofund_provider::ProviderErrorKind::Decode => PluginError::decode(error.message),
         hofund_provider::ProviderErrorKind::Unsupported => PluginError::unsupported(error.message),
         hofund_provider::ProviderErrorKind::Auth => PluginError::auth(error.message),
-        hofund_provider::ProviderErrorKind::Quota => PluginError::quota(error.message),
+        hofund_provider::ProviderErrorKind::Quota => match error.status {
+            Some(status) => PluginError::quota_status(status, error.message),
+            None => PluginError::quota(error.message),
+        },
         hofund_provider::ProviderErrorKind::Config => PluginError::config(error.message),
         hofund_provider::ProviderErrorKind::Cancelled => PluginError::cancelled(error.message),
         hofund_provider::ProviderErrorKind::Io => PluginError::io(error.message),
         hofund_provider::ProviderErrorKind::Internal => PluginError::internal(error.message),
     };
+    if let Some(message) = credit_message {
+        converted = PluginError::credit_status(status.unwrap_or(402), message);
+    }
+    if !cooldown {
+        converted = converted.without_cooldown();
+    }
     if let Some(after) = retry_after {
         converted = converted.with_retry_after(after);
     }
