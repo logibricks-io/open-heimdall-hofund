@@ -1,9 +1,10 @@
 //! Ordered routing and failover across members.
 //!
 //! A model name maps to an ordered list of members. The next member is tried
-//! only when the current one fails before any stream event or raw chunk has
-//! been produced. This crate does not name vendors or the plugin upstream and
-//! host types, and it does not read quirk data. It does not depend on `tower`.
+//! only when the current one fails before any content stream event or raw
+//! chunk has been produced. This crate does not name vendors or the plugin
+//! upstream and host types, and it does not read quirk data. It does not
+//! depend on `tower`.
 //! The daemon adapts each member into a service and wraps that service in the
 //! kernel layers.
 
@@ -47,9 +48,10 @@ impl FailoverPolicy {
     /// Whether `error` happened early enough, and is of a kind, that another
     /// member may be tried.
     ///
-    /// Kinds other than connect, timeout, interrupted, and a listed status do
-    /// not fail over. An interrupted 2xx body has not reached the client yet:
-    /// failover occurs before a completion or first stream event is returned,
+    /// Credit refusals fail over at any 4xx. Other kinds must be connect,
+    /// timeout, interrupted, or a listed status. An interrupted 2xx body has
+    /// not reached the client yet: failover occurs before a completion or
+    /// first content stream event is returned,
     /// like the reference's held reply that ends short and goes to the next
     /// candidate (`reference: internal/gateway/fallback.go:1859-1866`,
     /// `reference: internal/gateway/fallback.go:2364-2368`,
@@ -60,6 +62,13 @@ impl FailoverPolicy {
     /// this match.
     #[must_use]
     pub fn allows(&self, error: &PluginError) -> bool {
+        if error.is_credit()
+            && error
+                .status()
+                .is_some_and(|status| (400..500).contains(&status))
+        {
+            return true;
+        }
         match error.kind() {
             PluginErrorKind::Connect | PluginErrorKind::Timeout | PluginErrorKind::Interrupted => {
                 self.connect_errors
@@ -466,8 +475,8 @@ pub struct Routed {
     /// Model name sent to that provider. The gateway compares it with the
     /// name the client asked for before touching a raw body.
     pub upstream_model: String,
-    /// The completion. A stream or raw body has already produced its first
-    /// chunk, or ended empty. A failure before that is not returned here.
+    /// The completion. A stream has produced its first content event, a raw
+    /// body its first chunk, or either ended empty. An earlier failure is not returned here.
     pub completion: Completion,
 }
 
@@ -583,20 +592,38 @@ fn label_model(completion: Completion, model: String) -> Completion {
 
 async fn accept(completion: Completion) -> Result<Completion, PluginError> {
     match completion {
-        Completion::Stream(mut stream) => match stream.next().await {
-            None => Ok(Completion::Stream(stream)),
-            Some(Err(error)) => Err(error),
-            Some(Ok(event)) => {
-                let head = futures_util::stream::once(async move { Ok(event) });
-                Ok(Completion::Stream(Box::pin(head.chain(stream))))
+        Completion::Stream(mut stream) => {
+            let mut held = Vec::new();
+            while let Some(item) = stream.next().await {
+                let event = item?;
+                let commits = stream_commits(&event);
+                held.push(event);
+                if commits {
+                    let head = futures_util::stream::iter(held.into_iter().map(Ok));
+                    return Ok(Completion::Stream(Box::pin(head.chain(stream))));
+                }
             }
-        },
+            Ok(Completion::Stream(Box::pin(futures_util::stream::iter(
+                held.into_iter().map(Ok),
+            ))))
+        }
         Completion::Raw(mut body) => match body.next_chunk().await {
             None => Ok(Completion::Raw(body)),
             Some(Err(error)) => Err(error),
             Some(Ok(chunk)) => Ok(Completion::Raw(BodyStream::resume(chunk, body))),
         },
         other => Ok(other),
+    }
+}
+
+fn stream_commits(event: &StreamEvent) -> bool {
+    match event {
+        StreamEvent::MessageStart(_)
+        | StreamEvent::ContentBlockStart(_)
+        | StreamEvent::ContentBlockStop(_)
+        | StreamEvent::Ping(_) => false,
+        StreamEvent::MessageDelta(delta) => delta.stop.is_some(),
+        _ => true,
     }
 }
 

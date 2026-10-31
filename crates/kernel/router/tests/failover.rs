@@ -10,7 +10,9 @@ use futures_util::StreamExt;
 use futures_util::stream;
 use hofund_ir::{ContentPart, Message, Request, Response, Role, StreamEvent, TextDelta};
 use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PluginErrorKind, PresetId};
-use hofund_router::{Completion, FailoverPolicy, Member, Router, RouterError, Snapshot};
+use hofund_router::{
+    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Member, Router, RouterError, Snapshot,
+};
 
 struct Fake {
     route_id: &'static str,
@@ -28,6 +30,9 @@ enum Kind {
     StreamFail(u16),
     RawOk,
     RawFail,
+    Credit(u16),
+    FinishError,
+    FinishAfterText,
 }
 
 #[async_trait]
@@ -64,6 +69,26 @@ impl Member for Fake {
             Kind::RawFail => Ok(Completion::Raw(BodyStream::from_stream(stream::iter(
                 vec![Err(PluginError::status_error(503, "raw"))],
             )))),
+            Kind::Credit(status) => Err(PluginError::credit_status(status, "out of credit")),
+            Kind::FinishError => Ok(Completion::Stream(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::MessageStart(hofund_ir::MessageStart {
+                    id: None,
+                    model: None,
+                    usage: None,
+                    extensions: hofund_ir::Extensions::new(),
+                })),
+                Err(
+                    PluginError::status_error(502, "the reply ended with finish_reason \"error\"")
+                        .without_cooldown(),
+                ),
+            ])))),
+            Kind::FinishAfterText => Ok(Completion::Stream(Box::pin(stream::iter(vec![
+                Ok(text_event("already sent")),
+                Err(
+                    PluginError::status_error(502, "the reply ended with finish_reason \"error\"")
+                        .without_cooldown(),
+                ),
+            ])))),
         }
     }
 }
@@ -251,4 +276,71 @@ async fn a_loaded_snapshot_is_unchanged_by_a_later_store() {
     assert_eq!(routed.upstream_id, "first");
     assert!(snapshot.load().models().is_empty());
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a5_credit_refusal_at_any_4xx_fails_over() {
+    for status in [400, 402, 409, 422, 429] {
+        let second = Arc::new(AtomicUsize::new(0));
+        let router = router(vec![
+            fake(
+                "first",
+                &Arc::new(AtomicUsize::new(0)),
+                Kind::Credit(status),
+            ),
+            fake("second", &second, Kind::Unary),
+        ]);
+        let routed = dispatch(&router, "demo").await.expect("credit failover");
+        assert_eq!(routed.upstream_id, "second", "{status}");
+        assert_eq!(second.load(Ordering::SeqCst), 1, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a7_finish_error_before_content_fails_over_without_a_rest() {
+    let second = Arc::new(AtomicUsize::new(0));
+    let book = Arc::new(Cooldowns::new(CooldownPolicy::default()));
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "demo".to_owned(),
+        vec![
+            fake("first", &Arc::new(AtomicUsize::new(0)), Kind::FinishError),
+            fake("second", &second, Kind::Unary),
+        ],
+    );
+    let router = Router::new(routes, FailoverPolicy::default()).with_cooldowns(Arc::clone(&book));
+    let routed = dispatch(&router, "demo").await.expect("finish failover");
+    assert_eq!(routed.upstream_id, "second");
+    let first = MemberId::from_preset(
+        PresetId::from_static("first"),
+        MemberKey::from_static("row"),
+    );
+    assert_eq!(book.cooling(&first), None);
+}
+
+#[tokio::test]
+async fn a7_finish_error_after_content_does_not_replace_the_stream() {
+    let second = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake(
+            "first",
+            &Arc::new(AtomicUsize::new(0)),
+            Kind::FinishAfterText,
+        ),
+        fake("second", &second, Kind::Unary),
+    ]);
+    let routed = dispatch(&router, "demo").await.expect("committed stream");
+    assert_eq!(routed.upstream_id, "first");
+    let Completion::Stream(mut events) = routed.completion else {
+        panic!("stream");
+    };
+    let first = events.next().await.expect("text").expect("event");
+    assert!(matches!(first, StreamEvent::TextDelta(_)));
+    let error = events
+        .next()
+        .await
+        .expect("finish error")
+        .expect_err("finish error");
+    assert!(!error.cools());
+    assert_eq!(second.load(Ordering::SeqCst), 0);
 }

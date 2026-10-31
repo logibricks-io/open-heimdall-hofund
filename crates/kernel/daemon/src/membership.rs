@@ -721,6 +721,10 @@ fn map_count(outcome: ProviderCount) -> CountOutcome {
 
 pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     let retry_after = error.retry_after;
+    let credit = error.is_credit();
+    let cooldown = error.cools();
+    let status = error.status;
+    let credit_message = credit.then(|| error.message.clone());
     let mut converted = match error.kind {
         ProviderErrorKind::Connect => PluginError::connect(error.message),
         ProviderErrorKind::Timeout => PluginError::timeout(error.message),
@@ -741,6 +745,12 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
         ProviderErrorKind::Io => PluginError::io(error.message),
         ProviderErrorKind::Internal => PluginError::internal(error.message),
     };
+    if let Some(message) = credit_message {
+        converted = PluginError::credit_status(status.unwrap_or(402), message);
+    }
+    if !cooldown {
+        converted = converted.without_cooldown();
+    }
     if let Some(after) = retry_after {
         converted = converted.with_retry_after(after);
     }

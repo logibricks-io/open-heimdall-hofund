@@ -186,9 +186,15 @@ transport::Reply derives(Clone, Debug, PartialEq, Eq)
 transport::Reply::fn body (& self) -> & [u8]
 transport::Reply::fn into_body (self) -> Vec < u8 >
 transport::Reply::fn status (& self) -> u16
+transport::fn carried_error (body : & [u8] , allocation_quota_rate : bool) -> Option < PluginError >
+transport::fn is_allocation_quota_rate (status : u16 , body : & [u8]) -> bool
+transport::fn is_context_overflow_error (status : u16 , body : & [u8]) -> bool
+transport::fn is_credit_error (status : u16 , body : & [u8]) -> bool
 transport::fn is_quota_error (status : u16 , body : & [u8]) -> bool
 transport::fn parse_retry_after (value : & str , now : std :: time :: SystemTime) -> Option < Duration >
 transport::fn parse_retry_after_headers (headers : & http :: HeaderMap , now : std :: time :: SystemTime ,) -> Option < Duration >
+transport::fn retry_after_from_body (body : & [u8]) -> Option < Duration >
+transport::fn status_for_error (body : & [u8]) -> u16
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse
 url
 wire::Rewrite
@@ -198,6 +204,7 @@ wire::Sent::async fn fold (self) -> Result < Completion , PluginError >
 wire::Sent::fn headers (& self) -> & http :: HeaderMap
 wire::Sent::fn watch (mut self , limit : usize , watch : Watch) -> Self
 wire::Target derives(Clone)
+wire::Target::const fn allocation_quota_rate (mut self , enabled : bool) -> Self
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
 wire::Target::fn method_root (mut self , root : & 'static str) -> Self
