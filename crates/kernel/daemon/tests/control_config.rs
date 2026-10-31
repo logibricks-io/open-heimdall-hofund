@@ -1,6 +1,8 @@
 //! L6b configuration transaction and L6d live relisten over the control
 //! listener.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -103,7 +105,7 @@ impl Client {
             .trim()
             .to_owned();
         Self {
-            http: reqwest::Client::new(),
+            http: support::client(),
             base: format!("http://{}", running.control_local_addr().expect("control")),
             token,
         }
@@ -277,7 +279,7 @@ async fn apply_writes_exact_bytes_publishes_and_reports_one_generation_everywher
     assert_eq!(ok(status, &body).generation, 3);
     // An open stream would hold the graceful drain of the control listener.
     drop(stream);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -304,7 +306,7 @@ async fn apply_stale_disk_revision_returns_409_without_overwriting_hand_edit() {
     assert_eq!(status.generation, 1);
     assert_eq!(status.disk_revision, revision(&hand_edit));
     assert_eq!(status.runtime_revision, revision(&original));
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -350,7 +352,7 @@ async fn apply_bad_toml_is_422_rejected_and_never_echoes_config_text() {
     assert!(!rendered.contains(SECRET), "{rendered}");
     // An open stream would hold the graceful drain of the control listener.
     drop(stream);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -410,7 +412,7 @@ async fn pending_restart_fields_agree_across_response_status_and_events() {
     }
     // An open stream would hold the graceful drain of the control listener.
     drop(stream);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[cfg(unix)]
@@ -463,7 +465,7 @@ async fn atomic_apply_preserves_symlink_mode_owner_and_exact_bytes_and_fsyncs() 
         .filter(|name| name.ends_with(".tmp"))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 /// Makes `dir` read-only, or returns false when this user can still write it.
@@ -508,7 +510,7 @@ async fn read_only_config_dir_reload_uses_runtime_sidecar_lock() {
     let running = start_at(&scratch, &scratch.path(), &original).await;
     let client = Client::new(&running, &scratch);
     if !read_only(&scratch.config_dir) {
-        running.shutdown().await;
+        support::shutdown(running).await;
         return;
     }
     let (status, body) = client.reload(&revision(&original)).await;
@@ -517,7 +519,7 @@ async fn read_only_config_dir_reload_uses_runtime_sidecar_lock() {
     assert!(!scratch.config_dir.join("hofund.toml.lock").exists());
     let fallback = has_config_lock(&scratch.runtime_dir);
     assert!(fallback, "runtime sidecar lock was not used");
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[cfg(unix)]
@@ -528,7 +530,7 @@ async fn read_only_config_dir_write_fails_clearly() {
     let running = start_at(&scratch, &scratch.path(), &original).await;
     let client = Client::new(&running, &scratch);
     if !read_only(&scratch.config_dir) {
-        running.shutdown().await;
+        support::shutdown(running).await;
         return;
     }
     let (status, body) = client
@@ -551,7 +553,7 @@ async fn read_only_config_dir_write_fails_clearly() {
         original
     );
     assert_eq!(client.status().await.generation, 1);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -614,7 +616,7 @@ async fn config_text_never_in_events_status_or_errors() {
     let rendered = format!("{status:?}");
     assert!(!rendered.contains(SECRET), "{rendered}");
     drop(stream);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -669,7 +671,7 @@ async fn rotated_key_reaches_the_model_host_after_apply() {
         .map(|model| model.id.as_str())
         .collect();
     assert_eq!(ids, ["fresh"]);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 /// Returns a loopback address whose port was free a moment ago.
@@ -689,7 +691,7 @@ fn with_listen(listen: &str) -> String {
 }
 
 async fn health(addr: std::net::SocketAddr) -> Result<reqwest::StatusCode, reqwest::Error> {
-    reqwest::Client::new()
+    support::client()
         .get(format!("http://{addr}/health"))
         .timeout(Duration::from_secs(5))
         .send()
@@ -727,7 +729,7 @@ async fn relisten_port_change_moves_the_model_listener_and_status() {
         reqwest::StatusCode::OK
     );
     assert!(health(old).await.is_err(), "the old listener is closed");
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -795,7 +797,7 @@ async fn relisten_failure_publishes_rest_and_reports_not_applied() {
     );
     assert_eq!(running.listen_addr(), target);
     drop(stream);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -890,5 +892,5 @@ async fn reload_listen_with_hofund_addr_reports_not_applied_env_override() {
         other => panic!("expected config_reloaded/snapshot_published pairs, got {other:?}"),
     }
     drop(stream);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
