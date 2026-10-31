@@ -14,11 +14,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use hofund_config::{Accounts, Config};
+use hofund_control_proto::{Quota, QuotaKind};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, HostContext, MemberId, PluginErrorKind, PluginId, PluginKind,
-    QuotaObservation, QuotaWindow, RawTable, Subscription, UpstreamProvider,
+    AccountId, AccountStatus, HostContext, MemberId, PluginError, PluginErrorKind, PluginId,
+    PluginKind, QuotaObservation, QuotaWindow, RawTable, Subscription, UpstreamProvider,
 };
 use hofund_plugin_host::HttpLimits;
+use hofund_router::quota::{QuotaStore, WindowInfo};
 use hofund_router::Cooldowns;
 use tokio::time::Instant;
 
@@ -265,21 +267,28 @@ impl SubscriptionState {
         })
     }
 
-    async fn quota(&self, account: &AccountId) -> Result<Vec<QuotaWindow>, PluginErrorKind> {
-        self.instance
-            .quota(account, &self.host)
-            .await
-            .map_err(|error| {
-                if error.kind() != PluginErrorKind::Unsupported {
-                    tracing::warn!(
-                        subscription = %self.config.id,
-                        account = %account,
-                        %error,
-                        "quota poll failed"
-                    );
-                }
-                error.kind()
-            })
+    async fn quota(&self, account: &AccountId) -> Result<Vec<QuotaWindow>, PluginError> {
+        self.instance.quota(account, &self.host).await.map_err(|error| {
+            if error.kind() != PluginErrorKind::Unsupported {
+                tracing::warn!(
+                    subscription = %self.config.id,
+                    account = %account,
+                    %error,
+                    "quota poll failed"
+                );
+            }
+            error
+        })
+    }
+
+    fn quota_card(&self, account: &AccountId) -> Quota {
+        Quota {
+            provider: self.config.id.clone(),
+            name: self.config.id.clone(),
+            kind: QuotaKind::Subscription,
+            user: account.to_string(),
+            ..Quota::default()
+        }
     }
 }
 
@@ -431,17 +440,22 @@ impl QuotaPolls {
         &mut self,
         subscriptions: &Subscriptions,
         cooldowns: &Cooldowns,
+        quotas: &QuotaStore,
         now: Instant,
+        force: bool,
     ) -> Vec<MemberId> {
         let mut live = HashSet::new();
         let mut cooled = Vec::new();
         for state in subscriptions.values() {
             for member in state.members() {
                 live.insert(member.id.clone());
+                let card = state.quota_card(&member.account);
+                quotas.register(card.clone());
                 if self.unsupported.contains(&member.id) {
+                    quotas.record_deferred(card);
                     continue;
                 }
-                if self.next.get(&member.id).is_some_and(|due| *due > now) {
+                if !force && self.next.get(&member.id).is_some_and(|due| *due > now) {
                     continue;
                 }
                 self.round = self.round.wrapping_add(1);
@@ -452,12 +466,32 @@ impl QuotaPolls {
                         if apply_windows(cooldowns, &member.id, &state.plugin, &windows) {
                             cooled.push(member.id.clone());
                         }
+                        quotas.record_success(
+                            card,
+                            windows.iter().map(WindowInfo::from_plugin).collect(),
+                            quotas.now(),
+                        );
                     }
-                    Err(PluginErrorKind::Unsupported) => {
+                    Err(error) if error.kind() == PluginErrorKind::Unsupported => {
                         self.unsupported.insert(member.id.clone());
                         self.next.remove(&member.id);
+                        quotas.record_deferred(card);
                     }
-                    Err(_) => {}
+                    Err(error) => {
+                        let transient = matches!(
+                            error.kind(),
+                            PluginErrorKind::Connect
+                                | PluginErrorKind::Timeout
+                                | PluginErrorKind::Transport
+                                | PluginErrorKind::Interrupted
+                                | PluginErrorKind::Io
+                                | PluginErrorKind::Internal
+                                | PluginErrorKind::Quota
+                        ) || error.status().is_some_and(|status| status == 429 || status >= 500);
+                        let mut failed = card;
+                        failed.error = error.to_string();
+                        quotas.record_failure(failed, transient);
+                    }
                 }
             }
         }

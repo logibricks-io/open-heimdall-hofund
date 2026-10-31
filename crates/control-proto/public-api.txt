@@ -186,6 +186,10 @@ HealthResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize,
 HealthResponse.api_version
 HealthResponse.daemon_version
 HealthResponse.version
+ListEnvelope derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+ListEnvelope.data
+ListEnvelope.object
+ListEnvelope::fn new (data : Vec < T >) -> Self
 ListenSource #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
 ListenSource::Config
 ListenSource::Environment
@@ -281,6 +285,64 @@ ProviderTestResult.latency_ms
 ProviderTestResult.model
 ProviderTestResult.ok
 ProviderTestResult.status
+Quota derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+Quota.alias
+Quota.as_of
+Quota.balance
+Quota.error
+Quota.kind
+Quota.last
+Quota.last_served_at
+Quota.name
+Quota.plan
+Quota.provider
+Quota.read_at
+Quota.read_deferred
+Quota.renew
+Quota.until
+Quota.user
+Quota.windows
+QuotaHistory derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+QuotaHistory.lines
+QuotaHistory.provider
+QuotaHistory.user
+QuotaHistoryResponse derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+QuotaHistoryResponse.data
+QuotaHistoryResponse.version
+QuotaKind derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "lowercase")]
+QuotaKind::Balance
+QuotaKind::Plan
+QuotaKind::Subscription
+QuotaKind::Unknown #[serde(other)]
+QuotaLine derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+QuotaLine.name
+QuotaLine.points
+QuotaPoint derives(Clone, Debug, PartialEq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+QuotaPoint.at
+QuotaPoint.left
+QuotaPoint.resets_at
+QuotaPoint.start
+QuotaResponse derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+QuotaResponse.data
+QuotaResponse.version
+QuotaSpan derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+QuotaSpan.amount
+QuotaSpan.balance
+QuotaSpan.display
+QuotaSpan.limit
+QuotaSpan.name
+QuotaSpan.pool
+QuotaSpan.remaining
+QuotaSpan.resets_at
+QuotaSpan.runs_out
+QuotaSpan.runs_out_at
+QuotaSpan.text
+QuotaSpan.unit
+QuotaSpan.unlimited
+QuotaSpan.used
+QuotaTime derives(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)
+QuotaTime::fn as_str (& self) -> & str
+QuotaTime::fn new (value : impl Into < String >) -> Self
 ReloadRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ReloadRequest.expected_revision
 ReloadRequest.version

@@ -6,6 +6,7 @@ use std::time::Duration;
 use hofund_config::Config;
 use hofund_control_proto::{EventPayload, MemberCooledEvent, MemberRecoveredEvent};
 use hofund_plugin_api::MemberId;
+use hofund_router::quota::QuotaStore;
 use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
 use tokio::sync::watch;
 
@@ -62,6 +63,7 @@ pub(crate) struct Runtime {
     events: OnceLock<Arc<EventBus>>,
     plan: Mutex<Plan>,
     polls: tokio::sync::Mutex<QuotaPolls>,
+    quotas: Arc<QuotaStore>,
     /// Wakes the subscription task after a publication.
     wake: tokio::sync::Notify,
 }
@@ -95,6 +97,9 @@ impl Runtime {
             events: OnceLock::new(),
             plan: Mutex::new(Plan::default()),
             polls: tokio::sync::Mutex::new(QuotaPolls::default()),
+            quotas: Arc::new(QuotaStore::new(
+                path.parent().unwrap_or_else(|| Path::new(".")),
+            )),
             wake: tokio::sync::Notify::new(),
         })
     }
@@ -354,6 +359,10 @@ impl Runtime {
 
     /// Polls quota for each subscription member that is due.
     pub(crate) async fn poll_quotas(&self, now: tokio::time::Instant) -> Vec<MemberId> {
+        self.poll_quotas_with(now, false).await
+    }
+
+    async fn poll_quotas_with(&self, now: tokio::time::Instant, force: bool) -> Vec<MemberId> {
         let current = self
             .plan
             .lock()
@@ -363,8 +372,42 @@ impl Runtime {
         self.polls
             .lock()
             .await
-            .poll(&current, &self.cooldowns, now)
+            .poll(&current, &self.cooldowns, &self.quotas, now, force)
             .await
+    }
+
+    /// Returns a cached report or refreshes every readable subscription first.
+    pub(crate) async fn quota_report(&self, kept: bool) -> Vec<hofund_control_proto::Quota> {
+        if !kept {
+            self.poll_quotas_with(tokio::time::Instant::now(), true)
+                .await;
+        }
+        let order = self
+            .config
+            .get()
+            .map(|config| {
+                let config = config.subscribe();
+                let config = config.borrow();
+                config
+                    .providers
+                    .iter()
+                    .map(|provider| provider.id.clone())
+                    .chain(config.subscriptions.iter().map(|entry| entry.id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.quotas.report(&order)
+    }
+
+    /// Returns sampled history from the shared store.
+    pub(crate) fn quota_histories(
+        &self,
+        days: Option<&str>,
+        provider: Option<&str>,
+        user: Option<&str>,
+    ) -> Vec<hofund_control_proto::QuotaHistory> {
+        self.quotas
+            .histories(days, provider, user, self.quotas.now())
     }
 
     /// Rereads accounts every tick and after each publication, then polls
