@@ -64,7 +64,7 @@ impl RequestState {
             .contains(model)
     }
 
-    fn wanted_token_field(&self) -> Option<TokenField> {
+    fn refused_token_field(&self) -> Option<TokenField> {
         *self
             .token_field
             .lock()
@@ -207,10 +207,13 @@ pub fn with_token_field(body: &[u8], wanted: TokenField) -> (Vec<u8>, bool) {
 }
 
 pub(crate) fn wanted_token_field(base_url: &str, state: &RequestState) -> Option<TokenField> {
-    if openai_host(base_url) {
-        return Some(TokenField::CompletionTokens);
+    // A learned refusal wins over the host default, as in the reference:
+    // a refused `max_completion_tokens` asks with `max_tokens` even on
+    // OpenAI's own API.
+    if let Some(refused) = state.refused_token_field() {
+        return Some(refused.other());
     }
-    state.wanted_token_field().map(TokenField::other)
+    openai_host(base_url).then_some(TokenField::CompletionTokens)
 }
 
 fn openai_host(base_url: &str) -> bool {

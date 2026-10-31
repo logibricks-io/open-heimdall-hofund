@@ -86,3 +86,44 @@ fn v5_chat_token_field_retried_when_named() {
     );
     assert_eq!(other, body);
 }
+
+#[test]
+fn v5_learned_completion_tokens_refusal_wins_on_openai_host() {
+    // Reference chatTokenField: a refused max_completion_tokens is checked
+    // before the OpenAI host default.
+    let body = br#"{"model":"m","max_completion_tokens":64,"messages":[]}"#;
+    let state = RequestState::default();
+    state.learn_token_field(TokenField::MaxTokens);
+    let got = apply_encoded_with_state(
+        EncodedContext {
+            base_url: "https://api.openai.com/v1",
+            preset: None,
+            protocol: "openai-chat",
+        },
+        &state,
+        body,
+    );
+    let value: Value = serde_json::from_slice(&got).expect("JSON");
+    assert_eq!(value["max_tokens"], 64);
+    assert!(value.get("max_completion_tokens").is_none());
+}
+
+#[test]
+fn v5_deepseek_token_field_runs_before_learned_chat_token_field() {
+    // Reference forwardOnce order: deepseekTokenField, then chatTokenField.
+    let body = br#"{"model":"deepseek-chat","max_completion_tokens":64,"messages":[]}"#;
+    let state = RequestState::default();
+    state.learn_token_field(TokenField::CompletionTokens);
+    let got = apply_encoded_with_state(
+        EncodedContext {
+            base_url: "https://api.deepseek.com/v1",
+            preset: Some("deepseek"),
+            protocol: "openai-chat",
+        },
+        &state,
+        body,
+    );
+    let value: Value = serde_json::from_slice(&got).expect("JSON");
+    assert_eq!(value["max_completion_tokens"], 64);
+    assert!(value.get("max_tokens").is_none());
+}

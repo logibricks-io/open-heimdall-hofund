@@ -35,8 +35,18 @@ pub fn apply_before_encode(_context: EncodedContext<'_>, request: &mut Request) 
 /// Untouched bodies and every byte outside a targeted edit are preserved.
 #[must_use]
 pub fn apply_encoded(context: EncodedContext<'_>, body: &[u8]) -> Vec<u8> {
-    let mut body = chat_token_field(context, &RequestState::default(), body);
-    for rule in ENCODED_RULES {
+    apply_rules(context, &RequestState::default(), body)
+}
+
+/// The reference order: tool patterns, the DeepSeek token cap, the learned
+/// or host Chat token field, then the schema and sampling rules.
+fn apply_rules(context: EncodedContext<'_>, state: &RequestState, body: &[u8]) -> Vec<u8> {
+    let mut body = body.to_vec();
+    for rule in BEFORE_TOKEN_FIELD {
+        body = rule(context, &body);
+    }
+    body = chat_token_field(context, state, &body);
+    for rule in AFTER_TOKEN_FIELD {
         body = rule(context, &body);
     }
     body
@@ -54,8 +64,7 @@ pub fn apply_encoded_with_state(
         .and_then(|root| root.get("model").and_then(Node::text).map(str::to_owned))
         .unwrap_or_default();
     let (body, _) = fold_object_roots(context.base_url, context.protocol, &model, state, body);
-    let body = chat_token_field(context, state, &body);
-    apply_encoded(context, &body)
+    apply_rules(context, state, &body)
 }
 
 fn chat_token_field(context: EncodedContext<'_>, state: &RequestState, body: &[u8]) -> Vec<u8> {
@@ -70,10 +79,13 @@ fn chat_token_field(context: EncodedContext<'_>, state: &RequestState, body: &[u
 
 type EncodedRule = fn(EncodedContext<'_>, &[u8]) -> Vec<u8>;
 
-const ENCODED_RULES: &[EncodedRule] = &[
+const BEFORE_TOKEN_FIELD: &[EncodedRule] = &[
     deepseek_tool_patterns,
     grok_tool_patterns,
     deepseek_token_field,
+];
+
+const AFTER_TOKEN_FIELD: &[EncodedRule] = &[
     tool_one_of_as_any_of,
     kimi_tool_enum_types,
     kimi_tool_ref_types,
