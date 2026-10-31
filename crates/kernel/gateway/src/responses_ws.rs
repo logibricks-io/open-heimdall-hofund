@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 use tower::ServiceExt;
 
 use super::{
-    BODY_LIMIT, Inner, codec_routes, current_token, next_request_id, reject, text_response,
+    BODY_LIMIT, Inner, current_token, next_request_id, reject, request_router, text_response,
 };
 
 const KEEP_TURNS: usize = 2;
@@ -36,10 +36,21 @@ pub(super) fn wants_socket(method: &Method, headers: &HeaderMap) -> bool {
             .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
 }
 
-pub(super) async fn path_guard(request: Request<Body>, next: Next) -> Response {
-    if wants_socket(request.method(), request.headers()) && !is_responses_path(request.uri().path())
-    {
-        return upgrade_required();
+pub(super) async fn path_guard(
+    State(app): State<Arc<Inner>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if wants_socket(request.method(), request.headers()) {
+        let path = request.uri().path();
+        let admitted = is_responses_path(path)
+            || app
+                .surfaces
+                .iter()
+                .any(|surface| surface.responses_websocket_paths().contains(&path));
+        if !admitted {
+            return upgrade_required();
+        }
     }
     next.run(request).await
 }
@@ -238,8 +249,7 @@ impl SocketSession {
             Prepared::Replay { body, input } => {
                 self.stats.bytes_sent += body.len() as u64;
                 let request = replay_request(&self.origin, &body);
-                let router = codec_routes(&self.app).with_state(Arc::clone(&self.app));
-                let response = match router.oneshot(request).await {
+                let response = match request_router(&self.app).oneshot(request).await {
                     Ok(response) => response,
                     Err(never) => match never {},
                 };

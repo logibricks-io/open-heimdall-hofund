@@ -420,13 +420,7 @@ impl Gateway {
     /// a Generative Language codec is registered, the process binds the
     /// catch-all generate route and the model list instead.
     pub fn into_router(self) -> axum::Router {
-        let mut routes = codec_routes(&self.inner);
-        if !self.inner.surfaces.is_empty() {
-            routes = routes.fallback(dispatch_surface);
-        }
-        routes
-            .with_state(Arc::clone(&self.inner))
-            .layer(axum::middleware::from_fn(responses_ws::path_guard))
+        request_router(&self.inner)
     }
 
     /// Binds `listen` and serves until [`Running`] shuts down.
@@ -683,6 +677,20 @@ impl Drop for Running {
     }
 }
 
+/// The complete outer request path, also used to replay a socket turn.
+fn request_router(app: &Arc<Inner>) -> axum::Router {
+    let mut routes = codec_routes(app);
+    if !app.surfaces.is_empty() {
+        routes = routes.fallback(dispatch_surface);
+    }
+    routes
+        .with_state(Arc::clone(app))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(app),
+            responses_ws::path_guard,
+        ))
+}
+
 /// `/health`, the model lists and every codec route. Surfaces are not here,
 /// so the in-process gateway a surface calls cannot reach another surface.
 fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
@@ -865,7 +873,7 @@ async fn not_found(request: Request) -> Response {
 
 async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Response {
     if responses_ws::wants_socket(request.method(), request.headers()) {
-        return responses_ws::upgrade_required();
+        return responses_ws::get(State(app), request).await;
     }
     let method = request.method().clone();
     let path = request.uri().path().to_owned();

@@ -241,8 +241,11 @@ Checked 2026-10-25 against the Responses tool list and against
 
 ## A Responses WebSocket
 
-`GET /v1/responses` and `GET /responses` accept a WebSocket upgrade. A
-plain GET still answers 405 with `Allow: POST`; an upgrade on any other path
+`GET /v1/responses`, `GET /responses`, and
+`GET /backend-api/codex/responses` accept a WebSocket upgrade. The last path
+is declared by the Codex catalog surface through the inbound plugin API. A
+plain GET still answers 405 with `Allow: POST` on the built-in routes and keeps
+its ordinary surface behavior on the Codex path; an upgrade on any other path
 answers 426. Text frames are `response.create` objects and turns run one at a
 time in arrival order. Binary frames close with 1003, malformed requests get a
 400 error frame, and the message read limit is the same 8 MiB as the HTTP body
@@ -274,9 +277,9 @@ drain are not part of this transport yet.
 
 The upstream leg still receives the whole expanded conversation on every
 turn; only the client's upload to hofund is reduced. Socket history is memory
-only and is lost when the socket closes or the gateway restarts. The
-Codex-backend Responses path is not applicable because hofund has no such
-socket surface; if that surface is added, it must use this same behavior.
+only and is lost when the socket closes or the gateway restarts. P0-1e (#481)
+added the Codex-backend Responses path with this same behavior; it is no longer
+an out-of-scope gap.
 
 ## Client-facing ids and Chat usage chunks
 

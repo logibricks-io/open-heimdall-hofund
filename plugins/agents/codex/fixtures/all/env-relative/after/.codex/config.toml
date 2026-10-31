@@ -6,4 +6,5 @@ model_provider = "hofund"
 name = "hofund"
 base_url = "http://127.0.0.1:3425/v1"
 wire_api = "responses"
+supports_websockets = true
 experimental_bearer_token = "old-token"
