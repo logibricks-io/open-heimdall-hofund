@@ -344,7 +344,13 @@ mod tests {
 
     async fn serve(listen: SocketAddr) -> Running {
         let router = axum::Router::new().route("/health", get(|| async { "ok" }));
-        serve_relistenable(router, listen).await.expect("serve")
+        serve_relistenable(
+            router,
+            listen,
+            Arc::new(crate::responses_ws::SocketRegistry::default()),
+        )
+        .await
+        .expect("serve")
     }
 
     fn loopback(port: u16) -> SocketAddr {
