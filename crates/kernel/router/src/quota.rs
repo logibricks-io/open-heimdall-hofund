@@ -1396,6 +1396,77 @@ mod tests {
     }
 
     #[test]
+    fn q7g_standing_reads_used_up_and_back_at_like_the_reference() {
+        let now = at(1_900_000_000);
+        let later = now + Duration::from_secs(600);
+        let latest = now + Duration::from_secs(7200);
+        let mut card = quota("p", "a");
+        card.windows = vec![span("5h", 100.0, Some(later))];
+        let windows = vec![
+            info("5h", 100.0, Some(later)),
+            info("week", 100.0, Some(latest)),
+            info("past", 100.0, Some(now - Duration::from_secs(1))),
+            info("model", 100.0, None).with_scope_model("model-a"),
+            info("aside", 100.0, None).with_blocking(false),
+            info("open", 99.9, None),
+        ];
+        let out = standing(&card, &windows, now);
+        assert!(out.readable);
+        assert!(out.used_up);
+        assert_eq!(out.back_at, Some(quota_time(latest)), "the latest reset wins");
+        assert_eq!(out.provider, "p");
+        assert_eq!(out.user, "a");
+        assert_eq!(out.name, "p");
+
+        let unknown = standing(
+            &card,
+            &[info("5h", 100.0, Some(later)), info("week", 100.0, None)],
+            now,
+        );
+        assert!(unknown.used_up);
+        assert_eq!(unknown.back_at, None, "one silent window hides when it is back");
+
+        let exact = standing(&card, &[info("5h", 100.0, Some(now))], now);
+        assert!(!exact.used_up, "a window resetting now is no longer used up");
+        let free = standing(&card, &[info("open", 99.9, Some(later))], now);
+        assert!(!free.used_up);
+        assert_eq!(free.back_at, None);
+    }
+
+    #[test]
+    fn q7h_standing_is_unreadable_for_errors_cached_or_empty_cards() {
+        let now = at(1_900_000_000);
+        let mut card = quota("p", "a");
+        assert!(!standing(&card, &[], now).readable, "no windows");
+        card.windows = vec![span("5h", 10.0, None)];
+        assert!(standing(&card, &[], now).readable);
+        card.as_of = Some(quota_time(now));
+        assert!(!standing(&card, &[], now).readable, "cached");
+        card.as_of = None;
+        card.error = "401".to_owned();
+        let failed = standing(&card, &[], now);
+        assert!(!failed.readable);
+        assert_eq!(failed.error, "401");
+    }
+
+    #[test]
+    fn q7i_standings_follow_provider_order_and_skip_balances() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = QuotaStore::new(dir.path());
+        let now = at(1_900_000_000);
+        let reset = now + Duration::from_secs(60);
+        store.record_success(quota("z", "a"), vec![info("5h", 100.0, Some(reset))], now);
+        store.record_success(quota("b", "u"), vec![info("5h", 5.0, None)], now);
+        store.record_success(quota("k", ""), Vec::new(), now);
+        let out = store.standings(&["z".to_owned(), "b".to_owned()], now);
+        let order: Vec<&str> = out.iter().map(|entry| entry.provider.as_str()).collect();
+        assert_eq!(order, ["z", "b"]);
+        assert!(out[0].used_up);
+        assert_eq!(out[0].back_at, Some(quota_time(reset)));
+        assert!(!out[1].used_up);
+    }
+
+    #[test]
     fn q9c_allowance_fullest_and_renewal_order() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = QuotaStore::new(dir.path());

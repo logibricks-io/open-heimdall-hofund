@@ -818,6 +818,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn q3d_kept_report_never_reads_and_fresh_report_does() {
+        let dir = tempfile::tempdir().expect("dir");
+        write_accounts(dir.path(), &[("one", "One"), ("two", "Two")]);
+        let config = config("quota = \"exhausted\"");
+        let (runtime, _snapshot) = runtime(dir.path(), &config);
+        runtime.refresh_subscriptions().await;
+        let (kept, standings) = runtime.quota_report(true).await;
+        assert!(kept.is_empty(), "a kept report asks no vendor: {kept:?}");
+        assert!(standings.is_empty());
+        let (fresh, standings) = runtime.quota_report(false).await;
+        let users: Vec<&str> = fresh.iter().map(|quota| quota.user.as_str()).collect();
+        assert_eq!(users, ["one", "two"]);
+        assert!(standings.iter().all(|standing| standing.readable && standing.used_up));
+        let (kept, _) = runtime.quota_report(true).await;
+        assert_eq!(kept.len(), 2, "the fresh readings are kept");
+    }
+
+    #[tokio::test]
     async fn scoped_or_nonblocking_window_does_not_cool() {
         for mode in ["scoped", "nonblocking", "ok"] {
             let (cooldowns, _, cooled, _) = polled(mode).await;

@@ -441,6 +441,7 @@ fn is_zero(value: &f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{QuotaHistoryQuery, QuotaQuery};
     use serde_json::{Value, json};
 
     use super::{Quota, QuotaKind, QuotaSpan, QuotaTime};
@@ -538,5 +539,36 @@ mod tests {
         assert_eq!(empty, json!({"name":"", "used":0.0, "remaining":0.0}));
         assert!(empty.get("runsOutAt").is_none());
         assert!(matches!(empty, Value::Object(_)));
+    }
+
+    #[test]
+    fn q5f_quota_query_round_trips_only_kept_one() {
+        assert_eq!(QuotaQuery::parse(Some("kept=1")), QuotaQuery::kept());
+        for query in [None, Some(""), Some("kept=true"), Some("kept=0"), Some("kept"), Some("x=1")] {
+            assert_eq!(QuotaQuery::parse(query), QuotaQuery::fresh(), "{query:?}");
+        }
+        assert!(QuotaQuery::parse(Some("a=b&kept=1")).kept);
+        assert_eq!(QuotaQuery::kept().encode(), "kept=1");
+        assert_eq!(QuotaQuery::fresh().encode(), "");
+    }
+
+    #[test]
+    fn q5g_history_query_decodes_encodes_and_drops_empty_values() {
+        let parsed = QuotaHistoryQuery::parse(Some("days=7&provider=&user=Me%40x.io+b&other=1"));
+        assert_eq!(parsed.days.as_deref(), Some("7"));
+        assert_eq!(parsed.provider, None);
+        assert_eq!(parsed.user.as_deref(), Some("Me@x.io b"));
+        let built = QuotaHistoryQuery::default()
+            .with_days("30")
+            .with_provider("codex")
+            .with_user("a b&c=d/%");
+        let encoded = built.encode();
+        assert_eq!(encoded, "days=30&provider=codex&user=a%20b%26c%3Dd%2F%25");
+        assert_eq!(QuotaHistoryQuery::parse(Some(&encoded)), built);
+        assert_eq!(QuotaHistoryQuery::default().encode(), "");
+        let bad = QuotaHistoryQuery::parse(Some("user=%zz%4"));
+        assert_eq!(bad.user.as_deref(), Some("%zz%4"), "a broken escape stays literal");
+        let multibyte = QuotaHistoryQuery::default().with_user("\u{e9}");
+        assert_eq!(QuotaHistoryQuery::parse(Some(&multibyte.encode())), multibyte);
     }
 }

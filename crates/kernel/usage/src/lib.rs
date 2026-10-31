@@ -382,6 +382,37 @@ mod tests {
     }
 
     #[test]
+    fn q8c_last_served_is_the_newest_answered_row_per_upstream() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let served = |at: i64, upstream: &str, status: &str| Row {
+            upstream: upstream.to_owned(),
+            status: status.to_owned(),
+            ..row(at, None, None)
+        };
+        for entry in [
+            served(100, "account:p:a", "200"),
+            served(300, "account:p:a", "201"),
+            served(400, "account:p:a", "429"),
+            served(50, "old", "200"),
+            served(500, "", "200"),
+            served(200, "plain", "200"),
+            served(250, "failed", "500"),
+        ] {
+            ledger.record(&entry).expect("record");
+        }
+        assert_eq!(
+            ledger.last_served(100).expect("served"),
+            [("account:p:a".to_owned(), 300), ("plain".to_owned(), 200)]
+        );
+        assert_eq!(
+            ledger.last_served(0).expect("served").len(),
+            3,
+            "the since bound is inclusive and old rows return"
+        );
+    }
+
+    #[test]
     fn windows_start_at_local_midnight() {
         let zone = FixedOffset::east_opt(-4 * 3600).expect("offset");
         let now = zone
