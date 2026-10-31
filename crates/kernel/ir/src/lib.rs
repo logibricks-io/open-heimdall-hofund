@@ -13,6 +13,7 @@
 mod assemble;
 mod content;
 mod effort;
+mod error;
 mod estimate;
 mod extensions;
 mod message;
@@ -30,6 +31,7 @@ pub use content::{
     ToolCallPart, ToolResultPart, UnknownPart,
 };
 pub use effort::Effort;
+pub use error::{too_long, words_of};
 pub use estimate::estimate_input_tokens;
 pub use extensions::Extensions;
 pub use message::{Message, Role};

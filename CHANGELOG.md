@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Responses failures caused by a 413 byte cap or a context overflow now emit
+  `response.failed` with code `context_length_exceeded`, allowing the client to
+  compact rather than reconnect (D-1). Codex receives this in its requested
+  stream even when routing fails before the first event; other clients keep
+  their pre-stream HTTP errors, and other protocols are unchanged.
+- Asked-model relabelling is now verified end to end for Chat, Messages,
+  Responses, and Generative Language, streamed and whole, for translated and
+  raw member replies; equal asked/wire names retain dated upstream ids (D-9).
 - A connection failure while this computer has no network no longer rests
   route members: unless an upstream answered in the last 15 seconds, the daemon
   checks for a route out and dials other providers, and an offline verdict

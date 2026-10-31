@@ -10,8 +10,9 @@ use axum::http::{Request, StatusCode, header};
 use bytes::Bytes;
 use futures_util::stream;
 use hofund_codec::{
-    AnthropicMessages, Codec, CodecError, GenerativeLanguage, OpenAiChat, OpenAiResponses,
-    StreamDecoder, StreamEncoder,
+    AnthropicMessages, Codec, CodecError, GenerativeLanguage,
+    OpenAiChat, OpenAiResponses, PLUGIN_HOST_PREFIX, STREAM_CLIENT_PREFIXES,
+    STREAM_TURN_METADATA_HEADER, STREAM_WINDOW_HEADER, StreamDecoder, StreamEncoder,
 };
 use hofund_gateway::Gateway;
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY};
@@ -544,6 +545,247 @@ async fn a_stream_error_after_an_event_is_an_error_frame() {
     assert!(body.contains("mid-stream"), "{body}");
 }
 
+struct StreamFailure {
+    member_id: MemberId,
+    status: u16,
+    message: &'static str,
+}
+
+#[async_trait]
+impl Member for StreamFailure {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, PluginError> {
+        let event = StreamEvent::TextDelta(TextDelta {
+            index: 0,
+            text: "hi".to_owned(),
+            extensions: Extensions::new(),
+        });
+        Ok(Completion::Stream(Box::pin(stream::iter(vec![
+            Ok(event),
+            Err(PluginError::status_error(self.status, self.message)),
+        ]))))
+    }
+}
+
+fn stream_failure(status: u16, message: &'static str) -> Arc<dyn Member> {
+    Arc::new(StreamFailure {
+        member_id: member_id("primary"),
+        status,
+        message,
+    })
+}
+
+const NGINX_413: &str = "<html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n<body>\r\n<center><h1>413 Request Entity Too Large</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n";
+const OVERFLOW_400: &str =
+    "This model's maximum context length is 131072 tokens. However, you requested 140000 tokens.";
+
+fn assert_context_length_failed(body: &str) {
+    let event = body.find("event: response.failed").expect("failed event");
+    let text = body
+        .find("response.output_text.delta")
+        .expect("answer event");
+    assert!(text < event, "failure did not follow the stream: {body}");
+    assert!(
+        body.contains(r#""code":"context_length_exceeded""#),
+        "{body}"
+    );
+    assert!(body.contains(r#""status":"failed""#), "{body}");
+}
+
+#[tokio::test]
+async fn d1a_byte_cap_after_stream_start_tells_stream_client_to_compact() {
+    let (app, dir) = protocol_app(vec![stream_failure(413, NGINX_413)]);
+    let (status, content_type, body) = post_raw_with_agent(
+        app,
+        "/v1/responses",
+        r#"{"model":"demo","input":"hi","stream":true}"#,
+        Some(stream_client_ua().as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(content_type, "text/event-stream");
+    assert_context_length_failed(&body);
+    assert!(body.contains("request_too_large"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d1b_context_overflow_after_stream_start_tells_stream_client_to_compact() {
+    let (app, dir) = protocol_app(vec![stream_failure(400, OVERFLOW_400)]);
+    let (status, _, body) = post_raw_with_agent(
+        app,
+        "/v1/responses",
+        r#"{"model":"demo","input":"hi","stream":true}"#,
+        Some(stream_client_ua().as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_context_length_failed(&body);
+    assert!(!body.contains("request_too_large"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d1c_non_stream_client_and_pre_stream_errors_keep_their_shape() {
+    let (app, dir) = protocol_app(vec![stream_failure(413, NGINX_413)]);
+    let (status, _, body) = post_raw_with_agent(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        Some(OTHER_CLIENT_UA),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("context_length_exceeded"), "{body}");
+    assert!(!body.contains("response.failed"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+
+    let (app, dir) = protocol_app(vec![failure(
+        "primary",
+        &Arc::new(AtomicUsize::new(0)),
+        EdgeFailure::Status(413, NGINX_413),
+    )]);
+    let (status, content_type, body) = post_raw_with_agent(
+        app,
+        "/v1/responses",
+        r#"{"model":"demo","input":"hi","stream":true}"#,
+        Some(OTHER_CLIENT_UA),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(content_type, "application/json");
+    assert!(!body.contains("response.failed"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d1d_stream_client_byte_cap_and_overflow_before_stream_start_compact() {
+    for (status, message) in [(413, NGINX_413), (400, OVERFLOW_400)] {
+        let (app, dir) = protocol_app(vec![failure(
+            "primary",
+            &Arc::new(AtomicUsize::new(0)),
+            EdgeFailure::Status(status, message),
+        )]);
+        let (status, content_type, body) = post_raw_with_agent(
+            app,
+            "/v1/responses",
+            r#"{"model":"demo","input":"hi","stream":true}"#,
+            Some(stream_client_ua().as_str()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(content_type, "text/event-stream");
+        assert!(body.contains("event: response.failed"), "{body}");
+        assert!(
+            body.contains(r#""code":"context_length_exceeded""#),
+            "{body}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// A client that keeps ordinary HTTP error behavior.
+const OTHER_CLIENT_UA: &str = "other-agent/1.4.0 ai-sdk/openai";
+
+/// The compacting client's own User-Agent, as it sends it.
+fn stream_client_ua() -> String {
+    format!("{}_cli_rs/0.162.3 (Mac OS 26.6.0; arm64)", STREAM_CLIENT_PREFIXES[0])
+}
+
+/// The same client behind an ACP extension, in mixed case.
+fn acp_client_ua() -> String {
+    format!("{}/1.0", STREAM_CLIENT_PREFIXES[1].to_uppercase())
+}
+
+/// The plugin host's User-Agent, in mixed case with surrounding space.
+fn plugin_host_ua() -> String {
+    let host: String = PLUGIN_HOST_PREFIX
+        .chars()
+        .enumerate()
+        .map(|(at, c)| if at % 2 == 0 { c.to_ascii_uppercase() } else { c })
+        .collect();
+    format!(" {host}/1.0")
+}
+
+async fn assert_pre_stream_compact(headers: &[(&str, &str)]) {
+    let (app, dir) = protocol_app(vec![failure(
+        "primary",
+        &Arc::new(AtomicUsize::new(0)),
+        EdgeFailure::Status(413, NGINX_413),
+    )]);
+    let (status, content_type, body) = post_raw_with_headers(
+        app,
+        "/v1/responses",
+        r#"{"model":"demo","input":"hi","stream":true}"#,
+        headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(content_type, "text/event-stream");
+    assert!(body.contains("event: response.failed"), "{body}");
+    assert!(
+        body.contains(r#""code":"context_length_exceeded""#),
+        "{body}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d1e_originator_header_marks_stream_client() {
+    assert_pre_stream_compact(&[("originator", stream_client_ua().as_str())]).await;
+}
+
+#[tokio::test]
+async fn d1f_acp_extension_marks_stream_client() {
+    assert_pre_stream_compact(&[(header::USER_AGENT.as_str(), acp_client_ua().as_str())]).await;
+}
+
+#[tokio::test]
+async fn d1g_plugin_headers_mark_stream_client() {
+    for name in [STREAM_WINDOW_HEADER, STREAM_TURN_METADATA_HEADER] {
+        assert_pre_stream_compact(&[
+            (header::USER_AGENT.as_str(), plugin_host_ua().as_str()),
+            (name, "present"),
+        ])
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn d1h_plugin_agent_without_metadata_keeps_status() {
+    let (app, dir) = protocol_app(vec![failure(
+        "primary",
+        &Arc::new(AtomicUsize::new(0)),
+        EdgeFailure::Status(413, NGINX_413),
+    )]);
+    let (status, content_type, body) = post_raw_with_headers(
+        app,
+        "/v1/responses",
+        r#"{"model":"demo","input":"hi","stream":true}"#,
+        &[(header::USER_AGENT.as_str(), plugin_host_ua().as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(content_type, "application/json");
+    assert!(!body.contains("response.failed"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 async fn call_with(
     app: axum::Router,
     header: &str,
@@ -650,15 +892,37 @@ fn raw_app(
 }
 
 async fn post_raw(app: axum::Router, uri: &str, body: &str) -> (StatusCode, String, String) {
+    post_raw_with_agent(app, uri, body, None).await
+}
+
+async fn post_raw_with_agent(
+    app: axum::Router,
+    uri: &str,
+    body: &str,
+    agent: Option<&str>,
+) -> (StatusCode, String, String) {
+    let headers: Vec<_> = agent
+        .into_iter()
+        .map(|agent| (header::USER_AGENT.as_str(), agent))
+        .collect();
+    post_raw_with_headers(app, uri, body, &headers).await
+}
+
+async fn post_raw_with_headers(
+    app: axum::Router,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String, String) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("authorization", "Bearer secret");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header("authorization", "Bearer secret")
-                .body(Body::from(body.to_owned()))
-                .expect("request"),
-        )
+        .oneshot(request.body(Body::from(body.to_owned())).expect("request"))
         .await
         .expect("response");
     let status = response.status();
@@ -687,7 +951,7 @@ fn split_at(bytes: &'static [u8], marker: &str) -> Vec<Vec<u8>> {
 }
 
 #[tokio::test]
-async fn raw_passthrough_counts_usage_and_keeps_the_requested_model() {
+async fn d9h_raw_plugin_member_names_the_asked_model_and_counts_usage() {
     let chat_stream = concat!(
         "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"upstream\",",
         "\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
@@ -904,6 +1168,209 @@ async fn held_rewriter_bytes_are_flushed_before_the_error_frame() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+struct NamedReply {
+    member_id: MemberId,
+    stream: bool,
+    answer: &'static str,
+}
+
+#[async_trait]
+impl Member for NamedReply {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, PluginError> {
+        if self.stream {
+            let start = StreamEvent::MessageStart(hofund_ir::MessageStart {
+                id: Some("reply-1".to_owned()),
+                model: Some(self.answer.to_owned()),
+                usage: None,
+                extensions: Extensions::new(),
+            });
+            let text = StreamEvent::TextDelta(TextDelta {
+                index: 0,
+                text: "ok".to_owned(),
+                extensions: Extensions::new(),
+            });
+            return Ok(Completion::Stream(Box::pin(stream::iter(vec![
+                Ok(start),
+                Ok(text),
+            ]))));
+        }
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(ContentPart::text("ok"));
+        Ok(Completion::Unary(Box::new(
+            Response::new(message).with_model(Some(self.answer.to_owned())),
+        )))
+    }
+}
+
+fn named_app(stream: bool, wire: &str, answer: &'static str) -> (axum::Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let routes = BTreeMap::from([(
+        "demo".to_owned(),
+        vec![Hop {
+            member: Arc::new(NamedReply {
+                member_id: member_id("primary"),
+                stream,
+                answer,
+            }) as Arc<dyn Member>,
+            wire_model: Some(wire.to_owned()),
+            max_output_tokens: None,
+            context_window: None,
+            weight: 1,
+            free: false,
+        }],
+    )]);
+    let codecs = HashMap::from([
+        (
+            "/v1/chat/completions".to_owned(),
+            Arc::new(OpenAiChat) as Arc<dyn Codec>,
+        ),
+        ("/v1/responses".to_owned(), Arc::new(OpenAiResponses)),
+        ("/v1/messages".to_owned(), Arc::new(AnthropicMessages)),
+        (GENERATIVE_UNARY.to_owned(), Arc::new(GenerativeLanguage)),
+        (GENERATIVE_STREAM.to_owned(), Arc::new(GenerativeLanguage)),
+    ]);
+    let app = Gateway::new(
+        Snapshot::new(Router::from_hops(routes, FailoverPolicy::default())),
+        "secret".to_owned(),
+        codecs,
+        usage,
+    )
+    .into_router();
+    (app, dir)
+}
+
+async fn assert_named_reply(uri: &str, request: &str, stream: bool, wire: &str, want: &str) {
+    let (app, dir) = named_app(stream, wire, "upstream-2026-10-17");
+    let (status, _, body) = post_raw(app, uri, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(want), "missing {want}: {body}");
+    assert!(!body.contains("upstream-2026-10-17"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d9a_chat_whole_names_the_asked_model() {
+    assert_named_reply(
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#,
+        false,
+        "upstream",
+        r#""model":"demo""#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d9b_chat_stream_names_the_asked_model() {
+    assert_named_reply(
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        true,
+        "upstream",
+        r#""model":"demo""#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d9c_messages_whole_names_the_asked_model() {
+    assert_named_reply(
+        "/v1/messages",
+        r#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+        false,
+        "upstream",
+        r#""model":"demo""#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d9d_messages_stream_names_the_asked_model() {
+    assert_named_reply(
+        "/v1/messages",
+        r#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        true,
+        "upstream",
+        r#""model":"demo""#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d9e_responses_whole_names_the_asked_model() {
+    assert_named_reply(
+        "/v1/responses",
+        r#"{"model":"demo","input":"hi"}"#,
+        false,
+        "upstream",
+        r#""model":"demo""#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d9f_responses_stream_names_the_asked_model() {
+    assert_named_reply(
+        "/v1/responses",
+        r#"{"model":"demo","input":"hi","stream":true}"#,
+        true,
+        "upstream",
+        r#""model":"demo""#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d9g_generative_whole_and_stream_name_the_asked_model() {
+    for (uri, stream) in [
+        ("/v1beta/models/demo:generateContent", false),
+        ("/v1beta/models/demo:streamGenerateContent", true),
+    ] {
+        assert_named_reply(
+            uri,
+            r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+            stream,
+            "upstream",
+            r#""modelVersion":"demo""#,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn d9i_equal_wire_name_keeps_the_dated_upstream_model() {
+    for stream in [false, true] {
+        let (app, dir) = named_app(stream, "demo", "upstream-2026-10-17");
+        let request = if stream {
+            r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#
+        } else {
+            r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#
+        };
+        let (status, _, body) = post_raw(app, "/v1/chat/completions", request).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("upstream-2026-10-17"), "{body}");
+        assert!(!body.contains(r#""model":"demo""#), "{body}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 enum EdgeFailure {
     Status(u16, &'static str),
     Transport,
@@ -967,10 +1434,13 @@ fn protocol_app(members: Vec<Arc<dyn Member>>) -> (axum::Router, tempfile::TempD
         })
         .collect();
     let routes = BTreeMap::from([("demo".to_owned(), hops)]);
-    let codecs = HashMap::from([(
-        "/v1/chat/completions".to_owned(),
-        Arc::new(OpenAiChat) as Arc<dyn Codec>,
-    )]);
+    let codecs = HashMap::from([
+        (
+            "/v1/chat/completions".to_owned(),
+            Arc::new(OpenAiChat) as Arc<dyn Codec>,
+        ),
+        ("/v1/responses".to_owned(), Arc::new(OpenAiResponses)),
+    ]);
     let app = Gateway::new(
         Snapshot::new(Router::from_hops(routes, FailoverPolicy::default())),
         "secret".to_owned(),
