@@ -13,8 +13,8 @@ use hofund_control_proto::{
     ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES,
     ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
     ProviderTestResponse, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
-    decode_error_envelope,
+    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse, decode_error_envelope,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -157,6 +157,17 @@ impl ControlState for FakeControlState {
         self.reply(format!("set_agent_model:{id}:{:?}", request.model))
     }
 
+    fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse> {
+        self.reply(format!("quotas:kept={}", query.kept))
+    }
+
+    fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse> {
+        self.reply(format!(
+            "quota_history:{:?}:{:?}:{:?}",
+            query.days, query.provider, query.user
+        ))
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         self.reply(format!("usage:{:?}", query.period))
     }
@@ -264,6 +275,12 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             json!(&AgentModelRequest::new(Some("m".to_owned()))),
         ),
         (Method::GET, "/v1/hofund/usage?period=day", Vec::new()),
+        (Method::GET, "/v1/hofund/quotas?kept=1", Vec::new()),
+        (
+            Method::GET,
+            "/v1/hofund/quotas/history?days=7&provider=codex&user=Me%40x.io",
+            Vec::new(),
+        ),
         (
             Method::POST,
             "/v1/hofund/token/rotate",
@@ -385,6 +402,8 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "disconnect_agent:agent",
             "set_agent_model:agent:Some(\"m\")",
             "usage:Day",
+            "quotas:kept=true",
+            "quota_history:Some(\"7\"):Some(\"codex\"):Some(\"Me@x.io\")",
             "rotate_token",
             "shutdown",
             "config",

@@ -25,7 +25,8 @@ use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
     ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_ID_BYTES,
     MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
-    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, ReloadRequest,
+    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest,
     RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
     TokenRotateResponse, Topic, UsageQuery, UsageResponse, decode_request,
 };
@@ -199,6 +200,12 @@ pub trait ControlState: Send + Sync {
     ) -> ControlFuture<'_, AgentChangeResponse>;
     /// Reports usage for a period.
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
+    /// Reports what is left of every subscription, with each account's
+    /// standing. A kept query never asks a vendor.
+    fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse>;
+    /// Reports sampled quota history.
+    fn quota_history(&self, query: QuotaHistoryQuery)
+    -> ControlFuture<'_, QuotaHistoryResponse>;
     /// Rotates the control and model bearer token.
     fn rotate_token(&self, request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse>;
     /// Starts graceful daemon shutdown.
@@ -328,6 +335,11 @@ impl Control {
             .route("/v1/hofund/agents/{id}/disconnect", post(disconnect_agent))
             .route("/v1/hofund/agents/{id}/model", post(set_agent_model))
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
+            .route("/v1/hofund/quotas", get(quotas).head(method_not_allowed))
+            .route(
+                "/v1/hofund/quotas/history",
+                get(quota_history).head(method_not_allowed),
+            )
             .route("/v1/hofund/token/rotate", post(rotate_token))
             .route("/v1/hofund/shutdown", post(shutdown))
             .route("/v1/hofund/config", get(config).head(method_not_allowed))
@@ -821,6 +833,16 @@ async fn usage(
         return failure_response(error.into());
     }
     operation_response!(state.control.state.usage(query).await)
+}
+
+async fn quotas(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = QuotaQuery::parse(uri.query());
+    operation_response!(state.control.state.quotas(query).await)
+}
+
+async fn quota_history(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = QuotaHistoryQuery::parse(uri.query());
+    operation_response!(state.control.state.quota_history(query).await)
 }
 
 async fn rotate_token(State(state): State<HttpState>, body: Bytes) -> Response {

@@ -23,6 +23,9 @@ use crate::{
 /// Cooldown observer tick. One second keeps cooled/recovered events prompt
 /// without busy-waiting on the book.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a fresh quota report waits on the vendors before answering
+/// what is kept.
+pub(crate) const QUOTA_READ_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Providers and routes built from a candidate configuration, not yet live.
 pub(crate) struct Candidate {
@@ -376,14 +379,30 @@ impl Runtime {
             .await
     }
 
-    /// Returns a cached report or refreshes every readable subscription first.
-    pub(crate) async fn quota_report(&self, kept: bool) -> Vec<hofund_control_proto::Quota> {
+    /// Returns the kept report, or reads every subscription first. A fresh
+    /// read gives up after [`QUOTA_READ_TIMEOUT`] and answers what is kept.
+    pub(crate) async fn quota_report(
+        &self,
+        kept: bool,
+    ) -> (
+        Vec<hofund_control_proto::Quota>,
+        Vec<hofund_control_proto::QuotaStanding>,
+    ) {
         if !kept {
-            self.poll_quotas_with(tokio::time::Instant::now(), true)
-                .await;
+            let _ = tokio::time::timeout(
+                QUOTA_READ_TIMEOUT,
+                self.poll_quotas_with(tokio::time::Instant::now(), true),
+            )
+            .await;
         }
-        let order = self
-            .config
+        let order = self.quota_order();
+        let now = self.quotas.now();
+        (self.quotas.report(&order), self.quotas.standings(&order, now))
+    }
+
+    /// Providers then subscriptions, as configured.
+    fn quota_order(&self) -> Vec<String> {
+        self.config
             .get()
             .map(|config| {
                 let config = config.subscribe();
@@ -395,8 +414,12 @@ impl Runtime {
                     .chain(config.subscriptions.iter().map(|entry| entry.id.clone()))
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
-        self.quotas.report(&order)
+            .unwrap_or_default()
+    }
+
+    /// The quota store's wall clock.
+    pub(crate) fn quota_now(&self) -> std::time::SystemTime {
+        self.quotas.now()
     }
 
     /// Returns sampled history from the shared store.

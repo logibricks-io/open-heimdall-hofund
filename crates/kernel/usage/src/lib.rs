@@ -188,6 +188,31 @@ impl Ledger {
             .map_err(|error| UsageError(error.to_string()))
     }
 
+    /// Each upstream's newest answered request at or after `since`: rows
+    /// with a 2xx status and an upstream, as `(upstream, created_unix)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when the query fails.
+    pub fn last_served(&self, since: i64) -> Result<Vec<(String, i64)>, UsageError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT upstream, MAX(created_unix) FROM requests
+                 WHERE created_unix >= ?1 AND upstream != '' AND status LIKE '2%'
+                 GROUP BY upstream ORDER BY upstream",
+            )
+            .map_err(|error| UsageError(error.to_string()))?;
+        let rows = statement
+            .query_map([since], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| UsageError(error.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| UsageError(error.to_string()))
+    }
+
     /// The newest `row_limit` rows at or after `since` (oldest first), and
     /// totals over every row in the window.
     ///

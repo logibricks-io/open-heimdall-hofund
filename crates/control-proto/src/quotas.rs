@@ -188,6 +188,209 @@ impl<T> ListEnvelope<T> {
     }
 }
 
+/// Query for `GET /v1/hofund/quotas`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuotaQuery {
+    /// Answer from the kept readings without asking any vendor.
+    pub kept: bool,
+}
+
+impl QuotaQuery {
+    /// A fresh report, read from the vendors now.
+    #[must_use]
+    pub fn fresh() -> Self {
+        Self { kept: false }
+    }
+
+    /// A report of the kept readings; no vendor is asked.
+    #[must_use]
+    pub fn kept() -> Self {
+        Self { kept: true }
+    }
+
+    /// Parses a query string. `kept=1` selects the kept report; any other
+    /// parameter is ignored.
+    #[must_use]
+    pub fn parse(query: Option<&str>) -> Self {
+        Self {
+            kept: query_pairs(query).any(|(key, value)| key == "kept" && value == "1"),
+        }
+    }
+
+    /// The query string for this request, without the leading `?`.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        if self.kept { "kept=1".to_owned() } else { String::new() }
+    }
+}
+
+/// Query for `GET /v1/hofund/quotas/history`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuotaHistoryQuery {
+    /// Days back, as given. Invalid or absent values mean the whole retention.
+    pub days: Option<String>,
+    /// Provider id to keep.
+    pub provider: Option<String>,
+    /// Account to keep, compared without case.
+    pub user: Option<String>,
+}
+
+impl QuotaHistoryQuery {
+    /// Parses `days`, `provider`, and `user`; empty values are absent and any
+    /// other parameter is ignored.
+    #[must_use]
+    pub fn parse(query: Option<&str>) -> Self {
+        let mut out = Self::default();
+        for (key, value) in query_pairs(query) {
+            if value.is_empty() {
+                continue;
+            }
+            match key.as_str() {
+                "days" => out.days = Some(value),
+                "provider" => out.provider = Some(value),
+                "user" => out.user = Some(value),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Sets the days back.
+    #[must_use]
+    pub fn with_days(mut self, days: impl Into<String>) -> Self {
+        self.days = Some(days.into());
+        self
+    }
+
+    /// Sets the provider filter.
+    #[must_use]
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+
+    /// Sets the account filter.
+    #[must_use]
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
+    }
+
+    /// The query string for this request, without the leading `?`.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        [
+            ("days", &self.days),
+            ("provider", &self.provider),
+            ("user", &self.user),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| {
+            value
+                .as_deref()
+                .map(|value| format!("{key}={}", percent_encode(value)))
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+    }
+}
+
+fn query_pairs(query: Option<&str>) -> impl Iterator<Item = (String, String)> + '_ {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(key), percent_decode(value))
+        })
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => out.push(b' '),
+            b'%' if index + 2 < bytes.len() => {
+                match (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                    (Some(high), Some(low)) => {
+                        out.push(high << 4 | low);
+                        index += 2;
+                    }
+                    _ => out.push(b'%'),
+                }
+            }
+            byte => out.push(byte),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+const fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Whether one account has allowance now, as `hofund quota wait` reads it.
+///
+/// This is the daemon's own reckoning over windows that stop the account for
+/// every model; windows scoped to one model or set aside never count.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct QuotaStanding {
+    /// Provider or subscription id.
+    pub provider: String,
+    /// Display name.
+    pub name: String,
+    /// Account label; empty for a provider-wide card.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user: String,
+    /// A reading made now that names windows: no error and not a cached reading.
+    pub readable: bool,
+    /// A window that stops the account is used up and has not reset.
+    pub used_up: bool,
+    /// When the last stopping window starts again; absent when one does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_at: Option<QuotaTime>,
+    /// Why the reading failed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
+impl QuotaStanding {
+    /// A standing for one account.
+    #[must_use]
+    pub fn new(provider: impl Into<String>, user: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            user: user.into(),
+            ..Self::default()
+        }
+    }
+}
+
 /// Control response containing quota snapshots.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QuotaResponse {
@@ -195,6 +398,9 @@ pub struct QuotaResponse {
     pub version: u32,
     /// Quota snapshots.
     pub data: Vec<Quota>,
+    /// Each subscription account's standing, for `hofund quota wait`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standings: Vec<QuotaStanding>,
 }
 
 impl Default for QuotaResponse {
@@ -202,6 +408,7 @@ impl Default for QuotaResponse {
         Self {
             version: API_VERSION,
             data: Vec::new(),
+            standings: Vec::new(),
         }
     }
 }

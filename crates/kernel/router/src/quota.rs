@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hofund_control_proto::{
-    Quota, QuotaHistory, QuotaKind, QuotaLine, QuotaPoint, QuotaSpan, QuotaTime,
+    Quota, QuotaHistory, QuotaKind, QuotaLine, QuotaPoint, QuotaSpan, QuotaStanding, QuotaTime,
 };
 use hofund_plugin_api::QuotaWindow;
 use serde::{Deserialize, Serialize};
@@ -321,6 +321,30 @@ impl QuotaStore {
         out
     }
 
+    /// Each account's standing at `now`, in configured provider order, for
+    /// `hofund quota wait`. Key balances have no windows to wait on and are
+    /// left out.
+    #[must_use]
+    pub fn standings(&self, provider_order: &[String], now: SystemTime) -> Vec<QuotaStanding> {
+        let state = self.state.lock().expect("quota store");
+        let mut quotas = report_of(&state);
+        in_provider_order(&mut quotas, provider_order);
+        quotas
+            .into_iter()
+            .filter(|quota| quota.kind != QuotaKind::Balance)
+            .map(|quota| {
+                let key = quota_key(&quota);
+                let windows: Vec<WindowInfo> = state
+                    .records
+                    .iter()
+                    .find(|record| quota_key(&record.quota) == key)
+                    .map(|record| record.windows.clone())
+                    .unwrap_or_default();
+                standing(&quota, &windows, now)
+            })
+            .collect()
+    }
+
     /// Router-facing allowance for every currently readable member.
     #[must_use]
     pub fn allowances(&self, now: SystemTime) -> Vec<Allowance> {
@@ -358,6 +382,47 @@ impl QuotaStore {
             })
             .collect()
     }
+}
+
+/// Whether `quota` has allowance at `now`, reckoned over `windows`.
+///
+/// A reading is readable when it has no error, is not a kept reading, and
+/// names windows. It is used up when a window that stops the account for
+/// every model is at 100% and has not reset. It is back when the last such
+/// window resets; when one of them does not say, nobody can tell.
+#[must_use]
+pub fn standing(quota: &Quota, windows: &[WindowInfo], now: SystemTime) -> QuotaStanding {
+    let mut out = QuotaStanding::new(quota.provider.clone(), quota.user.clone());
+    out.name = quota.name.clone();
+    out.error = quota.error.clone();
+    out.readable = quota.error.is_empty() && quota.as_of.is_none() && !quota.windows.is_empty();
+    let stopping: Vec<&WindowInfo> = windows
+        .iter()
+        .filter(|info| {
+            info.blocking
+                && info.scope_model.is_none()
+                && info.span.used >= 100.0
+                && !info
+                    .span
+                    .resets_at
+                    .as_ref()
+                    .and_then(parse_quota_time)
+                    .is_some_and(|reset| reset <= now)
+        })
+        .collect();
+    out.used_up = !stopping.is_empty();
+    let mut back: Option<SystemTime> = None;
+    for info in &stopping {
+        match info.span.resets_at.as_ref().and_then(parse_quota_time) {
+            Some(at) => back = Some(back.map_or(at, |known| known.max(at))),
+            None => {
+                back = None;
+                break;
+            }
+        }
+    }
+    out.back_at = back.map(quota_time);
+    out
 }
 
 /// One member's remaining windows.

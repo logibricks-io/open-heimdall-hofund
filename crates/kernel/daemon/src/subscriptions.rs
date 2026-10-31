@@ -792,7 +792,7 @@ mod tests {
         }
         let mut polls = QuotaPolls::default();
         let cooled = polls
-            .poll(&states, &cooldowns, tokio::time::Instant::now())
+            .poll(&states, &cooldowns, &hofund_router::quota::QuotaStore::in_memory(), tokio::time::Instant::now(), false)
             .await;
         (cooldowns, polls, cooled, states)
     }
@@ -810,11 +810,11 @@ mod tests {
             "{left:?}"
         );
         let again = polls
-            .poll(&states, &cooldowns, tokio::time::Instant::now())
+            .poll(&states, &cooldowns, &hofund_router::quota::QuotaStore::in_memory(), tokio::time::Instant::now(), false)
             .await;
         assert!(again.is_empty(), "polled again before the interval");
         let later = tokio::time::Instant::now() + super::QUOTA_POLL * 2;
-        assert_eq!(polls.poll(&states, &cooldowns, later).await.len(), 2);
+        assert_eq!(polls.poll(&states, &cooldowns, &hofund_router::quota::QuotaStore::in_memory(), later, false).await.len(), 2);
     }
 
     #[tokio::test]
