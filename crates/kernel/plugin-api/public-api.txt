@@ -47,7 +47,9 @@ AgentDescription::const fn id (& self) -> & PluginId
 AgentDescription::const fn model_file (& self) -> Option < & 'static str >
 AgentDescription::const fn model_key (& self) -> Option < & 'static str >
 AgentDescription::const fn model_prefix (& self) -> Option < & 'static str >
+AgentDescription::const fn model_table (& self) -> Option < & 'static str >
 AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: SurfaceId]
+AgentDescription::const fn restore_model_on_clear (& self) -> bool
 AgentDescription::const fn route (& self) -> AgentRoute
 AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
 AgentDescription::const fn visible (& self) -> Visible
@@ -55,6 +57,8 @@ AgentDescription::const fn with_credential (mut self , credential : AgentCredent
 AgentDescription::const fn with_effort_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_prefix (mut self , prefix : & 'static str) -> Self
+AgentDescription::const fn with_model_restore_on_clear (mut self , restore : bool) -> Self
+AgentDescription::const fn with_model_table (mut self , table : & 'static str) -> Self
 AgentFactory
 AgentFactory::Config
 AgentFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn AgentIntegration > , BuildError >

@@ -7,7 +7,9 @@ model_prefix = "hofund/"
 # KIMI_CODE_HOME replaces ~/.kimi-code. Sessions start on default_model, a
 # key of the [models."<key>"] tables, each naming a [providers.<name>] table
 # and the model to ask it for. Kimi refuses a config whose default_model or a
-# model's provider is missing; one write puts in all three at once.
+# model's provider is missing; one write puts in all three at once. Clearing a
+# pick restores the user's default only while its model table remains, and
+# status reports a hofund default whose table is gone.
 # The older Python kimi-cli kept the same shape in ~/.kimi, but it has no
 # tool_use capability and Kimi Code stops reading ~/.kimi once it has copied
 # it over, so hofund does not write there.
@@ -55,3 +57,5 @@ slot = { model_map = { prefix = "hofund/", fields = [
 [model]
 file = "config"
 key = "default_model"
+restore_on_clear = true
+table = "models"
