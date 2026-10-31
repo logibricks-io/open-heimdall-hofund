@@ -625,6 +625,7 @@ fn raw_app(
             }) as Arc<dyn Member>,
             wire_model: Some("upstream".to_owned()),
             max_output_tokens: None,
+            context_window: None,
         }],
     );
     let mut codecs = HashMap::new();
@@ -898,5 +899,136 @@ async fn held_rewriter_bytes_are_flushed_before_the_error_frame() {
         body.starts_with("data: {\"model\":\"upstream\n\ndata: {\"error\":"),
         "{body}"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+enum EdgeFailure {
+    Status(u16, &'static str),
+    Transport,
+}
+
+struct Fails {
+    route_id: &'static str,
+    member_id: MemberId,
+    hits: Arc<AtomicUsize>,
+    failure: EdgeFailure,
+}
+
+#[async_trait]
+impl Member for Fails {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        self.route_id
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, PluginError> {
+        self.hits.fetch_add(1, Ordering::SeqCst);
+        Err(match self.failure {
+            EdgeFailure::Status(status, message) => PluginError::status_error(status, message),
+            EdgeFailure::Transport => PluginError::transport("reset after the request body"),
+        })
+    }
+}
+
+fn failure(id: &'static str, hits: &Arc<AtomicUsize>, failure: EdgeFailure) -> Arc<dyn Member> {
+    Arc::new(Fails {
+        route_id: id,
+        member_id: member_id(id),
+        hits: Arc::clone(hits),
+        failure,
+    })
+}
+
+fn protocol_app(members: Vec<Arc<dyn Member>>) -> (axum::Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let hops = members
+        .into_iter()
+        .map(|member| Hop {
+            member,
+            wire_model: None,
+            max_output_tokens: None,
+            context_window: None,
+        })
+        .collect();
+    let routes = BTreeMap::from([("demo".to_owned(), hops)]);
+    let codecs = HashMap::from([(
+        "/v1/chat/completions".to_owned(),
+        Arc::new(OpenAiChat) as Arc<dyn Codec>,
+    )]);
+    let app = Gateway::new(
+        Snapshot::new(Router::from_hops(routes, FailoverPolicy::default())),
+        "secret".to_owned(),
+        codecs,
+        usage,
+    )
+    .into_router();
+    (app, dir)
+}
+
+#[tokio::test]
+async fn c8_overflow_is_returned_in_the_client_protocol() {
+    let second = Arc::new(AtomicUsize::new(0));
+    let (app, dir) = protocol_app(vec![
+        failure(
+            "first",
+            &Arc::new(AtomicUsize::new(0)),
+            EdgeFailure::Status(400, "context_length_exceeded"),
+        ),
+        Arc::new(Fake {
+            // Another account of the same provider and model holds no more.
+            route_id: "first",
+            member_id: member_id("second"),
+            hits: Arc::clone(&second),
+            fail: None,
+            stream: false,
+        }),
+    ]);
+    let (status, content_type, body) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(content_type, "application/json");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("JSON error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("context_length_exceeded")),
+        "{body}"
+    );
+    assert!(body["error"]["type"].is_string(), "{body}");
+    assert_eq!(second.load(Ordering::SeqCst), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn c13_transport_error_before_any_byte_is_a_502() {
+    let (app, dir) = protocol_app(vec![failure(
+        "first",
+        &Arc::new(AtomicUsize::new(0)),
+        EdgeFailure::Transport,
+    )]);
+    let (status, _, body) = post_raw(
+        app,
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains("reset after the request body"), "{body}");
     let _ = std::fs::remove_dir_all(dir);
 }

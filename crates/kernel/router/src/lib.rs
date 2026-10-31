@@ -10,6 +10,7 @@
 
 mod attempt;
 mod cooldown;
+mod decision;
 mod member;
 mod snapshot;
 
@@ -31,9 +32,9 @@ pub use snapshot::Snapshot;
 /// Which failures may try the next member.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailoverPolicy {
-    /// Connect, timeout, and interrupted-body errors try the next member.
+    /// Connect, timeout, transport, and interrupted-body errors try the next member.
     pub connect_errors: bool,
-    /// HTTP statuses that try the next member.
+    /// HTTP statuses that try the next member. Body-word classes are independent.
     pub statuses: BTreeSet<u16>,
 }
 
@@ -41,7 +42,10 @@ impl Default for FailoverPolicy {
     fn default() -> Self {
         Self {
             connect_errors: true,
-            statuses: [429, 500, 502, 503, 504].into_iter().collect(),
+            statuses: [401, 402, 403, 404, 408, 429]
+                .into_iter()
+                .chain(500..=599)
+                .collect(),
         }
     }
 }
@@ -50,44 +54,13 @@ impl FailoverPolicy {
     /// Whether `error` happened early enough, and is of a kind, that another
     /// member may be tried.
     ///
-    /// Credit refusals fail over at any 4xx. Other kinds must be connect,
-    /// timeout, interrupted, or a listed status. An interrupted 2xx body has
-    /// not reached the client yet: failover occurs before a completion or
-    /// first content stream event is returned,
-    /// like the reference's held reply that ends short and goes to the next
-    /// candidate (`reference: internal/gateway/fallback.go:1859-1866`,
-    /// `reference: internal/gateway/fallback.go:2364-2368`,
-    /// `reference: internal/gateway/gateway.go:2854`). A transport failure has
-    /// no reply and gives no evidence about what the upstream processed, so the
-    /// request is not resent elsewhere. The wildcard is required because
-    /// [`PluginErrorKind`] is `#[non_exhaustive]`: a new kind does not break
-    /// this match.
+    /// Overflow is ruled out first. Listed statuses, transport failures, credit
+    /// refusals, and the body-word classes then follow their independent rules.
+    /// Failover occurs only before a completion or first content stream event
+    /// is returned (`reference: internal/gateway/fallback.go:1487-1517`).
     #[must_use]
     pub fn allows(&self, error: &PluginError) -> bool {
-        if error.is_credit()
-            && error
-                .status()
-                .is_some_and(|status| (400..500).contains(&status))
-        {
-            return true;
-        }
-        match error.kind() {
-            PluginErrorKind::Connect | PluginErrorKind::Timeout | PluginErrorKind::Interrupted => {
-                self.connect_errors
-            }
-            PluginErrorKind::Status | PluginErrorKind::Quota => error
-                .status()
-                .is_some_and(|code| self.statuses.contains(&code)),
-            PluginErrorKind::Transport
-            | PluginErrorKind::Decode
-            | PluginErrorKind::Unsupported
-            | PluginErrorKind::Auth
-            | PluginErrorKind::Config
-            | PluginErrorKind::Cancelled
-            | PluginErrorKind::Io
-            | PluginErrorKind::Internal => false,
-            _ => false,
-        }
+        decision::allows(error, self.connect_errors, &self.statuses)
     }
 }
 
@@ -101,6 +74,8 @@ pub struct Hop {
     pub wire_model: Option<String>,
     /// Output cap applied when the request omitted one.
     pub max_output_tokens: Option<u64>,
+    /// Input context window, when the route or catalog knows it.
+    pub context_window: Option<u64>,
 }
 
 /// A model-to-upstream table.
@@ -142,6 +117,7 @@ impl Router {
                         member,
                         wire_model: None,
                         max_output_tokens: None,
+                        context_window: None,
                     })
                     .collect();
                 (model, hops)
@@ -250,11 +226,26 @@ impl Router {
             resolved.hops = order_hops(resolved.hops, cooldowns);
         }
         let policy = self.policy.clone();
+        let input_tokens = estimate_input_tokens(request);
         let mut last = None;
+        let mut refused_providers = BTreeSet::new();
+        let mut outgrown = Vec::<(String, String)>::new();
+        let mut needs_room = None;
         for (index, hop) in resolved.hops.iter().enumerate() {
             let mut attempt = request.clone();
             apply_wire(&mut attempt, hop, &resolved.bare);
             let upstream_model = attempt.model.clone();
+            if refused_providers.contains(hop.member.route_id())
+                || outgrown.iter().any(|(route, model)| {
+                    route == hop.member.route_id() && *model == upstream_model
+                })
+                || needs_room.is_some_and(|tokens| {
+                    hop.context_window
+                        .is_some_and(|window| window > 0 && tokens >= window)
+                })
+            {
+                continue;
+            }
             let info = Attempt {
                 member: hop.member.attempt(),
                 inbound_protocol: inbound_protocol.to_owned(),
@@ -285,14 +276,34 @@ impl Router {
                         completion,
                     });
                 }
-                Err(error) if policy.allows(&error) => {
-                    last = Some((hop.member.route_id().to_owned(), error));
-                }
                 Err(error) => {
-                    return Err(RouterError::Upstream {
-                        upstream_id: hop.member.route_id().to_owned(),
-                        error,
-                    });
+                    let upstream_id = hop.member.route_id().to_owned();
+                    let inferred = decision::too_long_unsaid(
+                        &error,
+                        input_tokens,
+                        hop.context_window,
+                        &upstream_model,
+                        &upstream_id,
+                    );
+                    let error = inferred.unwrap_or(error);
+                    if decision::outgrown(&error) {
+                        // As long on every account of this model; another
+                        // member not known to be too small may hold it.
+                        if error.status() != Some(413) {
+                            needs_room = Some(input_tokens);
+                        }
+                        outgrown.push((upstream_id.clone(), upstream_model));
+                        last = Some((upstream_id, error));
+                        continue;
+                    }
+                    if decision::skips_provider(&error) {
+                        // Every account of the provider refuses the same
+                        // content; another provider is asked once.
+                        refused_providers.insert(upstream_id.clone());
+                    } else if !decision::asks_next(&error) && !policy.allows(&error) {
+                        return Err(RouterError::Upstream { upstream_id, error });
+                    }
+                    last = Some((upstream_id, error));
                 }
             }
         }
