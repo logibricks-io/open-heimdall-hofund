@@ -1,8 +1,6 @@
 {
   "model": "relative-model",
-  "plugin": [
-    "default"
-  ],
+  "plugin": ["default"],
   "provider": {
     "hofund": {
       "name": "hofund",

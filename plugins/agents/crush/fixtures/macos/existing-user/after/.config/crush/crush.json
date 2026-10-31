@@ -1,20 +1,11 @@
 {
   "$schema": "https://charm.land/crush.json",
   "models": {
-    "large": {
-      "provider": "anthropic",
-      "model": "user-large",
-      "max_tokens": 8000
-    },
-    "small": {
-      "provider": "anthropic",
-      "model": "user-small"
-    }
+    "large": { "provider": "anthropic", "model": "user-large", "max_tokens": 8000 },
+    "small": { "provider": "anthropic", "model": "user-small" }
   },
   "providers": {
-    "anthropic": {
-      "api_key": "$ANTHROPIC_API_KEY"
-    },
+    "anthropic": { "api_key": "$ANTHROPIC_API_KEY" },
     "hofund": {
       "type": "openai",
       "name": "hofund",
@@ -32,12 +23,7 @@
     }
   },
   "mcp": {
-    "files": {
-      "type": "stdio",
-      "command": "files-mcp"
-    }
+    "files": { "type": "stdio", "command": "files-mcp" }
   },
-  "options": {
-    "debug": true
-  }
+  "options": { "debug": true }
 }

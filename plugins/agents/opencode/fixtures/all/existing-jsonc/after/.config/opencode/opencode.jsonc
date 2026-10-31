@@ -1,13 +1,10 @@
 {
+  // This comment is restored only by revert or disconnect.
   "$schema": "https://opencode.ai/config.json",
   "model": "jsonc-model",
-  "plugin": [
-    "a"
-  ],
+  "plugin": ["a"],
   "provider": {
-    "other": {
-      "name": "Other"
-    },
+    "other": { "name": "Other" },
     "hofund": {
       "name": "hofund",
       "npm": "@ai-sdk/openai-compatible",
@@ -22,5 +19,5 @@
         }
       }
     }
-  }
+  },
 }

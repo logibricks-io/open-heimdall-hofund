@@ -1,10 +1,6 @@
 {
-  "model": {
-    "name": "empty-model"
-  },
-  "ui": {
-    "theme": "dark"
-  },
+  "model": { "name": "empty-model" },
+  "ui": { "theme": "dark" },
   "user_added": "keep",
   "security": {
     "auth": {

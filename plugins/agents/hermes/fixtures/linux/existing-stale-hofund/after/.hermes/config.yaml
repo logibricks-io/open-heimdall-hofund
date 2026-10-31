@@ -14,4 +14,4 @@ providers:
     extra_headers:
       X-Keep: keep
   other:
-    base_url: "https://other.example/v1"
+    base_url: https://other.example/v1

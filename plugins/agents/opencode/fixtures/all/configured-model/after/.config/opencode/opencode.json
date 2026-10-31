@@ -1,8 +1,6 @@
 {
   "model": "hofund/route-a",
-  "plugin": [
-    "a"
-  ],
+  "plugin": ["a"],
   "provider": {
     "hofund": {
       "name": "hofund",
