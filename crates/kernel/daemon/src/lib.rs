@@ -471,8 +471,8 @@ async fn start_inner(
     }
     let config = Arc::new(config);
     if let Some(session) = control_session.as_mut() {
-        let (shutdown_request, shutdown_requested) = tokio::sync::watch::channel(false);
-        running = running.with_shutdown_request(shutdown_requested);
+        let shutdown_request = tokio::sync::watch::channel(false).0;
+        running = running.with_shutdown_request(shutdown_request.clone());
         let token_generation = options
             .token_generation
             .unwrap_or_else(|| tokio::sync::watch::channel(0).0);

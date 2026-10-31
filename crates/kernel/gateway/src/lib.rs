@@ -263,6 +263,10 @@ fn unix_ms_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Maximum graceful drain for a control listener before its connections close.
+#[doc(hidden)]
+pub const CONTROL_DRAIN: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// A bound server.
 pub struct Running {
     /// The address the listener accepted at start. After a relisten,
@@ -275,7 +279,8 @@ pub struct Running {
     control_addr: Option<SocketAddr>,
     control_socket_path: Option<PathBuf>,
     resources: Vec<Box<dyn std::any::Any + Send>>,
-    shutdown_request: Option<watch::Receiver<bool>>,
+    shutdown_request: Option<(watch::Sender<bool>, watch::Receiver<bool>)>,
+    drain_bound: Option<std::time::Duration>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
 }
@@ -475,6 +480,7 @@ impl Running {
             control_socket_path: None,
             resources: Vec::new(),
             shutdown_request: None,
+            drain_bound: None,
             relisten: None,
             fatal: None,
         }
@@ -536,11 +542,11 @@ impl Running {
         self.fatal.as_ref().and_then(|fatal| fatal.borrow().clone())
     }
 
-    /// Attaches the flag a control client sets to request shutdown.
+    /// Attaches the flag a control client or embedded shutdown sets to request shutdown.
     #[doc(hidden)]
     #[must_use]
-    pub fn with_shutdown_request(mut self, request: watch::Receiver<bool>) -> Self {
-        self.shutdown_request = Some(request);
+    pub fn with_shutdown_request(mut self, request: watch::Sender<bool>) -> Self {
+        self.shutdown_request = Some((request.clone(), request.subscribe()));
         self
     }
 
@@ -553,7 +559,7 @@ impl Running {
     pub async fn shutdown_requested(&mut self) {
         let (request, fatal) = (self.shutdown_request.as_mut(), self.fatal.as_mut());
         let requested = async {
-            let Some(request) = request else {
+            let Some((_, request)) = request else {
                 return std::future::pending().await;
             };
             if request.wait_for(|requested| *requested).await.is_err() {
@@ -572,6 +578,12 @@ impl Running {
             () = requested => {}
             () = fatal => {}
         }
+    }
+
+    /// Bounds the graceful drain for a control listener.
+    fn with_control_drain(mut self) -> Self {
+        self.drain_bound = Some(CONTROL_DRAIN);
+        self
     }
 
     /// Attaches a background task aborted by both shutdown and drop.
@@ -622,8 +634,16 @@ impl Running {
         self.control_socket_path.as_deref()
     }
 
+    fn request_shutdown(&self) {
+        if let Some((request, _)) = &self.shutdown_request {
+            request.send_replace(true);
+        }
+    }
+
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
+    /// Control listeners close connections that outlast their drain deadline.
     pub async fn shutdown(mut self) {
+        self.request_shutdown();
         for task in self.attached.drain(..) {
             task.abort();
         }
@@ -633,8 +653,18 @@ impl Running {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
+        if let Some(mut task) = self.task.take() {
+            match self.drain_bound {
+                Some(bound) => {
+                    if tokio::time::timeout(bound, &mut task).await.is_err() {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                }
+                None => {
+                    let _ = task.await;
+                }
+            }
         }
     }
 }
