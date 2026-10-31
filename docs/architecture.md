@@ -387,7 +387,10 @@ the next member is asked. The order is fixed:
    skipped, and so are members whose known context window is at or below the
    estimated input tokens (a 413 only skips the same model). Members with an
    unknown window are asked. If none is left, the overflow goes back to the
-   client in its own protocol. An overflow never rests the member.
+   client in its own protocol. An overflow never rests the member. A member's
+   window is the context size its provider's model list gives the hop's model
+   (matched without regard to case); a model the list does not size has an
+   unknown window.
 2. The statuses in `failover.statuses` fail over. The default is 401, 402, 403,
    404, 408, 429, and 500 to 599.
 3. Some replies fail over by their body words even with a status not in
