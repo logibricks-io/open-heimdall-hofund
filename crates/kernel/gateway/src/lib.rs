@@ -1031,7 +1031,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     } else {
         bytes
     };
-    let expansion = (codec.id() == "openai-responses")
+    let expansion = (codec.id() == ProtocolId::OPENAI_RESPONSES.as_str())
         .then(|| app.prev.expand(&prev_response::request_scope(), &bytes));
     let bytes = expansion
         .as_ref()

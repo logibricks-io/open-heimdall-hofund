@@ -3,12 +3,17 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hofund_codec::{Codec, OpenAiChat, OpenAiResponses};
 use hofund_ir::{Message, Request as ModelRequest, Response, Role};
-use hofund_plugin_api::{BodyStream, Completion, MemberId, MemberKey, PluginError, PresetId};
+use hofund_plugin_api::{
+    BodyStream, Completion, MemberId, MemberKey, PluginError, PresetId, ProtocolId,
+};
 use hofund_router::{FailoverPolicy, Member, MemberAttempt, Router, Snapshot};
 use hofund_usage::Ledger;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use tower::ServiceExt;
+
+const RESPONSES: &str = ProtocolId::OPENAI_RESPONSES.as_str();
+const CHAT: &str = ProtocolId::OPENAI_CHAT.as_str();
 
 use super::*;
 use crate::Gateway;
@@ -93,7 +98,7 @@ impl Member for FakeMember {
         inbound: &str,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Completion, PluginError> {
-        let responses = self.protocol == "openai-responses";
+        let responses = self.protocol == RESPONSES;
         let whole = if responses {
             let encoded = OpenAiResponses
                 .encode_request(&request)
@@ -254,11 +259,7 @@ fn turn(own: usize) -> Turn {
 
 #[tokio::test]
 async fn a1_other_protocols_pass_through_unchanged() {
-    let member = Arc::new(FakeMember::new(
-        "openai-chat",
-        false,
-        vec![Reply::Text("ok")],
-    ));
+    let member = Arc::new(FakeMember::new(CHAT, false, vec![Reply::Text("ok")]));
     let (app, _, _dir) = gateway(Arc::clone(&member));
     let (status, _) = post(
         app,
@@ -370,7 +371,7 @@ fn a5_scopes_separate_callers_and_keyless_remote_peers() {
 #[tokio::test]
 async fn a6_given_whole_to_chat_across_three_turns() {
     let member = Arc::new(FakeMember::new(
-        "openai-chat",
+        CHAT,
         false,
         vec![
             Reply::Text("answer 1"),
@@ -427,7 +428,7 @@ async fn a6_given_whole_to_chat_across_three_turns() {
 #[tokio::test]
 async fn a7_not_found_is_exact_and_precedes_translating_or_subscription_calls() {
     let member = Arc::new(FakeMember::new(
-        "openai-chat",
+        CHAT,
         false,
         vec![Reply::Text("unused"), Reply::Text("unused")],
     ));
@@ -445,7 +446,7 @@ async fn a7_not_found_is_exact_and_precedes_translating_or_subscription_calls() 
     );
     assert!(member.seen().is_empty());
 
-    let member = Arc::new(FakeMember::new("openai-responses", true, vec![]).subscribed());
+    let member = Arc::new(FakeMember::new(RESPONSES, true, vec![]).subscribed());
     let (app, _, _dir) = gateway(Arc::clone(&member));
     let (status, _) = post(
         app,
@@ -460,7 +461,7 @@ async fn a7_not_found_is_exact_and_precedes_translating_or_subscription_calls() 
 #[tokio::test]
 async fn a8_unknown_previous_response_is_relayed_as_sent() {
     let member = Arc::new(FakeMember::new(
-        "openai-responses",
+        RESPONSES,
         true,
         vec![Reply::Raw(raw_response("resp_up", "ok", "completed"))],
     ));
@@ -478,7 +479,7 @@ async fn a8_unknown_previous_response_is_relayed_as_sent() {
 #[tokio::test]
 async fn a9_non_keeping_routes_never_get_a_delta() {
     let member = Arc::new(FakeMember::new(
-        "openai-responses",
+        RESPONSES,
         false,
         vec![
             Reply::Raw(raw_response("resp_up1", "first", "completed")),
@@ -510,7 +511,7 @@ async fn a9_non_keeping_routes_never_get_a_delta() {
 #[tokio::test]
 async fn omitted_store_keeps_the_privacy_default_and_sends_no_delta() {
     let member = Arc::new(FakeMember::new(
-        "openai-responses",
+        RESPONSES,
         true,
         vec![
             Reply::Raw(raw_response("resp_up1", "first", "completed")),
@@ -541,7 +542,7 @@ async fn omitted_store_keeps_the_privacy_default_and_sends_no_delta() {
 #[tokio::test]
 async fn a10_kept_upstream_sends_only_new_input_and_upstream_id() {
     let member = Arc::new(FakeMember::new(
-        "openai-responses",
+        RESPONSES,
         true,
         vec![
             Reply::Raw(raw_response("resp_up1", "first", "completed")),
@@ -575,7 +576,7 @@ async fn a10_kept_upstream_sends_only_new_input_and_upstream_id() {
 #[tokio::test]
 async fn a11_refused_delta_is_retried_once_with_the_whole_conversation() {
     let member = Arc::new(FakeMember::new(
-        "openai-responses",
+        RESPONSES,
         true,
         vec![
             Reply::Raw(raw_response("resp_up1", "first", "completed")),
@@ -615,12 +616,12 @@ fn a12_only_an_answered_keeping_relay_records_its_route() {
     let ask = expansion.ask.expect("ask");
     let attempt = Attempt {
         member: MemberAttempt {
-            protocol: "openai-responses".to_owned(),
+            protocol: RESPONSES.to_owned(),
             route: "fake\0hash".to_owned(),
             keeps_responses: true,
             ..MemberAttempt::default()
         },
-        inbound_protocol: "openai-responses".to_owned(),
+        inbound_protocol: RESPONSES.to_owned(),
     };
     ask.attempt().answered(&attempt);
     let reply = raw_response("resp_route", "ok", "completed");
@@ -675,7 +676,7 @@ fn a13_prev_store_is_bounded_by_cap_ttl_replacement_lru_and_own_bytes() {
 #[tokio::test]
 async fn a14_expansion_precedes_decode_at_the_future_masking_hook_point() {
     let member = Arc::new(FakeMember::new(
-        "openai-chat",
+        CHAT,
         false,
         vec![Reply::Text("answer"), Reply::Text("next")],
     ));
@@ -702,7 +703,7 @@ async fn a14_expansion_precedes_decode_at_the_future_masking_hook_point() {
 #[tokio::test]
 async fn a15_usage_and_routing_observe_the_expanded_request() {
     let member = Arc::new(FakeMember::new(
-        "openai-chat",
+        CHAT,
         false,
         vec![Reply::Text("answer"), Reply::Text("next")],
     ));
@@ -773,11 +774,7 @@ fn an_unfinished_capture_is_not_kept() {
 
 #[tokio::test]
 async fn non_200_replies_are_not_kept() {
-    let member = Arc::new(FakeMember::new(
-        "openai-chat",
-        false,
-        vec![Reply::Fail(400)],
-    ));
+    let member = Arc::new(FakeMember::new(CHAT, false, vec![Reply::Fail(400)]));
     let (app, _, _dir) = gateway(Arc::clone(&member));
     let (status, _) = post(
         app.clone(),
@@ -798,11 +795,7 @@ async fn non_200_replies_are_not_kept() {
 
 #[tokio::test]
 async fn store_false_response_id_is_not_found_on_the_next_turn() {
-    let member = Arc::new(FakeMember::new(
-        "openai-chat",
-        false,
-        vec![Reply::Text("forget")],
-    ));
+    let member = Arc::new(FakeMember::new(CHAT, false, vec![Reply::Text("forget")]));
     let (app, _, _dir) = gateway(Arc::clone(&member));
     let (_, first) = post(
         app.clone(),
@@ -831,7 +824,7 @@ fn a11_refusal_words_count_on_400_404_and_422_only() {
     let hook = ask.attempt();
     let attempt = Attempt {
         member: MemberAttempt::default(),
-        inbound_protocol: "openai-responses".to_owned(),
+        inbound_protocol: RESPONSES.to_owned(),
     };
     let word = br#"{"error":{"code":"previous_response_not_found"}}"#;
     for status in [400, 404, 422] {

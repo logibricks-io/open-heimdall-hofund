@@ -32,7 +32,8 @@ impl Attempt {
     /// Whether this attempt relays Responses rather than translating them.
     #[must_use]
     pub fn relays_responses(&self) -> bool {
-        self.inbound_protocol == "openai-responses" && self.member.protocol == "openai-responses"
+        let responses = hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str();
+        self.inbound_protocol == responses && self.member.protocol == responses
     }
 }
 
