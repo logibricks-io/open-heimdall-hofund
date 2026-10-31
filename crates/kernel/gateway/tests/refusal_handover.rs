@@ -744,17 +744,25 @@ async fn b9s_spliced_responses_stream_drops_the_next_members_progress_events() {
 }
 
 #[tokio::test]
-async fn b9t_lone_member_refusal_error_keeps_the_held_message_start() {
-    let first = Scripted::events("first", vec![start(), error_event("content_filter")]);
-    let (app, _dir) = gateway(vec![Arc::clone(&first)]);
+async fn b9t_last_member_refusal_error_keeps_its_held_events() {
+    let first = Scripted::events("first", thought_then_refusal(0));
+    let second = Scripted::events(
+        "second",
+        vec![start(), text_block(0), error_event("content_filter")],
+    );
+    let (app, _dir) = gateway(vec![Arc::clone(&first), Arc::clone(&second)]);
     let (status, body) = call(app, "/v1/messages", MESSAGES).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let start_at = body.find("\"type\":\"message_start\"");
-    let error_at = body.find("event: error");
+    let events = data_events(&body);
+    let held = events
+        .iter()
+        .position(|event| event["type"] == "content_block_start" && event["index"] == 1);
+    let error = events.iter().position(|event| event["type"] == "error");
     assert!(
-        matches!((start_at, error_at), (Some(start_at), Some(error_at)) if start_at < error_at),
+        matches!((held, error), (Some(held), Some(error)) if held < error),
         "{body}"
     );
+    assert_eq!((first.hits(), second.hits()), (1, 1));
 }
 
 #[derive(Default)]
