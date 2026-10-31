@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-model rests (P0-3b2): model-cooling and unserved-model refusals now rest
+  only the affected member/model pair, with independent rate, generic, and
+  persisted credit ladders. Routing probes are selected per pair, model success
+  clears only that model, and status, usage, and request events expose the
+  model scope. Failure events replace rest deadlines like the reference, while
+  passive observations keep the longer rest.
 - Credit-rest ladders and persistence (P0-3b1): API-key credit refusals now
   climb 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, and a repeating 7-day
   rung after ended rests, with flat retry/soon shapes and named resets capped

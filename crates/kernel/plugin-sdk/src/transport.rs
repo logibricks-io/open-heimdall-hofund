@@ -2236,4 +2236,34 @@ mod tests {
             Some(Duration::from_secs(200))
         );
     }
+
+    #[test]
+    fn b5a_model_cooldown_preserves_failure_classification() {
+        let rate = classify(
+            429,
+            None,
+            br#"{"error":{"code":"model_cooldown","type":"rate_limit_error"}}"#.to_vec(),
+        )
+        .expect_err("rate");
+        assert_eq!(rate.kind(), PluginErrorKind::Status);
+        assert!(!rate.is_credit());
+
+        let credit = classify(
+            429,
+            None,
+            b"All credentials for model model-a are cooling down (last error: insufficient balance)"
+                .to_vec(),
+        )
+        .expect_err("credit");
+        assert!(credit.is_credit());
+
+        let quota = classify(
+            429,
+            None,
+            b"All credentials for model model-a are cooling down (last error: usage limit reached)"
+                .to_vec(),
+        )
+        .expect_err("quota");
+        assert_eq!(quota.kind(), PluginErrorKind::Quota);
+    }
 }

@@ -50,6 +50,10 @@ static UNSERVED_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 
+/// A pooled upstream says only the requested model's credentials cooled down.
+static MODEL_COOLING: LazyLock<Regex> =
+    LazyLock::new(|| re("(?i)credentials for (?:the requested )?model .{0,200}?cooling down"));
+
 /// The model is retired there, though a list may still name it.
 static RETIRED_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     re(
@@ -255,6 +259,32 @@ pub(crate) fn rests(error: &PluginError) -> bool {
     error
         .status()
         .is_none_or(|status| status != 413 && !shape_refused(status, message) && !outgrown(error))
+}
+
+/// Whether a 429 says only the requested model's pooled credentials cooled.
+pub(crate) fn model_cooling(error: &PluginError) -> bool {
+    if error.status() != Some(429) {
+        return false;
+    }
+    let text = words_of(error.message());
+    MODEL_COOLING.is_match(&text) || text.to_ascii_lowercase().contains("model_cooldown")
+}
+
+/// Whether the member does not serve this model, rather than being out of
+/// quota or refused for the request's content (`reference:
+/// internal/gateway/fallback.go:1281-1299`).
+pub(crate) fn model_unserved(error: &PluginError) -> bool {
+    let Some(status) = error.status() else {
+        return false;
+    };
+    if !matches!(status, 400 | 403 | 404 | 422) {
+        return false;
+    }
+    let text = words_of(error.message());
+    UNSERVED_WORDS.is_match(&text)
+        && !QUOTA_WORDS.is_match(&text)
+        && !REFUSED_WORDS.is_match(&text)
+        && !ZDR_CODED.is_match(&text)
 }
 
 /// Tells a vague failure as the request being too long for the model, when

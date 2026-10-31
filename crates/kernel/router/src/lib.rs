@@ -223,7 +223,7 @@ impl Router {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         if let Some(cooldowns) = &self.cooldowns {
-            resolved.hops = order_hops(resolved.hops, cooldowns);
+            resolved.hops = order_hops(resolved.hops, cooldowns, &resolved.bare);
         }
         let policy = self.policy.clone();
         let input_tokens = estimate_input_tokens(request);
@@ -332,7 +332,7 @@ impl Router {
     ) -> Result<InputCount, RouterError> {
         let mut resolved = self.resolve(&request.model)?;
         if let Some(cooldowns) = &self.cooldowns {
-            resolved.hops = order_hops(resolved.hops, cooldowns);
+            resolved.hops = order_hops(resolved.hops, cooldowns, &resolved.bare);
         }
         let policy = self.policy.clone();
         let mut last = None;
@@ -400,7 +400,7 @@ impl Router {
     pub async fn forward(&self, call: &Forward) -> Result<Forwarded, RouterError> {
         let mut resolved = self.resolve(call.model())?;
         if let Some(cooldowns) = &self.cooldowns {
-            resolved.hops = order_hops(resolved.hops, cooldowns);
+            resolved.hops = order_hops(resolved.hops, cooldowns, &resolved.bare);
         }
         let mut last = None;
         for (index, hop) in resolved.hops.iter().enumerate() {
@@ -419,7 +419,7 @@ impl Router {
             let started = Instant::now();
             let result = hop
                 .member
-                .forward(call.path(), body)
+                .forward_for_model(call.path(), body, &upstream_model)
                 .instrument(span.clone())
                 .await;
             record_call(&span, &result_status(result.as_ref().err()), started);
@@ -578,11 +578,12 @@ pub enum RouterError {
     },
 }
 
-fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns) -> Vec<Hop> {
+fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> Vec<Hop> {
     let mut ready = Vec::with_capacity(hops.len());
     let mut cooling = Vec::new();
     for hop in hops {
-        if let Some(state) = cooldowns.cooling(hop.member.id()) {
+        let model = hop.wire_model.as_deref().unwrap_or(bare);
+        if let Some(state) = cooldowns.cooling_for_model(hop.member.id(), model) {
             cooling.push((hop, state.until()));
         } else {
             ready.push(hop);

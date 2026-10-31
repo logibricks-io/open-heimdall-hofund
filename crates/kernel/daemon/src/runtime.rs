@@ -403,25 +403,29 @@ impl Runtime {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(MAINTENANCE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // Last observed cooling revision per member; a rise means cooled.
-            let mut last_revisions: HashMap<MemberId, u64> = HashMap::new();
+            // Last observed cooling revision per member/model; a rise means cooled.
+            let mut last_revisions: HashMap<(MemberId, Option<String>), u64> = HashMap::new();
             loop {
                 interval.tick().await;
                 cooldowns.maintain();
                 rests.lock().expect("credit rest store").save(&cooldowns);
-                let recoveries = cooldowns.drain_recoveries();
+                let recoveries = cooldowns.drain_scoped_recoveries();
                 if let Some(bus) = &events {
-                    for (id, _cause) in &recoveries {
+                    for (id, model, _cause) in &recoveries {
                         let mut event = MemberRecoveredEvent::default();
                         event.member_id = id.to_string();
+                        event.model.clone_from(model);
                         event.ready = true;
                         bus.emit(EventPayload::MemberRecovered(event));
-                        last_revisions.remove(id);
+                        last_revisions.remove(&(id.clone(), model.clone()));
                     }
                     let now = std::time::Instant::now();
-                    for (id, cooling) in cooldowns.entries() {
-                        let revision = cooldowns.revision(&id);
-                        let previous = last_revisions.insert(id.clone(), revision);
+                    for (id, model, cooling) in cooldowns.scoped_entries() {
+                        let revision = model.as_deref().map_or_else(
+                            || cooldowns.revision(&id),
+                            |model| cooldowns.revision_for_model(&id, model),
+                        );
+                        let previous = last_revisions.insert((id.clone(), model.clone()), revision);
                         if previous == Some(revision) {
                             continue;
                         }
@@ -431,6 +435,7 @@ impl Runtime {
                             });
                         let mut event = MemberCooledEvent::default();
                         event.member_id = id.to_string();
+                        event.model = model;
                         event.cause = control_map::cooldown_reason(cooling.cause());
                         event.remaining_ms = remaining;
                         event.retry_after_ms = remaining;

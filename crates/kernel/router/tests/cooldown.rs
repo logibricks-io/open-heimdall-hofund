@@ -253,3 +253,38 @@ async fn all_cooling_members_reduce_to_the_soonest_probe() {
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
 }
+
+#[tokio::test]
+async fn b5e_model_rests_order_each_member_model_pair_independently() {
+    let (book, seen) = fixture();
+    for (id, seconds) in [("first", 300), ("third", 60)] {
+        let error = PluginError::status_error(429, "model_cooldown")
+            .with_retry_after(Duration::from_secs(seconds));
+        book.record_failure_for_model(&member_id(id), "model-a", &error)
+            .expect("model rest");
+    }
+    let members = vec![
+        fake("first", &seen, Behavior::Unary),
+        fake("second", &seen, Behavior::Fail),
+        fake("third", &seen, Behavior::Unary),
+    ];
+    let mut routes = BTreeMap::new();
+    routes.insert("model-a".to_owned(), members.clone());
+    routes.insert("model-b".to_owned(), members);
+    let router = Router::new(routes, FailoverPolicy::default()).with_cooldowns(Arc::clone(&book));
+
+    let routed = router
+        .dispatch(&Request::new("model-a"), "inbound")
+        .await
+        .expect("model-a");
+    assert_eq!(routed.upstream_id, "third");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second", "third"]);
+
+    seen.lock().expect("seen").clear();
+    let routed = router
+        .dispatch(&Request::new("model-b"), "inbound")
+        .await
+        .expect("model-b");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+}
