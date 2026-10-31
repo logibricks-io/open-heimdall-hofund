@@ -629,13 +629,12 @@ impl Engine {
         Ok(picked)
     }
 
+    /// Whether `value` names a gateway route. A prefixed route id starts
+    /// with the prefix, so the prefix test covers it.
     fn gateway_model(&self, target: &GatewayTarget, value: &str) -> bool {
         self.model_prefix
             .is_some_and(|prefix| value.starts_with(prefix))
-            || self
-                .models(target)
-                .iter()
-                .any(|id| id == value || self.prefixed(id) == value)
+            || self.models(target).iter().any(|id| id == value)
     }
 
     fn model_table_has(

@@ -1029,6 +1029,48 @@ fn shipped_vscode_clear_without_previous_default_model_removes_key() {
 }
 
 #[test]
+fn shipped_vscode_clear_with_an_empty_previous_default_model_removes_key() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(
+        &settings,
+        "{\"chat.defaultModel\": \"\", \"editor.fontSize\": 14}\n",
+    );
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["editor.fontSize"], 14);
+}
+
+#[test]
+fn shipped_vscode_clear_does_not_restore_a_previous_gateway_model() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(
+        &settings,
+        "{\"chat.defaultModel\": \"route-a\", \"editor.fontSize\": 14}\n",
+    );
+    let target = target_with(&["route-a", "route-b"]);
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-b"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["editor.fontSize"], 14);
+}
+
+#[test]
 fn shipped_vscode_clear_then_disconnect_restores_once() {
     let home = scratch();
     let session = Session::new(&*home);
