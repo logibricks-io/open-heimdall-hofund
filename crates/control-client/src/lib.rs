@@ -12,10 +12,10 @@ use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
     ControlError, ErrorEnvelope, EventEnvelope, HealthResponse, MAX_RESPONSE_BODY_BYTES,
     ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
-    ProviderTestResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UsagePeriod, UsageQuery,
-    UsageResponse, decode_error_envelope, decode_response,
+    ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UsagePeriod, UsageQuery, UsageResponse,
+    decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -427,7 +427,8 @@ impl Client {
         if query.is_empty() {
             self.get("/v1/hofund/quotas/history").await
         } else {
-            self.get(&format!("/v1/hofund/quotas/history?{query}")).await
+            self.get(&format!("/v1/hofund/quotas/history?{query}"))
+                .await
         }
     }
 

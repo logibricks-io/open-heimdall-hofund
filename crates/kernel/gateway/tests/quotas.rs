@@ -10,9 +10,7 @@ use futures_util::future::BoxFuture;
 use hofund_control_proto::{
     Quota, QuotaHistory, QuotaHistoryQuery, QuotaKind, QuotaQuery, QuotaResponse,
 };
-use hofund_gateway::{
-    Gateway, QuotaAccess, QuotaCaller, QuotaScope, QuotaScopeHook, QuotaSource,
-};
+use hofund_gateway::{Gateway, QuotaAccess, QuotaCaller, QuotaScope, QuotaScopeHook, QuotaSource};
 use hofund_router::{FailoverPolicy, Router, Snapshot};
 use hofund_usage::Ledger;
 use serde_json::Value;
@@ -47,7 +45,11 @@ impl QuotaSource for Source {
         self.reports.lock().expect("reports").push(query.kept);
         Box::pin(async move {
             let mut response = QuotaResponse::default();
-            response.data = vec![card("codex", "a@x.io"), card("codex", "b@x.io"), card("kimi", "")];
+            response.data = vec![
+                card("codex", "a@x.io"),
+                card("codex", "b@x.io"),
+                card("kimi", ""),
+            ];
             response
         })
     }
@@ -66,7 +68,10 @@ impl QuotaScope for OnlyAccount {
     }
 }
 
-fn app_with(source: &Arc<Source>, scope: Option<QuotaScopeHook>) -> (axum::Router, tempfile::TempDir) {
+fn app_with(
+    source: &Arc<Source>,
+    scope: Option<QuotaScopeHook>,
+) -> (axum::Router, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir");
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut gateway = Gateway::new(
@@ -96,7 +101,10 @@ async fn get(app: &axum::Router, uri: &str, auth: Option<(&str, &str)>) -> (Stat
     let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
         .await
         .expect("body");
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 fn bearer() -> Option<(&'static str, &'static str)> {
@@ -112,8 +120,14 @@ async fn q5a_snapshot_route_supports_kept_and_fresh_reads() {
     assert_eq!(body["object"], "list");
     assert_eq!(body["data"].as_array().map(Vec::len), Some(3));
     assert_eq!(body["data"][0]["provider"], "codex");
-    assert!(body.get("version").is_none(), "the model API answers the bare envelope");
-    assert!(body.get("standings").is_none(), "standings are for the control API only");
+    assert!(
+        body.get("version").is_none(),
+        "the model API answers the bare envelope"
+    );
+    assert!(
+        body.get("standings").is_none(),
+        "standings are for the control API only"
+    );
     for header in [("x-api-key", "secret"), ("x-goog-api-key", "secret")] {
         let (status, _) = get(&app, "/v1/hofund/quotas", Some(header)).await;
         assert_eq!(status, StatusCode::OK, "{} is accepted", header.0);
@@ -149,9 +163,20 @@ async fn q5c_snapshot_requires_gateway_authentication() {
         let (status, _) = get(&app, "/v1/hofund/quotas/history", auth).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
-    assert!(source.reports.lock().expect("reports").is_empty(), "no read before auth");
-    let (_, body) = get(&app, "/v1/hofund/quotas", Some(("authorization", "Bearer wrong"))).await;
-    assert!(!body.to_string().contains("wrong"), "the presented key is never echoed");
+    assert!(
+        source.reports.lock().expect("reports").is_empty(),
+        "no read before auth"
+    );
+    let (_, body) = get(
+        &app,
+        "/v1/hofund/quotas",
+        Some(("authorization", "Bearer wrong")),
+    )
+    .await;
+    assert!(
+        !body.to_string().contains("wrong"),
+        "the presented key is never echoed"
+    );
     assert!(!body.to_string().contains("secret"));
 }
 
@@ -200,10 +225,21 @@ async fn q5b_scope_hook_filters_snapshot_cards() {
     assert_eq!(data.len(), 1);
     assert_eq!(data[0]["user"], "a@x.io");
     let (_, body) = get(&app, "/v1/hofund/quotas?kept=1", bearer()).await;
-    assert_eq!(body["data"].as_array().map(Vec::len), Some(1), "kept reports are scoped too");
+    assert_eq!(
+        body["data"].as_array().map(Vec::len),
+        Some(1),
+        "kept reports are scoped too"
+    );
     let (_, body) = get(&unscoped, "/v1/hofund/quotas", bearer()).await;
-    assert_eq!(body["data"].as_array().map(Vec::len), Some(3), "the default tells everything");
-    assert_eq!(callers.lock().expect("callers").as_slice(), ["secret", "secret"]);
+    assert_eq!(
+        body["data"].as_array().map(Vec::len),
+        Some(3),
+        "the default tells everything"
+    );
+    assert_eq!(
+        callers.lock().expect("callers").as_slice(),
+        ["secret", "secret"]
+    );
 }
 
 #[tokio::test]

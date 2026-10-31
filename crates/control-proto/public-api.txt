@@ -310,6 +310,15 @@ QuotaHistory derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
 QuotaHistory.lines
 QuotaHistory.provider
 QuotaHistory.user
+QuotaHistoryQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+QuotaHistoryQuery.days
+QuotaHistoryQuery.provider
+QuotaHistoryQuery.user
+QuotaHistoryQuery::fn encode (& self) -> String
+QuotaHistoryQuery::fn parse (query : Option < & str >) -> Self
+QuotaHistoryQuery::fn with_days (mut self , days : impl Into < String >) -> Self
+QuotaHistoryQuery::fn with_provider (mut self , provider : impl Into < String >) -> Self
+QuotaHistoryQuery::fn with_user (mut self , user : impl Into < String >) -> Self
 QuotaHistoryResponse derives(Clone, Debug, PartialEq, Serialize, Deserialize)
 QuotaHistoryResponse.data
 QuotaHistoryResponse.version
@@ -326,8 +335,15 @@ QuotaPoint.at
 QuotaPoint.left
 QuotaPoint.resets_at
 QuotaPoint.start
+QuotaQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+QuotaQuery.kept
+QuotaQuery::fn encode (& self) -> String
+QuotaQuery::fn fresh () -> Self
+QuotaQuery::fn kept () -> Self
+QuotaQuery::fn parse (query : Option < & str >) -> Self
 QuotaResponse derives(Clone, Debug, PartialEq, Serialize, Deserialize)
 QuotaResponse.data
+QuotaResponse.standings
 QuotaResponse.version
 QuotaSpan derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
 QuotaSpan.amount
@@ -344,6 +360,15 @@ QuotaSpan.text
 QuotaSpan.unit
 QuotaSpan.unlimited
 QuotaSpan.used
+QuotaStanding #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+QuotaStanding.back_at
+QuotaStanding.error
+QuotaStanding.name
+QuotaStanding.provider
+QuotaStanding.readable
+QuotaStanding.used_up
+QuotaStanding.user
+QuotaStanding::fn new (provider : impl Into < String > , user : impl Into < String >) -> Self
 QuotaTime derives(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)
 QuotaTime::fn as_str (& self) -> & str
 QuotaTime::fn new (value : impl Into < String >) -> Self

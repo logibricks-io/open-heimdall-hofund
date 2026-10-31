@@ -12,8 +12,8 @@ mod attempt;
 mod cooldown;
 mod decision;
 mod member;
-mod snapshot;
 pub mod quota;
+mod snapshot;
 pub mod strategy;
 
 use std::collections::{BTreeMap, BTreeSet};

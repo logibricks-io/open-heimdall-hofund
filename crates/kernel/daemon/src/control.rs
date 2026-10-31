@@ -10,10 +10,10 @@ use hofund_control_proto::{
     AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
     ControlErrorKind, FieldIssue, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderListResponse, ProviderSummary, ProviderTestRequest,
-    ProviderTestResponse, ProviderTestResult, RouteModel, RouteModelListResponse, ShutdownRequest,
-    ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, UsagePeriod, UsageQuery,
-    UsageResponse, UsageRow, UsageTotals,
+    ProviderTestResponse, ProviderTestResult, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery,
+    QuotaResponse, RouteModel, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod,
+    UsageQuery, UsageResponse, UsageRow, UsageTotals,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -429,10 +429,7 @@ impl ControlState for DaemonControl {
         })
     }
 
-    fn quota_history(
-        &self,
-        query: QuotaHistoryQuery,
-    ) -> ControlFuture<'_, QuotaHistoryResponse> {
+    fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse> {
         Box::pin(async move {
             let quotas = self.quotas.as_ref().ok_or_else(quotas_unavailable)?;
             Ok::<_, ControlFailure>(quotas.history_response(&query))

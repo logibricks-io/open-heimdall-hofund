@@ -221,7 +221,11 @@ impl QuotaQuery {
     /// The query string for this request, without the leading `?`.
     #[must_use]
     pub fn encode(&self) -> String {
-        if self.kept { "kept=1".to_owned() } else { String::new() }
+        if self.kept {
+            "kept=1".to_owned()
+        } else {
+            String::new()
+        }
     }
 }
 
@@ -483,12 +487,21 @@ mod tests {
         ] {
             assert!(value.get(key).is_some(), "missing {key}: {value}");
         }
-        for key in ["balance", "error", "as_of", "read_deferred", "last_served_at"] {
+        for key in [
+            "balance",
+            "error",
+            "as_of",
+            "read_deferred",
+            "last_served_at",
+        ] {
             assert!(value.get(key).is_none(), "unexpected {key}: {value}");
         }
         quota.kind = QuotaKind::Balance;
         quota.balance = "5 credits".to_owned();
-        assert_eq!(serde_json::to_value(quota).expect("balance")["kind"], "balance");
+        assert_eq!(
+            serde_json::to_value(quota).expect("balance")["kind"],
+            "balance"
+        );
         assert_eq!(
             serde_json::to_value(Quota::default()).expect("empty"),
             json!({"provider":"", "name":"", "kind":"subscription", "windows":[]})
@@ -544,7 +557,14 @@ mod tests {
     #[test]
     fn q5f_quota_query_round_trips_only_kept_one() {
         assert_eq!(QuotaQuery::parse(Some("kept=1")), QuotaQuery::kept());
-        for query in [None, Some(""), Some("kept=true"), Some("kept=0"), Some("kept"), Some("x=1")] {
+        for query in [
+            None,
+            Some(""),
+            Some("kept=true"),
+            Some("kept=0"),
+            Some("kept"),
+            Some("x=1"),
+        ] {
             assert_eq!(QuotaQuery::parse(query), QuotaQuery::fresh(), "{query:?}");
         }
         assert!(QuotaQuery::parse(Some("a=b&kept=1")).kept);
@@ -567,8 +587,15 @@ mod tests {
         assert_eq!(QuotaHistoryQuery::parse(Some(&encoded)), built);
         assert_eq!(QuotaHistoryQuery::default().encode(), "");
         let bad = QuotaHistoryQuery::parse(Some("user=%zz%4"));
-        assert_eq!(bad.user.as_deref(), Some("%zz%4"), "a broken escape stays literal");
+        assert_eq!(
+            bad.user.as_deref(),
+            Some("%zz%4"),
+            "a broken escape stays literal"
+        );
         let multibyte = QuotaHistoryQuery::default().with_user("\u{e9}");
-        assert_eq!(QuotaHistoryQuery::parse(Some(&multibyte.encode())), multibyte);
+        assert_eq!(
+            QuotaHistoryQuery::parse(Some(&multibyte.encode())),
+            multibyte
+        );
     }
 }

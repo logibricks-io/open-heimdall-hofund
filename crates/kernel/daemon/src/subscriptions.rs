@@ -20,8 +20,8 @@ use hofund_plugin_api::{
     PluginKind, QuotaObservation, QuotaWindow, RawTable, Subscription, UpstreamProvider,
 };
 use hofund_plugin_host::HttpLimits;
-use hofund_router::quota::{QuotaStore, WindowInfo};
 use hofund_router::Cooldowns;
+use hofund_router::quota::{QuotaStore, WindowInfo};
 use tokio::time::Instant;
 
 use crate::membership::{self, BuiltProvider, PlannedHop};
@@ -268,17 +268,20 @@ impl SubscriptionState {
     }
 
     async fn quota(&self, account: &AccountId) -> Result<Vec<QuotaWindow>, PluginError> {
-        self.instance.quota(account, &self.host).await.map_err(|error| {
-            if error.kind() != PluginErrorKind::Unsupported {
-                tracing::warn!(
-                    subscription = %self.config.id,
-                    account = %account,
-                    %error,
-                    "quota poll failed"
-                );
-            }
-            error
-        })
+        self.instance
+            .quota(account, &self.host)
+            .await
+            .map_err(|error| {
+                if error.kind() != PluginErrorKind::Unsupported {
+                    tracing::warn!(
+                        subscription = %self.config.id,
+                        account = %account,
+                        %error,
+                        "quota poll failed"
+                    );
+                }
+                error
+            })
     }
 
     fn quota_card(&self, account: &AccountId) -> Quota {
@@ -487,7 +490,9 @@ impl QuotaPolls {
                                 | PluginErrorKind::Io
                                 | PluginErrorKind::Internal
                                 | PluginErrorKind::Quota
-                        ) || error.status().is_some_and(|status| status == 429 || status >= 500);
+                        ) || error
+                            .status()
+                            .is_some_and(|status| status == 429 || status >= 500);
                         let mut failed = card;
                         failed.error = error.to_string();
                         quotas.record_failure(failed, transient);
@@ -792,7 +797,13 @@ mod tests {
         }
         let mut polls = QuotaPolls::default();
         let cooled = polls
-            .poll(&states, &cooldowns, &hofund_router::quota::QuotaStore::in_memory(), tokio::time::Instant::now(), false)
+            .poll(
+                &states,
+                &cooldowns,
+                &hofund_router::quota::QuotaStore::in_memory(),
+                tokio::time::Instant::now(),
+                false,
+            )
             .await;
         (cooldowns, polls, cooled, states)
     }
@@ -810,11 +821,29 @@ mod tests {
             "{left:?}"
         );
         let again = polls
-            .poll(&states, &cooldowns, &hofund_router::quota::QuotaStore::in_memory(), tokio::time::Instant::now(), false)
+            .poll(
+                &states,
+                &cooldowns,
+                &hofund_router::quota::QuotaStore::in_memory(),
+                tokio::time::Instant::now(),
+                false,
+            )
             .await;
         assert!(again.is_empty(), "polled again before the interval");
         let later = tokio::time::Instant::now() + super::QUOTA_POLL * 2;
-        assert_eq!(polls.poll(&states, &cooldowns, &hofund_router::quota::QuotaStore::in_memory(), later, false).await.len(), 2);
+        assert_eq!(
+            polls
+                .poll(
+                    &states,
+                    &cooldowns,
+                    &hofund_router::quota::QuotaStore::in_memory(),
+                    later,
+                    false
+                )
+                .await
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -830,7 +859,11 @@ mod tests {
         let (fresh, standings) = runtime.quota_report(false).await;
         let users: Vec<&str> = fresh.iter().map(|quota| quota.user.as_str()).collect();
         assert_eq!(users, ["one", "two"]);
-        assert!(standings.iter().all(|standing| standing.readable && standing.used_up));
+        assert!(
+            standings
+                .iter()
+                .all(|standing| standing.readable && standing.used_up)
+        );
         let (kept, _) = runtime.quota_report(true).await;
         assert_eq!(kept.len(), 2, "the fresh readings are kept");
     }

@@ -397,7 +397,10 @@ impl Runtime {
         }
         let order = self.quota_order();
         let now = self.quotas.now();
-        (self.quotas.report(&order), self.quotas.standings(&order, now))
+        (
+            self.quotas.report(&order),
+            self.quotas.standings(&order, now),
+        )
     }
 
     /// Providers then subscriptions, as configured.

@@ -115,7 +115,7 @@ impl WindowInfo {
         self.span
             .resets_at
             .as_ref()
-            .and_then(|at| parse_quota_time(at))
+            .and_then(parse_quota_time)
             .or_else(|| self.reset_after.map(|after| now + after))
     }
 }
@@ -203,7 +203,10 @@ impl QuotaStore {
     pub fn register(&self, quota: Quota) {
         let mut state = self.state.lock().expect("quota store");
         let key = quota_key(&quota);
-        if !state.records.iter().any(|record| quota_key(&record.quota) == key)
+        if !state
+            .records
+            .iter()
+            .any(|record| quota_key(&record.quota) == key)
             && !state.issues.contains_key(&key)
         {
             state.issues.insert(key, ReadIssue::Deferred(quota));
@@ -215,7 +218,7 @@ impl QuotaStore {
         let read_at = quota
             .read_at
             .as_ref()
-            .and_then(|at| parse_quota_time(at))
+            .and_then(parse_quota_time)
             .filter(|at| *at <= now)
             .unwrap_or(now);
         quota.read_at = Some(quota_time(read_at));
@@ -261,10 +264,9 @@ impl QuotaStore {
     /// Records a failed read. A transient failure uses the last good reading.
     pub fn record_failure(&self, quota: Quota, transient: bool) {
         let mut state = self.state.lock().expect("quota store");
-        state.issues.insert(
-            quota_key(&quota),
-            ReadIssue::Failed { quota, transient },
-        );
+        state
+            .issues
+            .insert(quota_key(&quota), ReadIssue::Failed { quota, transient });
     }
 
     /// Returns a report in configured provider order without fetching anything.
@@ -354,7 +356,10 @@ impl QuotaStore {
             .filter(|quota| quota.error.is_empty())
             .filter_map(|quota| {
                 let key = quota_key(&quota);
-                let record = state.records.iter().find(|record| quota_key(&record.quota) == key)?;
+                let record = state
+                    .records
+                    .iter()
+                    .find(|record| quota_key(&record.quota) == key)?;
                 let windows = record
                     .windows
                     .iter()
@@ -469,7 +474,9 @@ impl Allowance {
                 .windows
                 .iter()
                 .filter(|window| window.blocking && window.counts(model))
-                .all(|window| window.remaining > 0.0 || window.resets_at.is_some_and(|at| at <= now))
+                .all(|window| {
+                    window.remaining > 0.0 || window.resets_at.is_some_and(|at| at <= now)
+                })
     }
 }
 
@@ -504,9 +511,7 @@ impl AllowanceWindow {
     }
 
     fn applies(&self, model: &str, now: SystemTime) -> bool {
-        self.blocking
-            && self.counts(model)
-            && !self.resets_at.is_some_and(|reset| reset <= now)
+        self.blocking && self.counts(model) && !self.resets_at.is_some_and(|reset| reset <= now)
     }
 }
 
@@ -523,7 +528,10 @@ pub struct ServedRequest {
 pub fn apply_last_served(quotas: &mut [Quota], served: &[ServedRequest], now: SystemTime) {
     let mut latest = BTreeMap::<String, SystemTime>::new();
     for request in served {
-        if now.duration_since(request.at).is_ok_and(|age| age <= SERVED_RETENTION) {
+        if now
+            .duration_since(request.at)
+            .is_ok_and(|age| age <= SERVED_RETENTION)
+        {
             latest
                 .entry(request.member.clone())
                 .and_modify(|at| *at = (*at).max(request.at))
@@ -553,13 +561,8 @@ pub fn apply_last_served(quotas: &mut [Quota], served: &[ServedRequest], now: Sy
         }
     }
     for quota in quotas {
-        quota.last = newest.is_some_and(|at| {
-            quota
-                .last_served_at
-                .as_ref()
-                .and_then(|value| parse_quota_time(value))
-                == Some(at)
-        });
+        quota.last = newest
+            .is_some_and(|at| quota.last_served_at.as_ref().and_then(parse_quota_time) == Some(at));
     }
 }
 
@@ -605,7 +608,9 @@ fn report_of(state: &State) -> Vec<Quota> {
                 quota.as_of = quota.read_at.clone();
                 quota.read_deferred = true;
             }
-            Some(ReadIssue::Failed { transient: true, .. }) => {
+            Some(ReadIssue::Failed {
+                transient: true, ..
+            }) => {
                 quota.as_of = quota.read_at.clone();
                 quota.read_deferred = false;
             }
@@ -618,7 +623,11 @@ fn report_of(state: &State) -> Vec<Quota> {
         out.push(quota);
     }
     for (key, issue) in &state.issues {
-        if state.records.iter().any(|record| quota_key(&record.quota) == *key) {
+        if state
+            .records
+            .iter()
+            .any(|record| quota_key(&record.quota) == *key)
+        {
             continue;
         }
         match issue {
@@ -647,10 +656,7 @@ fn note_history(state: &mut State, quota: &Quota, read_at: SystemTime, now: Syst
     };
     for info in &record.windows {
         let window = &info.span;
-        if window.unlimited
-            || !info.blocking
-            || window.name.is_empty()
-            || !window.used.is_finite()
+        if window.unlimited || !info.blocking || window.name.is_empty() || !window.used.is_finite()
         {
             continue;
         }
@@ -659,7 +665,8 @@ fn note_history(state: &mut State, quota: &Quota, read_at: SystemTime, now: Syst
             at: quota_time(read_at),
             left: ((100.0 - window.used).clamp(0.0, 100.0) * 100.0).round() / 100.0,
             start: reset.and_then(|end| {
-                window_span(info).map(|span| quota_time(end.checked_sub(span).unwrap_or(UNIX_EPOCH)))
+                window_span(info)
+                    .map(|span| quota_time(end.checked_sub(span).unwrap_or(UNIX_EPOCH)))
             }),
             resets_at: reset.map(quota_time),
         };
@@ -685,8 +692,8 @@ fn add_point(mut points: Vec<QuotaPoint>, next: QuotaPoint) -> Vec<QuotaPoint> {
         let first = &points[points.len() - 2];
         let second = &points[points.len() - 1];
         if !new_cycle(first, second) && !new_cycle(second, &next) {
-            let flat = (next.left - second.left).abs() < 0.05
-                && (second.left - first.left).abs() < 0.05;
+            let flat =
+                (next.left - second.left).abs() < 0.05 && (second.left - first.left).abs() < 0.05;
             let close = time_between(&first.at, &next.at) < HISTORY_GAP;
             if flat || close {
                 let last = points.len() - 1;
@@ -708,10 +715,7 @@ fn add_point(mut points: Vec<QuotaPoint>, next: QuotaPoint) -> Vec<QuotaPoint> {
 }
 
 fn new_cycle(previous: &QuotaPoint, next: &QuotaPoint) -> bool {
-    let (Some(a), Some(b)) = (
-        parse_quota_time(&previous.at),
-        parse_quota_time(&next.at),
-    ) else {
+    let (Some(a), Some(b)) = (parse_quota_time(&previous.at), parse_quota_time(&next.at)) else {
         return false;
     };
     let ar = previous.resets_at.as_ref().and_then(parse_quota_time);
@@ -729,8 +733,8 @@ fn new_cycle(previous: &QuotaPoint, next: &QuotaPoint) -> bool {
                 -ar.duration_since(br).unwrap_or_default().as_secs_f64()
             };
             let elapsed = b.duration_since(a).unwrap_or_default().as_secs_f64();
-            let rolling = moved_signed > 0.0
-                && (moved_signed - elapsed).abs() <= HISTORY_SLACK.as_secs_f64();
+            let rolling =
+                moved_signed > 0.0 && (moved_signed - elapsed).abs() <= HISTORY_SLACK.as_secs_f64();
             if !rolling
                 && moved_signed.abs() <= HISTORY_SLACK.as_secs_f64()
                 && next.left > previous.left + 5.0
@@ -743,13 +747,15 @@ fn new_cycle(previous: &QuotaPoint, next: &QuotaPoint) -> bool {
     }
 }
 
-fn prune_history(history: &mut BTreeMap<String, BTreeMap<String, Vec<QuotaPoint>>>, now: SystemTime) {
+fn prune_history(
+    history: &mut BTreeMap<String, BTreeMap<String, Vec<QuotaPoint>>>,
+    now: SystemTime,
+) {
     let cut = now.checked_sub(HISTORY_RETENTION).unwrap_or(UNIX_EPOCH);
     history.retain(|_, windows| {
         windows.retain(|_, points| {
-            let first = points.partition_point(|point| {
-                parse_quota_time(&point.at).is_some_and(|at| at < cut)
-            });
+            let first = points
+                .partition_point(|point| parse_quota_time(&point.at).is_some_and(|at| at < cut));
             if first > 0 {
                 points.drain(..first);
             }
@@ -906,8 +912,8 @@ pub fn parse_quota_time(value: &QuotaTime) -> Option<SystemTime> {
         if hours > 23 || minutes > 59 {
             return None;
         }
-        let seconds = (hours * 3600 + minutes * 60) * if suffix.starts_with('-') { -1 } else { 1 };
-        seconds
+
+        (hours * 3600 + minutes * 60) * if suffix.starts_with('-') { -1 } else { 1 }
     } else {
         return None;
     };
@@ -946,7 +952,6 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 const fn yes() -> bool {
     true
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1032,12 +1037,16 @@ mod tests {
         assert_eq!(report[0].windows[0].remaining, 70.0);
         assert_eq!(report[0].windows[0].amount, 3.0);
         assert_eq!(report[0].windows[0].limit, 10.0);
-        assert!(serde_json::to_value(&report[0])
-            .expect("JSON")["windows"][0]
-            .get("scopeModel")
-            .is_none());
+        assert!(
+            serde_json::to_value(&report[0]).expect("JSON")["windows"][0]
+                .get("scopeModel")
+                .is_none()
+        );
         let allowance = store.allowances(at(1_900_000_001));
-        assert_eq!(allowance[0].windows[0].scope_model.as_deref(), Some("model-a"));
+        assert_eq!(
+            allowance[0].windows[0].scope_model.as_deref(),
+            Some("model-a")
+        );
         assert!(!allowance[0].windows[0].blocking);
     }
 
@@ -1070,7 +1079,11 @@ mod tests {
         let path = dir.path().join("quotas.json");
         {
             let store = QuotaStore::new(dir.path());
-            store.record_success(quota("p", "A@example.com"), vec![info("day", 25.0, None)], read_at);
+            store.record_success(
+                quota("p", "A@example.com"),
+                vec![info("day", 25.0, None)],
+                read_at,
+            );
             let fresh = store.report(&[]);
             assert_eq!(fresh[0].read_at, Some(quota_time(read_at)));
             assert_eq!(fresh[0].as_of, None);
@@ -1126,7 +1139,11 @@ mod tests {
         let reset = read_at + Duration::from_secs(60);
         {
             let store = QuotaStore::new(dir.path());
-            store.record_success(quota("p", "a"), vec![info("minute", 100.0, Some(reset))], read_at);
+            store.record_success(
+                quota("p", "a"),
+                vec![info("minute", 100.0, Some(reset))],
+                read_at,
+            );
         }
         let store = QuotaStore::new(dir.path());
         let report = store.report(&[]);
@@ -1184,7 +1201,10 @@ mod tests {
         let reset = read_at + Duration::from_secs(5 * 3600);
         store.record_success(
             quota("p", "A@Example.com"),
-            vec![info("5 hours", 12.345, Some(reset)).with_window_span(Duration::from_secs(5 * 3600))],
+            vec![
+                info("5 hours", 12.345, Some(reset))
+                    .with_window_span(Duration::from_secs(5 * 3600)),
+            ],
             read_at,
         );
         let histories = store.histories(None, None, None, read_at);
@@ -1261,14 +1281,20 @@ mod tests {
         let now = at(1_900_000_000);
         let old = now - HISTORY_RETENTION - Duration::from_secs(1);
         let mut points = vec![point(
-            old.duration_since(UNIX_EPOCH).expect("after epoch").as_secs(),
+            old.duration_since(UNIX_EPOCH)
+                .expect("after epoch")
+                .as_secs(),
             1.0,
             None,
         )];
         let begin = now - Duration::from_secs(10_000);
         for index in 0..=HISTORY_POINT_LIMIT as u64 {
             points.push(point(
-                begin.duration_since(UNIX_EPOCH).expect("after epoch").as_secs() + index * 31,
+                begin
+                    .duration_since(UNIX_EPOCH)
+                    .expect("after epoch")
+                    .as_secs()
+                    + index * 31,
                 50.0,
                 None,
             ));
@@ -1280,7 +1306,11 @@ mod tests {
         prune_history(&mut history, now);
         let points = &history["p|a"]["day"];
         assert_eq!(points.len(), HISTORY_POINT_LIMIT);
-        assert!(points.iter().all(|point| parse_quota_time(&point.at).expect("time") >= begin));
+        assert!(
+            points
+                .iter()
+                .all(|point| parse_quota_time(&point.at).expect("time") >= begin)
+        );
         history.insert("empty|".to_owned(), BTreeMap::new());
         prune_history(&mut history, now);
         assert!(!history.contains_key("empty|"));
@@ -1299,9 +1329,30 @@ mod tests {
                 BTreeMap::from([(
                     "day".to_owned(),
                     vec![
-                        point((now - 2 * day).duration_since(UNIX_EPOCH).expect("epoch").as_secs(), 90.0, None),
-                        point((now - day).duration_since(UNIX_EPOCH).expect("epoch").as_secs(), 80.0, None),
-                        point((now - Duration::from_secs(60)).duration_since(UNIX_EPOCH).expect("epoch").as_secs(), 70.0, None),
+                        point(
+                            (now - 2 * day)
+                                .duration_since(UNIX_EPOCH)
+                                .expect("epoch")
+                                .as_secs(),
+                            90.0,
+                            None,
+                        ),
+                        point(
+                            (now - day)
+                                .duration_since(UNIX_EPOCH)
+                                .expect("epoch")
+                                .as_secs(),
+                            80.0,
+                            None,
+                        ),
+                        point(
+                            (now - Duration::from_secs(60))
+                                .duration_since(UNIX_EPOCH)
+                                .expect("epoch")
+                                .as_secs(),
+                            70.0,
+                            None,
+                        ),
                     ],
                 )]),
             );
@@ -1309,7 +1360,11 @@ mod tests {
         let selected = store.histories(Some("1"), Some("p"), Some("A@EXAMPLE.COM"), now);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].lines[0].points.len(), 3);
-        assert!(store.histories(Some("0"), Some("other"), None, now).is_empty());
+        assert!(
+            store
+                .histories(Some("0"), Some("other"), None, now)
+                .is_empty()
+        );
         assert_eq!(history_since(Some("46"), now), now - HISTORY_RETENTION);
         assert_eq!(history_since(Some("nope"), now), now - HISTORY_RETENTION);
     }
@@ -1319,12 +1374,22 @@ mod tests {
         let now = at(1_900_000_000);
         let recent = now - Duration::from_secs(60);
         let old = now - SERVED_RETENTION - Duration::from_secs(1);
-        let mut cards = vec![quota("p", "A@Example.com"), quota("p", "b"), quota("q", "c")];
+        let mut cards = vec![
+            quota("p", "A@Example.com"),
+            quota("p", "b"),
+            quota("q", "c"),
+        ];
         apply_last_served(
             &mut cards,
             &[
-                ServedRequest { member: "account:p:a@example.com".to_owned(), at: recent },
-                ServedRequest { member: "account:p:b".to_owned(), at: old },
+                ServedRequest {
+                    member: "account:p:a@example.com".to_owned(),
+                    at: recent,
+                },
+                ServedRequest {
+                    member: "account:p:b".to_owned(),
+                    at: old,
+                },
             ],
             now,
         );
@@ -1337,17 +1402,34 @@ mod tests {
     fn q8b_last_served_marks_latest_and_ties() {
         let now = at(1_900_000_000);
         let served = vec![
-            ServedRequest { member: "account:p:a".to_owned(), at: now - Duration::from_secs(60) },
-            ServedRequest { member: "account:p:b".to_owned(), at: now - Duration::from_secs(30) },
-            ServedRequest { member: "account:p:c".to_owned(), at: now - Duration::from_secs(30) },
+            ServedRequest {
+                member: "account:p:a".to_owned(),
+                at: now - Duration::from_secs(60),
+            },
+            ServedRequest {
+                member: "account:p:b".to_owned(),
+                at: now - Duration::from_secs(30),
+            },
+            ServedRequest {
+                member: "account:p:c".to_owned(),
+                at: now - Duration::from_secs(30),
+            },
         ];
         let mut provider_card = quota("p", "");
         provider_card.kind = QuotaKind::Subscription;
-        let mut cards = vec![quota("p", "a"), quota("p", "b"), quota("p", "c"), provider_card];
+        let mut cards = vec![
+            quota("p", "a"),
+            quota("p", "b"),
+            quota("p", "c"),
+            provider_card,
+        ];
         apply_last_served(&mut cards, &served, now);
         assert!(!cards[0].last);
         assert!(cards[1].last && cards[2].last);
-        assert_eq!(cards[3].last_served_at, Some(quota_time(now - Duration::from_secs(30))));
+        assert_eq!(
+            cards[3].last_served_at,
+            Some(quota_time(now - Duration::from_secs(30)))
+        );
         assert!(cards[3].last);
     }
 
@@ -1392,7 +1474,12 @@ mod tests {
         failed.error = "401".to_owned();
         store.record_failure(failed, false);
         assert!(store.allowances(now).is_empty());
-        assert!(store.allowances(now).iter().all(|entry| entry.member != "unknown"));
+        assert!(
+            store
+                .allowances(now)
+                .iter()
+                .all(|entry| entry.member != "unknown")
+        );
     }
 
     #[test]
@@ -1413,7 +1500,11 @@ mod tests {
         let out = standing(&card, &windows, now);
         assert!(out.readable);
         assert!(out.used_up);
-        assert_eq!(out.back_at, Some(quota_time(latest)), "the latest reset wins");
+        assert_eq!(
+            out.back_at,
+            Some(quota_time(latest)),
+            "the latest reset wins"
+        );
         assert_eq!(out.provider, "p");
         assert_eq!(out.user, "a");
         assert_eq!(out.name, "p");
@@ -1424,10 +1515,16 @@ mod tests {
             now,
         );
         assert!(unknown.used_up);
-        assert_eq!(unknown.back_at, None, "one silent window hides when it is back");
+        assert_eq!(
+            unknown.back_at, None,
+            "one silent window hides when it is back"
+        );
 
         let exact = standing(&card, &[info("5h", 100.0, Some(now))], now);
-        assert!(!exact.used_up, "a window resetting now is no longer used up");
+        assert!(
+            !exact.used_up,
+            "a window resetting now is no longer used up"
+        );
         let free = standing(&card, &[info("open", 99.9, Some(later))], now);
         assert!(!free.used_up);
         assert_eq!(free.back_at, None);
@@ -1483,7 +1580,10 @@ mod tests {
             now,
         );
         let allowance = &store.allowances(now)[0];
-        assert_eq!(allowance.fullest("model", now).expect("fullest").name, "week");
+        assert_eq!(
+            allowance.fullest("model", now).expect("fullest").name,
+            "week"
+        );
         assert_eq!(allowance.renewals("model", now), vec![week, month]);
         let tied = Allowance {
             member: "p".to_owned(),

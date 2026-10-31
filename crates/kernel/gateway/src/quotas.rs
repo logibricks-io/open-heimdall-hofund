@@ -49,7 +49,9 @@ impl<'a> QuotaCaller<'a> {
 
 impl std::fmt::Debug for QuotaCaller<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("QuotaCaller").finish_non_exhaustive()
+        formatter
+            .debug_struct("QuotaCaller")
+            .finish_non_exhaustive()
     }
 }
 
@@ -143,7 +145,11 @@ fn admit<'a>(
         return Err(rejected);
     }
     let Some(source) = app.quota_source.as_deref() else {
-        return Err(list_failure(StatusCode::NOT_FOUND, "not_found", "not found"));
+        return Err(list_failure(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "not found",
+        ));
     };
     let key = presented(headers, uri);
     match (app.quota_scope)(QuotaCaller::new(&key)) {
@@ -162,7 +168,9 @@ async fn quotas(State(app): State<Arc<Inner>>, headers: HeaderMap, uri: Uri) -> 
         Err(response) => return response,
     };
     let report = source.report(QuotaQuery::parse(uri.query())).await;
-    list(serde_json::to_vec(&ListEnvelope::new(access.quotas(report.data))))
+    list(serde_json::to_vec(&ListEnvelope::new(
+        access.quotas(report.data),
+    )))
 }
 
 async fn history(State(app): State<Arc<Inner>>, headers: HeaderMap, uri: Uri) -> Response {
@@ -171,7 +179,9 @@ async fn history(State(app): State<Arc<Inner>>, headers: HeaderMap, uri: Uri) ->
         Err(response) => return response,
     };
     let lines = source.history(QuotaHistoryQuery::parse(uri.query()));
-    list(serde_json::to_vec(&ListEnvelope::new(access.histories(lines))))
+    list(serde_json::to_vec(&ListEnvelope::new(
+        access.histories(lines),
+    )))
 }
 
 fn list(encoded: Result<Vec<u8>, serde_json::Error>) -> Response {

@@ -26,9 +26,9 @@ use hofund_control_proto::{
     ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_ID_BYTES,
     MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
     ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest,
-    RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, Topic, UsageQuery, UsageResponse, decode_request,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteModelListResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    Topic, UsageQuery, UsageResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -204,8 +204,7 @@ pub trait ControlState: Send + Sync {
     /// standing. A kept query never asks a vendor.
     fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse>;
     /// Reports sampled quota history.
-    fn quota_history(&self, query: QuotaHistoryQuery)
-    -> ControlFuture<'_, QuotaHistoryResponse>;
+    fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse>;
     /// Rotates the control and model bearer token.
     fn rotate_token(&self, request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse>;
     /// Starts graceful daemon shutdown.

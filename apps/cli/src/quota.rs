@@ -93,12 +93,13 @@ pub(crate) fn parse(args: &[&str]) -> QuotaCommand {
     match args {
         ["wait", rest @ ..] => parse_wait(rest),
         ["history", rest @ ..] => parse_history(rest),
-        [verb @ ("reset" | "auto-reset" | "credits" | "alert" | "refresh"), ..] => {
-            QuotaCommand::Invalid {
-                code: 2,
-                message: format!("hofund quota {verb} is not supported yet"),
-            }
-        }
+        [
+            verb @ ("reset" | "auto-reset" | "credits" | "alert" | "refresh"),
+            ..,
+        ] => QuotaCommand::Invalid {
+            code: 2,
+            message: format!("hofund quota {verb} is not supported yet"),
+        },
         rest => parse_list(rest),
     }
 }
@@ -144,12 +145,13 @@ fn parse_history(args: &[&str]) -> QuotaCommand {
         index += 1;
     }
     if let Some(value) = &days
-        && !value.parse::<f64>().is_ok_and(|days| days > 0.0) {
-            return QuotaCommand::Invalid {
-                code: 1,
-                message: format!("--days takes a number of days, such as 1 or 7, not {value:?}"),
-            };
-        }
+        && !value.parse::<f64>().is_ok_and(|days| days > 0.0)
+    {
+        return QuotaCommand::Invalid {
+            code: 1,
+            message: format!("--days takes a number of days, such as 1 or 7, not {value:?}"),
+        };
+    }
     QuotaCommand::History {
         filters,
         days,
@@ -206,9 +208,9 @@ fn parse_wait(args: &[&str]) -> QuotaCommand {
             timeout,
             quiet,
         },
-        None => usage(
-            "wait for what? hofund quota wait <provider|account>, such as codex".to_owned(),
-        ),
+        None => {
+            usage("wait for what? hofund quota wait <provider|account>, such as codex".to_owned())
+        }
     }
 }
 
@@ -247,11 +249,14 @@ pub(crate) fn run(config: &Path, command: QuotaCommand) -> ExitCode {
         }
         QuotaCommand::List { filters, json } => printed(runtime.block_on(async {
             let client = client(config).await?;
-            let response = client
-                .quotas(QuotaQuery::fresh())
-                .await
-                .map_err(failure)?;
-            render_list(response.data, &filters, json, &known_ids(config), &Local::now())
+            let response = client.quotas(QuotaQuery::fresh()).await.map_err(failure)?;
+            render_list(
+                response.data,
+                &filters,
+                json,
+                &known_ids(config),
+                &Local::now(),
+            )
         })),
         QuotaCommand::History {
             filters,
@@ -373,9 +378,11 @@ where
                 filters.join(", ")
             ));
         }
-        return Ok("nothing to tell · a signed-in subscription, a coding plan or a key \
+        return Ok(
+            "nothing to tell · a signed-in subscription, a coding plan or a key \
                    whose vendor tells its balance shows up here"
-            .to_owned());
+                .to_owned(),
+        );
     }
     Ok(table(&kept, now))
 }
@@ -469,7 +476,11 @@ where
 
 /// When a plan's paid time ends: `renews Oct 18`, `expires Oct 18`, or
 /// `until Oct 18` when the vendor does not say which; empty with no end.
-pub(crate) fn plan_term<Tz: TimeZone>(until: Option<DateTime<Utc>>, renew: &str, zone: &Tz) -> String
+pub(crate) fn plan_term<Tz: TimeZone>(
+    until: Option<DateTime<Utc>>,
+    renew: &str,
+    zone: &Tz,
+) -> String
 where
     Tz::Offset: Display,
 {
@@ -671,9 +682,11 @@ where
         if !filters.is_empty() {
             return Err(format!("no readings kept of {}", filters.join(", ")));
         }
-        return Ok("nothing kept yet · a subscription's or plan's windows are kept here \
+        return Ok(
+            "nothing kept yet · a subscription's or plan's windows are kept here \
                    as hofund reads them"
-            .to_owned());
+                .to_owned(),
+        );
     }
     let zone = now.timezone();
     let mut out = String::new();
@@ -779,19 +792,20 @@ pub(crate) fn resolve(
         });
     }
     if let Some((provider, user)) = arg.split_once('/')
-        && let Some(id) = by_provider(provider) {
-            let target = Target {
-                label: format!("{id} · {user}"),
-                provider: id.clone(),
-                user: user.to_owned(),
-            };
-            if standings.iter().any(|standing| target.has(standing)) {
-                return Ok(target);
-            }
-            return Err(format!(
-                "{id} has no account {user} · hofund quota {id} lists its accounts"
-            ));
+        && let Some(id) = by_provider(provider)
+    {
+        let target = Target {
+            label: format!("{id} · {user}"),
+            provider: id.clone(),
+            user: user.to_owned(),
+        };
+        if standings.iter().any(|standing| target.has(standing)) {
+            return Ok(target);
         }
+        return Err(format!(
+            "{id} has no account {user} · hofund quota {id} lists its accounts"
+        ));
+    }
     let mut hits: Vec<Target> = Vec::new();
     for standing in standings {
         if !standing.user.is_empty()
@@ -890,9 +904,10 @@ impl Waiter {
             }
             known += 1;
             if let Some(at) = standing.back_at.as_ref().and_then(instant)
-                && back.is_none_or(|(soonest, _)| at < soonest) {
-                    back = Some((at, &standing.user));
-                }
+                && back.is_none_or(|(soonest, _)| at < soonest)
+            {
+                back = Some((at, &standing.user));
+            }
         }
         let (mut wait, mut line) = if known == 0 {
             let wait = self.backoff;
@@ -1261,7 +1276,10 @@ mod tests {
         let known: Vec<String> = Vec::new();
 
         let all = render_list(cards.clone(), &[], true, &known, &now()).expect("json");
-        assert!(all.starts_with("[\n  {\n    \"provider\": \"codex\""), "{all}");
+        assert!(
+            all.starts_with("[\n  {\n    \"provider\": \"codex\""),
+            "{all}"
+        );
         let parsed: serde_json::Value = serde_json::from_str(&all).expect("parse");
         assert_eq!(parsed.as_array().map(Vec::len), Some(3));
         assert_eq!(parsed[0]["lastServedAt"], "2026-11-01T01:00:00Z");
@@ -1272,8 +1290,8 @@ mod tests {
         assert!(parsed[1].get("last").is_none());
 
         let pick = |words: &[&str]| {
-            let out = render_list(cards.clone(), &filters(words), true, &known, &now())
-                .expect("json");
+            let out =
+                render_list(cards.clone(), &filters(words), true, &known, &now()).expect("json");
             let parsed: serde_json::Value = serde_json::from_str(&out).expect("parse");
             parsed
                 .as_array()
@@ -1339,8 +1357,8 @@ mod tests {
         glm.windows = vec![unlimited, text, wallet];
         glm.read_at = Some(later(TimeDelta::seconds(-30)));
 
-        let out = render_list(vec![codex, kimi, claude, glm], &[], false, &[], &now())
-            .expect("table");
+        let out =
+            render_list(vec![codex, kimi, claude, glm], &[], false, &[], &now()).expect("table");
         let want = [
             "codex · plus · renews Nov 18 · work (a@x.io)  subscription  \
              5h 42% ↻2h13m 12:13  weekly all models 10% (10/100)",
@@ -1364,9 +1382,11 @@ mod tests {
         let known = vec!["codex".to_owned(), "OpenRouter".to_owned()];
         assert_eq!(
             render_list(Vec::new(), &[], false, &known, &now()),
-            Ok("nothing to tell · a signed-in subscription, a coding plan or a key \
+            Ok(
+                "nothing to tell · a signed-in subscription, a coding plan or a key \
                 whose vendor tells its balance shows up here"
-                .to_owned())
+                    .to_owned()
+            )
         );
         assert_eq!(
             render_list(Vec::new(), &filters(&["Nope"]), false, &known, &now()),
@@ -1400,7 +1420,10 @@ mod tests {
         assert_eq!(until_short(TimeDelta::minutes(-1)), "now");
         assert_eq!(until_short(TimeDelta::minutes(59)), "59m");
         assert_eq!(until_short(TimeDelta::minutes(60)), "1h0m");
-        assert_eq!(until_short(TimeDelta::hours(47) + TimeDelta::minutes(59)), "47h59m");
+        assert_eq!(
+            until_short(TimeDelta::hours(47) + TimeDelta::minutes(59)),
+            "47h59m"
+        );
         assert_eq!(until_short(TimeDelta::hours(48)), "2d0h");
         expired.resets_at = Some(QuotaTime::new("not a time"));
         assert_eq!(window_cell(&expired, &now()), "5h 100%");
@@ -1445,15 +1468,19 @@ mod tests {
         );
         assert_eq!(
             target("a@x.io"),
-            Err("a@x.io is an account of more than one subscription: name one of \
+            Err(
+                "a@x.io is an account of more than one subscription: name one of \
                  codex/a@x.io, claude/A@X.IO"
-                .to_owned())
+                    .to_owned()
+            )
         );
         assert_eq!(
             target("OpenAI"),
-            Err("OpenAI has no subscription or plan whose allowance hofund reads: sign in \
+            Err(
+                "OpenAI has no subscription or plan whose allowance hofund reads: sign in \
                  to it first, or hofund quota lists what there is"
-                .to_owned())
+                    .to_owned()
+            )
         );
         assert_eq!(
             target("nope"),
@@ -1620,7 +1647,10 @@ mod tests {
         );
         let other = [standing("claude", "a")];
         assert!(
-            matches!(waiter.step(&target, &other, None, &now()), Step::Sleep { .. }),
+            matches!(
+                waiter.step(&target, &other, None, &now()),
+                Step::Sleep { .. }
+            ),
             "another provider's allowance does not count"
         );
         assert_eq!(
@@ -1763,9 +1793,11 @@ mod tests {
         );
         assert_eq!(
             render_history(Vec::new(), &[], false, &now()),
-            Ok("nothing kept yet · a subscription's or plan's windows are kept here as \
+            Ok(
+                "nothing kept yet · a subscription's or plan's windows are kept here as \
                 hofund reads them"
-                .to_owned())
+                    .to_owned()
+            )
         );
     }
 
@@ -1781,9 +1813,18 @@ mod tests {
         let cell = points_cell(&points, 8, &zone());
         assert_eq!(cell.matches(" · ").count(), 7, "{cell}");
         assert!(cell.starts_with("Nov 1 10:02 50%"), "{cell}");
-        assert!(new_run(&point(0, 10.0, Some(60)), &point(1, 10.0, Some(71))));
-        assert!(!new_run(&point(0, 10.0, Some(60)), &point(1, 90.0, Some(70))));
-        assert!(new_run(&point(0, 10.0, Some(60)), &point(1, 10.0, Some(49))));
+        assert!(new_run(
+            &point(0, 10.0, Some(60)),
+            &point(1, 10.0, Some(71))
+        ));
+        assert!(!new_run(
+            &point(0, 10.0, Some(60)),
+            &point(1, 90.0, Some(70))
+        ));
+        assert!(new_run(
+            &point(0, 10.0, Some(60)),
+            &point(1, 10.0, Some(49))
+        ));
         assert!(new_run(&point(0, 10.0, None), &point(1, 15.5, Some(10))));
         assert!(!new_run(&point(0, 10.0, None), &point(1, 15.0, None)));
     }
@@ -1822,7 +1863,10 @@ mod tests {
         assert_eq!(round_wait(Duration::from_secs(89)), "1m");
         assert_eq!(round_wait(Duration::from_secs(600)), "10m");
         assert_eq!(round_wait(Duration::from_secs(20)), "");
-        assert_eq!(super::balance_text(1_234_567.891, "credits"), "1,234,567.89 credits left");
+        assert_eq!(
+            super::balance_text(1_234_567.891, "credits"),
+            "1,234,567.89 credits left"
+        );
         assert_eq!(super::balance_text(-1000.0, ""), "-1,000 left");
         assert_eq!(super::balance_text(12.0, "USD"), "12 USD left");
     }

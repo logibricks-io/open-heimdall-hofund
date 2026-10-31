@@ -14,11 +14,11 @@ use hofund_control_proto::{
     RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
     TokenRotateResponse, UsageQuery, UsageResponse, decode_error_envelope,
 };
-use hofund_control_proto::{QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse};
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
     ReloadRequest,
 };
+use hofund_control_proto::{QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse};
 use hofund_gateway::control::{
     Control, ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery,
 };

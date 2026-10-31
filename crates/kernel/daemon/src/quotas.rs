@@ -71,7 +71,9 @@ async fn served_since(usage: Arc<Ledger>, now: SystemTime) -> Vec<ServedRequest>
     let since = now
         .checked_sub(SERVED_RETENTION)
         .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        });
     let rows = tokio::task::spawn_blocking(move || usage.last_served(since))
         .await
         .ok()
@@ -91,7 +93,10 @@ async fn served_since(usage: Arc<Ledger>, now: SystemTime) -> Vec<ServedRequest>
 /// A ledger upstream as a card's served key: a subscription member's
 /// account compares without case.
 pub(crate) fn member_key(upstream: &str) -> String {
-    match upstream.strip_prefix("account:").and_then(|rest| rest.split_once(':')) {
+    match upstream
+        .strip_prefix("account:")
+        .and_then(|rest| rest.split_once(':'))
+    {
         Some((subscription, account)) => {
             format!("account:{subscription}:{}", account.to_lowercase())
         }
@@ -105,7 +110,10 @@ mod tests {
 
     #[test]
     fn q4b_member_key_lowercases_only_the_account() {
-        assert_eq!(member_key("account:Codex:Me@Example.com"), "account:Codex:me@example.com");
+        assert_eq!(
+            member_key("account:Codex:Me@Example.com"),
+            "account:Codex:me@example.com"
+        );
         assert_eq!(member_key("openai"), "openai");
         assert_eq!(member_key("account:broken"), "account:broken");
     }
