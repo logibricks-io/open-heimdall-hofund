@@ -113,10 +113,10 @@ mod tests {
     #[test]
     fn q4b_member_key_lowercases_only_the_account() {
         assert_eq!(
-            member_key("account:Codex:Me@Example.com"),
-            "account:Codex:me@example.com"
+            member_key("account:Acct:Me@Example.com"),
+            "account:Acct:me@example.com"
         );
-        assert_eq!(member_key("openai"), "openai");
+        assert_eq!(member_key("plain"), "plain");
         assert_eq!(member_key("account:broken"), "account:broken");
     }
 }
