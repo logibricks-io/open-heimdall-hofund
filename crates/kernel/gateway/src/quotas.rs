@@ -140,24 +140,24 @@ fn admit<'a>(
     app: &'a Inner,
     headers: &HeaderMap,
     uri: &Uri,
-) -> Result<(&'a dyn QuotaSource, QuotaAccess), Response> {
+) -> Result<(&'a dyn QuotaSource, QuotaAccess), Box<Response>> {
     if let Some(rejected) = reject(&current_token(app), headers, uri, None) {
-        return Err(rejected);
+        return Err(Box::new(rejected));
     }
     let Some(source) = app.quota_source.as_deref() else {
-        return Err(list_failure(
+        return Err(Box::new(list_failure(
             StatusCode::NOT_FOUND,
             "not_found",
             "not found",
-        ));
+        )));
     };
     let key = presented(headers, uri);
     match (app.quota_scope)(QuotaCaller::new(&key)) {
-        QuotaAccess::Refused => Err(list_failure(
+        QuotaAccess::Refused => Err(Box::new(list_failure(
             StatusCode::FORBIDDEN,
             "permission_error",
             "this key may not read quotas",
-        )),
+        ))),
         access => Ok((source, access)),
     }
 }
@@ -165,7 +165,7 @@ fn admit<'a>(
 async fn quotas(State(app): State<Arc<Inner>>, headers: HeaderMap, uri: Uri) -> Response {
     let (source, access) = match admit(&app, &headers, &uri) {
         Ok(admitted) => admitted,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let report = source.report(QuotaQuery::parse(uri.query())).await;
     list(serde_json::to_vec(&ListEnvelope::new(
@@ -176,7 +176,7 @@ async fn quotas(State(app): State<Arc<Inner>>, headers: HeaderMap, uri: Uri) -> 
 async fn history(State(app): State<Arc<Inner>>, headers: HeaderMap, uri: Uri) -> Response {
     let (source, access) = match admit(&app, &headers, &uri) {
         Ok(admitted) => admitted,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let lines = source.history(QuotaHistoryQuery::parse(uri.query()));
     list(serde_json::to_vec(&ListEnvelope::new(

@@ -37,6 +37,14 @@ pub enum QuotaKind {
     Unknown,
 }
 
+impl QuotaKind {
+    /// Whether this card is a signed-in account's renewable allowance.
+    #[must_use]
+    pub fn is_account(self) -> bool {
+        self == Self::Subscription
+    }
+}
+
 /// One account, plan, or key allowance.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -580,10 +588,10 @@ mod tests {
         assert_eq!(parsed.user.as_deref(), Some("Me@x.io b"));
         let built = QuotaHistoryQuery::default()
             .with_days("30")
-            .with_provider("codex")
+            .with_provider("acct")
             .with_user("a b&c=d/%");
         let encoded = built.encode();
-        assert_eq!(encoded, "days=30&provider=codex&user=a%20b%26c%3Dd%2F%25");
+        assert_eq!(encoded, "days=30&provider=acct&user=a%20b%26c%3Dd%2F%25");
         assert_eq!(QuotaHistoryQuery::parse(Some(&encoded)), built);
         assert_eq!(QuotaHistoryQuery::default().encode(), "");
         let bad = QuotaHistoryQuery::parse(Some("user=%zz%4"));

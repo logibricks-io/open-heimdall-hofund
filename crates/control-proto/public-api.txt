@@ -327,6 +327,7 @@ QuotaKind::Balance
 QuotaKind::Plan
 QuotaKind::Subscription
 QuotaKind::Unknown #[serde(other)]
+QuotaKind::fn is_account (self) -> bool
 QuotaLine derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
 QuotaLine.name
 QuotaLine.points

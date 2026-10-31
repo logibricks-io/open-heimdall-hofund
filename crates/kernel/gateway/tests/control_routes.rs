@@ -278,7 +278,7 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
         (Method::GET, "/v1/hofund/quotas?kept=1", Vec::new()),
         (
             Method::GET,
-            "/v1/hofund/quotas/history?days=7&provider=codex&user=Me%40x.io",
+            "/v1/hofund/quotas/history?days=7&provider=acct&user=Me%40x.io",
             Vec::new(),
         ),
         (
@@ -403,7 +403,7 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "set_agent_model:agent:Some(\"m\")",
             "usage:Day",
             "quotas:kept=true",
-            "quota_history:Some(\"7\"):Some(\"codex\"):Some(\"Me@x.io\")",
+            "quota_history:Some(\"7\"):Some(\"acct\"):Some(\"Me@x.io\")",
             "rotate_token",
             "shutdown",
             "config",

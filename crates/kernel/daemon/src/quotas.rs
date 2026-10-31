@@ -32,10 +32,11 @@ impl DaemonQuotas {
         let now = self.runtime.quota_now();
         let served = served_since(Arc::clone(&self.usage), now).await;
         apply_last_served(&mut data, &served, now);
-        let mut response = QuotaResponse::default();
-        response.data = data;
-        response.standings = standings;
-        response
+        QuotaResponse {
+            data,
+            standings,
+            ..QuotaResponse::default()
+        }
     }
 
     /// Sampled history for the query.
@@ -49,9 +50,10 @@ impl DaemonQuotas {
 
     /// The history response for the control API.
     pub(crate) fn history_response(&self, query: &QuotaHistoryQuery) -> QuotaHistoryResponse {
-        let mut response = QuotaHistoryResponse::default();
-        response.data = self.lines(query);
-        response
+        QuotaHistoryResponse {
+            data: self.lines(query),
+            ..QuotaHistoryResponse::default()
+        }
     }
 }
 

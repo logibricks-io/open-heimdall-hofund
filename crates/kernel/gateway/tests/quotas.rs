@@ -44,19 +44,20 @@ impl QuotaSource for Source {
     fn report(&self, query: QuotaQuery) -> BoxFuture<'_, QuotaResponse> {
         self.reports.lock().expect("reports").push(query.kept);
         Box::pin(async move {
-            let mut response = QuotaResponse::default();
-            response.data = vec![
-                card("codex", "a@x.io"),
-                card("codex", "b@x.io"),
-                card("kimi", ""),
-            ];
-            response
+            QuotaResponse {
+                data: vec![
+                    card("acct", "a@x.io"),
+                    card("acct", "b@x.io"),
+                    card("plan", ""),
+                ],
+                ..QuotaResponse::default()
+            }
         })
     }
 
     fn history(&self, query: QuotaHistoryQuery) -> Vec<QuotaHistory> {
         self.histories.lock().expect("histories").push(query);
-        vec![line("codex", "a@x.io"), line("kimi", "")]
+        vec![line("acct", "a@x.io"), line("plan", "")]
     }
 }
 
@@ -64,7 +65,7 @@ struct OnlyAccount(&'static str);
 
 impl QuotaScope for OnlyAccount {
     fn card(&self, provider: &str, user: &str) -> bool {
-        provider == "codex" && user.eq_ignore_ascii_case(self.0)
+        provider == "acct" && user.eq_ignore_ascii_case(self.0)
     }
 }
 
@@ -119,7 +120,7 @@ async fn q5a_snapshot_route_supports_kept_and_fresh_reads() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["object"], "list");
     assert_eq!(body["data"].as_array().map(Vec::len), Some(3));
-    assert_eq!(body["data"][0]["provider"], "codex");
+    assert_eq!(body["data"][0]["provider"], "acct");
     assert!(
         body.get("version").is_none(),
         "the model API answers the bare envelope"
@@ -186,25 +187,24 @@ async fn q6g_history_route_filters_and_scopes() {
     let (app, _dir) = app_with(&source, None);
     let (status, body) = get(
         &app,
-        "/v1/hofund/quotas/history?days=7&provider=codex&user=A%40x.io&extra=1",
+        "/v1/hofund/quotas/history?days=7&provider=acct&user=A%40x.io&extra=1",
         bearer(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["object"], "list");
     assert_eq!(body["data"].as_array().map(Vec::len), Some(2));
-    let seen = source.histories.lock().expect("histories");
-    assert_eq!(seen[0].days.as_deref(), Some("7"));
-    assert_eq!(seen[0].provider.as_deref(), Some("codex"));
-    assert_eq!(seen[0].user.as_deref(), Some("A@x.io"));
-    drop(seen);
+    let seen = source.histories.lock().expect("histories")[0].clone();
+    assert_eq!(seen.days.as_deref(), Some("7"));
+    assert_eq!(seen.provider.as_deref(), Some("acct"));
+    assert_eq!(seen.user.as_deref(), Some("A@x.io"));
     let scope: QuotaScopeHook =
         Arc::new(|_: QuotaCaller<'_>| QuotaAccess::Scoped(Arc::new(OnlyAccount("A@X.IO"))));
     let (scoped, _dir) = app_with(&source, Some(scope));
     let (_, body) = get(&scoped, "/v1/hofund/quotas/history?days=1", bearer()).await;
     let data = body["data"].as_array().expect("data");
     assert_eq!(data.len(), 1, "the scope narrows history as it does cards");
-    assert_eq!(data[0]["provider"], "codex");
+    assert_eq!(data[0]["provider"], "acct");
     assert_eq!(data[0]["user"], "a@x.io");
 }
 

@@ -541,7 +541,7 @@ pub fn apply_last_served(quotas: &mut [Quota], served: &[ServedRequest], now: Sy
     let mut newest = None;
     for quota in quotas.iter_mut() {
         let exact = served_key(quota);
-        let at = if quota.kind == QuotaKind::Subscription && !quota.user.is_empty() {
+        let at = if quota.kind.is_account() && !quota.user.is_empty() {
             latest.get(&exact).copied()
         } else if quota.user.is_empty() {
             latest
@@ -569,7 +569,7 @@ pub fn apply_last_served(quotas: &mut [Quota], served: &[ServedRequest], now: Sy
 /// Stable identity shared by a quota card and served request rows.
 #[must_use]
 pub fn served_key(quota: &Quota) -> String {
-    if quota.kind == QuotaKind::Subscription && !quota.user.is_empty() {
+    if quota.kind.is_account() && !quota.user.is_empty() {
         format!("account:{}:{}", quota.provider, quota.user.to_lowercase())
     } else {
         quota.provider.clone()
@@ -973,7 +973,7 @@ mod tests {
             kind: if user.is_empty() {
                 QuotaKind::Balance
             } else {
-                QuotaKind::Subscription
+                QuotaKind::default()
             },
             user: user.to_owned(),
             ..Quota::default()
@@ -1160,11 +1160,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = QuotaStore::new(dir.path());
         for (provider, user, kind) in [
-            ("a", "a1", QuotaKind::Subscription),
-            ("unknown", "r", QuotaKind::Subscription),
-            ("c", "c1", QuotaKind::Subscription),
+            ("a", "a1", QuotaKind::default()),
+            ("unknown", "r", QuotaKind::default()),
+            ("c", "c1", QuotaKind::default()),
             ("b", "", QuotaKind::Plan),
-            ("a", "a2", QuotaKind::Subscription),
+            ("a", "a2", QuotaKind::default()),
             ("c", "", QuotaKind::Balance),
         ] {
             let mut card = quota(provider, user);
@@ -1175,19 +1175,21 @@ mod tests {
         let identities = |cards: &[Quota]| {
             cards
                 .iter()
-                .map(|card| format!("{}:{}:{:?}", card.provider, card.user, card.kind))
+                .map(|card| {
+                    format!("{}:{}:{:?}", card.provider, card.user, card.kind).to_lowercase()
+                })
                 .collect::<Vec<_>>()
         };
         let first = store.report(&order);
         assert_eq!(
             identities(&first),
             [
-                "c:c1:Subscription",
-                "c::Balance",
-                "a:a1:Subscription",
-                "a:a2:Subscription",
-                "b::Plan",
-                "unknown:r:Subscription"
+                "c:c1:subscription",
+                "c::balance",
+                "a:a1:subscription",
+                "a:a2:subscription",
+                "b::plan",
+                "unknown:r:subscription"
             ]
         );
         assert_eq!(identities(&store.report(&order)), identities(&first));
@@ -1416,7 +1418,7 @@ mod tests {
             },
         ];
         let mut provider_card = quota("p", "");
-        provider_card.kind = QuotaKind::Subscription;
+        provider_card.kind = QuotaKind::default();
         let mut cards = vec![
             quota("p", "a"),
             quota("p", "b"),
