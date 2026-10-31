@@ -64,18 +64,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hofund's key as the `Authorization` header, `skip_canonical_filtering`,
   one `models[]` entry per route, and `dynamic_models: false` only while a
   route is listed (Goose rejects an empty static list it may not
-  discover). Two deviations from the reference, by design: the provider
+  discover). One deviation from the reference, by design: the provider
   file is written at connect rather than only on a pick, so Goose lists
-  one more provider until disconnect removes it; and clearing the model
-  puts back the user's `active_provider` instead of deleting it. A pick
-  writes `active_provider: hofund` and `providers.hofund.{enabled,
-  configured, model}` (the bare route). User keys in `hofund.json` (extra
-  headers, `timeout_seconds`) are kept. Not yet: the legacy
-  `GOOSE_PROVIDER`/`GOOSE_MODEL` layout (#450), per-model reasoning and
-  `context_limit` (#451), `GOOSE_THINKING_EFFORT` (#452), a pick changed
-  in Goose (#453), WSL homes (#454), telling the pressly migration tool
-  apart (#455), and dropping a stale `dynamic_models` once every route is
-  gone (#456).
+  one more provider until disconnect removes it. A pick writes
+  `active_provider: hofund` and `providers.hofund.{enabled, configured,
+  model}` in the current layout, or `GOOSE_PROVIDER`/`GOOSE_MODEL` in the
+  legacy layout. User keys in `hofund.json` (extra headers,
+  `timeout_seconds`) are kept. Not yet: per-model reasoning and
+  `context_limit` (#451), `GOOSE_THINKING_EFFORT` (#452), and WSL homes
+  (#454).
 - agent.toml: `[[file]] env_os = ["linux", "macos"]` limits `env_override`
   to the named systems, and `env_replaces` is checked only against their
   paths (part of #411); a `json` slot with `with_models = true` is written
@@ -923,6 +920,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Goose model picks retain the config's current or legacy layout, remove stale
+  flat keys from the current layout, and clear/disconnect by removing only
+  hofund's active-provider and provider entries; other providers and YAML
+  comments survive (#450).
+- Goose `configured_model` follows `active_provider` with the legacy provider
+  and model fallbacks, and no longer reports hofund's model while another
+  provider is active (#453).
+- Goose detection rejects the pressly migration binary through bounded,
+  shell-free Go build-info inspection (#455). The answer is cached by the
+  binary's path, size and modification time; a probe that outlasts one
+  second counts as the agent and its late answer serves the next check.
+- Agent descriptors gain `binary_not_go` and an `[active_provider]` table
+  (`AgentActiveProvider` in the plugin API), so the Goose layouts above are
+  declared in its `agent.toml` rather than named in the agent kernel.
+- `Slot::JsonWithModels` removes its previous value when the visible route
+  list becomes empty, including from the connect snapshot, so Goose no longer
+  retains stale `dynamic_models: false` (#456).
 - Clearing a model restores the user's previous value for VS Code, Droid, and
   Qwen Code, and removes the key when no previous value exists. Kimi Code
   restores its previous `default_model` only while the matching model table
