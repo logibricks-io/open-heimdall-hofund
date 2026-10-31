@@ -9,6 +9,7 @@ mod events;
 mod local;
 mod provider;
 mod provider_edit;
+mod quota;
 mod serve;
 mod subscription;
 
@@ -39,6 +40,7 @@ fn main() -> ExitCode {
         }
         Command::TokenShow => finish(local::token_show(&config)),
         Command::Subscription(command) => hand_over(subscription::run(&config, &command)),
+        Command::Quota(command) => quota::run(&config, command),
         other => finish(run_control(&config, other)),
     }
 }
@@ -107,7 +109,8 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             | Command::Help(_)
             | Command::Serve
             | Command::TokenShow
-            | Command::Subscription(_) => Err("not a control command".to_owned()),
+            | Command::Subscription(_)
+            | Command::Quota(_) => Err("not a control command".to_owned()),
         }
     })
 }
@@ -150,6 +153,8 @@ enum Command {
         model: Option<String>,
     },
     Subscription(SubscriptionCommand),
+    /// `quota`, `quota history`, and `quota wait`.
+    Quota(quota::QuotaCommand),
     ProviderList,
     ProviderShow {
         id: String,
@@ -227,6 +232,7 @@ enum HelpTopic {
     SubscriptionSignOut,
     SubscriptionRefresh,
     SubscriptionQuota,
+    Quota,
     Provider,
     Routes,
     Model,
@@ -254,6 +260,9 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
                     .next()
                     .ok_or_else(|| "--config needs a path".to_owned())?;
                 config = Some(PathBuf::from(path));
+            }
+            other if words.first() == Some(&"quota") && !matches!(other, "-h" | "--help") => {
+                words.push(other);
             }
             "--dry-run" => dry_run = true,
             "--force" => force = true,
@@ -326,6 +335,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             model: agent_model(pairs)?,
         },
         ["agent", "set", ..] => return Err(help_text(HelpTopic::AgentSet)),
+        ["quota", rest @ ..] => match quota::parse(rest) {
+            quota::QuotaCommand::Help => Command::Help(HelpTopic::Quota),
+            parsed => Command::Quota(parsed),
+        },
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
@@ -480,6 +493,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["subscription", "refresh", ..] => HelpTopic::SubscriptionRefresh,
         ["subscription", "quota", ..] => HelpTopic::SubscriptionQuota,
         ["subscription", ..] => HelpTopic::Subscription,
+        ["quota", ..] => HelpTopic::Quota,
         ["provider", ..] => HelpTopic::Provider,
         ["routes", ..] => HelpTopic::Routes,
         ["model", ..] => HelpTopic::Model,
@@ -521,6 +535,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::SubscriptionSignOut => subscription::SIGN_OUT_HELP,
         HelpTopic::SubscriptionRefresh => subscription::REFRESH_HELP,
         HelpTopic::SubscriptionQuota => subscription::QUOTA_HELP,
+        HelpTopic::Quota => quota::QUOTA_HELP,
         HelpTopic::Provider => PROVIDER_HELP,
         HelpTopic::Routes => ROUTES_HELP,
         HelpTopic::Model => MODEL_HELP,
@@ -560,6 +575,9 @@ commands:
   subscription sign-out <id> <account>
   subscription refresh <id> [<account>]
   subscription quota [<id>] [--json]
+  quota [<provider>...] [--json]  print what is left of each subscription
+  quota wait <provider|account> [--timeout <duration>] [--quiet]
+  quota history [<provider|account>...] [--days <n>] [--json]
   provider list                   list providers
   provider show <id>              print a provider, its listed models and picks
   provider test <id> [<model>...] probe a provider's models

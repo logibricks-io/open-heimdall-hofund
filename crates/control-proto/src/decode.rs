@@ -8,8 +8,8 @@ use crate::{
     ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, HealthResponse,
     MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, UsageResponse,
+    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageResponse,
 };
 
 mod sealed {
@@ -269,6 +269,8 @@ response!(
     AgentStatusResponse,
     AgentPlanResponse,
     AgentChangeResponse,
+    QuotaResponse,
+    QuotaHistoryResponse,
     UsageResponse,
     TokenRotateResponse,
     ShutdownResponse,

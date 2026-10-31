@@ -12,6 +12,7 @@ mod attempt;
 mod cooldown;
 mod decision;
 mod member;
+pub mod quota;
 mod snapshot;
 pub mod strategy;
 

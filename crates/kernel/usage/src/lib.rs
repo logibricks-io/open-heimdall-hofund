@@ -188,6 +188,31 @@ impl Ledger {
             .map_err(|error| UsageError(error.to_string()))
     }
 
+    /// Each upstream's newest answered request at or after `since`: rows
+    /// with a 2xx status and an upstream, as `(upstream, created_unix)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when the query fails.
+    pub fn last_served(&self, since: i64) -> Result<Vec<(String, i64)>, UsageError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT upstream, MAX(created_unix) FROM requests
+                 WHERE created_unix >= ?1 AND upstream != '' AND status LIKE '2%'
+                 GROUP BY upstream ORDER BY upstream",
+            )
+            .map_err(|error| UsageError(error.to_string()))?;
+        let rows = statement
+            .query_map([since], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| UsageError(error.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| UsageError(error.to_string()))
+    }
+
     /// The newest `row_limit` rows at or after `since` (oldest first), and
     /// totals over every row in the window.
     ///
@@ -354,6 +379,37 @@ mod tests {
             latency_ms: 1,
             status: "200".to_owned(),
         }
+    }
+
+    #[test]
+    fn q8c_last_served_is_the_newest_answered_row_per_upstream() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let served = |at: i64, upstream: &str, status: &str| Row {
+            upstream: upstream.to_owned(),
+            status: status.to_owned(),
+            ..row(at, None, None)
+        };
+        for entry in [
+            served(100, "account:p:a", "200"),
+            served(300, "account:p:a", "201"),
+            served(400, "account:p:a", "429"),
+            served(50, "old", "200"),
+            served(500, "", "200"),
+            served(200, "plain", "200"),
+            served(250, "failed", "500"),
+        ] {
+            ledger.record(&entry).expect("record");
+        }
+        assert_eq!(
+            ledger.last_served(100).expect("served"),
+            [("account:p:a".to_owned(), 300), ("plain".to_owned(), 200)]
+        );
+        assert_eq!(
+            ledger.last_served(0).expect("served").len(),
+            3,
+            "the since bound is inclusive and old rows return"
+        );
     }
 
     #[test]

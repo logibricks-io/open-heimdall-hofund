@@ -10,9 +10,10 @@ use hofund_control_proto::{
     AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
     ControlErrorKind, FieldIssue, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderListResponse, ProviderSummary, ProviderTestRequest,
-    ProviderTestResponse, ProviderTestResult, RouteModel, RouteModelListResponse, ShutdownRequest,
-    ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
+    ProviderTestResponse, ProviderTestResult, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery,
+    QuotaResponse, RouteModel, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod,
+    UsageQuery, UsageResponse, UsageRow, UsageTotals,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -22,6 +23,8 @@ use hofund_gateway::control::{
     ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery,
 };
 use hofund_plugin_api::ModelSpec;
+
+use crate::quotas::DaemonQuotas;
 use hofund_router::Cooldowns;
 use hofund_usage::{Ledger, Window};
 use sha2::{Digest, Sha256};
@@ -48,6 +51,7 @@ pub(crate) struct DaemonControl {
     shutdown: watch::Sender<bool>,
     events: Arc<EventBus>,
     in_flight: Arc<AtomicU64>,
+    quotas: Option<Arc<DaemonQuotas>>,
 }
 
 impl DaemonControl {
@@ -97,7 +101,14 @@ impl DaemonControl {
             shutdown,
             events: Arc::new(EventBus::new()),
             in_flight: Arc::new(AtomicU64::new(0)),
+            quotas: None,
         }
+    }
+
+    /// Serves `/v1/hofund/quotas` and its history from `quotas`.
+    pub(crate) fn with_quotas(mut self, quotas: Arc<DaemonQuotas>) -> Self {
+        self.quotas = Some(quotas);
+        self
     }
 
     /// Serves `/v1/hofund/events` from `bus`.
@@ -411,6 +422,20 @@ impl ControlState for DaemonControl {
         Box::pin(async move { self.agents.set_model(id, request).await.map_err(Into::into) })
     }
 
+    fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse> {
+        Box::pin(async move {
+            let quotas = self.quotas.as_ref().ok_or_else(quotas_unavailable)?;
+            Ok::<_, ControlFailure>(quotas.response(&query).await)
+        })
+    }
+
+    fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse> {
+        Box::pin(async move {
+            let quotas = self.quotas.as_ref().ok_or_else(quotas_unavailable)?;
+            Ok::<_, ControlFailure>(quotas.history_response(&query))
+        })
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         let ledger = Arc::clone(&self.usage);
         Box::pin(async move {
@@ -623,6 +648,15 @@ fn usage_row(row: hofund_usage::Row) -> UsageRow {
     out.duration_ms = u64::try_from(row.latency_ms).unwrap_or(0);
     out.status = row.status;
     out
+}
+
+fn quotas_unavailable() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::Unavailable,
+        "quota reports are not served by this daemon",
+        "quotas",
+    )
+    .into()
 }
 
 fn internal(message: String) -> ControlError {
