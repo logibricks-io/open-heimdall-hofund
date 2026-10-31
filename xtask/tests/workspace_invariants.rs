@@ -154,7 +154,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-quirks",
         ],
         "hofund-quirks" => &["hofund-ir"],
-        "hofund-router" => &["hofund-ir", "hofund-plugin-api"],
+        "hofund-router" => &["hofund-control-proto", "hofund-ir", "hofund-plugin-api"],
         "hofund-secrets" => &[],
         "hofund-usage" => &[],
         "xtask" => &[],

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Quota windows (P0-5a): a kernel quota store keeps each subscription
+  card with its windows, absolute reset times, `runsOutAt`, cached `asOf`
+  fallbacks, deferred reads, and last-served times from the usage ledger,
+  persisted atomically in `quotas.json`, plus a 45-day window history with
+  near-point, flat-run, and cycle sampling. The gateway answers
+  `GET /v1/hofund/quotas` (`kept=1` for no fresh read) and
+  `GET /v1/hofund/quotas/history?days=&provider=&user=` behind the normal
+  gateway key, with a caller scope hook for gateway keys. `hofund quota`
+  prints the table or `--json`, `hofund quota history` the kept readings,
+  and `hofund quota wait` blocks until a subscription or account has
+  allowance again (exit 0, 1 on `--timeout`, 2 for an unknown name, 130 on
+  Ctrl+C). The router reads a per-member allowance view.
 - Code Assist tool schemas are flattened to the accepted plain subset (V-1),
   including local reference expansion, cycle handling, union folding, boolean
   schemas, keyword filtering, and array item defaults. Ordinary Generative
