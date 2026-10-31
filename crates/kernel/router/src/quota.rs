@@ -368,7 +368,13 @@ impl QuotaStore {
                     .map(|info| {
                         let reset = info.reset(now);
                         let expired = reset.is_some_and(|at| at <= now);
-                        let used = if expired { 0.0 } else { info.span.used };
+                        let used = if expired {
+                            0.0
+                        } else if info.span.balance == Some(0.0) {
+                            100.0
+                        } else {
+                            info.span.used
+                        };
                         AllowanceWindow {
                             name: info.span.name.clone(),
                             used,
@@ -379,11 +385,16 @@ impl QuotaStore {
                             unit: info.span.unit.clone(),
                             blocking: info.blocking,
                             scope_model: info.scope_model.clone(),
+                            window_span: window_span(info),
+                            runs_out_at: info.span.runs_out_at.as_ref().and_then(parse_quota_time),
+                            runs_out: info.span.runs_out,
+                            balance: info.span.balance,
                         }
                     })
                     .collect();
                 Some(Allowance {
                     member: served_key(&quota),
+                    provider: quota.provider.clone(),
                     windows,
                 })
             })
@@ -432,11 +443,19 @@ pub fn standing(quota: &Quota, windows: &[WindowInfo], now: SystemTime) -> Quota
     out
 }
 
+/// Shortest window that is a budget rather than a rate cap.
+const BUDGET_SPAN: Duration = Duration::from_secs(24 * 60 * 60);
+/// Budget span assumed when a window tells neither its span nor its reset.
+const WEEK_SPAN: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const HOUR: Duration = Duration::from_secs(60 * 60);
+
 /// One member's remaining windows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Allowance {
     /// Stable member identity shared with served request rows.
     pub member: String,
+    /// Provider or subscription id, shared by all of its accounts.
+    pub provider: String,
     /// Current windows.
     pub windows: Vec<AllowanceWindow>,
 }
@@ -455,6 +474,23 @@ impl Allowance {
             })
     }
 
+    /// Used share for routing: the fullest window that counts `model`,
+    /// credit windows included. A window whose reset has passed is empty.
+    #[must_use]
+    pub fn used_for_routing(&self, model: &str, now: SystemTime) -> f64 {
+        self.windows
+            .iter()
+            .filter(|window| window.counts(model))
+            .map(|window| {
+                if window.expired(now) {
+                    0.0
+                } else {
+                    window.used
+                }
+            })
+            .fold(0.0, f64::max)
+    }
+
     /// Applicable reset deadlines, earliest first.
     #[must_use]
     pub fn renewals(&self, model: &str, now: SystemTime) -> Vec<SystemTime> {
@@ -466,6 +502,104 @@ impl Allowance {
             .collect();
         resets.sort();
         resets
+    }
+
+    /// Renewal times for smart routing, longest window first and, among
+    /// equal spans, the later reset first. A window not started, or whose
+    /// reset has passed, renews its span from now; one whose remaining
+    /// portion lapses before it renews renews then. `None` is a renewal not
+    /// known, which smart orders after every known one.
+    #[must_use]
+    pub fn routing_renewals(&self, model: &str, now: SystemTime) -> Vec<Option<SystemTime>> {
+        let mut windows = self
+            .windows
+            .iter()
+            .filter(|window| window.counts(model))
+            .map(|window| {
+                let span = window.window_span.unwrap_or_default();
+                let mut at = window
+                    .resets_at
+                    .filter(|reset| *reset > now)
+                    .or_else(|| (!span.is_zero()).then(|| now + span));
+                if let Some(lapse) = window.runs_out_at.filter(|lapse| *lapse > now)
+                    && at.is_none_or(|at| lapse < at)
+                {
+                    at = Some(lapse);
+                }
+                (span, at)
+            })
+            .collect::<Vec<_>>();
+        windows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        windows.into_iter().map(|(_, at)| at).collect()
+    }
+
+    /// Soonest remaining portion that lapses apart from a window renewal.
+    #[must_use]
+    pub fn lapse(&self, model: &str, now: SystemTime) -> Option<SystemTime> {
+        self.windows
+            .iter()
+            .filter(|window| window.counts(model))
+            .filter_map(|window| window.runs_out_at)
+            .filter(|at| *at > now)
+            .min()
+    }
+
+    /// Share of its budget the account has left for `model`, per hour until
+    /// that budget renews: the tightest of the windows a day or longer (or
+    /// of unknown span, taken as a budget running to its reset, else a
+    /// week). Hours are never fewer than one. With only shorter windows,
+    /// the tightest of those; with none, what is unused over a week.
+    #[must_use]
+    pub fn pace(&self, model: &str, now: SystemTime) -> f64 {
+        let mut budget: Option<f64> = None;
+        let mut short: Option<f64> = None;
+        let mut used: f64 = 0.0;
+        for window in self.windows.iter().filter(|window| window.counts(model)) {
+            let share = if window.expired(now) {
+                0.0
+            } else {
+                window.used.clamp(0.0, 100.0)
+            };
+            let span = window.window_span.unwrap_or_default();
+            let reset = window
+                .resets_at
+                .filter(|reset| *reset > now)
+                .and_then(|reset| reset.duration_since(now).ok());
+            let is_short = !span.is_zero() && span < BUDGET_SPAN;
+            let until = reset.unwrap_or(if span.is_zero() { WEEK_SPAN } else { span });
+            let pace = (100.0 - share) / (until.max(HOUR).as_secs_f64() / 3600.0);
+            let slot = if is_short {
+                used = used.max(share);
+                &mut short
+            } else {
+                &mut budget
+            };
+            *slot = Some(slot.map_or(pace, |best: f64| best.min(pace)));
+        }
+        budget
+            .or(short)
+            .unwrap_or((100.0 - used) / (WEEK_SPAN.as_secs_f64() / 3600.0))
+    }
+
+    /// Lowest wallet balance counting `model` and its provider/unit identity.
+    #[must_use]
+    pub fn left(&self, model: &str) -> Option<(f64, String)> {
+        let (balance, unit) = self
+            .windows
+            .iter()
+            .filter(|window| window.counts(model))
+            .filter_map(|window| window.balance.map(|balance| (balance, &window.unit)))
+            .min_by(|a, b| a.0.total_cmp(&b.0))?;
+        Some((balance, format!("{}\0{unit}", self.provider)))
+    }
+
+    /// Whether the account goes on past its allowance on credits: it has a
+    /// window counting `model` whose exhaustion does not block it.
+    #[must_use]
+    pub fn spends_credits(&self, model: &str) -> bool {
+        self.windows
+            .iter()
+            .any(|window| !window.blocking && window.counts(model))
     }
 
     /// Whether no applicable blocking window is exhausted.
@@ -503,6 +637,14 @@ pub struct AllowanceWindow {
     pub blocking: bool,
     /// The model this window covers, or all models.
     pub scope_model: Option<String>,
+    /// Window length, when known.
+    pub window_span: Option<Duration>,
+    /// When a remaining portion lapses apart from the reset.
+    pub runs_out_at: Option<SystemTime>,
+    /// Amount lost at `runs_out_at`.
+    pub runs_out: f64,
+    /// Prepaid wallet balance, where shares do not apply.
+    pub balance: Option<f64>,
 }
 
 impl AllowanceWindow {
@@ -510,6 +652,10 @@ impl AllowanceWindow {
         self.scope_model
             .as_deref()
             .is_none_or(|scope| scope.eq_ignore_ascii_case(model))
+    }
+
+    fn expired(&self, now: SystemTime) -> bool {
+        self.resets_at.is_some_and(|reset| reset <= now)
     }
 
     fn applies(&self, model: &str, now: SystemTime) -> bool {
@@ -1676,6 +1822,7 @@ mod tests {
         assert_eq!(allowance.renewals("model", now), vec![week, month]);
         let tied = Allowance {
             member: "p".to_owned(),
+            provider: "p".to_owned(),
             windows: vec![
                 AllowanceWindow {
                     name: "week".to_owned(),
@@ -1687,6 +1834,10 @@ mod tests {
                     unit: String::new(),
                     blocking: true,
                     scope_model: None,
+                    window_span: None,
+                    runs_out_at: None,
+                    runs_out: 0.0,
+                    balance: None,
                 },
                 AllowanceWindow {
                     name: "month".to_owned(),
@@ -1698,9 +1849,159 @@ mod tests {
                     unit: String::new(),
                     blocking: true,
                     scope_model: None,
+                    window_span: None,
+                    runs_out_at: None,
+                    runs_out: 0.0,
+                    balance: None,
                 },
             ],
         };
         assert_eq!(tied.fullest("model", now).expect("tie").name, "month");
+    }
+
+    fn allowance_of(windows: Vec<WindowInfo>, now: SystemTime) -> Allowance {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = QuotaStore::new(dir.path());
+        store.record_success(quota("p", "a"), windows, now);
+        store.allowances(now).remove(0)
+    }
+
+    const H: u64 = 3600;
+
+    #[test]
+    fn b3b_pace_takes_the_tightest_budget_with_an_hour_floor() {
+        let now = at(1_900_000_000);
+        // a week 50% used renewing in 50h (1.0/h) beside a month 10% used
+        // renewing in 300h (0.3/h): the tightest budget is the month's
+        let week = info("w", 50.0, Some(now + Duration::from_secs(50 * H)))
+            .with_window_span(Duration::from_secs(168 * H));
+        let month = info("m", 10.0, Some(now + Duration::from_secs(300 * H)))
+            .with_window_span(Duration::from_secs(720 * H));
+        let five = info("5h", 0.0, Some(now + Duration::from_secs(H)))
+            .with_window_span(Duration::from_secs(5 * H));
+        let allowance = allowance_of(vec![month, week.clone(), five.clone()], now);
+        assert!((allowance.pace("model", now) - 0.3).abs() < 1e-9);
+        // a budget a minute from renewing counts at least an hour
+        let soon = info("w", 40.0, Some(now + Duration::from_secs(60)))
+            .with_window_span(Duration::from_secs(168 * H));
+        assert!((allowance_of(vec![soon], now).pace("model", now) - 60.0).abs() < 1e-9);
+        // only a short window: it goes by that, per hour until its reset
+        let only_short = info("5h", 20.0, Some(now + Duration::from_secs(4 * H)))
+            .with_window_span(Duration::from_secs(5 * H));
+        assert!((allowance_of(vec![only_short], now).pace("model", now) - 20.0).abs() < 1e-9);
+        // a nearly spent short window does not set the pace beside a budget
+        let tight_short = info("5h", 99.0, Some(now + Duration::from_secs(4 * H)))
+            .with_window_span(Duration::from_secs(5 * H));
+        let roomy_week = info("Weekly", 0.0, Some(now + Duration::from_secs(168 * H)))
+            .with_window_span(Duration::from_secs(168 * H));
+        assert!(
+            (allowance_of(vec![tight_short, roomy_week], now).pace("model", now) - 100.0 / 168.0)
+                .abs()
+                < 1e-9
+        );
+        // a short window not started runs its whole span
+        assert!(
+            (allowance_of(
+                vec![info("5h", 0.0, None).with_window_span(Duration::from_secs(5 * H))],
+                now
+            )
+            .pace("model", now)
+                - 20.0)
+                .abs()
+                < 1e-9
+        );
+        // a budget whose span and reset are unknown is a week from now
+        let unknown = allowance_of(vec![info("budget", 16.0, None)], now);
+        assert!((unknown.pace("model", now) - 0.5).abs() < 1e-9);
+        // a window whose reset has passed is empty again
+        let passed = info("w", 90.0, Some(now - Duration::from_secs(H)))
+            .with_window_span(Duration::from_secs(168 * H));
+        assert!((allowance_of(vec![passed], now).pace("model", now) - 100.0 / 168.0).abs() < 1e-9);
+        // nothing counts the model: unused over a week
+        let scoped = info("w", 10.0, Some(now + Duration::from_secs(H))).with_scope_model("other");
+        assert!((allowance_of(vec![scoped], now).pace("model", now) - 100.0 / 168.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn b1d_renewals_rank_longest_first_and_fill_unstarted_spans() {
+        let now = at(1_900_000_000);
+        let day = now + Duration::from_secs(24 * H);
+        let week = now + Duration::from_secs(168 * H);
+        let lapse = now + Duration::from_secs(H);
+        let mut weekly = info("Weekly", 50.0, Some(week));
+        weekly.span.runs_out_at = Some(quota_time(lapse));
+        weekly.span.runs_out = 10.0;
+        let unstarted = info("5h", 0.0, None).with_window_span(Duration::from_secs(5 * H));
+        let unknown = info("budget", 0.0, None);
+        let allowance = allowance_of(
+            vec![info("Daily", 10.0, Some(day)), unstarted, unknown, weekly],
+            now,
+        );
+        assert_eq!(
+            allowance.routing_renewals("model", now),
+            [
+                Some(lapse),
+                Some(day),
+                Some(now + Duration::from_secs(5 * H)),
+                None
+            ]
+        );
+        assert_eq!(allowance.lapse("model", now), Some(lapse));
+        assert_eq!(allowance.used_for_routing("model", now), 50.0);
+        assert!(allowance.renewals("model", now) == [day, week]);
+        // equal spans: the later reset first
+        let a = info("x1", 0.0, Some(day)).with_window_span(Duration::from_secs(168 * H));
+        let b = info("x2", 0.0, Some(week)).with_window_span(Duration::from_secs(168 * H));
+        assert_eq!(
+            allowance_of(vec![a, b], now).routing_renewals("model", now),
+            [Some(week), Some(day)]
+        );
+        // a reset passed renews its span from now
+        let passed = info("Daily", 70.0, Some(now - Duration::from_secs(60)));
+        let passed = allowance_of(vec![passed], now);
+        assert_eq!(passed.routing_renewals("model", now), [Some(day)]);
+        assert_eq!(passed.used_for_routing("model", now), 0.0);
+        // a portion that already lapsed is no longer the next lapse
+        let mut lapsed = info("Weekly", 50.0, Some(week));
+        lapsed.span.runs_out_at = Some(quota_time(now - Duration::from_secs(60)));
+        lapsed.span.runs_out = 10.0;
+        let lapsed = allowance_of(vec![lapsed], now);
+        assert_eq!(lapsed.lapse("model", now), None);
+        assert_eq!(lapsed.routing_renewals("model", now), [Some(week)]);
+    }
+
+    #[test]
+    fn b1e_credit_windows_count_toward_use_and_mark_credits() {
+        let now = at(1_900_000_000);
+        let week = now + Duration::from_secs(168 * H);
+        // a credit window part used still counts toward the share used
+        let credits = allowance_of(
+            vec![
+                info("Weekly", 20.0, Some(week)),
+                info("credit week", 60.0, Some(week)).with_blocking(false),
+            ],
+            now,
+        );
+        assert!(credits.spends_credits("model"));
+        assert_eq!(credits.used_for_routing("model", now), 60.0);
+        // once the windows reset, the reading taken before counts as empty
+        assert_eq!(
+            credits.used_for_routing("model", week + Duration::from_secs(60)),
+            0.0
+        );
+        let plain = allowance_of(vec![info("Weekly", 99.0, Some(week))], now);
+        assert!(!plain.spends_credits("model"));
+        assert_eq!(plain.used_for_routing("model", now), 99.0);
+        // a wallet: the least balance, named by provider and unit
+        let mut wallet = info("wallet", 0.0, None);
+        wallet.span.balance = Some(7.5);
+        wallet.span.unit = "usd".to_owned();
+        let mut bigger = info("wallet2", 0.0, None);
+        bigger.span.balance = Some(9.0);
+        bigger.span.unit = "usd".to_owned();
+        assert_eq!(
+            allowance_of(vec![bigger, wallet], now).left("model"),
+            Some((7.5, "p\0usd".to_owned()))
+        );
     }
 }

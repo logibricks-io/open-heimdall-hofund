@@ -335,6 +335,29 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `desktop` | Menu-bar shell at `apps/desktop`. Renders status and calls the daemon and the agent adapters. |
 | `xtask` | Local workspace tasks and the architecture tests. |
 
+## Routing strategies and measurements
+
+`hofund_router::strategy` owns the pure ordering functions and explicit
+per-route rotation, weighted-round, and speed-probe state. The daemon implements
+`Measurements` by reading the shared quota store, successful usage rows, and
+cached model catalogs. Token use has a one-hour half-life. Streamed replies
+record first-content latency beside whole-answer latency; speed uses a
+20-minute half-life and becomes unknown after an hour. Prices remain catalog
+data and are converted from millionths of a dollar to dollars per million
+tokens when a route is weighed. No process-global measurement or routing
+counter exists, and the router does not own the usage ledger. Each strategy
+declares the measurements it reads (`Needs`); allowances are always filled, and
+the ledger is read only for usage or speed, over the last day or hour through
+the `created_unix` index.
+
+Smart uses 90% and 98% allowance tiers, hourly renewal and lapse comparisons,
+and prepaid balances ranked only inside one provider and unit. Usage and pace
+break ties with decayed tokens; pace also uses 10% remaining-per-hour bands.
+Fast estimates a 200-token reply and probes unmeasured members every fifth
+eligible request. Cheap compares input-plus-output price, then cache-read
+price, with unpriced members last. Ready members retain strategy order before
+the single cooling probe.
+
 ## Member cooldowns
 
 `hofund_router::Cooldowns` is the cooldown book: explicit, thread-safe state
@@ -410,7 +433,6 @@ Connect, timeout, and interrupted-body errors follow `failover.connect_errors`.
 
 ## What is intentionally absent
 
-- Measurement-based smart, usage, pace, fast, and cheap routing strategies.
 - A running process does not reload configuration. The daemon publishes the
   route table as an `ArcSwap` snapshot at startup. A panic in a member
   publishes a snapshot that omits that member. In-flight requests keep the
