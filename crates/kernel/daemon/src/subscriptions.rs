@@ -14,12 +14,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use hofund_config::{Accounts, Config};
+use hofund_control_proto::{Quota, QuotaKind};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, HostContext, MemberId, PluginErrorKind, PluginId, PluginKind,
-    QuotaObservation, QuotaWindow, RawTable, Subscription, UpstreamProvider,
+    AccountId, AccountStatus, HostContext, MemberId, PluginError, PluginErrorKind, PluginId,
+    PluginKind, QuotaObservation, QuotaWindow, RawTable, Subscription, UpstreamProvider,
 };
 use hofund_plugin_host::HttpLimits;
 use hofund_router::Cooldowns;
+use hofund_router::quota::{QuotaStore, WindowInfo};
 use tokio::time::Instant;
 
 use crate::membership::{self, BuiltProvider, PlannedHop};
@@ -265,7 +267,7 @@ impl SubscriptionState {
         })
     }
 
-    async fn quota(&self, account: &AccountId) -> Result<Vec<QuotaWindow>, PluginErrorKind> {
+    async fn quota(&self, account: &AccountId) -> Result<Vec<QuotaWindow>, PluginError> {
         self.instance
             .quota(account, &self.host)
             .await
@@ -278,8 +280,18 @@ impl SubscriptionState {
                         "quota poll failed"
                     );
                 }
-                error.kind()
+                error
             })
+    }
+
+    fn quota_card(&self, account: &AccountId) -> Quota {
+        Quota {
+            provider: self.config.id.clone(),
+            name: self.config.id.clone(),
+            kind: QuotaKind::Subscription,
+            user: account.to_string(),
+            ..Quota::default()
+        }
     }
 }
 
@@ -431,17 +443,22 @@ impl QuotaPolls {
         &mut self,
         subscriptions: &Subscriptions,
         cooldowns: &Cooldowns,
+        quotas: &QuotaStore,
         now: Instant,
+        force: bool,
     ) -> Vec<MemberId> {
         let mut live = HashSet::new();
         let mut cooled = Vec::new();
         for state in subscriptions.values() {
             for member in state.members() {
                 live.insert(member.id.clone());
+                let card = state.quota_card(&member.account);
+                quotas.register(card.clone());
                 if self.unsupported.contains(&member.id) {
+                    quotas.record_deferred(card);
                     continue;
                 }
-                if self.next.get(&member.id).is_some_and(|due| *due > now) {
+                if !force && self.next.get(&member.id).is_some_and(|due| *due > now) {
                     continue;
                 }
                 self.round = self.round.wrapping_add(1);
@@ -452,12 +469,34 @@ impl QuotaPolls {
                         if apply_windows(cooldowns, &member.id, &state.plugin, &windows) {
                             cooled.push(member.id.clone());
                         }
+                        quotas.record_success(
+                            card,
+                            windows.iter().map(WindowInfo::from_plugin).collect(),
+                            quotas.now(),
+                        );
                     }
-                    Err(PluginErrorKind::Unsupported) => {
+                    Err(error) if error.kind() == PluginErrorKind::Unsupported => {
                         self.unsupported.insert(member.id.clone());
                         self.next.remove(&member.id);
+                        quotas.record_deferred(card);
                     }
-                    Err(_) => {}
+                    Err(error) => {
+                        let transient = matches!(
+                            error.kind(),
+                            PluginErrorKind::Connect
+                                | PluginErrorKind::Timeout
+                                | PluginErrorKind::Transport
+                                | PluginErrorKind::Interrupted
+                                | PluginErrorKind::Io
+                                | PluginErrorKind::Internal
+                                | PluginErrorKind::Quota
+                        ) || error
+                            .status()
+                            .is_some_and(|status| status == 429 || status >= 500);
+                        let mut failed = card;
+                        failed.error = error.to_string();
+                        quotas.record_failure(failed, transient);
+                    }
                 }
             }
         }
@@ -758,7 +797,13 @@ mod tests {
         }
         let mut polls = QuotaPolls::default();
         let cooled = polls
-            .poll(&states, &cooldowns, tokio::time::Instant::now())
+            .poll(
+                &states,
+                &cooldowns,
+                &hofund_router::quota::QuotaStore::in_memory(),
+                tokio::time::Instant::now(),
+                false,
+            )
             .await;
         (cooldowns, polls, cooled, states)
     }
@@ -776,11 +821,51 @@ mod tests {
             "{left:?}"
         );
         let again = polls
-            .poll(&states, &cooldowns, tokio::time::Instant::now())
+            .poll(
+                &states,
+                &cooldowns,
+                &hofund_router::quota::QuotaStore::in_memory(),
+                tokio::time::Instant::now(),
+                false,
+            )
             .await;
         assert!(again.is_empty(), "polled again before the interval");
         let later = tokio::time::Instant::now() + super::QUOTA_POLL * 2;
-        assert_eq!(polls.poll(&states, &cooldowns, later).await.len(), 2);
+        assert_eq!(
+            polls
+                .poll(
+                    &states,
+                    &cooldowns,
+                    &hofund_router::quota::QuotaStore::in_memory(),
+                    later,
+                    false
+                )
+                .await
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn q3d_kept_report_never_fetches() {
+        let dir = tempfile::tempdir().expect("dir");
+        write_accounts(dir.path(), &[("one", "One"), ("two", "Two")]);
+        let config = config("quota = \"exhausted\"");
+        let (runtime, _snapshot) = runtime(dir.path(), &config);
+        runtime.refresh_subscriptions().await;
+        let (kept, standings) = runtime.quota_report(true).await;
+        assert!(kept.is_empty(), "a kept report asks no vendor: {kept:?}");
+        assert!(standings.is_empty());
+        let (fresh, standings) = runtime.quota_report(false).await;
+        let users: Vec<&str> = fresh.iter().map(|quota| quota.user.as_str()).collect();
+        assert_eq!(users, ["one", "two"]);
+        assert!(
+            standings
+                .iter()
+                .all(|standing| standing.readable && standing.used_up)
+        );
+        let (kept, _) = runtime.quota_report(true).await;
+        assert_eq!(kept.len(), 2, "the fresh readings are kept");
     }
 
     #[tokio::test]

@@ -133,6 +133,7 @@ flowchart BT
   pluginGemini --> pluginApi
   pluginGemini --> pluginSdk
   router --> pluginApi
+  router --> controlProto
   router --> ir
   gateway --> router
   gateway --> codec
@@ -165,7 +166,7 @@ flowchart BT
 ```
 
 The HTTP spine is `ir ← codec ← provider`, then `gateway ← daemon ← cli`.
-`router` depends on `ir` and `plugin-api`, not on `provider`. Read each arrow
+`router` depends on `ir`, `plugin-api`, and `control-proto` (the quota store keeps and reports the wire quota cards), not on `provider`. Read each arrow
 as "depends on". `gateway` depends on `plugin-api` for the raw body and
 `PluginError`. `agent` depends on `config` and `plugin-api`. `daemon`
 depends on `plugin-api` so it can adapt a provider into a router member.
@@ -238,7 +239,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-kit-subscription` | `hofund-plugin-host` |
 | `hofund-kit-agent` | `hofund-agent`, `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-quirks` |
-| `hofund-router` | `hofund-ir`, `hofund-plugin-api` |
+| `hofund-router` | `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api` |
 | `hofund-gateway` | `hofund-codec`, `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-usage` |
 | `hofund-config` | — |
 | `hofund-control-client` | `hofund-control-proto` |

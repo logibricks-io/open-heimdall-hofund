@@ -18,6 +18,7 @@ use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
     ReloadRequest,
 };
+use hofund_control_proto::{QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse};
 use hofund_gateway::control::{
     Control, ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery,
 };
@@ -124,6 +125,14 @@ impl ControlState for State {
         _id: String,
         _request: AgentModelRequest,
     ) -> ControlFuture<'_, AgentChangeResponse> {
+        unavailable()
+    }
+
+    fn quotas(&self, _query: QuotaQuery) -> ControlFuture<'_, QuotaResponse> {
+        unavailable()
+    }
+
+    fn quota_history(&self, _query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse> {
         unavailable()
     }
 
