@@ -669,3 +669,134 @@ async fn b9o_last_handed_member_refusal_error_is_the_protocol_error_frame() {
     error_frame_not_raw(&body);
     assert_eq!((first.hits(), second.hits()), (1, 1));
 }
+
+#[tokio::test]
+async fn b9q_open_thinking_block_closes_before_the_next_member_starts() {
+    for path in ["/v1/messages", "/v1/responses"] {
+        let first = Scripted::events("first", thought_then_refusal(0));
+        let second = Scripted::events("second", answer());
+        let (app, _dir) = gateway(vec![Arc::clone(&first), Arc::clone(&second)]);
+        let body_in = if path == "/v1/messages" {
+            MESSAGES
+        } else {
+            RESPONSES
+        };
+        let (status, body) = call(app, path, body_in).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let events = data_events(&body);
+        let closed = events.iter().position(|event| {
+            (event["type"] == "content_block_stop" && event["index"] == 0)
+                || (event["type"] == "response.output_item.done" && event["output_index"] == 0)
+        });
+        let next = events.iter().position(|event| {
+            (event["type"] == "content_block_start" && event["index"] == 1)
+                || (event["type"] == "response.output_item.added" && event["output_index"] == 1)
+        });
+        assert!(
+            matches!((closed, next), (Some(closed), Some(next)) if closed < next),
+            "{path}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn b9r_tool_arguments_alone_count_as_spoken() {
+    let first = Scripted::events(
+        "first",
+        vec![
+            start(),
+            thinking_block(0),
+            thinking(0, "first thought"),
+            StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta {
+                index: 1,
+                partial_json: "{}".to_owned(),
+                extensions: Extensions::new(),
+            }),
+            stopped(StopReason::Refusal),
+            message_stop(),
+        ],
+    );
+    let second = Scripted::events("second", answer());
+    let (app, _dir) = gateway(vec![Arc::clone(&first), Arc::clone(&second)]);
+    let (status, body) = call(app, "/v1/messages", MESSAGES).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("from next"), "{body}");
+    assert_eq!((first.hits(), second.hits()), (1, 0));
+}
+
+#[tokio::test]
+async fn b9s_spliced_responses_stream_drops_the_next_members_progress_events() {
+    let first = Scripted::events("first", thought_then_refusal(0));
+    let mut next = answer();
+    next.insert(
+        1,
+        StreamEvent::Unknown(UnknownEvent {
+            name: "response.in_progress".to_owned(),
+            payload: serde_json::json!({"type":"response.in_progress","response":{"id":"r2","status":"in_progress"}}),
+        }),
+    );
+    let second = Scripted::events("second", next);
+    let (app, _dir) = gateway(vec![Arc::clone(&first), Arc::clone(&second)]);
+    let (status, body) = call(app, "/v1/responses", RESPONSES).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("from next"), "{body}");
+    assert!(!body.contains("\"id\":\"r2\""), "{body}");
+}
+
+#[tokio::test]
+async fn b9t_lone_member_refusal_error_keeps_the_held_message_start() {
+    let first = Scripted::events("first", vec![start(), error_event("content_filter")]);
+    let (app, _dir) = gateway(vec![Arc::clone(&first)]);
+    let (status, body) = call(app, "/v1/messages", MESSAGES).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let start_at = body.find("\"type\":\"message_start\"");
+    let error_at = body.find("event: error");
+    assert!(
+        matches!((start_at, error_at), (Some(start_at), Some(error_at)) if start_at < error_at),
+        "{body}"
+    );
+}
+
+#[derive(Default)]
+struct Ends(Mutex<Vec<Option<String>>>);
+
+impl hofund_gateway::RequestEvents for Ends {
+    fn started(&self, _start: &hofund_gateway::RequestStart) {}
+    fn finished(&self, end: &hofund_gateway::RequestEnd) {
+        self.0.lock().expect("ends").push(end.member.clone());
+    }
+}
+
+#[tokio::test]
+async fn b9u_request_end_names_the_member_that_took_over() {
+    let first = Scripted::events("first", thought_then_refusal(0));
+    let second = Scripted::events("second", answer());
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let members = vec![
+        Arc::clone(&first) as Arc<dyn Member>,
+        Arc::clone(&second) as Arc<dyn Member>,
+    ];
+    let routes = BTreeMap::from([("demo".to_owned(), members)]);
+    let codecs: HashMap<String, Arc<dyn Codec>> = HashMap::from([(
+        "/v1/messages".to_owned(),
+        Arc::new(AnthropicMessages) as Arc<dyn Codec>,
+    )]);
+    let ends = Arc::new(Ends::default());
+    let app = Gateway::new(
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
+        "secret".to_owned(),
+        codecs,
+        usage,
+    )
+    .with_request_events(
+        Arc::clone(&ends) as Arc<dyn hofund_gateway::RequestEvents>,
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    )
+    .into_router();
+    let (status, body) = call(app, "/v1/messages", MESSAGES).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("from next"), "{body}");
+    let ends = ends.0.lock().expect("ends").clone();
+    assert_eq!(ends, [Some(second.route_id().to_owned())], "{ends:?}");
+}

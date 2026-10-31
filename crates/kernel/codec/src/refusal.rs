@@ -108,4 +108,19 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn b9w_only_lowercase_policy_codes_are_refusals() {
+        assert_eq!(
+            refusal_reason(&json!({"error":{"code":"cyber_policy"}})),
+            Some(StopReason::ContentFilter)
+        );
+        for code in ["_policy", "Billing_policy", "retry-after_policy", "policy"] {
+            assert_eq!(
+                refusal_reason(&json!({"error":{"code":code}})),
+                None,
+                "{code}"
+            );
+        }
+    }
 }

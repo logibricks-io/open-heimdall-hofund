@@ -511,8 +511,32 @@ pub(super) fn body(
 
 #[cfg(test)]
 mod tests {
-    use super::extension_event;
+    use super::{extension_event, refusal_failure};
+    use hofund_ir::{StreamEvent, UnknownEvent};
     use hofund_plugin_api::responses_ws::RATE_LIMITS_EVENT;
+
+    fn refusal(message: &str) -> StreamEvent {
+        StreamEvent::Unknown(UnknownEvent {
+            name: "error".to_owned(),
+            payload: serde_json::json!({"error":{"code":"content_filter","message":message}}),
+        })
+    }
+
+    #[test]
+    fn b9v_refusal_failure_status_follows_the_error_words() {
+        let status = |message: &str| refusal_failure(&refusal(message)).and_then(|e| e.status());
+        assert_eq!(status("refused"), Some(502));
+        assert_eq!(status("invalid content"), Some(400));
+        assert_eq!(status("prompt is too long"), Some(400));
+        assert_eq!(status("context_length exceeded"), Some(400));
+        assert!(
+            refusal_failure(&StreamEvent::Unknown(UnknownEvent {
+                name: "error".to_owned(),
+                payload: serde_json::json!({"error":{"code":"overloaded","message":"busy"}}),
+            }))
+            .is_none()
+        );
+    }
 
     #[test]
     fn b9p_client_extension_events_are_not_reply_content() {
