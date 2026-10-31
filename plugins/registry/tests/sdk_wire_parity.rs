@@ -3,8 +3,7 @@
 //! Each case runs the same request through `openai_compat` (SDK `wire` on the
 //! host client) and `openai_compat_adapter` (the adapter's own transport), each
 //! against its own mock with the same reply. The received requests and the
-//! outputs must be equal, except the kind of a reset after the request was
-//! written (see the last test).
+//! outputs must be equal, including a reset after the request was written.
 //!
 //! The host HTTP client is process-wide, as in the daemon, so every test runs
 //! on one shared runtime: a pooled connection opened on a runtime that a
@@ -453,7 +452,7 @@ fn request_complete(data: &[u8]) -> bool {
 }
 
 #[test]
-fn a_post_reset_after_its_body_was_written_is_not_replayed() {
+fn post_reset_is_asked_of_the_next_member() {
     run(async {
         let mut failures = Vec::new();
         for side in [Side::Sdk, Side::Adapter] {
@@ -471,20 +470,18 @@ fn a_post_reset_after_its_body_was_written_is_not_replayed() {
             assert_eq!(
                 accepted.load(Ordering::SeqCst),
                 1,
-                "{side:?} replayed the POST"
+                "{side:?} replayed the POST on the same member"
             );
             let Outcome::Failed(failure) = result else {
                 panic!("{side:?}: {result:?}");
             };
             failures.push(failure);
         }
-        // The one intended difference. The adapter's `map_transport` labels any
-        // error without a status `Connect`, so the router would resend the POST
-        // to the next member. The SDK keeps the host's `Transport`, which the
-        // router does not fail over (follow-up filed for the adapter label).
+        // Same-member POST replay stays off. Both labels fail over to the next
+        // member before the client receives a byte.
         assert_eq!(failures[0].kind, "Transport", "{failures:?}");
         assert_eq!(failures[1].kind, "Connect", "{failures:?}");
-        assert_eq!(failures[0].status, None);
-        assert_eq!(failures[1].status, None);
+        assert_eq!(failures[0].status, failures[1].status);
+        assert_eq!(failures[0].retry_after, failures[1].retry_after);
     });
 }

@@ -58,7 +58,10 @@ impl Default for Failover {
     fn default() -> Self {
         Self {
             connect_errors: true,
-            statuses: [429, 500, 502, 503, 504].into_iter().collect(),
+            statuses: [401, 402, 403, 404, 408, 429]
+                .into_iter()
+                .chain(500..=599)
+                .collect(),
         }
     }
 }
@@ -1093,7 +1096,10 @@ impl Default for RawFailover {
 }
 
 fn default_statuses() -> BTreeSet<u16> {
-    [429, 500, 502, 503, 504].into_iter().collect()
+    [401, 402, 403, 404, 408, 429]
+        .into_iter()
+        .chain(500..=599)
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -1364,7 +1370,13 @@ mod tests {
         )
         .expect("config");
         assert_eq!(config.listen.to_string(), "127.0.0.1:3425");
-        assert_eq!(config.failover.statuses, [429, 500, 502, 503, 504].into());
+        assert_eq!(
+            config.failover.statuses,
+            [401, 402, 403, 404, 408, 429]
+                .into_iter()
+                .chain(500..=599)
+                .collect()
+        );
         assert_eq!(
             config.providers[0].protocol.as_deref(),
             Some("openai-responses")

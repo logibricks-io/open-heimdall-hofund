@@ -697,6 +697,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Failover decisions (P0-3c) follow the reference order: the default
+  `failover.statuses` is 401, 402, 403, 404, 408, 429, and 500 to 599; retired
+  models, edge blocks, credit, quota, unserved models, refusals, request
+  shapes, unsupported parameters, and region replies fail over by body words on
+  any 4xx; a context overflow asks only members that may hold the request and
+  is otherwise returned to the client; a response-protection refusal skips the
+  provider's other accounts; an unexplained error on a member whose known window
+  is too small is reported as a prompt too long. Overflow, shape, refusal, and
+  protection replies do not rest the member.
 - Daemon integration tests now bound every HTTP request (60 s, no idle
   pooled connections) and every daemon shutdown (60 s), so a stalled
   request fails with a message instead of hanging the Windows runner
