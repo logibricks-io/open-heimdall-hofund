@@ -334,10 +334,7 @@ async fn unix_shutdown_closes_a_control_request_that_outlasts_the_drain_bound() 
          Content-Length: 1000\r\n\r\n{{",
         token(&dir.0)
     );
-    stuck
-        .write_all(head.as_bytes())
-        .await
-        .expect("send head");
+    stuck.write_all(head.as_bytes()).await.expect("send head");
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let started = std::time::Instant::now();
     tokio::time::timeout(std::time::Duration::from_secs(10), running.shutdown())
