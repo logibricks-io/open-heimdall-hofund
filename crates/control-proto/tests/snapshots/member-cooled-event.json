@@ -8,6 +8,7 @@
     "event": "member_cooled",
     "data": {
       "member_id": "member-1",
+      "model": "model-a",
       "cause": "rate_limit",
       "retry_after_ms": 1000,
       "remaining_ms": 900,

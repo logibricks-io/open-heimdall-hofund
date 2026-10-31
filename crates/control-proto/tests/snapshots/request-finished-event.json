@@ -9,6 +9,7 @@
     "data": {
       "request_id": "request-1",
       "member": "member-1",
+      "model": "model-a",
       "status_class": "success",
       "duration_ms": 20,
       "input_tokens": 10,
