@@ -1767,6 +1767,30 @@ fn shipped_goose_lets_goose_ask_the_gateway_only_when_no_route_is_listed() {
     assert!(!root.exists());
 }
 
+#[test]
+fn b7_goose_emptied_route_list_drops_the_stale_dynamic_models_flag() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let root = home.join(".config");
+    let agent = adapter("goose", TargetOs::Linux);
+    let one = target();
+    agent.apply(&session, &one).expect("apply with a route");
+    assert_eq!(
+        goose_provider(&root)["dynamic_models"],
+        serde_json::json!(false)
+    );
+    let empty = target_with(&[]);
+    assert!(!agent.status(&session, &empty).expect("status").connected());
+    agent
+        .apply(&session, &empty)
+        .expect("apply after the routes went away");
+    let provider = goose_provider(&root);
+    assert!(provider.get("dynamic_models").is_none(), "{provider}");
+    assert!(agent.status(&session, &empty).expect("status").connected());
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!root.exists());
+}
+
 const ZED_SETTINGS: &str = r#"// Zed settings
 {
   "theme": "One Dark", // keep this note
