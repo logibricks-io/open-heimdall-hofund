@@ -29,7 +29,8 @@ use hofund_provider::{
 };
 use hofund_router::{
     Attempt, AttemptHook, Cooldowns, FailoverPolicy, Hop, Member, MemberAttempt, Route, Router,
-    Snapshot, strategy::StrategyState,
+    Snapshot,
+    strategy::{Measurements, StrategyState},
 };
 use tower::Service;
 
@@ -56,6 +57,7 @@ pub(crate) struct Table {
     cooldowns: Arc<Cooldowns>,
     offline: Arc<Offline>,
     strategies: Arc<StrategyState>,
+    measurements: Mutex<Option<Arc<dyn Measurements>>>,
     snapshot: Snapshot,
 }
 
@@ -221,6 +223,7 @@ fn build_table(
         cooldowns,
         offline: Arc::new(Offline::new(network)),
         strategies,
+        measurements: Mutex::new(None),
         snapshot,
     });
     let stored = build_specs(&table, built, routes)?;
@@ -325,6 +328,11 @@ impl Table {
         Ok(())
     }
 
+    pub(crate) fn set_measurements(&self, measurements: Arc<dyn Measurements>) {
+        *self.measurements.lock().expect("measurements") = Some(measurements);
+        self.publish();
+    }
+
     pub(crate) fn publish(&self) {
         let hops = self.hops.lock().expect("membership");
         let routes = hops
@@ -347,11 +355,19 @@ impl Table {
             })
             .collect();
         let policy = self.policy.lock().expect("failover policy").clone();
-        self.snapshot.store(
-            Router::from_routes(routes, policy)
-                .with_strategies(Arc::clone(&self.strategies))
-                .with_cooldowns(Arc::clone(&self.cooldowns)),
-        );
+        let mut router = Router::from_routes(routes, policy)
+            .with_strategies(Arc::clone(&self.strategies))
+            .with_cooldowns(Arc::clone(&self.cooldowns));
+        if let Some(measurements) = self
+            .measurements
+            .lock()
+            .expect("measurements")
+            .as_ref()
+            .cloned()
+        {
+            router = router.with_measurements(measurements);
+        }
+        self.snapshot.store(router);
     }
 }
 
@@ -422,6 +438,12 @@ impl Member for LiveMember {
 
     fn protocol(&self) -> &str {
         self.protocol
+    }
+
+    fn learns_allowance(&self) -> bool {
+        // As the reference: a Claude subscription tells what it has left as
+        // it answers, so one not yet known is tried first to learn it.
+        learns_allowance(self.subscription, &self.plugin_id)
     }
 
     fn attempt(&self) -> MemberAttempt {
@@ -992,9 +1014,16 @@ fn kebab_of(value: &str) -> String {
     }
 }
 
+/// Whether an account not yet measured is tried first to learn its
+/// allowance: as the reference, only a Claude subscription reports what it
+/// has left as it answers.
+fn learns_allowance(subscription: bool, plugin_id: &str) -> bool {
+    subscription && plugin_id == "claude"
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BuiltProvider, PlannedHop, open, open_checking};
+    use super::{BuiltProvider, PlannedHop, learns_allowance, open, open_checking};
     use crate::offline::NetworkCheck;
     use std::collections::BTreeMap;
     use std::future::Future;
@@ -1013,6 +1042,14 @@ mod tests {
             CooldownPolicy::default(),
             Arc::new(|| tokio::time::Instant::now().into_std()),
         ))
+    }
+
+    #[test]
+    fn b1f_only_an_unmeasured_claude_subscription_learns_its_allowance() {
+        assert!(learns_allowance(true, "claude"));
+        assert!(!learns_allowance(true, "codex"));
+        assert!(!learns_allowance(true, "gemini"));
+        assert!(!learns_allowance(false, "claude"));
     }
 
     #[test]

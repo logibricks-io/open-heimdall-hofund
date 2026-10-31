@@ -133,6 +133,7 @@ pub struct Router {
     policy: FailoverPolicy,
     cooldowns: Option<Arc<Cooldowns>>,
     strategies: Arc<strategy::StrategyState>,
+    measurements: Option<Arc<dyn strategy::Measurements>>,
 }
 
 /// A counted input.
@@ -196,6 +197,7 @@ impl Router {
             policy,
             cooldowns: None,
             strategies: Arc::new(strategy::StrategyState::with_builtins()),
+            measurements: None,
         }
     }
 
@@ -203,6 +205,13 @@ impl Router {
     #[must_use]
     pub fn with_strategies(mut self, strategies: Arc<strategy::StrategyState>) -> Self {
         self.strategies = strategies;
+        self
+    }
+
+    /// Supplies live allowance, usage, speed, and price measurements.
+    #[must_use]
+    pub fn with_measurements(mut self, measurements: Arc<dyn strategy::Measurements>) -> Self {
+        self.measurements = Some(measurements);
         self
     }
 
@@ -504,11 +513,13 @@ impl Router {
         let ordered = if resolved.hops.len() < 2 {
             resolved.hops.clone()
         } else {
-            let seats = resolved
+            let mut seats = resolved
                 .hops
                 .iter()
                 .map(|hop| {
-                    let mut seat = strategy::Seat::new(hop.member.id().to_string());
+                    let mut seat = strategy::Seat::new(hop.member.route_id());
+                    seat.account = hop.member.id().account().is_some();
+                    seat.learns = hop.member.learns_allowance();
                     seat.weight = hop.weight;
                     seat.free = hop.free;
                     let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
@@ -520,6 +531,24 @@ impl Router {
                     seat
                 })
                 .collect::<Vec<_>>();
+            if let Some(measurements) = &self.measurements {
+                let models = resolved
+                    .hops
+                    .iter()
+                    .map(|hop| {
+                        hop.wire_model
+                            .clone()
+                            .unwrap_or_else(|| resolved.bare.clone())
+                    })
+                    .collect::<Vec<_>>();
+                measurements.weigh(
+                    &mut seats,
+                    &models,
+                    &resolved.pool,
+                    self.strategies.needs(&resolved.routing),
+                    std::time::SystemTime::now(),
+                );
+            }
             self.strategies
                 .order(&resolved.routing, &resolved.pool, &seats)
                 .into_iter()
