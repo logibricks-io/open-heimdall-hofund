@@ -977,7 +977,7 @@ fn b1e_try_again_wording_stays_flat() {
 #[test]
 fn b1e_minutes_later_wording_stays_flat() {
     assert_flat_credit(
-        PluginError::credit_status(402, "余额不足，请充值后 1 分钟后重试")
+        PluginError::credit_status(402, "\u{4f59}\u{989d}\u{4e0d}\u{8db3}\u{ff0c}\u{8bf7}\u{5145}\u{503c}\u{540e} 1 \u{5206}\u{949f}\u{540e}\u{91cd}\u{8bd5}")
             .with_reset_after(Duration::from_secs(MINUTE)),
         Duration::from_secs(MINUTE),
     );

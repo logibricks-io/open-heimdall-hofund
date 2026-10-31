@@ -2213,13 +2213,13 @@ mod tests {
     fn b3b_header_reset_is_used_when_body_has_no_reset() {
         let error = classify_with_reset(
             402,
-            Some(Duration::from_secs(6 * 3_600)),
+            Some(Duration::from_hours(6)),
             Some(Duration::from_secs(200)),
             b"out of credit".to_vec(),
         )
         .expect_err("credit");
         assert_eq!(error.reset_after(), Some(Duration::from_secs(200)));
-        assert_eq!(error.retry_after(), Some(Duration::from_secs(6 * 3_600)));
+        assert_eq!(error.retry_after(), Some(Duration::from_hours(6)));
         assert_eq!(
             parse_reset_after_headers(
                 &headers(&[("x-ratelimit-reset-requests", "200s")]),
