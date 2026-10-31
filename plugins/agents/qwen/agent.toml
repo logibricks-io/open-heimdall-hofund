@@ -58,3 +58,4 @@ slot = { model_pair = { value = "{v1}" } }
 [model]
 file = "settings"
 key = "model.name"
+restore_on_clear = true
