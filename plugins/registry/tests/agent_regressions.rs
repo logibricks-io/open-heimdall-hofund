@@ -1945,6 +1945,25 @@ fn b7_goose_new_layout_pick_writes_map_and_removes_flat_keys() {
 }
 
 #[test]
+fn b7_goose_providers_map_alone_is_the_current_layout() {
+    let (_home, _session, _agent, path) =
+        picked_goose("providers:\n  anthropic:\n    model: claude\n");
+    let picked = fs::read_to_string(path).expect("picked");
+    assert!(picked.contains("active_provider: hofund\n"), "{picked}");
+    assert!(picked.contains("  hofund:\n"), "{picked}");
+    assert!(!picked.contains("GOOSE_"), "{picked}");
+}
+
+#[test]
+fn b7_goose_active_provider_alone_is_the_current_layout() {
+    let (_home, _session, _agent, path) = picked_goose("active_provider: anthropic\n");
+    let picked = fs::read_to_string(path).expect("picked");
+    assert!(picked.starts_with("active_provider: hofund\n"), "{picked}");
+    assert!(picked.contains("providers:\n  hofund:\n"), "{picked}");
+    assert!(!picked.contains("GOOSE_"), "{picked}");
+}
+
+#[test]
 fn b7_goose_old_layout_clear_and_disconnect_remove_flat_keys() {
     let (_home, session, agent, path) = picked_goose(B7_GOOSE_OLD);
     let target = target();
