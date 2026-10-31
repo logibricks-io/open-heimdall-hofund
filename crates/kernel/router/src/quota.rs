@@ -1889,6 +1889,16 @@ mod tests {
         let only_short = info("5h", 20.0, Some(now + Duration::from_secs(4 * H)))
             .with_window_span(Duration::from_secs(5 * H));
         assert!((allowance_of(vec![only_short], now).pace("model", now) - 20.0).abs() < 1e-9);
+        // a nearly spent short window does not set the pace beside a budget
+        let tight_short = info("5h", 99.0, Some(now + Duration::from_secs(4 * H)))
+            .with_window_span(Duration::from_secs(5 * H));
+        let roomy_week = info("Weekly", 0.0, Some(now + Duration::from_secs(168 * H)))
+            .with_window_span(Duration::from_secs(168 * H));
+        assert!(
+            (allowance_of(vec![tight_short, roomy_week], now).pace("model", now) - 100.0 / 168.0)
+                .abs()
+                < 1e-9
+        );
         // a short window not started runs its whole span
         assert!(
             (allowance_of(
@@ -1951,6 +1961,13 @@ mod tests {
         let passed = allowance_of(vec![passed], now);
         assert_eq!(passed.routing_renewals("model", now), [Some(day)]);
         assert_eq!(passed.used_for_routing("model", now), 0.0);
+        // a portion that already lapsed is no longer the next lapse
+        let mut lapsed = info("Weekly", 50.0, Some(week));
+        lapsed.span.runs_out_at = Some(quota_time(now - Duration::from_secs(60)));
+        lapsed.span.runs_out = 10.0;
+        let lapsed = allowance_of(vec![lapsed], now);
+        assert_eq!(lapsed.lapse("model", now), None);
+        assert_eq!(lapsed.routing_renewals("model", now), [Some(week)]);
     }
 
     #[test]
@@ -1967,6 +1984,11 @@ mod tests {
         );
         assert!(credits.spends_credits("model"));
         assert_eq!(credits.used_for_routing("model", now), 60.0);
+        // once the windows reset, the reading taken before counts as empty
+        assert_eq!(
+            credits.used_for_routing("model", week + Duration::from_secs(60)),
+            0.0
+        );
         let plain = allowance_of(vec![info("Weekly", 99.0, Some(week))], now);
         assert!(!plain.spends_credits("model"));
         assert_eq!(plain.used_for_routing("model", now), 99.0);

@@ -443,7 +443,7 @@ impl Member for LiveMember {
     fn learns_allowance(&self) -> bool {
         // As the reference: a Claude subscription tells what it has left as
         // it answers, so one not yet known is tried first to learn it.
-        self.subscription && self.plugin_id == "claude"
+        learns_allowance(self.subscription, &self.plugin_id)
     }
 
     fn attempt(&self) -> MemberAttempt {
@@ -1014,9 +1014,16 @@ fn kebab_of(value: &str) -> String {
     }
 }
 
+/// Whether an account not yet measured is tried first to learn its
+/// allowance: as the reference, only a Claude subscription reports what it
+/// has left as it answers.
+fn learns_allowance(subscription: bool, plugin_id: &str) -> bool {
+    subscription && plugin_id == "claude"
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BuiltProvider, PlannedHop, open, open_checking};
+    use super::{BuiltProvider, PlannedHop, learns_allowance, open, open_checking};
     use crate::offline::NetworkCheck;
     use std::collections::BTreeMap;
     use std::future::Future;
@@ -1035,6 +1042,14 @@ mod tests {
             CooldownPolicy::default(),
             Arc::new(|| tokio::time::Instant::now().into_std()),
         ))
+    }
+
+    #[test]
+    fn b1f_only_an_unmeasured_claude_subscription_learns_its_allowance() {
+        assert!(learns_allowance(true, "claude"));
+        assert!(!learns_allowance(true, "codex"));
+        assert!(!learns_allowance(true, "gemini"));
+        assert!(!learns_allowance(false, "claude"));
     }
 
     #[test]

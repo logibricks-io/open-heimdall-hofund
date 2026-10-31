@@ -268,6 +268,20 @@ mod tests {
         );
         assert_eq!(seats[0].tokens, 176.0);
         assert_eq!(seats[1].tokens, 0.0);
+        // a strategy that weighs only speed reads the ledger but not use
+        let mut seats = vec![Seat::new("p")];
+        let speed_only = Needs {
+            speed: true,
+            ..Needs::default()
+        };
+        measurements.weigh(
+            &mut seats,
+            &["demo".to_owned()],
+            "demo",
+            speed_only,
+            at(now),
+        );
+        assert_eq!(seats[0].tokens, 0.0);
         // a strategy that does not weigh use leaves it unread
         let mut seats = vec![Seat::new("p")];
         measurements.weigh(
