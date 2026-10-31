@@ -348,20 +348,24 @@ pub(crate) fn apply_windows(
     windows: &[QuotaWindow],
 ) -> bool {
     let now = SystemTime::now();
-    let full_reset = windows
+    let full = windows
         .iter()
         .filter(|window| {
             window.blocking()
                 && window.scope_model().is_none()
                 && window.limit().is_some_and(|limit| window.used() >= limit)
         })
+        .collect::<Vec<_>>();
+    let full_reset = full
+        .iter()
         .filter_map(|window| {
             window
                 .resets_at()
                 .and_then(|reset| reset.duration_since(now).ok())
         })
-        .min();
-    cooldowns.observe_credit_window(member, full_reset);
+        .max();
+    let full_unknown = full.iter().any(|window| window.resets_at().is_none());
+    cooldowns.observe_credit_window(member, full_reset, full_unknown);
     let mut cooled = false;
     for window in windows {
         if !window.blocking() || window.scope_model().is_some() {
@@ -774,6 +778,52 @@ mod tests {
             .await;
         assert!(cooldowns.cooling(&member("one")).is_some());
         assert!(cooldowns.cooling(&member("two")).is_none());
+    }
+
+    fn full_window(name: &str, reset: Option<Duration>) -> hofund_plugin_api::QuotaWindow {
+        hofund_plugin_api::QuotaWindow::new(
+            name,
+            10,
+            Some(10),
+            reset.map(|after| std::time::SystemTime::now() + after),
+        )
+        .expect("window")
+    }
+
+    fn credit_left(cooldowns: &Cooldowns, id: &MemberId) -> Duration {
+        cooldowns
+            .cooling(id)
+            .expect("cooled")
+            .until()
+            .saturating_duration_since(std::time::Instant::now())
+    }
+
+    #[test]
+    fn credit_rest_uses_latest_full_window_and_lifts_when_it_renews_sooner() {
+        const HOUR: Duration = Duration::from_secs(3600);
+        let cooldowns = cooldowns();
+        let id = member("one");
+        cooldowns.configure_credit_window(&id);
+        let plugin = PluginId::from_static(PLUGIN);
+        let both = [
+            full_window("five-hour", Some(HOUR)),
+            full_window("weekly", Some(3 * HOUR)),
+        ];
+        assert!(super::apply_windows(&cooldowns, &id, &plugin, &both));
+        cooldowns.record_failure(
+            &id,
+            &hofund_plugin_api::PluginError::credit_status(402, "out"),
+        );
+        let left = credit_left(&cooldowns, &id);
+        assert!(left > 3 * HOUR - Duration::from_secs(60), "{left:?}");
+        // The same reading again is not a renewal.
+        super::apply_windows(&cooldowns, &id, &plugin, &both);
+        assert!(credit_left(&cooldowns, &id) > 3 * HOUR - Duration::from_secs(60));
+        // Only the five-hour window is still full: the latest full reset
+        // moved sooner, so the credit rest lifts and only the quota rest stays.
+        super::apply_windows(&cooldowns, &id, &plugin, &both[..1]);
+        let left = credit_left(&cooldowns, &id);
+        assert!(left <= HOUR + Duration::from_secs(1), "{left:?}");
     }
 
     #[test]

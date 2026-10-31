@@ -235,7 +235,7 @@ impl State {
 struct Book {
     states: HashMap<MemberId, State>,
     windowed_credit: HashSet<MemberId>,
-    credit_windows: HashMap<MemberId, Option<Instant>>,
+    credit_windows: HashMap<MemberId, CreditWindow>,
     next_revision: u64,
     recoveries: VecDeque<(MemberId, CooldownCause)>,
 }
@@ -282,39 +282,43 @@ impl Cooldowns {
         self.lock().windowed_credit.insert(id.clone());
     }
 
-    /// Records the latest full account-window reset and lifts a windowed
-    /// credit rest when a later observation shows that the window renewed.
-    pub fn observe_credit_window(&self, id: &MemberId, reset: Option<Duration>) {
+    /// Records when an account's full account-wide windows renew and lifts
+    /// a windowed account's credit or quota rest when a later observation
+    /// finds them renewing sooner than the one before. A rate or generic
+    /// rest stays.
+    ///
+    /// `reset` is the last positive reset among the full windows; it also
+    /// bounds a later credit rest. `unknown` says a full window gave no
+    /// reset, which counts as renewing later than any known reset.
+    pub fn observe_credit_window(&self, id: &MemberId, reset: Option<Duration>, unknown: bool) {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         if !book.windowed_credit.contains(id) {
             return;
         }
-        let current = positive_hint(reset).map(|after| saturating_deadline(now, after));
-        let previous = book
+        let current = CreditWindow {
+            until: positive_hint(reset).map(|after| saturating_deadline(now, after)),
+            unknown,
+        };
+        let renewed = book
             .credit_windows
             .insert(id.clone(), current)
-            .unwrap_or(None);
-        let renewed = match (previous, current) {
-            (Some(before), Some(after)) => {
-                let difference = if before >= after {
-                    before.duration_since(after)
-                } else {
-                    after.duration_since(before)
-                };
-                difference > Duration::from_secs(1)
-            }
-            (Some(_), None) | (None, None) => true,
-            (None, Some(_)) => false,
-        };
-        let lifting = renewed
-            && book.states.get(id).is_some_and(|state| {
-                state.cooling.as_ref().is_some_and(|cooling| {
-                    cooling.cause == CooldownCause::Credit && now < cooling.until
-                })
-            });
-        if lifting {
+            .is_some_and(|previous| previous.renews_later_than(current));
+        let lifting = book
+            .states
+            .get(id)
+            .and_then(|state| state.cooling.as_ref())
+            .filter(|cooling| {
+                renewed
+                    && matches!(
+                        cooling.cause,
+                        CooldownCause::Credit | CooldownCause::Quota | CooldownCause::Observed
+                    )
+                    && now < cooling.until
+            })
+            .map(|cooling| cooling.cause);
+        if let Some(cause) = lifting {
             let revision = next_revision(&mut book);
             let state = book.states.get_mut(id).expect("existing credit state");
             state.cooling = None;
@@ -325,7 +329,7 @@ impl Cooldowns {
             state.idle_since = Some(now);
             state.touched = now;
             state.revision = revision;
-            recover(&mut book, id.clone(), CooldownCause::Credit);
+            recover(&mut book, id.clone(), cause);
         }
     }
 
@@ -841,6 +845,34 @@ impl Cooldowns {
     }
 }
 
+/// The renewal of an account's full account-wide windows, as last read.
+#[derive(Clone, Copy)]
+struct CreditWindow {
+    /// The last known positive reset among the full windows.
+    until: Option<Instant>,
+    /// Whether a full window gave no reset.
+    unknown: bool,
+}
+
+impl CreditWindow {
+    /// Whether this reading renews later than `current`: a full window with
+    /// no reset renews latest, no full window renews at once, and readings
+    /// within a second of each other count as the same.
+    fn renews_later_than(self, current: Self) -> bool {
+        match (self.unknown, current.unknown) {
+            (_, true) => false,
+            (true, false) => true,
+            (false, false) => match (self.until, current.until) {
+                (Some(_), None) => true,
+                (Some(before), Some(after)) => {
+                    before.saturating_duration_since(after) > Duration::from_secs(1)
+                }
+                (None, _) => false,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CreditContext {
     subscription: bool,
@@ -855,8 +887,7 @@ fn credit_context(book: &Book, id: &MemberId, now: Instant) -> CreditContext {
         window_reset: book
             .credit_windows
             .get(id)
-            .copied()
-            .flatten()
+            .and_then(|window| window.until)
             .filter(|until| *until > now),
     }
 }
