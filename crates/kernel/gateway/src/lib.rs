@@ -7,6 +7,7 @@
 
 pub mod control;
 mod endpoints;
+mod prev_response;
 mod relisten;
 mod responses_ws;
 
@@ -65,6 +66,7 @@ struct Inner {
     tokens: TokenState,
     codecs: HashMap<String, Arc<dyn Codec>>,
     usage: Arc<Ledger>,
+    prev: prev_response::PrevStore,
     surfaces: Vec<Arc<dyn InboundSurface>>,
     /// Optional request-topic emitter. Absent when control is off.
     request_events: Option<Arc<dyn RequestEvents>>,
@@ -262,6 +264,10 @@ fn unix_ms_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Maximum graceful drain for a control listener before its connections close.
+#[doc(hidden)]
+pub const CONTROL_DRAIN: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// A bound server.
 pub struct Running {
     /// The address the listener accepted at start. After a relisten,
@@ -274,7 +280,8 @@ pub struct Running {
     control_addr: Option<SocketAddr>,
     control_socket_path: Option<PathBuf>,
     resources: Vec<Box<dyn std::any::Any + Send>>,
-    shutdown_request: Option<watch::Receiver<bool>>,
+    shutdown_request: Option<(watch::Sender<bool>, watch::Receiver<bool>)>,
+    drain_bound: Option<std::time::Duration>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
 }
@@ -358,6 +365,7 @@ impl Gateway {
                 tokens: TokenState::new(token, token_file),
                 codecs,
                 usage,
+                prev: prev_response::PrevStore::new(),
                 surfaces: Vec::new(),
                 request_events: None,
                 surface_http: None,
@@ -475,6 +483,7 @@ impl Running {
             control_socket_path: None,
             resources: Vec::new(),
             shutdown_request: None,
+            drain_bound: None,
             relisten: None,
             fatal: None,
         }
@@ -536,11 +545,11 @@ impl Running {
         self.fatal.as_ref().and_then(|fatal| fatal.borrow().clone())
     }
 
-    /// Attaches the flag a control client sets to request shutdown.
+    /// Attaches the flag a control client or embedded shutdown sets to request shutdown.
     #[doc(hidden)]
     #[must_use]
-    pub fn with_shutdown_request(mut self, request: watch::Receiver<bool>) -> Self {
-        self.shutdown_request = Some(request);
+    pub fn with_shutdown_request(mut self, request: watch::Sender<bool>) -> Self {
+        self.shutdown_request = Some((request.clone(), request.subscribe()));
         self
     }
 
@@ -553,7 +562,7 @@ impl Running {
     pub async fn shutdown_requested(&mut self) {
         let (request, fatal) = (self.shutdown_request.as_mut(), self.fatal.as_mut());
         let requested = async {
-            let Some(request) = request else {
+            let Some((_, request)) = request else {
                 return std::future::pending().await;
             };
             if request.wait_for(|requested| *requested).await.is_err() {
@@ -572,6 +581,12 @@ impl Running {
             () = requested => {}
             () = fatal => {}
         }
+    }
+
+    /// Bounds the graceful drain for a control listener.
+    fn with_control_drain(mut self) -> Self {
+        self.drain_bound = Some(CONTROL_DRAIN);
+        self
     }
 
     /// Attaches a background task aborted by both shutdown and drop.
@@ -622,8 +637,16 @@ impl Running {
         self.control_socket_path.as_deref()
     }
 
+    fn request_shutdown(&self) {
+        if let Some((request, _)) = &self.shutdown_request {
+            request.send_replace(true);
+        }
+    }
+
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
+    /// Control listeners close connections that outlast their drain deadline.
     pub async fn shutdown(mut self) {
+        self.request_shutdown();
         for task in self.attached.drain(..) {
             task.abort();
         }
@@ -633,8 +656,18 @@ impl Running {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
+        if let Some(mut task) = self.task.take() {
+            match self.drain_bound {
+                Some(bound) => {
+                    if tokio::time::timeout(bound, &mut task).await.is_err() {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                }
+                None => {
+                    let _ = task.await;
+                }
+            }
         }
     }
 }
@@ -775,7 +808,8 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                         String::new(),
                         PluginError::status_error(404, error.to_string()),
                     ),
-                    RouterError::Ambiguous { .. } => (
+                    RouterError::Ambiguous { .. }
+                    | RouterError::PreviousResponseNotFound { .. } => (
                         String::new(),
                         PluginError::status_error(400, error.to_string()),
                     ),
@@ -1054,6 +1088,15 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     } else {
         bytes
     };
+    let expansion = (codec.id() == ProtocolId::OPENAI_RESPONSES.as_str())
+        .then(|| app.prev.expand(&prev_response::request_scope(), &bytes));
+    let bytes = expansion
+        .as_ref()
+        .map_or(bytes, |expansion| Bytes::from(expansion.body.clone()));
+    let ask = expansion
+        .as_ref()
+        .and_then(|expansion| expansion.ask.clone());
+    let capture = expansion.and_then(|expansion| expansion.capture);
     let model_request = match codec.decode_request(&bytes) {
         Ok(model_request) => model_request,
         Err(error) => {
@@ -1078,7 +1121,11 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         },
     );
     let router = app.snapshot.load();
-    match router.dispatch(&model_request, codec.id()).await {
+    let attempt = ask.as_ref().map(|ask| ask.attempt());
+    match router
+        .dispatch_with_attempt(&model_request, codec.id(), attempt)
+        .await
+    {
         Ok(routed) => {
             success(
                 app,
@@ -1089,6 +1136,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 routed.completion,
                 started,
                 &mut track,
+                capture,
             )
             .await
         }
@@ -1145,7 +1193,9 @@ async fn count_tokens(
         Err(error) => {
             let (status, message) = match error {
                 RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string()),
-                RouterError::Ambiguous { .. } => (StatusCode::BAD_REQUEST, error.to_string()),
+                RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
+                    (StatusCode::BAD_REQUEST, error.to_string())
+                }
                 RouterError::Upstream { error, .. } => {
                     (status_of(&error), error.message().to_owned())
                 }
@@ -1281,9 +1331,11 @@ async fn success(
     completion: Completion,
     started: Instant,
     track: &mut RequestTrack,
+    capture: Option<prev_response::Capture>,
 ) -> Response {
     let meta = UsageMeta::new(request, upstream, started);
     let member = Some(upstream.to_owned());
+    let capture = prev_response::ReplyCapture::new(capture);
     match completion {
         Completion::Unary(response) => {
             let input = response
@@ -1297,8 +1349,17 @@ async fn success(
             write_usage(&app.usage, &meta, Some((input, output)), StatusCode::OK);
             let status = StatusCode::OK;
             let encoded = codec.encode_response_for(request, &response);
+            let mut capture = capture;
             let (status, body) = match encoded {
-                Ok(bytes) => (status, json_response(status, bytes)),
+                Ok(bytes) => {
+                    if let Some(capture) = capture.as_mut() {
+                        capture.push(&bytes);
+                    }
+                    if let Some(capture) = capture.take() {
+                        capture.finish();
+                    }
+                    (status, json_response(status, bytes))
+                }
                 Err(error) => {
                     let status = StatusCode::BAD_GATEWAY;
                     (status, coded(codec.as_ref(), status, &error.to_string()))
@@ -1334,6 +1395,7 @@ async fn success(
                 },
                 Box::new(on_error),
             );
+            let body = capture_stream(body, capture);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, codec.stream_content_type())
@@ -1350,6 +1412,7 @@ async fn success(
                 body,
                 track,
                 member,
+                capture,
             )
             .await
         }
@@ -1370,6 +1433,7 @@ async fn raw_body(
     mut body: BodyStream,
     track: &mut RequestTrack,
     member: Option<String>,
+    capture: Option<prev_response::ReplyCapture>,
 ) -> Response {
     let content_type = codec.response_content_type(request.stream);
     if request.stream {
@@ -1469,6 +1533,7 @@ async fn raw_body(
                 }
             },
         );
+        let stream = capture_stream(stream, capture);
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, content_type)
@@ -1502,6 +1567,10 @@ async fn raw_body(
         output.and_then(|value| u64::try_from(value).ok()),
     );
     let body = codec.rewrite_model(&bytes, &request.model, upstream_model);
+    if let Some(mut capture) = capture {
+        capture.push(&body);
+        capture.finish();
+    }
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, codec.response_content_type(false))
@@ -1517,8 +1586,19 @@ fn failure(
     started: Instant,
     track: &mut RequestTrack,
 ) -> Response {
+    if let RouterError::PreviousResponseNotFound { id } = &error {
+        write_usage(
+            &app.usage,
+            &UsageMeta::new(request, "", started),
+            None,
+            StatusCode::BAD_REQUEST,
+        );
+        track.end_with(None, StatusCode::BAD_REQUEST.as_u16(), None, None);
+        return json_response(StatusCode::BAD_REQUEST, prev_response::not_found_body(id));
+    }
     let (status, upstream, message) = match error {
         RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, String::new(), error.to_string()),
+        RouterError::PreviousResponseNotFound { .. } => unreachable!(),
         RouterError::Ambiguous { .. } => {
             (StatusCode::BAD_REQUEST, String::new(), error.to_string())
         }
@@ -1579,6 +1659,38 @@ struct RecordOnEnd {
 }
 
 type ErrorFrame = Box<dyn Fn(&PluginError) -> Vec<u8> + Send>;
+
+fn capture_stream<S>(
+    incoming: S,
+    capture: Option<prev_response::ReplyCapture>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+{
+    futures_util::stream::unfold(
+        (Box::pin(incoming), capture, true),
+        |(mut incoming, mut capture, mut normal)| async move {
+            match incoming.next().await {
+                Some(Ok(chunk)) => {
+                    if let Some(capture) = capture.as_mut() {
+                        capture.push(&chunk);
+                    }
+                    Some((Ok(chunk), (incoming, capture, normal)))
+                }
+                Some(Err(error)) => {
+                    normal = false;
+                    Some((Err(error), (incoming, capture, normal)))
+                }
+                None => {
+                    if normal && let Some(capture) = capture.take() {
+                        capture.finish();
+                    }
+                    None
+                }
+            }
+        },
+    )
+}
 
 fn sse_body(
     incoming: Pin<Box<dyn Stream<Item = Result<StreamEvent, PluginError>> + Send>>,

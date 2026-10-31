@@ -104,6 +104,25 @@ pub(crate) struct Targets {
     dirs: HashSet<PathBuf>,
 }
 
+/// Uses the spelling on disk when a case-insensitive file system accepted a
+/// differently-cased configuration path. An exact entry always wins.
+fn on_disk_name(name: &std::ffi::OsStr, entries: impl IntoIterator<Item = OsString>) -> OsString {
+    let mut folded = None;
+    for entry in entries {
+        if entry == name {
+            return entry;
+        }
+        if folded.is_none()
+            && entry
+                .as_encoded_bytes()
+                .eq_ignore_ascii_case(name.as_encoded_bytes())
+        {
+            folded = Some(entry);
+        }
+    }
+    folded.unwrap_or_else(|| name.to_owned())
+}
+
 impl Targets {
     pub(crate) fn resolve(path: &Path) -> io::Result<Self> {
         let absolute = std::path::absolute(path)?;
@@ -114,6 +133,13 @@ impl Targets {
             ));
         };
         let parent = fs::canonicalize(parent)?;
+        let entries = fs::read_dir(&parent)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name());
+        let name = on_disk_name(name, entries);
         let mut targets = Self::default();
         targets.add(parent.join(name));
         // A symlinked configuration is written through to its target, so the
@@ -387,6 +413,58 @@ mod tests {
         assert!(targets.matches(&path));
         assert!(!targets.matches(&dir.path().join("sub").join("hofund.toml")));
         assert!(!targets.matches(&dir.path().join("hofund.toml.tmp")));
+    }
+
+    #[test]
+    fn resolve_targets_the_on_disk_spelling_of_a_differently_cased_name() {
+        let (dir, path) = scratch();
+        let upper = dir.path().join("HOFUND.TOML");
+        let targets = Targets::resolve(&upper).expect("targets");
+        assert!(targets.matches(&path), "the on-disk name is watched");
+        // The given spelling is matched only when no entry has it.
+        let missing = Targets::resolve(&dir.path().join("Other.toml")).expect("targets");
+        assert!(missing.matches(&dir.path().join("Other.toml")));
+    }
+
+    #[test]
+    fn on_disk_name_prefers_exact_then_ascii_case_and_keeps_unmatched() {
+        let entries = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| OsString::from(*name))
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        assert_eq!(
+            on_disk_name(
+                std::ffi::OsStr::new("hofund.toml"),
+                entries(&["HOFUND.TOML", "hofund.toml"]),
+            ),
+            "hofund.toml"
+        );
+        assert_eq!(
+            on_disk_name(
+                std::ffi::OsStr::new("HOFUND.TOML"),
+                entries(&["other.toml", "hofund.toml"]),
+            ),
+            "hofund.toml"
+        );
+        // Two case variants with no exact match: the first listed wins, so
+        // the choice does not drift as later entries are read.
+        assert_eq!(
+            on_disk_name(
+                std::ffi::OsStr::new("Hofund.toml"),
+                entries(&["HOFUND.TOML", "hofund.toml"]),
+            ),
+            "HOFUND.TOML"
+        );
+        assert_eq!(
+            on_disk_name(
+                std::ffi::OsStr::new("missing.toml"),
+                entries(&["hofund.toml"]),
+            ),
+            "missing.toml"
+        );
     }
 
     #[tokio::test(start_paused = true)]

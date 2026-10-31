@@ -526,6 +526,38 @@ already produced a delta. `response.content_part.done` is ignored, because
 round trip of decoder output is stable. Hand-built events are not required to
 round-trip byte for byte.
 
+## A Responses request that names the response it follows
+
+A `/v1/responses` request may send only its new `input` and name
+`previous_response_id`. The gateway expands a known id before decoding and
+routing: the stored input and output items precede the new items, and the id is
+removed. A translated upstream therefore receives the whole conversation. A
+string input is one user message item. A non-string, non-array input is left
+unchanged and is not kept.
+
+Successful unary and SSE replies are captured as client-bound bytes pass, up to
+64 MiB, and committed only after a normal end. Failed, cancelled, non-200,
+interrupted, and over-cap replies are not kept. `store: false` also keeps
+nothing, although it does not prevent resolving an earlier id.
+
+History is in memory, scoped to the authenticated gateway caller, least
+recently used first out above 256 MiB of new-turn bytes, and expired after six
+hours. One turn larger than half the cap is not kept. Shared earlier items are
+not counted again. History is lost on restart, and the whole local request body
+is still read before any upstream delta is selected.
+
+An unknown id on a translating route or subscription account returns 400
+`previous_response_not_found` before an upstream call. A same-protocol
+Responses relay passes the id upstream. With explicit `store: true`, the same
+API-key route on a response-keeping host may receive only the new items and its
+own upstream id; a 400 or 404 refusal naming the previous response causes one
+whole-body retry. An omitted `store` keeps hofund's upstream `store: false`
+privacy default and never selects this delta path.
+
+Request masking is not currently implemented (A14 is therefore N/A). When that
+feature is added, it must run after this expansion on every turn so stored text
+is masked identically to text sent in the current request.
+
 ## Responses items
 
 `instructions` becomes a leading system message. Encode hoists that message

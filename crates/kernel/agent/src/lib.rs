@@ -8,8 +8,7 @@
 //! wrote. Otherwise each key apply touched is restored to its previous value,
 //! unless the user changed it, in which case that value stays and a warning is
 //! returned. [`AgentAdapter::revert`] puts the original bytes back. Unrelated
-//! keys are left in place on apply. TOML comments stay.
-//! JSON comments do not survive an apply; revert restores them.
+//! keys and comments in JSONC, YAML, and TOML stay in place on apply.
 //!
 //! This crate depends on `config` and `hofund-plugin-api`. It does not read
 //! the token file and it does not start the gateway. The daemon resolves the
@@ -57,7 +56,9 @@ pub use hofund_plugin_api::{
 mod catalog;
 mod credential;
 mod edit;
+mod jsonc_edit;
 mod store;
+mod yaml_edit;
 
 pub use catalog::{Catalog, Compiled, catalog, resolve};
 pub use credential::CREDENTIAL_CHANGE_PREFIX;

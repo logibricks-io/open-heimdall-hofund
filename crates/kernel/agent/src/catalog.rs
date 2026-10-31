@@ -1439,7 +1439,8 @@ fn plan_of(rendered: &[Rendered]) -> Plan {
     Plan::new(changes)
 }
 
-/// Records the bytes apply would write onto the pre-connect file.
+/// Records the bytes apply would write, advancing the previous snapshot when
+/// one exists so repeated edits have the same formatting path as the live file.
 ///
 /// User edits are not part of this snapshot. Disconnect compares the live file
 /// with it, per key, so a later edit is not treated as something hofund wrote.
@@ -1451,8 +1452,9 @@ fn snapshot_wrote(
     assignments: &[Assignment],
     pinned: &[(&'static str, Option<String>)],
 ) -> Result<(), AgentError> {
+    let previous = read_optional(&sibling_wrote(path))?;
     let backup = read_optional(&sibling_bak(path))?;
-    let text = match &backup {
+    let text = match previous.as_ref().or(backup.as_ref()) {
         Some(bytes) => Some(utf8(path, bytes)?),
         None => None,
     };
