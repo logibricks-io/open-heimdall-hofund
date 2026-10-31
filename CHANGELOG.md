@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Measurement routing (P0-2b): `smart`, `usage`, `pace`, `fast`, and `cheap`
+  now use live allowance, token, speed, and price measurements. Smart handles
+  allowance tiers, renewals, credit lapse and spending, and per-provider/unit
+  wallets; usage decays tokens by one hour; pace ranks remaining allowance per
+  hour; fast estimates short replies and probes unknown members; cheap compares
+  current catalog and cache-read prices. Streamed replies record first-content
+  latency in the migrated usage ledger, and daemon measurements survive router
+  snapshot replacement. Measurements are read only for strategies that use
+  them, over a bounded window backed by a new `created_unix` ledger index.
+
 - Quota windows (P0-5a): a kernel quota store keeps each subscription
   card with its windows, absolute reset times, `runsOutAt`, cached `asOf`
   fallbacks, deferred reads, and last-served times from the usage ledger,
@@ -50,8 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   weighted round robin, and free-first ordering, with per-route and per-account
   weights, manual/catalog/zero-price free detection, and strategy state kept
   across configuration snapshots. `smart`, `usage`, `pace`, `fast`, and `cheap`
-  are registered and validated but preserve listed order until P0-2b. Ready
-  members retain strategy order before the single cooling probe, and
+  are registered and validated at configuration load. Ready members retain
+  strategy order before the single cooling probe, and
   `hofund routes` prints each route's strategy.
 
 - Credit-rest ladders and persistence (P0-3b1): API-key credit refusals now

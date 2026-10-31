@@ -29,7 +29,8 @@ use hofund_provider::{
 };
 use hofund_router::{
     Attempt, AttemptHook, Cooldowns, FailoverPolicy, Hop, Member, MemberAttempt, Route, Router,
-    Snapshot, strategy::StrategyState,
+    Snapshot,
+    strategy::{Measurements, StrategyState},
 };
 use tower::Service;
 
@@ -52,6 +53,7 @@ pub(crate) struct Table {
     policy: Mutex<FailoverPolicy>,
     cooldowns: Arc<Cooldowns>,
     strategies: Arc<StrategyState>,
+    measurements: Mutex<Option<Arc<dyn Measurements>>>,
     snapshot: Snapshot,
 }
 
@@ -200,6 +202,7 @@ fn build_table(
         policy: Mutex::new(policy),
         cooldowns,
         strategies,
+        measurements: Mutex::new(None),
         snapshot,
     });
     let stored = build_specs(&table, built, routes)?;
@@ -294,6 +297,11 @@ impl Table {
         Ok(())
     }
 
+    pub(crate) fn set_measurements(&self, measurements: Arc<dyn Measurements>) {
+        *self.measurements.lock().expect("measurements") = Some(measurements);
+        self.publish();
+    }
+
     pub(crate) fn publish(&self) {
         let hops = self.hops.lock().expect("membership");
         let routes = hops
@@ -316,11 +324,19 @@ impl Table {
             })
             .collect();
         let policy = self.policy.lock().expect("failover policy").clone();
-        self.snapshot.store(
-            Router::from_routes(routes, policy)
-                .with_strategies(Arc::clone(&self.strategies))
-                .with_cooldowns(Arc::clone(&self.cooldowns)),
-        );
+        let mut router = Router::from_routes(routes, policy)
+            .with_strategies(Arc::clone(&self.strategies))
+            .with_cooldowns(Arc::clone(&self.cooldowns));
+        if let Some(measurements) = self
+            .measurements
+            .lock()
+            .expect("measurements")
+            .as_ref()
+            .cloned()
+        {
+            router = router.with_measurements(measurements);
+        }
+        self.snapshot.store(router);
     }
 }
 
@@ -388,6 +404,12 @@ impl Member for LiveMember {
 
     fn protocol(&self) -> &str {
         self.protocol
+    }
+
+    fn learns_allowance(&self) -> bool {
+        // As the reference: a Claude subscription tells what it has left as
+        // it answers, so one not yet known is tried first to learn it.
+        self.subscription && self.plugin_id == "claude"
     }
 
     fn attempt(&self) -> MemberAttempt {

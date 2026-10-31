@@ -844,6 +844,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             started,
             input: None,
             output: None,
+            ttft_ms: None,
         };
         match router.forward(&call).await {
             Ok(forwarded) => {
@@ -1579,6 +1580,7 @@ async fn raw_body(
                         ))
                     }
                     Some(Ok(chunk)) => {
+                        meta.note_first_content();
                         let forwarded = tap.push(&chunk);
                         let (input, output) = tap.tokens();
                         meta.input = input.or(meta.input);
@@ -1698,6 +1700,7 @@ struct UsageMeta {
     started: Instant,
     input: Option<i64>,
     output: Option<i64>,
+    ttft_ms: Option<i64>,
 }
 
 impl UsageMeta {
@@ -1708,6 +1711,14 @@ impl UsageMeta {
             started,
             input: None,
             output: None,
+            ttft_ms: None,
+        }
+    }
+
+    fn note_first_content(&mut self) {
+        if self.ttft_ms.is_none() {
+            self.ttft_ms =
+                Some(i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX));
         }
     }
 }
@@ -1805,6 +1816,14 @@ fn sse_body(
                     }
                     Some(Ok(event)) => {
                         note_usage(&event, &mut record.input, &mut record.output);
+                        if matches!(
+                            event,
+                            StreamEvent::TextDelta(_)
+                                | StreamEvent::ThinkingDelta(_)
+                                | StreamEvent::ToolArgumentsDelta(_)
+                        ) {
+                            record.meta.note_first_content();
+                        }
                         match encoder.push(&event) {
                             Ok(bytes) if bytes.is_empty() => {}
                             Ok(bytes) => {
@@ -1887,7 +1906,7 @@ fn write_usage(
         latency_ms: i64::try_from(meta.started.elapsed().as_millis()).unwrap_or(i64::MAX),
         status: status.as_u16().to_string(),
     };
-    let _ = usage.record(&row);
+    let _ = usage.record_with_ttft(&row, meta.ttft_ms);
 }
 
 fn as_i64(value: Option<u64>) -> Option<i64> {
