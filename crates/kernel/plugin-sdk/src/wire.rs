@@ -974,7 +974,7 @@ fn classify_count(
 /// Whether a 400 says the count endpoint itself is missing. A rejection of
 /// something in the request stays an error.
 fn endpoint_unsupported(bytes: &[u8]) -> bool {
-    let message = message_from(bytes).to_ascii_lowercase();
+    let message = message_with(bytes, false).to_ascii_lowercase();
     let message = message.trim();
     message == "unsupported"
         || message.contains("unsupported endpoint")
@@ -1297,11 +1297,26 @@ fn pointer(value: &serde_json::Value, path: &str) -> Option<String> {
 }
 
 fn message_from(bytes: &[u8]) -> String {
+    message_with(bytes, true)
+}
+
+/// The error's words, with `error.code` appended when `keep_code` is set and
+/// the words leave it out.
+fn message_with(bytes: &[u8], keep_code: bool) -> String {
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        let code = pointer(&value, "error.code");
         for path in ["error.message", "message"] {
             if let Some(text) = pointer(&value, path) {
-                return text;
+                // A vendor code the words leave out (`token_expired`) is
+                // kept, so callers that match on it still see it.
+                return match code {
+                    Some(code) if keep_code && !text.contains(&code) => format!("{text} ({code})"),
+                    _ => text,
+                };
             }
+        }
+        if let Some(code) = code {
+            return code;
         }
     }
     let text = String::from_utf8_lossy(bytes);
@@ -1510,6 +1525,18 @@ mod tests {
             "slow down"
         );
         assert_eq!(message_from(br#"{"message":"bad key"}"#), "bad key");
+        assert_eq!(
+            message_from(br#"{"error":{"code":"token_expired"}}"#),
+            "token_expired"
+        );
+        assert_eq!(
+            message_from(br#"{"error":{"message":"Unauthorized","code":"token_expired"}}"#),
+            "Unauthorized (token_expired)"
+        );
+        assert_eq!(
+            message_from(br#"{"error":{"message":"bad token_expired","code":"token_expired"}}"#),
+            "bad token_expired"
+        );
         assert_eq!(message_from(b"  plain failure \n"), "plain failure");
         assert_eq!(message_from(b"   "), "upstream request failed");
         let long = "x".repeat(600);
@@ -1905,6 +1932,8 @@ mod tests {
             let body = serde_json::json!({"error": {"message": message}}).to_string();
             assert!(endpoint_unsupported(body.as_bytes()), "{message}");
         }
+        let coded = serde_json::json!({"error": {"message": "unsupported", "code": "bad_request"}});
+        assert!(endpoint_unsupported(coded.to_string().as_bytes()));
         for message in ["unsupported image type png", "messages: field required", ""] {
             let body = serde_json::json!({"error": {"message": message}}).to_string();
             assert!(!endpoint_unsupported(body.as_bytes()), "{message}");

@@ -594,6 +594,76 @@ fn token_expired_401_retries_once() {
 }
 
 #[test]
+fn token_expired_code_401_refreshes_and_retries() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let json = [("content-type", "application/json")];
+    host.http().enqueue_response(
+        401,
+        &json,
+        br#"{"error":{"code":"token_expired"}}"#.to_vec(),
+    );
+    host.http()
+        .enqueue(token_reply(&access_token("second", 10_000), None, None));
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    let upstream = upstream_for(&host, &id);
+    block_on(upstream.execute(streaming_request(), ProtocolId::OPENAI_RESPONSES))
+        .expect("code-only expiry is refreshed and retried");
+    let uris: Vec<String> = host
+        .http()
+        .calls()
+        .iter()
+        .map(|call| call.uri().to_owned())
+        .collect();
+    let responses = format!("{BASE}/responses");
+    assert_eq!(
+        uris,
+        vec![responses.clone(), TOKEN_URL.to_owned(), responses]
+    );
+}
+
+#[test]
+fn token_expired_code_beside_a_message_401_refreshes_and_retries() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let json = [("content-type", "application/json")];
+    host.http().enqueue_response(
+        401,
+        &json,
+        br#"{"error":{"message":"Unauthorized","code":"token_expired"}}"#.to_vec(),
+    );
+    host.http()
+        .enqueue(token_reply(&access_token("second", 10_000), None, None));
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    let upstream = upstream_for(&host, &id);
+    block_on(upstream.execute(streaming_request(), ProtocolId::OPENAI_RESPONSES))
+        .expect("an expiry code beside other words is refreshed and retried");
+    assert_eq!(host.http().calls().len(), 3);
+}
+
+#[test]
+fn unrelated_error_code_401_is_not_retried() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        401,
+        &[("content-type", "application/json")],
+        br#"{"error":{"code":"permission_denied"}}"#.to_vec(),
+    );
+    let upstream = upstream_for(&host, &id);
+    let error = block_on(upstream.execute(streaming_request(), ProtocolId::OPENAI_RESPONSES))
+        .err()
+        .expect("401");
+    assert_eq!(error.status(), Some(401));
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
 fn other_401_is_not_retried() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
