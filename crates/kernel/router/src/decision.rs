@@ -486,6 +486,27 @@ mod tests {
     }
 
     #[test]
+    fn v4_google_schema_400_failover_classification() {
+        let schema = r#"{"error":{"code":400,"message":"* GenerateContentRequest.tools[0].function_declarations[17].parameters.properties[batch].items: missing field.\n* GenerateContentRequest.tools[0].function_declarations[18].parameters.properties[items].items: missing field.\n","status":"INVALID_ARGUMENT"}}"#;
+        let error = PluginError::status_error(400, schema);
+        assert!(allows(&error, false, &none()));
+        assert!(asks_next(&error));
+        assert!(!rests(&error));
+        let name = PluginError::status_error(
+            400,
+            r#"{"error":{"code":400,"message":"* GenerateContentRequest.tools[0].function_declarations[2].name: Invalid function name.","status":"INVALID_ARGUMENT"}}"#,
+        );
+        assert!(!asks_next(&name));
+        let contents = PluginError::status_error(
+            400,
+            r#"{"error":{"code":400,"message":"* GenerateContentRequest.contents: contents is not specified\n","status":"INVALID_ARGUMENT"}}"#,
+        );
+        assert!(!asks_next(&contents));
+        let server = PluginError::status_error(500, schema);
+        assert!(!asks_next(&server));
+    }
+
+    #[test]
     fn every_list_compiles() {
         for list in [
             &QUOTA_WORDS,

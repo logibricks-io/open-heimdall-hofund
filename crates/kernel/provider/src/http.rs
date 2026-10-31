@@ -1,7 +1,7 @@
 //! Shared HTTP execution for the protocol adapters.
 
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -158,6 +158,9 @@ pub(crate) struct Upstream {
     url: String,
     headers: HeaderMap,
     quirks: Option<&'static Profile>,
+    base_url: String,
+    preset: Option<String>,
+    state: Arc<hofund_quirks::RequestState>,
     allocation_quota_rate: bool,
 }
 
@@ -236,6 +239,9 @@ impl Upstream {
             url,
             headers,
             quirks: endpoint.quirks,
+            base_url: endpoint.base_url,
+            preset: endpoint.preset.clone(),
+            state: Arc::new(hofund_quirks::RequestState::default()),
             allocation_quota_rate: matches!(endpoint.preset.as_deref(), Some("qwen" | "qwen-cn")),
         })
     }
@@ -325,6 +331,14 @@ pub(crate) fn prepare_body(
     if let Some(profile) = upstream.quirks {
         hofund_quirks::apply(profile, &mut request);
     }
+    hofund_quirks::apply_before_encode(
+        hofund_quirks::EncodedContext {
+            base_url: &upstream.base_url,
+            preset: upstream.preset.as_deref(),
+            protocol: codec.id(),
+        },
+        &mut request,
+    );
     let cross_protocol = codec.id() != inbound_protocol;
     if cross_protocol {
         warn_unmapped(&request);
@@ -339,7 +353,15 @@ pub(crate) fn prepare_body(
     if let Some(prepare) = prepare {
         body = prepare(&body).map_err(|error| ProviderError::decode(error.to_string()))?;
     }
-    Ok(body)
+    Ok(hofund_quirks::apply_encoded_with_state(
+        hofund_quirks::EncodedContext {
+            base_url: &upstream.base_url,
+            preset: upstream.preset.as_deref(),
+            protocol: codec.id(),
+        },
+        &upstream.state,
+        &body,
+    ))
 }
 
 pub(crate) async fn post_json(
@@ -532,23 +554,50 @@ async fn send<'a>(
 ) -> Result<Sent<'a>, ProviderError> {
     let cross_protocol = codec.id() != inbound_protocol;
     let streaming = request.stream;
+    let model = request.model.clone();
     let whole = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
     let shortened = hook.and_then(|hook| hook.prepare(route, &whole));
     let delta = shortened.is_some();
-    let body = shortened.unwrap_or_else(|| whole.clone());
-    let mut response = send_json(upstream, url, body).await?;
-    if !response.status().is_success() {
+    let mut body = shortened.unwrap_or_else(|| whole.clone());
+    let mut response = send_json(upstream, url, body.clone()).await?;
+    let mut root_retried = false;
+    let mut token_retried = false;
+    while !response.status().is_success() {
         let status = response.status();
         let retry_after = explicit_retry_after(response.headers());
         let reset_after = reset_after(response.headers());
         let bytes = response.bytes().await.unwrap_or_default();
+        if status.as_u16() == 400 && !root_retried && hofund_quirks::root_union_refusal(&bytes) {
+            let (folded, changed) = hofund_quirks::fold_encoded(codec.id(), &body);
+            if changed {
+                root_retried = true;
+                upstream.state.learn_root_union(&model);
+                body = folded;
+                response = send_json(upstream, url, body.clone()).await?;
+                continue;
+            }
+        }
+        if status.as_u16() == 400
+            && codec.id() == "openai-chat"
+            && !token_retried
+            && let Some(wanted) = hofund_quirks::token_field_wanted(&bytes)
+        {
+            let (renamed, changed) = hofund_quirks::with_token_field(&body, wanted);
+            if changed {
+                token_retried = true;
+                upstream.state.learn_token_field(wanted);
+                body = renamed;
+                response = send_json(upstream, url, body.clone()).await?;
+                continue;
+            }
+        }
         let refused = delta
             && matches!(status.as_u16(), 400 | 404 | 422)
             && hook.is_some_and(|hook| {
                 hook.refused(route, status.as_u16(), &bytes[..bytes.len().min(1 << 20)])
             });
         if refused {
-            response = send_json(upstream, url, whole).await?;
+            response = send_json(upstream, url, whole.clone()).await?;
             if !response.status().is_success() {
                 return Err(response_error(response, upstream.allocation_quota_rate).await);
             }

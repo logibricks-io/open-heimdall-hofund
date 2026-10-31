@@ -12,6 +12,10 @@
 //! adapter strips those two fields before it posts: the model is the path,
 //! and `stream` selects `streamGenerateContent`.
 
+mod plain_schema;
+
+pub use plain_schema::{plain_code_assist_tools, plain_schema};
+
 use std::collections::BTreeMap;
 
 use hofund_ir::{

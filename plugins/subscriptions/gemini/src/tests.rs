@@ -1016,6 +1016,46 @@ fn envelope_adds_project_and_prompt_id() {
 }
 
 #[test]
+fn v1_code_assist_flattens_function_declaration_schemas() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let (sub, id) = ready(&host, Some("proj-9"));
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let request: hofund_plugin_api::Request =
+        hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+            "model": "gemini-2.5-pro",
+            "messages": [],
+            "tools": [{
+                "name": "write",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "rows": {"type": "array", "items": true},
+                        "mode": {"enum": ["fast", "slow"]}
+                    },
+                    "additionalProperties": false
+                }
+            }]
+        }))
+        .expect("request");
+    block_on(upstream.execute(request, ProtocolId::GENERATIVE_LANGUAGE)).expect("execute");
+    let call = &host.http().calls()[1];
+    let sent: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(call.body()).expect("json body");
+    let parameters = &sent["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
+    assert_eq!(
+        parameters["properties"]["rows"]["items"],
+        hofund_plugin_sdk::json::json!({})
+    );
+    assert!(parameters.get("additionalProperties").is_none());
+    assert_eq!(
+        parameters["properties"]["mode"]["enum"],
+        hofund_plugin_sdk::json::json!(["fast", "slow"])
+    );
+}
+
+#[test]
 fn the_configured_project_is_used_when_none_is_stored() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

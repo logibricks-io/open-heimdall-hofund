@@ -23,7 +23,7 @@ mod sse;
 pub use anthropic::AnthropicMessages;
 pub use converse::Converse;
 pub use error::CodecError;
-pub use generative::GenerativeLanguage;
+pub use generative::{GenerativeLanguage, plain_code_assist_tools, plain_schema};
 pub use openai_chat::OpenAiChat;
 pub use openai_responses::{OpenAiResponses, UNMAPPED_TOOLS};
 pub use passthrough::RawTap;
