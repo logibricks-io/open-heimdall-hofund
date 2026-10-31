@@ -190,12 +190,24 @@ fn unknown_kind(event: &hofund_ir::UnknownEvent) -> Kind {
             | "response.metadata"
             | "content_block_stop"
             | "response.content_part.done"
-    ) || name.starts_with("codex.")
+    ) || extension_event(name)
     {
         Kind::Lead
     } else {
         Kind::Content
     }
+}
+
+/// A client-extension event (the namespace of
+/// [`hofund_plugin_api::responses_ws::RATE_LIMITS_EVENT`]) carries no reply
+/// content, so it never counts as having spoken.
+fn extension_event(name: &str) -> bool {
+    hofund_plugin_api::responses_ws::RATE_LIMITS_EVENT
+        .split_once('.')
+        .is_some_and(|(namespace, _)| {
+            name.strip_prefix(namespace)
+                .is_some_and(|rest| rest.starts_with('.'))
+        })
 }
 
 fn shift(event: StreamEvent, offset: u32) -> StreamEvent {
@@ -495,4 +507,21 @@ pub(super) fn body(
         },
         State::next,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extension_event;
+    use hofund_plugin_api::responses_ws::RATE_LIMITS_EVENT;
+
+    #[test]
+    fn b9p_client_extension_events_are_not_reply_content() {
+        let namespace = RATE_LIMITS_EVENT.split_once('.').map(|(head, _)| head);
+        let namespace = namespace.unwrap_or_default();
+        assert!(extension_event(RATE_LIMITS_EVENT));
+        assert!(extension_event(&format!("{namespace}.other")));
+        assert!(!extension_event(namespace));
+        assert!(!extension_event(&format!("{namespace}x.other")));
+        assert!(!extension_event("response.output_text.delta"));
+    }
 }
