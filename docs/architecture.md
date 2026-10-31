@@ -350,6 +350,34 @@ and stream outcomes, but counts never record success and cool only on 429 or
 transport-class failures. The router only orders members, putting ready members
 first and retaining the soonest cooling member as a probe.
 
+## Failover decisions
+
+`crates/kernel/router/src/decision.rs` decides, before any reply byte, whether
+the next member is asked. The order is fixed:
+
+1. A context overflow (413, or a body naming the context or token limit) is
+   never a plain failover. Members of the same provider and wire model are
+   skipped, and so are members whose known context window is at or below the
+   estimated input tokens (a 413 only skips the same model). Members with an
+   unknown window are asked. If none is left, the overflow goes back to the
+   client in its own protocol. An overflow never rests the member.
+2. The statuses in `failover.statuses` fail over. The default is 401, 402, 403,
+   404, 408, 429, and 500 to 599.
+3. Some replies fail over by their body words even with a status not in
+   `failover.statuses`: a retired model on any status, an edge block on any
+   error status, a credit reply on any 4xx, and quota, unserved-model,
+   refusal, request-shape, unsupported-parameter, wrong-endpoint, or region
+   wording on a 400 or 422. Narrowing `statuses` does not turn these off.
+   Escaped (`\u`) JSON text is read decoded as well.
+4. A response-protection refusal skips every member of the same provider, and
+   a request-shape refusal asks the next member, whatever the status list
+   says. Neither rests the member, nor does a refusal of the prompt.
+5. A 400, 413, 422, or 5xx with no clear cause, on a member whose known window
+   is below the estimated input times 1.2, is told to the client as a prompt
+   too long, and the overflow rule above applies.
+
+Connect, timeout, and interrupted-body errors follow `failover.connect_errors`.
+
 ## What is intentionally absent
 
 - Routing strategies other than ordered failover.

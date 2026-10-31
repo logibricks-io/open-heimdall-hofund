@@ -71,6 +71,7 @@ fn hop(
         }),
         wire_model: wire.map(str::to_owned),
         max_output_tokens: None,
+        context_window: None,
     }
 }
 
@@ -175,10 +176,6 @@ async fn a_refusal_stops_at_the_member_that_refused() {
             Some(400),
         ),
         (|| Err(PluginError::auth("no key")), None),
-        (
-            || Err(PluginError::status_error(403, "forbidden")),
-            Some(403),
-        ),
     ] {
         let seen = seen();
         let router = router(vec![
@@ -273,6 +270,7 @@ async fn a_member_without_forward_is_passed_over_as_unsupported() {
             member: Arc::new(Plain(member_id("plain"))),
             wire_model: None,
             max_output_tokens: None,
+            context_window: None,
         }],
     );
     let only_plain = Router::from_hops(routes, FailoverPolicy::default());

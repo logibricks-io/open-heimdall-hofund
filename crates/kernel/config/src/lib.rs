@@ -58,7 +58,10 @@ impl Default for Failover {
     fn default() -> Self {
         Self {
             connect_errors: true,
-            statuses: [429, 500, 502, 503, 504].into_iter().collect(),
+            statuses: [401, 402, 403, 404, 408, 429]
+                .into_iter()
+                .chain(500..=599)
+                .collect(),
         }
     }
 }
@@ -1093,7 +1096,10 @@ impl Default for RawFailover {
 }
 
 fn default_statuses() -> BTreeSet<u16> {
-    [429, 500, 502, 503, 504].into_iter().collect()
+    [401, 402, 403, 404, 408, 429]
+        .into_iter()
+        .chain(500..=599)
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -1240,7 +1246,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{Accounts, ConfigError, ListenSource, effective_listen, load};
+    use super::{Accounts, ConfigError, Failover, ListenSource, effective_listen, load};
 
     #[test]
     fn effective_listen_prefers_hofund_addr() {
@@ -1350,6 +1356,15 @@ mod tests {
     }
 
     #[test]
+    fn default_failover_lists_auth_and_every_server_status() {
+        let statuses = Failover::default().statuses;
+        for status in [401, 402, 403, 404, 408, 429, 500, 599] {
+            assert!(statuses.contains(&status), "{status}");
+        }
+        assert!(!statuses.contains(&400));
+    }
+
+    #[test]
     fn defaults_and_a_route_parse() {
         let config = load(
             r#"
@@ -1364,7 +1379,13 @@ mod tests {
         )
         .expect("config");
         assert_eq!(config.listen.to_string(), "127.0.0.1:3425");
-        assert_eq!(config.failover.statuses, [429, 500, 502, 503, 504].into());
+        assert_eq!(
+            config.failover.statuses,
+            [401, 402, 403, 404, 408, 429]
+                .into_iter()
+                .chain(500..=599)
+                .collect()
+        );
         assert_eq!(
             config.providers[0].protocol.as_deref(),
             Some("openai-responses")
