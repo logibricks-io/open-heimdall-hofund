@@ -744,6 +744,61 @@ fn verify_store_released(label: &str, home: &Path, store: &MemoryCredentialStore
     );
 }
 
+/// Parses JSON with comments and trailing commas for a simulated user edit.
+pub fn parse_jsonc(text: &str) -> serde_json::Value {
+    let mut normalized = String::new();
+    let mut chars = text.chars().peekable();
+    let mut string = false;
+    let mut escaped = false;
+    while let Some(character) = chars.next() {
+        if string {
+            normalized.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => {
+                string = true;
+                normalized.push(character);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        normalized.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = '\0';
+                for next in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+            }
+            ',' => {
+                let rest = chars.clone().collect::<String>();
+                let trimmed = rest.trim_start();
+                if !trimmed.starts_with(['}', ']']) {
+                    normalized.push(',');
+                }
+            }
+            other => normalized.push(other),
+        }
+    }
+    serde_json::from_str(&normalized).expect("edit JSONC")
+}
+
 fn add_user_edits(
     description: &'static AgentDescription,
     os: TargetOs,
@@ -764,7 +819,7 @@ fn add_user_edits(
         };
         text = match kind {
             FileKind::Json => {
-                let mut value: serde_json::Value = serde_json::from_str(&text).expect("edit JSON");
+                let mut value = parse_jsonc(&text);
                 let added = serde_json::Value::String("keep".to_owned());
                 // A root array gets the user's own object appended.
                 if let Some(items) = value.as_array_mut() {

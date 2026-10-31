@@ -39,13 +39,18 @@ struct Daemon {
 
 impl Daemon {
     async fn start(text: &str) -> Self {
+        Self::start_cased(text, "hofund.toml").await
+    }
+
+    async fn start_cased(text: &str, start_name: &str) -> Self {
         let config_dir = tempfile::tempdir().expect("config dir");
         let runtime_dir = tempfile::tempdir().expect("runtime dir");
         std::fs::create_dir_all(runtime_dir.path().join("home")).expect("home");
         let path = config_dir.path().join("hofund.toml");
         std::fs::write(&path, text).expect("config");
+        let start_path = config_dir.path().join(start_name);
         let running = start_with_options(
-            &path,
+            &start_path,
             StartOptions {
                 control_listen: Some("127.0.0.1:0".parse().expect("control address")),
                 control_runtime: Some(ControlRuntime::new(None, runtime_dir.path().to_path_buf())),
@@ -217,5 +222,33 @@ async fn watcher_skips_daemon_write_when_revisions_match() {
     assert_eq!(status.generation, 2);
     assert_eq!(status.runtime_revision, revision(&candidate));
     drop(stream);
+    support::shutdown(daemon.running).await;
+}
+
+#[tokio::test]
+async fn watcher_matches_on_disk_name_after_differently_cased_edit() {
+    let probe_dir = tempfile::tempdir().expect("case probe dir");
+    let probe = probe_dir.path().join("case-probe");
+    std::fs::write(&probe, "probe").expect("case probe");
+    if !probe_dir.path().join("CASE-PROBE").exists() {
+        return;
+    }
+    drop(probe_dir);
+
+    let original = config("");
+    let daemon = Daemon::start_cased(&original, "HOFUND.TOML").await;
+    let mut stream = daemon.events().await;
+    let mut buffer = String::new();
+    let edited = config("# edited through another case\n");
+    std::fs::write(daemon.path.with_file_name("HoFuNd.ToMl"), &edited).expect("hand edit");
+
+    match next_event(&mut stream, &mut buffer, Duration::from_secs(3)).await {
+        Some((name, EventPayload::ConfigReloaded(event))) => {
+            assert_eq!(name, "config_reloaded");
+            assert_eq!(event.generation, 2);
+            assert_eq!(event.runtime_revision, revision(&edited));
+        }
+        other => panic!("expected config_reloaded, got {other:?}"),
+    }
     support::shutdown(daemon.running).await;
 }

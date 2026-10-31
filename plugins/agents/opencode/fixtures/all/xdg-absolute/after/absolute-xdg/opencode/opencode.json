@@ -1,8 +1,6 @@
 {
   "model": "absolute-model",
-  "plugin": [
-    "absolute"
-  ],
+  "plugin": ["absolute"],
   "provider": {
     "hofund": {
       "name": "hofund",

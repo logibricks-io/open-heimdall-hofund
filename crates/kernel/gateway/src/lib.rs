@@ -9,6 +9,7 @@ pub mod control;
 mod endpoints;
 mod prev_response;
 mod relisten;
+mod responses_ws;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 #[doc(hidden)]
@@ -263,6 +264,10 @@ fn unix_ms_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Maximum graceful drain for a control listener before its connections close.
+#[doc(hidden)]
+pub const CONTROL_DRAIN: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// A bound server.
 pub struct Running {
     /// The address the listener accepted at start. After a relisten,
@@ -275,7 +280,8 @@ pub struct Running {
     control_addr: Option<SocketAddr>,
     control_socket_path: Option<PathBuf>,
     resources: Vec<Box<dyn std::any::Any + Send>>,
-    shutdown_request: Option<watch::Receiver<bool>>,
+    shutdown_request: Option<(watch::Sender<bool>, watch::Receiver<bool>)>,
+    drain_bound: Option<std::time::Duration>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
 }
@@ -418,7 +424,9 @@ impl Gateway {
         if !self.inner.surfaces.is_empty() {
             routes = routes.fallback(dispatch_surface);
         }
-        routes.with_state(Arc::clone(&self.inner))
+        routes
+            .with_state(Arc::clone(&self.inner))
+            .layer(axum::middleware::from_fn(responses_ws::path_guard))
     }
 
     /// Binds `listen` and serves until [`Running`] shuts down.
@@ -475,6 +483,7 @@ impl Running {
             control_socket_path: None,
             resources: Vec::new(),
             shutdown_request: None,
+            drain_bound: None,
             relisten: None,
             fatal: None,
         }
@@ -536,11 +545,11 @@ impl Running {
         self.fatal.as_ref().and_then(|fatal| fatal.borrow().clone())
     }
 
-    /// Attaches the flag a control client sets to request shutdown.
+    /// Attaches the flag a control client or embedded shutdown sets to request shutdown.
     #[doc(hidden)]
     #[must_use]
-    pub fn with_shutdown_request(mut self, request: watch::Receiver<bool>) -> Self {
-        self.shutdown_request = Some(request);
+    pub fn with_shutdown_request(mut self, request: watch::Sender<bool>) -> Self {
+        self.shutdown_request = Some((request.clone(), request.subscribe()));
         self
     }
 
@@ -553,7 +562,7 @@ impl Running {
     pub async fn shutdown_requested(&mut self) {
         let (request, fatal) = (self.shutdown_request.as_mut(), self.fatal.as_mut());
         let requested = async {
-            let Some(request) = request else {
+            let Some((_, request)) = request else {
                 return std::future::pending().await;
             };
             if request.wait_for(|requested| *requested).await.is_err() {
@@ -572,6 +581,12 @@ impl Running {
             () = requested => {}
             () = fatal => {}
         }
+    }
+
+    /// Bounds the graceful drain for a control listener.
+    fn with_control_drain(mut self) -> Self {
+        self.drain_bound = Some(CONTROL_DRAIN);
+        self
     }
 
     /// Attaches a background task aborted by both shutdown and drop.
@@ -622,8 +637,16 @@ impl Running {
         self.control_socket_path.as_deref()
     }
 
+    fn request_shutdown(&self) {
+        if let Some((request, _)) = &self.shutdown_request {
+            request.send_replace(true);
+        }
+    }
+
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
+    /// Control listeners close connections that outlast their drain deadline.
     pub async fn shutdown(mut self) {
+        self.request_shutdown();
         for task in self.attached.drain(..) {
             task.abort();
         }
@@ -633,8 +656,18 @@ impl Running {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
+        if let Some(mut task) = self.task.take() {
+            match self.drain_bound {
+                Some(bound) => {
+                    if tokio::time::timeout(bound, &mut task).await.is_err() {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                }
+                None => {
+                    let _ = task.await;
+                }
+            }
         }
     }
 }
@@ -658,13 +691,22 @@ fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
         .route("/v1/models", get(models));
     let generative =
         inner.codecs.contains_key(GENERATIVE_UNARY) || inner.codecs.contains_key(GENERATIVE_STREAM);
+    let responses = inner
+        .codecs
+        .values()
+        .any(|codec| codec.id() == ProtocolId::OPENAI_RESPONSES.as_str());
     let paths: Vec<String> = inner.codecs.keys().cloned().collect();
     let messages = paths.iter().any(|path| path == "/v1/messages");
     for path in paths {
-        if path.contains('{') {
+        if path.contains('{') || responses && responses_ws::is_responses_path(&path) {
             continue;
         }
         routes = routes.route(&path, post(complete));
+    }
+    if responses {
+        routes = routes
+            .route("/v1/responses", post(complete).get(responses_ws::get))
+            .route("/responses", post(complete).get(responses_ws::get));
     }
     if messages {
         routes = routes.route("/v1/messages/count_tokens", post(complete));
@@ -674,7 +716,7 @@ fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
             .route(GENERATIVE_CATCHALL, post(complete))
             .route(GENERATIVE_LIST, get(generative_models));
     }
-    routes
+    routes.fallback(not_found)
 }
 
 /// The gateway's codec routes, run in process for an inbound surface.
@@ -814,7 +856,17 @@ fn forwarded_tokens(body: &[u8]) -> (Option<i64>, Option<i64>) {
     (input, count("/usage/output_tokens"))
 }
 
+async fn not_found(request: Request) -> Response {
+    if responses_ws::wants_socket(request.method(), request.headers()) {
+        return responses_ws::upgrade_required();
+    }
+    text_response(StatusCode::NOT_FOUND, "not found")
+}
+
 async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Response {
+    if responses_ws::wants_socket(request.method(), request.headers()) {
+        return responses_ws::upgrade_required();
+    }
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let Some(surface) = app.surfaces.iter().find(|surface| {
@@ -1005,10 +1057,15 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         return count_tokens(app, headers, uri, request, GENERATIVE_UNARY, Some(model)).await;
     }
     let matched = match_generate(&path);
+    let codec_path = if path == "/responses" {
+        "/v1/responses"
+    } else {
+        path.as_str()
+    };
     let codec_key = matched
         .as_ref()
         .map(|route| route.key)
-        .unwrap_or(path.as_str());
+        .unwrap_or(codec_path);
     let Some(codec) = app.codecs.get(codec_key).cloned() else {
         return text_response(StatusCode::NOT_FOUND, "not found");
     };

@@ -831,5 +831,6 @@ kernel::SecretsBackend
 kernel::SecretsBackend::async fn get (& self , plugin : & PluginKey , id : & str) -> Result < Option < SecretString > , PluginError >
 kernel::fn expose_secret (secret : & SecretString) -> & str
 mod kernel
+mod responses_ws
 redact_token
 safe_url

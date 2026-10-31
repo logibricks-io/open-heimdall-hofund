@@ -1,4 +1,4 @@
-# dropped on apply, restored on revert
+# kept on apply and token refresh
 theme: dark
 extensions:
   developer:

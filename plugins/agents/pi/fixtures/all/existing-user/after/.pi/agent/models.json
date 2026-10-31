@@ -4,11 +4,7 @@
       "baseUrl": "http://localhost:11434/v1",
       "api": "openai-completions",
       "apiKey": "ollama",
-      "models": [
-        {
-          "id": "llama3.1:8b"
-        }
-      ]
+      "models": [{ "id": "llama3.1:8b" }]
     },
     "hofund": {
       "name": "hofund",

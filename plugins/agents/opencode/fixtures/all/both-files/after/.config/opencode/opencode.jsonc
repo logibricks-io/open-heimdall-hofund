@@ -1,8 +1,7 @@
 {
+  // JSONC wins when both files exist.
   "model": "jsonc-model",
-  "plugin": [
-    "jsonc"
-  ],
+  "plugin": ["jsonc"],
   "provider": {
     "hofund": {
       "name": "hofund",

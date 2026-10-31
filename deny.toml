@@ -56,6 +56,7 @@ skip = [
     { crate = "indexmap@1.9.3", reason = "schemars 0.8, via tauri-utils, depends on indexmap 1 while hyper depends on indexmap 2" },
     { crate = "miniz_oxide@0.8.9", reason = "png 0.18, via the menu-bar icons, depends on miniz_oxide 0.8 while flate2 depends on 0.9" },
     { crate = "proc-macro-crate@1.3.1", reason = "gtk3-macros 0.18 depends on proc-macro-crate 1 while glib-macros depends on 2" },
+    { crate = "rand_core@0.9.5", reason = "tungstenite 0.29 depends on rand 0.9 while proptest uses rand_core 0.10" },
     { crate = "serde_spanned@0.6.9", reason = "system-deps 6 depends on toml 0.8 and serde_spanned 0.6 while the workspace toml uses 1" },
     { crate = "syn@1.0.109", reason = "glib-macros 0.18 depends on proc-macro-error and syn 1 while the workspace uses syn 3" },
     { crate = "syn@2.0.119", reason = "tauri-utils depends on derive_more, which depends on syn 2, while the workspace uses syn 3" },

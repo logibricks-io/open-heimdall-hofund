@@ -1,10 +1,6 @@
 {
-  "model": {
-    "name": "absolute-model"
-  },
-  "ui": {
-    "theme": "dark"
-  },
+  "model": { "name": "absolute-model" },
+  "ui": { "theme": "dark" },
   "user_added": "keep",
   "security": {
     "auth": {

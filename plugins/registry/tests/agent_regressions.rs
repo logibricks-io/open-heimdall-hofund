@@ -958,9 +958,16 @@ fn shipped_vscode_clear_restores_previous_default_model() {
     let plan = agent.apply(&session, &target).expect("apply");
     assert_eq!(plan.changes().len(), 1, "{plan:?}");
     let read = |path: &Path| -> serde_json::Value {
-        serde_json::from_slice(&fs::read(path).expect("read")).expect("json")
+        hofund_kit_agent::parse_jsonc(
+            std::str::from_utf8(&fs::read(path).expect("read")).expect("UTF-8"),
+        )
     };
     let groups = read(&models);
+    assert!(
+        fs::read_to_string(&models)
+            .expect("models")
+            .contains("// mine")
+    );
     assert_eq!(groups[0]["name"], "local");
     assert_eq!(groups[1]["name"], "hofund");
     assert_eq!(
@@ -1301,7 +1308,8 @@ fn shipped_cline_writes_providers_only_for_a_pick() {
     assert!(!dir.join("models.json").exists());
 }
 
-const KIMI_CONFIG: &str = r#"default_model = "kimi-code/kimi-for-coding"
+const KIMI_CONFIG: &str = r#"# my model choice
+default_model = "kimi-code/kimi-for-coding"
 
 # mine
 [providers."managed:kimi-code"]
@@ -1325,6 +1333,11 @@ fn shipped_kimi_clear_restores_default_model_when_table_exists() {
     let target = target();
     let agent = adapter("kimi", TargetOs::Linux);
     agent.apply(&session, &target).expect("apply");
+    assert!(
+        fs::read_to_string(&path)
+            .expect("apply")
+            .contains("# my model choice")
+    );
     let read = || -> toml::Table {
         toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml")
     };
@@ -1344,6 +1357,11 @@ fn shipped_kimi_clear_restores_default_model_when_table_exists() {
     agent
         .set_model(&session, &target, Some("route-a"))
         .expect("pick");
+    assert!(
+        fs::read_to_string(&path)
+            .expect("pick")
+            .contains("# my model choice")
+    );
     assert_eq!(read()["default_model"].as_str(), Some("hofund/route-a"));
     assert_eq!(
         agent.configured_model(&session).expect("model").as_deref(),
@@ -1355,9 +1373,16 @@ fn shipped_kimi_clear_restores_default_model_when_table_exists() {
         read()["default_model"].as_str(),
         Some("kimi-code/kimi-for-coding")
     );
+    let cleared_text = fs::read_to_string(&path).expect("clear");
+    assert!(cleared_text.contains("# my model choice"), "{cleared_text}");
     agent
         .set_model(&session, &target, Some("route-a"))
         .expect("pick again");
+    assert!(
+        fs::read_to_string(&path)
+            .expect("pick")
+            .contains("# my model choice")
+    );
     agent.disconnect(&session, false).expect("disconnect");
     assert_eq!(fs::read_to_string(&path).expect("read"), KIMI_CONFIG);
 }
@@ -1510,6 +1535,24 @@ fn shipped_grok_pick_in_a_fresh_home_leaves_nothing_after_disconnect() {
     assert!(!path.exists());
 }
 
+#[test]
+fn shipped_hermes_connect_keeps_the_yaml_comment() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".hermes").join("config.yaml");
+    let original = "# my hermes setup\nmodel:\n  provider: openrouter\nproviders:\n  local:\n    base_url: http://localhost:8080/v1\n";
+    write(&path, original);
+    let target = target();
+    let agent = adapter("hermes", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    let connected = fs::read_to_string(&path).expect("connected");
+    assert!(connected.starts_with("# my hermes setup\n"), "{connected}");
+    assert!(connected.contains("  hofund:\n"), "{connected}");
+    assert!(connected.contains("    base_url: \"http://127.0.0.1:3425/v1\"\n"));
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(fs::read_to_string(&path).expect("restored"), original);
+}
+
 const GOOSE_CONFIG: &str = "# my goose settings
 GOOSE_MODE: smart_approve
 active_provider: anthropic
@@ -1550,10 +1593,9 @@ fn shipped_goose_pick_makes_hofund_active_and_clear_gives_the_user_provider_back
         .expect("pick");
     let picked = fs::read_to_string(&path).expect("read");
     assert!(picked.contains("active_provider: hofund\n"), "{picked}");
-    // The YAML editor drops the user's comment (#414); the keys stay.
     assert_eq!(
         picked,
-        "GOOSE_MODE: smart_approve\nactive_provider: hofund\nproviders:\n  anthropic:\n    enabled: true\n    model: claude-sonnet-4-5\n    configured: true\n  hofund:\n    enabled: true\n    configured: true\n    model: route-a\n"
+        "# my goose settings\nGOOSE_MODE: smart_approve\nactive_provider: hofund\nproviders:\n  anthropic:\n    enabled: true\n    model: claude-sonnet-4-5\n    configured: true\n  hofund:\n    enabled: true\n    configured: true\n    model: route-a\n"
     );
     assert_eq!(
         agent.configured_model(&session).expect("model").as_deref(),
@@ -1563,14 +1605,14 @@ fn shipped_goose_pick_makes_hofund_active_and_clear_gives_the_user_provider_back
     // Clearing puts the user's provider back and drops hofund's entry.
     agent.set_model(&session, &target, None).expect("clear");
     let cleared = fs::read_to_string(&path).expect("read");
-    assert_eq!(cleared, GOOSE_CONFIG.replace("# my goose settings\n", ""));
+    assert_eq!(cleared, GOOSE_CONFIG);
     assert_eq!(agent.configured_model(&session).expect("model"), None);
     agent
         .set_model(&session, &target, Some("route-a"))
         .expect("pick again");
     agent.disconnect(&session, false).expect("disconnect");
     let restored = fs::read_to_string(&path).expect("read");
-    assert_eq!(restored, GOOSE_CONFIG.replace("# my goose settings\n", ""));
+    assert_eq!(restored, GOOSE_CONFIG);
     assert!(
         !home
             .join(".config/goose/custom_providers/hofund.json")
@@ -1720,9 +1762,8 @@ fn shipped_zed_keeps_its_key_in_the_store_and_gives_the_user_model_back() {
     agent.apply(&session, &target).expect("apply");
     let applied = fs::read_to_string(&path).expect("read");
     assert!(!applied.contains("local-token"), "{applied}");
-    // The JSON editor reads the comments but does not keep them while
-    // connected (#145); an exact disconnect brings them back.
-    assert!(!applied.contains("// keep this note"), "{applied}");
+    assert!(applied.starts_with("// Zed settings\n"), "{applied}");
+    assert!(applied.contains("// keep this note"), "{applied}");
     let items = store.items();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].url(), "http://127.0.0.1:3425/v1");
@@ -1745,8 +1786,7 @@ fn shipped_zed_keeps_its_key_in_the_store_and_gives_the_user_model_back() {
     agent
         .set_model(&session, &target, Some("route-a"))
         .expect("pick");
-    let picked: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+    let picked = hofund_kit_agent::parse_jsonc(&fs::read_to_string(&path).expect("read"));
     assert_eq!(
         picked["agent"]["default_model"],
         serde_json::json!({ "provider": "hofund", "model": "route-a" })
@@ -1754,8 +1794,7 @@ fn shipped_zed_keeps_its_key_in_the_store_and_gives_the_user_model_back() {
     agent.set_model(&session, &target, None).expect("clear");
     // Zed reads default_model only whole, so clearing puts back the user's
     // object rather than leaving a provider with no model.
-    let cleared: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+    let cleared = hofund_kit_agent::parse_jsonc(&fs::read_to_string(&path).expect("read"));
     assert_eq!(
         cleared["agent"]["default_model"],
         serde_json::json!({ "provider": "anthropic", "model": "claude-sonnet-4" })
