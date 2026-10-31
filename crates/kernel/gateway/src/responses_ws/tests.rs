@@ -1377,7 +1377,12 @@ async fn e4_other_paths_still_refuse_sockets_and_plain_get_uses_the_surface() {
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let surface = Arc::new(BackendSurface::default());
     let app = backend_gateway(vec![fake.member()], None, usage, None, Arc::clone(&surface));
-    for path in ["/backend-api/agent/models", "/v1/models", "/other"] {
+    for path in [
+        "/backend-api/agent/models",
+        "/backend-api/agent/responses/compact",
+        "/v1/models",
+        "/other",
+    ] {
         let response = app
             .clone()
             .oneshot(
