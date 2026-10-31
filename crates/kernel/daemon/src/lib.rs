@@ -39,6 +39,7 @@ mod events;
 mod membership;
 mod models;
 mod models_state;
+mod offline;
 mod one_shot;
 mod registry;
 mod rests;
@@ -900,6 +901,7 @@ fn providers(
                 plugin_id,
                 preset_id: provider.preset.clone().unwrap_or_default(),
                 fingerprint,
+                base_url: endpoint.base_url.clone(),
             },
         );
         instances.insert(provider.id.clone(), instance);

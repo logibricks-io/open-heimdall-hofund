@@ -360,7 +360,19 @@ restores configured members at startup, keeps ended rungs for 35 days, ignores
 corrupt files without failing startup, and lets in-process state win. Rate,
 quota, generic, observation, flat-credit, and subscription rests remain
 in-memory. The daemon records call and stream outcomes, but counts never record
-success and cool only on 429 or transport-class failures. The router only orders
+success and cool only on 429 or transport-class failures.
+
+A failure that says no connection was made (a connect error, or a 502,
+transport, or I/O error naming a refused dial or failed lookup) does not rest
+the member when this computer has no network
+(`crates/kernel/daemon/src/offline.rs`). The network is only checked when no
+upstream answered in the last 15 seconds: the check needs a route out with a
+usable local address, then dials up to three other providers (not the failing
+one, and not hosts on this computer or its local network) for 2 seconds each.
+No connection means offline; with nothing else to dial, a route out counts as
+online. The answer is kept for 5 seconds and one request asks at a time.
+Offline, the next member is still asked, and the last member's failure goes to
+the client, but nobody rests. The router only orders
 members, putting ready members first and retaining the soonest cooling member
 as a probe.
 

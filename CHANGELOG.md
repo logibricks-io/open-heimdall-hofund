@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A connection failure while this computer has no network no longer rests
+  route members: unless an upstream answered in the last 15 seconds, the daemon
+  checks for a route out and dials other providers, and an offline verdict
+  passes the failure on without a rest (P0-3b3 b8).
 - Code Assist tool schemas are flattened to the accepted plain subset (V-1),
   including local reference expansion, cycle handling, union folding, boolean
   schemas, keyword filtering, and array item defaults. Ordinary Generative
