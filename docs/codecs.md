@@ -239,6 +239,45 @@ Checked 2026-10-25 against the Responses tool list and against
 `callTo`, `web_search` not offered as a function, client `tool_search`) and
 `internal/gateway/custom_tool.go` (`customStream`).
 
+## A Responses WebSocket
+
+`GET /v1/responses` and `GET /responses` accept a WebSocket upgrade. A
+plain GET still answers 405 with `Allow: POST`; an upgrade on any other path
+answers 426. Text frames are `response.create` objects and turns run one at a
+time in arrival order. Binary frames close with 1003, malformed requests get a
+400 error frame, and the message read limit is the same 8 MiB as the HTTP body
+limit.
+
+Each create is replayed through the ordinary Responses POST handler with the
+upgrade request's URI, Host, peer data, and non-hop-by-hop headers. Socket
+handshake headers are removed, JSON and SSE are requested, and client metadata
+supplies the turn-state and responses-lite headers. Authentication, body
+limits, routing, failover, usage rows, and request events therefore apply to
+every turn again; rotating the token does not close the socket, but the old
+credential fails its next turn.
+
+The socket keeps only its own last two completed replies, plus a locally
+answered `generate: false` warmup. A continuation names one of those ids in
+`previous_response_id`; its held input and output items are prepended to the
+new input. An unknown, evicted, failed, or other-socket id gets
+`previous_response_not_found`. A warmup gets `response.created` followed by
+`response.completed` with zero usage and a fresh `resp_` id, without an
+upstream call.
+
+SSE replies become one text frame per JSON event. Unary Responses become a
+created event, output-item done events, and the matching terminal event.
+Response headers become metadata and rate-limit frames; HTTP failures become
+error frames with their status, error object, and retry/rate-limit headers.
+Error bodies are capped at 1 MiB. A reply that ends without a terminal event
+closes the socket with 1011. Interrupts, disconnect cancellation, and shutdown
+drain are not part of this transport yet.
+
+The upstream leg still receives the whole expanded conversation on every
+turn; only the client's upload to hofund is reduced. Socket history is memory
+only and is lost when the socket closes or the gateway restarts. The
+Codex-backend Responses path is not applicable because hofund has no such
+socket surface; if that surface is added, it must use this same behavior.
+
 ## Client-facing ids and Chat usage chunks
 
 A Responses body and each `response.created` / completed skeleton use an id

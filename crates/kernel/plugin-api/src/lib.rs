@@ -42,6 +42,7 @@ pub mod kernel;
 mod kernel;
 mod records;
 mod redaction;
+pub mod responses_ws;
 mod subscription;
 mod upstream;
 
