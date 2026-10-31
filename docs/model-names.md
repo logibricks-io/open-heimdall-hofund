@@ -18,9 +18,10 @@ The splice is keyed by the field path, never by the string value. A tool
 argument whose text equals the wire name stays byte for byte. A leading BOM
 is stripped and the rest uses that path. An event larger than 1 MiB is
 scanned once in the held prefix. A complete model string there is spliced and
-the rest of the event is streamed unchanged. If that string is not in the
-prefix, or the event is invalid JSON, has trailing garbage, holds two JSON
-values, or is flushed unfinished after an upstream error, the bytes are
+the rest of the event is streamed unchanged. A final SSE event without its
+blank-line terminator is also spliced when its data is a complete JSON value.
+If the model string is not in an oversize prefix, or the event is invalid or
+incomplete JSON, has trailing garbage, or holds two JSON values, the bytes are
 forwarded unchanged. Each of those cases increments
 `hofund_model_rewrite_skipped_total{reason}` and is logged at debug. A model
 value that is an array or an object is left alone; only a JSON string at the
