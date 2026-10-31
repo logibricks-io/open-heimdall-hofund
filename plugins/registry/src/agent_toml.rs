@@ -25,6 +25,21 @@ pub struct AgentToml {
     pub model_prefix: Option<String>,
     pub effort: Option<KeyToml>,
     pub credential: Option<CredentialToml>,
+    pub active_provider: Option<ActiveProviderToml>,
+    #[serde(default)]
+    pub binary_not_go: bool,
+}
+
+/// The model kept under a provider the agent names in one key, with an older
+/// layout of two flat keys.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveProviderToml {
+    pub key: String,
+    pub value: String,
+    pub entry: String,
+    pub legacy_provider: String,
+    pub legacy_model: String,
 }
 
 /// An OS credential store item the agent reads hofund's key from.
@@ -238,6 +253,53 @@ pub fn parse(
     Ok(agent)
 }
 
+fn validate_active_provider(
+    agent: &AgentToml,
+    layout: &ActiveProviderToml,
+    source: &str,
+) -> Result<(), String> {
+    for (name, value) in [
+        ("key", &layout.key),
+        ("value", &layout.value),
+        ("entry", &layout.entry),
+        ("legacy_provider", &layout.legacy_provider),
+        ("legacy_model", &layout.legacy_model),
+    ] {
+        if value.is_empty() {
+            return Err(error(
+                source,
+                format!("active_provider.{name}"),
+                "must not be empty",
+            ));
+        }
+    }
+    if layout.value.contains('.') {
+        return Err(error(
+            source,
+            "active_provider.value",
+            "must not contain `.`",
+        ));
+    }
+    if !layout.entry.contains('.') {
+        return Err(error(
+            source,
+            "active_provider.entry",
+            "must be an entry inside a providers map",
+        ));
+    }
+    let Some(model) = &agent.model else {
+        return Err(error(source, "active_provider", "needs `[model]`"));
+    };
+    if model.key != format!("{}.model", layout.entry) {
+        return Err(error(
+            source,
+            "active_provider.entry",
+            "must be the parent of `model.key`",
+        ));
+    }
+    Ok(())
+}
+
 fn validate(
     agent: &AgentToml,
     source: &str,
@@ -279,6 +341,9 @@ fn validate(
             "model_prefix",
             "must be non-empty and end with `/`",
         ));
+    }
+    if let Some(layout) = &agent.active_provider {
+        validate_active_provider(agent, layout, source)?;
     }
     if let VisibleToml::Name(name) = &agent.visible
         && name != "all"
@@ -1135,6 +1200,15 @@ pub fn render(agent: &AgentToml) -> (String, String) {
             credential.windows_target,
         ));
     }
+    if let Some(layout) = &agent.active_provider {
+        output.push_str(&format!(
+            ".with_active_provider(hofund_plugin_api::AgentActiveProvider::from_static({:?}, {:?}, {:?}, {:?}, {:?}))",
+            layout.key, layout.value, layout.entry, layout.legacy_provider, layout.legacy_model,
+        ));
+    }
+    if agent.binary_not_go {
+        output.push_str(".with_binary_not_go()");
+    }
     output.push_str(";\n");
     (static_name, output)
 }
@@ -1335,6 +1409,50 @@ key = "effort"
                 "model_prefix",
             );
         }
+    }
+
+    #[test]
+    fn b7_active_provider_and_binary_not_go_are_validated_and_rendered() {
+        let table = "\n[active_provider]\nkey = \"active\"\nvalue = \"hofund\"\nentry = \"providers.hofund\"\nlegacy_provider = \"P\"\nlegacy_model = \"M\"\n";
+        let with_model = |text: String| {
+            text.replace(
+                "[model]\nfile = \"config\"\nkey = \"model\"",
+                "[model]\nfile = \"config\"\nkey = \"providers.hofund.model\"",
+            )
+            .replace(
+                "route = \"gateway\"",
+                "route = \"gateway\"\nbinary_not_go = true",
+            )
+        };
+        let agent = validate(&with_model(base() + table)).expect("active provider");
+        let source = render(&agent).1;
+        assert!(source.contains(
+            ".with_active_provider(hofund_plugin_api::AgentActiveProvider::from_static(\"active\", \"hofund\", \"providers.hofund\", \"P\", \"M\"))"
+        ));
+        assert!(source.contains(".with_binary_not_go()"));
+        let plain = render(&validate(&base()).expect("plain")).1;
+        assert!(!plain.contains(".with_active_provider("));
+        assert!(!plain.contains(".with_binary_not_go()"));
+
+        // The entry must hold the model key.
+        reject(base() + table, "active_provider.entry");
+        // A provider name with a dot would split into a nested key.
+        reject(
+            with_model(base() + &table.replace("value = \"hofund\"", "value = \"a.b\"")),
+            "active_provider.value",
+        );
+        reject(
+            with_model(base() + &table.replace("legacy_model = \"M\"", "legacy_model = \"\"")),
+            "active_provider.legacy_model",
+        );
+        reject(
+            with_model(
+                base() + &table.replace("entry = \"providers.hofund\"", "entry = \"hofund\""),
+            ),
+            "active_provider.entry",
+        );
+        let without_model = base().replace("[model]\nfile = \"config\"\nkey = \"model\"\n", "");
+        reject(without_model + table, "active_provider");
     }
 
     #[test]

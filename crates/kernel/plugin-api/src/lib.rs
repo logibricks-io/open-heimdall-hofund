@@ -72,11 +72,11 @@ pub use id::{
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use records::{
-    Account, AccountStatus, AgentCredential, AgentDescription, AgentFile, AgentRoute, AgentSet,
-    AuthChoice, BinaryName, DeviceFlow, FileKind, ListQuery, MatchNeedle, ModelField, ModelList,
-    ModelSpec, ModelValue, OwnerTest, ProbeQuery, QuotaObservation, QuotaQuery, QuotaWindow,
-    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Slot, SubscriptionSpec,
-    Visible,
+    Account, AccountStatus, AgentActiveProvider, AgentCredential, AgentDescription, AgentFile,
+    AgentRoute, AgentSet, AuthChoice, BinaryName, DeviceFlow, FileKind, ListQuery, MatchNeedle,
+    ModelField, ModelList, ModelSpec, ModelValue, OwnerTest, ProbeQuery, QuotaObservation,
+    QuotaQuery, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof,
+    Slot, SubscriptionSpec, Visible,
 };
 pub use redaction::{redact_token, safe_url};
 pub use secrecy::SecretString;

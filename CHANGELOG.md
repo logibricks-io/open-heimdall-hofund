@@ -917,7 +917,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and model fallbacks, and no longer reports hofund's model while another
   provider is active (#453).
 - Goose detection rejects the pressly migration binary through bounded,
-  shell-free Go build-info inspection; a probe timeout is not detected (#455).
+  shell-free Go build-info inspection (#455). The answer is cached by the
+  binary's path, size and modification time; a probe that outlasts one
+  second counts as the agent and its late answer serves the next check.
+- Agent descriptors gain `binary_not_go` and an `[active_provider]` table
+  (`AgentActiveProvider` in the plugin API), so the Goose layouts above are
+  declared in its `agent.toml` rather than named in the agent kernel.
 - `Slot::JsonWithModels` removes its previous value when the visible route
   list becomes empty, including from the connect snapshot, so Goose no longer
   retains stale `dynamic_models: false` (#456).

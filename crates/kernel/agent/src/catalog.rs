@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hofund_plugin_api::{
-    AgentCredential, AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, ModelField,
-    ModelValue, Slot as ApiSlot, Visible,
+    AgentActiveProvider, AgentCredential, AgentDescription, AgentFile, AgentRoute,
+    FileKind as ApiFileKind, ModelField, ModelValue, Slot as ApiSlot, Visible,
 };
 
 use crate::credential::EngineCredential;
@@ -17,7 +17,6 @@ use crate::edit::{
     Assignment, FileKind, Shared, get, is_empty_document, is_empty_json, owned_part, remove_keys,
     render, string_at, strip_owned,
 };
-use crate::goose;
 use crate::store::{
     backup_once, clear_markers, created_here, delete_verified, marker_present, read_optional,
     remove_empty_parents, revert_path, unified_diff, write_atomic, write_verified,
@@ -27,6 +26,7 @@ use crate::{
     GatewayTarget, Plan, Session, TargetOs,
 };
 use crate::{DisconnectOutcome, usable_override};
+use crate::{active_provider, go_binary};
 
 #[derive(Clone, Copy)]
 struct ModelKey {
@@ -218,6 +218,8 @@ struct Engine {
     route: AgentRoute,
     credential: Option<AgentCredential>,
     credential_store: Option<Arc<dyn CredentialStore>>,
+    active_provider: Option<AgentActiveProvider>,
+    binary_not_go: bool,
 }
 
 /// What an apply does with the agent's model setting.
@@ -304,6 +306,8 @@ impl Engine {
             route: description.route(),
             credential: description.credential().copied(),
             credential_store: session.credential_store().cloned(),
+            active_provider: description.active_provider().copied(),
+            binary_not_go: description.binary_not_go(),
         })
     }
 
@@ -338,7 +342,7 @@ impl Engine {
         let Some(binary) = binary_on_path(session, self.binary) else {
             return false;
         };
-        self.id != "goose" || goose::binary_detected(&binary)
+        !self.binary_not_go || go_binary::not_go_program(&binary)
     }
 
     fn read(&self) -> Result<Vec<ConfigFile>, AgentError> {
@@ -430,8 +434,8 @@ impl Engine {
             return Ok(Plan::new(Vec::new()));
         };
         let text = utf8(&chosen.path, &before)?;
-        if self.id == "goose" {
-            let after = remove_keys(chosen.kind, text, goose::CLEAR_KEYS)
+        if let Some(layout) = &self.active_provider {
+            let after = remove_keys(chosen.kind, text, &active_provider::clear_keys(layout))
                 .map_err(|error| annotate(&chosen.path, error))?;
             if after == before {
                 return Ok(Plan::new(Vec::new()));
@@ -481,10 +485,12 @@ impl Engine {
                 None => None,
             };
             let model = self.model.filter(|model| model.file == file);
-            if self.id == "goose" && file == "config" && !matches!(choice, Choice::Keep) {
-                if let Some(file) =
-                    self.render_goose(path, &before, text, &sets, target, choice)?
-                {
+            if let (Some(layout), Some(model)) = (&self.active_provider, model)
+                && !matches!(choice, Choice::Keep)
+            {
+                if let Some(file) = self.render_active_provider(
+                    layout, model, path, kind, &before, text, &sets, target, choice,
+                )? {
                     rendered.push(file);
                 }
                 continue;
@@ -578,47 +584,61 @@ impl Engine {
         Ok(rendered)
     }
 
-    fn render_goose(
+    #[allow(clippy::too_many_arguments)]
+    fn render_active_provider(
         &self,
+        layout: &AgentActiveProvider,
+        model: ModelKey,
         path: PathBuf,
+        kind: FileKind,
         before: &Option<Vec<u8>>,
         text: Option<&str>,
         sets: &[&EngineSet],
         target: &GatewayTarget,
         choice: Choice<'_>,
     ) -> Result<Option<Rendered>, AgentError> {
-        let kind = FileKind::Yaml;
         let mut assignments = Vec::new();
         let mut removed = Vec::new();
         match choice {
             Choice::Set(id) => {
                 let new_layout = text
                     .map(|text| {
-                        goose::new_layout(kind, text).map_err(|error| annotate(&path, error))
+                        active_provider::current_layout(layout, kind, text)
+                            .map_err(|error| annotate(&path, error))
                     })
                     .transpose()?
                     .unwrap_or(false);
                 if new_layout {
-                    assignments = self.assignments_for(sets, kind, target, text, choice);
-                    if let Some(model) = self.model {
-                        assignments.push(Assignment {
-                            key: model.key,
-                            value: self.prefixed(id),
-                            raw_json: false,
-                            shared: None,
-                        });
-                    }
-                    removed = vec!["GOOSE_PROVIDER", "GOOSE_MODEL"];
+                    // The provider pick goes first so a new file names it
+                    // before the providers map.
+                    assignments.push(Assignment {
+                        key: layout.key(),
+                        value: layout.value().to_owned(),
+                        raw_json: false,
+                        shared: None,
+                    });
+                    assignments.extend(
+                        self.assignments_for(sets, kind, target, text, choice)
+                            .into_iter()
+                            .filter(|assignment| assignment.key != layout.key()),
+                    );
+                    assignments.push(Assignment {
+                        key: model.key,
+                        value: self.prefixed(id),
+                        raw_json: false,
+                        shared: None,
+                    });
+                    removed = vec![layout.legacy_provider(), layout.legacy_model()];
                 } else {
                     assignments = vec![
                         Assignment {
-                            key: "GOOSE_PROVIDER",
-                            value: "hofund".to_owned(),
+                            key: layout.legacy_provider(),
+                            value: layout.value().to_owned(),
                             raw_json: false,
                             shared: None,
                         },
                         Assignment {
-                            key: "GOOSE_MODEL",
+                            key: layout.legacy_model(),
                             value: self.prefixed(id),
                             raw_json: false,
                             shared: None,
@@ -630,13 +650,14 @@ impl Engine {
                 if before.is_none() {
                     return Ok(None);
                 }
-                removed = goose::CLEAR_KEYS.to_vec();
+                removed = active_provider::clear_keys(layout).to_vec();
             }
             Choice::Keep => return Ok(None),
         }
-        let mut after = if assignments.first().is_some_and(|assignment| {
-            assignment.key == "active_provider" && matches!(choice, Choice::Set(_))
-        }) {
+        let mut after = if assignments
+            .first()
+            .is_some_and(|assignment| assignment.key == layout.key())
+        {
             let active =
                 render(kind, text, &assignments[..1]).map_err(|error| annotate(&path, error))?;
             render(kind, Some(utf8(&path, &active)?), &assignments[1..])
@@ -873,8 +894,10 @@ impl Engine {
             if !marker_present(path) {
                 continue;
             }
-            if self.id == "goose" && location.file == "config" {
-                disconnect_goose_config(path, location.kind, &preserve)?;
+            if let Some(layout) = &self.active_provider
+                && self.model.is_some_and(|model| model.file == location.file)
+            {
+                disconnect_active_provider(layout, path, location.kind, &preserve)?;
                 changed = true;
                 continue;
             }
@@ -1012,8 +1035,8 @@ impl Engine {
                 return Ok(None);
             };
             let text = utf8(&chosen.path, &bytes)?;
-            if self.id == "goose" {
-                return goose::configured_model(chosen.kind, text)
+            if let Some(layout) = &self.active_provider {
+                return active_provider::configured_model(layout, model.key, chosen.kind, text)
                     .map_err(|error| annotate(&chosen.path, error));
             }
             return string_at(chosen.kind, text, model.key)
@@ -1861,7 +1884,8 @@ fn preserve_dirs(session: &Session) -> Vec<PathBuf> {
     dirs
 }
 
-fn disconnect_goose_config(
+fn disconnect_active_provider(
+    layout: &AgentActiveProvider,
     path: &Path,
     kind: FileKind,
     preserve: &[PathBuf],
@@ -1871,8 +1895,8 @@ fn disconnect_goose_config(
         return Ok(());
     };
     let text = utf8(path, &before)?;
-    let after =
-        remove_keys(kind, text, goose::CLEAR_KEYS).map_err(|error| annotate(path, error))?;
+    let after = remove_keys(kind, text, &active_provider::clear_keys(layout))
+        .map_err(|error| annotate(path, error))?;
     let remove_file = created_here(path) && is_empty_document(kind, &after)?;
     if remove_file {
         delete_verified(path)?;

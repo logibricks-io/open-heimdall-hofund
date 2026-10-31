@@ -26,6 +26,14 @@ AccountsHandle::async fn remove (& self , id : & AccountId) -> Result < () , Plu
 AccountsHandle::async fn secret (& self , id : & AccountId) -> Result < Option < SecretString > , PluginError >
 AccountsHandle::async fn upsert (& self , account : Account , secret : SecretString) -> Result < () , PluginError >
 AccountsHandle::fn account (& self , id : AccountId , label : impl Into < String >) -> Result < Account , PluginError >
+AgentActiveProvider
+AgentActiveProvider #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentActiveProvider::const fn entry (& self) -> & 'static str
+AgentActiveProvider::const fn from_static (key : & 'static str , value : & 'static str , entry : & 'static str , legacy_provider : & 'static str , legacy_model : & 'static str ,) -> Self
+AgentActiveProvider::const fn key (& self) -> & 'static str
+AgentActiveProvider::const fn legacy_model (& self) -> & 'static str
+AgentActiveProvider::const fn legacy_provider (& self) -> & 'static str
+AgentActiveProvider::const fn value (& self) -> & 'static str
 AgentCredential
 AgentCredential #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AgentCredential::const fn account (& self) -> & 'static str
@@ -36,7 +44,9 @@ AgentCredential::const fn url (& self) -> & 'static str
 AgentCredential::const fn windows_target (& self) -> & 'static str
 AgentDescription
 AgentDescription #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+AgentDescription::const fn active_provider (& self) -> Option < & AgentActiveProvider >
 AgentDescription::const fn binary (& self) -> & 'static str
+AgentDescription::const fn binary_not_go (& self) -> bool
 AgentDescription::const fn credential (& self) -> Option < & AgentCredential >
 AgentDescription::const fn display_name (& self) -> & 'static str
 AgentDescription::const fn effort_file (& self) -> Option < & 'static str >
@@ -51,6 +61,8 @@ AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: Surfac
 AgentDescription::const fn route (& self) -> AgentRoute
 AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
 AgentDescription::const fn visible (& self) -> Visible
+AgentDescription::const fn with_active_provider (mut self , layout : AgentActiveProvider) -> Self
+AgentDescription::const fn with_binary_not_go (mut self) -> Self
 AgentDescription::const fn with_credential (mut self , credential : AgentCredential) -> Self
 AgentDescription::const fn with_effort_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_file (mut self , file : & 'static str) -> Self

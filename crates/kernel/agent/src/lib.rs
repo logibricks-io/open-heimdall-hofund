@@ -53,10 +53,11 @@ pub use hofund_plugin_api::{
     DisconnectOutcome, DynAgentFactory, FileChange, GatewayTarget, Plan,
 };
 
+mod active_provider;
 mod catalog;
 mod credential;
 mod edit;
-mod goose;
+mod go_binary;
 mod jsonc_edit;
 mod store;
 mod yaml_edit;

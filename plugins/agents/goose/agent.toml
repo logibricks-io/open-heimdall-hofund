@@ -1,6 +1,8 @@
 id = "goose"
 display_name = "Goose"
 binary = "goose"
+# A Go program named goose is the pressly/goose database tool, not this agent.
+binary_not_go = true
 
 # Goose (Block's CLI and desktop app) keeps its settings in config.yaml:
 # ~/.config/goose on Linux and macOS, where XDG_CONFIG_HOME replaces
@@ -121,3 +123,12 @@ slot = { model_pair = { json = "true" } }
 [model]
 file = "config"
 key = "providers.hofund.model"
+
+# One key names the provider Goose uses and each provider keeps its model in
+# the providers map; older configs use GOOSE_PROVIDER and GOOSE_MODEL.
+[active_provider]
+key = "active_provider"
+value = "hofund"
+entry = "providers.hofund"
+legacy_provider = "GOOSE_PROVIDER"
+legacy_model = "GOOSE_MODEL"
