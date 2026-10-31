@@ -159,6 +159,10 @@ fn shipped_agent_descriptions_preserve_public_fields() {
                 Slot::Literal("responses"),
             ),
             (
+                "model_providers.hofund.supports_websockets",
+                Slot::Json("true"),
+            ),
+            (
                 "model_providers.hofund.experimental_bearer_token",
                 Slot::Token,
             ),
@@ -287,6 +291,65 @@ fn assert_sets(description: &AgentDescription, file: &str, expected: &[(&str, Sl
         assert_eq!(set.key(), *key);
         assert_eq!(set.slot(), slot);
     }
+}
+
+#[test]
+fn e1_codex_websocket_flag_survives_lifecycle_and_preserves_user_providers() {
+    let home = scratch();
+    let path = home.join(".codex/config.toml");
+    let original = r#"model = "user-model"
+
+[model_providers.other]
+name = "Other provider"
+base_url = "https://other.example/v1"
+supports_websockets = false
+extra = true
+"#;
+    write(&path, original);
+    let session = Session::new(&*home);
+    let target = target();
+    let agent = adapter("codex", TargetOs::Linux);
+    let read = || -> toml::Table {
+        toml::from_str(&fs::read_to_string(&path).expect("config")).expect("TOML")
+    };
+
+    agent.apply(&session, &target).expect("connect");
+    assert_eq!(
+        read()["model_providers"]["hofund"]["supports_websockets"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        read()["model_providers"]["other"],
+        toml::from_str::<toml::Table>(original).expect("original")["model_providers"]["other"]
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+
+    let drifted = fs::read_to_string(&path)
+        .expect("connected config")
+        .replace("supports_websockets = true", "supports_websockets = false");
+    write(&path, &drifted);
+    assert!(!agent.status(&session, &target).expect("drift").connected());
+    agent.apply(&session, &target).expect("repair drift");
+    assert_eq!(
+        read()["model_providers"]["hofund"]["supports_websockets"].as_bool(),
+        Some(true)
+    );
+
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    assert_eq!(
+        read()["model_providers"]["hofund"]["supports_websockets"].as_bool(),
+        Some(true)
+    );
+    agent.disconnect(&session, false).expect("disconnect");
+    let restored = read();
+    assert!(restored["model_providers"].get("hofund").is_none());
+    assert_eq!(
+        restored["model_providers"]["other"],
+        toml::from_str::<toml::Table>(original).expect("original")["model_providers"]["other"]
+    );
 }
 
 #[test]

@@ -299,6 +299,7 @@ InboundSurface::async fn handle (& self , route : & RouteSpec , request : http :
 InboundSurface::async fn health (& self) -> Result < () , PluginError >
 InboundSurface::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
 InboundSurface::fn id (& self) -> & SurfaceId
+InboundSurface::fn responses_websocket_paths (& self) -> & 'static [& 'static str]
 InboundSurface::fn routes (& self) -> & 'static [RouteSpec]
 Job
 JobId
