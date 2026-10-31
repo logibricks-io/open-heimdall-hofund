@@ -59,6 +59,7 @@ struct HopSpec {
     member: Arc<LiveMember>,
     wire_model: Option<String>,
     max_output_tokens: Option<u64>,
+    context_window: Option<u64>,
     routing: String,
     weight: u64,
     free: bool,
@@ -254,6 +255,7 @@ fn build_specs(
                 )),
                 wire_model: hop.wire_model,
                 max_output_tokens: hop.max_output_tokens,
+                context_window: hop.context_window,
                 routing: hop.routing,
                 weight: hop.weight,
                 free: hop.free,
@@ -275,6 +277,9 @@ pub(crate) struct PlannedHop {
     pub member_id: Option<MemberId>,
     pub wire_model: Option<String>,
     pub max_output_tokens: Option<u64>,
+    /// Input context window of the hop's model, from the provider's model
+    /// list, when it is known.
+    pub context_window: Option<u64>,
     pub routing: String,
     pub weight: u64,
     pub free: bool,
@@ -306,7 +311,7 @@ impl Table {
                         member: Arc::clone(&spec.member) as Arc<dyn Member>,
                         wire_model: spec.wire_model.clone(),
                         max_output_tokens: spec.max_output_tokens,
-                        context_window: None,
+                        context_window: spec.context_window,
                         weight: spec.weight,
                         free: spec.free,
                     })
@@ -1039,6 +1044,7 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                context_window: None,
                 routing: "smart".to_owned(),
                 weight: 1,
                 free: false,
@@ -1130,6 +1136,7 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                context_window: None,
                 routing: "smart".to_owned(),
                 weight: 1,
                 free: false,
@@ -1212,6 +1219,7 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                context_window: None,
                 routing: "smart".to_owned(),
                 weight: 1,
                 free: false,
@@ -1293,6 +1301,7 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                context_window: None,
                 routing: "smart".to_owned(),
                 weight: 1,
                 free: false,
@@ -1346,6 +1355,7 @@ mod tests {
                     member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
+                    context_window: None,
                     routing: "smart".to_owned(),
                     weight: 1,
                     free: false,
@@ -1356,6 +1366,7 @@ mod tests {
                     member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
+                    context_window: None,
                     routing: "smart".to_owned(),
                     weight: 1,
                     free: false,
@@ -1390,6 +1401,7 @@ mod tests {
                     member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
+                    context_window: None,
                     routing: "smart".to_owned(),
                     weight: 1,
                     free: false,
@@ -1583,6 +1595,163 @@ mod tests {
         assert_eq!(routed.upstream_id, "first");
         assert_eq!(first_hits.load(Ordering::SeqCst), 2);
         assert_eq!(second_hits.load(Ordering::SeqCst), 3);
+    }
+
+    fn windowed(hops: &[(&str, Option<u64>)]) -> BTreeMap<String, Vec<PlannedHop>> {
+        let mut routes = route(&hops.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+        for (hop, (_, window)) in routes
+            .get_mut("demo")
+            .expect("demo route")
+            .iter_mut()
+            .zip(hops)
+        {
+            hop.context_window = *window;
+        }
+        routes
+    }
+
+    fn scripted(
+        id: &'static str,
+        hits: &Arc<AtomicUsize>,
+        answers: Vec<Result<Completion, ProviderError>>,
+    ) -> BuiltProvider {
+        built_member(
+            id,
+            Arc::new(Scripted {
+                id,
+                hits: Arc::clone(hits),
+                answers: std::sync::Mutex::new(answers.into_iter().collect()),
+            }),
+        )
+    }
+
+    /// A request the estimate puts at `tokens` input tokens.
+    fn sized(tokens: usize) -> Request {
+        let mut request = Request::new("demo");
+        let text = hofund_plugin_api::ContentPart::text("x".repeat(tokens * 4));
+        let part = serde_json::to_value(text).expect("part");
+        let message =
+            serde_json::json!({ "role": hofund_plugin_api::Role::User, "content": [part] });
+        request
+            .messages
+            .push(serde_json::from_value(message).expect("message"));
+        request
+    }
+
+    #[tokio::test]
+    async fn b10a_a_vague_400_on_an_oversized_request_is_reported_as_too_long() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                scripted(
+                    "first",
+                    &first,
+                    vec![Err(ProviderError::status(
+                        400,
+                        "Invalid request parameters",
+                    ))],
+                ),
+            ),
+            (
+                "second".to_owned(),
+                scripted("second", &second, vec![Ok(raw_ok())]),
+            ),
+        ]);
+        let snapshot = open(
+            &built,
+            windowed(&[("first", Some(100)), ("second", Some(100))]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        let error = match snapshot.load().dispatch(&sized(120), "openai-chat").await {
+            Ok(_) => panic!("an oversized request should be reported as too long"),
+            Err(error) => error,
+        };
+        let hofund_router::RouterError::Upstream { upstream_id, error } = error else {
+            panic!("upstream error");
+        };
+        assert_eq!(upstream_id, "first");
+        assert_eq!(error.status(), Some(400));
+        assert!(
+            error.message().starts_with(
+                "prompt is too long: about 120 tokens, more than demo's context window of 100"
+            ),
+            "{}",
+            error.message()
+        );
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(second.load(Ordering::SeqCst), 0);
+        // Not a rest: the member answers a request it holds.
+        assert!(
+            snapshot
+                .load()
+                .cooldowns()
+                .expect("cooldowns")
+                .cooling(&super::member_id("first"))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn b10b_a_member_known_too_small_is_skipped_after_an_overflow() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let small = Arc::new(AtomicUsize::new(0));
+        let roomy = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                scripted(
+                    "first",
+                    &first,
+                    vec![Err(ProviderError::status(
+                        400,
+                        "prompt is too long: 200 tokens > 150 maximum",
+                    ))],
+                ),
+            ),
+            (
+                "small".to_owned(),
+                scripted("small", &small, vec![Ok(raw_ok())]),
+            ),
+            (
+                "roomy".to_owned(),
+                scripted("roomy", &roomy, vec![Ok(raw_ok())]),
+            ),
+        ]);
+        let snapshot = open(
+            &built,
+            windowed(&[
+                ("first", Some(150)),
+                ("small", Some(150)),
+                ("roomy", Some(1000)),
+            ]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        let routed = snapshot
+            .load()
+            .dispatch(&sized(160), "openai-chat")
+            .await
+            .expect("a member with room answers");
+        assert_eq!(routed.upstream_id, "roomy");
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(small.load(Ordering::SeqCst), 0);
+        assert_eq!(roomy.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn b10c_the_hop_window_comes_from_the_model_list() {
+        let listed = hofund_plugin_api::ModelSpec::new("demo", None)
+            .expect("model")
+            .with_context(128_000);
+        assert_eq!(crate::hop_window(Some(&listed)), Some(128_000));
+        let unknown = hofund_plugin_api::ModelSpec::new("demo", None).expect("model");
+        assert_eq!(crate::hop_window(Some(&unknown)), None);
+        assert_eq!(crate::hop_window(None), None);
     }
 
     struct Observing {
