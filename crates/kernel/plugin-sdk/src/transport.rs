@@ -2182,6 +2182,14 @@ mod tests {
     }
 
     #[test]
+    fn b1e_soon_wording_marks_only_credit_errors() {
+        let error = classify(429, None, b"slow down, try again in 30 seconds".to_vec())
+            .expect_err("rate limit");
+        assert!(!error.is_credit());
+        assert!(!error.credit_soon());
+    }
+
+    #[test]
     fn b1f_past_absolute_reset_falls_through_to_other_sources() {
         let now = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         assert_eq!(

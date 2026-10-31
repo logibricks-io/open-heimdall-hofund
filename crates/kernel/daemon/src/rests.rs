@@ -184,4 +184,27 @@ mod tests {
         store.load(&book, &HashSet::from([id.clone()]));
         assert_eq!(book.revision(&id), 0);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn b2a_rests_file_is_private_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut store, book, id, _, root) = fixture();
+        book.record_failure(&id, &PluginError::credit_status(402, "out of credit"));
+        store.save(&book);
+        let mode = std::fs::metadata(root.path().join("rests.json"))
+            .expect("saved rests")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn b2a_rung_change_at_same_deadline_is_a_change() {
+        let until = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let left = [hofund_router::PersistedRest::new("m".to_owned(), until, 1)];
+        let right = [hofund_router::PersistedRest::new("m".to_owned(), until, 2)];
+        assert!(super::same_rests(&left, &left));
+        assert!(!super::same_rests(&left, &right));
+    }
 }

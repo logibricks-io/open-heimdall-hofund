@@ -236,7 +236,7 @@ impl SubscriptionState {
         cooldowns: &Arc<Cooldowns>,
     ) -> Result<SubscriptionMember, DaemonError> {
         let id = MemberId::from_parts(self.plugin.clone(), account.clone());
-        if self.plugin.as_str() == "codex" {
+        if credit_windowed(&self.plugin) {
             cooldowns.configure_credit_window(&id);
         }
         let host = hofund_plugin_host::runtime_host_with_observe_for(
@@ -337,6 +337,12 @@ pub(crate) fn member_ids(subscriptions: &Subscriptions) -> HashSet<MemberId> {
         .values()
         .flat_map(|state| state.members().into_iter().map(|member| member.id))
         .collect()
+}
+
+/// Whether `plugin`'s accounts rest out of credit until their quota window
+/// renews rather than on the flat subscription rest.
+fn credit_windowed(plugin: &PluginId) -> bool {
+    plugin.as_str() == "codex"
 }
 
 /// Turns polled windows into a cooldown. Only a blocking, model-wide window
@@ -824,6 +830,56 @@ mod tests {
         super::apply_windows(&cooldowns, &id, &plugin, &both[..1]);
         let left = credit_left(&cooldowns, &id);
         assert!(left <= HOUR + Duration::from_secs(1), "{left:?}");
+    }
+
+    #[test]
+    fn credit_rest_waits_for_a_full_window_with_no_reset_to_renew() {
+        const HOUR: Duration = Duration::from_secs(3600);
+        let cooldowns = cooldowns();
+        let id = member("one");
+        cooldowns.configure_credit_window(&id);
+        let plugin = PluginId::from_static(PLUGIN);
+        super::apply_windows(&cooldowns, &id, &plugin, &[full_window("weekly", None)]);
+        cooldowns.record_failure(
+            &id,
+            &hofund_plugin_api::PluginError::credit_status(402, "out"),
+        );
+        assert!(credit_left(&cooldowns, &id) > 5 * HOUR - Duration::from_secs(60));
+        super::apply_windows(&cooldowns, &id, &plugin, &[full_window("weekly", Some(HOUR))]);
+        assert!(cooldowns.cooling(&id).is_none_or(|rest| {
+            rest.until().saturating_duration_since(std::time::Instant::now())
+                <= HOUR + Duration::from_secs(1)
+        }));
+    }
+
+    #[test]
+    fn credit_rest_ignores_a_window_that_is_not_full() {
+        const HOUR: Duration = Duration::from_secs(3600);
+        let cooldowns = cooldowns();
+        let id = member("one");
+        cooldowns.configure_credit_window(&id);
+        let plugin = PluginId::from_static(PLUGIN);
+        let open = hofund_plugin_api::QuotaWindow::new(
+            "weekly",
+            3,
+            Some(10),
+            Some(std::time::SystemTime::now() + 3 * HOUR),
+        )
+        .expect("window");
+        assert!(!super::apply_windows(&cooldowns, &id, &plugin, &[open]));
+        cooldowns.record_failure(
+            &id,
+            &hofund_plugin_api::PluginError::credit_status(402, "out"),
+        );
+        let left = credit_left(&cooldowns, &id);
+        assert!(left > 5 * HOUR - Duration::from_secs(60), "{left:?}");
+    }
+
+    #[test]
+    fn only_codex_accounts_rest_on_their_window() {
+        assert!(super::credit_windowed(&PluginId::from_static("codex")));
+        assert!(!super::credit_windowed(&PluginId::from_static(PLUGIN)));
+        assert!(!super::credit_windowed(&PluginId::from_static("claude")));
     }
 
     #[test]

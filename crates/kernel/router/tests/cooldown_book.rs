@@ -1291,3 +1291,178 @@ fn b4b_generic_climbs_after_rest_ended() {
         Duration::from_secs(2 * MINUTE)
     );
 }
+
+#[test]
+fn b1c_ended_rung_is_kept_in_memory_past_35_days() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("first");
+    advance(&clock, 36 * DAY);
+    let next = book.record_failure(&id, &credit_error()).expect("next");
+    assert_eq!(next.failures(), 2);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn b2b_rest_of_unconfigured_member_does_not_land_on_another() {
+    let (book, id, _) = fixture();
+    let other = member("other");
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            other.to_string(),
+            wall + Duration::from_secs(HOUR),
+            2,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.revision(&id), 0);
+}
+
+#[test]
+fn b2b_ended_rest_restores_without_a_recovery() {
+    let (book, id, _) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall - Duration::from_secs(HOUR),
+            3,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id), None);
+    assert!(book.drain_recoveries().is_empty());
+}
+
+#[test]
+fn b2b_rung_zero_rest_is_ignored() {
+    let (book, id, _) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall + Duration::from_secs(HOUR),
+            0,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.revision(&id), 0);
+}
+
+#[test]
+fn b2b_restored_rest_is_capped_at_a_week() {
+    let (book, id, clock) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall + Duration::from_secs(30 * DAY),
+            6,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(7 * DAY));
+}
+
+#[test]
+fn b2b_rung_past_the_ladder_is_clamped() {
+    let (book, id, clock) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall - Duration::from_secs(HOUR),
+            9,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    let next = book.record_failure(&id, &credit_error()).expect("next");
+    assert_eq!(next.failures(), 6);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(7 * DAY));
+}
+
+#[test]
+fn b2c_rest_ended_more_than_35_days_ago_is_not_saved() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("ladder");
+    advance(&clock, 30 * MINUTE + 35 * DAY + MINUTE);
+    assert!(book.credit_snapshot(SystemTime::now()).is_empty());
+    let next = book.record_failure(&id, &credit_error()).expect("next");
+    assert_eq!(next.failures(), 2);
+}
+
+#[test]
+fn b2c_credit_rung_is_not_saved_after_a_later_rate_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("ladder");
+    assert_eq!(book.credit_snapshot(SystemTime::now()).len(), 1);
+    advance(&clock, 30 * MINUTE + 1);
+    book.record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate rest");
+    assert!(book.credit_snapshot(SystemTime::now()).is_empty());
+}
+
+#[test]
+fn b3f_renewal_lifts_a_quota_refusal_rest_of_a_windowed_account() {
+    let (book, id, _) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    let applied = book
+        .record_failure(&id, &PluginError::quota("empty"))
+        .expect("quota rest");
+    assert_eq!(applied.cause(), CooldownCause::Quota);
+    book.observe_credit_window(&id, None, false);
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Quota)]);
+}
+
+#[test]
+fn b3f_renewal_ten_minutes_sooner_lifts_rest() {
+    let (book, id, _) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.record_failure(&id, &credit_error())
+        .expect("window rest");
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR - 10 * MINUTE)), false);
+    assert_eq!(book.cooling(&id), None);
+}
+
+#[test]
+fn b2b_running_rest_past_the_ladder_restores_on_the_top_rung() {
+    let (book, id, _) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall + Duration::from_secs(HOUR),
+            9,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id).expect("restored").failures(), 6);
+    assert_eq!(book.credit_snapshot(SystemTime::now())[0].rung, 6);
+}
+
+#[test]
+fn b2b_subscription_account_rest_is_not_restored() {
+    let (book, _, _) = fixture();
+    let account = subscription();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            account.to_string(),
+            wall + Duration::from_secs(HOUR),
+            2,
+        )],
+        &HashSet::from([account.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&account), None);
+    assert_eq!(book.revision(&account), 0);
+}

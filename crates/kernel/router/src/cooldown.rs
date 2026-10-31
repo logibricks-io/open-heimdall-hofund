@@ -351,6 +351,9 @@ impl Cooldowns {
             })
             .filter_map(|(id, state)| {
                 let until = state.credit_until?;
+                if now.saturating_duration_since(until) > CREDIT_RESET_MAX {
+                    return None;
+                }
                 let until = if until >= now {
                     now_wall.checked_add(until.duration_since(now))
                 } else {
@@ -379,11 +382,12 @@ impl Cooldowns {
             .map(|id| (id.to_string(), id))
             .collect::<HashMap<_, _>>();
         for rest in rests {
-            if rest.rung == 0
-                || usize::try_from(rest.rung).unwrap_or(usize::MAX) > CREDIT_LADDER.len()
-            {
+            if rest.rung == 0 {
                 continue;
             }
+            let rung = rest
+                .rung
+                .min(u32::try_from(CREDIT_LADDER.len()).unwrap_or(u32::MAX));
             let Some(id) = configured.get(&rest.member) else {
                 continue;
             };
@@ -402,7 +406,7 @@ impl Cooldowns {
             };
             let revision = next_revision(&mut book);
             let mut state = State::new(now, revision);
-            state.credit_rung = rest.rung;
+            state.credit_rung = rung;
             state.credit_until = Some(until);
             state.credit_ladder = true;
             state.last_cause = Some(CooldownCause::Credit);
@@ -411,7 +415,7 @@ impl Cooldowns {
                     now,
                     until.saturating_duration_since(now),
                     CooldownCause::Credit,
-                    rest.rung,
+                    rung,
                 ));
             } else {
                 state.idle_since = Some(until);
@@ -797,14 +801,6 @@ impl Cooldowns {
             }) {
                 state.rate_until = None;
                 state.rate_failures = 0;
-            }
-            if state
-                .credit_until
-                .is_some_and(|until| now.saturating_duration_since(until) >= CREDIT_RESET_MAX)
-            {
-                state.credit_rung = 0;
-                state.credit_until = None;
-                state.credit_ladder = false;
             }
         }
         for (id, cause) in recovered {
