@@ -61,8 +61,9 @@ use secrecy::ExposeSecret;
 
 use crate::sigv4::{self, AwsSigner};
 use crate::transport::{
-    Call, HttpResponse, carried_error, is_credit_error, is_quota_error, parse_retry_after_headers,
-    read_body, retry_after_from_body, status_for_error,
+    Call, HttpResponse, carried_error, credit_soon, is_credit_error, is_quota_error,
+    parse_retry_after_headers, read_body, reset_after_from_body, retry_after_from_body,
+    status_for_error,
 };
 
 /// Attempts per call. Only a connect failure is retried.
@@ -1002,16 +1003,32 @@ fn endpoint_unsupported(bytes: &[u8]) -> bool {
 }
 
 async fn status_error(response: HttpResponse, allocation_quota_rate: bool) -> PluginError {
-    let (status, retry_after, body) = match read_body(response).await {
+    let (status, retry_after, reset_after, body) = match read_body(response).await {
         Ok(read) => read,
         Err(error) => return error,
     };
-    status_failure(status, retry_after, &body, allocation_quota_rate)
+    status_failure_with_reset(
+        status,
+        retry_after,
+        reset_after,
+        &body,
+        allocation_quota_rate,
+    )
 }
 
 fn status_failure(
     status: u16,
     retry_after: Option<std::time::Duration>,
+    body: &[u8],
+    allocation_quota_rate: bool,
+) -> PluginError {
+    status_failure_with_reset(status, retry_after, None, body, allocation_quota_rate)
+}
+
+fn status_failure_with_reset(
+    status: u16,
+    retry_after: Option<std::time::Duration>,
+    reset_after: Option<std::time::Duration>,
     body: &[u8],
     allocation_quota_rate: bool,
 ) -> PluginError {
@@ -1026,10 +1043,22 @@ fn status_failure(
     } else {
         PluginError::status_error(status, message)
     };
-    match retry_after
+    let credit = error.is_credit();
+    let named_reset = reset_after_from_body(body, std::time::SystemTime::now()).or(reset_after);
+    let error = match named_reset.filter(|_| credit) {
+        Some(after) => error.with_reset_after(after),
+        None => error,
+    };
+    let error = if credit && credit_soon(body) {
+        error.with_credit_soon()
+    } else {
+        error
+    };
+    let retry = retry_after
+        .or_else(|| (!credit).then_some(named_reset).flatten())
         .or_else(|| retry_delay(body))
-        .or_else(|| retry_after_from_body(body))
-    {
+        .or_else(|| retry_after_from_body(body));
+    match retry {
         Some(after) => error.with_retry_after(after),
         None => error,
     }

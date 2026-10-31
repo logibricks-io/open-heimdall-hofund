@@ -12,6 +12,7 @@ use tokio::sync::watch;
 use crate::control_map;
 use crate::events::EventBus;
 use crate::membership::{self, Table};
+use crate::rests::RestStore;
 use crate::subscriptions::{self, QuotaPolls, Subscriptions};
 use crate::{
     Built, DaemonError, DaemonRegistry, Instance, ModelsHost, RouterParts, providers, route_plan,
@@ -46,6 +47,7 @@ struct Plan {
 pub(crate) struct Runtime {
     registry: Arc<dyn DaemonRegistry>,
     cooldowns: Arc<Cooldowns>,
+    rests: Arc<Mutex<RestStore>>,
     fingerprints: Mutex<HashMap<MemberId, String>>,
     path: PathBuf,
     max_idle_per_host: Option<usize>,
@@ -82,6 +84,7 @@ impl Runtime {
                 CooldownPolicy::default(),
                 Arc::new(|| tokio::time::Instant::now().into_std()),
             )),
+            rests: Arc::new(Mutex::new(RestStore::new(path))),
             fingerprints: Mutex::new(HashMap::new()),
             path: path.to_path_buf(),
             max_idle_per_host,
@@ -125,6 +128,7 @@ impl Runtime {
             &self.registry,
             &subscriptions,
         )?;
+        let configured = fingerprints.keys().cloned().collect::<HashSet<_>>();
         *self.plan.lock().expect("published plan") = Plan {
             built,
             routes,
@@ -133,6 +137,10 @@ impl Runtime {
         };
         *self.fingerprints.lock().expect("provider fingerprints") = fingerprints;
         *self.instances.lock().expect("provider instances") = instances;
+        self.rests
+            .lock()
+            .expect("credit rest store")
+            .load(&self.cooldowns, &configured);
         self.config
             .set(watch::Sender::new(Arc::new(config.clone())))
             .map_err(|_| DaemonError::new("runtime published its first configuration twice"))?;
@@ -390,6 +398,7 @@ impl Runtime {
 
     pub(crate) fn spawn_maintenance(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let cooldowns = Arc::clone(&self.cooldowns);
+        let rests = Arc::clone(&self.rests);
         let events = self.events.get().cloned();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(MAINTENANCE_INTERVAL);
@@ -399,6 +408,7 @@ impl Runtime {
             loop {
                 interval.tick().await;
                 cooldowns.maintain();
+                rests.lock().expect("credit rest store").save(&cooldowns);
                 let recoveries = cooldowns.drain_recoveries();
                 if let Some(bus) = &events {
                     for (id, _cause) in &recoveries {

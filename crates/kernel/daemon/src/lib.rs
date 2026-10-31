@@ -41,6 +41,7 @@ mod models;
 mod models_state;
 mod one_shot;
 mod registry;
+mod rests;
 mod runtime;
 mod sign_in;
 mod subscriptions;

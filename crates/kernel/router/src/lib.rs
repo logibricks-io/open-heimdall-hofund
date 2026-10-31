@@ -25,7 +25,7 @@ use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawA
 use tracing::Instrument;
 
 pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
-pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling};
+pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::Member;
 pub use snapshot::Snapshot;
