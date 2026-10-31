@@ -748,17 +748,30 @@ fn json_with_models_is_written_only_beside_a_listed_model() {
         assert_eq!(value.get("dynamic").cloned(), expected, "{routes:?}");
         assert!(agent.status(&session, &target).expect("status").connected());
     }
-    // A key left from an earlier listing stays when no model is listed.
+}
+
+#[test]
+fn b7_json_with_models_empty_routes_remove_stale_value() {
     let home = scratch();
     let session = Session::new(&*home);
+    let path = home.join(".array").join("config.json");
+    seed(&path, r#"{"dynamic":true,"keep":1}"#);
     let agent = Compiled::new(&WITH_MODELS);
     agent.apply(&session, &target_with(&["a"])).expect("apply");
-    agent
-        .apply(&session, &target_with(&[]))
-        .expect("apply empty");
-    let value = read_json(&home.join(".array").join("config.json"));
-    assert_eq!(value["dynamic"], serde_json::json!(false));
+    let empty = target_with(&[]);
+    agent.apply(&session, &empty).expect("apply empty");
+    let value = read_json(&path);
+    assert!(value.get("dynamic").is_none(), "{value}");
     assert_eq!(value["models"], serde_json::json!([]));
+    assert!(agent.status(&session, &empty).expect("status").connected());
+
+    let mut edited = value;
+    edited["keep"] = serde_json::json!(2);
+    fs::write(&path, edited.to_string()).expect("user edit");
+    agent.disconnect(&session, false).expect("disconnect");
+    let restored = read_json(&path);
+    assert_eq!(restored["dynamic"], serde_json::json!(true));
+    assert_eq!(restored["keep"], serde_json::json!(2));
 }
 
 static APPEND_OWNER: &[OwnerTest] = &[OwnerTest::prefix("id", "custom:hofund/")];
