@@ -322,7 +322,23 @@ fn json_child<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
 }
 
 fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
-    let mut root = json_root(original)?;
+    let before = json_root(original)?;
+    let root = json_rendered_value(before.clone(), assignments)?;
+    if !original.trim().is_empty()
+        && let Some(text) = crate::jsonc_edit::reconcile(original, &before, &root)
+    {
+        return Ok(text);
+    }
+    // A full render is only for an empty file or input the scanner cannot parse.
+    pretty_json(&root)
+}
+
+#[cfg(test)]
+fn legacy_render_json(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
+    pretty_json(&json_rendered_value(json_root(original)?, assignments)?)
+}
+
+fn json_rendered_value(mut root: Value, assignments: &[Assignment]) -> Result<Value, AgentError> {
     let string_model = assignments.iter().find_map(string_model_restore);
     let writes_model_name = assignments.iter().any(|assignment| {
         assignment.key == "model.name" && string_model_restore(assignment).is_none()
@@ -366,7 +382,7 @@ fn render_json(original: &str, assignments: &[Assignment]) -> Result<String, Age
             assignment.raw_json,
         )?;
     }
-    pretty_json(&root)
+    Ok(root)
 }
 
 fn render_toml(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
@@ -454,7 +470,8 @@ pub(crate) fn json_root(text: &str) -> Result<Value, AgentError> {
 }
 
 fn remove_json(original: &str, keys: &[&str]) -> Result<String, AgentError> {
-    let mut root = json_root(original)?;
+    let before = json_root(original)?;
+    let mut root = before.clone();
     for key in keys {
         // `model.name` may still be the older string `model`.
         if *key == "model.name"
@@ -466,6 +483,10 @@ fn remove_json(original: &str, keys: &[&str]) -> Result<String, AgentError> {
         }
         unset_json(&mut root, &split_key(key))?;
     }
+    if let Some(text) = crate::jsonc_edit::reconcile(original, &before, &root) {
+        return Ok(text);
+    }
+    // A full render is the safe fallback when the scanner cannot parse the file.
     pretty_json(&root)
 }
 
@@ -513,7 +534,7 @@ fn restore_string_model(root: &mut Value, name: String) -> Result<(), AgentError
     Ok(())
 }
 
-fn pretty_json(root: &Value) -> Result<String, AgentError> {
+pub(crate) fn pretty_json(root: &Value) -> Result<String, AgentError> {
     let mut bytes = serde_json::to_vec_pretty(root)
         .map_err(|error| AgentError::message(format!("JSON: {error}")))?;
     if !bytes.ends_with(b"\n") {
@@ -652,7 +673,23 @@ fn set_json(
 }
 
 fn render_yaml(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
-    let mut root = yaml_root(original)?;
+    let before = yaml_root(original)?;
+    let root = yaml_rendered_value(before.clone(), assignments)?;
+    if !original.trim().is_empty()
+        && let Some(text) = crate::yaml_edit::reconcile(original, &before, &root)
+    {
+        return Ok(text);
+    }
+    // The line editor defers touched flow collections, tags, and aliases here.
+    emit_yaml(&root)
+}
+
+#[cfg(test)]
+fn legacy_render_yaml(original: &str, assignments: &[Assignment]) -> Result<String, AgentError> {
+    emit_yaml(&yaml_rendered_value(yaml_root(original)?, assignments)?)
+}
+
+fn yaml_rendered_value(mut root: Yaml, assignments: &[Assignment]) -> Result<Yaml, AgentError> {
     for assignment in assignments {
         let path = split_key(assignment.key);
         if let Some(shared) = assignment.shared {
@@ -683,19 +720,23 @@ fn render_yaml(original: &str, assignments: &[Assignment]) -> Result<String, Age
         }
         set_yaml(&mut root, &path, value)?;
     }
-    emit_yaml(&root)
+    Ok(root)
 }
 
 fn remove_yaml(original: &str, keys: &[&str]) -> Result<String, AgentError> {
-    let mut root = yaml_root(original)?;
+    let before = yaml_root(original)?;
+    let mut root = before.clone();
     for key in keys {
         unset_yaml(&mut root, &split_key(key))?;
+    }
+    if let Some(text) = crate::yaml_edit::reconcile(original, &before, &root) {
+        return Ok(text);
     }
     emit_yaml(&root)
 }
 
 /// Parses one YAML document. An empty file is an empty mapping.
-fn yaml_root(text: &str) -> Result<Yaml, AgentError> {
+pub(crate) fn yaml_root(text: &str) -> Result<Yaml, AgentError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut documents = YamlLoader::load_from_str(text)
         .map_err(|error| AgentError::message(format!("YAML: {error}")))?;
@@ -715,7 +756,7 @@ fn yaml_root(text: &str) -> Result<Yaml, AgentError> {
     }
 }
 
-fn emit_yaml(root: &Yaml) -> Result<String, AgentError> {
+pub(crate) fn emit_yaml(root: &Yaml) -> Result<String, AgentError> {
     let mut text = String::new();
     YamlEmitter::new(&mut text)
         .dump(root)
@@ -728,7 +769,7 @@ fn emit_yaml(root: &Yaml) -> Result<String, AgentError> {
     Ok(text)
 }
 
-fn yaml_key(key: &str) -> Yaml {
+pub(crate) fn yaml_key(key: &str) -> Yaml {
     Yaml::String(key.to_owned())
 }
 
@@ -759,7 +800,7 @@ fn yaml_get(value: &Yaml, key: &str) -> Option<String> {
     }
 }
 
-fn set_yaml(value: &mut Yaml, path: &[&str], written: Yaml) -> Result<(), AgentError> {
+pub(crate) fn set_yaml(value: &mut Yaml, path: &[&str], written: Yaml) -> Result<(), AgentError> {
     let Some((key, rest)) = path.split_first() else {
         return Err(AgentError::message("empty YAML key"));
     };
@@ -793,7 +834,7 @@ fn set_yaml(value: &mut Yaml, path: &[&str], written: Yaml) -> Result<(), AgentE
     set_yaml(child, rest, written)
 }
 
-fn unset_yaml(value: &mut Yaml, path: &[&str]) -> Result<(), AgentError> {
+pub(crate) fn unset_yaml(value: &mut Yaml, path: &[&str]) -> Result<(), AgentError> {
     let Some((key, rest)) = path.split_first() else {
         return Err(AgentError::message("empty YAML key"));
     };
@@ -1047,7 +1088,10 @@ fn lookup<'a>(item: &'a Item, path: &[&str]) -> Option<&'a str> {
 fn remove_toml(original: &str, keys: &[&str]) -> Result<String, AgentError> {
     let mut document = parse_toml(original)?;
     for key in keys {
-        unset_toml(document.as_item_mut(), &split_key(key))?;
+        if let Some(prefix) = unset_toml(document.as_item_mut(), &split_key(key))? {
+            let trailing = document.trailing().as_str().unwrap_or_default().to_owned();
+            document.set_trailing(format!("{prefix}{trailing}"));
+        }
     }
     let mut text = document.to_string();
     if !text.ends_with('\n') {
@@ -1056,7 +1100,7 @@ fn remove_toml(original: &str, keys: &[&str]) -> Result<String, AgentError> {
     Ok(text)
 }
 
-fn unset_toml(item: &mut Item, path: &[&str]) -> Result<(), AgentError> {
+fn unset_toml(item: &mut Item, path: &[&str]) -> Result<Option<String>, AgentError> {
     let Some((key, rest)) = path.split_first() else {
         return Err(AgentError::message("empty TOML key"));
     };
@@ -1064,17 +1108,14 @@ fn unset_toml(item: &mut Item, path: &[&str]) -> Result<(), AgentError> {
         return Err(AgentError::message(format!("`{key}` is not a table")));
     }
     if rest.is_empty() {
-        if let Some(table) = item.as_table_like_mut() {
-            table.remove(key);
-        }
-        return Ok(());
+        return Ok(transfer_toml_prefix(item, key, String::new(), true));
     }
     let present = item
         .as_table_like()
         .and_then(|table| table.get(key))
         .is_some();
     if !present {
-        return Ok(());
+        return Ok(None);
     }
     let is_table = item
         .as_table_like()
@@ -1083,22 +1124,83 @@ fn unset_toml(item: &mut Item, path: &[&str]) -> Result<(), AgentError> {
     if !is_table {
         return Err(AgentError::message(format!("`{key}` is not a table")));
     }
-    {
+    let mut prefix = {
         let child = item
             .as_table_like_mut()
             .and_then(|table| table.get_mut(key))
             .expect("child");
-        unset_toml(child, rest)?;
-    }
+        unset_toml(child, rest)?
+    };
     let empty = item
         .as_table_like()
         .and_then(|table| table.get(key))
         .and_then(Item::as_table_like)
         .is_some_and(|table| table.is_empty());
-    if empty && let Some(table) = item.as_table_like_mut() {
+    if empty {
+        prefix = transfer_toml_prefix(item, key, prefix.take().unwrap_or_default(), true);
+    } else if let Some(comment) = prefix.take() {
+        prefix = transfer_toml_prefix(item, key, comment, false);
+    }
+    Ok(prefix)
+}
+
+fn transfer_toml_prefix(
+    item: &mut Item,
+    key: &str,
+    prefix: String,
+    remove: bool,
+) -> Option<String> {
+    let table = item.as_table_like_mut()?;
+    let own = table
+        .get_key_value(key)
+        .and_then(|(key, _)| key.leaf_decor().prefix())
+        .and_then(|prefix| prefix.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let mut found = false;
+    let next = table.iter().find_map(|(candidate, _)| {
+        let next = found;
+        found |= candidate == key;
+        (next && candidate != key).then(|| candidate.to_owned())
+    });
+    if remove {
         table.remove(key);
     }
-    Ok(())
+    let prefix = format!("{own}{prefix}");
+    if prefix.is_empty() {
+        return None;
+    }
+    if let Some(next) = next {
+        if let Some((key, item)) = table.get_key_value_mut(&next)
+            && prepend_toml_prefix(key, item, &prefix)
+        {
+            return None;
+        }
+        Some(prefix)
+    } else {
+        Some(prefix)
+    }
+}
+
+fn prepend_toml_prefix(mut key: toml_edit::KeyMut<'_>, item: &mut Item, prefix: &str) -> bool {
+    if item.as_table().is_some_and(|table| table.is_implicit()) {
+        let Some(table) = item.as_table_like_mut() else {
+            return false;
+        };
+        let Some((child_key, child_item)) = table.iter_mut().next() else {
+            return false;
+        };
+        return prepend_toml_prefix(child_key, child_item, prefix);
+    }
+    let existing = key
+        .leaf_decor()
+        .prefix()
+        .and_then(|prefix| prefix.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    key.leaf_decor_mut()
+        .set_prefix(format!("{prefix}{existing}"));
+    true
 }
 
 fn remove_env(original: &str, keys: &[&str]) -> String {
@@ -1126,7 +1228,14 @@ fn set_toml(item: &mut Item, path: &[&str], text: &str) -> Result<(), AgentError
         return Err(AgentError::message("empty TOML key"));
     };
     if rest.is_empty() {
-        item[key] = toml_edit::value(text);
+        let table = item
+            .as_table_like_mut()
+            .ok_or_else(|| AgentError::message(format!("`{key}` is not a table")))?;
+        if let Some(slot) = table.get_mut(key) {
+            *slot = toml_edit::value(text);
+        } else {
+            table.insert(key, toml_edit::value(text));
+        }
         return Ok(());
     }
     let missing = item
@@ -1164,7 +1273,11 @@ fn set_toml_item(item: &mut Item, path: &[&str], written: Item) -> Result<(), Ag
             }
             written => written,
         };
-        table.insert(key, written);
+        if let Some(slot) = table.get_mut(key) {
+            *slot = written;
+        } else {
+            table.insert(key, written);
+        }
         return Ok(());
     }
     if table.get(key).is_none() {
@@ -1805,6 +1918,7 @@ mod tests {
         assert_eq!(
             order,
             [
+                "# a comment",
                 "GOOSE_PROVIDER: hofund",
                 "extensions:",
                 "ratio: 1.50",
@@ -1959,6 +2073,83 @@ mod tests {
         );
         let again = render(FileKind::Toml, Some(&text), &assignments).expect("again");
         assert_eq!(again, text.into_bytes());
+    }
+
+    #[test]
+    fn jsonc_set_and_clear_keep_comments() {
+        let original = "{\n  // pick\n  \"model\": \"old\",\n  /* keep */ \"theme\": \"dark\"\n}\n";
+        let set = text(
+            FileKind::Json,
+            Some(original),
+            &[assign("model", "new", false)],
+        );
+        assert_eq!(
+            set,
+            "{\n  // pick\n  \"model\": \"new\",\n  /* keep */ \"theme\": \"dark\"\n}\n"
+        );
+        let cleared = remove_keys(FileKind::Json, &set, &["model"]).expect("clear");
+        let cleared = String::from_utf8(cleared).expect("UTF-8");
+        assert!(cleared.contains("/* keep */"), "{cleared}");
+        assert!(!cleared.contains("model"), "{cleared}");
+    }
+
+    #[test]
+    fn yaml_document_marker_file_is_still_edited() {
+        let original = "---\n# note\nmodel: old\n";
+        let set = text(
+            FileKind::Yaml,
+            Some(original),
+            &[assign("model", "new", false)],
+        );
+        assert_eq!(
+            get(FileKind::Yaml, &set, "model").expect("model"),
+            Some("new".to_owned())
+        );
+    }
+
+    #[test]
+    fn toml_comment_above_removed_key_is_kept() {
+        let original = "# model choice\ndefault_model = \"mine\"\ndefault_thinking = true\n";
+        let cleared = remove_keys(FileKind::Toml, original, &["default_model"]).expect("clear");
+        let cleared = String::from_utf8(cleared).expect("UTF-8");
+        assert_eq!(cleared, "# model choice\ndefault_thinking = true\n");
+
+        let last = remove_keys(
+            FileKind::Toml,
+            "# only model\nmodel = \"mine\"\n",
+            &["model"],
+        )
+        .expect("clear last");
+        assert_eq!(String::from_utf8(last).expect("UTF-8"), "# only model\n");
+
+        let table = remove_keys(
+            FileKind::Toml,
+            "# model choice\ndefault_model = \"mine\"\n\n# mine\n[providers.mine]\ntype = \"kimi\"\n",
+            &["default_model"],
+        )
+        .expect("clear before a table");
+        assert_eq!(
+            String::from_utf8(table).expect("UTF-8"),
+            "# model choice\n\n# mine\n[providers.mine]\ntype = \"kimi\"\n"
+        );
+    }
+
+    #[test]
+    fn toml_restore_after_clear_keeps_the_comment() {
+        let original = "# model choice\ndefault_model = \"mine\"\nkeep = true\n";
+        let cleared = remove_keys(FileKind::Toml, original, &["default_model"]).expect("clear");
+        let cleared = String::from_utf8(cleared).expect("UTF-8");
+        let restored = text(
+            FileKind::Toml,
+            Some(&cleared),
+            &[assign("default_model", "mine", false)],
+        );
+        assert!(restored.contains("# model choice"), "{restored}");
+        assert_eq!(
+            get(FileKind::Toml, &restored, "default_model").expect("model"),
+            Some("mine".to_owned())
+        );
+        assert!(restored.contains("keep = true"));
     }
 
     #[test]
@@ -2191,5 +2382,115 @@ experimental_bearer_token = \"local-token\"
             rendered["model"],
             serde_json::json!({"name": {"name": "x", "extra": 1}})
         );
+    }
+
+    fn agent_fixture_files(extension: &str) -> Vec<std::path::PathBuf> {
+        fn collect(
+            directory: &std::path::Path,
+            extension: &str,
+            files: &mut Vec<std::path::PathBuf>,
+        ) {
+            for entry in std::fs::read_dir(directory).expect("fixture directory") {
+                let path = entry.expect("fixture entry").path();
+                if path.is_dir() {
+                    collect(&path, extension, files);
+                } else if path.extension().is_some_and(|found| found == extension)
+                    && path.components().any(|part| part.as_os_str() == "before")
+                {
+                    files.push(path);
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/agents");
+        let mut files = Vec::new();
+        collect(&root, extension, &mut files);
+        files
+    }
+
+    #[test]
+    fn jsonc_fixture_edits_match_legacy_semantics() {
+        let mut cases = 0;
+        for path in agent_fixture_files("json") {
+            let original = std::fs::read_to_string(&path).expect("fixture");
+            let Ok(before) = super::json_root(&original) else {
+                continue;
+            };
+            let assignments = if before.is_array() {
+                vec![append(".", r#"[{"id":"hof/a","kind":"gw"}]"#)]
+            } else {
+                vec![assign("hofund_semantic_check", "kept", false)]
+            };
+            let expected = super::legacy_render_json(&original, &assignments)
+                .unwrap_or_else(|error| panic!("legacy {}: {error}", path.display()));
+            let actual = text(FileKind::Json, Some(&original), &assignments);
+            assert_eq!(
+                super::json_root(&actual).expect("new JSON"),
+                super::json_root(&expected).expect("legacy JSON"),
+                "{}",
+                path.display()
+            );
+            if let Some(key) = before
+                .as_object()
+                .and_then(|object| object.keys().next().cloned())
+            {
+                let actual = remove_keys(FileKind::Json, &original, &[&key])
+                    .unwrap_or_else(|error| panic!("remove {}: {error}", path.display()));
+                let mut after = before.clone();
+                super::unset_json(&mut after, &super::split_key(&key)).expect("legacy removal");
+                assert_eq!(
+                    super::json_root(std::str::from_utf8(&actual).expect("UTF-8"))
+                        .expect("new JSON removal"),
+                    after,
+                    "{}",
+                    path.display()
+                );
+            }
+            cases += 1;
+        }
+        assert!(cases > 20, "expected the shipped JSON fixtures");
+    }
+
+    #[test]
+    fn yaml_fixture_edits_match_legacy_semantics() {
+        let mut cases = 0;
+        for path in agent_fixture_files("yaml") {
+            let original = std::fs::read_to_string(&path).expect("fixture");
+            let Ok(before) = super::yaml_root(&original) else {
+                continue;
+            };
+            let assignments = if before.is_array() {
+                vec![append(".", r#"[{"id":"hof/a","kind":"gw"}]"#)]
+            } else {
+                vec![assign("hofund_semantic_check", "kept", false)]
+            };
+            let expected = super::legacy_render_yaml(&original, &assignments)
+                .unwrap_or_else(|error| panic!("legacy {}: {error}", path.display()));
+            let actual = text(FileKind::Yaml, Some(&original), &assignments);
+            assert_eq!(
+                super::yaml_root(&actual).expect("new YAML"),
+                super::yaml_root(&expected).expect("legacy YAML"),
+                "{}",
+                path.display()
+            );
+            if let Some(key) = before
+                .as_hash()
+                .and_then(|hash| hash.keys().find_map(|key| key.as_str().map(str::to_owned)))
+            {
+                let actual = remove_keys(FileKind::Yaml, &original, &[&key])
+                    .unwrap_or_else(|error| panic!("remove {}: {error}", path.display()));
+                let mut after = before.clone();
+                super::unset_yaml(&mut after, &[&key]).expect("legacy removal");
+                assert_eq!(
+                    super::yaml_root(std::str::from_utf8(&actual).expect("UTF-8"))
+                        .expect("new YAML removal"),
+                    after,
+                    "{}",
+                    path.display()
+                );
+            }
+            cases += 1;
+        }
+        assert!(cases > 5, "expected the shipped YAML fixtures");
     }
 }

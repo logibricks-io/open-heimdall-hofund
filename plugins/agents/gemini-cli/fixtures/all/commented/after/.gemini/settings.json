@@ -1,14 +1,9 @@
 {
-  "model": {
-    "name": "commented-model"
-  },
+  // Keep this comment in the original backup.
+  "model": { "name": "commented-model" },
   "security": {
-    "auth": {
-      "selectedType": "gemini-api-key",
-      "userKey": true
-    }
+    // Replace only the selected authentication type.
+    "auth": { "selectedType": "gemini-api-key", "userKey": true },
   },
-  "ui": {
-    "theme": "dark"
-  }
+  "ui": { "theme": "dark" },
 }
