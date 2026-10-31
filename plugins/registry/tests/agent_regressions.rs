@@ -938,3 +938,768 @@ impl std::ops::Deref for Scratch {
 fn scratch() -> Scratch {
     Scratch(tempfile::tempdir().expect("scratch"))
 }
+
+#[test]
+fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let dir = home.join(".config").join("Code").join("User");
+    let models = dir.join("chatLanguageModels.json");
+    let settings = dir.join("settings.json");
+    // VS Code writes JSONC: comments and trailing commas are allowed.
+    let models_text =
+        "[\n  // mine\n  { \"vendor\": \"ollama\", \"name\": \"local\", \"models\": [] },\n]\n";
+    let settings_text = "{\n  \"chat.defaultModel\": \"mine\",\n  \"chat\": { \"agent\": { \"enabled\": true } },\n}\n";
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(&models, models_text).expect("seed models");
+    fs::write(&settings, settings_text).expect("seed settings");
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    let read = |path: &Path| -> serde_json::Value {
+        serde_json::from_slice(&fs::read(path).expect("read")).expect("json")
+    };
+    let groups = read(&models);
+    assert_eq!(groups[0]["name"], "local");
+    assert_eq!(groups[1]["name"], "hofund");
+    assert_eq!(
+        groups[1]["models"][0]["requestHeaders"]["Authorization"],
+        format!("Bearer {}", target.token())
+    );
+    assert_eq!(
+        fs::read_to_string(&settings).expect("settings"),
+        settings_text
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json = read(&settings);
+    assert_eq!(json["chat.defaultModel"], "route-a");
+    assert_eq!(
+        json["chat"],
+        serde_json::json!({ "agent": { "enabled": true } })
+    );
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("route-a")
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    agent.set_model(&session, &target, None).expect("clear");
+    let json = read(&settings);
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(
+        json["chat"],
+        serde_json::json!({ "agent": { "enabled": true } })
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    // The models file comes back byte for byte; settings gets the user's
+    // default model back beside their other keys.
+    assert_eq!(fs::read_to_string(&models).expect("models"), models_text);
+    let json = read(&settings);
+    assert_eq!(json["chat.defaultModel"], "mine");
+    assert_eq!(
+        json["chat"],
+        serde_json::json!({ "agent": { "enabled": true } })
+    );
+}
+
+#[test]
+fn shipped_vscode_creates_settings_only_for_a_pick() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let dir = home.join(".config").join("Code").join("User");
+    let settings = dir.join("settings.json");
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    assert!(dir.join("chatLanguageModels.json").is_file());
+    assert!(!settings.exists());
+    assert!(agent.status(&session, &target).expect("status").connected());
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json["chat.defaultModel"], "route-a");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!settings.exists());
+    assert!(!dir.join("chatLanguageModels.json").exists());
+}
+
+#[test]
+fn shipped_qwen_pick_points_the_session_at_the_gateway_entry() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".qwen").join("settings.json");
+    let original = r#"{
+  "security": { "auth": { "selectedType": "qwen-oauth" } },
+  "model": { "name": "mine", "baseUrl": "https://mine.example.test/v1" },
+  "modelProviders": { "openai": [
+    { "baseUrl": "https://mine.example.test/v1", "envKey": "MY_KEY", "id": "route-a", "name": "mine" }
+  ] }
+}
+"#;
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, original).expect("seed");
+    let target = target();
+    let agent = adapter("qwen", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    let read = || -> serde_json::Value {
+        serde_json::from_slice(&fs::read(&path).expect("read")).expect("json")
+    };
+    assert_eq!(read()["security"]["auth"]["selectedType"], "qwen-oauth");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json = read();
+    // The user's entry of the same id comes first; the base URL picks hofund's.
+    assert_eq!(json["model"]["name"], "route-a");
+    assert_eq!(json["model"]["baseUrl"], "http://127.0.0.1:3425/v1");
+    assert_eq!(json["security"]["auth"]["selectedType"], "openai");
+    assert!(agent.status(&session, &target).expect("status").connected());
+    agent.set_model(&session, &target, None).expect("clear");
+    let json = read();
+    assert_eq!(json["model"]["baseUrl"], "https://mine.example.test/v1");
+    assert_eq!(json["security"]["auth"]["selectedType"], "qwen-oauth");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(
+        read(),
+        serde_json::from_str::<serde_json::Value>(original).expect("original")
+    );
+}
+
+const CLINE_PROVIDERS: &str = r#"{
+  "version": 1,
+  "lastUsedProvider": "anthropic",
+  "providers": {
+    "anthropic": {
+      "settings": { "provider": "anthropic", "apiKey": "user-anthropic-key", "model": "claude-sonnet-4-5" },
+      "updatedAt": "2026-03-01T10:00:00.000Z",
+      "tokenSource": "manual"
+    },
+    "openai-compatible": {
+      "settings": { "provider": "openai-compatible", "apiKey": "user-key", "model": "my-model", "baseUrl": "http://localhost:8000/v1" },
+      "updatedAt": "2026-03-02T10:00:00.000Z",
+      "tokenSource": "manual"
+    }
+  }
+}
+"#;
+
+#[test]
+fn shipped_cline_pick_takes_over_openai_compatible_and_clear_gives_it_back() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let dir = home.join(".cline").join("data").join("settings");
+    let providers = dir.join("providers.json");
+    write(&providers, CLINE_PROVIDERS);
+    let target = target();
+    let agent = adapter("cline", TargetOs::Linux);
+    let read = || -> serde_json::Value {
+        serde_json::from_slice(&fs::read(&providers).expect("read")).expect("json")
+    };
+    let original = read();
+    agent.apply(&session, &target).expect("apply");
+    assert_eq!(read(), original);
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("my-model")
+    );
+    // The user's own model of a route's name points elsewhere: a refresh
+    // leaves their entry alone.
+    agent.refresh_token(&session, &target).expect("refresh");
+    assert_eq!(read(), original);
+
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json = read();
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["lastUsedProvider"], "openai-compatible");
+    assert_eq!(
+        json["providers"]["anthropic"],
+        original["providers"]["anthropic"]
+    );
+    let entry = &json["providers"]["openai-compatible"];
+    assert_eq!(
+        entry["settings"],
+        serde_json::json!({
+            "provider": "openai-compatible",
+            "apiKey": target.token(),
+            "baseUrl": "http://127.0.0.1:3425/v1",
+            "headers": { "User-Agent": "cline" },
+            "model": "route-a"
+        })
+    );
+    assert_eq!(entry["updatedAt"], "2026-01-01T00:00:00.000Z");
+    assert_eq!(entry["tokenSource"], "manual");
+    assert!(agent.status(&session, &target).expect("status").connected());
+    // A second connect keeps the pick as it is.
+    let picked = read();
+    agent.apply(&session, &target).expect("apply again");
+    assert_eq!(read(), picked);
+
+    // A key the user adds inside the entry survives a refresh, which only
+    // swaps the token.
+    let mut edited = read();
+    edited["providers"]["openai-compatible"]["settings"]["reasoning"] =
+        serde_json::json!({ "effort": "high" });
+    write(&providers, &edited.to_string());
+    let fresh = GatewayTarget::new(
+        "http://127.0.0.1:3425/",
+        "fresh-token",
+        vec!["route-a".to_owned()],
+    );
+    agent.refresh_token(&session, &fresh).expect("refresh");
+    let mut expected = edited.clone();
+    expected["providers"]["openai-compatible"]["settings"]["apiKey"] =
+        serde_json::json!("fresh-token");
+    assert_eq!(read(), expected);
+
+    // Once the entry points elsewhere it is the user's again.
+    let mut moved = read();
+    moved["providers"]["openai-compatible"]["settings"]["baseUrl"] =
+        serde_json::json!("http://localhost:9000/v1");
+    write(&providers, &moved.to_string());
+    let later = GatewayTarget::new(
+        "http://127.0.0.1:3425/",
+        "later-token",
+        vec!["route-a".to_owned()],
+    );
+    agent.refresh_token(&session, &later).expect("refresh");
+    assert_eq!(read(), moved);
+
+    // So it is once the user picks a model that is not a route.
+    let mut own = expected.clone();
+    own["providers"]["openai-compatible"]["settings"]["model"] = serde_json::json!("my-model");
+    write(&providers, &own.to_string());
+    agent.refresh_token(&session, &later).expect("refresh");
+    assert_eq!(read(), own);
+
+    // An entry without a key is not hofund's either; a refresh adds none.
+    let mut keyless = expected.clone();
+    keyless["providers"]["openai-compatible"]["settings"]
+        .as_object_mut()
+        .expect("settings")
+        .remove("apiKey");
+    write(&providers, &keyless.to_string());
+    agent.refresh_token(&session, &later).expect("refresh");
+    assert_eq!(read(), keyless);
+    write(&providers, &expected.to_string());
+
+    agent.set_model(&session, &target, None).expect("clear");
+    assert_eq!(read(), original);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(read(), original);
+    assert!(!dir.join("models.json").exists());
+}
+
+#[test]
+fn shipped_cline_writes_providers_only_for_a_pick() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let dir = home.join(".cline").join("data").join("settings");
+    let providers = dir.join("providers.json");
+    let target = target();
+    let agent = adapter("cline", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    assert!(dir.join("models.json").is_file());
+    assert!(!providers.exists());
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&providers).expect("read")).expect("json");
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["lastUsedProvider"], "openai-compatible");
+    assert_eq!(
+        json["providers"]["openai-compatible"]["settings"]["model"],
+        "route-a"
+    );
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&providers).expect("read")).expect("json");
+    assert_eq!(json.get("version"), None);
+    assert_eq!(json.get("lastUsedProvider"), None);
+    assert_eq!(json, serde_json::json!({}));
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!providers.exists());
+    assert!(!dir.join("models.json").exists());
+}
+
+const KIMI_CONFIG: &str = r#"default_model = "kimi-code/kimi-for-coding"
+
+# mine
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+api_key = "user-key"
+
+[models."kimi-code/kimi-for-coding"]
+provider = "managed:kimi-code"
+model = "kimi-for-coding"
+max_context_size = 262144
+"#;
+
+#[test]
+fn shipped_kimi_pick_sets_default_model_and_disconnect_gives_it_back() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".kimi-code").join("config.toml");
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, KIMI_CONFIG).expect("seed");
+    let target = target();
+    let agent = adapter("kimi", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    let read = || -> toml::Table {
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml")
+    };
+    let config = read();
+    assert_eq!(
+        config["default_model"].as_str(),
+        Some("kimi-code/kimi-for-coding")
+    );
+    let route = &config["models"]["hofund/route-a"];
+    assert_eq!(route["provider"].as_str(), Some("hofund"));
+    assert_eq!(route["model"].as_str(), Some("route-a"));
+    assert_eq!(route["max_context_size"].as_integer(), Some(128000));
+    assert_eq!(
+        config["providers"]["hofund"]["base_url"].as_str(),
+        Some("http://127.0.0.1:3425/v1")
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    assert_eq!(read()["default_model"].as_str(), Some("hofund/route-a"));
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("hofund/route-a")
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    // Clearing drops the key (#433); disconnect puts back the user's.
+    agent.set_model(&session, &target, None).expect("clear");
+    assert!(!read().contains_key("default_model"));
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(fs::read_to_string(&path).expect("read"), KIMI_CONFIG);
+}
+
+const GROK_CONFIG: &str = r#"[models]
+default = "grok-4.7"
+
+[model."my-local"]
+model = "llama3"
+base_url = "http://localhost:11434/v1"
+api_key = "local"
+
+[features]
+campaigns = true
+"#;
+
+#[test]
+fn shipped_grok_pick_turns_campaigns_off_and_clear_gives_them_back() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".grok").join("config.toml");
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, GROK_CONFIG).expect("seed");
+    let target = target();
+    let agent = adapter("grok", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    let read = || -> toml::Table {
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml")
+    };
+    let config = read();
+    assert_eq!(config["models"]["default"].as_str(), Some("grok-4.7"));
+    assert_eq!(config["features"]["campaigns"].as_bool(), Some(true));
+    let route = &config["model"]["hofund/route-a"];
+    assert_eq!(route["model"].as_str(), Some("route-a"));
+    assert_eq!(route["base_url"].as_str(), Some("http://127.0.0.1:3425/v1"));
+    assert_eq!(route["api_backend"].as_str(), Some("chat_completions"));
+    assert_eq!(
+        config["model"]["my-local"]["model"].as_str(),
+        Some("llama3")
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let config = read();
+    assert_eq!(config["models"]["default"].as_str(), Some("hofund/route-a"));
+    assert_eq!(config["features"]["campaigns"].as_bool(), Some(false));
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("hofund/route-a")
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    // Clearing drops the default (#433) and puts the user's campaigns back.
+    agent.set_model(&session, &target, None).expect("clear");
+    let config = read();
+    assert!(
+        config
+            .get("models")
+            .and_then(|m| m.get("default"))
+            .is_none()
+    );
+    assert_eq!(config["features"]["campaigns"].as_bool(), Some(true));
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    // The clear dropped the emptied [models] table, so disconnect writes it
+    // back at the end: the same settings, in another order.
+    assert_eq!(
+        read(),
+        toml::from_str::<toml::Table>(GROK_CONFIG).expect("toml")
+    );
+    agent.apply(&session, &target).expect("apply again");
+    agent.disconnect(&session, false).expect("disconnect again");
+    assert_eq!(
+        read(),
+        toml::from_str::<toml::Table>(GROK_CONFIG).expect("toml")
+    );
+}
+
+#[test]
+fn shipped_grok_pick_in_a_fresh_home_leaves_nothing_after_disconnect() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".grok").join("config.toml");
+    let target = target();
+    let agent = adapter("grok", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let config: toml::Table =
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml");
+    assert_eq!(config["features"]["campaigns"].as_bool(), Some(false));
+    agent.set_model(&session, &target, None).expect("clear");
+    let config: toml::Table =
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml");
+    assert!(!config.contains_key("features"));
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!path.exists());
+}
+
+const GOOSE_CONFIG: &str = "# my goose settings
+GOOSE_MODE: smart_approve
+active_provider: anthropic
+providers:
+  anthropic:
+    enabled: true
+    model: claude-sonnet-4-5
+    configured: true
+";
+
+fn goose_provider(root: &Path) -> serde_json::Value {
+    let path = root
+        .join("goose")
+        .join("custom_providers")
+        .join("hofund.json");
+    serde_json::from_str(&fs::read_to_string(path).expect("read provider")).expect("json")
+}
+
+#[test]
+fn shipped_goose_pick_makes_hofund_active_and_clear_gives_the_user_provider_back() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".config").join("goose").join("config.yaml");
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, GOOSE_CONFIG).expect("seed");
+    let target = target();
+    let agent = adapter("goose", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    // Connect writes only the provider file; the user's choice stays.
+    assert_eq!(fs::read_to_string(&path).expect("read"), GOOSE_CONFIG);
+    let provider = goose_provider(&home.join(".config"));
+    assert_eq!(provider["base_url"], "http://127.0.0.1:3425/v1");
+    assert_eq!(provider["headers"]["Authorization"], "Bearer local-token");
+    assert_eq!(provider["models"][0]["name"], "route-a");
+    assert_eq!(agent.configured_model(&session).expect("model"), None);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let picked = fs::read_to_string(&path).expect("read");
+    assert!(picked.contains("active_provider: hofund\n"), "{picked}");
+    // The YAML editor drops the user's comment (#414); the keys stay.
+    assert_eq!(
+        picked,
+        "GOOSE_MODE: smart_approve\nactive_provider: hofund\nproviders:\n  anthropic:\n    enabled: true\n    model: claude-sonnet-4-5\n    configured: true\n  hofund:\n    enabled: true\n    configured: true\n    model: route-a\n"
+    );
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("route-a")
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+    // Clearing puts the user's provider back and drops hofund's entry.
+    agent.set_model(&session, &target, None).expect("clear");
+    let cleared = fs::read_to_string(&path).expect("read");
+    assert_eq!(cleared, GOOSE_CONFIG.replace("# my goose settings\n", ""));
+    assert_eq!(agent.configured_model(&session).expect("model"), None);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    let restored = fs::read_to_string(&path).expect("read");
+    assert_eq!(restored, GOOSE_CONFIG.replace("# my goose settings\n", ""));
+    assert!(
+        !home
+            .join(".config/goose/custom_providers/hofund.json")
+            .exists()
+    );
+}
+
+#[test]
+fn shipped_goose_pick_in_a_fresh_home_leaves_nothing_after_disconnect() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let target = target();
+    let agent = adapter("goose", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let config = home.join(".config").join("goose").join("config.yaml");
+    let picked = fs::read_to_string(&config).expect("read");
+    assert!(picked.contains("active_provider: hofund"), "{picked}");
+    agent.set_model(&session, &target, None).expect("clear");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!home.join(".config").exists());
+}
+
+#[test]
+fn shipped_goose_follows_xdg_config_home_except_on_windows() {
+    for (value, unix_root) in [
+        (Some("absolute"), "xdg"),
+        (Some(""), ".config"),
+        (Some("relative/config"), ".config"),
+        (None, ".config"),
+    ] {
+        let home = scratch();
+        let session = match value {
+            Some("absolute") => {
+                Session::from_env_iter(&*home, [("XDG_CONFIG_HOME", home.join("xdg").as_os_str())])
+            }
+            Some(text) => {
+                Session::from_env_iter(&*home, [("XDG_CONFIG_HOME", std::ffi::OsStr::new(text))])
+            }
+            None => Session::new(&*home),
+        };
+        for os in OPERATING_SYSTEMS {
+            let root = if os == TargetOs::Windows {
+                "AppData/Roaming/Block/goose/config".to_owned()
+            } else {
+                format!("{unix_root}/goose")
+            };
+            let plan = adapter("goose", os)
+                .plan(&session, &target())
+                .expect("plan");
+            let paths = plan
+                .changes()
+                .iter()
+                .map(|change| {
+                    change
+                        .path()
+                        .strip_prefix(&*home)
+                        .expect("relative")
+                        .to_path_buf()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                paths,
+                [PathBuf::from(format!(
+                    "{root}/custom_providers/hofund.json"
+                ))],
+                "{value:?} on {os:?}"
+            );
+        }
+        // A pick writes config.yaml beside the provider file.
+        let agent = adapter("goose", TargetOs::Windows);
+        agent.apply(&session, &target()).expect("apply");
+        agent
+            .set_model(&session, &target(), Some("route-a"))
+            .expect("pick");
+        assert!(
+            home.join("AppData/Roaming/Block/goose/config/config.yaml")
+                .is_file()
+        );
+        assert!(!home.join("xdg").exists());
+        agent.disconnect(&session, false).expect("disconnect");
+        assert!(!home.join("AppData").exists());
+    }
+}
+
+#[test]
+fn shipped_goose_lets_goose_ask_the_gateway_only_when_no_route_is_listed() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let root = home.join(".config");
+    let agent = adapter("goose", TargetOs::Linux);
+    let empty = target_with(&[]);
+    agent.apply(&session, &empty).expect("apply without routes");
+    let provider = goose_provider(&root);
+    assert_eq!(provider["models"], serde_json::json!([]));
+    assert!(provider.get("dynamic_models").is_none());
+    assert!(agent.status(&session, &empty).expect("status").connected());
+    let one = target();
+    assert!(!agent.status(&session, &one).expect("status").connected());
+    agent.apply(&session, &one).expect("apply with a route");
+    let provider = goose_provider(&root);
+    assert_eq!(provider["dynamic_models"], serde_json::json!(false));
+    assert_eq!(provider["models"][0]["name"], "route-a");
+    assert!(agent.status(&session, &one).expect("status").connected());
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!root.exists());
+}
+
+const ZED_SETTINGS: &str = r#"// Zed settings
+{
+  "theme": "One Dark", // keep this note
+  "agent": {
+    "default_model": { "provider": "anthropic", "model": "claude-sonnet-4" }
+  }
+}
+"#;
+
+fn zed_store_session(
+    home: &Path,
+) -> (
+    Session,
+    std::sync::Arc<hofund_kit_agent::MemoryCredentialStore>,
+) {
+    let store = std::sync::Arc::new(hofund_kit_agent::MemoryCredentialStore::new());
+    let shared: std::sync::Arc<dyn hofund_plugin_api::CredentialStore> = store.clone();
+    (Session::new(home).with_credential_store(shared), store)
+}
+
+#[test]
+fn shipped_zed_keeps_its_key_in_the_store_and_gives_the_user_model_back() {
+    let home = scratch();
+    let (session, store) = zed_store_session(&home);
+    let path = home.join(".config").join("zed").join("settings.json");
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, ZED_SETTINGS).expect("seed");
+    let target = target();
+    let agent = adapter("zed", TargetOs::Linux);
+    let plan = agent.plan(&session, &target).expect("plan");
+    assert!(
+        plan.changes()
+            .iter()
+            .any(|change| change.path() == Path::new("credential store: http://127.0.0.1:3425/v1")),
+        "{plan:?}"
+    );
+    agent.apply(&session, &target).expect("apply");
+    let applied = fs::read_to_string(&path).expect("read");
+    assert!(!applied.contains("local-token"), "{applied}");
+    // The JSON editor reads the comments but does not keep them while
+    // connected (#145); an exact disconnect brings them back.
+    assert!(!applied.contains("// keep this note"), "{applied}");
+    let items = store.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].url(), "http://127.0.0.1:3425/v1");
+    assert_eq!(items[0].account(), "Bearer");
+    assert_eq!(items[0].label(), "zed-github-account");
+    assert_eq!(
+        items[0].windows_target(),
+        "zed:url=http://127.0.0.1:3425/v1"
+    );
+    assert_eq!(
+        store
+            .secret("http://127.0.0.1:3425/v1", "Bearer")
+            .as_deref(),
+        Some("local-token")
+    );
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("claude-sonnet-4")
+    );
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let picked: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+    assert_eq!(
+        picked["agent"]["default_model"],
+        serde_json::json!({ "provider": "hofund", "model": "route-a" })
+    );
+    agent.set_model(&session, &target, None).expect("clear");
+    // Zed reads default_model only whole, so clearing puts back the user's
+    // object rather than leaving a provider with no model.
+    let cleared: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+    assert_eq!(
+        cleared["agent"]["default_model"],
+        serde_json::json!({ "provider": "anthropic", "model": "claude-sonnet-4" })
+    );
+    // Replacing the store item by hand reads as not connected.
+    store.set(&items[0], "someone-else");
+    assert!(!agent.status(&session, &target).expect("status").connected());
+    store.set(&items[0], "local-token");
+    assert!(agent.status(&session, &target).expect("status").connected());
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(fs::read_to_string(&path).expect("read"), ZED_SETTINGS);
+    assert!(store.items().is_empty());
+}
+
+#[test]
+fn shipped_zed_without_a_store_refuses_to_connect_and_writes_nothing() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let agent = adapter("zed", TargetOs::Linux);
+    let error = agent.apply(&session, &target()).expect_err("no store");
+    assert!(error.to_string().contains("OS credential store"), "{error}");
+    assert!(!home.join(".config").exists());
+}
+
+#[test]
+fn shipped_zed_settings_live_under_appdata_on_windows() {
+    let home = scratch();
+    let (session, store) = zed_store_session(&home);
+    let agent = adapter("zed", TargetOs::Windows);
+    agent.apply(&session, &target()).expect("apply");
+    assert!(
+        home.join("AppData/Roaming/Zed/settings.json").is_file(),
+        "settings not written under AppData"
+    );
+    assert_eq!(
+        store.items()[0].windows_target(),
+        "zed:url=http://127.0.0.1:3425/v1"
+    );
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!home.join("AppData").exists());
+}
+
+#[test]
+fn shipped_zed_clear_in_a_fresh_home_drops_the_whole_default_model() {
+    let home = scratch();
+    let (session, store) = zed_store_session(&home);
+    let path = home.join(".config").join("zed").join("settings.json");
+    let target = target();
+    let agent = adapter("zed", TargetOs::Linux);
+    agent.apply(&session, &target).expect("apply");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    assert_eq!(
+        agent.configured_model(&session).expect("model").as_deref(),
+        Some("route-a")
+    );
+    agent.set_model(&session, &target, None).expect("clear");
+    let cleared: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+    assert_eq!(cleared.get("agent"), None, "{cleared}");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!home.join(".config").exists());
+    assert!(store.items().is_empty());
+}

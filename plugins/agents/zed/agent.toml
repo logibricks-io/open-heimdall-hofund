@@ -1,0 +1,64 @@
+id = "zed"
+display_name = "Zed"
+binary = "zed"
+
+# Zed keeps its user settings in settings.json (JSON with comments):
+# ~/.config/zed on Linux and macOS, %APPDATA%\Zed on Windows (taken here as
+# ~/AppData/Roaming/Zed). This adapter edits those default paths only:
+# XDG_CONFIG_HOME and a relocated APPDATA are not followed, because one file
+# entry cannot name a different override variable per OS (#411). Source:
+# https://zed.dev/docs/configuring-zed and
+# https://zed.dev/docs/ai/llm-providers (OpenAI API Compatible).
+# Comments in the file are lost while connected and come back on an exact
+# disconnect (#461).
+[[file]]
+id = "settings"
+kind = "json"
+linux = "~/.config/zed/settings.json"
+macos = "~/.config/zed/settings.json"
+windows = "~/AppData/Roaming/Zed/settings.json"
+
+# hofund is an OpenAI-compatible provider named hofund, at the gateway's /v1.
+[[set]]
+file = "settings"
+key = "language_models.openai_compatible.hofund.api_url"
+slot = "v1"
+
+# One model per route. Zed needs a context window for every custom model;
+# this build has no catalog values per model, so every entry gets 128000
+# tokens, tool calling, no images, and no reasoning_effort (#459).
+[[set]]
+file = "settings"
+key = "language_models.openai_compatible.hofund.available_models"
+slot = { model_array = { fields = [
+    { key = "name", value = "id" },
+    { key = "display_name", value = "id" },
+    { key = "max_tokens", json = "128000" },
+    { key = "capabilities", json = '{"tools":true,"images":false,"parallel_tool_calls":false,"prompt_cache_key":false,"chat_completions":true}' },
+] } }
+
+# Zed does not read an OpenAI-compatible provider's key from settings.json:
+# it looks the key up in the OS credential store by the provider's api_url.
+# macOS: an internet password with the api_url as server and account
+# Bearer. Linux: a Secret Service item with the attributes url and username
+# (Bearer). Windows: a generic credential named zed:url=<api_url>, user
+# Bearer. Zed labels the Linux item zed-github-account.
+[credential]
+file = "settings"
+url = "{v1}"
+account = "Bearer"
+label = "zed-github-account"
+windows_target = "zed:url={v1}"
+
+# The agent panel starts on agent.default_model, an object of provider and
+# model that Zed reads only whole. A pick writes the object with provider
+# hofund, then the route as its model; clearing the model puts back the
+# user's object as it was before connect, or drops it when there was none.
+[[set]]
+file = "settings"
+key = "agent.default_model"
+slot = { model_pair = { json = '{"provider":"hofund"}' } }
+
+[model]
+file = "settings"
+key = "agent.default_model.model"

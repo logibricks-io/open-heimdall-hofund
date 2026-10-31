@@ -26,9 +26,18 @@ AccountsHandle::async fn remove (& self , id : & AccountId) -> Result < () , Plu
 AccountsHandle::async fn secret (& self , id : & AccountId) -> Result < Option < SecretString > , PluginError >
 AccountsHandle::async fn upsert (& self , account : Account , secret : SecretString) -> Result < () , PluginError >
 AccountsHandle::fn account (& self , id : AccountId , label : impl Into < String >) -> Result < Account , PluginError >
+AgentCredential
+AgentCredential #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentCredential::const fn account (& self) -> & 'static str
+AgentCredential::const fn file (& self) -> & 'static str
+AgentCredential::const fn from_static (file : & 'static str , url : & 'static str , account : & 'static str , label : & 'static str , windows_target : & 'static str ,) -> Self
+AgentCredential::const fn label (& self) -> & 'static str
+AgentCredential::const fn url (& self) -> & 'static str
+AgentCredential::const fn windows_target (& self) -> & 'static str
 AgentDescription
 AgentDescription #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 AgentDescription::const fn binary (& self) -> & 'static str
+AgentDescription::const fn credential (& self) -> Option < & AgentCredential >
 AgentDescription::const fn display_name (& self) -> & 'static str
 AgentDescription::const fn effort_file (& self) -> Option < & 'static str >
 AgentDescription::const fn effort_key (& self) -> Option < & 'static str >
@@ -42,6 +51,7 @@ AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: Surfac
 AgentDescription::const fn route (& self) -> AgentRoute
 AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
 AgentDescription::const fn visible (& self) -> Visible
+AgentDescription::const fn with_credential (mut self , credential : AgentCredential) -> Self
 AgentDescription::const fn with_effort_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_prefix (mut self , prefix : & 'static str) -> Self
@@ -54,6 +64,7 @@ AgentFactory::fn validate (& self , raw : & RawTable) -> Result < Self :: Config
 AgentFile
 AgentFile #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AgentFile::const fn create (& self) -> bool
+AgentFile::const fn env_os (& self) -> [bool ; 3]
 AgentFile::const fn env_override (& self) -> Option < & 'static str >
 AgentFile::const fn env_replaces (& self) -> Option < & 'static str >
 AgentFile::const fn from_static (id : & 'static str , kind : FileKind , linux : & 'static str , macos : & 'static str , windows : & 'static str , env_override : Option < & 'static str > ,) -> Self
@@ -63,6 +74,7 @@ AgentFile::const fn linux (& self) -> & 'static str
 AgentFile::const fn macos (& self) -> & 'static str
 AgentFile::const fn windows (& self) -> & 'static str
 AgentFile::const fn with_create (mut self , create : bool) -> Self
+AgentFile::const fn with_env_os (mut self , linux : bool , macos : bool , windows : bool) -> Self
 AgentFile::const fn with_env_replaces (mut self , prefix : & 'static str) -> Self
 AgentIntegration
 AgentIntegration::fn custom_write (& self , ctx : & WriteCtx , target : & GatewayTarget ,) -> Result < Option < Plan > , PluginError >
@@ -144,6 +156,20 @@ CountOutcome
 CountOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 CountOutcome::Counted
 CountOutcome::Unsupported
+Credential
+Credential #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Hash)
+Credential::fn account (& self) -> & str
+Credential::fn label (& self) -> & str
+Credential::fn new (url : impl Into < String > , account : impl Into < String > , label : impl Into < String > , windows_target : impl Into < String > ,) -> Self
+Credential::fn url (& self) -> & str
+Credential::fn windows_target (& self) -> & str
+CredentialError
+CredentialError derives(Clone, Debug, PartialEq, Eq, Error)
+CredentialError::fn new (message : impl Into < String >) -> Self
+CredentialStore
+CredentialStore::fn delete (& self , item : & Credential) -> Result < () , CredentialError >
+CredentialStore::fn read (& self , item : & Credential) -> Result < Option < SecretString > , CredentialError >
+CredentialStore::fn write (& self , item : & Credential , secret : & str) -> Result < () , CredentialError >
 CredentialStyle
 CredentialStyle #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 CredentialStyle::ApiKey
@@ -194,6 +220,7 @@ FileKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 FileKind::Env
 FileKind::Json
 FileKind::Toml
+FileKind::Yaml
 Forward
 Forward #[non_exhaustive] derives(Clone)
 Forward::fn body_for (& self , model : & str) -> Result < RawBody , PluginError >
@@ -328,6 +355,20 @@ Method::Get
 Method::Patch
 Method::Post
 Method::Put
+ModelField
+ModelField derives(Clone, Copy, Debug, PartialEq, Eq)
+ModelField::const fn id (key : & 'static str) -> Self
+ModelField::const fn json (key : & 'static str , text : & 'static str) -> Self
+ModelField::const fn key (& self) -> & 'static str
+ModelField::const fn literal (key : & 'static str , text : & 'static str) -> Self
+ModelField::const fn models (key : & 'static str , fields : & 'static [Self]) -> Self
+ModelField::const fn object (key : & 'static str , fields : & 'static [Self]) -> Self
+ModelField::const fn origin (key : & 'static str) -> Self
+ModelField::const fn prefixed (key : & 'static str , prefix : & 'static str) -> Self
+ModelField::const fn template (key : & 'static str , text : & 'static str) -> Self
+ModelField::const fn token (key : & 'static str) -> Self
+ModelField::const fn v1 (key : & 'static str) -> Self
+ModelField::const fn value (& self) -> ModelValue
 ModelList
 ModelList #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 ModelList::const fn auth_choice (& self) -> Option < AuthChoice >
@@ -374,10 +415,31 @@ ModelSpec::fn with_max_output (mut self , max_output : u64) -> Self
 ModelSpec::fn with_output_modalities (mut self , modalities : Vec < String >) -> Self
 ModelSpec::fn with_service_tiers (mut self , service_tiers : Vec < String >) -> Self
 ModelSpec::fn with_web_search (mut self , web_search : impl Into < String >) -> Self
+ModelValue
+ModelValue #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+ModelValue::Id
+ModelValue::Json
+ModelValue::Literal
+ModelValue::Models
+ModelValue::Object
+ModelValue::Origin
+ModelValue::Prefixed
+ModelValue::Template
+ModelValue::Token
+ModelValue::V1
+ModelValue::fn has_token (& self) -> bool
 ObserveHandle
 ObserveHandle #[non_exhaustive] derives(Clone)
 ObserveHandle::fn observation (& self) -> QuotaObservation
 ObserveHandle::fn observe (& self , observation : QuotaObservation) -> Result < () , PluginError >
+OwnerTest
+OwnerTest derives(Clone, Copy, Debug, PartialEq, Eq)
+OwnerTest::const fn equals (key : & 'static str , text : & 'static str) -> Self
+OwnerTest::const fn is_prefix (& self) -> bool
+OwnerTest::const fn key (& self) -> & 'static str
+OwnerTest::const fn prefix (key : & 'static str , text : & 'static str) -> Self
+OwnerTest::const fn text (& self) -> & 'static str
+OwnerTest::fn matches (& self , value : & str) -> bool
 PROBE_CAP
 PipedChild
 PipedChild #[non_exhaustive]
@@ -612,11 +674,18 @@ SignInProof::fn device (user_code : impl Into < SecretString >) -> Self
 SignInProof::fn token (token : impl Into < SecretString >) -> Self
 Slot
 Slot #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+Slot::Append
 Slot::CatalogModels
+Slot::Json
+Slot::JsonWithModels
 Slot::Literal
+Slot::ModelArray
 Slot::ModelIfUnset
+Slot::ModelMap
+Slot::ModelPair
 Slot::ModelTier
 Slot::Origin
+Slot::Template
 Slot::Token
 Slot::V1
 Slot::const fn model_if_unset (from : Option < & 'static str >) -> Self

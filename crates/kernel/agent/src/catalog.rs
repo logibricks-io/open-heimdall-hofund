@@ -5,19 +5,25 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hofund_plugin_api::{
-    AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, Slot as ApiSlot, Visible,
+    AgentCredential, AgentDescription, AgentFile, AgentRoute, FileKind as ApiFileKind, ModelField,
+    ModelValue, Slot as ApiSlot, Visible,
 };
 
-use crate::edit::{Assignment, FileKind, get, is_empty_document, remove_keys, render, string_at};
+use crate::credential::EngineCredential;
+use crate::edit::{
+    Assignment, FileKind, Shared, get, is_empty_document, is_empty_json, owned_part, remove_keys,
+    render, string_at, strip_owned,
+};
 use crate::store::{
     backup_once, clear_markers, created_here, delete_verified, marker_present, read_optional,
     remove_empty_parents, revert_path, unified_diff, write_atomic, write_verified,
 };
 use crate::{
-    AgentAdapter, AgentError, ConfigFile, ConnectionStatus, FileChange, GatewayTarget, Plan,
-    Session, TargetOs,
+    AgentAdapter, AgentError, ConfigFile, ConnectionStatus, CredentialStore, FileChange,
+    GatewayTarget, Plan, Session, TargetOs,
 };
 use crate::{DisconnectOutcome, usable_override};
 
@@ -139,7 +145,8 @@ fn builtin_adapter(_id: &str) -> Option<Box<dyn AgentAdapter>> {
 /// Resolves one compiled file location against a session.
 ///
 /// Empty and relative environment overrides are treated as unset, so the
-/// default template is used.
+/// default template is used; so is an override on an OS the file does not
+/// follow it on.
 #[must_use]
 pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
     let template = match os {
@@ -147,7 +154,13 @@ pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
         TargetOs::Macos => file.macos(),
         TargetOs::Windows => file.windows(),
     };
-    let override_value = file.env_override().and_then(|name| {
+    let [linux, macos, windows] = file.env_os();
+    let followed = match os {
+        TargetOs::Linux => linux,
+        TargetOs::Macos => macos,
+        TargetOs::Windows => windows,
+    };
+    let override_value = file.env_override().filter(|_| followed).and_then(|name| {
         session
             .env(name)
             .filter(|value| usable_override(value))
@@ -202,6 +215,8 @@ struct Engine {
     model_prefix: Option<&'static str>,
     visible: Visible,
     route: AgentRoute,
+    credential: Option<AgentCredential>,
+    credential_store: Option<Arc<dyn CredentialStore>>,
 }
 
 /// What an apply does with the agent's model setting.
@@ -240,6 +255,7 @@ impl Engine {
                     ApiFileKind::Json => FileKind::Json,
                     ApiFileKind::Toml => FileKind::Toml,
                     ApiFileKind::Env => FileKind::Env,
+                    ApiFileKind::Yaml => FileKind::Yaml,
                     _ => {
                         return Err(AgentError::message(format!(
                             "agent `{}` file `{}` has an unsupported file kind",
@@ -284,7 +300,29 @@ impl Engine {
             model_prefix: description.model_prefix(),
             visible: description.visible(),
             route: description.route(),
+            credential: description.credential().copied(),
+            credential_store: session.credential_store().cloned(),
         })
+    }
+
+    /// The credential store item hofund's key goes in, when the agent reads
+    /// it there and receives the gateway.
+    fn credential(&self) -> Result<Option<EngineCredential<'_>>, AgentError> {
+        let Some(spec) = self.credential.as_ref() else {
+            return Ok(None);
+        };
+        if self.route != AgentRoute::Gateway {
+            return Ok(None);
+        }
+        let location = self.choose(spec.file()).ok_or_else(|| {
+            AgentError::message(format!("`{}` has no config location", spec.file()))
+        })?;
+        Ok(Some(EngineCredential::new(
+            self.id,
+            spec,
+            &location.path,
+            self.credential_store.as_ref(),
+        )))
     }
 
     fn detect(&self, session: &Session) -> bool {
@@ -308,7 +346,11 @@ impl Engine {
     }
 
     fn plan(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
-        Ok(plan_of(&self.render_all(target, Choice::Keep)?))
+        let plan = plan_of(&self.render_all(target, Choice::Keep)?);
+        let Some(credential) = self.credential()? else {
+            return Ok(plan);
+        };
+        Ok(with_change(plan, credential.planned(target)?))
     }
 
     fn apply(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
@@ -318,6 +360,12 @@ impl Engine {
     fn apply_with(&self, target: &GatewayTarget, choice: Choice<'_>) -> Result<Plan, AgentError> {
         let rendered = self.render_all(target, choice)?;
         let plan = plan_of(&rendered);
+        // The item goes in before any file names the gateway, so the agent
+        // never reads a gateway URL without a key; an item alone is inert.
+        let stored = match self.credential()? {
+            Some(credential) => credential.put(target)?,
+            None => None,
+        };
         for change in plan.changes() {
             backup_once(change.path())?;
         }
@@ -329,7 +377,7 @@ impl Engine {
                 snapshot_wrote(&file.path, file.kind, &file.assignments, &file.pinned)?;
             }
         }
-        Ok(plan)
+        Ok(with_change(plan, stored))
     }
 
     fn set_model(&self, target: &GatewayTarget, model: Option<&str>) -> Result<Plan, AgentError> {
@@ -424,7 +472,15 @@ impl Engine {
                     key: model.key,
                     value: self.prefixed(id),
                     raw_json: false,
+                    shared: None,
                 });
+            }
+            // A file nothing is written to is left as it is: a missing one
+            // stays missing, so a settings file that holds only the model key
+            // is not created until a model is picked, and an existing one
+            // keeps its bytes (comments included) unless a clear drops keys.
+            if assignments.is_empty() && (before.is_none() || !matches!(choice, Choice::Clear)) {
+                continue;
             }
             // Clear renders over the original text so the keys it keeps stay
             // in place, then drops the model keys no set wrote back.
@@ -436,8 +492,24 @@ impl Engine {
                     .into_iter()
                     .filter(|key| !assignments.iter().any(|assignment| assignment.key == *key))
                     .collect();
+                // A pair goes back to the pick the user had before connect.
+                let picked = self.picked_before(&path, kind, &leftover)?;
+                // A key inside a restored pair came back with it.
+                let leftover: Vec<&'static str> = leftover
+                    .into_iter()
+                    .filter(|key| {
+                        !picked.iter().any(|assignment| {
+                            assignment.key == *key
+                                || key
+                                    .strip_prefix(assignment.key)
+                                    .is_some_and(|rest| rest.starts_with('.'))
+                        })
+                    })
+                    .collect();
                 let written = utf8(&path, &after)?.to_owned();
-                after = remove_keys(kind, &written, &leftover)
+                let written = render(kind, Some(&written), &picked)
+                    .map_err(|error| annotate(&path, error))?;
+                after = remove_keys(kind, utf8(&path, &written)?, &leftover)
                     .map_err(|error| annotate(&path, error))?;
             }
             let pinned = match model {
@@ -499,6 +571,37 @@ impl Engine {
             .collect()
     }
 
+    /// The pre-connect values of the pair keys among `keys`, read from the
+    /// connect backup. A key the backup lacks is not listed.
+    fn picked_before(
+        &self,
+        path: &Path,
+        kind: FileKind,
+        keys: &[&'static str],
+    ) -> Result<Vec<Assignment>, AgentError> {
+        let Some(backup) = read_optional(&sibling_bak(path))? else {
+            return Ok(Vec::new());
+        };
+        let backup = utf8(path, &backup)?;
+        let mut picked = Vec::new();
+        for set in &self.sets {
+            if !matches!(set.slot, ApiSlot::ModelPair { .. }) || !keys.contains(&set.key) {
+                continue;
+            }
+            if let Some(value) =
+                get(kind, backup, set.key).map_err(|error| annotate(path, error))?
+            {
+                picked.push(Assignment {
+                    key: set.key,
+                    raw_json: typed(kind, backup, set.key, &value),
+                    shared: None,
+                    value,
+                });
+            }
+        }
+        Ok(picked)
+    }
+
     /// The model key and the tier keys that follow it in the model file.
     fn model_keys(&self, model: ModelKey) -> Vec<&'static str> {
         let mut keys = vec![model.key];
@@ -506,7 +609,11 @@ impl Engine {
             self.sets
                 .iter()
                 .filter(|set| {
-                    set.file == model.file && matches!(set.slot, ApiSlot::ModelTier { .. })
+                    set.file == model.file
+                        && matches!(
+                            set.slot,
+                            ApiSlot::ModelTier { .. } | ApiSlot::ModelPair { .. }
+                        )
                 })
                 .map(|set| set.key),
         );
@@ -519,6 +626,9 @@ impl Engine {
 
     fn revert(&self) -> Result<(), AgentError> {
         let mut restored = false;
+        if let Some(credential) = self.credential()? {
+            restored = credential.release(false)?.0;
+        }
         for location in &self.locations {
             if revert_path(&location.path)? {
                 restored = true;
@@ -550,7 +660,12 @@ impl Engine {
                 continue;
             }
             let Some(bytes) = read_optional(&path)? else {
-                connected = false;
+                // Apply leaves a file missing when it would write nothing
+                // there, such as a settings file holding only the model key.
+                connected = !sets.iter().any(|set| {
+                    self.slot_value(set, kind, target, None, Choice::Keep)
+                        .is_some()
+                });
                 continue;
             };
             let text = utf8(&path, &bytes)?;
@@ -560,11 +675,31 @@ impl Engine {
                     continue;
                 };
                 let current = get(kind, text, set.key).map_err(|error| annotate(&path, error))?;
-                if current.as_deref() != Some(expected.as_str()) {
+                let expected = match set.slot {
+                    ApiSlot::Append { .. } | ApiSlot::ModelMap { .. } => {
+                        // Compare after a merge, so entries hofund does not
+                        // own are not counted against it.
+                        let assignment = Assignment {
+                            key: set.key,
+                            value: expected,
+                            raw_json: true,
+                            shared: shared_of(&set.slot),
+                        };
+                        let merged = render(kind, Some(text), &[assignment])
+                            .map_err(|error| annotate(&path, error))?;
+                        let merged = utf8(&path, &merged)?;
+                        get(kind, merged, set.key).map_err(|error| annotate(&path, error))?
+                    }
+                    _ => Some(expected),
+                };
+                if current != expected {
                     connected = false;
                     break;
                 }
             }
+        }
+        if connected && let Some(credential) = self.credential()? {
+            connected = credential.connected(target)?;
         }
         Ok(ConnectionStatus::new(
             self.id,
@@ -579,6 +714,13 @@ impl Engine {
         let mut changed = false;
         let mut warnings = Vec::new();
         let preserve = preserve_dirs(session);
+        // The record sits beside a managed file, so it goes first; a parent
+        // directory can then be removed when the file leaves it empty.
+        if let Some(credential) = self.credential()? {
+            let (released, notes) = credential.release(force)?;
+            changed |= released;
+            warnings.extend(notes);
+        }
         for location in &self.locations {
             let path = &location.path;
             if !marker_present(path) {
@@ -597,6 +739,7 @@ impl Engine {
                 path,
                 location.kind,
                 self.owned_keys(location.file),
+                &self.shared_keys(location.file),
                 self.tracked_key(location.file),
                 &preserve,
                 self.id,
@@ -613,7 +756,7 @@ impl Engine {
                 .sets
                 .iter()
                 .copied()
-                .filter(|set| matches!(set.slot, ApiSlot::Token))
+                .filter(|set| carries_token(&set.slot))
                 .collect();
             if token_sets.is_empty() {
                 continue;
@@ -622,8 +765,22 @@ impl Engine {
                 continue;
             };
             let text = utf8(&chosen.path, &before)?;
-            let assignments =
+            let mut assignments =
                 self.assignments_for(&token_sets, chosen.kind, target, Some(text), Choice::Keep);
+            for set in &token_sets {
+                if assignments
+                    .iter()
+                    .any(|assignment| assignment.key == set.key)
+                {
+                    continue;
+                }
+                if let Some(assignment) = self
+                    .refreshed_pair(set, chosen.kind, target, text)
+                    .map_err(|error| annotate(&chosen.path, error))?
+                {
+                    assignments.push(assignment);
+                }
+            }
             let after = render(chosen.kind, Some(text), &assignments)
                 .map_err(|error| annotate(&chosen.path, error))?;
             if before != after {
@@ -632,7 +789,63 @@ impl Engine {
                 updated.push(chosen.path);
             }
         }
+        if let Some(credential) = self.credential()? {
+            updated.extend(credential.refresh(target)?);
+        }
         Ok(updated)
+    }
+
+    /// The new value of a pair that holds the token while the model key in
+    /// its file names a route, so the agent keeps reaching the gateway.
+    fn refreshed_pair(
+        &self,
+        set: &EngineSet,
+        kind: FileKind,
+        target: &GatewayTarget,
+        text: &str,
+    ) -> Result<Option<Assignment>, AgentError> {
+        let ApiSlot::ModelPair { value, json, .. } = set.slot else {
+            return Ok(None);
+        };
+        if self.route != AgentRoute::Gateway {
+            return Ok(None);
+        }
+        let Some(model) = self.model.filter(|model| model.file == set.file) else {
+            return Ok(None);
+        };
+        let Some(main) = string_value(kind, text, model.key) else {
+            return Ok(None);
+        };
+        if !self
+            .models(target)
+            .iter()
+            .any(|id| *id == main || self.prefixed(id) == main)
+        {
+            return Ok(None);
+        }
+        let Some(current) = get(kind, text, set.key)? else {
+            return Ok(None);
+        };
+        let value = if json {
+            let (Ok(template), Ok(mut current)) = (
+                serde_json::from_str(value),
+                serde_json::from_str::<serde_json::Value>(&current),
+            ) else {
+                return Ok(None);
+            };
+            if !refresh_json(&template, &mut current, target) {
+                return Ok(None);
+            }
+            current.to_string()
+        } else {
+            fill_template(value, target)
+        };
+        Ok(Some(Assignment {
+            key: set.key,
+            value,
+            raw_json: json,
+            shared: None,
+        }))
     }
 
     fn configured_model(&self) -> Result<Option<String>, AgentError> {
@@ -715,7 +928,17 @@ impl Engine {
                 Some(Assignment {
                     key: set.key,
                     value,
-                    raw_json: matches!(set.slot, ApiSlot::CatalogModels),
+                    raw_json: matches!(
+                        set.slot,
+                        ApiSlot::CatalogModels
+                            | ApiSlot::Json(_)
+                            | ApiSlot::JsonWithModels(_)
+                            | ApiSlot::ModelArray { .. }
+                            | ApiSlot::Append { .. }
+                            | ApiSlot::ModelMap { .. }
+                            | ApiSlot::ModelPair { json: true, .. }
+                    ),
+                    shared: shared_of(&set.slot),
                 })
             })
             .collect()
@@ -740,6 +963,51 @@ impl Engine {
             ApiSlot::V1 if gateway => Some(format!("{}/v1", origin(target.base_url()))),
             ApiSlot::Token if gateway => Some(target.token().to_owned()),
             ApiSlot::Literal(text) => Some((*text).to_owned()),
+            ApiSlot::Template(text) if gateway => Some(fill_template(text, target)),
+            ApiSlot::ModelPair {
+                value,
+                unless,
+                json,
+            } if gateway => {
+                let model = self.model.filter(|model| model.file == set.file)?;
+                if chosen.is_none() {
+                    let picked = |key| existing.and_then(|text| string_value(kind, text, key));
+                    // A typed value may be a number or an object, so any
+                    // value at the key counts as the user's.
+                    let held = if *json {
+                        existing.and_then(|text| get(kind, text, set.key).ok().flatten())
+                    } else {
+                        picked(set.key)
+                    };
+                    if held.is_some() || unless.iter().any(|key| picked(key).is_some()) {
+                        return None;
+                    }
+                    // The model the file holds after this write: the one
+                    // already there, or the one the model key's own set writes.
+                    let main = match picked(model.key) {
+                        Some(value) => value,
+                        None => {
+                            let owner = self.sets.iter().find(|owner| {
+                                owner.file == model.file
+                                    && owner.key == model.key
+                                    && !matches!(owner.slot, ApiSlot::ModelPair { .. })
+                            })?;
+                            self.slot_value(owner, kind, target, existing, choice)?
+                        }
+                    };
+                    if !models
+                        .iter()
+                        .any(|id| *id == main || self.prefixed(id) == main)
+                    {
+                        return None;
+                    }
+                }
+                if *json {
+                    fill_json(value, target)
+                } else {
+                    Some(fill_template(value, target))
+                }
+            }
             ApiSlot::ModelIfUnset { from } => match chosen {
                 Some(id) if self.model.is_some_and(|model| model.key == set.key) => {
                     Some(self.prefixed(id))
@@ -761,6 +1029,24 @@ impl Engine {
                 Some(main)
             }
             ApiSlot::CatalogModels if gateway => Some(catalog_models_json(&models)),
+            ApiSlot::Json(text) => Some((*text).to_owned()),
+            ApiSlot::JsonWithModels(text) if gateway && models.iter().any(|id| !id.is_empty()) => {
+                Some((*text).to_owned())
+            }
+            ApiSlot::ModelArray { fields } if gateway => {
+                Some(model_array_json(&models, fields, target))
+            }
+            ApiSlot::Append {
+                each_model, fields, ..
+            } if gateway => Some(if *each_model {
+                model_array_json(&models, fields, target)
+            } else {
+                serde_json::Value::Array(vec![field_object(fields, None, &models, target)])
+                    .to_string()
+            }),
+            ApiSlot::ModelMap { prefix, fields } if gateway => {
+                Some(model_map_json(&models, prefix, fields, target))
+            }
             _ => None,
         }
     }
@@ -800,6 +1086,15 @@ impl Engine {
             .iter()
             .filter(|set| set.file == file)
             .map(|set| set.key)
+            .collect()
+    }
+
+    /// The keys of `file` holding arrays or maps hofund shares with the user.
+    fn shared_keys(&self, file: &str) -> Vec<(&'static str, Shared)> {
+        self.sets
+            .iter()
+            .filter(|set| set.file == file)
+            .filter_map(|set| Some((set.key, shared_of(&set.slot)?)))
             .collect()
     }
 
@@ -941,8 +1236,190 @@ fn catalog_models_json(models: &[String]) -> String {
     serde_json::Value::Object(root).to_string()
 }
 
+/// One object per distinct non-empty model, in route order, holding `fields`.
+/// How hofund's entries are found in the value a slot writes, when the user
+/// shares that value.
+fn shared_of(slot: &ApiSlot) -> Option<Shared> {
+    match slot {
+        ApiSlot::Append { owner, .. } => Some(Shared::Array(owner)),
+        ApiSlot::ModelMap { prefix, .. } if !prefix.is_empty() => Some(Shared::Map(prefix)),
+        _ => None,
+    }
+}
+
+/// A JSON object with one entry per distinct non-empty model, named
+/// `prefix` and the model id, in route order.
+fn model_map_json(
+    models: &[String],
+    prefix: &str,
+    fields: &[ModelField],
+    target: &GatewayTarget,
+) -> String {
+    let mut entries = serde_json::Map::new();
+    for id in models {
+        let name = format!("{prefix}{id}");
+        if id.is_empty() || entries.contains_key(&name) {
+            continue;
+        }
+        entries.insert(name, field_object(fields, Some(id), models, target));
+    }
+    serde_json::Value::Object(entries).to_string()
+}
+
+fn model_array_json(models: &[String], fields: &[ModelField], target: &GatewayTarget) -> String {
+    model_items(models, fields, target).to_string()
+}
+
+fn model_items(
+    models: &[String],
+    fields: &[ModelField],
+    target: &GatewayTarget,
+) -> serde_json::Value {
+    let mut seen = BTreeSet::new();
+    let mut items = Vec::new();
+    for id in models {
+        if id.is_empty() || !seen.insert(id.as_str()) {
+            continue;
+        }
+        items.push(field_object(fields, Some(id), models, target));
+    }
+    serde_json::Value::Array(items)
+}
+
+/// One object holding `fields`, for the model `id` when there is one.
+fn field_object(
+    fields: &[ModelField],
+    id: Option<&str>,
+    models: &[String],
+    target: &GatewayTarget,
+) -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    for field in fields {
+        let value = match field.value() {
+            ModelValue::Id => id.map_or(serde_json::Value::Null, |id| {
+                serde_json::Value::String(id.to_owned())
+            }),
+            ModelValue::Prefixed(prefix) => id.map_or(serde_json::Value::Null, |id| {
+                serde_json::Value::String(format!("{prefix}{id}"))
+            }),
+            ModelValue::Literal(text) => serde_json::Value::String(text.to_owned()),
+            ModelValue::Json(text) => serde_json::from_str(text).unwrap_or(serde_json::Value::Null),
+            ModelValue::V1 => {
+                serde_json::Value::String(format!("{}/v1", origin(target.base_url())))
+            }
+            ModelValue::Origin => serde_json::Value::String(origin(target.base_url())),
+            ModelValue::Token => serde_json::Value::String(target.token().to_owned()),
+            ModelValue::Models(fields) => model_items(models, fields, target),
+            ModelValue::Template(text) => serde_json::Value::String(fill_template(text, target)),
+            ModelValue::Object(fields) => field_object(fields, id, models, target),
+            _ => serde_json::Value::Null,
+        };
+        entry.insert(field.key().to_owned(), value);
+    }
+    serde_json::Value::Object(entry)
+}
+
+/// Whether a slot writes the bearer token, directly or inside its entries.
+fn carries_token(slot: &ApiSlot) -> bool {
+    match slot {
+        ApiSlot::Token => true,
+        ApiSlot::Template(text) => text.contains("{token}"),
+        ApiSlot::ModelArray { fields }
+        | ApiSlot::Append { fields, .. }
+        | ApiSlot::ModelMap { fields, .. } => fields.iter().any(|field| field.value().has_token()),
+        ApiSlot::ModelPair { value, .. } => value.contains("{token}"),
+        _ => false,
+    }
+}
+
+/// The JSON text `template` with the placeholders filled in inside its
+/// strings, so a filled value is always escaped; `None` when it is not JSON.
+fn fill_json(template: &str, target: &GatewayTarget) -> Option<String> {
+    fn fill(value: &mut serde_json::Value, target: &GatewayTarget) {
+        match value {
+            serde_json::Value::String(text) => *text = fill_template(text, target),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|item| fill(item, target)),
+            serde_json::Value::Object(fields) => {
+                fields.values_mut().for_each(|item| fill(item, target));
+            }
+            _ => {}
+        }
+    }
+    let mut value = serde_json::from_str(template).ok()?;
+    fill(&mut value, target);
+    serde_json::to_string(&value).ok()
+}
+
+/// Rewrites the token strings of `current` that `template` marks with
+/// `{token}`, keeping everything else as it is. False when `current` is not
+/// hofund's: a string `template` fills from the gateway address differs.
+fn refresh_json(
+    template: &serde_json::Value,
+    current: &mut serde_json::Value,
+    target: &GatewayTarget,
+) -> bool {
+    match template {
+        serde_json::Value::String(text) if text.contains("{token}") => match current {
+            serde_json::Value::String(held) => {
+                *held = fill_template(text, target);
+                true
+            }
+            _ => false,
+        },
+        serde_json::Value::String(text) if text.contains("{origin}") || text.contains("{v1}") => {
+            current.as_str() == Some(fill_template(text, target).as_str())
+        }
+        serde_json::Value::Object(fields) => {
+            let Some(held) = current.as_object_mut() else {
+                return false;
+            };
+            // A part the user removed stays removed.
+            fields.iter().all(|(name, value)| {
+                held.get_mut(name)
+                    .is_none_or(|current| refresh_json(value, current, target))
+            })
+        }
+        _ => true,
+    }
+}
+
+/// `text` with `{origin}`, `{v1}`, and `{token}` replaced in one pass, so a
+/// filled value is never read as a placeholder.
+pub(crate) fn fill_template(text: &str, target: &GatewayTarget) -> String {
+    let origin = origin(target.base_url());
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let (value, len) = if rest.starts_with("{origin}") {
+            (origin.clone(), "{origin}".len())
+        } else if rest.starts_with("{v1}") {
+            (format!("{origin}/v1"), "{v1}".len())
+        } else if rest.starts_with("{token}") {
+            (target.token().to_owned(), "{token}".len())
+        } else {
+            ("{".to_owned(), 1)
+        };
+        out.push_str(&value);
+        rest = &rest[len..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn origin(base_url: &str) -> String {
     base_url.trim_end_matches('/').to_owned()
+}
+
+/// `plan` with `change` appended, when there is one.
+fn with_change(plan: Plan, change: Option<FileChange>) -> Plan {
+    let Some(change) = change else {
+        return plan;
+    };
+    let mut changes = plan.changes().to_vec();
+    changes.push(change);
+    Plan::new(changes)
 }
 
 fn plan_of(rendered: &[Rendered]) -> Plan {
@@ -988,6 +1465,7 @@ fn snapshot_wrote(
                 Some(Assignment {
                     key,
                     raw_json: is_json_value(&value),
+                    shared: None,
                     value,
                 })
             })
@@ -1006,6 +1484,16 @@ fn snapshot_wrote(
 }
 
 /// Whether a value read back with `get` is JSON text rather than a string.
+/// Whether `value`, read at `key` in `text`, goes back as JSON: a number,
+/// flag, or object returns as one, not as text.
+fn typed(kind: FileKind, text: &str, key: &str, value: &str) -> bool {
+    match string_at(kind, text, key) {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(_) => is_json_value(value),
+    }
+}
+
 fn is_json_value(value: &str) -> bool {
     let value = value.trim_start();
     value.starts_with('{') || value.starts_with('[')
@@ -1050,6 +1538,7 @@ fn merge_owned_keys(
     path: &Path,
     kind: FileKind,
     keys: Vec<&'static str>,
+    shared_keys: &[(&'static str, Shared)],
     tracked: Option<&'static str>,
     preserve: &[PathBuf],
     id: &str,
@@ -1082,6 +1571,45 @@ fn merge_owned_keys(
     for key in keys.into_iter().chain(tracked) {
         let current_value =
             get(kind, current_text, key).map_err(|error| refused(id, path, &error.to_string()))?;
+        if let Some((_, shared)) = shared_keys.iter().find(|(shared, _)| *shared == key) {
+            // Shared values lose only hofund's entries; the user's stay.
+            let shared = *shared;
+            let kept = strip_owned(kind, current_text, key, shared)
+                .map_err(|error| refused(id, path, &error.to_string()))?;
+            let Some(kept) = kept.filter(|kept| Some(kept) != current_value.as_ref()) else {
+                continue;
+            };
+            // Entries are removed whole, so an edited one is reported.
+            let ours = |text| {
+                owned_part(kind, text, key, shared)
+                    .map_err(|error| refused(id, path, &error.to_string()))
+            };
+            if ours(current_text)? != ours(wrote_text)? {
+                warnings.push(format!(
+                    "warning: {id} removed its entries from `{key}` in {}; they no longer match the values hofund wrote",
+                    path.display()
+                ));
+            }
+            let original = match backup_text {
+                Some(text) => {
+                    get(kind, text, key).map_err(|error| refused(id, path, &error.to_string()))?
+                }
+                None => None,
+            };
+            if is_empty_json(&kept) && original.is_none() && key != "." {
+                remove.push(key);
+            } else {
+                // Merging no entries drops hofund's in place, so the user's
+                // keep their layout.
+                restore.push(Assignment {
+                    key,
+                    value: shared.empty().to_owned(),
+                    raw_json: true,
+                    shared: Some(shared),
+                });
+            }
+            continue;
+        }
         let wrote_value =
             get(kind, wrote_text, key).map_err(|error| refused(id, path, &error.to_string()))?;
         let original = match backup_text {
@@ -1094,13 +1622,14 @@ fn merge_owned_keys(
             continue;
         }
         if current_value == wrote_value {
-            match original {
-                Some(value) => restore.push(Assignment {
+            match (original, backup_text) {
+                (Some(value), Some(text)) => restore.push(Assignment {
                     key,
-                    raw_json: is_json_value(&value),
+                    raw_json: typed(kind, text, key, &value),
+                    shared: None,
                     value,
                 }),
-                None => remove.push(key),
+                _ => remove.push(key),
             }
         } else {
             warnings.push(format!(
@@ -1505,7 +2034,11 @@ mod tests {
     fn real_fixture_trees_pass_layout_validation() {
         let agents = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../plugins/registry/tests/fixtures/agents");
-        for id in ["fixture-toml-agent", "fixture-json-agent"] {
+        for id in [
+            "fixture-toml-agent",
+            "fixture-json-agent",
+            "fixture-yaml-agent",
+        ] {
             golden_layout(id, &agents.join(id).join("fixtures"))
                 .unwrap_or_else(|error| panic!("{id}: {error}"));
         }

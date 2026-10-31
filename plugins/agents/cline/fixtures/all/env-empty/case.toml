@@ -1,0 +1,7 @@
+routes = ["route-a"]
+base_url = "http://127.0.0.1:3425/"
+token = "old-token"
+refreshed_token = "refreshed-token"
+
+[env]
+CLINE_DIR = ""

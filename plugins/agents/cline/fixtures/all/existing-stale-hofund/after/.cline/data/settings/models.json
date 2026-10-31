@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "providers": {
+    "openai-compatible": {
+      "models": {
+        "my-model": {
+          "id": "my-model"
+        },
+        "hofund/route-b": {
+          "id": "route-b",
+          "name": "route-b",
+          "capabilities": [
+            "streaming",
+            "tools"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+model:
+  provider: hofund
+  default: stale-route
+providers:
+  hofund:
+    name: my-gateway
+    base_url: https://stale.example/v1
+    api_key: stale-token
+    api_mode: responses
+    models:
+      - stale-route
+    request_timeout_seconds: 120
+    extra_headers:
+      X-Keep: keep
+  other:
+    base_url: https://other.example/v1

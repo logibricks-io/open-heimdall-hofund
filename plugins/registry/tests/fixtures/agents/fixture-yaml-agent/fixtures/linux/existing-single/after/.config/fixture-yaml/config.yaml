@@ -1,0 +1,24 @@
+theme: dark
+extensions:
+  developer:
+    enabled: true
+    timeout: 300
+model:
+  provider: hofund
+  default: route-a
+providers:
+  hofund:
+    base_url: "http://127.0.0.1:3425/v1"
+    api_key: old-token
+    models:
+      - id: route-a
+        name: Hofund
+        reasoning: true
+features:
+  stream: false
+groups:
+  - name: hofund
+    url: "http://127.0.0.1:3425/v1"
+    models:
+      - id: hofund/route-a
+        key: old-token

@@ -1,0 +1,6 @@
+model:
+  default: user-model
+  temperature: 0.2
+providers:
+  other:
+    base_url: https://example.invalid/v1

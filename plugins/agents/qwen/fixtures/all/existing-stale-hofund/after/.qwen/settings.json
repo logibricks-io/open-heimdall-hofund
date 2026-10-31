@@ -1,0 +1,21 @@
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "baseUrl": "https://mine.example.test/v1",
+        "envKey": "MY_KEY",
+        "id": "mine",
+        "name": "mine"
+      },
+      {
+        "baseUrl": "http://127.0.0.1:3425/v1",
+        "envKey": "HOFUND_QWEN_API_KEY",
+        "id": "route-b",
+        "name": "route-b"
+      }
+    ]
+  },
+  "env": {
+    "HOFUND_QWEN_API_KEY": "old-token"
+  }
+}

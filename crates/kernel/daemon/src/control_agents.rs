@@ -151,7 +151,7 @@ impl AgentOps {
         tokio::task::spawn_blocking(move || {
             let catalog = hofund_agent::catalog(descriptions)
                 .map_err(|error| internal(format!("agent catalog: {error}")))?;
-            let session = session.unwrap_or_else(Session::from_process_env);
+            let session = session.unwrap_or_else(crate::agent_session);
             work(&catalog, &session)
         })
         .await

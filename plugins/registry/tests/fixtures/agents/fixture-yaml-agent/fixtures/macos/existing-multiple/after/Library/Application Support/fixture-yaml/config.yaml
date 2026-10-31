@@ -1,0 +1,27 @@
+model:
+  default: user-model
+  temperature: 0.2
+  provider: hofund
+providers:
+  other:
+    base_url: "https://example.invalid/v1"
+  hofund:
+    base_url: "http://127.0.0.1:3425/v1"
+    api_key: old-token
+    models:
+      - id: route-a
+        name: Hofund
+        reasoning: true
+      - id: route-b
+        name: Hofund
+        reasoning: true
+features:
+  stream: false
+groups:
+  - name: hofund
+    url: "http://127.0.0.1:3425/v1"
+    models:
+      - id: hofund/route-a
+        key: old-token
+      - id: hofund/route-b
+        key: old-token

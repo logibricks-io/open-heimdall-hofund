@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "providers": {
+    "openai-compatible": {
+      "provider": {
+        "name": "My Server",
+        "baseUrl": "http://localhost:8000/v1",
+        "defaultModelId": "my-model"
+      },
+      "models": {
+        "my-model": {
+          "id": "my-model",
+          "name": "My Model"
+        },
+        "hofund/route-a": {
+          "id": "route-a",
+          "name": "route-a",
+          "capabilities": [
+            "streaming",
+            "tools"
+          ]
+        }
+      }
+    }
+  }
+}

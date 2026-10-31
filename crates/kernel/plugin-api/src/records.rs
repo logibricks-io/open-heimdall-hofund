@@ -1449,6 +1449,36 @@ pub enum Slot {
         /// Another key in the same file from which to take the model.
         from: Option<&'static str>,
     },
+    /// Text with gateway values filled in, such as `Bearer {token}`.
+    ///
+    /// `{origin}`, `{v1}`, and `{token}` are replaced with the gateway
+    /// origin, the origin followed by `/v1`, and the gateway token; every
+    /// other character is written as is. The write is skipped when the agent
+    /// does not route through the gateway.
+    #[doc(hidden)]
+    Template(&'static str),
+    /// A value that names hofund beside the model, such as a provider key
+    /// read together with the model key.
+    ///
+    /// `value` is written when the model is set to a route, and when connect
+    /// leaves the description's model key, in the same logical file, on a
+    /// visible route while this key and every `unless` key in the file have
+    /// no non-empty string. When the model is cleared it goes back to the
+    /// value the file had before connect, or is dropped when it had none.
+    /// While the model key names a route, a token refresh rewrites a value
+    /// that holds `{token}`.
+    #[doc(hidden)]
+    ModelPair {
+        /// The text written, with `{origin}`, `{v1}`, and `{token}` filled
+        /// in as for [`Slot::Template`].
+        value: &'static str,
+        /// Keys whose non-empty string means the user picked a provider.
+        unless: &'static [&'static str],
+        /// When set, `value` is JSON written as a typed value, such as `1`
+        /// or a whole object, with the placeholders filled in inside its
+        /// strings; any value already at the key then counts as a pick.
+        json: bool,
+    },
     /// A tier environment variable.
     ///
     /// The value is the non-empty string at the description's model key when
@@ -1469,6 +1499,290 @@ pub enum Slot {
     /// object is written as raw JSON, and this slot is valid only in JSON files.
     #[doc(hidden)]
     CatalogModels,
+    /// A fixed JSON value, such as `false`, `3`, or an object.
+    ///
+    /// The text is written as raw JSON, and this slot is valid only in JSON
+    /// and YAML files.
+    #[doc(hidden)]
+    Json(&'static str),
+    /// A fixed JSON value written only while at least one visible model is
+    /// listed, such as a flag that is wrong for an empty model list.
+    ///
+    /// The text is written as raw JSON, and this slot is valid only in JSON
+    /// and YAML files. With no visible model the write is skipped and a value
+    /// already in the file is left as it is.
+    #[doc(hidden)]
+    JsonWithModels(&'static str),
+    /// A JSON array with one object per distinct non-empty visible model.
+    ///
+    /// Objects follow route order and hold `fields` in declaration order.
+    /// The array is written as raw JSON, and this slot is valid only in JSON
+    /// and YAML files.
+    #[doc(hidden)]
+    ModelArray {
+        /// The fields of each model object.
+        fields: &'static [ModelField],
+    },
+    /// hofund's entries in an array the user also writes to.
+    ///
+    /// An entry is hofund's when it is an object that passes every `owner`
+    /// test. Writing drops hofund's entries, keeps the user's in order, and
+    /// adds hofund's after them: one object per distinct non-empty visible
+    /// model when `each_model` is set, otherwise one object. Disconnect drops
+    /// hofund's entries and keeps every other entry, including entries added
+    /// after connect. The key `.` names the document root. This slot is valid
+    /// only in JSON and YAML files.
+    #[doc(hidden)]
+    Append {
+        /// Tests that all hold for an entry hofund owns.
+        owner: &'static [OwnerTest],
+        /// One object per model when set, otherwise a single object.
+        each_model: bool,
+        /// The fields of each object hofund writes.
+        fields: &'static [ModelField],
+    },
+    /// hofund's entries in a map keyed by name: a JSON object, a YAML
+    /// mapping, or a TOML table.
+    ///
+    /// Each distinct non-empty visible model gets one entry, named `prefix`
+    /// followed by the model id, holding `fields` in declaration order;
+    /// entries follow route order. An entry is hofund's when its name starts
+    /// with `prefix`. Writing drops hofund's entries, keeps the user's, and
+    /// adds hofund's after them; disconnect drops hofund's entries and keeps
+    /// every other entry. An empty `prefix` makes every entry hofund's, so
+    /// the map is replaced and disconnect restores what was there before. In
+    /// a TOML file each entry is a table and JSON numbers, booleans, arrays,
+    /// and objects keep their types. The key `.` names the document root.
+    #[doc(hidden)]
+    ModelMap {
+        /// The start of every entry name hofund writes.
+        prefix: &'static str,
+        /// The fields of each entry.
+        fields: &'static [ModelField],
+    },
+}
+
+/// One test an array entry passes when hofund owns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnerTest {
+    key: &'static str,
+    text: &'static str,
+    prefix: bool,
+}
+
+impl OwnerTest {
+    /// The entry's string at `key` equals `text`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn equals(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            text,
+            prefix: false,
+        }
+    }
+
+    /// The entry's string at `key` starts with `text`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn prefix(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            text,
+            prefix: true,
+        }
+    }
+
+    /// The entry key the test reads.
+    #[must_use]
+    pub const fn key(&self) -> &'static str {
+        self.key
+    }
+
+    /// The text the entry's string is compared with.
+    #[must_use]
+    pub const fn text(&self) -> &'static str {
+        self.text
+    }
+
+    /// Whether the string only has to start with [`Self::text`].
+    #[must_use]
+    pub const fn is_prefix(&self) -> bool {
+        self.prefix
+    }
+
+    /// Whether `value`, an entry's string at [`Self::key`], passes.
+    #[must_use]
+    pub fn matches(&self, value: &str) -> bool {
+        if self.prefix {
+            value.starts_with(self.text)
+        } else {
+            value == self.text
+        }
+    }
+}
+
+/// One field of each object a [`Slot::ModelArray`] writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelField {
+    key: &'static str,
+    value: ModelValue,
+}
+
+impl ModelField {
+    /// A field holding the model id.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn id(key: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Id,
+        }
+    }
+
+    /// A field holding a fixed string.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn literal(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Literal(text),
+        }
+    }
+
+    /// A field holding fixed JSON text.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn json(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Json(text),
+        }
+    }
+
+    /// A field holding the gateway origin plus `/v1`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn v1(key: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::V1,
+        }
+    }
+
+    /// A field holding the gateway origin, without `/v1`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn origin(key: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Origin,
+        }
+    }
+
+    /// A field holding the bearer token.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn token(key: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Token,
+        }
+    }
+
+    /// A field holding the model id after a fixed prefix.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn prefixed(key: &'static str, prefix: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Prefixed(prefix),
+        }
+    }
+
+    /// A field holding text with `{origin}`, `{v1}`, and `{token}` filled
+    /// in, as for [`Slot::Template`].
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn template(key: &'static str, text: &'static str) -> Self {
+        Self {
+            key,
+            value: ModelValue::Template(text),
+        }
+    }
+
+    /// A field holding one object of `fields`, for the same model.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn object(key: &'static str, fields: &'static [Self]) -> Self {
+        Self {
+            key,
+            value: ModelValue::Object(fields),
+        }
+    }
+
+    /// A field holding an array with one object of `fields` per model.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn models(key: &'static str, fields: &'static [Self]) -> Self {
+        Self {
+            key,
+            value: ModelValue::Models(fields),
+        }
+    }
+
+    /// The object key.
+    #[must_use]
+    pub const fn key(&self) -> &'static str {
+        self.key
+    }
+
+    /// The value written under the key.
+    #[must_use]
+    pub const fn value(&self) -> ModelValue {
+        self.value
+    }
+}
+
+/// What a [`ModelField`] writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ModelValue {
+    /// The model id.
+    Id,
+    /// A fixed string.
+    Literal(&'static str),
+    /// Fixed JSON text.
+    Json(&'static str),
+    /// The gateway origin plus `/v1`.
+    V1,
+    /// The gateway origin, without `/v1`.
+    Origin,
+    /// The bearer token.
+    Token,
+    /// The model id after a fixed prefix.
+    Prefixed(&'static str),
+    /// An array with one object of these fields per model.
+    Models(&'static [ModelField]),
+    /// Text with `{origin}`, `{v1}`, and `{token}` filled in.
+    Template(&'static str),
+    /// One object of these fields, for the same model.
+    Object(&'static [ModelField]),
+}
+
+impl ModelValue {
+    /// Whether this value, or a nested one, is the bearer token.
+    #[must_use]
+    pub fn has_token(&self) -> bool {
+        match self {
+            Self::Token => true,
+            Self::Template(text) => text.contains("{token}"),
+            Self::Models(fields) | Self::Object(fields) => {
+                fields.iter().any(|field| field.value.has_token())
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Slot {
@@ -1500,7 +1814,7 @@ pub enum AgentRoute {
     None,
 }
 
-/// File format a description can name. YAML is a later kernel change.
+/// File format a description can name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FileKind {
@@ -1510,6 +1824,8 @@ pub enum FileKind {
     Json,
     /// A dotenv file containing `KEY=VALUE` assignments.
     Env,
+    /// YAML with one document whose root is a mapping.
+    Yaml,
 }
 
 /// One ordered candidate location for a logical agent file.
@@ -1531,6 +1847,7 @@ pub struct AgentFile {
     env_override: Option<&'static str>,
     create: bool,
     env_replaces: Option<&'static str>,
+    env_os: [bool; 3],
 }
 
 impl AgentFile {
@@ -1567,6 +1884,7 @@ impl AgentFile {
             env_override,
             create: true,
             env_replaces: None,
+            env_os: [true; 3],
         }
     }
 
@@ -1583,6 +1901,16 @@ impl AgentFile {
     #[must_use]
     pub const fn with_env_replaces(mut self, prefix: &'static str) -> Self {
         self.env_replaces = Some(prefix);
+        self
+    }
+
+    /// Sets the operating systems on which `env_override` is followed, in the
+    /// order Linux, macOS, Windows. On the others the variable is ignored and
+    /// the OS path template is used as written.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_env_os(mut self, linux: bool, macos: bool, windows: bool) -> Self {
+        self.env_os = [linux, macos, windows];
         self
     }
 
@@ -1627,6 +1955,13 @@ impl AgentFile {
     #[must_use]
     pub const fn create(&self) -> bool {
         self.create
+    }
+
+    /// Whether `env_override` is followed on Linux, macOS, and Windows, in
+    /// that order. Every OS follows it unless the description says otherwise.
+    #[must_use]
+    pub const fn env_os(&self) -> [bool; 3] {
+        self.env_os
     }
 
     /// Leading path-template prefix replaced by `env_override`.
@@ -1700,6 +2035,108 @@ pub struct AgentDescription {
     visible: Visible,
     route: AgentRoute,
     requires: &'static [crate::id::SurfaceId],
+    credential: Option<AgentCredential>,
+}
+
+/// Where an agent reads hofund's key from the OS credential store instead of
+/// a file.
+///
+/// `url` and `windows_target` are templates over `{origin}` and `{v1}`; they
+/// never hold the token. `file` names the managed file the item belongs to:
+/// the engine keeps its record of what it stored beside that file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AgentCredential {
+    file: &'static str,
+    url: &'static str,
+    account: &'static str,
+    label: &'static str,
+    windows_target: &'static str,
+}
+
+impl AgentCredential {
+    /// A credential. Generated code calls this.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a field is empty or a template names `{token}`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_static(
+        file: &'static str,
+        url: &'static str,
+        account: &'static str,
+        label: &'static str,
+        windows_target: &'static str,
+    ) -> Self {
+        assert!(!file.is_empty(), "credential file is empty");
+        assert!(!url.is_empty(), "credential url is empty");
+        assert!(!account.is_empty(), "credential account is empty");
+        assert!(!label.is_empty(), "credential label is empty");
+        assert!(
+            !windows_target.is_empty(),
+            "credential windows_target is empty"
+        );
+        assert!(!names_token(url), "credential url names the token");
+        assert!(
+            !names_token(windows_target),
+            "credential windows_target names the token"
+        );
+        Self {
+            file,
+            url,
+            account,
+            label,
+            windows_target,
+        }
+    }
+
+    /// The managed file this item belongs to.
+    #[must_use]
+    pub const fn file(&self) -> &'static str {
+        self.file
+    }
+
+    /// Template of the URL the agent looks the key up by.
+    #[must_use]
+    pub const fn url(&self) -> &'static str {
+        self.url
+    }
+
+    /// Account (user name) of the item.
+    #[must_use]
+    pub const fn account(&self) -> &'static str {
+        self.account
+    }
+
+    /// Label shown by the store, where it has one.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        self.label
+    }
+
+    /// Template of the generic-credential target name on Windows.
+    #[must_use]
+    pub const fn windows_target(&self) -> &'static str {
+        self.windows_target
+    }
+}
+
+const fn names_token(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let needle = b"{token}";
+    let mut start = 0;
+    while start + needle.len() <= bytes.len() {
+        let mut index = 0;
+        while index < needle.len() && bytes[start + index] == needle[index] {
+            index += 1;
+        }
+        if index == needle.len() {
+            return true;
+        }
+        start += 1;
+    }
+    false
 }
 
 impl AgentDescription {
@@ -1748,7 +2185,16 @@ impl AgentDescription {
             visible,
             route,
             requires,
+            credential: None,
         }
+    }
+
+    /// Stores hofund's key in the OS credential store, as `credential` says.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_credential(mut self, credential: AgentCredential) -> Self {
+        self.credential = Some(credential);
+        self
     }
 
     /// Sets the logical file containing the model key.
@@ -1855,6 +2301,12 @@ impl AgentDescription {
     pub const fn requires(&self) -> &'static [crate::id::SurfaceId] {
         self.requires
     }
+
+    /// The OS credential store item holding hofund's key, if any.
+    #[must_use]
+    pub const fn credential(&self) -> Option<&AgentCredential> {
+        self.credential.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -1868,6 +2320,42 @@ mod tests {
     };
     use crate::ListKind;
     use crate::id::{AccountId, PluginId, ProtocolId};
+
+    #[test]
+    fn credential_templates_never_name_the_token() {
+        let spec = super::AgentCredential::from_static("f", "{v1}", "Bearer", "label", "t:{v1}");
+        assert_eq!(
+            (
+                spec.file(),
+                spec.url(),
+                spec.account(),
+                spec.label(),
+                spec.windows_target()
+            ),
+            ("f", "{v1}", "Bearer", "label", "t:{v1}")
+        );
+        assert!(super::names_token("{token}"));
+        assert!(super::names_token("a{token}b"));
+        assert!(!super::names_token("{toke}"));
+        assert!(!super::names_token("{tokenx"));
+        assert!(!super::names_token(""));
+        for fields in [
+            ["", "{v1}", "a", "l", "t"],
+            ["f", "", "a", "l", "t"],
+            ["f", "{v1}", "", "l", "t"],
+            ["f", "{v1}", "a", "", "t"],
+            ["f", "{v1}", "a", "l", ""],
+            ["f", "{v1}/{token}", "a", "l", "t"],
+            ["f", "{v1}", "a", "l", "t={token}"],
+        ] {
+            let built = std::panic::catch_unwind(|| {
+                super::AgentCredential::from_static(
+                    fields[0], fields[1], fields[2], fields[3], fields[4],
+                )
+            });
+            assert!(built.is_err(), "{fields:?}");
+        }
+    }
 
     #[test]
     fn model_metadata_round_trips_and_unknown_values_stay_empty() {

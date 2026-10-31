@@ -1,0 +1,6 @@
+# dropped on apply, restored on revert
+theme: dark
+extensions:
+  developer:
+    enabled: true
+    timeout: 300

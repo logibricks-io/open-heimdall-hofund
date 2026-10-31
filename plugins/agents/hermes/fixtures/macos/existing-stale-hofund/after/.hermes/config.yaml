@@ -1,0 +1,17 @@
+model:
+  provider: hofund
+  default: stale-route
+providers:
+  hofund:
+    name: hofund
+    base_url: "http://127.0.0.1:3425/v1"
+    api_key: old-token
+    api_mode: chat_completions
+    models:
+      - id: route-a
+      - id: route-b
+    request_timeout_seconds: 120
+    extra_headers:
+      X-Keep: keep
+  other:
+    base_url: "https://other.example/v1"

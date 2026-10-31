@@ -9,6 +9,175 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent keys in the OS credential store (Z1): an agent descriptor may
+  declare a `[credential]` item (URL and Windows target templates, literal
+  account and label). The engine stores hofund's key there through a
+  `CredentialStore` passed to the `Session`, before the config files are
+  written; it is idempotent, rewritten on token refresh, reported as drift
+  when missing or replaced, and removed on disconnect only while it still
+  holds hofund's key. A record beside the managed file keeps a SHA-256
+  digest of the key, never the key. `hofund-kit-agent` adds
+  `MemoryCredentialStore` for tests. Native OS backends follow in Z2.
+- Native credential stores (Z2): `hofund_plugin_host::native_credential_store()`
+  keeps agent keys in the macOS keychain (internet password by URL and
+  account), the Secret Service default collection (attributes `url` and
+  `username`) and Windows Credential Manager (generic credential by target,
+  local persistence), without child processes and with a 90 s deadline per
+  call. The daemon and the desktop app use it through
+  `hofund_daemon::agent_session()`.
+- Zed agent (Z3): `hofund agent connect zed` writes the OpenAI-compatible
+  provider `language_models.openai_compatible.hofund` (gateway `/v1`, one
+  model per route with a 128000-token window and tool calling) to Zed's
+  `settings.json` (`~/.config/zed` on Linux and macOS,
+  `%APPDATA%\Zed` on Windows) and puts hofund's key in the OS credential
+  store where Zed looks it up by the provider URL. A pick writes
+  `agent.default_model` with provider `hofund`; clearing it puts back the
+  user's choice. Golden conformance now runs credential agents against an
+  in-memory store and checks the item through connect, refresh and both
+  disconnects. Not yet: XDG and APPDATA overrides (#411), catalog windows
+  and reasoning effort (#459), the restart notice (#460), keeping
+  JSONC comments while connected (#461).
+- Goose agent (G14): `hofund agent connect goose` writes hofund's own
+  custom provider, `custom_providers/hofund.json` beside Goose's
+  `config.yaml` (`~/.config/goose`, or `$XDG_CONFIG_HOME/goose` when it is
+  absolute, on Linux and macOS; `%APPDATA%\Block\goose\config` on Windows,
+  where `XDG_CONFIG_HOME` is not followed): engine `openai`, gateway `/v1`,
+  hofund's key as the `Authorization` header, `skip_canonical_filtering`,
+  one `models[]` entry per route, and `dynamic_models: false` only while a
+  route is listed (Goose rejects an empty static list it may not
+  discover). Two deviations from the reference, by design: the provider
+  file is written at connect rather than only on a pick, so Goose lists
+  one more provider until disconnect removes it; and clearing the model
+  puts back the user's `active_provider` instead of deleting it. A pick
+  writes `active_provider: hofund` and `providers.hofund.{enabled,
+  configured, model}` (the bare route). User keys in `hofund.json` (extra
+  headers, `timeout_seconds`) are kept. Not yet: the legacy
+  `GOOSE_PROVIDER`/`GOOSE_MODEL` layout (#450), per-model reasoning and
+  `context_limit` (#451), `GOOSE_THINKING_EFFORT` (#452), a pick changed
+  in Goose (#453), WSL homes (#454), telling the pressly migration tool
+  apart (#455), and dropping a stale `dynamic_models` once every route is
+  gone (#456); YAML comments are lost on a pick (#414).
+- agent.toml: `[[file]] env_os = ["linux", "macos"]` limits `env_override`
+  to the named systems, and `env_replaces` is checked only against their
+  paths (part of #411); a `json` slot with `with_models = true` is written
+  only while at least one visible route is listed.
+- Grok Build agent (G13): `hofund agent connect grok` writes one
+  `[model."hofund/<route>"]` table per route (gateway `/v1`, hofund's key,
+  `api_backend = "chat_completions"`) to `~/.grok/config.toml` (or under an
+  absolute `GROK_HOME`), leaving the user's own model tables alone. A model
+  pick writes `[models] default` and turns xAI's remote campaigns off
+  (`[features] campaigns = false`), since a launch campaign would override the
+  default; clearing it drops the default (#433) and puts back the user's
+  campaigns setting. No catalog display names, context windows or reasoning
+  efforts yet (#447), and WSL homes are not wired (#448).
+- Kimi Code agent (G12): `hofund agent connect kimi` writes
+  `[providers.hofund]` (type `kimi`, `base_url` with `/v1`, `api_key`) and
+  one `[models."hofund/<route>"]` table per route (128000 context, tool
+  use) to `~/.kimi-code/config.toml` (or under an absolute
+  `KIMI_CODE_HOME`), leaving the user's own providers and models alone. A
+  model pick writes `default_model`; clearing it drops the key (#433) and
+  disconnect puts back the user's. No
+  per-model catalog values yet (#441), a user comment right above `default_model` is lost when it is cleared (#444), and the older kimi-cli's `~/.kimi` is
+  not written (#442). The conformance kit's TOML user edit is now a
+  top-level key, so it no longer lands inside a table hofund owns.
+
+- Cline agent (G11): `hofund agent connect cline` lists each route as
+  `hofund/<route>` under `providers.openai-compatible.models` in
+  `~/.cline/data/settings/models.json` (or under an absolute `CLINE_DIR`),
+  leaving the user's own models alone. A model pick writes hofund's whole
+  `openai-compatible` entry in `providers.json` (gateway `/v1`, token, model,
+  `updatedAt`) and sets `lastUsedProvider`; clearing the model or
+  disconnecting puts back the user's entry and provider. A token refresh
+  rewrites only the key, and only while the entry still points at the
+  gateway. No VS Code extension settings (#437), fixed model capabilities
+  and no reasoning effort (#438), and `CLINE_DATA_DIR` is not followed (#439).
+- Agent descriptions can write a `model_pair` as a typed JSON value
+  (`json = '...'`) and may put `{token}` in it; a token refresh rewrites a
+  pair that holds `{token}` while the picked model is a route. Clearing the
+  model or disconnecting now restores a number, flag, or object the user had
+  as that type, and a file hofund created and a clear emptied is removed on
+  disconnect.
+- VS Code agent (G10): `hofund agent connect vscode` appends one
+  `customendpoint` group named `hofund` to `chatLanguageModels.json` beside
+  the default profile's `settings.json` (VS Code Stable only), each route at
+  the gateway's `/v1/chat/completions` with the token as its `Authorization`
+  header. A model pick writes `chat.defaultModel` as the route id; clearing
+  the model drops it (#433) and disconnect puts back the user's value.
+- Agent descriptions can write gateway text and nested objects inside model
+  entries (`{ key, template }`, `{ key, object = [...] }`), and a key part
+  may be quoted to hold a dot (`'"chat.defaultModel"'`). A file nothing is
+  written to is now left as it is, and a missing one is not created.
+
+- Qwen Code agent (G9): `hofund agent connect qwen` appends one entry per
+  route to `modelProviders.openai` in `~/.qwen/settings.json` (or under an
+  absolute `QWEN_HOME`), after the user's entries, each reading its key from
+  `env.HOFUND_QWEN_API_KEY` in the same file. A model pick writes
+  `model.name`, points `model.baseUrl` at the gateway's `/v1`, and sets
+  `security.auth.selectedType` to `openai`; clearing the model puts back the
+  user's values. Connect alone leaves the auth type alone, so a user on
+  another sign-in keeps it until they pick a hofund route.
+
+- `model_pair` values fill in `{origin}` and `{v1}` like `template` does.
+
+- Droid agent (G8): `hofund agent connect droid` appends one entry per route
+  to `customModels` in `~/.factory/settings.json` (or under an absolute
+  `FACTORY_HOME_OVERRIDE`), after the user's entries, each on Chat
+  Completions at the gateway's `/v1`. A model pick writes
+  `sessionDefaultSettings.model` as `custom:hofund/<route>`.
+
+- Agent descriptions can fill gateway values into text and pair a provider
+  with the model (G6, #418): `slot = { template = "Bearer {token}" }` writes
+  the text with `{origin}`, `{v1}`, and `{token}` filled in and is rewritten
+  on token refresh. `slot = { model_pair = { value, unless } }` writes
+  `value` beside the model key whenever the model is set to a route, and on
+  connect when the model is a route and neither this key nor an `unless`
+  key is set; clearing the model drops it.
+- Clearing the model of an agent whose description pairs a provider with it
+  now puts back the provider the user had picked before connect, instead of
+  dropping it (G7). Cline uses this to hand `lastUsedProvider` back.
+- Agent descriptions can write a model map (G5, #417): `slot = { model_map =
+  { prefix, fields } }` writes one entry per visible route model, named
+  prefix plus model id, into a JSON, YAML, or TOML map. Entries without the
+  prefix are the user's and are kept; an empty prefix owns the whole map and
+  disconnect restores the original. TOML entries are written as typed tables.
+- Agent descriptions can edit YAML files (G1): `kind = "yaml"` in an
+  `agent.toml` file entry. Edits re-emit the file, so comments and layout are
+  not kept; disconnecting restores the original bytes from the backup.
+- Hermes Agent (G3): `hofund agent connect hermes` writes `providers.hofund`
+  (name, `base_url` with `/v1`, `api_key`, `api_mode` `chat_completions`, and
+  one `models` row per route) to `~/.hermes/config.yaml`
+  (`%LOCALAPPDATA%\hermes\config.yaml` on Windows). It does not pick a model
+  or honor `HERMES_HOME` yet (#411, #412), and YAML comments are not kept
+  (#414).
+- Pi agent (G3): `hofund agent connect pi` writes `providers.hofund` (name,
+  `baseUrl` with `/v1`, `api` `openai-completions`, `apiKey`, session affinity
+  headers on, and one `models` entry per route) to `~/.pi/agent/models.json`,
+  or `$PI_CODING_AGENT_DIR/models.json` when that is an absolute path. It does
+  not pick a model; choose hofund in Pi's `/model` picker.
+- Crush agent (G3): `hofund agent connect crush` writes `providers.hofund`
+  (type `openai`, `base_url` with `/v1`, `api_key`, and one `models` entry per
+  route) to `~/.config/crush/crush.json`, or
+  `%LOCALAPPDATA%\crush\crush.json` on Windows. It does not pick a model;
+  choose hofund in Crush's model picker.
+- Two agent slots for JSON and YAML files (G2): `{ json = "<json>" }` writes a
+  fixed typed value such as `false`, and `{ model_array = { fields = [...] } }`
+  writes one object per distinct visible model, each field holding the model
+  id (`value = "id"`), a fixed string (`literal`), or a fixed JSON value
+  (`json`). A model array is a gateway slot, so a `route = "none"` agent
+  cannot use it.
+- Shared-array append slot for JSON and YAML files (G4):
+  `{ append = { each = "model" | "once", owner = [...], fields = [...] } }`
+  adds hofund's objects after the user's entries in an existing array (key
+  `"."` is the document root) instead of replacing the array. An entry is
+  hofund's when it is an object whose string fields pass every `owner` test
+  (`equals` or `prefix`); each test must hold for the written objects, so a
+  second connect replaces rather than duplicates them. Connect, token refresh,
+  and status touch only those entries; disconnect removes them, keeps every
+  other entry, including ones added after connect, and drops the key only
+  when it was absent before and no entry is left. Fields gain `value = "v1"`,
+  `"origin"`, and `"token"`, `prefixed = "<text>"` (the prefix and the model
+  id), and nested `models = [...]` (one object per model). Append is a
+  gateway slot.
 - Codex accounts on Codex's ChatGPT backend (S6d): a
   `POST /backend-api/codex/responses` for one of Codex's own models, say
   `gpt-5`, is served in process as `codex/gpt-5` when the gateway lists a
@@ -515,6 +684,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response body. Token `Debug` is redacted.
 
 ### Changed
+
+- Disconnect now warns when it removes hofund's entries from a shared array
+  or map that were edited after connect (G8). Such entries are still removed
+  whole, token included.
 
 - The CLI crate (`hofund-cli`, binary `hofund`) moved from `crates/cli` to
   `apps/cli` (RFC 0001 row J). Install with

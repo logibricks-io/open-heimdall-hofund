@@ -1,0 +1,13 @@
+model:
+  provider: hofund
+providers:
+  hofund:
+    base_url: "http://127.0.0.1:3425/v1"
+    api_key: old-token
+    models: []
+features:
+  stream: false
+groups:
+  - name: hofund
+    url: "http://127.0.0.1:3425/v1"
+    models: []

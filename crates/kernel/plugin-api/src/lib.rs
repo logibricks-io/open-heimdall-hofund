@@ -50,8 +50,9 @@ mod upstream;
 pub const API: &str = "1";
 
 pub use agent::{
-    AgentFactory, AgentIntegration, ConnectionStatus, DisconnectOutcome, DynAgentFactory,
-    FileChange, GatewayTarget, ImportCtx, ImportedProvider, Plan, WriteCtx,
+    AgentFactory, AgentIntegration, ConnectionStatus, Credential, CredentialError, CredentialStore,
+    DisconnectOutcome, DynAgentFactory, FileChange, GatewayTarget, ImportCtx, ImportedProvider,
+    Plan, WriteCtx,
 };
 pub use body::{Body, BodyStream};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
@@ -71,10 +72,11 @@ pub use id::{
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use records::{
-    Account, AccountStatus, AgentDescription, AgentFile, AgentRoute, AgentSet, AuthChoice,
-    BinaryName, DeviceFlow, FileKind, ListQuery, MatchNeedle, ModelList, ModelSpec, ProbeQuery,
-    QuotaObservation, QuotaQuery, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow,
-    SignInFlowKind, SignInProof, Slot, SubscriptionSpec, Visible,
+    Account, AccountStatus, AgentCredential, AgentDescription, AgentFile, AgentRoute, AgentSet,
+    AuthChoice, BinaryName, DeviceFlow, FileKind, ListQuery, MatchNeedle, ModelField, ModelList,
+    ModelSpec, ModelValue, OwnerTest, ProbeQuery, QuotaObservation, QuotaQuery, QuotaWindow,
+    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Slot, SubscriptionSpec,
+    Visible,
 };
 pub use redaction::{redact_token, safe_url};
 pub use secrecy::SecretString;
