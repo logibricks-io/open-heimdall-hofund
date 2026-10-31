@@ -1357,6 +1357,21 @@ async fn c5_new_sockets_get_503_while_draining() {
     assert_eq!(body.as_ref(), RESTARTING.as_bytes());
 }
 
+#[test]
+fn c5_registry_refuses_sockets_once_draining() {
+    let registry = Arc::new(SocketRegistry::default());
+    let open = registry
+        .register()
+        .expect("a socket registers before the drain");
+    registry.drain();
+    assert!(registry.ending());
+    assert!(
+        registry.register().is_none(),
+        "a socket that upgraded as the drain began must not join it"
+    );
+    assert_eq!(*open.lifecycle.borrow(), SOCKET_AWAY);
+}
+
 #[tokio::test]
 async fn c5_shutdown_closes_idle_now_and_busy_after_turn() {
     let (fake, _calls, replies) = Fake::new("primary");

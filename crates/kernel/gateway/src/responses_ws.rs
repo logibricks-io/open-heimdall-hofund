@@ -383,11 +383,9 @@ impl SocketSession {
         let writer = SocketWriter::new(sink);
         let mut queued = SocketMessages::new();
         loop {
-            let signal = *lifecycle.borrow_and_update();
-            if signal != 0 {
-                if signal != SOCKET_CUT {
-                    let _ = close(&writer, close_code::AWAY, RESTARTING).await;
-                }
+            // going away or cut, a socket between turns closes 1001 now
+            if *lifecycle.borrow_and_update() != 0 {
+                let _ = close(&writer, close_code::AWAY, RESTARTING).await;
                 break;
             }
             let message = match queued.pop_front() {
@@ -395,12 +393,8 @@ impl SocketSession {
                 None => {
                     tokio::select! {
                         message = incoming.next() => message,
-                        _ = lifecycle.changed() => {
-                            if *lifecycle.borrow_and_update() != SOCKET_CUT {
-                                let _ = close(&writer, close_code::AWAY, RESTARTING).await;
-                            }
-                            break;
-                        }
+                        // the loop-top check closes or cuts the socket
+                        _ = lifecycle.changed() => continue,
                     }
                 }
             };
@@ -482,13 +476,8 @@ impl SocketSession {
                 .await
             {
                 DriveResult::Disconnected => break,
-                DriveResult::Interrupted { away } => {
-                    if away {
-                        let _ = close(&writer, close_code::AWAY, RESTARTING).await;
-                        break;
-                    }
-                }
-                DriveResult::Finished { mapped, away } => {
+                DriveResult::Interrupted => {}
+                DriveResult::Finished(mapped) => {
                     if !mapped.connected {
                         break;
                     }
@@ -498,10 +487,6 @@ impl SocketSession {
                     }
                     if let Some(held) = mapped.held {
                         self.keep(held);
-                    }
-                    if away {
-                        let _ = close(&writer, close_code::AWAY, RESTARTING).await;
-                        break;
                     }
                 }
             }
@@ -531,26 +516,23 @@ impl SocketSession {
             Arc::clone(&run),
             cancelled,
         ));
-        let mut away = *lifecycle.borrow_and_update() == SOCKET_AWAY;
         loop {
             tokio::select! {
                 outcome = &mut task => {
                     return match outcome {
-                        Ok(mapped) => DriveResult::Finished { mapped, away },
+                        Ok(mapped) => DriveResult::Finished(mapped),
                         Err(_) => DriveResult::Disconnected,
                     };
                 }
                 message = incoming.next() => {
-                    let Some(message) = message else {
+                    let Some(message) = message.filter(|message| {
+                        !matches!(message, Ok(Message::Close(_)) | Err(_))
+                    }) else {
+                        // the client went: the turn in flight ends with it
                         run.cancel();
                         let _ = task.await;
                         return DriveResult::Disconnected;
                     };
-                    if matches!(message, Ok(Message::Close(_)) | Err(_)) {
-                        run.cancel();
-                        let _ = task.await;
-                        return DriveResult::Disconnected;
-                    }
                     if let Some(id) = interrupt_id(&message) {
                         if run.interrupt(&id) {
                             let _ = task.await;
@@ -559,7 +541,7 @@ impl SocketSession {
                             {
                                 return DriveResult::Disconnected;
                             }
-                            return DriveResult::Interrupted { away };
+                            return DriveResult::Interrupted;
                         }
                         if !send_json(writer, &interrupt_reply("response.interrupt.failed", &id)).await {
                             return DriveResult::Disconnected;
@@ -568,17 +550,13 @@ impl SocketSession {
                         queued.push_back(message);
                     }
                 }
+                // going away waits for the turn; the loop-top check closes 1001
                 _ = lifecycle.changed() => {
-                    let signal = *lifecycle.borrow_and_update();
-                    match signal {
-                        SOCKET_CUT => {
-                            run.cancel();
-                            task.abort();
-                            let _ = task.await;
-                            return DriveResult::Disconnected;
-                        }
-                        SOCKET_AWAY => away = true,
-                        _ => {}
+                    if *lifecycle.borrow() == SOCKET_CUT {
+                        run.cancel();
+                        task.abort();
+                        let _ = task.await;
+                        return DriveResult::Disconnected;
                     }
                 }
             }
@@ -626,8 +604,8 @@ impl SocketSession {
 
 enum DriveResult {
     Disconnected,
-    Interrupted { away: bool },
-    Finished { mapped: MappedTurn, away: bool },
+    Interrupted,
+    Finished(MappedTurn),
 }
 
 fn interrupt_id(message: &Result<Message, axum::Error>) -> Option<String> {
@@ -1322,9 +1300,6 @@ async fn send_local_error(
 }
 
 async fn send_json(writer: &SocketWriter, value: &Value) -> bool {
-    if writer.cancelled() {
-        return false;
-    }
     let Ok(text) = serde_json::to_string(value) else {
         return false;
     };
