@@ -387,6 +387,8 @@ fn json_snapshots_round_trip() {
     cooled.retry_after_ms = Some(1000);
     cooled.remaining_ms = Some(900);
     cooled.failures = 2;
+    cooled.status = Some(500);
+    cooled.error = "vendor failure".to_owned();
     event_snapshot("member-cooled-event", EventPayload::MemberCooled(cooled));
     event_snapshot(
         "member-recovered-event",
@@ -468,6 +470,20 @@ fn json_snapshots_round_trip() {
             ],
         )),
     );
+}
+
+#[test]
+fn a10_member_cooled_event_carries_status_and_vendor_words() {
+    let mut event = MemberCooledEvent::default();
+    event.status = Some(500);
+    event.error = "failed upstream".to_owned();
+    let encoded = serde_json::to_value(&event).expect("event json");
+    assert_eq!(encoded["status"], 500);
+    assert_eq!(encoded["error"], "failed upstream");
+    let older = br#"{"member_id":"m","cause":"failure","retry_after_ms":null,"remaining_ms":null,"failures":1}"#;
+    let decoded: MemberCooledEvent = serde_json::from_slice(older).expect("older event");
+    assert_eq!(decoded.status, None);
+    assert!(decoded.error.is_empty());
 }
 
 #[test]

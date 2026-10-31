@@ -116,12 +116,14 @@ impl CooldownCause {
 }
 
 /// An active member cooldown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Cooling {
     until: Instant,
     cause: CooldownCause,
     failures: u32,
+    status: Option<u16>,
+    error: String,
 }
 
 impl Cooling {
@@ -141,6 +143,18 @@ impl Cooling {
     #[must_use]
     pub const fn failures(&self) -> u32 {
         self.failures
+    }
+
+    /// Upstream status that caused the cooldown, when there was one.
+    #[must_use]
+    pub const fn status(&self) -> Option<u16> {
+        self.status
+    }
+
+    /// Upstream words, capped at 300 characters.
+    #[must_use]
+    pub fn error(&self) -> &str {
+        &self.error
     }
 }
 
@@ -171,7 +185,9 @@ impl State {
     }
 
     fn active(&self, now: Instant) -> bool {
-        self.cooling.is_some_and(|cooling| now < cooling.until)
+        self.cooling
+            .as_ref()
+            .is_some_and(|cooling| now < cooling.until)
     }
 }
 
@@ -236,7 +252,7 @@ impl Cooldowns {
         };
         let applied = self.apply_failure(state, failure, now, error);
         drop(book);
-        self.emit(id, applied, now);
+        self.emit(id, &applied, now);
         Some(applied)
     }
 
@@ -307,7 +323,7 @@ impl Cooldowns {
         let candidate = Self::generic(state, now, &self.policy, CooldownCause::Panic);
         let applied = apply(state, candidate);
         drop(book);
-        self.emit(id, applied, now);
+        self.emit(id, &applied, now);
         applied
     }
 
@@ -332,7 +348,7 @@ impl Cooldowns {
             cooling(now, duration, CooldownCause::Observed, state.failures),
         );
         drop(book);
-        self.emit(id, applied, now);
+        self.emit(id, &applied, now);
         Some(applied)
     }
 
@@ -345,7 +361,7 @@ impl Cooldowns {
         let cooling = book
             .states
             .get(id)
-            .and_then(|state| state.cooling)
+            .and_then(|state| state.cooling.clone())
             .filter(|cooling| now < cooling.until);
         if let Some(state) = book.states.get_mut(id) {
             state.touched = now;
@@ -368,8 +384,9 @@ impl Cooldowns {
             .filter_map(|(id, state)| {
                 state
                     .cooling
+                    .as_ref()
                     .filter(|cooling| now < cooling.until)
-                    .map(|cooling| (id.clone(), cooling))
+                    .map(|cooling| (id.clone(), cooling.clone()))
             })
             .collect::<Vec<_>>();
         entries.sort_by_key(|(id, _)| id.to_string());
@@ -417,7 +434,7 @@ impl Cooldowns {
         now: Instant,
         error: &PluginError,
     ) -> Cooling {
-        let candidate = match failure {
+        let mut candidate = match failure {
             Failure::Generic(cause) => Self::generic(state, now, &self.policy, cause),
             Failure::RateLimit => self.rate_limit(state, now, error.retry_after()),
             Failure::Quota => {
@@ -439,6 +456,8 @@ impl Cooldowns {
                 )
             }
         };
+        candidate.status = error.status();
+        candidate.error = error.message().trim().chars().take(300).collect();
         let applied = apply(state, candidate);
         state.idle_since = None;
         if matches!(failure, Failure::RateLimit) {
@@ -522,10 +541,12 @@ impl Cooldowns {
     fn maintain_locked(&self, book: &mut Book, now: Instant) {
         let mut recovered = Vec::new();
         for (id, state) in &mut book.states {
-            if let Some(cooling) = state.cooling
-                && now >= cooling.until
+            if state
+                .cooling
+                .as_ref()
+                .is_some_and(|cooling| now >= cooling.until)
+                && let Some(cooling) = state.cooling.take()
             {
-                state.cooling = None;
                 state.idle_since = Some(cooling.until);
                 recovered.push((id.clone(), cooling.cause));
             }
@@ -559,7 +580,7 @@ impl Cooldowns {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn emit(&self, id: &MemberId, cooling: Cooling, now: Instant) {
+    fn emit(&self, id: &MemberId, cooling: &Cooling, now: Instant) {
         let duration_ms = u128_as_u64(cooling.until.saturating_duration_since(now).as_millis());
         let cause = cooling.cause.as_str();
         tracing::info!(
@@ -582,6 +603,12 @@ enum Failure {
 }
 
 fn failure_kind(error: &PluginError) -> Option<Failure> {
+    if !error.cools() {
+        return None;
+    }
+    if error.is_credit() {
+        return Some(Failure::Credit);
+    }
     match error.kind() {
         PluginErrorKind::Connect
         | PluginErrorKind::Timeout
@@ -676,6 +703,8 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
         until: saturating_deadline(now, duration),
         cause,
         failures,
+        status: None,
+        error: String::new(),
     }
 }
 
@@ -683,11 +712,11 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
 /// (reference: internal/gateway/routing.go restSlow keeps the longer note).
 /// A candidate ending at the same instant replaces the current rest.
 fn apply(state: &mut State, candidate: Cooling) -> Cooling {
-    let applied = match state.cooling {
-        Some(current) if current.until > candidate.until => current,
+    let applied = match &state.cooling {
+        Some(current) if current.until > candidate.until => current.clone(),
         _ => candidate,
     };
-    state.cooling = Some(applied);
+    state.cooling = Some(applied.clone());
     state.last_cause = Some(applied.cause);
     applied
 }

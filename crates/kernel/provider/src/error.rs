@@ -20,6 +20,8 @@ pub struct ProviderError {
     pub status: Option<u16>,
     /// The upstream-directed retry delay, when it sent one.
     pub retry_after: Option<Duration>,
+    credit: bool,
+    cooldown: bool,
 }
 
 /// Classification of [`ProviderError`].
@@ -88,23 +90,82 @@ impl ProviderError {
             message: message.into(),
             status: Some(status),
             retry_after: None,
+            credit: false,
+            cooldown: true,
         }
     }
 
     /// An HTTP status and response body from the upstream.
     #[must_use]
     pub(crate) fn response(status: u16, body: &[u8]) -> Self {
+        Self::response_for(status, body, false)
+    }
+
+    pub(crate) fn response_for(status: u16, body: &[u8], allocation_quota_rate: bool) -> Self {
         let message = crate::stream::message_from(body);
-        if hofund_plugin_sdk::transport::is_quota_error(status, body) {
+        if allocation_quota_rate
+            && hofund_plugin_sdk::transport::is_allocation_quota_rate(status, body)
+        {
+            Self::status(status, message)
+        } else if hofund_plugin_sdk::transport::is_credit_error(status, body) {
+            Self::credit_status(status, message)
+        } else if hofund_plugin_sdk::transport::is_quota_error(status, body) {
             Self {
                 kind: ProviderErrorKind::Quota,
                 message,
                 status: Some(status),
                 retry_after: None,
+                credit: false,
+                cooldown: true,
             }
         } else {
             Self::status(status, message)
         }
+    }
+
+    /// An upstream credit refusal reported with an HTTP status.
+    #[must_use]
+    pub fn credit_status(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            credit: true,
+            ..Self::status(status, message)
+        }
+    }
+
+    pub(crate) fn from_plugin(error: hofund_plugin_api::PluginError) -> Self {
+        let kind = error.kind();
+        let status = error.status();
+        let message = error.message().to_owned();
+        let credit = error.is_credit();
+        let cooldown = error.cools();
+        let mut converted = match kind {
+            hofund_plugin_api::PluginErrorKind::Connect => Self::connect(message),
+            hofund_plugin_api::PluginErrorKind::Timeout => Self::timeout(message),
+            hofund_plugin_api::PluginErrorKind::Transport => Self::transport(message),
+            hofund_plugin_api::PluginErrorKind::Interrupted => Self::interrupted(message),
+            hofund_plugin_api::PluginErrorKind::Status if credit => {
+                Self::credit_status(status.unwrap_or(402), message)
+            }
+            hofund_plugin_api::PluginErrorKind::Status => {
+                Self::status(status.unwrap_or(502), message)
+            }
+            hofund_plugin_api::PluginErrorKind::Decode => Self::decode(message),
+            hofund_plugin_api::PluginErrorKind::Unsupported => Self::unsupported(message),
+            hofund_plugin_api::PluginErrorKind::Auth => Self::auth(message),
+            hofund_plugin_api::PluginErrorKind::Quota => Self::quota(message),
+            hofund_plugin_api::PluginErrorKind::Config => Self::config(message),
+            hofund_plugin_api::PluginErrorKind::Cancelled => Self::cancelled(message),
+            hofund_plugin_api::PluginErrorKind::Io => Self::io(message),
+            hofund_plugin_api::PluginErrorKind::Internal => Self::internal(message),
+            _ => Self::decode(message),
+        };
+        converted.status = status.or(converted.status);
+        converted.credit = credit;
+        converted.cooldown = cooldown;
+        if let Some(after) = error.retry_after() {
+            converted = converted.with_retry_after(after);
+        }
+        converted
     }
 
     /// A body this protocol could not decode.
@@ -168,12 +229,33 @@ impl ProviderError {
         self.retry_after
     }
 
+    /// Marks a failed response shape that must not cool the member.
+    #[must_use]
+    pub const fn without_cooldown(mut self) -> Self {
+        self.cooldown = false;
+        self
+    }
+
+    /// Whether the upstream refused the call for lack of credit.
+    #[must_use]
+    pub const fn is_credit(&self) -> bool {
+        self.credit
+    }
+
+    /// Whether a failure should cool the member.
+    #[must_use]
+    pub const fn cools(&self) -> bool {
+        self.cooldown
+    }
+
     fn new(kind: ProviderErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
             status: None,
             retry_after: None,
+            credit: false,
+            cooldown: true,
         }
     }
 }

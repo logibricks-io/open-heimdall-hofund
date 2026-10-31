@@ -68,6 +68,8 @@ pub struct PluginError {
     message: String,
     status: Option<u16>,
     retry_after: Option<Duration>,
+    credit: bool,
+    cooldown: bool,
     #[source]
     cause: Option<Box<dyn Error + Send + Sync>>,
 }
@@ -79,6 +81,8 @@ impl PluginError {
             message: message.into(),
             status: None,
             retry_after: None,
+            credit: false,
+            cooldown: true,
             cause: None,
         }
     }
@@ -149,6 +153,15 @@ impl PluginError {
         }
     }
 
+    /// An upstream credit refusal reported with an HTTP status.
+    #[must_use]
+    pub fn credit_status(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            credit: true,
+            ..Self::status_error(status, message)
+        }
+    }
+
     /// Configuration did not validate.
     #[must_use]
     pub fn config(message: impl Into<String>) -> Self {
@@ -187,6 +200,13 @@ impl PluginError {
         self
     }
 
+    /// Marks a failed response shape that must not cool the member.
+    #[must_use]
+    pub const fn without_cooldown(mut self) -> Self {
+        self.cooldown = false;
+        self
+    }
+
     /// How the call failed.
     #[must_use]
     pub const fn kind(&self) -> PluginErrorKind {
@@ -203,6 +223,18 @@ impl PluginError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         self.retry_after
+    }
+
+    /// Whether the upstream refused the call for lack of credit.
+    #[must_use]
+    pub const fn is_credit(&self) -> bool {
+        self.credit
+    }
+
+    /// Whether a failure should cool the member.
+    #[must_use]
+    pub const fn cools(&self) -> bool {
+        self.cooldown
     }
 
     /// The underlying error, when one was attached.

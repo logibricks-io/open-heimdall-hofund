@@ -12,6 +12,25 @@ The optional top-level `model_prefix` field declares the prefix the agent puts b
 
 When the field is present, route validation strips that exact prefix before comparing the model with configured route names. A bare route name or a different prefix does not match. When it is omitted, the complete model string must equal a route name.
 
+## Active-provider layouts
+
+Some agents name the provider they use in one key and keep each provider's model in an entry of a providers map, with an older layout of two flat keys. The optional `[active_provider]` table declares that layout:
+
+```toml
+[active_provider]
+key = "active_provider"
+value = "hofund"
+entry = "providers.hofund"
+legacy_provider = "GOOSE_PROVIDER"
+legacy_model = "GOOSE_MODEL"
+```
+
+`entry` must be the parent of `[model]`'s `key`, and `value` must not contain `.`. A pick on a file that already has `key` or the providers map writes `key = value` first, then the entry's sets and model, and removes both flat keys. Any other file gets the flat keys instead. The configured model is read under the provider `key` names, falling back to `legacy_provider`, and is hofund's only when that provider is `value`; an empty entry model falls back to `legacy_model`. Clear and disconnect remove `key`, both flat keys and `entry`, and keep other providers' entries.
+
+## Binaries that share a name
+
+`binary_not_go = true` says a Go program with the agent's binary name on `PATH` is another tool. Detection then reads the binary's Go build information (without running it) and ignores a Go program. The answer is cached by path, size and modification time. A check that takes longer than one second counts as the agent; the check finishes in the background and its answer is used next time. A config file that exists still detects the agent either way.
+
 ## File locations and `create`
 
 Multiple `[[file]]` tables with the same `id` are ordered location candidates for one logical file. The optional `create` field defaults to `true`. When no candidate exists, the engine chooses the first candidate with `create = true`; an existing candidate is chosen regardless of this field.

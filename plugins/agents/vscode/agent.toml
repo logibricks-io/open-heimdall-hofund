@@ -63,3 +63,4 @@ slot = { append = { each = "once", owner = [
 [model]
 file = "settings"
 key = '"chat.defaultModel"'
+restore_on_clear = true

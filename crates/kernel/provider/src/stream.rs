@@ -20,7 +20,6 @@ pub(crate) struct SseEvents {
     decoder: Box<dyn StreamDecoder>,
     pending: VecDeque<Result<StreamEvent, ProviderError>>,
     finished: bool,
-    yielded: bool,
     /// Drop extension bags, and raw events this decoder does not model, when
     /// the client protocol and the upstream protocol differ.
     strip: bool,
@@ -37,7 +36,6 @@ impl SseEvents {
             decoder,
             pending: VecDeque::new(),
             finished: false,
-            yielded: false,
             strip,
         }
     }
@@ -45,8 +43,7 @@ impl SseEvents {
     fn take_pending(&mut self) -> Option<Result<StreamEvent, ProviderError>> {
         loop {
             let mut item = self.pending.pop_front()?;
-            if !self.yielded
-                && let Ok(event) = &item
+            if let Ok(event) = &item
                 && let Some(error) = failure_of(event)
             {
                 self.pending.clear();
@@ -60,9 +57,6 @@ impl SseEvents {
                     continue;
                 }
                 event.strip_extensions();
-            }
-            if item.is_ok() {
-                self.yielded = true;
             }
             return Some(item);
         }
@@ -111,6 +105,16 @@ impl Stream for SseEvents {
 /// A stream that reports an upstream failure before any content event is a
 /// status the router can fail over, when that status is configured.
 pub(crate) fn failure_of(event: &StreamEvent) -> Option<ProviderError> {
+    if let StreamEvent::MessageDelta(delta) = event
+        && delta.stop.as_ref().is_some_and(|stop| {
+            matches!(&stop.reason, hofund_ir::StopReason::Other(reason) if reason == "error")
+        })
+    {
+        return Some(
+            ProviderError::status(502, "the reply ended with finish_reason \"error\"")
+                .without_cooldown(),
+        );
+    }
     let StreamEvent::Unknown(unknown) = event else {
         return None;
     };
@@ -122,7 +126,17 @@ pub(crate) fn failure_of(event: &StreamEvent) -> Option<ProviderError> {
         .into_iter()
         .find_map(|path| pointer(&unknown.payload, path))
         .unwrap_or_else(|| "upstream stream failed".to_owned());
-    Some(ProviderError::status(502, message))
+    let body = serde_json::to_vec(&unknown.payload).unwrap_or_default();
+    let status = hofund_plugin_sdk::transport::status_for_error(&body);
+    if hofund_plugin_sdk::transport::is_credit_error(status, &body) {
+        Some(ProviderError::credit_status(status, message))
+    } else if hofund_plugin_sdk::transport::is_quota_error(status, &body) {
+        let mut error = ProviderError::quota(message);
+        error.status = Some(status);
+        Some(error)
+    } else {
+        Some(ProviderError::status(status, message))
+    }
 }
 
 fn pointer(value: &serde_json::Value, path: &str) -> Option<String> {

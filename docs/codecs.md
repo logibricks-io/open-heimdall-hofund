@@ -272,8 +272,21 @@ created event, output-item done events, and the matching terminal event.
 Response headers become metadata and rate-limit frames; HTTP failures become
 error frames with their status, error object, and retry/rate-limit headers.
 Error bodies are capped at 1 MiB. A reply that ends without a terminal event
-closes the socket with 1011. Interrupts, disconnect cancellation, and shutdown
-drain are not part of this transport yet.
+closes the socket with 1011.
+
+A `response.interrupt` may name any id the turn has reported in a created,
+in-progress, or completed event. A match cancels the upstream request, then
+sends `response.interrupt.accepted` followed by `response.incomplete` with
+reason `interrupted` and empty output. The interrupted turn is not held for
+continuation, and its later writes are suppressed without closing the socket.
+An unknown id or an interrupt with no turn in flight gets
+`response.interrupt.failed`. A client disconnect also cancels the turn in
+flight.
+
+During graceful shutdown, new socket upgrades get 503 `hofund is restarting`.
+Idle sockets close 1001 immediately; a busy socket closes 1001 after its turn.
+Shutdown waits for those sockets until its deadline, then cuts any that remain.
+Socket turns are tracked by this socket drain, not by the HTTP request drain.
 
 The upstream leg still receives the whole expanded conversation on every
 turn; only the client's upload to hofund is reduced. Socket history is memory
