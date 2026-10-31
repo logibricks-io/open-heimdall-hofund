@@ -1,5 +1,7 @@
 //! Read-only daemon control operations over TCP and local IPC.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -129,7 +131,7 @@ async fn provider_list_is_secret_free() {
         json!([{"id": "model-a"}, {"id": "model-b"}]),
     );
     let running = start_tcp(&dir.0, &provider_config(&server.uri())).await;
-    let response = reqwest::Client::new()
+    let response = support::client()
         .get(format!(
             "http://{}/v1/hofund/providers",
             running.control_local_addr().expect("control")
@@ -152,7 +154,7 @@ async fn provider_list_is_secret_free() {
     assert_eq!(provider.protocol, "openai-chat");
     assert!(provider.ready);
     assert_eq!(provider.model_count, 2);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[cfg(unix)]
@@ -176,7 +178,7 @@ async fn cached_models_route_makes_no_upstream_call() {
     );
     let running = start_unix(&dir.0, &provider_config(&server.uri())).await;
     let socket = running.control_socket_path().expect("Unix socket");
-    let client = reqwest::Client::builder()
+    let client = support::builder()
         .unix_socket(socket)
         .build()
         .expect("Unix client");
@@ -201,7 +203,7 @@ async fn cached_models_route_makes_no_upstream_call() {
     assert_eq!(list.models[1].context, Some(4096));
     assert_eq!(list.models[1].max_output, Some(512));
     drop(client);
-    running.shutdown().await;
+    support::shutdown(running).await;
     server.verify().await;
 }
 
@@ -210,7 +212,7 @@ async fn unknown_provider_returns_404_without_state_file() {
     let server = MockServer::start().await;
     let dir = Scratch::new("unknown-provider");
     let running = start_tcp(&dir.0, &provider_config(&server.uri())).await;
-    let response = reqwest::Client::new()
+    let response = support::client()
         .get(format!(
             "http://{}/v1/hofund/providers/missing/models",
             running.control_local_addr().expect("control")
@@ -231,7 +233,7 @@ async fn unknown_provider_returns_404_without_state_file() {
         .map(|entries| entries.count())
         .unwrap_or(0);
     assert_eq!(files, 0);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -243,7 +245,7 @@ async fn route_models_in_config_order() {
         provider_config(&server.uri())
     );
     let running = start_tcp(&dir.0, &source).await;
-    let response = reqwest::Client::new()
+    let response = support::client()
         .get(format!(
             "http://{}/v1/hofund/models",
             running.control_local_addr().expect("control")
@@ -264,7 +266,7 @@ async fn route_models_in_config_order() {
         .map(|model| model.id)
         .collect::<Vec<_>>();
     assert_eq!(ids, ["z-last", "a-first", "middle"]);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -282,7 +284,7 @@ async fn provider_ready_reflects_shared_cooldowns() {
         provider_config(&server.uri())
     );
     let running = start_tcp(&dir.0, &source).await;
-    let client = reqwest::Client::new();
+    let client = support::client();
     let token = token(&dir.0);
     let control = running.control_local_addr().expect("control");
     let response = client
@@ -306,6 +308,6 @@ async fn provider_ready_reflects_shared_cooldowns() {
         decode_response(API_VERSION, &response.bytes().await.expect("provider body"))
             .expect("provider list");
     assert!(!list.providers[0].ready);
-    running.shutdown().await;
+    support::shutdown(running).await;
     server.verify().await;
 }
