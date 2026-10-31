@@ -23,6 +23,11 @@ pub trait Member: Send + Sync {
     /// Configured provider id. Usage rows and route errors use this text.
     fn route_id(&self) -> &str;
 
+    /// Provider id used in model and account scopes. Account members override it.
+    fn scope_provider(&self) -> &str {
+        self.route_id()
+    }
+
     /// Plugin that owns this member. Empty when the member is not a plugin.
     fn plugin_id(&self) -> &str {
         ""
@@ -35,6 +40,11 @@ pub trait Member: Send + Sync {
 
     /// Codec id this member speaks. Compared with the inbound protocol.
     fn protocol(&self) -> &str;
+
+    /// Stable account ids or provider-key fingerprints usable in account scopes.
+    fn account_refs(&self) -> Vec<String> {
+        vec![self.id().to_string()]
+    }
 
     /// Per-attempt facts. Adapters with upstream route metadata override this.
     fn attempt(&self) -> MemberAttempt {

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Named gateway keys (P0-4a): hashed caller-key storage with one-time secrets,
+  default-token migration, CLI and control management, export/restore,
+  constant-time authentication, model and account scopes, and key id/name usage
+  attribution. Limit, read-only, and short-lived-key fields are persisted for
+  their later enforcement phases. See `docs/gateway-keys.md`.
 - Responses continuation history (P0-1a): `/v1/responses` now resolves
   `previous_response_id` in a caller-scoped, bounded in-memory LRU before
   decoding and routing. Unary and SSE replies are captured without delaying

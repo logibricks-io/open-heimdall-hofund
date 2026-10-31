@@ -18,7 +18,7 @@ use tokio::sync::{Mutex as AsyncMutex, watch};
 use tower::ServiceExt;
 
 use super::{
-    BODY_LIMIT, Inner, current_token, next_request_id, reject, request_router, text_response,
+    BODY_LIMIT, Inner, authenticate_request, next_request_id, request_router, text_response,
 };
 
 const KEEP_TURNS: usize = 2;
@@ -194,13 +194,14 @@ pub(super) async fn get(State(app): State<Arc<Inner>>, request: Request<Body>) -
         );
     }
     let codec = app.codecs.get(RESPONSES_PATH).cloned();
-    if let Some(response) = reject(
-        &current_token(&app),
+    if let Err(response) = authenticate_request(
+        &app,
         request.headers(),
         request.uri(),
+        None,
         codec.as_deref(),
     ) {
-        return response;
+        return *response;
     }
     let (mut parts, _) = request.into_parts();
     let upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {

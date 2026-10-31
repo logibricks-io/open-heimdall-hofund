@@ -48,8 +48,8 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | Status | Rows |
 | --- | --- |
 | Done | 30 |
-| Partial | 35 |
-| Missing | 92 |
+| Partial | 37 |
+| Missing | 90 |
 | Total counted | 157 |
 | Not planned (not counted) | 1 |
 
@@ -254,7 +254,7 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 | 9.2 | Cache read and write tokens (5-minute and 1-hour split), reasoning tokens | `ref.md:1220`; `internal/usage/block_price.go` | core | Missing | `crates/kernel/usage/src/lib.rs` has no cache columns | Carry them through IR usage (`crates/kernel/ir/src/usage.rs`) into the ledger. |
 | 9.3 | Cost at effective prices: custom, provider catalog, models.dev; USD or CNY | `internal/catalog`; `internal/fx`; `ref.md:1150` | core | Missing | none | Store the price used in each row, so totals do not change when prices change. Mark calls with no price as unpriced, as magpie does. |
 | 9.4 | Usage report by period and CSV export | `internal/usageapi`; `internal/cli/main.go:38` | core | Partial | `apps/cli/src/main.rs:261` (local time and a totals line); `crates/kernel/usage/src/lib.rs:169` | Add `--since`, `--group-by`, `--csv` and `--json`. |
-| 9.5 | Attribution by agent, provider key and gateway key | `internal/usage/client_agents.go`; `ref.md:340` | core | Missing | none | Detect the agent from the path, headers and gateway key. Record it per row. |
+| 9.5 | Attribution by agent, provider key and gateway key | `internal/usage/client_agents.go`; `ref.md:340` | core | Partial | `crates/kernel/usage/src/lib.rs` (`caller_key_id`, `caller_key_name` additive migration); `crates/kernel/gateway/tests/keys.rs` (`k5_identity_is_carried_into_usage_rows`); `crates/control-proto/src/usage.rs` | Authenticated gateway-key id and name are recorded on every gateway usage row and returned by control usage. Agent detection and provider-key attribution remain. |
 | 9.6 | Sessions with cost and title; grouping of subagents | `internal/sessions`; `docs/subsystems/gateway-sessions.md` | auxiliary | Missing | none | A session id from each protocol, stored in the ledger. |
 | 9.7 | Read usage from agents' own session files | `internal/sessions/calls_*.go` | auxiliary | Missing | none | Later phase. |
 | 9.8 | Apps report their own usage (`POST /v1/magpie/usage/requests`) | `internal/gateway/usage_ingest.go`; `ref.md:2096` | auxiliary | Missing | none | Idempotent on a request id, as magpie does. |
@@ -270,7 +270,7 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 | 10.1 | Gateway authentication | `internal/gateway/lan.go`; `ref.md:1920` | core | Done | `crates/kernel/gateway/src/lib.rs:345` (`authorized`); `crates/kernel/secrets/src/lib.rs` (`TokenFile`, mode 0600) | Already better: a token is required on loopback too. |
 | 10.2 | Accept Bearer, `x-api-key`, `x-goog-api-key` or `?key=` | `ref.md:1440` | core | Done | `crates/kernel/gateway/src/lib.rs:352` (`x-api-key`) | `x-api-key` is compared in constant time, together with the bearer token, `x-goog-api-key`, and a `key` query value. Every presented secret is checked. |
 | 10.3 | Token rotation | `internal/access` | core | Done | `crates/kernel/gateway/src/lib.rs:325` (`current_token`); `apps/cli/src/main.rs` (`token rotate`) | The gateway re-reads the token file on each request and keeps the last good token when the read fails. Connected agents have their token keys rewritten. A failed rewrite prints `hofund agent connect <id>`. |
-| 10.4 | Named gateway keys with model and account limits | `internal/access`; `caller-keys.json` (`ref.md:2998`) | core | Missing | `crates/kernel/secrets/src/lib.rs` (one token) | Store hashed keys only (magpie stores them readable), with scopes and limits. |
+| 10.4 | Named gateway keys with model and account limits | `internal/access`; `caller-keys.json` (`ref.md:2998`) | core | Partial | `crates/kernel/secrets/src/keys.rs` (`k1_` through `k3_`, `k6_`, `k7_`, `k10_`, `k13_`); `crates/kernel/gateway/tests/keys.rs` (`k4_`, `k5_`, `k8_`, `k9_`); `crates/kernel/daemon/tests/gateway_keys.rs` (`k12_`); `apps/cli/src/gateway_key.rs` (`k11_`); `docs/gateway-keys.md` | Hashed secrets and one-time add/rotate output are safer than readable storage. Default migration, every management action, model/account scopes, control API, and backup are implemented. Spending limits are P0-4b, read-only enforcement is P0-4c, and expiry/issuing are P0-4d. |
 | 10.5 | LAN sharing, allowed IPs (`MAGPIE_ALLOW_IPS`), trusted proxy (`MAGPIE_TRUST_PROXY`) | `internal/gateway/lan.go`, `allow.go`; `ref.md:1850` | core | Partial | `crates/kernel/config/src/lib.rs` (`listen` can be any address) | Require named keys for any address other than loopback, plus a CIDR allow-list. |
 | 10.6 | Failed-auth throttling | `internal/gateway/auththrottle.go` | auxiliary | Missing | none | Throttle per IP with a `tower` layer. |
 | 10.7 | TLS serving with certificate hot reload | `internal/gateway/tls.go`; `ref.md:1440` | auxiliary | Missing | none | rustls, with the certificate reloaded when its file changes. |

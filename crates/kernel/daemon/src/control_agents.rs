@@ -384,7 +384,6 @@ impl AgentOps {
         let parts = self.parts();
         let generation = self.token_generation.clone();
         self.gated(move |catalog, session| {
-            let file = TokenFile::new(&parts.token_path);
             let previous_token = parts.token()?;
             let previous = parts.target(previous_token.clone());
             let mut results = Vec::new();
@@ -399,12 +398,15 @@ impl AgentOps {
                     }
                 }
             }
-            let token = file.rotate().map_err(|error| {
-                internal(scrub(
-                    &format!("token rotation failed: {error}"),
-                    &[&previous_token],
-                ))
-            })?;
+            let token = hofund_secrets::KeyStore::beside_token(&parts.token_path)
+                .rotate_default()
+                .map(|rotated| rotated.secret)
+                .map_err(|error| {
+                    internal(scrub(
+                        &format!("token rotation failed: {error}"),
+                        &[&previous_token],
+                    ))
+                })?;
             generation.send_modify(|value| *value = value.wrapping_add(1));
             let updated = parts.target(token.clone());
             for adapter in connected {

@@ -41,7 +41,8 @@ use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
 };
 use hofund_plugin_host::HttpBackend;
-use hofund_router::{Completion, RouterError, Snapshot};
+use hofund_router::{Completion, RouteScope, RouterError, Snapshot};
+use hofund_secrets::{Identity, KeyStore};
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -64,6 +65,7 @@ pub struct Gateway {
 struct Inner {
     snapshot: Snapshot,
     tokens: TokenState,
+    keys: Option<Arc<KeyStore>>,
     codecs: HashMap<String, Arc<dyn Codec>>,
     usage: Arc<Ledger>,
     prev: prev_response::PrevStore,
@@ -365,6 +367,7 @@ impl Gateway {
             inner: Arc::new(Inner {
                 snapshot,
                 tokens: TokenState::new(token, token_file),
+                keys: None,
                 codecs,
                 usage,
                 prev: prev_response::PrevStore::new(),
@@ -375,6 +378,15 @@ impl Gateway {
                 sockets: Arc::new(responses_ws::SocketRegistry::default()),
             }),
         }
+    }
+
+    /// Uses the named-key store for authentication and caller scopes.
+    #[must_use]
+    pub fn with_key_store(mut self, keys: Arc<KeyStore>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .keys = Some(keys);
+        self
     }
 
     /// Mounts inbound surfaces. A request that matches one is authenticated,
@@ -746,11 +758,12 @@ fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
 
 /// The gateway's codec routes, run in process for an inbound surface.
 ///
-/// The request presents the current gateway token as its bearer. Any other
-/// credential the surface sets is ignored: one matching secret is enough for
-/// `authorized`, so it can neither help nor hurt.
+/// The request presents the current gateway token as its bearer and inherits
+/// the authenticated caller's identity. Any other credential the surface sets
+/// is ignored, so it can neither help nor hurt.
 struct InProcess {
     app: std::sync::Weak<Inner>,
+    identity: Identity,
 }
 
 #[async_trait::async_trait]
@@ -767,6 +780,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             axum::http::HeaderValue::try_from(format!("Bearer {}", current_token(&app)))
                 .map_err(|_| PluginError::internal("the gateway token is not a header value"))?;
         parts.headers.insert(header::AUTHORIZATION, bearer);
+        parts.extensions.insert(self.identity.clone());
         let request = Request::from_parts(parts, Body::from(body.bytes().clone()));
         let router = codec_routes(&app).with_state(Arc::clone(&app));
         let response = tower::ServiceExt::oneshot(router, request)
@@ -804,10 +818,14 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             model: call.model().to_owned(),
             upstream: upstream.to_owned(),
             started,
+            identity: self.identity.clone(),
             input: None,
             output: None,
         };
-        match router.forward(&call).await {
+        match router
+            .forward_scoped(&call, Some(&route_scope(&self.identity)))
+            .await
+        {
             Ok(forwarded) => {
                 let answer = forwarded.answer;
                 let status =
@@ -828,6 +846,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 Ok(answer)
             }
             Err(error) => {
+                let scope_message = scope_error(&error, &self.identity);
                 let (upstream, error) = match error {
                     RouterError::NoRoute { .. } => (
                         String::new(),
@@ -838,6 +857,9 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                         String::new(),
                         PluginError::status_error(400, error.to_string()),
                     ),
+                    RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
+                        (String::new(), PluginError::status_error(403, scope_message))
+                    }
                     RouterError::Upstream { upstream_id, error }
                         if error.kind() == PluginErrorKind::Unsupported =>
                     {
@@ -905,9 +927,10 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
     let surface = Arc::clone(surface);
     let uri = request.uri().clone();
     let headers = request.headers().clone();
-    if let Some(response) = reject(&current_token(&app), &headers, &uri, None) {
-        return response;
-    }
+    let identity = match authenticate_request(&app, &headers, &uri, None, None) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
     let Some(route) =
         surface.routes().iter().copied().find(|route| {
             method_is(route.method(), &method) && path_matches(route.prefix(), &path)
@@ -916,7 +939,7 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
         return text_response(StatusCode::NOT_FOUND, "not found");
     };
     let (mut parts, body) = request.into_parts();
-    without_own_token(&current_token(&app), &mut parts);
+    without_own_token(&app, &mut parts);
     let bytes = match axum::body::to_bytes(body, SURFACE_BODY_LIMIT).await {
         Ok(bytes) => bytes,
         Err(_) => return text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
@@ -925,6 +948,7 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
         axum::http::Request::from_parts(parts, hofund_plugin_api::Body::from_bytes(bytes));
     let gateway = Arc::new(InProcess {
         app: Arc::downgrade(&app),
+        identity,
     });
     let members = app.snapshot.load().member_ids();
     let protocols = protocols_of(&app.codecs);
@@ -1020,13 +1044,16 @@ async fn health() -> Response {
 }
 
 async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
-    if let Some(response) = reject(&current_token(&app), request.headers(), request.uri(), None) {
-        return response;
-    }
+    let inherited = request.extensions().get::<Identity>().cloned();
+    let identity =
+        match authenticate_request(&app, request.headers(), request.uri(), inherited, None) {
+            Ok(identity) => identity,
+            Err(response) => return *response,
+        };
     let data: Vec<_> = app
         .snapshot
         .load()
-        .models()
+        .models_scoped(Some(&route_scope(&identity)))
         .into_iter()
         .map(|id| serde_json::json!({"id": id, "object": "model", "owned_by": "hofund"}))
         .collect();
@@ -1043,18 +1070,16 @@ async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> R
         .get(GENERATIVE_UNARY)
         .or_else(|| app.codecs.get(GENERATIVE_STREAM))
         .map(AsRef::as_ref);
-    if let Some(response) = reject(
-        &current_token(&app),
-        request.headers(),
-        request.uri(),
-        codec,
-    ) {
-        return response;
-    }
+    let inherited = request.extensions().get::<Identity>().cloned();
+    let identity =
+        match authenticate_request(&app, request.headers(), request.uri(), inherited, codec) {
+            Ok(identity) => identity,
+            Err(response) => return *response,
+        };
     let models: Vec<_> = app
         .snapshot
         .load()
-        .models()
+        .models_scoped(Some(&route_scope(&identity)))
         .into_iter()
         .map(|id| {
             serde_json::json!({
@@ -1075,11 +1100,21 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let path = request.uri().path().to_owned();
     let uri = request.uri().clone();
     let headers = request.headers().clone();
+    let inherited = request.extensions().get::<Identity>().cloned();
     if path == "/v1/messages/count_tokens" {
-        return count_tokens(app, headers, uri, request, "/v1/messages", None).await;
+        return count_tokens(app, headers, uri, request, inherited, "/v1/messages", None).await;
     }
     if let Some(model) = match_count(&path) {
-        return count_tokens(app, headers, uri, request, GENERATIVE_UNARY, Some(model)).await;
+        return count_tokens(
+            app,
+            headers,
+            uri,
+            request,
+            inherited,
+            GENERATIVE_UNARY,
+            Some(model),
+        )
+        .await;
     }
     let matched = match_generate(&path);
     let codec_path = if path == "/responses" {
@@ -1094,9 +1129,11 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let Some(codec) = app.codecs.get(codec_key).cloned() else {
         return text_response(StatusCode::NOT_FOUND, "not found");
     };
-    if let Some(response) = reject(&current_token(&app), &headers, &uri, Some(codec.as_ref())) {
-        return response;
-    }
+    let identity = match authenticate_request(&app, &headers, &uri, inherited, Some(codec.as_ref()))
+    {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
     let started = Instant::now();
     let bytes = match axum::body::to_bytes(request.into_body(), BODY_LIMIT).await {
         Ok(bytes) => bytes,
@@ -1127,7 +1164,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         Err(error) => {
             write_usage(
                 &app.usage,
-                &UsageMeta::new(&ModelRequest::new(model_name(&bytes)), "", started),
+                &UsageMeta::new(
+                    &ModelRequest::new(model_name(&bytes)),
+                    "",
+                    started,
+                    &identity,
+                ),
                 None,
                 StatusCode::BAD_REQUEST,
             );
@@ -1148,7 +1190,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let router = app.snapshot.load();
     let attempt = ask.as_ref().map(|ask| ask.attempt());
     match router
-        .dispatch_with_attempt(&model_request, codec.id(), attempt)
+        .dispatch_scoped(
+            &model_request,
+            codec.id(),
+            Some(&route_scope(&identity)),
+            attempt,
+        )
         .await
     {
         Ok(routed) => {
@@ -1160,6 +1207,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 &routed.upstream_model,
                 routed.completion,
                 started,
+                &identity,
                 &mut track,
                 capture,
             )
@@ -1171,6 +1219,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             &model_request,
             error,
             started,
+            &identity,
             &mut track,
         ),
     }
@@ -1181,15 +1230,18 @@ async fn count_tokens(
     headers: HeaderMap,
     uri: Uri,
     request: Request,
+    inherited: Option<Identity>,
     codec_key: &str,
     path_model: Option<String>,
 ) -> Response {
     let Some(codec) = app.codecs.get(codec_key).cloned() else {
         return text_response(StatusCode::NOT_FOUND, "not found");
     };
-    if let Some(response) = reject(&current_token(&app), &headers, &uri, Some(codec.as_ref())) {
-        return response;
-    }
+    let identity = match authenticate_request(&app, &headers, &uri, inherited, Some(codec.as_ref()))
+    {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
     let bytes = match axum::body::to_bytes(request.into_body(), BODY_LIMIT).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -1210,19 +1262,25 @@ async fn count_tokens(
         Err(error) => return coded(codec.as_ref(), StatusCode::BAD_REQUEST, &error.to_string()),
     };
     let router = app.snapshot.load();
-    match router.count(&model_request, codec.id()).await {
+    match router
+        .count_scoped(&model_request, codec.id(), Some(&route_scope(&identity)))
+        .await
+    {
         Ok(count) => json_response(
             StatusCode::OK,
             codec.encode_token_count(count.tokens, count.estimated),
         ),
         Err(error) => {
-            let (status, message) = match error {
+            let (status, message) = match &error {
                 RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string()),
                 RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
                     (StatusCode::BAD_REQUEST, error.to_string())
                 }
+                RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
+                    (StatusCode::FORBIDDEN, scope_error(&error, &identity))
+                }
                 RouterError::Upstream { error, .. } => {
-                    (status_of(&error), error.message().to_owned())
+                    (status_of(error), error.message().to_owned())
                 }
             };
             coded(codec.as_ref(), status, &message)
@@ -1230,20 +1288,62 @@ async fn count_tokens(
     }
 }
 
-fn reject(
-    expected: &str,
+fn authenticate_request(
+    app: &Inner,
     headers: &HeaderMap,
     uri: &Uri,
+    inherited: Option<Identity>,
     codec: Option<&dyn Codec>,
-) -> Option<Response> {
-    if authorized(expected, headers, uri) {
-        return None;
+) -> Result<Identity, Box<Response>> {
+    if let Some(identity) = inherited {
+        return Ok(identity);
+    }
+    if let Some(keys) = &app.keys {
+        let query = uri.query().and_then(query_key);
+        for secret in [
+            bearer(headers),
+            header_secret(headers, "x-api-key"),
+            header_secret(headers, "x-goog-api-key"),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(query.as_deref())
+        {
+            if let Ok(Some(identity)) = keys.authenticate(secret) {
+                return Ok(identity);
+            }
+        }
+    } else if authorized(&current_token(app), headers, uri) {
+        return Ok(Identity::default());
     }
     let body = match codec {
         Some(codec) => codec.encode_error(StatusCode::UNAUTHORIZED.as_u16(), "unauthorized"),
         None => list_error("unauthorized"),
     };
-    Some(json_response(StatusCode::UNAUTHORIZED, body))
+    Err(Box::new(json_response(StatusCode::UNAUTHORIZED, body)))
+}
+
+fn route_scope(identity: &Identity) -> RouteScope {
+    RouteScope {
+        models: identity.models.clone(),
+        accounts: identity.accounts.clone(),
+    }
+}
+
+fn scope_error(error: &RouterError, identity: &Identity) -> String {
+    match error {
+        RouterError::ModelScope { model, patterns } => format!(
+            "gateway key {:?} is not allowed to use model `{model}`; allowed models: {}",
+            identity.key_name,
+            patterns.join(", ")
+        ),
+        RouterError::AccountScope { model, accounts } => format!(
+            "gateway key {:?} is not allowed to use the accounts behind model `{model}`; allowed accounts: {}",
+            identity.key_name,
+            accounts.join(", ")
+        ),
+        other => other.to_string(),
+    }
 }
 
 fn current_token(app: &Inner) -> String {
@@ -1284,12 +1384,12 @@ fn authorized(expected: &str, headers: &HeaderMap, uri: &Uri) -> bool {
 /// matches the token goes: the bearer, `x-api-key`, `x-goog-api-key`, and any
 /// `key` query pair. A credential that does not match is the caller's own
 /// and stays, in its place.
-fn without_own_token(expected: &str, parts: &mut axum::http::request::Parts) {
-    if bearer(&parts.headers).is_some_and(|token| tokens_match(expected, token)) {
+fn without_own_token(app: &Inner, parts: &mut axum::http::request::Parts) {
+    if bearer(&parts.headers).is_some_and(|token| own_secret(app, token)) {
         parts.headers.remove(header::AUTHORIZATION);
     }
     for name in ["x-api-key", "x-goog-api-key"] {
-        if header_secret(&parts.headers, name).is_some_and(|token| tokens_match(expected, token)) {
+        if header_secret(&parts.headers, name).is_some_and(|token| own_secret(app, token)) {
             parts.headers.remove(name);
         }
     }
@@ -1298,7 +1398,7 @@ fn without_own_token(expected: &str, parts: &mut axum::http::request::Parts) {
     };
     let kept: Vec<&str> = query
         .split('&')
-        .filter(|pair| !is_own_key(expected, pair))
+        .filter(|pair| !is_own_key(app, pair))
         .collect();
     if kept.len() == query.split('&').count() {
         return;
@@ -1315,11 +1415,17 @@ fn without_own_token(expected: &str, parts: &mut axum::http::request::Parts) {
     }
 }
 
-/// Whether the query pair `pair` is `key=` with the gateway's token.
-fn is_own_key(expected: &str, pair: &str) -> bool {
-    pair.split_once('=').is_some_and(|(name, value)| {
-        name == "key" && tokens_match(expected, &percent_decode(value))
-    })
+/// Whether the query pair `pair` is `key=` with one of the gateway's keys.
+fn is_own_key(app: &Inner, pair: &str) -> bool {
+    pair.split_once('=')
+        .is_some_and(|(name, value)| name == "key" && own_secret(app, &percent_decode(value)))
+}
+
+fn own_secret(app: &Inner, secret: &str) -> bool {
+    app.keys.as_ref().map_or_else(
+        || tokens_match(&current_token(app), secret),
+        |keys| keys.contains(secret).unwrap_or(false),
+    )
 }
 
 fn header_secret<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -1355,10 +1461,11 @@ async fn success(
     upstream_model: &str,
     completion: Completion,
     started: Instant,
+    identity: &Identity,
     track: &mut RequestTrack,
     capture: Option<prev_response::Capture>,
 ) -> Response {
-    let meta = UsageMeta::new(request, upstream, started);
+    let meta = UsageMeta::new(request, upstream, started, identity);
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
     match completion {
@@ -1609,31 +1716,39 @@ fn failure(
     request: &ModelRequest,
     error: RouterError,
     started: Instant,
+    identity: &Identity,
     track: &mut RequestTrack,
 ) -> Response {
     if let RouterError::PreviousResponseNotFound { id } = &error {
         write_usage(
             &app.usage,
-            &UsageMeta::new(request, "", started),
+            &UsageMeta::new(request, "", started, identity),
             None,
             StatusCode::BAD_REQUEST,
         );
         track.end_with(None, StatusCode::BAD_REQUEST.as_u16(), None, None);
         return json_response(StatusCode::BAD_REQUEST, prev_response::not_found_body(id));
     }
-    let (status, upstream, message) = match error {
+    let (status, upstream, message) = match &error {
         RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, String::new(), error.to_string()),
         RouterError::PreviousResponseNotFound { .. } => unreachable!(),
         RouterError::Ambiguous { .. } => {
             (StatusCode::BAD_REQUEST, String::new(), error.to_string())
         }
-        RouterError::Upstream { upstream_id, error } => {
-            (status_of(&error), upstream_id, error.message().to_owned())
-        }
+        RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => (
+            StatusCode::FORBIDDEN,
+            String::new(),
+            scope_error(&error, identity),
+        ),
+        RouterError::Upstream { upstream_id, error } => (
+            status_of(error),
+            upstream_id.clone(),
+            error.message().to_owned(),
+        ),
     };
     write_usage(
         &app.usage,
-        &UsageMeta::new(request, &upstream, started),
+        &UsageMeta::new(request, &upstream, started, identity),
         None,
         status,
     );
@@ -1658,16 +1773,18 @@ struct UsageMeta {
     model: String,
     upstream: String,
     started: Instant,
+    identity: Identity,
     input: Option<i64>,
     output: Option<i64>,
 }
 
 impl UsageMeta {
-    fn new(request: &ModelRequest, upstream: &str, started: Instant) -> Self {
+    fn new(request: &ModelRequest, upstream: &str, started: Instant, identity: &Identity) -> Self {
         Self {
             model: request.model.clone(),
             upstream: upstream.to_owned(),
             started,
+            identity: identity.clone(),
             input: None,
             output: None,
         }
@@ -1848,6 +1965,8 @@ fn write_usage(
         output_tokens,
         latency_ms: i64::try_from(meta.started.elapsed().as_millis()).unwrap_or(i64::MAX),
         status: status.as_u16().to_string(),
+        caller_key_id: meta.identity.key_id.clone(),
+        caller_key_name: meta.identity.key_name.clone(),
     };
     let _ = usage.record(&row);
 }

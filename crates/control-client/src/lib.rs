@@ -10,8 +10,9 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
     AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
-    ControlError, ErrorEnvelope, EventEnvelope, HealthResponse, MAX_RESPONSE_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
+    ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest, GatewayKeyResponse,
+    GatewayKeyRestoreRequest, HealthResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
+    PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
     ProviderTestResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
     StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UsagePeriod, UsageQuery,
     UsageResponse, decode_error_envelope, decode_response,
@@ -416,6 +417,42 @@ impl Client {
             _ => "unknown",
         };
         self.get(&format!("/v1/hofund/usage?period={period}")).await
+    }
+
+    /// Lists named gateway keys.
+    pub async fn gateway_keys(&self) -> Result<GatewayKeyResponse, ClientError> {
+        self.get("/v1/hofund/gateway-keys").await
+    }
+
+    /// Changes a named gateway key.
+    pub async fn change_gateway_key(
+        &self,
+        request: GatewayKeyRequest,
+    ) -> Result<GatewayKeyResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/gateway-keys",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Exports hashed gateway-key records for backup.
+    pub async fn export_gateway_keys(&self) -> Result<GatewayKeyResponse, ClientError> {
+        self.get("/v1/hofund/gateway-keys/export").await
+    }
+
+    /// Restores hashed gateway-key records.
+    pub async fn restore_gateway_keys(
+        &self,
+        request: GatewayKeyRestoreRequest,
+    ) -> Result<GatewayKeyResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/gateway-keys/restore",
+            Some(json_body(&request)?),
+        )
+        .await
     }
 
     /// Rotates the control and model bearer token.

@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+mod keys;
+pub use keys::*;
+
 /// A failure while resolving or storing a secret.
 #[derive(Debug, Error)]
 pub enum SecretError {
@@ -18,6 +21,9 @@ pub enum SecretError {
     /// The token file could not be read or replaced.
     #[error("{0}")]
     File(String),
+    /// A named gateway key change is invalid.
+    #[error("{0}")]
+    Key(String),
     /// The process could not draw random bytes.
     #[error("cannot generate a token: {0}")]
     Random(String),

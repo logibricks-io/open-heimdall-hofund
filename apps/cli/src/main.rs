@@ -6,6 +6,7 @@
 mod commands;
 mod connect;
 mod events;
+mod gateway_key;
 mod local;
 mod provider;
 mod provider_edit;
@@ -85,6 +86,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::AgentSet { name, model } => {
                 commands::agent_set(config, &name, model.as_deref()).await
             }
+            Command::GatewayKey(command) => gateway_key::run(config, &command).await,
             Command::ProviderList => provider::list(config).await,
             Command::ProviderShow { id } => provider::show(config, &id).await,
             Command::ProviderTest { id, models } => provider::test(config, &id, &models).await,
@@ -130,6 +132,7 @@ enum Command {
     },
     TokenShow,
     TokenRotate,
+    GatewayKey(gateway_key::Command),
     Usage,
     AgentList,
     AgentConnect {
@@ -212,6 +215,7 @@ enum HelpTopic {
     Token,
     TokenShow,
     TokenRotate,
+    GatewayKey,
     Usage,
     Agent,
     AgentList,
@@ -235,6 +239,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut force = false;
     let mut requests = false;
     let mut help = false;
+    let mut own_secret = None;
     let mut flags = SubscriptionFlags::default();
     let mut words = Vec::new();
     let mut operands_only = false;
@@ -256,6 +261,12 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             "--force" => force = true,
             "--requests" => requests = true,
             "--json" => flags.json = true,
+            "--key" => {
+                let secret = iter
+                    .next()
+                    .ok_or_else(|| "--key needs a value".to_owned())?;
+                own_secret = Some(secret.clone());
+            }
             "--host" => {
                 let host = iter
                     .next()
@@ -290,6 +301,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         };
     }
     let subscription_flags = flags.json || flags.host.is_some() || flags.label.is_some();
+    let json = flags.json;
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
         ["serve"] => Command::Serve,
@@ -323,6 +335,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             model: agent_model(pairs)?,
         },
         ["agent", "set", ..] => return Err(help_text(HelpTopic::AgentSet)),
+        ["gateway-key", ..] => Command::GatewayKey(
+            gateway_key::parse(&words, own_secret.clone(), json)?
+                .expect("gateway-key parser matched"),
+        ),
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
@@ -399,10 +415,18 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["model", ..] => return Err(help_text(HelpTopic::Model)),
         _ => return Err(help_text(HelpTopic::Overview)),
     };
-    if subscription_flags && !matches!(command, Command::Subscription(_)) {
+    let json_elsewhere = json
+        && !matches!(
+            command,
+            Command::GatewayKey(gateway_key::Command::List { .. })
+        );
+    if (subscription_flags || json_elsewhere) && !matches!(command, Command::Subscription(_)) {
         return Err(
             "--json, --host, and --label are only valid with subscription commands".to_owned(),
         );
+    }
+    if own_secret.is_some() && !matches!(command, Command::GatewayKey(_)) {
+        return Err("--key is only valid with gateway-key add".to_owned());
     }
     if dry_run && !matches!(command, Command::AgentConnect { .. }) {
         return Err("--dry-run is only valid with agent connect".to_owned());
@@ -463,6 +487,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["token", "show", ..] => HelpTopic::TokenShow,
         ["token", "rotate", ..] => HelpTopic::TokenRotate,
         ["token", ..] => HelpTopic::Token,
+        ["gateway-key", ..] => HelpTopic::GatewayKey,
         ["usage", ..] => HelpTopic::Usage,
         ["agent", "list", ..] => HelpTopic::AgentList,
         ["agent", "connect", ..] => HelpTopic::AgentConnect,
@@ -503,6 +528,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::Token => TOKEN_HELP,
         HelpTopic::TokenShow => TOKEN_SHOW_HELP,
         HelpTopic::TokenRotate => TOKEN_ROTATE_HELP,
+        HelpTopic::GatewayKey => gateway_key::HELP,
         HelpTopic::Usage => USAGE_HELP,
         HelpTopic::Agent => AGENT_HELP,
         HelpTopic::AgentList => AGENT_LIST_HELP,
@@ -543,6 +569,7 @@ commands:
   config reload                   make a running daemon reread the config
   token show                      print the bearer token
   token rotate                    replace the bearer token
+  gateway-key                     manage named gateway keys and their scopes
   usage                           print the usage table
   agent list                      list coding-agent adapters
   agent connect <name> [--dry-run]
