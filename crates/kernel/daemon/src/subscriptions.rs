@@ -818,7 +818,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn q3d_kept_report_never_reads_and_fresh_report_does() {
+    async fn q3d_kept_report_never_fetches() {
         let dir = tempfile::tempdir().expect("dir");
         write_accounts(dir.path(), &[("one", "One"), ("two", "Two")]);
         let config = config("quota = \"exhausted\"");

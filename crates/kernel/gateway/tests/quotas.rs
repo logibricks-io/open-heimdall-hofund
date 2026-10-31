@@ -66,7 +66,7 @@ impl QuotaScope for OnlyAccount {
     }
 }
 
-fn app(source: &Arc<Source>, scope: Option<QuotaScopeHook>) -> (axum::Router, tempfile::TempDir) {
+fn app_with(source: &Arc<Source>, scope: Option<QuotaScopeHook>) -> (axum::Router, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir");
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut gateway = Gateway::new(
@@ -104,9 +104,9 @@ fn bearer() -> Option<(&'static str, &'static str)> {
 }
 
 #[tokio::test]
-async fn q5a_quotas_answer_a_list_envelope_to_a_token_holder() {
+async fn q5a_snapshot_route_supports_kept_and_fresh_reads() {
     let source = Arc::new(Source::default());
-    let (app, _dir) = app(&source, None);
+    let (app, _dir) = app_with(&source, None);
     let (status, body) = get(&app, "/v1/hofund/quotas", bearer()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["object"], "list");
@@ -120,12 +120,28 @@ async fn q5a_quotas_answer_a_list_envelope_to_a_token_holder() {
     }
     let (status, _) = get(&app, "/v1/hofund/quotas?key=secret", None).await;
     assert_eq!(status, StatusCode::OK, "a key query pair is accepted");
+    source.reports.lock().expect("reports").clear();
+    for uri in [
+        "/v1/hofund/quotas?kept=1",
+        "/v1/hofund/quotas",
+        "/v1/hofund/quotas?kept=true",
+        "/v1/hofund/quotas?kept=0&other=1",
+    ] {
+        let (status, body) = get(&app, uri, bearer()).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert_eq!(body["object"], "list", "{uri}");
+    }
+    assert_eq!(
+        source.reports.lock().expect("reports").as_slice(),
+        [true, false, false, false],
+        "only kept=1 selects the kept report"
+    );
 }
 
 #[tokio::test]
-async fn q5b_quotas_refuse_a_missing_or_wrong_token() {
+async fn q5c_snapshot_requires_gateway_authentication() {
     let source = Arc::new(Source::default());
-    let (app, _dir) = app(&source, None);
+    let (app, _dir) = app_with(&source, None);
     for auth in [None, Some(("authorization", "Bearer wrong"))] {
         let (status, body) = get(&app, "/v1/hofund/quotas", auth).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -134,31 +150,15 @@ async fn q5b_quotas_refuse_a_missing_or_wrong_token() {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
     assert!(source.reports.lock().expect("reports").is_empty(), "no read before auth");
+    let (_, body) = get(&app, "/v1/hofund/quotas", Some(("authorization", "Bearer wrong"))).await;
+    assert!(!body.to_string().contains("wrong"), "the presented key is never echoed");
+    assert!(!body.to_string().contains("secret"));
 }
 
 #[tokio::test]
-async fn q5c_kept_one_selects_the_kept_report_and_anything_else_reads_fresh() {
+async fn q6g_history_route_filters_and_scopes() {
     let source = Arc::new(Source::default());
-    let (app, _dir) = app(&source, None);
-    for uri in [
-        "/v1/hofund/quotas?kept=1",
-        "/v1/hofund/quotas",
-        "/v1/hofund/quotas?kept=true",
-        "/v1/hofund/quotas?kept=0&other=1",
-    ] {
-        let (status, _) = get(&app, uri, bearer()).await;
-        assert_eq!(status, StatusCode::OK, "{uri}");
-    }
-    assert_eq!(
-        source.reports.lock().expect("reports").as_slice(),
-        [true, false, false, false]
-    );
-}
-
-#[tokio::test]
-async fn q5d_history_passes_its_filters_and_answers_a_list() {
-    let source = Arc::new(Source::default());
-    let (app, _dir) = app(&source, None);
+    let (app, _dir) = app_with(&source, None);
     let (status, body) = get(
         &app,
         "/v1/hofund/quotas/history?days=7&provider=codex&user=A%40x.io&extra=1",
@@ -172,10 +172,19 @@ async fn q5d_history_passes_its_filters_and_answers_a_list() {
     assert_eq!(seen[0].days.as_deref(), Some("7"));
     assert_eq!(seen[0].provider.as_deref(), Some("codex"));
     assert_eq!(seen[0].user.as_deref(), Some("A@x.io"));
+    drop(seen);
+    let scope: QuotaScopeHook =
+        Arc::new(|_: QuotaCaller<'_>| QuotaAccess::Scoped(Arc::new(OnlyAccount("A@X.IO"))));
+    let (scoped, _dir) = app_with(&source, Some(scope));
+    let (_, body) = get(&scoped, "/v1/hofund/quotas/history?days=1", bearer()).await;
+    let data = body["data"].as_array().expect("data");
+    assert_eq!(data.len(), 1, "the scope narrows history as it does cards");
+    assert_eq!(data[0]["provider"], "codex");
+    assert_eq!(data[0]["user"], "a@x.io");
 }
 
 #[tokio::test]
-async fn q6g_a_narrowed_key_is_told_only_the_cards_it_may_use() {
+async fn q5b_scope_hook_filters_snapshot_cards() {
     let source = Arc::new(Source::default());
     let callers = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&callers);
@@ -183,24 +192,25 @@ async fn q6g_a_narrowed_key_is_told_only_the_cards_it_may_use() {
         seen.lock().expect("callers").push(caller.key().to_owned());
         QuotaAccess::Scoped(Arc::new(OnlyAccount("A@X.IO")))
     });
-    let (app, _dir) = app(&source, Some(scope));
+    let (app, _dir) = app_with(&source, Some(scope));
+    let (unscoped, _other) = app_with(&source, None);
     let (status, body) = get(&app, "/v1/hofund/quotas", bearer()).await;
     assert_eq!(status, StatusCode::OK);
     let data = body["data"].as_array().expect("data");
     assert_eq!(data.len(), 1);
     assert_eq!(data[0]["user"], "a@x.io");
-    let (_, body) = get(&app, "/v1/hofund/quotas/history", bearer()).await;
-    let data = body["data"].as_array().expect("data");
-    assert_eq!(data.len(), 1);
-    assert_eq!(data[0]["provider"], "codex");
+    let (_, body) = get(&app, "/v1/hofund/quotas?kept=1", bearer()).await;
+    assert_eq!(body["data"].as_array().map(Vec::len), Some(1), "kept reports are scoped too");
+    let (_, body) = get(&unscoped, "/v1/hofund/quotas", bearer()).await;
+    assert_eq!(body["data"].as_array().map(Vec::len), Some(3), "the default tells everything");
     assert_eq!(callers.lock().expect("callers").as_slice(), ["secret", "secret"]);
 }
 
 #[tokio::test]
-async fn q6h_a_refused_key_is_answered_403_without_a_read() {
+async fn q5d_a_refused_key_is_answered_403_without_a_read() {
     let source = Arc::new(Source::default());
     let scope: QuotaScopeHook = Arc::new(|_: QuotaCaller<'_>| QuotaAccess::Refused);
-    let (app, _dir) = app(&source, Some(scope));
+    let (app, _dir) = app_with(&source, Some(scope));
     for uri in ["/v1/hofund/quotas", "/v1/hofund/quotas/history"] {
         let (status, body) = get(&app, uri, bearer()).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
