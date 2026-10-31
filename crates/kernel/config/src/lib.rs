@@ -1246,7 +1246,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{Accounts, ConfigError, ListenSource, effective_listen, load};
+    use super::{Accounts, ConfigError, Failover, ListenSource, effective_listen, load};
 
     #[test]
     fn effective_listen_prefers_hofund_addr() {
@@ -1353,6 +1353,15 @@ mod tests {
             let error = load(&source).expect_err("invalid auto-include rule");
             assert!(error.to_string().contains("models.auto_include"), "{error}");
         }
+    }
+
+    #[test]
+    fn default_failover_lists_auth_and_every_server_status() {
+        let statuses = Failover::default().statuses;
+        for status in [401, 402, 403, 404, 408, 429, 500, 599] {
+            assert!(statuses.contains(&status), "{status}");
+        }
+        assert!(!statuses.contains(&400));
     }
 
     #[test]

@@ -581,6 +581,7 @@ async fn c9_shape_refusal_tries_the_next_member_without_a_rest() {
 async fn c9_shape_and_protection_ask_on_whatever_the_status_list() {
     for (status, message) in [
         (422, "Unknown parameter: tools"),
+        (400, "custom tools are not allowed"),
         (502, "response protection is unavailable"),
     ] {
         let second = Arc::new(AtomicUsize::new(0));

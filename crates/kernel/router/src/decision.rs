@@ -412,6 +412,72 @@ fn words_of(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn none() -> BTreeSet<u16> {
+        BTreeSet::new()
+    }
+
+    #[test]
+    fn body_word_classes_fail_over_without_a_listed_status() {
+        for (status, message) in [
+            (400, "Unknown parameter: tools"),
+            (400, "Unrecognized request argument supplied: foo"),
+            (422, "invalid request error trace_id: 0123456789abcdef01"),
+            (400, "This model is only supported in v1/responses and not in v1/chat/completions."),
+        ] {
+            let error = PluginError::status_error(status, message);
+            assert!(allows(&error, false, &none()), "{status} {message}");
+        }
+        let overflow = PluginError::status_error(400, "prompt is too long: 300 tokens");
+        assert!(!allows(&overflow, false, &[400].into_iter().collect()));
+    }
+
+    #[test]
+    fn a_custom_tool_refusal_asks_the_next_member() {
+        let error = PluginError::status_error(400, "custom tools are not allowed");
+        assert!(asks_next(&error));
+        assert!(!allows(&error, false, &none()));
+    }
+
+    fn unsaid(status: u16, message: &str, tokens: u64) -> Option<PluginError> {
+        too_long_unsaid(
+            &PluginError::status_error(status, message),
+            tokens,
+            Some(100),
+            "demo",
+            "primary",
+        )
+    }
+
+    #[test]
+    fn too_long_unsaid_needs_the_whole_margin() {
+        assert!(unsaid(502, "capacity issues", 119).is_none());
+        assert!(unsaid(502, "capacity issues", 110).is_none());
+        assert!(unsaid(502, "capacity issues", 120).is_some());
+        assert!(unsaid(504, "gateway timeout", 120).is_some());
+        assert!(unsaid(501, "not implemented", 120).is_none());
+    }
+
+    #[test]
+    fn too_long_unsaid_leaves_a_failure_that_says_its_cause() {
+        for message in [
+            "You exceeded your current quota, please check your plan",
+            "unapproved channel",
+            "User location is not supported for the API use.",
+            "prompt is too long: 300 tokens > 200 maximum",
+        ] {
+            assert!(unsaid(400, message, 1000).is_none(), "{message}");
+        }
+    }
+
+    #[test]
+    fn too_long_unsaid_cuts_the_vendor_text() {
+        let said = format!("prompt is too long {}", "x".repeat(300));
+        let error = unsaid(502, &said, 1000).expect("inferred");
+        let quoted = error.message().split("answered 502: ").nth(1).expect("quoted");
+        assert_eq!(quoted.chars().count(), 202);
+        assert!(quoted.ends_with("\u{2026})"));
+    }
+
     #[test]
     fn every_list_compiles() {
         for list in [
