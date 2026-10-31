@@ -905,6 +905,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Codex retries a 401 identified only by `error.code = token_expired`. Gemini
+  refresh jobs mark a refused sign-in lapsed even when their caller is
+  cancelled, and token replies without `expires_in` use a one-hour lifetime
+  with the existing refresh margin (#298, #331, #332).
 - Anthropic host checks match `anthropic.com` and its subdomains only, so a
   lookalike host such as `evilanthropic.com` no longer gets official Anthropic
   credential placement or model-list handling.

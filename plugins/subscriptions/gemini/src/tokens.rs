@@ -8,7 +8,8 @@ use std::time::{Duration, SystemTime};
 use hofund_plugin_api::{AccountId, HostContext, PluginError, PluginErrorKind, SecretString};
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::oauth::{
-    SecretObject, TokenCache, parse_token_set, refresh_secret_form, same_secret, token_error,
+    SecretObject, TokenCache, detached, parse_token_set, refresh_secret_form, same_secret,
+    token_error,
 };
 
 use crate::{CLIENT_ID, CLIENT_SECRET, Endpoints};
@@ -22,6 +23,9 @@ pub(crate) const LAPSED_REASON: &str = "Google refused the stored sign-in; sign 
 /// How long before expiry a token is refreshed, as Gemini CLI does.
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(2 * 60);
 
+/// How long an access token lasts when the reply omits `expires_in`.
+pub(crate) const DEFAULT_EXPIRY: Duration = Duration::from_secs(60 * 60);
+
 const LEASE_WAIT: Duration = Duration::from_secs(30);
 
 /// The account's access token, refreshed when it is within the margin of
@@ -34,7 +38,15 @@ pub(crate) async fn access(
 ) -> Result<SecretString, PluginError> {
     cache
         .get(host.clock(), account, || {
-            refresh(host, &endpoints.token, account)
+            let host = host.clone();
+            let token_url = endpoints.token.clone();
+            let account = account.clone();
+            async move {
+                // A refused refresh must mark the sign-in lapsed even when
+                // the caller that started it is cancelled.
+                let job = refresh(host.clone(), token_url, account);
+                detached(host.scheduler(), "gemini-refresh", job).await
+            }
         })
         .await
 }
@@ -53,13 +65,13 @@ pub(crate) fn form(refresh_token: &SecretString) -> String {
 }
 
 async fn refresh(
-    host: &HostContext,
-    token_url: &str,
-    account: &AccountId,
+    host: HostContext,
+    token_url: String,
+    account: AccountId,
 ) -> Result<(SecretString, Option<SystemTime>), PluginError> {
     let secret = host
         .accounts()
-        .secret(account)
+        .secret(&account)
         .await?
         .ok_or_else(|| PluginError::auth("no Gemini CLI sign-in is stored for this account"))?;
     let refresh_token = stored(&secret)?
@@ -73,13 +85,25 @@ async fn refresh(
     if !(200..300).contains(&reply.status()) {
         let error = token_error(reply.status(), reply.body());
         if error.kind() == PluginErrorKind::Auth {
-            mark_lapsed(host, account, &refresh_token).await?;
+            mark_lapsed(&host, &account, &refresh_token).await?;
         }
         return Err(error);
     }
-    let set = parse_token_set(reply.body(), host.clock().now())
-        .map_err(|error| PluginError::decode(error.message()))?;
-    Ok((set.access().clone(), set.expires_at()))
+    let now = host.clock().now();
+    let set =
+        parse_token_set(reply.body(), now).map_err(|error| PluginError::decode(error.message()))?;
+    let expires_at = Some(set.expires_at().unwrap_or(now + DEFAULT_EXPIRY));
+    Ok((set.access().clone(), expires_at))
+}
+
+/// [`refresh`] for the unit tests.
+#[cfg(test)]
+pub(crate) async fn refresh_for_test(
+    host: HostContext,
+    token_url: String,
+    account: AccountId,
+) -> Result<(SecretString, Option<SystemTime>), PluginError> {
+    refresh(host, token_url, account).await
 }
 
 /// Marks the sign-in lapsed, unless a new sign-in replaced the refresh
