@@ -18,7 +18,23 @@ use hofund_provider::{
 use hofund_quirks::named;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
-use wiremock::{Match, Mock, MockServer, Request as MockRequest, ResponseTemplate};
+use wiremock::{Match, Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
+
+struct RefuseOnce {
+    refusal: &'static str,
+    success: Value,
+    calls: AtomicUsize,
+}
+
+impl Respond for RefuseOnce {
+    fn respond(&self, _request: &MockRequest) -> ResponseTemplate {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            ResponseTemplate::new(400).set_body_string(self.refusal)
+        } else {
+            ResponseTemplate::new(200).set_body_json(self.success.clone())
+        }
+    }
+}
 
 fn user_request(stream: bool) -> Request {
     let mut request = Request::new("demo");
@@ -733,6 +749,41 @@ async fn no_sampling_profile_omits_temperature_and_top_p() {
 }
 
 #[tokio::test]
+async fn v2_deepseek_chat_preserves_both_caps_and_rewrites_patterns() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut endpoint = Endpoint::new("deepseek", server.uri());
+    endpoint.preset = Some("deepseek".to_owned());
+    let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+    let request = OpenAiChat
+        .decode_request(br#"{"model":"deepseek-chat","messages":[],"max_tokens":10,"max_completion_tokens":20,"tools":[{"type":"function","function":{"name":"Artifact","parameters":{"pattern":"^[^\\0]*$"}}}]}"#)
+        .expect("request");
+    provider
+        .execute(request, "openai-chat")
+        .await
+        .expect("call");
+    let requests = server.received_requests().await.expect("requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("body");
+    assert_eq!(body["max_tokens"], 10);
+    assert_eq!(body["max_completion_tokens"], 20);
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"]["pattern"],
+        r"^[^\u0000]*$"
+    );
+}
+
+#[tokio::test]
 async fn extra_header_is_sent() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1309,4 +1360,89 @@ async fn a7_finish_reason_error_fails_raw_and_translated_streams() {
     };
     assert_eq!(error.status, Some(502));
     assert!(!error.cools());
+}
+
+#[tokio::test]
+async fn v4_root_union_is_retried_folded_and_learned() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(RefuseOnce {
+            refusal: r#"{"error":{"message":"Invalid schema for function 'automation_update': schema must have type 'object' and not have 'oneOf'/'anyOf'/'allOf'/'enum'/'const'/'not' at the top level.","type":"invalid_request_error","code":"invalid_function_parameters"}}"#,
+            success: json!({
+                "id": "r1",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }),
+            calls: AtomicUsize::new(0),
+        })
+        .expect(3)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompat::new(
+        OpenAiProtocol::Responses,
+        Endpoint::new("relay", server.uri()),
+    )
+    .expect("provider");
+    let request = OpenAiResponses
+        .decode_request(br#"{"model":"grok-4.7","input":[],"tools":[{"type":"function","name":"automation_update","parameters":{"anyOf":[{"type":"object","properties":{"prompt":{"type":"string"},"mode":{"type":"string"}},"required":["prompt"]},{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}]}}]}"#)
+        .expect("request");
+    for _ in 0..2 {
+        provider
+            .execute(request.clone(), "openai-responses")
+            .await
+            .expect("folded response");
+    }
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 3);
+    for request in &requests[1..] {
+        let body: Value = serde_json::from_slice(&request.body).expect("body");
+        let parameters = &body["tools"][0]["parameters"];
+        assert_eq!(parameters["type"], "object");
+        assert!(parameters.get("anyOf").is_none());
+        assert_eq!(parameters["properties"]["prompt"]["type"], "string");
+        assert_eq!(parameters["properties"]["mode"]["type"], "string");
+        assert!(parameters.get("required").is_none());
+    }
+}
+
+#[tokio::test]
+async fn v5_chat_token_field_is_retried_and_learned() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(RefuseOnce {
+            refusal: r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#,
+            success: json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }]
+            }),
+            calls: AtomicUsize::new(0),
+        })
+        .expect(3)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompat::new(OpenAiProtocol::Chat, Endpoint::new("relay", server.uri()))
+        .expect("provider");
+    let request = OpenAiChat
+        .decode_request(br#"{"model":"gpt-6.1-sol","max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}"#)
+        .expect("request");
+    for _ in 0..2 {
+        provider
+            .execute(request.clone(), "openai-chat")
+            .await
+            .expect("completion");
+    }
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 3);
+    for request in &requests[1..] {
+        let body: Value = serde_json::from_slice(&request.body).expect("body");
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 4096);
+    }
 }

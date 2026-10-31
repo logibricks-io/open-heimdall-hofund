@@ -119,6 +119,7 @@ enum Method {
 pub struct Target {
     protocol: ProtocolId,
     base_url: String,
+    preset: Option<String>,
     credential: CredentialStyle,
     headers: Vec<(String, String)>,
     quirks: Option<&'static hofund_quirks::Profile>,
@@ -127,6 +128,7 @@ pub struct Target {
     rewrite: Option<Rewrite>,
     method_root: Option<&'static str>,
     unwrap: Option<Unwrap>,
+    state: Arc<hofund_quirks::RequestState>,
     allocation_quota_rate: bool,
 }
 
@@ -138,6 +140,7 @@ impl Target {
         Self {
             protocol,
             base_url: base_url.into(),
+            preset: None,
             credential: CredentialStyle::Bearer,
             headers: Vec::new(),
             quirks: None,
@@ -146,6 +149,7 @@ impl Target {
             rewrite: None,
             method_root: None,
             unwrap: None,
+            state: Arc::new(hofund_quirks::RequestState::default()),
             allocation_quota_rate: false,
         }
     }
@@ -176,6 +180,13 @@ impl Target {
     #[must_use]
     pub fn quirks(mut self, quirks: Option<&'static hofund_quirks::Profile>) -> Self {
         self.quirks = quirks;
+        self
+    }
+
+    /// The catalog preset id used by automatic request fixes.
+    #[must_use]
+    pub fn preset(mut self, preset: Option<String>) -> Self {
+        self.preset = preset;
         self
     }
 
@@ -233,6 +244,7 @@ impl fmt::Debug for Target {
             .debug_struct("Target")
             .field("protocol", &self.protocol.as_str())
             .field("base_url", &self.base_url)
+            .field("preset", &self.preset)
             .field("credential", &self.credential)
             .field("header_names", &names)
             .field("quirks", &self.quirks.is_some())
@@ -241,6 +253,7 @@ impl fmt::Debug for Target {
             .field("rewrite", &self.rewrite.is_some())
             .field("method_root", &self.method_root)
             .field("unwrap", &self.unwrap.is_some())
+            .field("state", &self.state)
             .field("allocation_quota_rate", &self.allocation_quota_rate)
             .finish()
     }
@@ -263,10 +276,43 @@ pub async fn execute(
     request: Request,
     inbound: ProtocolId,
 ) -> Result<Completion, PluginError> {
-    send(http, target, secret, request, inbound)
-        .await?
-        .complete()
-        .await
+    let mut root_retried = false;
+    let mut token_retried = false;
+    loop {
+        let sent = match send(http, target, secret, request.clone(), inbound).await {
+            Ok(sent) => sent,
+            Err(error) if error.status() == Some(400) => {
+                if !root_retried
+                    && hofund_quirks::root_union_refusal(error.message().as_bytes())
+                    && folds_any(&request)
+                {
+                    root_retried = true;
+                    target.state.learn_root_union(&request.model);
+                    continue;
+                }
+                if !token_retried
+                    && target.protocol == ProtocolId::OPENAI_CHAT
+                    && request.params.max_tokens.is_some()
+                    && let Some(wanted) =
+                        hofund_quirks::token_field_wanted(error.message().as_bytes())
+                {
+                    token_retried = true;
+                    target.state.learn_token_field(wanted);
+                    continue;
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        return sent.complete().await;
+    }
+}
+
+fn folds_any(request: &Request) -> bool {
+    request.tools.iter().any(|tool| {
+        let mut schema = tool.input_schema.clone();
+        hofund_ir::fold_object_root(&mut schema)
+    })
 }
 
 /// A 2xx response from [`send`] whose body is not read yet.
@@ -919,6 +965,14 @@ fn prepare_body(
     if let Some(profile) = target.quirks {
         hofund_quirks::apply(profile, &mut request);
     }
+    hofund_quirks::apply_before_encode(
+        hofund_quirks::EncodedContext {
+            base_url: &target.base_url,
+            preset: target.preset.as_deref(),
+            protocol: codec.id(),
+        },
+        &mut request,
+    );
     let cross_protocol = codec.id() != inbound.as_str();
     if cross_protocol {
         warn_unmapped(&request);
@@ -928,10 +982,19 @@ fn prepare_body(
     let body = codec
         .encode_request(&request)
         .map_err(|error| PluginError::status_error(400, error.to_string()))?;
-    match prepare {
-        Some(prepare) => prepare(&body).map_err(|error| PluginError::decode(error.to_string())),
-        None => Ok(body),
-    }
+    let body = match prepare {
+        Some(prepare) => prepare(&body).map_err(|error| PluginError::decode(error.to_string()))?,
+        None => body,
+    };
+    Ok(hofund_quirks::apply_encoded_with_state(
+        hofund_quirks::EncodedContext {
+            base_url: &target.base_url,
+            preset: target.preset.as_deref(),
+            protocol: codec.id(),
+        },
+        &target.state,
+        &body,
+    ))
 }
 
 /// `body` after `rewrite`, and the headers the rewrite adds. A body that is
@@ -1489,7 +1552,7 @@ fn is_key_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage};
+    use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat};
     use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
 
     use super::{
@@ -1512,6 +1575,25 @@ mod tests {
         AnthropicMessages
             .decode_request(body.to_string().as_bytes())
             .expect("messages request")
+    }
+
+    #[test]
+    fn v2_sdk_transport_applies_deepseek_request_fixes() {
+        let target = Target::new(ProtocolId::OPENAI_CHAT, "https://api.deepseek.com/v1")
+            .preset(Some("deepseek".to_owned()));
+        let request = OpenAiChat
+            .decode_request(br#"{"model":"deepseek-chat","messages":[],"max_tokens":10,"max_completion_tokens":20,"tools":[{"type":"function","function":{"name":"Artifact","parameters":{"pattern":"^[^\\0]*$"}}}]}"#)
+            .expect("request");
+        let body =
+            super::prepare_body(&target, &OpenAiChat, request, None, ProtocolId::OPENAI_CHAT)
+                .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+        assert_eq!(body["max_tokens"], 10);
+        assert_eq!(body["max_completion_tokens"], 20);
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["pattern"],
+            r"^[^\u0000]*$"
+        );
     }
 
     fn texts(request: &Request) -> Vec<String> {

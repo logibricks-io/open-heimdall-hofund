@@ -551,7 +551,8 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         .get("reasoning_effort")
         .and_then(Value::as_str)
         .and_then(Effort::from_label);
-    let params = GenerationParams {
+    let original_max_tokens = max_completion.and(max_tokens);
+    let mut params = GenerationParams {
         max_tokens: max_completion.or(max_tokens),
         temperature: take_f64(&mut object, "temperature")?,
         top_p: take_f64(&mut object, "top_p")?,
@@ -562,6 +563,16 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         effort,
         ..GenerationParams::default()
     };
+    if let Some(original) = original_max_tokens {
+        params
+            .extensions
+            .insert("originalChatMaxTokens", Value::from(original));
+    } else if max_tokens.is_some() {
+        params.extensions.insert(
+            "originalChatTokenField",
+            Value::String("max_tokens".to_owned()),
+        );
+    }
     let stream = take_bool(&mut object, "stream")?.unwrap_or(false);
     Ok(Request::new(model)
         .with_messages(messages)
@@ -588,11 +599,23 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     if let Some(choice) = &request.tool_choice {
         object.insert("tool_choice".to_owned(), encode_tool_choice(choice));
     }
-    insert_u64(
-        &mut object,
-        "max_completion_tokens",
-        request.params.max_tokens,
-    );
+    let token_field = if request
+        .params
+        .extensions
+        .get("originalChatMaxTokens")
+        .is_none()
+        && request
+            .params
+            .extensions
+            .get("originalChatTokenField")
+            .and_then(Value::as_str)
+            == Some("max_tokens")
+    {
+        "max_tokens"
+    } else {
+        "max_completion_tokens"
+    };
+    insert_u64(&mut object, token_field, request.params.max_tokens);
     insert_f64(&mut object, "temperature", request.params.temperature)?;
     insert_f64(&mut object, "top_p", request.params.top_p)?;
     if !request.params.stop.is_empty() {
@@ -625,7 +648,14 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     }
     write_chat_effort(&mut object, request);
     request.extensions.merge_into(&mut object);
-    request.params.extensions.merge_into(&mut object);
+    for (key, value) in request.params.extensions.iter() {
+        if !matches!(
+            key.as_str(),
+            "originalChatMaxTokens" | "originalChatTokenField"
+        ) {
+            object.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
     to_bytes(&Value::Object(object))
 }
 
