@@ -146,6 +146,8 @@ pub struct Provider {
     /// A route member can override this. Absent leaves the cap to a quirk
     /// profile, or to the Messages codec's fallback.
     pub max_output_tokens: Option<u64>,
+    /// Whether every model on this provider is free, overriding catalog prices.
+    pub free: bool,
     /// Plugin settings. The plugin validates the keys.
     ///
     /// See [`Value`] for which TOML shapes load and for the empty-string rule.
@@ -245,10 +247,23 @@ pub struct Subscription {
     pub id: String,
     /// Which accounts to serve.
     pub accounts: Accounts,
+    /// Account weights by lower-cased account id. Missing accounts weigh one.
+    pub account_weights: BTreeMap<String, u64>,
     /// Vendor host, client id, and any other plugin setting.
     ///
     /// The empty-string rule is the same as [`Provider::options`].
     pub options: BTreeMap<String, Value>,
+}
+
+impl Subscription {
+    /// The configured weight for `account`, or one when it has no entry.
+    #[must_use]
+    pub fn account_weight(&self, account: &str) -> u64 {
+        self.account_weights
+            .get(&account.trim().to_lowercase())
+            .copied()
+            .unwrap_or(1)
+    }
 }
 
 /// One model route.
@@ -256,6 +271,8 @@ pub struct Subscription {
 pub struct Route {
     /// Model name the client sends.
     pub model: String,
+    /// Registered member-ordering strategy.
+    pub routing: String,
     /// Providers tried in order, each with an optional upstream model name.
     pub upstreams: Vec<Upstream>,
 }
@@ -284,6 +301,8 @@ pub struct Upstream {
     /// Absent uses the provider's `max_output_tokens` when the target is a
     /// provider.
     pub max_output_tokens: Option<u64>,
+    /// Relative weighted-routing share. Absent means one.
+    pub weight: Option<u64>,
 }
 
 impl Upstream {
@@ -336,6 +355,7 @@ impl fmt::Debug for Provider {
             .field("quirks", &self.quirks)
             .field("headers", &RedactedPairs(&self.headers))
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("free", &self.free)
             .field("options", &self.options)
             .field("models", &self.model_list)
             .finish()
@@ -348,6 +368,7 @@ impl fmt::Debug for Subscription {
             .debug_struct("Subscription")
             .field("id", &self.id)
             .field("accounts", &self.accounts)
+            .field("account_weights", &self.account_weights)
             .field("options", &self.options)
             .finish()
     }
@@ -582,6 +603,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             quirks: provider.quirks,
             headers: provider.headers,
             max_output_tokens: provider.max_output_tokens,
+            free: provider.free,
             options,
             model_list,
         });
@@ -611,6 +633,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
                 )));
             }
         };
+        let account_weights = normalized_account_weights(&subscription)?;
         for key in subscription.options.keys() {
             if key.is_empty() {
                 return Err(ConfigError::Invalid(format!(
@@ -622,6 +645,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         subscriptions.push(Subscription {
             id: subscription.id,
             accounts,
+            account_weights,
             options: prune_table(subscription.options),
         });
     }
@@ -643,6 +667,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
                 route.model
             )));
         }
+        let routing = validated_routing(&route)?;
         let mut upstreams = Vec::new();
         for upstream in route.upstreams {
             let upstream = upstream_of(&route.model, upstream, &seen, &subscription_ids)?;
@@ -666,6 +691,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         }
         routes.push(Route {
             model: route.model,
+            routing,
             upstreams,
         });
     }
@@ -858,36 +884,103 @@ fn duration_ms(name: &str, millis: u64) -> Result<Duration, ConfigError> {
     Ok(Duration::from_nanos(nanos))
 }
 
+fn normalized_account_weights(
+    subscription: &RawSubscription,
+) -> Result<BTreeMap<String, u64>, ConfigError> {
+    let mut weights = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for (account, weight) in &subscription.account_weights {
+        let account = account.trim().to_lowercase();
+        if account.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "subscription `{}` has an empty account weight name",
+                subscription.id
+            )));
+        }
+        if *weight == 0 {
+            return Err(ConfigError::Invalid(format!(
+                "subscription `{subscription}` account `{account}` has weight 0; weight must be at least 1",
+                subscription = subscription.id
+            )));
+        }
+        if !seen.insert(account.clone()) {
+            return Err(ConfigError::Invalid(format!(
+                "subscription `{subscription}` repeats account weight `{account}` with different casing",
+                subscription = subscription.id
+            )));
+        }
+        if *weight > 1 {
+            weights.insert(account, *weight);
+        }
+    }
+    Ok(weights)
+}
+
+fn validated_routing(route: &RawRoute) -> Result<String, ConfigError> {
+    const NAMES: [&str; 9] = [
+        "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap",
+    ];
+    if !NAMES.contains(&route.routing.as_str()) {
+        return Err(ConfigError::Invalid(format!(
+            "route `{}` has unknown routing `{}`; expected {}",
+            route.model,
+            route.routing,
+            NAMES.join(", ")
+        )));
+    }
+    let group = route.upstreams.len() > 1
+        || route.upstreams.iter().any(|upstream| {
+            matches!(upstream, RawUpstream::Mapped(mapped) if mapped.subscription.is_some())
+        });
+    if route.routing == "cheap" && !group {
+        return Err(ConfigError::Invalid(format!(
+            "route `{}` uses cheap routing outside a group",
+            route.model
+        )));
+    }
+    Ok(route.routing.clone())
+}
+
 fn upstream_of(
     route: &str,
     upstream: RawUpstream,
     providers: &BTreeSet<String>,
     subscriptions: &BTreeSet<String>,
 ) -> Result<Upstream, ConfigError> {
-    let (target, model, max_output_tokens) = match upstream {
-        RawUpstream::Id(provider) => (UpstreamTarget::Provider(provider), None, None),
-        RawUpstream::Mapped(mapped) => match (mapped.provider, mapped.subscription) {
-            (Some(_), Some(_)) => {
+    let (target, model, max_output_tokens, weight) = match upstream {
+        RawUpstream::Id(provider) => (UpstreamTarget::Provider(provider), None, None, None),
+        RawUpstream::Mapped(mapped) => {
+            if mapped.weight == Some(0) {
                 return Err(ConfigError::Invalid(format!(
-                    "route `{route}` names both provider and subscription"
+                    "route `{route}` has weight 0; weight must be at least 1"
                 )));
             }
-            (None, None) => {
-                return Err(ConfigError::Invalid(format!(
-                    "route `{route}` upstream needs provider or subscription"
-                )));
+            let weight = mapped.weight.filter(|weight| *weight > 1);
+            match (mapped.provider, mapped.subscription) {
+                (Some(_), Some(_)) => {
+                    return Err(ConfigError::Invalid(format!(
+                        "route `{route}` names both provider and subscription"
+                    )));
+                }
+                (None, None) => {
+                    return Err(ConfigError::Invalid(format!(
+                        "route `{route}` upstream needs provider or subscription"
+                    )));
+                }
+                (Some(provider), None) => (
+                    UpstreamTarget::Provider(provider),
+                    mapped.model,
+                    mapped.max_output_tokens,
+                    weight,
+                ),
+                (None, Some(subscription)) => (
+                    UpstreamTarget::Subscription(subscription),
+                    mapped.model,
+                    mapped.max_output_tokens,
+                    weight,
+                ),
             }
-            (Some(provider), None) => (
-                UpstreamTarget::Provider(provider),
-                mapped.model,
-                mapped.max_output_tokens,
-            ),
-            (None, Some(subscription)) => (
-                UpstreamTarget::Subscription(subscription),
-                mapped.model,
-                mapped.max_output_tokens,
-            ),
-        },
+        }
     };
     match &target {
         UpstreamTarget::Provider(provider) => {
@@ -939,6 +1032,7 @@ fn upstream_of(
         target,
         model,
         max_output_tokens,
+        weight,
     })
 }
 
@@ -1124,6 +1218,8 @@ struct RawProvider {
     #[serde(default)]
     max_output_tokens: Option<u64>,
     #[serde(default)]
+    free: bool,
+    #[serde(default)]
     options: BTreeMap<String, Value>,
     #[serde(default)]
     models: ModelList,
@@ -1151,6 +1247,8 @@ struct RawProvider {
 struct RawSubscription {
     id: String,
     accounts: String,
+    #[serde(default)]
+    account_weights: BTreeMap<String, u64>,
     #[serde(default)]
     options: BTreeMap<String, Value>,
 }
@@ -1185,6 +1283,7 @@ impl fmt::Debug for RawProvider {
             .field("quirks", &self.quirks)
             .field("headers", &RedactedPairs(&self.headers))
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("free", &self.free)
             .field("options", &self.options)
             .field("models", &self.models)
             .field("project", &redacted_opt(&self.project))
@@ -1205,6 +1304,7 @@ impl fmt::Debug for RawSubscription {
             .debug_struct("RawSubscription")
             .field("id", &self.id)
             .field("accounts", &self.accounts)
+            .field("account_weights", &self.account_weights)
             .field("options", &self.options)
             .finish()
     }
@@ -1214,10 +1314,16 @@ fn redacted_opt(value: &Option<String>) -> Option<&'static str> {
     value.as_ref().map(|_| "<redacted>")
 }
 
+fn default_smart() -> String {
+    "smart".to_owned()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRoute {
     model: String,
+    #[serde(default = "default_smart")]
+    routing: String,
     upstreams: Vec<RawUpstream>,
 }
 
@@ -1239,6 +1345,8 @@ struct RawMappedUpstream {
     model: Option<String>,
     #[serde(default)]
     max_output_tokens: Option<u64>,
+    #[serde(default)]
+    weight: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1397,8 +1505,96 @@ mod tests {
         assert_eq!(config.routes[0].upstreams[0].model, None);
         assert_eq!(config.providers[0].max_output_tokens, None);
         assert_eq!(config.routes[0].upstreams[0].max_output_tokens, None);
+        assert_eq!(config.routes[0].routing, "smart");
+        assert!(!config.providers[0].free);
         assert_eq!(config.connect_timeout, Duration::from_secs(10));
         assert_eq!(config.read_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a2_routing_names_validate_and_cheap_requires_a_group() {
+        for name in [
+            "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap",
+        ] {
+            let config = load(&format!(
+                "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[providers]]\nid = \"two\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"{name}\"\nupstreams = [\"one\", \"two\"]\n"
+            ))
+            .unwrap_or_else(|error| panic!("routing {name}: {error}"));
+            assert_eq!(config.routes[0].routing, name);
+        }
+        let error = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"cheap\"\nupstreams = [\"one\"]\n",
+        )
+        .expect_err("cheap outside a group");
+        assert!(error.to_string().contains("outside a group"), "{error}");
+        let error = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"unknown\"\nupstreams = [\"one\"]\n",
+        )
+        .expect_err("unknown routing");
+        assert!(error.to_string().contains("unknown routing"), "{error}");
+        load(
+            "[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"cheap\"\nupstreams = [{ subscription = \"codex\" }]\n",
+        )
+        .expect("a subscription is an account group");
+    }
+
+    #[test]
+    fn a3_member_and_account_weights_default_and_normalize() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "one"
+            preset = "openai"
+            free = true
+            [[providers]]
+            id = "two"
+            preset = "openai"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [subscriptions.account_weights]
+            " Me@Example.com " = 3
+            "default" = 1
+            "SECOND" = 2
+            [[routes]]
+            model = "demo"
+            upstreams = [
+              { provider = "one", weight = 3 },
+              { provider = "two", weight = 1 },
+              { subscription = "codex" },
+            ]
+            "#,
+        )
+        .expect("weights");
+        assert!(config.providers[0].free);
+        assert_eq!(config.routes[0].upstreams[0].weight, Some(3));
+        assert_eq!(config.routes[0].upstreams[1].weight, None);
+        assert_eq!(config.routes[0].upstreams[2].weight, None);
+        let subscription = &config.subscriptions[0];
+        assert_eq!(subscription.account_weights.len(), 2);
+        assert_eq!(subscription.account_weight("ME@example.COM"), 3);
+        assert_eq!(subscription.account_weight("second"), 2);
+        assert_eq!(subscription.account_weight("default"), 1);
+        assert_eq!(subscription.account_weight("missing"), 1);
+
+        for (table, message) in [
+            ("\"zero\" = 0", "weight 0"),
+            ("\" \" = 2", "empty account weight"),
+            ("\"Name\" = 2\n\"name\" = 3", "repeats account weight"),
+            ("\"Name\" = 1\n\"name\" = 3", "repeats account weight"),
+            ("\"Name\" = 3\n\"name\" = 1", "repeats account weight"),
+        ] {
+            let error = load(&format!(
+                "[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\n[subscriptions.account_weights]\n{table}\n"
+            ))
+            .expect_err(table);
+            assert!(error.to_string().contains(message), "{table}: {error}");
+        }
+        let error = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nupstreams = [{ provider = \"one\", weight = 0 }]\n",
+        )
+        .expect_err("zero member weight");
+        assert!(error.to_string().contains("weight 0"), "{error}");
     }
 
     #[test]

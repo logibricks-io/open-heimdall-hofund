@@ -626,6 +626,8 @@ fn raw_app(
             wire_model: Some("upstream".to_owned()),
             max_output_tokens: None,
             context_window: None,
+            weight: 1,
+            free: false,
         }],
     );
     let mut codecs = HashMap::new();
@@ -960,6 +962,8 @@ fn protocol_app(members: Vec<Arc<dyn Member>>) -> (axum::Router, tempfile::TempD
             wire_model: None,
             max_output_tokens: None,
             context_window: None,
+            weight: 1,
+            free: false,
         })
         .collect();
     let routes = BTreeMap::from([("demo".to_owned(), hops)]);

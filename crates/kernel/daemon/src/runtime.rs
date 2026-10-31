@@ -211,7 +211,7 @@ impl Runtime {
             }
             fingerprints.insert(member, provider.fingerprint.clone());
         }
-        let (routes, policy) = route_plan(config);
+        let (routes, policy) = route_plan(config, self.models.get().map(AsRef::as_ref));
         // Publication cannot fail after the file is written: every routed
         // provider must already be built.
         for (model, hops) in &routes {
