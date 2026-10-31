@@ -908,6 +908,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Raw SSE model rewriting now covers a complete JSON payload in an
   unterminated final event, and the 1 MiB oversize decision is independent of
   upstream chunk boundaries (#33, #34).
+- Codex retries a 401 identified only by `error.code = token_expired`. Gemini
+  refresh jobs mark a refused sign-in lapsed even when their caller is
+  cancelled, and token replies without `expires_in` use a one-hour lifetime
+  with the existing refresh margin (#298, #331, #332).
 - Anthropic host checks match `anthropic.com` and its subdomains only, so a
   lookalike host such as `evilanthropic.com` no longer gets official Anthropic
   credential placement or model-list handling.

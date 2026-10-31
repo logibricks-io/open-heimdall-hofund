@@ -707,6 +707,99 @@ fn token_inside_the_margin_is_refreshed() {
     assert_eq!(posts_to(&host, TOKEN_URL).len(), 2);
 }
 
+struct ManualClock {
+    elapsed: std::sync::Mutex<Duration>,
+}
+
+impl ManualClock {
+    fn new() -> Self {
+        Self {
+            elapsed: std::sync::Mutex::new(Duration::ZERO),
+        }
+    }
+
+    fn advance(&self, by: Duration) {
+        *self.elapsed.lock().expect("clock") += by;
+    }
+}
+
+impl hofund_plugin_sdk::oauth::Clock for ManualClock {
+    fn now(&self) -> std::time::SystemTime {
+        std::time::SystemTime::UNIX_EPOCH + self.monotonic()
+    }
+
+    fn monotonic(&self) -> Duration {
+        *self.elapsed.lock().expect("clock")
+    }
+}
+
+#[test]
+fn missing_expires_in_refreshes_after_default_window() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &signed_in_blob(Some("proj-1")));
+    let cache = TokenCache::new(tokens::REFRESH_MARGIN);
+    let clock = ManualClock::new();
+    host.http()
+        .enqueue(br#"{"access_token":"acc-1","token_type":"Bearer"}"#.to_vec());
+    host.http()
+        .enqueue(br#"{"access_token":"acc-2","token_type":"Bearer"}"#.to_vec());
+    let refresh =
+        || tokens::refresh_for_test(host.context().clone(), TOKEN_URL.to_owned(), id.clone());
+    block_on(async {
+        cache.get(&clock, &id, refresh).await.expect("first");
+        // Without `expires_in` a token is taken to last an hour.
+        clock.advance(
+            Duration::from_secs(60 * 60) - tokens::REFRESH_MARGIN - Duration::from_secs(1),
+        );
+        cache.get(&clock, &id, refresh).await.expect("cached");
+        assert_eq!(posts_to(&host, TOKEN_URL).len(), 1);
+        clock.advance(Duration::from_secs(1));
+        let second = cache.get(&clock, &id, refresh).await.expect("refreshed");
+        assert!(hofund_plugin_sdk::oauth::same_secret(
+            &second,
+            &secret("acc-2")
+        ));
+    });
+    assert_eq!(posts_to(&host, TOKEN_URL).len(), 2);
+}
+
+#[test]
+fn cancelled_refresh_still_marks_lapsed() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &signed_in_blob(Some("proj-1")));
+    let cache = TokenCache::new(tokens::REFRESH_MARGIN);
+    let endpoints = endpoints();
+    host.http()
+        .enqueue_response(400, &[], br#"{"error":"invalid_grant"}"#.to_vec());
+    block_on(async {
+        {
+            let mut call = std::pin::pin!(tokens::access(host.context(), &endpoints, &cache, &id,));
+            let mut polls = 0;
+            while host.scheduler().running_once().is_empty() {
+                assert!(matches!(
+                    hofund_kit_subscription::poll_once(call.as_mut()),
+                    std::task::Poll::Pending
+                ));
+                hofund_kit_subscription::yield_times(1).await;
+                std::thread::sleep(Duration::from_millis(1));
+                polls += 1;
+                assert!(polls < 5_000, "the refresh never started");
+            }
+        }
+        let mut waits = 0;
+        while !host.scheduler().running_once().is_empty() {
+            hofund_kit_subscription::yield_times(1).await;
+            std::thread::sleep(Duration::from_millis(1));
+            waits += 1;
+            assert!(waits < 5_000, "the refresh job never finished");
+        }
+    });
+    assert_eq!(posts_to(&host, TOKEN_URL).len(), 1);
+    assert!(stored(&host, &id).flag(tokens::LAPSED));
+}
+
 #[test]
 fn invalid_grant_needs_sign_in() {
     let dir = tempfile::tempdir().expect("dir");
