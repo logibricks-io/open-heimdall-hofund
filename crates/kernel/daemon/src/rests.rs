@@ -98,6 +98,7 @@ fn same_rests(left: &[PersistedRest], right: &[PersistedRest]) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
             left.member == right.member
+                && left.model == right.model
                 && left.rung == right.rung
                 && match left.until.duration_since(right.until) {
                     Ok(difference) => difference <= std::time::Duration::from_secs(1),
@@ -206,5 +207,37 @@ mod tests {
         let right = [hofund_router::PersistedRest::new("m".to_owned(), until, 2)];
         assert!(super::same_rests(&left, &left));
         assert!(!super::same_rests(&left, &right));
+    }
+
+    #[test]
+    fn b5h_credit_rest_persistence_carries_and_restores_its_model() {
+        let (mut store, book, id, clock, root) = fixture();
+        let error = PluginError::credit_status(
+            429,
+            "All credentials for model model-a are cooling down (last error: insufficient balance)",
+        );
+        book.record_failure_for_model(&id, "model-a", &error)
+            .expect("model credit");
+        store.save(&book);
+
+        let path = root.path().join("rests.json");
+        let text = std::fs::read_to_string(&path).expect("saved model rest");
+        assert!(text.contains("\"model\":\"model-a\""), "{text}");
+        let saved: Vec<hofund_router::PersistedRest> =
+            serde_json::from_str(&text).expect("saved rests");
+        assert_eq!(saved[0].model.as_deref(), Some("model-a"));
+
+        let restored_clock = Arc::clone(&clock);
+        let restored = Cooldowns::with_clock(
+            CooldownPolicy::default(),
+            Arc::new(move || *restored_clock.lock().expect("clock")),
+        );
+        store.load(&restored, &HashSet::from([id.clone()]));
+        assert!(restored.cooling(&id).is_none());
+        let cooling = restored
+            .cooling_for_model(&id, "model-a")
+            .expect("restored model rest");
+        assert_eq!(cooling.failures(), 1);
+        assert!(restored.cooling_for_model(&id, "model-b").is_none());
     }
 }

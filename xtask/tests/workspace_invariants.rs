@@ -270,6 +270,8 @@ const VENDOR_SCAN_PENDING: &[&str] = &[
     "crates/kernel/plugin-sdk",
     // The Anthropic, OpenAI-compatible, and Generative adapters.
     "crates/kernel/provider",
+    // Host, preset, protocol, and model selection for vendor request fixes.
+    "crates/kernel/quirks",
 ];
 
 /// Repo-relative paths that may mention the upstream project this work was

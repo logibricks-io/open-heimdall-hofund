@@ -147,6 +147,8 @@ pub struct RequestEnd {
     pub request_id: String,
     /// Selected upstream route id when known.
     pub member: Option<String>,
+    /// Client-facing model whose call finished.
+    pub model: String,
     /// HTTP status code of the response.
     pub status: u16,
     /// Elapsed milliseconds.
@@ -173,6 +175,7 @@ struct RequestTrack {
     events: Option<Arc<dyn RequestEvents>>,
     in_flight: Arc<AtomicU64>,
     request_id: String,
+    model: String,
     started: Instant,
     active: bool,
     finished: bool,
@@ -190,6 +193,7 @@ impl RequestTrack {
             events,
             in_flight,
             request_id: start.request_id,
+            model: start.route,
             started: Instant::now(),
             active: true,
             finished: false,
@@ -225,6 +229,7 @@ impl RequestTrack {
         self.finish(RequestEnd {
             request_id: self.request_id.clone(),
             member,
+            model: self.model.clone(),
             status,
             duration_ms,
             input_tokens,
@@ -238,6 +243,7 @@ impl RequestTrack {
             events: self.events.take(),
             in_flight: Arc::clone(&self.in_flight),
             request_id: self.request_id.clone(),
+            model: self.model.clone(),
             started: self.started,
             active: self.active,
             finished: self.finished,
@@ -1959,6 +1965,7 @@ mod request_event_tests {
             events: Some(spy.clone() as Arc<dyn RequestEvents>),
             in_flight: Arc::clone(&counter),
             request_id: "r1".into(),
+            model: "demo".into(),
             started: std::time::Instant::now(),
             active: true,
             finished: false,
@@ -1996,6 +2003,7 @@ mod request_event_tests {
                 events: Some(spy.clone() as Arc<dyn RequestEvents>),
                 in_flight: Arc::clone(&counter),
                 request_id: "r-drop".into(),
+                model: "demo".into(),
                 started: std::time::Instant::now(),
                 active: true,
                 finished: false,

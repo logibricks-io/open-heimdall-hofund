@@ -109,6 +109,7 @@ page::fn json_error_message (body : & [u8]) -> String
 page::fn next_cursor (page : & [u8]) -> Result < Option < String > , PageError >
 page::fn string_items (page : & [u8] , key : & str) -> Result < Vec < String > , PageError >
 parse_access_token
+plain_code_assist_tools
 probe::ProbePage derives(Clone, Debug, PartialEq, Eq)
 probe::ProbePage.body
 probe::ProbePage.retry_after
@@ -213,6 +214,7 @@ wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Sel
 wire::Target::fn method_root (mut self , root : & 'static str) -> Self
 wire::Target::fn model_root (mut self , root : & 'static str) -> Self
 wire::Target::fn new (protocol : ProtocolId , base_url : impl Into < String >) -> Self
+wire::Target::fn preset (mut self , preset : Option < String >) -> Self
 wire::Target::fn quirks (mut self , quirks : Option < & 'static hofund_quirks :: Profile >) -> Self
 wire::Target::fn rewrite (mut self , rewrite : Rewrite) -> Self
 wire::Target::fn signer (mut self , signer : AwsSigner) -> Self

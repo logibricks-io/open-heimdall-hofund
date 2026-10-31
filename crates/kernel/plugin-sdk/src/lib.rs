@@ -22,6 +22,7 @@
 )]
 
 pub use async_trait::async_trait;
+pub use hofund_codec::plain_code_assist_tools;
 pub use hofund_quirks::apply as apply_quirks;
 /// Response headers, as [`wire::Sent::headers`] returns them.
 pub use http::HeaderMap;

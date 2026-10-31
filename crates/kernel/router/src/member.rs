@@ -104,4 +104,20 @@ pub trait Member: Send + Sync {
             "this member does not serve {path}"
         )))
     }
+
+    /// Posts a body built for `model`, allowing outcome accounting to scope a
+    /// refusal without parsing the body. Existing members need not override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::forward`].
+    async fn forward_for_model(
+        &self,
+        path: &str,
+        body: RawBody,
+        model: &str,
+    ) -> Result<RawAnswer, PluginError> {
+        let _ = model;
+        self.forward(path, body).await
+    }
 }

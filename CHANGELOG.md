@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Code Assist tool schemas are flattened to the accepted plain subset (V-1),
+  including local reference expansion, cycle handling, union folding, boolean
+  schemas, keyword filtering, and array item defaults. Ordinary Generative
+  Language and Vertex requests are unchanged.
+- Automatic vendor request fixes (V-2) now preserve untouched bytes while
+  normalizing DeepSeek and Grok tool patterns, converting selected `oneOf`
+  schemas, adding Kimi/Moonshot enum and reference-target types, renaming the
+  DeepSeek Chat token cap, and dropping locked Kimi/Moonshot/Ark sampling.
+  Selection uses the endpoint host, preset, protocol, and model in
+  `hofund-quirks`, and both kernel and SDK transports apply the same rules.
+- Gemini tool schemas now receive inferred types and have boolean schemas and
+  vendor extension keywords removed (V-3), keyed by model name on Chat,
+  Responses, and Messages routes rather than by provider.
+- Tool root unions fold to object schemas (V-4): always for xAI and Messages,
+  and after a recognized refusal on other upstreams. Each provider remembers
+  the model and retries once folded, then folds later requests immediately.
+- Chat token fields now follow the original request and OpenAI's
+  `max_completion_tokens` convention (V-5). A refusal naming the other field
+  triggers one retry and is remembered per provider for subsequent requests.
+- Per-model rests (P0-3b2): model-cooling and unserved-model refusals now rest
+  only the affected member/model pair, with independent rate, generic, and
+  persisted credit ladders. Routing probes are selected per pair, model success
+  clears only that model, and status, usage, and request events expose the
+  model scope. Failure events replace rest deadlines like the reference, while
+  passive observations keep the longer rest.
 - Routing strategy core (P0-2a): route-level `order`, `rotate`, smooth
   weighted round robin, and free-first ordering, with per-route and per-account
   weights, manual/catalog/zero-price free detection, and strategy state kept

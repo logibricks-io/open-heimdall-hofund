@@ -507,6 +507,7 @@ impl RequestEvents for RequestBridge {
         let mut event = RequestFinishedEvent::default();
         event.request_id.clone_from(&end.request_id);
         event.member.clone_from(&end.member);
+        event.model.clone_from(&end.model);
         event.status_class = status_class(end.status);
         event.duration_ms = end.duration_ms;
         event.input_tokens = end.input_tokens;
@@ -961,6 +962,7 @@ mod tests {
         bridge.finished(&RequestEnd {
             request_id: "r1".into(),
             member: Some("preset:openai:key".into()),
+            model: "demo".into(),
             status: 200,
             duration_ms: 12,
             input_tokens: Some(3),
@@ -1005,6 +1007,7 @@ mod tests {
         bridge.finished(&RequestEnd {
             request_id: "r2".into(),
             member: None,
+            model: "demo".into(),
             status: 429,
             duration_ms: 1,
             input_tokens: None,

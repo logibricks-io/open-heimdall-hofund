@@ -39,6 +39,18 @@ fn remaining(book: &Cooldowns, id: &MemberId, clock: &Mutex<Instant>) -> Duratio
         .duration_since(*clock.lock().expect("clock"))
 }
 
+fn remaining_model(
+    book: &Cooldowns,
+    id: &MemberId,
+    model: &str,
+    clock: &Mutex<Instant>,
+) -> Duration {
+    book.cooling_for_model(id, model)
+        .expect("model cooling")
+        .until()
+        .duration_since(*clock.lock().expect("clock"))
+}
+
 fn observation() -> QuotaObservation {
     QuotaObservation::from_stored(PluginId::from_static("member"))
 }
@@ -137,7 +149,7 @@ fn rate_limit_uses_retry_hint_and_does_not_stretch_its_ladder() {
         .record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("cooling");
     assert_eq!(repeated.failures(), 1);
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(120));
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(60));
     advance(&clock, 121);
     let next = book
         .record_failure(&id, &PluginError::status_error(429, "slow"))
@@ -211,18 +223,40 @@ fn quota_and_credit_use_their_own_limits() {
 }
 
 #[test]
-fn a_new_failure_never_shortens_a_longer_cooldown() {
+fn r494_new_failure_overwrites_longer_rest() {
     let (book, id, clock) = fixture();
-    let quota = PluginError::quota("empty").with_retry_after(Duration::from_secs(HOUR));
-    let expected = book.record_failure(&id, &quota).expect("quota");
+    book.record_failure(&id, &PluginError::status_error(402, "out of credit"))
+        .expect("credit");
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+
     let generic = book
         .record_failure(&id, &PluginError::connect("down"))
         .expect("generic");
-    assert_eq!(generic.until(), expected.until());
-    assert_eq!(generic.cause(), CooldownCause::Quota);
-    assert_eq!(generic.failures(), expected.failures());
-    assert_eq!(book.cooling(&id), Some(expected));
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
+    assert_eq!(generic.cause(), CooldownCause::Failure);
+    assert_eq!(generic.failures(), 1);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+}
+
+#[test]
+fn r494_observation_keeps_longer_rest() {
+    let (book, id, clock) = fixture();
+    let credit = book
+        .record_failure(&id, &PluginError::status_error(402, "out of credit"))
+        .expect("credit");
+    let observed = observation()
+        .with_remaining(0)
+        .with_retry_after(Duration::from_secs(60));
+
+    let applied = book.observe(&id, &observed).expect("observation");
+    assert_eq!(applied, credit);
+    assert_eq!(book.cooling(&id), Some(credit));
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
 }
 
 #[test]
@@ -806,13 +840,13 @@ fn rate_ladder_resets_during_active_non_rate_rest_after_forget() {
     let kept = book
         .record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("rate failure during quota rest");
-    assert_eq!(kept.cause(), CooldownCause::Quota);
+    assert_eq!(kept.cause(), CooldownCause::RateLimit);
     advance(&clock, 29 * MINUTE);
     let next = book
         .record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("rate failure after quota rest");
     assert_eq!(next.cause(), CooldownCause::RateLimit);
-    assert_eq!(next.failures(), 1);
+    assert_eq!(next.failures(), 2);
 }
 
 #[test]
@@ -1469,4 +1503,296 @@ fn b2b_subscription_account_rest_is_not_restored() {
     );
     assert_eq!(book.cooling(&account), None);
     assert_eq!(book.revision(&account), 0);
+}
+
+#[test]
+fn b5a_model_cooldown_rests_only_the_named_or_requested_model() {
+    for (message, seconds) in [
+        (
+            "All credentials for model model-a are cooling down via provider upstream",
+            120,
+        ),
+        (
+            "All credentials for the requested model are cooling down",
+            120,
+        ),
+    ] {
+        let (book, id, clock) = fixture();
+        let error =
+            PluginError::status_error(429, message).with_retry_after(Duration::from_secs(seconds));
+        let cooling = book
+            .record_failure_for_model(&id, "model-a", &error)
+            .expect("model rest");
+        assert_eq!(cooling.cause(), CooldownCause::RateLimit);
+        assert_eq!(cooling.failures(), 1);
+        assert_eq!(
+            remaining_model(&book, &id, "model-a", &clock),
+            Duration::from_secs(seconds)
+        );
+        assert!(book.cooling(&id).is_none());
+        assert!(book.cooling_for_model(&id, "model-b").is_none());
+        let entries = book.scoped_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.as_deref(), Some("model-a"));
+    }
+}
+
+#[test]
+fn b5b_account_cooldown_without_a_model_rests_the_whole_member() {
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(
+        429,
+        "All credentials are cooling down via provider upstream",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("member rest");
+    assert!(book.cooling(&id).is_some());
+    assert!(book.cooling_for_model(&id, "model-b").is_some());
+    assert_eq!(book.scoped_entries()[0].1, None);
+}
+
+#[test]
+fn b5c_model_credit_ladder_is_independent_of_the_member_ladder() {
+    let (book, id, clock) = fixture();
+    for rung in 1..=3 {
+        let cooling = book
+            .record_failure(&id, &PluginError::credit_status(402, "out of credit"))
+            .expect("member credit");
+        assert_eq!(cooling.failures(), rung);
+        let seconds = cooling
+            .until()
+            .duration_since(*clock.lock().expect("clock"))
+            .as_secs();
+        advance(&clock, seconds + 1);
+    }
+    let error = PluginError::credit_status(
+        429,
+        "All credentials for model model-a are cooling down (last error: insufficient balance)",
+    );
+    let cooling = book
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("model credit");
+    assert_eq!(cooling.cause(), CooldownCause::Credit);
+    assert_eq!(cooling.failures(), 1);
+    assert_eq!(
+        remaining_model(&book, &id, "model-a", &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+    let rests = book.credit_snapshot(SystemTime::now());
+    assert_eq!(rests.len(), 2);
+    assert!(
+        rests
+            .iter()
+            .any(|rest| { rest.model.as_deref() == Some("model-a") && rest.rung == 1 })
+    );
+    assert!(
+        rests
+            .iter()
+            .any(|rest| rest.model.is_none() && rest.rung == 3)
+    );
+}
+
+#[test]
+fn b5d_unserved_model_uses_its_own_generic_ladder() {
+    for status in [400, 403, 404, 422] {
+        let (book, id, clock) = fixture();
+        let error = PluginError::status_error(status, "model model-a is not supported");
+        let first = book
+            .record_failure_for_model(&id, "model-a", &error)
+            .expect("first model rest");
+        assert_eq!(first.cause(), CooldownCause::Failure);
+        assert_eq!(first.failures(), 1);
+        assert_eq!(
+            remaining_model(&book, &id, "model-a", &clock),
+            Duration::from_secs(MINUTE)
+        );
+        assert!(book.cooling(&id).is_none());
+        assert!(book.cooling_for_model(&id, "model-b").is_none());
+        advance(&clock, MINUTE + 1);
+        let next = book
+            .record_failure_for_model(&id, "model-a", &error)
+            .expect("second model rest");
+        assert_eq!(next.failures(), 2);
+        assert_eq!(
+            remaining_model(&book, &id, "model-a", &clock),
+            Duration::from_secs(2 * MINUTE)
+        );
+    }
+}
+
+#[test]
+fn b5f_model_success_and_manual_clear_have_distinct_scopes() {
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(
+        429,
+        "All credentials for model model-a are cooling down via provider upstream",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("model-a");
+    book.record_failure_for_model(&id, "model-b", &error)
+        .expect("model-b");
+
+    book.record_success_for_model(&id, "model-a");
+    assert!(book.cooling_for_model(&id, "model-a").is_none());
+    assert!(book.cooling_for_model(&id, "model-b").is_some());
+
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("model-a again");
+    book.record_failure(&id, &PluginError::credit_status(402, "out of credit"))
+        .expect("member rest");
+    book.record_success(&id);
+    assert!(book.scoped_entries().is_empty());
+    assert!(book.cooling(&id).is_none());
+    assert!(book.cooling_for_model(&id, "model-a").is_none());
+    assert!(book.cooling_for_model(&id, "model-b").is_none());
+}
+
+#[test]
+fn b5_generic_model_ladder_survives_sibling_answers() {
+    let (book, id, clock) = fixture();
+    let error = PluginError::connect("down");
+    let first = book
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("first failure");
+    assert_eq!(first.failures(), 1);
+    assert!(book.cooling(&id).is_some());
+    advance(&clock, MINUTE + 1);
+
+    book.record_success_for_model(&id, "model-b");
+    let next = book
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("second failure");
+    assert_eq!(next.failures(), 2);
+    assert_eq!(
+        remaining_model(&book, &id, "model-a", &clock),
+        Duration::from_secs(2 * MINUTE)
+    );
+    assert!(book.cooling(&id).is_none());
+    assert!(book.cooling_for_model(&id, "model-b").is_none());
+}
+
+#[test]
+fn b5a_bare_model_cooldown_code_rests_the_whole_member() {
+    // Reference modelCooledDown reads the sentence, not the code.
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(429, r#"{"error":{"code":"model_cooldown"}}"#);
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("member rest");
+    assert!(book.cooling(&id).is_some());
+    assert_eq!(book.scoped_entries()[0].1, None);
+}
+
+#[test]
+fn b5a_model_cooling_sentence_on_a_generic_failure_rests_the_member_ladder() {
+    // Only quota, credit, and rate refusals are scoped by the sentence.
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(
+        503,
+        "All credentials for model model-a are cooling down via provider upstream",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("generic rest");
+    assert!(book.cooling_for_model(&id, "model-a").is_some());
+    assert!(
+        book.scoped_entries()
+            .iter()
+            .any(|(_, model, _)| model.is_none())
+    );
+}
+
+#[test]
+fn b5a_model_cooling_sentence_on_a_credit_refusal_rests_only_the_model() {
+    let (book, id, _) = fixture();
+    let error = PluginError::credit_status(
+        402,
+        "All credentials for model model-a are cooling down (last error: insufficient balance)",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("model credit rest");
+    assert!(book.cooling(&id).is_none());
+    assert!(book.cooling_for_model(&id, "model-a").is_some());
+    assert!(book.cooling_for_model(&id, "model-b").is_none());
+}
+
+#[test]
+fn b5f_model_success_reads_the_newest_of_member_and_model_revisions() {
+    let (book, id, _) = fixture();
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "model-a", &unserved)
+        .expect("model rest");
+    book.record_failure(&id, &PluginError::status_error(500, "upstream down"))
+        .expect("member rest");
+    let revision = book.revision_for_model(&id, "model-a");
+    book.record_success_for_model_if_unchanged(&id, "model-a", revision);
+    assert!(
+        book.scoped_entries()
+            .iter()
+            .all(|(_, model, _)| model.is_none()),
+        "the model rest clears once its call saw every revision"
+    );
+}
+
+#[test]
+fn b5f_stale_model_success_keeps_a_newer_model_failure() {
+    let (book, id, _) = fixture();
+    book.record_failure(&id, &PluginError::status_error(500, "upstream down"))
+        .expect("member rest");
+    let revision = book.revision_for_model(&id, "model-a");
+    assert_ne!(revision, 0);
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "model-a", &unserved)
+        .expect("model rest");
+    book.record_success_for_model_if_unchanged(&id, "model-a", revision);
+    assert!(
+        book.scoped_entries()
+            .iter()
+            .any(|(_, model, _)| model.as_deref() == Some("model-a")),
+        "a success that started before the model failure must not clear it"
+    );
+}
+
+#[test]
+fn b5h_remove_drops_the_member_model_rests_too() {
+    let (book, id, _) = fixture();
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "model-a", &unserved)
+        .expect("model rest");
+    book.remove(&id);
+    assert!(book.cooling_for_model(&id, "model-a").is_none());
+    assert!(book.scoped_entries().is_empty());
+}
+
+#[test]
+fn b5b_an_empty_model_name_rests_the_whole_member() {
+    let (book, id, _) = fixture();
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "", &unserved)
+        .expect("member rest");
+    assert!(book.cooling(&id).is_some());
+    assert_eq!(book.scoped_entries()[0].1, None);
+}
+
+#[test]
+fn b5e_model_view_reports_the_later_of_member_and_model_rests() {
+    let (book, id, clock) = fixture();
+    let model = PluginError::status_error(
+        429,
+        "All credentials for model model-a are cooling down via provider upstream",
+    )
+    .with_retry_after(Duration::from_secs(300));
+    book.record_failure_for_model(&id, "model-a", &model)
+        .expect("model rest");
+    book.record_failure(
+        &id,
+        &PluginError::status_error(429, "slow down").with_retry_after(Duration::from_secs(90)),
+    )
+    .expect("member rest");
+    assert_eq!(
+        remaining_model(&book, &id, "model-a", &clock),
+        Duration::from_secs(300)
+    );
+    assert_eq!(
+        remaining_model(&book, &id, "model-b", &clock),
+        Duration::from_secs(90)
+    );
 }

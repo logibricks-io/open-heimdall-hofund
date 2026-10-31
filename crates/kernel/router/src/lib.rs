@@ -476,7 +476,7 @@ impl Router {
             let started = Instant::now();
             let result = hop
                 .member
-                .forward(call.path(), body)
+                .forward_for_model(call.path(), body, &upstream_model)
                 .instrument(span.clone())
                 .await;
             record_call(&span, &result_status(result.as_ref().err()), started);
@@ -511,10 +511,12 @@ impl Router {
                     let mut seat = strategy::Seat::new(hop.member.id().to_string());
                     seat.weight = hop.weight;
                     seat.free = hop.free;
-                    seat.resting = self
-                        .cooldowns
-                        .as_ref()
-                        .is_some_and(|cooldowns| cooldowns.cooling(hop.member.id()).is_some());
+                    let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                    seat.resting = self.cooldowns.as_ref().is_some_and(|cooldowns| {
+                        cooldowns
+                            .cooling_for_model(hop.member.id(), model)
+                            .is_some()
+                    });
                     seat
                 })
                 .collect::<Vec<_>>();
@@ -525,7 +527,7 @@ impl Router {
                 .collect()
         };
         if let Some(cooldowns) = &self.cooldowns {
-            order_hops(ordered, cooldowns)
+            order_hops(ordered, cooldowns, &resolved.bare)
         } else {
             ordered
         }
@@ -674,11 +676,12 @@ pub enum RouterError {
     },
 }
 
-fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns) -> Vec<Hop> {
+fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> Vec<Hop> {
     let mut ready = Vec::with_capacity(hops.len());
     let mut cooling = Vec::new();
     for hop in hops {
-        if let Some(state) = cooldowns.cooling(hop.member.id()) {
+        let model = hop.wire_model.as_deref().unwrap_or(bare);
+        if let Some(state) = cooldowns.cooling_for_model(hop.member.id(), model) {
             cooling.push((hop, state.until()));
         } else {
             ready.push(hop);
