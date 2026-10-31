@@ -84,8 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one `[models."hofund/<route>"]` table per route (128000 context, tool
   use) to `~/.kimi-code/config.toml` (or under an absolute
   `KIMI_CODE_HOME`), leaving the user's own providers and models alone. A
-  model pick writes `default_model`; clearing it drops the key (#433) and
-  disconnect puts back the user's. No
+  model pick writes `default_model`; clearing it puts back the user's value
+  while its model table remains. No
   per-model catalog values yet (#441), a user comment right above `default_model` is lost when it is cleared (#444), and the older kimi-cli's `~/.kimi` is
   not written (#442). The conformance kit's TOML user edit is now a
   top-level key, so it no longer lands inside a table hofund owns.
@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the default profile's `settings.json` (VS Code Stable only), each route at
   the gateway's `/v1/chat/completions` with the token as its `Authorization`
   header. A model pick writes `chat.defaultModel` as the route id; clearing
-  the model drops it (#433) and disconnect puts back the user's value.
+  the model or disconnecting puts back the user's value.
 - Agent descriptions can write gateway text and nested objects inside model
   entries (`{ key, template }`, `{ key, object = [...] }`), and a key part
   may be quoted to hold a dot (`'"chat.defaultModel"'`). A file nothing is
@@ -914,6 +914,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clearing a model restores the user's previous value for VS Code, Droid, and
+  Qwen Code, and removes the key when no previous value exists. Kimi Code
+  restores its previous `default_model` only while the matching model table
+  exists, and status reports a stale hofund default whose table is gone (#433,
+  #443).
 - Raw SSE model rewriting now covers a complete JSON payload in an
   unterminated final event, and the 1 MiB oversize decision is independent of
   upstream chunk boundaries (#33, #34).
