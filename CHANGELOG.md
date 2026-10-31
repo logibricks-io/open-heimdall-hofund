@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Responses continuation history (P0-1a): `/v1/responses` now resolves
+  `previous_response_id` in a caller-scoped, bounded in-memory LRU before
+  decoding and routing. Unary and SSE replies are captured without delaying
+  streaming; translated routes receive whole history, same-protocol relays can
+  send a delta with explicit `store: true`, and a refused delta is retried
+  whole once. Unknown ids on translating or subscription routes return the
+  OpenAI-shaped 400 error. History expires after six hours and is lost on
+  restart; upstream `store: false` remains the default when omitted.
+
 - Agent keys in the OS credential store (Z1): an agent descriptor may
   declare a `[credential]` item (URL and Windows target templates, literal
   account and label). The engine stores hofund's key there through a
