@@ -781,7 +781,9 @@ fn map_count(outcome: ProviderCount) -> CountOutcome {
 
 pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     let retry_after = error.retry_after;
+    let reset_after = error.reset_after;
     let credit = error.is_credit();
+    let credit_soon = error.credit_soon();
     let cooldown = error.cools();
     let status = error.status;
     let credit_message = credit.then(|| error.message.clone());
@@ -813,6 +815,12 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     }
     if let Some(after) = retry_after {
         converted = converted.with_retry_after(after);
+    }
+    if let Some(after) = reset_after {
+        converted = converted.with_reset_after(after);
+    }
+    if credit_soon {
+        converted = converted.with_credit_soon();
     }
     converted
 }
@@ -886,17 +894,24 @@ mod tests {
             ProviderError::internal("bug"),
             ProviderError::status(429, "slow"),
         ] {
-            let error = error.with_retry_after(Duration::from_secs(120));
+            let error = error
+                .with_retry_after(Duration::from_secs(120))
+                .with_reset_after(Duration::from_secs(240))
+                .with_credit_soon();
             let kind = error.kind;
             let message = error.message.clone();
             let status = error.status;
             let plugin = super::into_plugin(error);
             assert_eq!(plugin.retry_after(), Some(Duration::from_secs(120)));
+            assert_eq!(plugin.reset_after(), Some(Duration::from_secs(240)));
+            assert!(plugin.credit_soon());
             let restored = crate::adapt::provider_error(plugin);
             assert_eq!(restored.kind, kind);
             assert_eq!(restored.message, message);
             assert_eq!(restored.status, status);
             assert_eq!(restored.retry_after(), Some(Duration::from_secs(120)));
+            assert_eq!(restored.reset_after(), Some(Duration::from_secs(240)));
+            assert!(restored.credit_soon());
         }
     }
 

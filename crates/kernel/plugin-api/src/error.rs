@@ -58,8 +58,8 @@ pub enum PluginErrorKind {
 /// A plugin call failed.
 ///
 /// Fields are private. Callers branch on [`PluginError::kind`] and read
-/// [`PluginError::status`], [`PluginError::retry_after`], and
-/// [`PluginError::cause`].
+/// [`PluginError::status`], [`PluginError::retry_after`],
+/// [`PluginError::reset_after`], and [`PluginError::cause`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 #[error("{message}")]
@@ -68,7 +68,9 @@ pub struct PluginError {
     message: String,
     status: Option<u16>,
     retry_after: Option<Duration>,
+    reset_after: Option<Duration>,
     credit: bool,
+    credit_soon: bool,
     cooldown: bool,
     #[source]
     cause: Option<Box<dyn Error + Send + Sync>>,
@@ -81,7 +83,9 @@ impl PluginError {
             message: message.into(),
             status: None,
             retry_after: None,
+            reset_after: None,
             credit: false,
+            credit_soon: false,
             cooldown: true,
             cause: None,
         }
@@ -193,6 +197,20 @@ impl PluginError {
         self
     }
 
+    /// Attaches the delay until a reset named by the upstream.
+    #[must_use]
+    pub fn with_reset_after(mut self, after: Duration) -> Self {
+        self.reset_after = Some(after);
+        self
+    }
+
+    /// Marks a credit refusal that can pass soon or for a smaller request.
+    #[must_use]
+    pub const fn with_credit_soon(mut self) -> Self {
+        self.credit_soon = true;
+        self
+    }
+
     /// Attaches the underlying error.
     #[must_use]
     pub fn with_source(mut self, source: impl Error + Send + Sync + 'static) -> Self {
@@ -225,10 +243,22 @@ impl PluginError {
         self.retry_after
     }
 
+    /// How long until the reset named by the upstream, when one was given.
+    #[must_use]
+    pub const fn reset_after(&self) -> Option<Duration> {
+        self.reset_after
+    }
+
     /// Whether the upstream refused the call for lack of credit.
     #[must_use]
     pub const fn is_credit(&self) -> bool {
         self.credit
+    }
+
+    /// Whether the credit refusal can pass soon or for a smaller request.
+    #[must_use]
+    pub const fn credit_soon(&self) -> bool {
+        self.credit_soon
     }
 
     /// Whether a failure should cool the member.
@@ -285,10 +315,12 @@ mod tests {
     fn accessors_round_trip() {
         let error = PluginError::status_error(429, "slow down")
             .with_retry_after(Duration::from_secs(2))
+            .with_reset_after(Duration::from_secs(4))
             .with_source(std::io::Error::other("body"));
         assert_eq!(error.kind(), PluginErrorKind::Status);
         assert_eq!(error.status(), Some(429));
         assert_eq!(error.retry_after(), Some(Duration::from_secs(2)));
+        assert_eq!(error.reset_after(), Some(Duration::from_secs(4)));
         let source = Error::source(&error).expect("source");
         assert_eq!(source.to_string(), "body");
         assert_eq!(error.cause().expect("cause").to_string(), "body");

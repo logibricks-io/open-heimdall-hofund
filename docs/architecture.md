@@ -342,13 +342,27 @@ table owns one shared book and injects it into every published `Router`, so
 cooldowns and failure ladders survive `Snapshot::store`. The default policy in
 `crates/kernel/router/src/cooldown.rs` covers generic and rate-limit ladders,
 `Retry-After` hints, quota and credit rests, passive observations, and timed
-panic rests. Non-positive header hints are absent, and positive header hints
-are capped at one hour for every failure cause. A passive observation rests a
-member only when its window is exhausted; its stated reset is capped at eight
-days. New events never shorten a longer active rest. The daemon records call
-and stream outcomes, but counts never record success and cool only on 429 or
-transport-class failures. The router only orders members, putting ready members
-first and retaining the soonest cooling member as a probe.
+panic rests. Generic and rate-limit failures do not climb while their own rest
+is active. An API-key credit refusal climbs 30 minutes, 2 hours, 8 hours,
+24 hours, 3 days, and a repeating 7-day rung after each ended rest; success and
+manual removal restart it. Retry hints and soon/smaller-request wording stay
+flat at 30 minutes, while a named reset wins. Windowed subscription accounts
+use body reset, header reset, full-window reset, a retry hint longer than five
+hours, then five hours; a later renewed-window observation lifts the rest.
+Other subscription accounts stay at 30 minutes. Named credit resets cap at 35
+days, generic/rate/quota header hints cap at one hour, and passive window resets
+cap at eight days. New events never shorten a longer active rest.
+
+Only API-key credit-ladder rests persist. The daemon writes their wall-clock
+deadlines and rungs to `rests.json` beside the configuration through a
+same-directory temporary file and rename, only when the snapshot changes. It
+restores configured members at startup, keeps ended rungs for 35 days, ignores
+corrupt files without failing startup, and lets in-process state win. Rate,
+quota, generic, observation, flat-credit, and subscription rests remain
+in-memory. The daemon records call and stream outcomes, but counts never record
+success and cool only on 429 or transport-class failures. The router only orders
+members, putting ready members first and retaining the soonest cooling member
+as a probe.
 
 ## Failover decisions
 
