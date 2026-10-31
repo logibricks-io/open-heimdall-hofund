@@ -18,7 +18,7 @@ hofund-config = { workspace = true }
 hofund-plugin-api = { workspace = true }
 secrecy = "0.10.3"
 serde_json = "1.0.154"
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 thiserror = "2.0.21"
 toml_edit = "0.25.17"
 yaml-rust2 = { version = "0.13.0", default-features = false }

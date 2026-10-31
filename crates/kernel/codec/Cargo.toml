@@ -15,7 +15,7 @@ hofund-ir = { workspace = true }
 metrics = "0.24.3"
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tracing = "0.1.44"
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 thiserror = "2.0.21"
 
 [lints]
