@@ -930,7 +930,9 @@ async fn b10_bad_frames_get_errors_and_binary_closes_unsupported() {
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let server = TestServer::start(gateway_app(vec![fake.member()], None, usage, None)).await;
     let mut client = Client::connect(&server, "/v1/responses").await;
-    client.send_text(r#"{"type": "response.create", "input": "#).await;
+    client
+        .send_text(r#"{"type": "response.create", "input": "#)
+        .await;
     assert_eq!(client.json().await["error"]["code"], "invalid_json");
     for frame in ["{", "not json", "[1]"] {
         client.send_text(frame).await;

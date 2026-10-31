@@ -91,14 +91,21 @@ fn origin_matches_host(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return true;
     };
-    let Some(host) = headers.get(header::HOST).and_then(|value| value.to_str().ok()) else {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
         return false;
     };
     origin
         .to_str()
         .ok()
         .and_then(|origin| origin.parse::<axum::http::Uri>().ok())
-        .and_then(|origin| origin.authority().map(|authority| authority.as_str().to_owned()))
+        .and_then(|origin| {
+            origin
+                .authority()
+                .map(|authority| authority.as_str().to_owned())
+        })
         .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
 }
 
