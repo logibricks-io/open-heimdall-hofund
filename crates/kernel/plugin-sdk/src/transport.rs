@@ -956,8 +956,8 @@ fn resets_after(text: &str) -> Option<Duration> {
                 character.is_ascii_digit() || matches!(character, '.' | 'h' | 'm' | 's')
             })
             .collect::<String>();
-        if let Some(after) = parse_duration(&written)
-            .filter(|after| !after.is_zero() && *after <= LONGEST_WRITTEN)
+        if let Some(after) =
+            parse_duration(&written).filter(|after| !after.is_zero() && *after <= LONGEST_WRITTEN)
         {
             return Some(after);
         }
@@ -966,7 +966,7 @@ fn resets_after(text: &str) -> Option<Duration> {
 }
 
 /// The furthest off a reset written in words is believed.
-const LONGEST_WRITTEN: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const LONGEST_WRITTEN: Duration = Duration::from_hours(7 * 24);
 
 fn soon_written(text: &str) -> Option<Duration> {
     for tail in [
@@ -1817,7 +1817,7 @@ mod tests {
     fn a1_written_waits_past_a_week_or_unreadable_are_skipped() {
         assert_eq!(
             retry_after_from_body(b"usage limit resets in 7d"),
-            Some(Duration::from_secs(7 * 86_400))
+            Some(Duration::from_hours(7 * 24))
         );
         assert_eq!(retry_after_from_body(b"usage limit resets in 8d"), None);
         assert_eq!(
@@ -1831,7 +1831,9 @@ mod tests {
         );
         // A word wait, then thirty seconds in Chinese wording.
         assert_eq!(
-            retry_after_from_body("retry in a moment, 30\u{79d2}\u{540e}\u{518d}\u{8bd5}".as_bytes()),
+            retry_after_from_body(
+                "retry in a moment, 30\u{79d2}\u{540e}\u{518d}\u{8bd5}".as_bytes()
+            ),
             Some(Duration::from_secs(30))
         );
     }
