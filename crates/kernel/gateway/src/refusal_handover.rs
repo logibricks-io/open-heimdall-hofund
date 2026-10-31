@@ -244,18 +244,22 @@ pub(super) fn refusal_failure(event: &StreamEvent) -> Option<PluginError> {
     };
     let message = ["/error/message", "/message", "/response/error/message"]
         .into_iter()
-        .find_map(|path| unknown.payload.pointer(path).and_then(|value| value.as_str()))
+        .find_map(|path| {
+            unknown
+                .payload
+                .pointer(path)
+                .and_then(|value| value.as_str())
+        })
         .unwrap_or("upstream stream failed")
         .to_owned();
     let text = unknown.payload.to_string().to_lowercase();
-    let status = if text.contains("invalid")
-        || text.contains("context_length")
-        || text.contains("too long")
-    {
-        400
-    } else {
-        502
-    };
+    let status =
+        if text.contains("invalid") || text.contains("context_length") || text.contains("too long")
+        {
+            400
+        } else {
+            502
+        };
     Some(PluginError::status_error(status, message).without_cooldown())
 }
 
