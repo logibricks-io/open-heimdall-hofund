@@ -1,5 +1,7 @@
 //! Usage reports and graceful shutdown over the daemon control listener.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -95,7 +97,7 @@ fn control_url(running: &Running, route: &str) -> String {
 }
 
 async fn usage(running: &Running, dir: &Path, query: &str) -> reqwest::Response {
-    reqwest::Client::new()
+    support::client()
         .get(control_url(running, &format!("/v1/hofund/usage{query}")))
         .bearer_auth(token(dir))
         .send()
@@ -104,7 +106,7 @@ async fn usage(running: &Running, dir: &Path, query: &str) -> reqwest::Response 
 }
 
 async fn post_json(running: &Running, dir: &Path, route: &str, body: &str) -> reqwest::Response {
-    reqwest::Client::new()
+    support::client()
         .post(control_url(running, route))
         .bearer_auth(token(dir))
         .header("content-type", "application/json")
@@ -115,7 +117,7 @@ async fn post_json(running: &Running, dir: &Path, route: &str, body: &str) -> re
 }
 
 async fn status(running: &Running, dir: &Path) -> StatusResponse {
-    let response = reqwest::Client::new()
+    let response = support::client()
         .get(control_url(running, "/v1/hofund/status"))
         .bearer_auth(token(dir))
         .send()
@@ -192,7 +194,7 @@ async fn usage_route_filters_period_and_totals() {
     assert_eq!(day.period, UsagePeriod::Day);
     assert_eq!(day.totals.requests, 2);
     assert_eq!(day.rows.len(), 2);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -211,7 +213,7 @@ async fn usage_route_rejects_unknown_period_and_key() {
                 .expect("envelope");
         assert_eq!(envelope.error.kind, ControlErrorKind::BadRequest, "{query}");
     }
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -240,7 +242,7 @@ async fn usage_row_cap_keeps_totals_complete() {
     assert_eq!(all.totals.requests, 10_003);
     assert_eq!(all.totals.input_tokens, 10_003);
     assert_eq!(all.totals.output_tokens, 20_006);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[cfg(unix)]
@@ -286,7 +288,7 @@ async fn shutdown_route_drains_inflight_model_request() {
 
     let model_token = token.clone();
     let inflight = tokio::spawn(async move {
-        let response = reqwest::Client::new()
+        let response = support::client()
             .post(format!("http://{model_addr}/v1/chat/completions"))
             .bearer_auth(model_token)
             .body(r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#)
@@ -312,7 +314,7 @@ async fn shutdown_route_drains_inflight_model_request() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let control = reqwest::Client::builder()
+    let control = support::builder()
         .unix_socket(socket.clone())
         .build()
         .expect("Unix client");
@@ -349,7 +351,7 @@ async fn shutdown_route_drains_inflight_model_request() {
     let again = start_with_options(&config, options)
         .await
         .expect("the daemon lock was released");
-    again.shutdown().await;
+    support::shutdown(again).await;
 }
 
 #[tokio::test]
@@ -371,7 +373,7 @@ async fn shutdown_is_idempotent_and_status_reports_draining() {
         status(&running, &dir.0).await.shutdown,
         ShutdownState::Draining
     );
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -403,5 +405,5 @@ async fn mutations_after_shutdown_return_503() {
     }
     let usage = usage(&running, &dir.0, "").await;
     assert_eq!(usage.status(), reqwest::StatusCode::OK, "reads still work");
-    running.shutdown().await;
+    support::shutdown(running).await;
 }

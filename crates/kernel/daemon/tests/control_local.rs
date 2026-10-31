@@ -2,6 +2,8 @@
 
 //! Per-config local control lifecycle tests.
 
+mod support;
+
 use std::path::Path;
 
 use hofund_daemon::{ControlRuntime, StartOptions, start_with_options};
@@ -80,7 +82,7 @@ async fn concurrent_start_single_instance_lock() {
         std::fs::metadata(&socket).expect("live socket").ino(),
         inode
     );
-    running.shutdown().await;
+    support::shutdown(running).await;
     assert!(!discovery.exists());
     assert!(!socket.exists());
 }
@@ -105,9 +107,9 @@ async fn two_configs_in_one_directory_run_independent_daemons() {
     assert_ne!(socket_id(first_socket), socket_id(second_socket));
     assert!(first_socket.exists());
     assert!(second_socket.exists());
-    first_running.shutdown().await;
+    support::shutdown(first_running).await;
     assert!(second_socket.exists());
-    second_running.shutdown().await;
+    support::shutdown(second_running).await;
 }
 
 #[tokio::test]
@@ -147,7 +149,7 @@ async fn read_only_config_dir_falls_back_to_runtime_dir() {
             & 0o777,
         0o600
     );
-    running.shutdown().await;
+    support::shutdown(running).await;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
         .expect("restore directory permissions");
 }
@@ -165,7 +167,7 @@ async fn restart_refuses_non_socket_control_path() {
         .control_socket_path()
         .expect("Unix socket")
         .to_path_buf();
-    running.shutdown().await;
+    support::shutdown(running).await;
     std::fs::write(&socket, "do not remove").expect("regular file");
     let Err(error) = start_with_options(&config, options(dir)).await else {
         panic!("non-socket control path was replaced");
@@ -209,7 +211,7 @@ async fn unix_socket_unavailable_uses_configured_tcp() {
         serde_json::from_slice(&std::fs::read(discovery).expect("discovery JSON")).expect("JSON");
     assert_eq!(value["socket_path"], serde_json::Value::Null);
     assert!(value["tcp_endpoints"][0].as_str().is_some());
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -249,5 +251,5 @@ async fn overlong_unix_socket_path_uses_configured_tcp() {
         serde_json::from_slice(&std::fs::read(discovery).expect("discovery JSON")).expect("JSON");
     assert_eq!(value["socket_path"], serde_json::Value::Null);
     assert!(value["tcp_endpoints"][0].as_str().is_some());
-    running.shutdown().await;
+    support::shutdown(running).await;
 }

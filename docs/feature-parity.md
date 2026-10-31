@@ -4,7 +4,9 @@ This document compares every user-facing capability of
 [yetone/magpie](https://github.com/yetone/magpie), the Go original, with
 hofund, the Rust rewrite. Each row cites a source path in each repository.
 
-- **magpie snapshot:** `641b121` (shallow clone, October 2026).
+- **magpie snapshot:** coverage baseline `cbbf316` (v0.1.1504). The
+  reference has since moved to `1e15a7a` (v0.1.2360); rows for changes after
+  the baseline are tracked as follow-up work.
 - **hofund snapshot:** `main` at `0d8cfa9` ("Accept omitted Messages caps and return Codex tool calls intact.", #14).
   Hofund line citations below were checked against that commit on 2026-10-25,
   except rows 1.1, 1.2, 1.4, 1.12, and 5.1. Those cite this change,

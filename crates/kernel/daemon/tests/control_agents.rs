@@ -1,5 +1,7 @@
 //! Agent connect, disconnect, and token rotation over the control plane.
 
+mod support;
+
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -63,7 +65,7 @@ impl Daemon {
             scratch,
             running,
             generation,
-            client: reqwest::Client::new(),
+            client: support::client(),
         }
     }
 
@@ -189,7 +191,7 @@ async fn agent_list_reports_catalog_and_detection() {
     assert_eq!(list.agents[0].display_name, "Claude Code");
     assert!(list.agents[0].installed, "a settings file means installed");
     assert!(!list.agents[1].installed, "no codex file and an empty PATH");
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -217,7 +219,7 @@ async fn agent_status_reflects_connected_files() {
         .expect("claude row");
     assert_eq!(row.model.as_deref(), Some("m"));
     assert!(row.paths.contains(&daemon.settings().display().to_string()));
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -277,7 +279,7 @@ async fn agent_model_sets_connects_and_clears() {
         .await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert_eq!(daemon.read_settings(), "{\"model\": \"mine\"}\n");
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -304,7 +306,7 @@ async fn agent_plan_redacts_token_in_diff() {
     assert_eq!(disconnect.changes.len(), 1);
     assert!(disconnect.changes[0].diff.is_empty());
     assert_ne!(disconnect.plan_revision, plan.plan_revision);
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -334,7 +336,7 @@ async fn agent_plan_revision_prevents_stale_connect() {
         state_of(&daemon.status().await, "claude-code"),
         AgentState::Connected
     );
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -373,7 +375,7 @@ async fn agent_disconnect_restores_preconnect_bytes() {
     assert_eq!(status, StatusCode::OK);
     let again: AgentChangeResponse = decode_response(API_VERSION, &body).expect("second");
     assert!(again.changed_paths.is_empty());
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -400,7 +402,7 @@ async fn unknown_agent_404() {
         assert_eq!(kind, ControlErrorKind::NotFound);
         assert!(message.contains("nope"));
     }
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -445,7 +447,7 @@ async fn token_rotate_updates_connected_agents_and_old_token_fails() {
     let (status, _) = daemon.get("status", &rotated.token).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(*daemon.generation.borrow(), 1);
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -468,7 +470,7 @@ async fn token_rotate_bumps_generation_once_and_not_on_failure() {
     let (status, _) = daemon.rotate(&before).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(*daemon.generation.borrow(), 2);
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 /// Every formatted tracing event in this test binary.
@@ -565,7 +567,7 @@ async fn token_never_in_logs_or_errors() {
     assert!(log.contains("claude-code"), "the refresh failure is logged");
     assert!(!log.contains(&old), "{log}");
     assert!(!log.contains(&rotated.token), "{log}");
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -609,7 +611,7 @@ async fn concurrent_rotate_and_connect_serialize_on_gate() {
         assert_eq!(status, StatusCode::OK);
     }
     assert_eq!(*daemon.generation.borrow(), 6);
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -638,7 +640,7 @@ async fn token_rotate_scrubs_pre_rotation_status_errors() {
     assert!(message.contains("[redacted]"), "{message}");
     assert!(!message.contains(&old), "{message}");
     assert!(!String::from_utf8_lossy(&body).contains(&old));
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -673,5 +675,5 @@ async fn agent_plan_uses_reloaded_routes_and_bound_address() {
     assert!(diff.contains(&bound), "{diff}");
     assert!(diff.contains("routed-after-reload"), "{diff}");
     assert_ne!(after.plan_revision, before.plan_revision);
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }

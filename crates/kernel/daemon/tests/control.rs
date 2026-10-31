@@ -1,5 +1,7 @@
 //! Daemon control-state reporting over the opt-in TCP listener.
 
+mod support;
+
 use hofund_control_proto::{
     API_VERSION, ListenSource, ShutdownState, StatusResponse, decode_response,
 };
@@ -30,7 +32,7 @@ async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() 
     .expect("start");
     let control = running.control_local_addr().expect("control listener");
     let token = std::fs::read_to_string(dir.path().join("hofund.token")).expect("token");
-    let client = reqwest::Client::new();
+    let client = support::client();
     let url = format!("http://{control}/v1/hofund/status");
 
     let response = client
@@ -81,7 +83,7 @@ async fn status_reports_disk_runtime_revision_pending_restart_and_not_applied() 
     assert!(changed.pending_restart.is_empty());
     assert!(changed.not_applied.is_empty());
 
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[cfg(windows)]
@@ -111,5 +113,5 @@ async fn windows_token_uses_profile_acl_until_pipe() {
     .expect("control health");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert!(!token.trim().is_empty());
-    running.shutdown().await;
+    support::shutdown(running).await;
 }

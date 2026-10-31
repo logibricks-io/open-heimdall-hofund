@@ -1,5 +1,7 @@
 //! Picks, manual refresh, and provider test control routes.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 
 use hofund_control_proto::{
@@ -107,7 +109,7 @@ struct Control {
 impl Control {
     fn new(dir: &Path, running: &Running) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: support::client(),
             base: format!(
                 "http://{}/v1/hofund/providers",
                 running.control_local_addr().expect("control")
@@ -219,7 +221,7 @@ async fn picks_route_sets_and_returns_revision() {
     let read = control.picks().await;
     assert_eq!(read, restored);
     assert_eq!(read.picks_revision, file_revision(&dir.0));
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -243,7 +245,7 @@ async fn picks_route_stale_revision_returns_409() {
         file
     );
     assert_eq!(control.picks().await, current);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[cfg(unix)]
@@ -268,7 +270,7 @@ async fn picks_route_save_failure_returns_500_without_revision() {
     let (kind, _, _) = error_kind(&bytes);
     assert_eq!(kind, ControlErrorKind::Internal);
     assert_eq!(control.picks().await, before);
-    running.shutdown().await;
+    support::shutdown(running).await;
 
     let dir = Scratch::new("mismatched");
     seed(
@@ -289,7 +291,7 @@ async fn picks_route_save_failure_returns_500_without_revision() {
         std::fs::read(state_path(&dir.0, "chat")).expect("state file"),
         file
     );
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -338,7 +340,7 @@ async fn provider_picks_edit_forms_match_reference() {
     let reset: PicksResponse = decode_response(API_VERSION, &bytes).expect("reset");
     assert!(reset.picks.is_empty());
     assert_eq!(reset.delisted, ["former"]);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -362,7 +364,7 @@ async fn picks_get_unknown_provider_404_creates_nothing() {
         .map(|entries| entries.count())
         .unwrap_or(0);
     assert_eq!(files, 0);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -416,7 +418,7 @@ async fn models_refresh_drops_gone_picks_applies_auto_include_and_saves() {
             .contains(&json!("a"))
     );
     assert_eq!(control.picks().await.picks_revision, file_revision(&dir.0));
-    running.shutdown().await;
+    support::shutdown(running).await;
     server.verify().await;
 }
 
@@ -448,7 +450,7 @@ async fn refresh_upstream_429_maps_to_429_with_retry_after_ms() {
     assert_eq!(kind, ControlErrorKind::Upstream);
     assert_eq!(retry_after_ms, Some(7000));
     assert!(!String::from_utf8_lossy(&bytes).contains("test-key"));
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -507,7 +509,7 @@ async fn provider_test_route_probes_mock_upstream_exact_request() {
             .as_array()
             .is_some_and(|messages| !messages.is_empty())
     );
-    running.shutdown().await;
+    support::shutdown(running).await;
     server.verify().await;
 }
 
@@ -567,7 +569,7 @@ async fn provider_test_named_models_keep_order_and_per_model_errors() {
     let error = failed.error.as_ref().expect("per-model error");
     assert_eq!(error.kind, ControlErrorKind::Upstream);
     assert!(!error.message.contains("test-key"));
-    running.shutdown().await;
+    support::shutdown(running).await;
     server.verify().await;
 }
 
@@ -603,6 +605,6 @@ async fn provider_test_selection_error_sends_no_request() {
         String::from_utf8_lossy(&bytes)
     );
     assert_eq!(error_kind(&bytes).0, ControlErrorKind::Unprocessable);
-    running.shutdown().await;
+    support::shutdown(running).await;
     server.verify().await;
 }

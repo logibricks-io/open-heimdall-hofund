@@ -694,6 +694,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Daemon integration tests now bound every HTTP request (60 s, no idle
+  pooled connections) and every daemon shutdown (60 s), so a stalled
+  request fails with a message instead of hanging the Windows runner
+  (#409, #462, #467). The feature parity snapshot header names the current
+  reference baseline.
+
 - Disconnect now warns when it removes hofund's entries from a shared array
   or map that were edited after connect (G8). Such entries are still removed
   whole, token included.
@@ -908,6 +914,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Codex retries a 401 identified only by `error.code = token_expired`. Gemini
+  refresh jobs mark a refused sign-in lapsed even when their caller is
+  cancelled, and token replies without `expires_in` use a one-hour lifetime
+  with the existing refresh margin (#298, #331, #332).
 - Anthropic host checks match `anthropic.com` and its subdomains only, so a
   lookalike host such as `evilanthropic.com` no longer gets official Anthropic
   credential placement or model-list handling.

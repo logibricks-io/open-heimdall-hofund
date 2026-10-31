@@ -1,5 +1,7 @@
 //! Each inbound protocol against each upstream kind, plus auth and failover.
 
+mod support;
+
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -131,7 +133,7 @@ async fn listen(dir: &Path, text: &str) -> (hofund_daemon::Running, String) {
 
 #[tokio::test]
 async fn each_inbound_talks_to_each_upstream() {
-    let client = reqwest::Client::builder()
+    let client = support::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("client");
@@ -184,7 +186,7 @@ async fn each_inbound_talks_to_each_upstream() {
                     inbound.route,
                     upstream.wire_path
                 );
-                running.shutdown().await;
+                support::shutdown(running).await;
                 fs::remove_dir_all(dir).ok();
             }
         }
@@ -193,7 +195,7 @@ async fn each_inbound_talks_to_each_upstream() {
 
 #[tokio::test]
 async fn auth_models_failover_and_config_check() {
-    let client = reqwest::Client::builder()
+    let client = support::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("client");
@@ -284,7 +286,7 @@ upstreams = ["primary", "backup"]
     let listed_body = listed.text().await.expect("text");
     assert!(listed_body.contains("models/demo"), "{listed_body}");
     assert!(listed_body.contains("generateContent"), "{listed_body}");
-    running.shutdown().await;
+    support::shutdown(running).await;
 
     let bad = dir.join("bad.toml");
     fs::write(&bad, "listen = \"nope\"\n").expect("write");
@@ -295,7 +297,7 @@ upstreams = ["primary", "backup"]
 
 #[tokio::test]
 async fn generative_inbound_carries_a_tool_call() {
-    let client = reqwest::Client::builder()
+    let client = support::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("client");
@@ -370,7 +372,7 @@ async fn generative_inbound_carries_a_tool_call() {
                 text.contains("Paris"),
                 "{protocol} stream={stream_call}: {text}"
             );
-            running.shutdown().await;
+            support::shutdown(running).await;
             fs::remove_dir_all(dir).ok();
         }
     }
@@ -378,7 +380,7 @@ async fn generative_inbound_carries_a_tool_call() {
 
 #[tokio::test]
 async fn cross_protocol_fields_do_not_reach_the_client_or_the_upstream() {
-    let client = reqwest::Client::builder()
+    let client = support::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("client");
@@ -484,7 +486,7 @@ async fn cross_protocol_fields_do_not_reach_the_client_or_the_upstream() {
         .find(|body| body.contains("device-should-not-leak"))
         .expect("same-protocol metadata");
     assert!(same.contains("device-should-not-leak"));
-    running.shutdown().await;
+    support::shutdown(running).await;
     fs::remove_dir_all(dir).ok();
 }
 
@@ -493,8 +495,9 @@ async fn codex_responses_tools_are_accepted() {
     // Same reconstructed Codex CLI 0.164.0 tool set as the codec fixture.
     let fixture = include_str!("../../codec/tests/fixtures/codex_0_164_responses.json");
     let original: serde_json::Value = serde_json::from_str(fixture).expect("fixture");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
+    // Slow Windows runners took over 5 s for one of these posts (#462).
+    let client = support::builder()
+        .timeout(Duration::from_secs(30))
         .build()
         .expect("client");
 
@@ -530,7 +533,7 @@ async fn codex_responses_tools_are_accepted() {
     let seen = responses.received_requests().await.expect("requests");
     let forwarded: serde_json::Value = serde_json::from_slice(&seen[0].body).expect("json");
     assert_eq!(forwarded["tools"], original["tools"]);
-    running.shutdown().await;
+    support::shutdown(running).await;
     fs::remove_dir_all(&dir).ok();
 
     let chat = MockServer::start().await;
@@ -568,13 +571,13 @@ async fn codex_responses_tools_are_accepted() {
         .collect();
     assert_eq!(names, vec!["multi_agent_v1__spawn_agent", "apply_patch"]);
     assert!(!forwarded.to_string().contains("web_search"), "{forwarded}");
-    running.shutdown().await;
+    support::shutdown(running).await;
     fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test]
 async fn bedrock_converse_from_options_is_signed() {
-    let client = reqwest::Client::builder()
+    let client = support::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("client");
@@ -649,14 +652,14 @@ upstreams = [\"primary\"]
             .to_str()
             .expect("session text");
         assert_eq!(session, "SESSTOKEN");
-        running.shutdown().await;
+        support::shutdown(running).await;
         fs::remove_dir_all(&dir).ok();
     }
 }
 
 #[tokio::test]
 async fn vertex_generate_content_runs_through_the_factory() {
-    let client = reqwest::Client::builder()
+    let client = support::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("client");
@@ -724,7 +727,7 @@ upstreams = [\"vertex\"]
         .to_str()
         .expect("authorization text");
     assert_eq!(authorization, "Bearer ya29.test");
-    running.shutdown().await;
+    support::shutdown(running).await;
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -742,7 +745,7 @@ async fn vertex_startup_allows_a_credentials_file_that_does_not_exist_yet() {
     )
     .expect("config");
     let running = start_for_test(&config).await.expect("lazy startup");
-    running.shutdown().await;
+    support::shutdown(running).await;
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -773,7 +776,7 @@ async fn closed_idle_connection_is_retried() {
             std::thread::sleep(Duration::from_millis(10));
         }
     });
-    let client = reqwest::Client::builder()
+    let client = support::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("client");
@@ -819,7 +822,7 @@ upstreams = [\"primary\"]
     let retried = post_text(&client, &running, "/v1/chat/completions", &token, chat).await;
     assert!(retried.contains("ok"), "{retried}");
     second.join().expect("second server");
-    running.shutdown().await;
+    support::shutdown(running).await;
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -850,7 +853,7 @@ async fn builtin_read_timeout_follows_http_limits() {
             }
         }
     });
-    let client = reqwest::Client::builder()
+    let client = support::builder()
         .timeout(Duration::from_secs(3))
         .build()
         .expect("client");
@@ -891,7 +894,7 @@ upstreams = [\"primary\"]
         "read budget was not the pooled limit: {elapsed:?}"
     );
     assert_ne!(response.status().as_u16(), 200);
-    running.shutdown().await;
+    support::shutdown(running).await;
     fs::remove_dir_all(&dir).ok();
 }
 

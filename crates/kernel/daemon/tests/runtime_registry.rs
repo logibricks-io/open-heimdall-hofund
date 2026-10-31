@@ -1,5 +1,7 @@
 //! End-to-end daemon startup and requests through an injected registry.
 
+mod support;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -184,7 +186,7 @@ async fn daemon_runs_on_a_fake_registry() {
     });
     let running = start_with_registry(&config, registry).await.expect("start");
     let token = std::fs::read_to_string(dir.path().join("hofund.token")).expect("token");
-    let response = reqwest::Client::new()
+    let response = support::client()
         .post(format!("http://{}/v1/chat/completions", running.local_addr))
         .bearer_auth(token.trim())
         .json(&serde_json::json!({"model": "demo", "messages": []}))
@@ -194,7 +196,7 @@ async fn daemon_runs_on_a_fake_registry() {
     assert_eq!(response.status(), 200);
     assert!(response.text().await.expect("body").contains("ok"));
     assert!(consultations.load(Ordering::SeqCst) > 0);
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
 
 #[tokio::test]
@@ -217,7 +219,7 @@ async fn a_surface_relays_on_the_daemons_pooled_client() {
     });
     let running = start_with_registry(&config, registry).await.expect("start");
     let token = std::fs::read_to_string(dir.path().join("hofund.token")).expect("token");
-    let response = reqwest::Client::new()
+    let response = support::client()
         .post(format!("http://{}/relay", running.local_addr))
         .bearer_auth(token.trim())
         .body("payload")
@@ -226,5 +228,5 @@ async fn a_surface_relays_on_the_daemons_pooled_client() {
         .expect("request");
     assert_eq!(response.status(), 200);
     assert_eq!(response.text().await.expect("body"), "from upstream");
-    running.shutdown().await;
+    support::shutdown(running).await;
 }
