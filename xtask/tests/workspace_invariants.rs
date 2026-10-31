@@ -1320,3 +1320,15 @@ fn relative(root: &Path, path: &Path) -> String {
         .collect::<Vec<_>>()
         .join("/")
 }
+
+#[test]
+fn e6_docs_cover_the_backend_socket_and_codex_wiring() {
+    let root = workspace_root();
+    let read = |rel: &str| read_to_string(&root.join(rel));
+    let codecs = read("docs/codecs.md");
+    assert!(codecs.contains("GET /backend-api/codex/responses"));
+    assert!(!codecs.contains("Codex-backend Responses path is not applicable"));
+    assert!(read("CHANGELOG.md").contains("P0-1e"));
+    assert!(read("docs/coverage/agents.md").contains("supports_websockets"));
+    assert!(read("docs/feature-parity.md").contains("e3_"));
+}

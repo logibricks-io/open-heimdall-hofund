@@ -282,6 +282,7 @@ impl Table {
                         member: Arc::clone(&spec.member) as Arc<dyn Member>,
                         wire_model: spec.wire_model.clone(),
                         max_output_tokens: spec.max_output_tokens,
+                        context_window: None,
                     })
                     .collect();
                 (model.clone(), list)

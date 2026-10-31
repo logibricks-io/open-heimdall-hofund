@@ -87,6 +87,11 @@ pub trait InboundSurface: Send + Sync + 'static {
     /// Routes the gateway mounts. Prefixes are checked for conflicts at build time.
     fn routes(&self) -> &'static [RouteSpec];
 
+    /// Exact paths on which this surface accepts a Responses WebSocket.
+    fn responses_websocket_paths(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Handles a request the gateway has already accepted.
     ///
     /// # Errors

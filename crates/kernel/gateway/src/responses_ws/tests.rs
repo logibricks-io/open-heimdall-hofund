@@ -33,6 +33,7 @@ struct Reply {
     fail: Option<u16>,
     chunks: Vec<Vec<u8>>,
     delay: Duration,
+    pending: bool,
 }
 
 type Calls = Arc<Mutex<Vec<ModelRequest>>>;
@@ -55,6 +56,18 @@ impl Reply {
 
     fn delayed(self, delay: Duration) -> Self {
         Self { delay, ..self }
+    }
+
+    fn pending(id: &str) -> Self {
+        Self {
+            chunks: vec![sse(&[json!({
+                "type": "response.created",
+                "response": {"id": id, "object": "response", "status": "in_progress", "output": []},
+            })])
+            .into_bytes()],
+            pending: true,
+            ..Self::default()
+        }
     }
 
     fn stream(id: &str, answer: &str) -> Self {
@@ -112,7 +125,15 @@ impl Drop for ActiveGuard {
 struct ReplyStream {
     chunks: VecDeque<Vec<u8>>,
     delay: Duration,
+    pending: bool,
+    dropped: Arc<AtomicUsize>,
     _guard: Option<ActiveGuard>,
+}
+
+impl Drop for ReplyStream {
+    fn drop(&mut self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 struct Fake {
@@ -122,6 +143,7 @@ struct Fake {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     active: Arc<AtomicUsize>,
     maximum: Arc<AtomicUsize>,
+    dropped: Arc<AtomicUsize>,
 }
 
 impl Fake {
@@ -135,6 +157,7 @@ impl Fake {
             replies: Arc::clone(&replies),
             active: Arc::new(AtomicUsize::new(0)),
             maximum: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(AtomicUsize::new(0)),
         });
         (fake, calls, replies)
     }
@@ -187,6 +210,8 @@ impl Member for Fake {
         let state = ReplyStream {
             chunks: reply.chunks.into(),
             delay: reply.delay,
+            pending: reply.pending,
+            dropped: Arc::clone(&self.dropped),
             _guard: guard,
         };
         Ok(Completion::Raw(BodyStream::from_stream(stream::unfold(
@@ -196,7 +221,12 @@ impl Member for Fake {
                     tokio::time::sleep(state.delay).await;
                     state.delay = Duration::ZERO;
                 }
-                let chunk = state.chunks.pop_front()?;
+                let Some(chunk) = state.chunks.pop_front() else {
+                    if state.pending {
+                        std::future::pending::<()>().await;
+                    }
+                    return None;
+                };
                 Some((Ok(Bytes::from(chunk)), state))
             },
         ))))
@@ -231,12 +261,12 @@ impl RequestEvents for EventSpy {
     }
 }
 
-fn gateway_app(
+fn gateway(
     members: Vec<Arc<dyn Member>>,
     token_file: Option<PathBuf>,
     usage: Arc<Ledger>,
     events: Option<Arc<EventSpy>>,
-) -> Router {
+) -> Gateway {
     let mut routes = BTreeMap::new();
     routes.insert("demo".to_owned(), members);
     let snapshot = Snapshot::new(ModelRouter::new(routes, FailoverPolicy::default()));
@@ -250,11 +280,28 @@ fn gateway_app(
         None => Gateway::new(snapshot, "secret".to_owned(), codecs, usage),
     };
     match events {
-        Some(events) => gateway
-            .with_request_events(events, Arc::new(AtomicU64::new(0)))
-            .into_router(),
-        None => gateway.into_router(),
+        Some(events) => gateway.with_request_events(events, Arc::new(AtomicU64::new(0))),
+        None => gateway,
     }
+}
+
+fn gateway_app(
+    members: Vec<Arc<dyn Member>>,
+    token_file: Option<PathBuf>,
+    usage: Arc<Ledger>,
+    events: Option<Arc<EventSpy>>,
+) -> Router {
+    gateway(members, token_file, usage, events).into_router()
+}
+
+async fn wait_for_drop(fake: &Fake, before: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fake.dropped.load(Ordering::SeqCst) == before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("upstream request body was not dropped");
 }
 
 struct TestServer {
@@ -285,11 +332,19 @@ struct Client {
 
 impl Client {
     async fn connect(server: &TestServer, path: &str) -> Self {
-        Self::connect_with(server, path, &[("authorization", "Bearer secret")]).await
+        Self::connect_addr(server.addr, path).await
     }
 
     async fn connect_with(server: &TestServer, path: &str, headers: &[(&str, &str)]) -> Self {
-        let mut request = format!("ws://{}{path}", server.addr)
+        Self::connect_addr_with(server.addr, path, headers).await
+    }
+
+    async fn connect_addr(addr: SocketAddr, path: &str) -> Self {
+        Self::connect_addr_with(addr, path, &[("authorization", "Bearer secret")]).await
+    }
+
+    async fn connect_addr_with(addr: SocketAddr, path: &str, headers: &[(&str, &str)]) -> Self {
+        let mut request = format!("ws://{addr}{path}")
             .into_client_request()
             .expect("client request");
         for (name, value) in headers {
@@ -951,7 +1006,7 @@ async fn b10_bad_frames_get_errors_and_binary_closes_unsupported() {
         assert_eq!(refused["error"]["param"], "type", "{frame}");
     }
     client.send_text(r#"{"type":"response.interrupt"}"#).await;
-    assert_eq!(client.json().await["error"]["code"], "unsupported_message");
+    assert_eq!(client.json().await["type"], "response.interrupt.failed");
     client.send(&create(None, Value::Null)).await;
     assert_eq!(client.json().await["error"]["code"], "invalid_value");
     assert!(calls.lock().expect("calls").is_empty());
@@ -1124,4 +1179,611 @@ fn b14_socket_end_logs_turns_continuations_and_byte_counts() {
     };
     with_default(LogSubscriber(Arc::clone(&quiet)), || idle.log());
     assert!(quiet.0.lock().expect("log fields").is_empty());
+}
+
+const BACKEND_PREFIX: &str = "/backend-api/agent";
+const BACKEND_PATH: &str = "/backend-api/agent/responses";
+static BACKEND_ID: hofund_plugin_api::SurfaceId =
+    hofund_plugin_api::SurfaceId::from_static("backend-test");
+static BACKEND_ROUTES: [hofund_plugin_api::RouteSpec; 2] = [
+    hofund_plugin_api::RouteSpec::from_static(hofund_plugin_api::Method::Get, BACKEND_PREFIX),
+    hofund_plugin_api::RouteSpec::from_static(hofund_plugin_api::Method::Post, BACKEND_PREFIX),
+];
+static BACKEND_SOCKET_PATHS: [&str; 1] = [BACKEND_PATH];
+
+#[derive(Debug)]
+struct BackendCall {
+    method: String,
+    path: String,
+    body: Value,
+    turn_state: Option<String>,
+    lite: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct BackendSurface {
+    calls: Arc<Mutex<Vec<BackendCall>>>,
+}
+
+#[async_trait]
+impl hofund_plugin_api::InboundSurface for BackendSurface {
+    fn id(&self) -> &hofund_plugin_api::SurfaceId {
+        &BACKEND_ID
+    }
+
+    fn routes(&self) -> &'static [hofund_plugin_api::RouteSpec] {
+        &BACKEND_ROUTES
+    }
+
+    fn responses_websocket_paths(&self) -> &'static [&'static str] {
+        &BACKEND_SOCKET_PATHS
+    }
+
+    async fn handle(
+        &self,
+        _route: &hofund_plugin_api::RouteSpec,
+        request: Request<hofund_plugin_api::Body>,
+        host: &hofund_plugin_api::SurfaceHost,
+    ) -> Result<Response<BodyStream>, PluginError> {
+        let header = |name: &str| {
+            request
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        self.calls.lock().expect("backend calls").push(BackendCall {
+            method: request.method().as_str().to_owned(),
+            path: request.uri().path().to_owned(),
+            body: serde_json::from_slice(request.body().bytes()).unwrap_or(Value::Null),
+            turn_state: header(wire::TURN_STATE),
+            lite: header(wire::LITE_HEADER),
+        });
+        if request.method() == Method::GET {
+            return Ok(Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(BodyStream::from_bytes(Vec::new()))
+                .expect("plain GET"));
+        }
+        let mut local = Request::new(hofund_plugin_api::Body::from_bytes(
+            request.body().bytes().clone(),
+        ));
+        *local.method_mut() = Method::POST;
+        *local.uri_mut() = "/v1/responses".parse().expect("local URI");
+        for name in ["content-type", "accept"] {
+            if let Some(value) = request.headers().get(name) {
+                local.headers_mut().insert(name, value.clone());
+            }
+        }
+        let mut response = host.gateway().call(local).await?;
+        for (name, value) in [
+            (wire::TURN_STATE, "turn-state"),
+            (wire::MODEL_HEADER, "demo"),
+            (wire::REASONING_HEADER, "yes"),
+            (wire::MODELS_ETAG_HEADER, "W/\"gateway\""),
+            (wire::PLAN_TYPE_HEADER, "plan"),
+            (wire::CREDITS_HAS_HEADER, "true"),
+            (wire::CREDITS_UNLIMITED_HEADER, "false"),
+            (wire::CREDITS_BALANCE_HEADER, "9.5"),
+        ] {
+            response
+                .headers_mut()
+                .insert(name, HeaderValue::from_static(value));
+        }
+        for (suffix, value) in [
+            ("primary-used-percent", "12.5"),
+            ("primary-window-minutes", "300"),
+            ("primary-reset-at", "1234"),
+        ] {
+            let name = format!("{}{suffix}", wire::CLIENT_HEADER_PREFIX);
+            response.headers_mut().insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+                HeaderValue::from_static(value),
+            );
+        }
+        Ok(response)
+    }
+}
+
+fn backend_gateway(
+    members: Vec<Arc<dyn Member>>,
+    token_file: Option<PathBuf>,
+    usage: Arc<Ledger>,
+    events: Option<Arc<EventSpy>>,
+    surface: Arc<BackendSurface>,
+) -> Router {
+    let mut routes = BTreeMap::new();
+    routes.insert("demo".to_owned(), members);
+    let snapshot = Snapshot::new(ModelRouter::new(routes, FailoverPolicy::default()));
+    let mut codecs = std::collections::HashMap::new();
+    codecs.insert(
+        "/v1/responses".to_owned(),
+        Arc::new(OpenAiResponses) as Arc<dyn Codec>,
+    );
+    let gateway = match token_file {
+        Some(path) => Gateway::with_token_file(snapshot, "first".to_owned(), path, codecs, usage),
+        None => Gateway::new(snapshot, "secret".to_owned(), codecs, usage),
+    }
+    .with_surfaces(vec![surface as Arc<dyn hofund_plugin_api::InboundSurface>]);
+    match events {
+        Some(events) => gateway
+            .with_request_events(events, Arc::new(AtomicU64::new(0)))
+            .into_router(),
+        None => gateway.into_router(),
+    }
+}
+
+fn backend_calls(surface: &BackendSurface) -> Vec<(String, String, Value)> {
+    surface
+        .calls
+        .lock()
+        .expect("backend calls")
+        .iter()
+        .map(|call| (call.method.clone(), call.path.clone(), call.body.clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn e3_backend_socket_replays_each_turn_through_the_full_surface_route() {
+    let (primary, primary_calls, primary_replies) = Fake::new("primary");
+    let (backup, backup_calls, backup_replies) = Fake::new("backup");
+    primary_replies
+        .lock()
+        .expect("primary replies")
+        .push_back(Reply::failure(503));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let events = Arc::new(EventSpy::default());
+    let surface = Arc::new(BackendSurface::default());
+    let server = TestServer::start(backend_gateway(
+        vec![primary.member(), backup.member()],
+        None,
+        Arc::clone(&usage),
+        Some(Arc::clone(&events)),
+        Arc::clone(&surface),
+    ))
+    .await;
+    let mut client = Client::connect(&server, BACKEND_PATH).await;
+
+    let mut warmup = create(None, json!([user("held")]));
+    warmup["generate"] = Value::Bool(false);
+    let warmed = client.turn(&warmup).await;
+    assert_eq!(warmed.len(), 2);
+    assert!(backend_calls(&surface).is_empty());
+
+    let mut first_turn = create(Some(terminal_id(&warmed)), json!([user("first")]));
+    first_turn["client_metadata"] = json!({
+        wire::TURN_STATE: "from-client",
+        wire::LITE_METADATA: "true",
+    });
+    let first = client.turn(&first_turn).await;
+    assert_eq!(
+        first.last().expect("completed")["type"],
+        "response.completed"
+    );
+    assert!(first.iter().any(|frame| {
+        frame["type"] == "response.metadata"
+            && frame["headers"][wire::TURN_STATE] == "turn-state"
+            && frame["headers"][wire::MODEL_HEADER] == "demo"
+            && frame["headers"][wire::REASONING_HEADER] == "yes"
+    }));
+    assert!(first.iter().any(|frame| {
+        frame["type"] == wire::RESPONSE_METADATA_EVENT
+            && frame["headers"][wire::MODELS_ETAG_HEADER] == "W/\"gateway\""
+    }));
+    assert!(first.iter().any(|frame| {
+        frame["type"] == wire::RATE_LIMITS_EVENT
+            && frame["rate_limits"]["primary"]["used_percent"] == 12.5
+            && frame["rate_limits"]["primary"]["window_minutes"] == 300
+            && frame["rate_limits"]["primary"]["reset_at"] == 1234
+            && frame["plan_type"] == "plan"
+            && frame["credits"]["balance"] == "9.5"
+    }));
+
+    let second = client
+        .turn(&create(Some(terminal_id(&first)), json!([user("second")])))
+        .await;
+    assert_eq!(
+        second.last().expect("completed")["type"],
+        "response.completed"
+    );
+    primary_replies
+        .lock()
+        .expect("primary replies")
+        .push_back(Reply::failure(429));
+    backup_replies
+        .lock()
+        .expect("backup replies")
+        .push_back(Reply::failure(429));
+    let refused = client
+        .turn(&create(
+            Some(terminal_id(&second)),
+            json!([user("limited")]),
+        ))
+        .await;
+    assert_eq!(refused.last().expect("error")["type"], "error");
+    assert_eq!(refused.last().expect("error")["status"], 429);
+
+    let calls = backend_calls(&surface);
+    assert_eq!(calls.len(), 3);
+    for (method, path, body) in &calls {
+        assert_eq!(method, "POST");
+        assert_eq!(path, BACKEND_PATH);
+        assert!(body.get("type").is_none());
+        assert!(body.get("previous_response_id").is_none());
+        assert!(body.get("generate").is_none());
+    }
+    assert_eq!(calls[0].2["input"].as_array().expect("input").len(), 2);
+    assert_eq!(calls[1].2["input"].as_array().expect("input").len(), 4);
+    assert_eq!(primary_calls.lock().expect("primary calls").len(), 3);
+    assert_eq!(backup_calls.lock().expect("backup calls").len(), 2);
+    assert_eq!(usage.rows().expect("usage rows").len(), 3);
+    assert_eq!(events.starts.lock().expect("starts").len(), 3);
+    assert_eq!(events.ends.lock().expect("ends").len(), 3);
+    let seen = surface.calls.lock().expect("backend calls");
+    assert_eq!(seen[0].turn_state.as_deref(), Some("from-client"));
+    assert_eq!(seen[0].lite.as_deref(), Some("true"));
+}
+
+#[tokio::test]
+async fn e4_other_paths_still_refuse_sockets_and_plain_get_uses_the_surface() {
+    let (fake, _calls, _replies) = Fake::new("primary");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let surface = Arc::new(BackendSurface::default());
+    let app = backend_gateway(vec![fake.member()], None, usage, None, Arc::clone(&surface));
+    for path in [
+        "/backend-api/agent/models",
+        "/backend-api/agent/responses/compact",
+        "/v1/models",
+        "/other",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .header(header::UPGRADE, "websocket")
+                    .body(Body::empty())
+                    .expect("upgrade"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED, "{path}");
+    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(BACKEND_PATH)
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .expect("plain GET"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let calls = surface.calls.lock().expect("backend calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].method, "GET");
+    assert_eq!(calls[0].path, BACKEND_PATH);
+}
+
+#[tokio::test]
+async fn e5_revoked_token_fails_the_next_backend_turn_not_the_socket() {
+    let (fake, calls, _replies) = Fake::new("primary");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let token = dir.path().join("token");
+    std::fs::write(&token, "first\n").expect("token");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let surface = Arc::new(BackendSurface::default());
+    let server = TestServer::start(backend_gateway(
+        vec![fake.member()],
+        Some(token.clone()),
+        usage,
+        None,
+        Arc::clone(&surface),
+    ))
+    .await;
+    let mut client =
+        Client::connect_with(&server, BACKEND_PATH, &[("authorization", "Bearer first")]).await;
+    let first = client.turn(&create(None, json!([user("first")]))).await;
+    assert_eq!(
+        first.last().expect("completed")["type"],
+        "response.completed"
+    );
+    std::fs::write(&token, "second\n").expect("rotate");
+    let refused = client
+        .turn(&create(Some(terminal_id(&first)), json!([user("second")])))
+        .await;
+    assert_eq!(refused.last().expect("error")["type"], "error");
+    assert_eq!(refused.last().expect("error")["status"], 401);
+    assert_eq!(calls.lock().expect("model calls").len(), 1);
+    assert_eq!(backend_calls(&surface).len(), 1);
+}
+
+#[test]
+fn c1_created_in_progress_and_completed_ids_are_interruptible() {
+    for kind in [
+        "response.created",
+        "response.in_progress",
+        "response.completed",
+    ] {
+        let run = Arc::new(TurnRun::new());
+        let mut events = TurnEvents::new(&run);
+        note_id(
+            &mut events,
+            &json!({"type": kind, "response": {"id": "resp_turn"}}),
+        );
+        assert!(run.interrupt("resp_turn"), "{kind}");
+        assert!(run.cancelled.load(Ordering::SeqCst), "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn c1_matching_interrupt_cancels_turn_and_holds_no_history() {
+    let (fake, _calls, replies) = Fake::new("primary");
+    replies
+        .lock()
+        .expect("replies")
+        .push_back(Reply::pending("resp_long"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let server = TestServer::start(gateway_app(vec![fake.member()], None, usage, None)).await;
+    let mut client = Client::connect(&server, "/v1/responses").await;
+    client.send(&create(None, json!([user("long")]))).await;
+    let created = client.json().await;
+    assert_eq!(created["type"], "response.created");
+    assert_eq!(created["response"]["id"], "resp_long");
+
+    let before = fake.dropped.load(Ordering::SeqCst);
+    client
+        .send(&json!({
+            "type": "response.interrupt",
+            "response_id": "resp_long",
+            "mode": "discard_partial_items",
+        }))
+        .await;
+    let accepted = client.json().await;
+    assert_eq!(accepted["type"], "response.interrupt.accepted");
+    assert_eq!(accepted["response_id"], "resp_long");
+    let incomplete = client.json().await;
+    assert_eq!(incomplete["type"], "response.incomplete");
+    assert_eq!(incomplete["response"]["id"], "resp_long");
+    assert_eq!(incomplete["response"]["object"], "response");
+    assert_eq!(incomplete["response"]["status"], "incomplete");
+    assert_eq!(
+        incomplete["response"]["incomplete_details"]["reason"],
+        "interrupted"
+    );
+    assert_eq!(incomplete["response"]["output"], json!([]));
+    wait_for_drop(&fake, before).await;
+
+    let unknown = client
+        .turn(&create(Some("resp_long"), json!([user("continuation")])))
+        .await;
+    assert_eq!(
+        unknown.last().expect("error")["error"]["code"],
+        "previous_response_not_found"
+    );
+    let next = client.turn(&create(None, json!([user("next")]))).await;
+    assert_eq!(next.last().expect("terminal")["type"], "response.completed");
+}
+
+#[tokio::test]
+async fn c2_idle_and_unknown_id_interrupts_fail() {
+    let (fake, _calls, replies) = Fake::new("primary");
+    replies
+        .lock()
+        .expect("replies")
+        .push_back(Reply::pending("resp_current"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let server = TestServer::start(gateway_app(vec![fake.member()], None, usage, None)).await;
+    let mut client = Client::connect(&server, "/v1/responses").await;
+
+    client
+        .send(&json!({"type": "response.interrupt", "response_id": "resp_idle"}))
+        .await;
+    let idle = client.json().await;
+    assert_eq!(idle["type"], "response.interrupt.failed");
+    assert_eq!(idle["response_id"], "resp_idle");
+
+    client.send(&create(None, json!([user("current")]))).await;
+    assert_eq!(client.json().await["response"]["id"], "resp_current");
+    client
+        .send(&json!({"type": "response.interrupt", "response_id": "resp_other"}))
+        .await;
+    let unknown = client.json().await;
+    assert_eq!(unknown["type"], "response.interrupt.failed");
+    assert_eq!(unknown["response_id"], "resp_other");
+
+    client
+        .send(&json!({"type": "response.interrupt", "response_id": "resp_current"}))
+        .await;
+    assert_eq!(client.json().await["type"], "response.interrupt.accepted");
+    assert_eq!(client.json().await["type"], "response.incomplete");
+}
+
+#[tokio::test]
+async fn c3_client_disconnect_cancels_upstream_request() {
+    let (fake, calls, replies) = Fake::new("primary");
+    replies
+        .lock()
+        .expect("replies")
+        .push_back(Reply::pending("resp_disconnect"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let server = TestServer::start(gateway_app(vec![fake.member()], None, usage, None)).await;
+    let mut client = Client::connect(&server, "/v1/responses").await;
+    client
+        .send(&create(None, json!([user("disconnect")])))
+        .await;
+    assert_eq!(client.json().await["response"]["id"], "resp_disconnect");
+    let before = fake.dropped.load(Ordering::SeqCst);
+    drop(client);
+    wait_for_drop(&fake, before).await;
+    assert_eq!(calls.lock().expect("calls").len(), 1);
+}
+
+#[tokio::test]
+async fn c4_writes_after_interrupt_are_suppressed_without_closing_socket() {
+    let app = Router::new().route(
+        "/v1/responses",
+        axum::routing::get(|upgrade: WebSocketUpgrade| async move {
+            upgrade.on_upgrade(|socket| async move {
+                let (sink, mut incoming) = socket.split();
+                let writer = SocketWriter::new(sink);
+                let run = Arc::new(TurnRun::new());
+                let turn = writer.for_turn(&run);
+                assert!(send_json(&turn, &json!({"type": "before"})).await);
+                run.cancel();
+                assert!(!send_json(&turn, &json!({"type": "after"})).await);
+                assert!(send_json(&writer, &json!({"type": "socket.live"})).await);
+                let _ = incoming.next().await;
+            })
+        }),
+    );
+    let server = TestServer::start(app).await;
+    let mut client = Client::connect(&server, "/v1/responses").await;
+    assert_eq!(client.json().await["type"], "before");
+    assert_eq!(client.json().await["type"], "socket.live");
+    client.socket.close(None).await.expect("close client");
+}
+
+#[tokio::test]
+async fn c5_new_sockets_get_503_while_draining() {
+    let (fake, _calls, _replies) = Fake::new("primary");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let gateway = gateway(vec![fake.member()], None, usage, None);
+    gateway.inner.sockets.drain();
+    let response = gateway
+        .into_router()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/responses")
+                .header(header::UPGRADE, "websocket")
+                .header(header::AUTHORIZATION, "Bearer secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body");
+    assert_eq!(body.as_ref(), RESTARTING.as_bytes());
+}
+
+#[test]
+fn c5_registry_refuses_sockets_once_draining() {
+    let registry = Arc::new(SocketRegistry::default());
+    let open = registry
+        .register()
+        .expect("a socket registers before the drain");
+    registry.drain();
+    assert!(registry.ending());
+    assert!(
+        registry.register().is_none(),
+        "a socket that upgraded as the drain began must not join it"
+    );
+    assert_eq!(*open.lifecycle.borrow(), SOCKET_AWAY);
+}
+
+#[tokio::test]
+async fn c5_shutdown_closes_idle_now_and_busy_after_turn() {
+    let (fake, _calls, replies) = Fake::new("primary");
+    replies
+        .lock()
+        .expect("replies")
+        .push_back(Reply::stream("resp_busy", "done").delayed(Duration::from_millis(150)));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let running = gateway(vec![fake.member()], None, usage, None)
+        .bind("127.0.0.1:0".parse().expect("listen"))
+        .await
+        .expect("bind");
+    let addr = running.local_addr;
+    let mut idle = Client::connect_addr(addr, "/v1/responses").await;
+    let mut busy = Client::connect_addr(addr, "/v1/responses").await;
+    busy.send(&create(None, json!([user("busy")]))).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fake.active.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("busy turn did not start");
+
+    let mut shutdown = tokio::spawn(running.shutdown());
+    tokio::time::timeout(Duration::from_millis(40), &mut shutdown)
+        .await
+        .expect_err("shutdown did not wait for the busy socket");
+    let idle_close = idle.close().await.expect("idle close");
+    assert_eq!(
+        idle_close.code,
+        tungstenite::protocol::frame::coding::CloseCode::Away
+    );
+    assert_eq!(idle_close.reason, RESTARTING);
+    let completed = busy.until_terminal().await;
+    assert_eq!(
+        completed.last().expect("terminal")["type"],
+        "response.completed"
+    );
+    let busy_close = busy.close().await.expect("busy close");
+    assert_eq!(
+        busy_close.code,
+        tungstenite::protocol::frame::coding::CloseCode::Away
+    );
+    assert_eq!(busy_close.reason, RESTARTING);
+    tokio::time::timeout(Duration::from_secs(10), &mut shutdown)
+        .await
+        .expect("shutdown did not finish")
+        .expect("shutdown task");
+}
+
+#[tokio::test]
+async fn c5_shutdown_deadline_cuts_remaining_sockets() {
+    let (fake, _calls, replies) = Fake::new("primary");
+    replies
+        .lock()
+        .expect("replies")
+        .push_back(Reply::pending("resp_stuck"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let running = gateway(vec![fake.member()], None, usage, None)
+        .bind("127.0.0.1:0".parse().expect("listen"))
+        .await
+        .expect("bind");
+    let mut client = Client::connect_addr(running.local_addr, "/v1/responses").await;
+    client.send(&create(None, json!([user("stuck")]))).await;
+    assert_eq!(client.json().await["response"]["id"], "resp_stuck");
+    let before = fake.dropped.load(Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_millis(50), running.shutdown())
+        .await
+        .expect_err("a pending socket outlasted its drain deadline");
+    wait_for_drop(&fake, before).await;
+    assert!(client.message().await.is_none());
+}
+
+#[test]
+fn c6_docs_cover_interrupt_disconnect_and_shutdown() {
+    let docs = include_str!("../../../../../docs/codecs.md");
+    for expected in [
+        "response.interrupt.accepted",
+        "response.interrupt.failed",
+        "503",
+        "1001",
+        "disconnect",
+    ] {
+        assert!(docs.contains(expected), "codecs.md lacks {expected}");
+    }
+    assert!(include_str!("../../../../../CHANGELOG.md").contains("P0-1c"));
+    let parity = include_str!("../../../../../docs/feature-parity.md");
+    assert!(parity.contains("c1_"));
+    assert!(parity.contains("c5_"));
 }

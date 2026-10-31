@@ -241,8 +241,11 @@ Checked 2026-10-25 against the Responses tool list and against
 
 ## A Responses WebSocket
 
-`GET /v1/responses` and `GET /responses` accept a WebSocket upgrade. A
-plain GET still answers 405 with `Allow: POST`; an upgrade on any other path
+`GET /v1/responses`, `GET /responses`, and
+`GET /backend-api/codex/responses` accept a WebSocket upgrade. The last path
+is declared by the Codex catalog surface through the inbound plugin API. A
+plain GET still answers 405 with `Allow: POST` on the built-in routes and keeps
+its ordinary surface behavior on the Codex path; an upgrade on any other path
 answers 426. Text frames are `response.create` objects and turns run one at a
 time in arrival order. Binary frames close with 1003, malformed requests get a
 400 error frame, and the message read limit is the same 8 MiB as the HTTP body
@@ -269,14 +272,27 @@ created event, output-item done events, and the matching terminal event.
 Response headers become metadata and rate-limit frames; HTTP failures become
 error frames with their status, error object, and retry/rate-limit headers.
 Error bodies are capped at 1 MiB. A reply that ends without a terminal event
-closes the socket with 1011. Interrupts, disconnect cancellation, and shutdown
-drain are not part of this transport yet.
+closes the socket with 1011.
+
+A `response.interrupt` may name any id the turn has reported in a created,
+in-progress, or completed event. A match cancels the upstream request, then
+sends `response.interrupt.accepted` followed by `response.incomplete` with
+reason `interrupted` and empty output. The interrupted turn is not held for
+continuation, and its later writes are suppressed without closing the socket.
+An unknown id or an interrupt with no turn in flight gets
+`response.interrupt.failed`. A client disconnect also cancels the turn in
+flight.
+
+During graceful shutdown, new socket upgrades get 503 `hofund is restarting`.
+Idle sockets close 1001 immediately; a busy socket closes 1001 after its turn.
+Shutdown waits for those sockets until its deadline, then cuts any that remain.
+Socket turns are tracked by this socket drain, not by the HTTP request drain.
 
 The upstream leg still receives the whole expanded conversation on every
 turn; only the client's upload to hofund is reduced. Socket history is memory
-only and is lost when the socket closes or the gateway restarts. The
-Codex-backend Responses path is not applicable because hofund has no such
-socket surface; if that surface is added, it must use this same behavior.
+only and is lost when the socket closes or the gateway restarts. P0-1e (#481)
+added the Codex-backend Responses path with this same behavior; it is no longer
+an out-of-scope gap.
 
 ## Client-facing ids and Chat usage chunks
 

@@ -73,6 +73,7 @@ struct Inner {
     surface_http: Option<Arc<dyn HttpBackend>>,
     /// Shared in-flight counter surfaced on control status and snapshots.
     in_flight: Arc<AtomicU64>,
+    sockets: Arc<responses_ws::SocketRegistry>,
 }
 
 struct TokenState {
@@ -282,6 +283,7 @@ pub struct Running {
     resources: Vec<Box<dyn std::any::Any + Send>>,
     shutdown_request: Option<(watch::Sender<bool>, watch::Receiver<bool>)>,
     drain_bound: Option<std::time::Duration>,
+    sockets: Option<Arc<responses_ws::SocketRegistry>>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
 }
@@ -370,6 +372,7 @@ impl Gateway {
                 request_events: None,
                 surface_http: None,
                 in_flight: Arc::new(AtomicU64::new(0)),
+                sockets: Arc::new(responses_ws::SocketRegistry::default()),
             }),
         }
     }
@@ -420,13 +423,7 @@ impl Gateway {
     /// a Generative Language codec is registered, the process binds the
     /// catch-all generate route and the model list instead.
     pub fn into_router(self) -> axum::Router {
-        let mut routes = codec_routes(&self.inner);
-        if !self.inner.surfaces.is_empty() {
-            routes = routes.fallback(dispatch_surface);
-        }
-        routes
-            .with_state(Arc::clone(&self.inner))
-            .layer(axum::middleware::from_fn(responses_ws::path_guard))
+        request_router(&self.inner)
     }
 
     /// Binds `listen` and serves until [`Running`] shuts down.
@@ -438,7 +435,8 @@ impl Gateway {
     /// The returned server can move to another address with
     /// [`Running::relisten`].
     pub async fn bind(self, listen: SocketAddr) -> Result<Running, GatewayError> {
-        serve_relistenable(self.into_router(), listen).await
+        let sockets = Arc::clone(&self.inner.sockets);
+        serve_relistenable(self.into_router(), listen, sockets).await
     }
 }
 
@@ -446,6 +444,7 @@ impl Gateway {
 async fn serve_relistenable(
     router: axum::Router,
     listen: SocketAddr,
+    sockets: Arc<responses_ws::SocketRegistry>,
 ) -> Result<Running, GatewayError> {
     let listener = TcpListener::bind(listen)
         .await
@@ -464,6 +463,7 @@ async fn serve_relistenable(
     });
     let mut running = Running::new(local_addr, shutdown, task);
     running.relisten = Some(handle);
+    running.sockets = Some(sockets);
     Ok(running)
 }
 
@@ -484,6 +484,7 @@ impl Running {
             resources: Vec::new(),
             shutdown_request: None,
             drain_bound: None,
+            sockets: None,
             relisten: None,
             fatal: None,
         }
@@ -645,16 +646,23 @@ impl Running {
 
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
     /// Control listeners close connections that outlast their drain deadline.
+    /// Responses sockets close after their turns; dropping a bounded drain cuts them.
     pub async fn shutdown(mut self) {
         self.request_shutdown();
         for task in self.attached.drain(..) {
             task.abort();
+        }
+        if let Some(sockets) = &self.sockets {
+            sockets.drain();
         }
         for linked in self.linked.drain(..) {
             Box::pin(linked.shutdown()).await;
         }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
+        }
+        if let Some(sockets) = &self.sockets {
+            sockets.wait().await;
         }
         if let Some(mut task) = self.task.take() {
             match self.drain_bound {
@@ -677,10 +685,27 @@ impl Drop for Running {
         for task in self.attached.drain(..) {
             task.abort();
         }
+        if let Some(sockets) = &self.sockets {
+            sockets.cut();
+        }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
     }
+}
+
+/// The complete outer request path, also used to replay a socket turn.
+fn request_router(app: &Arc<Inner>) -> axum::Router {
+    let mut routes = codec_routes(app);
+    if !app.surfaces.is_empty() {
+        routes = routes.fallback(dispatch_surface);
+    }
+    routes
+        .with_state(Arc::clone(app))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(app),
+            responses_ws::path_guard,
+        ))
 }
 
 /// `/health`, the model lists and every codec route. Surfaces are not here,
@@ -865,7 +890,7 @@ async fn not_found(request: Request) -> Response {
 
 async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Response {
     if responses_ws::wants_socket(request.method(), request.headers()) {
-        return responses_ws::upgrade_required();
+        return responses_ws::get(State(app), request).await;
     }
     let method = request.method().clone();
     let path = request.uri().path().to_owned();

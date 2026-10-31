@@ -159,6 +159,10 @@ fn shipped_agent_descriptions_preserve_public_fields() {
                 Slot::Literal("responses"),
             ),
             (
+                "model_providers.hofund.supports_websockets",
+                Slot::Json("true"),
+            ),
+            (
                 "model_providers.hofund.experimental_bearer_token",
                 Slot::Token,
             ),
@@ -287,6 +291,65 @@ fn assert_sets(description: &AgentDescription, file: &str, expected: &[(&str, Sl
         assert_eq!(set.key(), *key);
         assert_eq!(set.slot(), slot);
     }
+}
+
+#[test]
+fn e1_codex_websocket_flag_survives_lifecycle_and_preserves_user_providers() {
+    let home = scratch();
+    let path = home.join(".codex/config.toml");
+    let original = r#"model = "user-model"
+
+[model_providers.other]
+name = "Other provider"
+base_url = "https://other.example/v1"
+supports_websockets = false
+extra = true
+"#;
+    write(&path, original);
+    let session = Session::new(&*home);
+    let target = target();
+    let agent = adapter("codex", TargetOs::Linux);
+    let read = || -> toml::Table {
+        toml::from_str(&fs::read_to_string(&path).expect("config")).expect("TOML")
+    };
+
+    agent.apply(&session, &target).expect("connect");
+    assert_eq!(
+        read()["model_providers"]["hofund"]["supports_websockets"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        read()["model_providers"]["other"],
+        toml::from_str::<toml::Table>(original).expect("original")["model_providers"]["other"]
+    );
+    assert!(agent.status(&session, &target).expect("status").connected());
+
+    let drifted = fs::read_to_string(&path)
+        .expect("connected config")
+        .replace("supports_websockets = true", "supports_websockets = false");
+    write(&path, &drifted);
+    assert!(!agent.status(&session, &target).expect("drift").connected());
+    agent.apply(&session, &target).expect("repair drift");
+    assert_eq!(
+        read()["model_providers"]["hofund"]["supports_websockets"].as_bool(),
+        Some(true)
+    );
+
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    assert_eq!(
+        read()["model_providers"]["hofund"]["supports_websockets"].as_bool(),
+        Some(true)
+    );
+    agent.disconnect(&session, false).expect("disconnect");
+    let restored = read();
+    assert!(restored["model_providers"].get("hofund").is_none());
+    assert_eq!(
+        restored["model_providers"]["other"],
+        toml::from_str::<toml::Table>(original).expect("original")["model_providers"]["other"]
+    );
 }
 
 #[test]
@@ -940,7 +1003,7 @@ fn scratch() -> Scratch {
 }
 
 #[test]
-fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
+fn shipped_vscode_clear_restores_previous_default_model() {
     let home = scratch();
     let session = Session::new(&*home);
     let dir = home.join(".config").join("Code").join("User");
@@ -955,7 +1018,8 @@ fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
     fs::write(&settings, settings_text).expect("seed settings");
     let target = target();
     let agent = adapter("vscode", TargetOs::Linux);
-    agent.apply(&session, &target).expect("apply");
+    let plan = agent.apply(&session, &target).expect("apply");
+    assert_eq!(plan.changes().len(), 1, "{plan:?}");
     let read = |path: &Path| -> serde_json::Value {
         hofund_kit_agent::parse_jsonc(
             std::str::from_utf8(&fs::read(path).expect("read")).expect("UTF-8"),
@@ -993,7 +1057,7 @@ fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
     assert!(agent.status(&session, &target).expect("status").connected());
     agent.set_model(&session, &target, None).expect("clear");
     let json = read(&settings);
-    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["chat.defaultModel"], "mine");
     assert_eq!(
         json["chat"],
         serde_json::json!({ "agent": { "enabled": true } })
@@ -1002,15 +1066,96 @@ fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
         .set_model(&session, &target, Some("route-a"))
         .expect("pick again");
     agent.disconnect(&session, false).expect("disconnect");
-    // The models file comes back byte for byte; settings gets the user's
-    // default model back beside their other keys.
     assert_eq!(fs::read_to_string(&models).expect("models"), models_text);
-    let json = read(&settings);
-    assert_eq!(json["chat.defaultModel"], "mine");
     assert_eq!(
-        json["chat"],
-        serde_json::json!({ "agent": { "enabled": true } })
+        fs::read_to_string(&settings).expect("settings"),
+        settings_text
     );
+}
+
+#[test]
+fn shipped_vscode_clear_without_previous_default_model_removes_key() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(&settings, "{\"editor.fontSize\": 14}\n");
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["editor.fontSize"], 14);
+}
+
+#[test]
+fn shipped_vscode_clear_with_an_empty_previous_default_model_removes_key() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(
+        &settings,
+        "{\"chat.defaultModel\": \"\", \"editor.fontSize\": 14}\n",
+    );
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["editor.fontSize"], 14);
+}
+
+#[test]
+fn shipped_vscode_clear_does_not_restore_a_previous_gateway_model() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(
+        &settings,
+        "{\"chat.defaultModel\": \"route-a\", \"editor.fontSize\": 14}\n",
+    );
+    let target = target_with(&["route-a", "route-b"]);
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-b"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["editor.fontSize"], 14);
+}
+
+#[test]
+fn shipped_vscode_clear_then_disconnect_restores_once() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(&settings, "{\"chat.defaultModel\": \"mine\"}\n");
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let mut edited: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(edited["chat.defaultModel"], "mine");
+    edited["note"] = serde_json::json!("keep");
+    write(&settings, &edited.to_string());
+    agent.disconnect(&session, false).expect("disconnect");
+    let restored: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(restored["chat.defaultModel"], "mine");
+    assert_eq!(restored["note"], "keep");
+    assert!(!agent.disconnect(&session, false).expect("again").changed());
 }
 
 #[test]
@@ -1069,6 +1214,7 @@ fn shipped_qwen_pick_points_the_session_at_the_gateway_entry() {
     assert!(agent.status(&session, &target).expect("status").connected());
     agent.set_model(&session, &target, None).expect("clear");
     let json = read();
+    assert_eq!(json["model"]["name"], "mine");
     assert_eq!(json["model"]["baseUrl"], "https://mine.example.test/v1");
     assert_eq!(json["security"]["auth"]["selectedType"], "qwen-oauth");
     agent.disconnect(&session, false).expect("disconnect");
@@ -1076,6 +1222,33 @@ fn shipped_qwen_pick_points_the_session_at_the_gateway_entry() {
         read(),
         serde_json::from_str::<serde_json::Value>(original).expect("original")
     );
+}
+
+#[test]
+fn shipped_droid_clear_restores_previous_default_model() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".factory/settings.json");
+    write(
+        &path,
+        "{\"sessionDefaultSettings\":{\"model\":\"custom:mine\"},\"theme\":\"dark\"}\n",
+    );
+    let target = target();
+    let agent = adapter("droid", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let picked: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    assert_eq!(
+        picked["sessionDefaultSettings"]["model"],
+        "custom:hofund/route-a"
+    );
+    agent.set_model(&session, &target, None).expect("clear");
+    let cleared: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    assert_eq!(cleared["sessionDefaultSettings"]["model"], "custom:mine");
+    assert_eq!(cleared["theme"], "dark");
 }
 
 const CLINE_PROVIDERS: &str = r#"{
@@ -1256,7 +1429,7 @@ max_context_size = 262144
 "#;
 
 #[test]
-fn shipped_kimi_pick_sets_default_model_and_disconnect_gives_it_back() {
+fn shipped_kimi_clear_restores_default_model_when_table_exists() {
     let home = scratch();
     let session = Session::new(&*home);
     let path = home.join(".kimi-code").join("config.toml");
@@ -1300,9 +1473,11 @@ fn shipped_kimi_pick_sets_default_model_and_disconnect_gives_it_back() {
         Some("hofund/route-a")
     );
     assert!(agent.status(&session, &target).expect("status").connected());
-    // Clearing drops the key (#433); disconnect puts back the user's.
     agent.set_model(&session, &target, None).expect("clear");
-    assert!(!read().contains_key("default_model"));
+    assert_eq!(
+        read()["default_model"].as_str(),
+        Some("kimi-code/kimi-for-coding")
+    );
     let cleared_text = fs::read_to_string(&path).expect("clear");
     assert!(cleared_text.contains("# my model choice"), "{cleared_text}");
     agent
@@ -1315,6 +1490,57 @@ fn shipped_kimi_pick_sets_default_model_and_disconnect_gives_it_back() {
     );
     agent.disconnect(&session, false).expect("disconnect");
     assert_eq!(fs::read_to_string(&path).expect("read"), KIMI_CONFIG);
+}
+
+#[test]
+fn shipped_kimi_clear_drops_default_model_when_table_is_gone() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".kimi-code").join("config.toml");
+    write(&path, KIMI_CONFIG);
+    let target = target();
+    let agent = adapter("kimi", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let without_user_model = KIMI_CONFIG
+        .split("[models.\"kimi-code/kimi-for-coding\"]")
+        .next()
+        .expect("prefix");
+    write(&path, without_user_model);
+    agent.set_model(&session, &target, None).expect("clear");
+    let config: toml::Table =
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml");
+    assert!(!config.contains_key("default_model"));
+}
+
+#[test]
+fn shipped_kimi_status_reports_stale_hofund_default() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".kimi-code").join("config.toml");
+    write(&path, KIMI_CONFIG);
+    let agent = adapter("kimi", TargetOs::Linux);
+    agent
+        .set_model(
+            &session,
+            &target_with(&["route-a", "route-b"]),
+            Some("route-a"),
+        )
+        .expect("pick");
+    let remaining = target_with(&["route-b"]);
+    agent.apply(&session, &remaining).expect("route removed");
+    let config: toml::Table =
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml");
+    assert_eq!(config["default_model"].as_str(), Some("hofund/route-a"));
+    assert!(config["models"].get("hofund/route-b").is_some());
+    assert!(config["models"].get("hofund/route-a").is_none());
+    assert!(
+        !agent
+            .status(&session, &remaining)
+            .expect("status")
+            .connected()
+    );
 }
 
 const GROK_CONFIG: &str = r#"[models]
@@ -1451,7 +1677,7 @@ fn goose_provider(root: &Path) -> serde_json::Value {
 }
 
 #[test]
-fn shipped_goose_pick_makes_hofund_active_and_clear_gives_the_user_provider_back() {
+fn shipped_goose_pick_makes_hofund_active_and_clear_drops_the_pick() {
     let home = scratch();
     let session = Session::new(&*home);
     let path = home.join(".config").join("goose").join("config.yaml");
@@ -1481,17 +1707,18 @@ fn shipped_goose_pick_makes_hofund_active_and_clear_gives_the_user_provider_back
         Some("route-a")
     );
     assert!(agent.status(&session, &target).expect("status").connected());
-    // Clearing puts the user's provider back and drops hofund's entry.
+    // Clearing and disconnecting remove the pick and keep other providers.
+    let cleared_config = "# my goose settings\nGOOSE_MODE: smart_approve\nproviders:\n  anthropic:\n    enabled: true\n    model: claude-sonnet-4-5\n    configured: true\n";
     agent.set_model(&session, &target, None).expect("clear");
     let cleared = fs::read_to_string(&path).expect("read");
-    assert_eq!(cleared, GOOSE_CONFIG);
+    assert_eq!(cleared, cleared_config);
     assert_eq!(agent.configured_model(&session).expect("model"), None);
     agent
         .set_model(&session, &target, Some("route-a"))
         .expect("pick again");
     agent.disconnect(&session, false).expect("disconnect");
     let restored = fs::read_to_string(&path).expect("read");
-    assert_eq!(restored, GOOSE_CONFIG);
+    assert_eq!(restored, cleared_config);
     assert!(
         !home
             .join(".config/goose/custom_providers/hofund.json")
@@ -1511,7 +1738,8 @@ fn shipped_goose_pick_in_a_fresh_home_leaves_nothing_after_disconnect() {
         .expect("pick");
     let config = home.join(".config").join("goose").join("config.yaml");
     let picked = fs::read_to_string(&config).expect("read");
-    assert!(picked.contains("active_provider: hofund"), "{picked}");
+    assert!(picked.contains("GOOSE_PROVIDER: hofund"), "{picked}");
+    assert!(picked.contains("GOOSE_MODEL: route-a"), "{picked}");
     agent.set_model(&session, &target, None).expect("clear");
     agent.disconnect(&session, false).expect("disconnect");
     assert!(!home.join(".config").exists());
@@ -1598,6 +1826,30 @@ fn shipped_goose_lets_goose_ask_the_gateway_only_when_no_route_is_listed() {
     assert_eq!(provider["dynamic_models"], serde_json::json!(false));
     assert_eq!(provider["models"][0]["name"], "route-a");
     assert!(agent.status(&session, &one).expect("status").connected());
+    agent.disconnect(&session, false).expect("disconnect");
+    assert!(!root.exists());
+}
+
+#[test]
+fn b7_goose_emptied_route_list_drops_the_stale_dynamic_models_flag() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let root = home.join(".config");
+    let agent = adapter("goose", TargetOs::Linux);
+    let one = target();
+    agent.apply(&session, &one).expect("apply with a route");
+    assert_eq!(
+        goose_provider(&root)["dynamic_models"],
+        serde_json::json!(false)
+    );
+    let empty = target_with(&[]);
+    assert!(!agent.status(&session, &empty).expect("status").connected());
+    agent
+        .apply(&session, &empty)
+        .expect("apply after the routes went away");
+    let provider = goose_provider(&root);
+    assert!(provider.get("dynamic_models").is_none(), "{provider}");
+    assert!(agent.status(&session, &empty).expect("status").connected());
     agent.disconnect(&session, false).expect("disconnect");
     assert!(!root.exists());
 }
@@ -1741,4 +1993,216 @@ fn shipped_zed_clear_in_a_fresh_home_drops_the_whole_default_model() {
     agent.disconnect(&session, false).expect("disconnect");
     assert!(!home.join(".config").exists());
     assert!(store.items().is_empty());
+}
+
+fn picked_goose(initial: &str) -> (Scratch, Session, Compiled, PathBuf) {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".config/goose/config.yaml");
+    write(&path, initial);
+    let agent = adapter("goose", TargetOs::Linux);
+    let target = target();
+    agent.apply(&session, &target).expect("apply");
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    (home, session, agent, path)
+}
+
+const B7_GOOSE_OLD: &str =
+    "# legacy\nGOOSE_PROVIDER: anthropic\nGOOSE_MODEL: claude\nGOOSE_MODE: auto\n";
+const B7_GOOSE_NEW: &str = "# current\nGOOSE_PROVIDER: openai\nGOOSE_MODEL: gpt\nactive_provider: anthropic\nproviders:\n  anthropic:\n    enabled: true\n    configured: true\n    model: claude\n";
+
+#[test]
+fn b7_goose_old_layout_pick_writes_flat_keys() {
+    let (_home, _session, _agent, path) = picked_goose(B7_GOOSE_OLD);
+    assert_eq!(
+        fs::read_to_string(path).expect("picked"),
+        "# legacy\nGOOSE_PROVIDER: hofund\nGOOSE_MODEL: route-a\nGOOSE_MODE: auto\n"
+    );
+}
+
+#[test]
+fn b7_goose_new_layout_pick_writes_map_and_removes_flat_keys() {
+    let (_home, _session, _agent, path) = picked_goose(B7_GOOSE_NEW);
+    assert_eq!(
+        fs::read_to_string(path).expect("picked"),
+        "# current\nactive_provider: hofund\nproviders:\n  anthropic:\n    enabled: true\n    configured: true\n    model: claude\n  hofund:\n    enabled: true\n    configured: true\n    model: route-a\n"
+    );
+}
+
+#[test]
+fn b7_goose_providers_map_alone_is_the_current_layout() {
+    let (_home, _session, _agent, path) =
+        picked_goose("providers:\n  anthropic:\n    model: claude\n");
+    let picked = fs::read_to_string(path).expect("picked");
+    assert!(picked.contains("active_provider: hofund\n"), "{picked}");
+    assert!(picked.contains("  hofund:\n"), "{picked}");
+    assert!(!picked.contains("GOOSE_"), "{picked}");
+}
+
+#[test]
+fn b7_goose_active_provider_alone_is_the_current_layout() {
+    let (_home, _session, _agent, path) = picked_goose("active_provider: anthropic\n");
+    let picked = fs::read_to_string(path).expect("picked");
+    assert!(picked.starts_with("active_provider: hofund\n"), "{picked}");
+    assert!(picked.contains("providers:\n  hofund:\n"), "{picked}");
+    assert!(!picked.contains("GOOSE_"), "{picked}");
+}
+
+#[test]
+fn b7_goose_old_layout_clear_and_disconnect_remove_flat_keys() {
+    let (_home, session, agent, path) = picked_goose(B7_GOOSE_OLD);
+    let target = target();
+    agent.set_model(&session, &target, None).expect("clear");
+    let cleared = "# legacy\nGOOSE_MODE: auto\n";
+    assert_eq!(fs::read_to_string(&path).expect("cleared"), cleared);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(fs::read_to_string(path).expect("disconnected"), cleared);
+}
+
+#[test]
+fn b7_goose_new_layout_clear_and_disconnect_remove_active_and_hofund() {
+    let (_home, session, agent, path) = picked_goose(B7_GOOSE_NEW);
+    let target = target();
+    agent.set_model(&session, &target, None).expect("clear");
+    let cleared = "# current\nproviders:\n  anthropic:\n    enabled: true\n    configured: true\n    model: claude\n";
+    assert_eq!(fs::read_to_string(&path).expect("cleared"), cleared);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    agent.disconnect(&session, false).expect("disconnect");
+    assert_eq!(fs::read_to_string(path).expect("disconnected"), cleared);
+}
+
+#[test]
+fn b7_goose_other_provider_entries_survive_clear_and_disconnect() {
+    let initial = "active_provider: hofund\nproviders:\n  hofund:\n    enabled: true\n    configured: true\n    model: route-a\n  anthropic:\n    enabled: true\n    model: claude\n  openai:\n    enabled: false\n    model: gpt\n";
+    let (home, session, agent, path) = picked_goose(initial);
+    let target = target();
+    for disconnect in [false, true] {
+        if disconnect {
+            agent
+                .set_model(&session, &target, Some("route-a"))
+                .expect("pick again");
+            agent.disconnect(&session, false).expect("disconnect");
+        } else {
+            agent.set_model(&session, &target, None).expect("clear");
+        }
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(
+            text.contains("  anthropic:\n    enabled: true\n    model: claude\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  openai:\n    enabled: false\n    model: gpt\n"),
+            "{text}"
+        );
+        assert!(!text.contains("  hofund:\n"), "{text}");
+    }
+    agent
+        .disconnect(&session, false)
+        .expect("second disconnect");
+    assert!(
+        !home
+            .join(".config/goose/custom_providers/hofund.json")
+            .exists()
+    );
+}
+
+#[test]
+fn b7_goose_configured_model_follows_active_provider() {
+    for (initial, expected) in [
+        (
+            "active_provider: hofund\nproviders:\n  hofund:\n    model: route-a\n",
+            Some("route-a"),
+        ),
+        (
+            "active_provider: anthropic\nproviders:\n  hofund:\n    model: route-a\n",
+            None,
+        ),
+        (
+            "GOOSE_PROVIDER: hofund\nGOOSE_MODEL: flat-route\n",
+            Some("flat-route"),
+        ),
+        (
+            "active_provider: hofund\nGOOSE_MODEL: flat-route\nproviders:\n  hofund:\n    enabled: true\n",
+            Some("flat-route"),
+        ),
+        (
+            "active_provider: anthropic\nGOOSE_PROVIDER: hofund\nproviders:\n  hofund:\n    model: route-a\n",
+            None,
+        ),
+        (
+            "active_provider: \"\"\nGOOSE_PROVIDER: hofund\nGOOSE_MODEL: flat-route\n",
+            Some("flat-route"),
+        ),
+    ] {
+        let home = scratch();
+        let session = Session::new(&*home);
+        write(&home.join(".config/goose/config.yaml"), initial);
+        assert_eq!(
+            adapter("goose", TargetOs::Linux)
+                .configured_model(&session)
+                .expect("configured model")
+                .as_deref(),
+            expected,
+            "{initial}"
+        );
+    }
+}
+
+fn b7_go_binary(path: &Path) {
+    let mut bytes = b"\xff Go buildinf:".to_vec();
+    bytes.extend_from_slice(&[8, 2, 8, b'g', b'o', b'1', b'.', b'9', b'9', b'.', b'1', 0]);
+    write_bytes(path, &bytes);
+}
+
+#[test]
+fn b7_goose_pressly_binary_is_not_detected() {
+    let home = scratch();
+    let name = if cfg!(windows) { "goose.exe" } else { "goose" };
+    b7_go_binary(&home.join("bin").join(name));
+    let session = Session::new(&*home).with_path(home.join("bin"));
+    assert!(!adapter("goose", TargetOs::Linux).detect(&session));
+}
+
+#[test]
+fn b7_goose_real_binary_is_detected() {
+    let home = scratch();
+    let name = if cfg!(windows) { "goose.exe" } else { "goose" };
+    write(&home.join("bin").join(name), "not a Go program\n");
+    let session = Session::new(&*home).with_path(home.join("bin"));
+    assert!(adapter("goose", TargetOs::Linux).detect(&session));
+}
+
+#[test]
+fn b7_goose_yaml_comments_survive_pick_clear_and_disconnect() {
+    let initial = "# top\nGOOSE_MODE: auto # inline\nactive_provider: anthropic # active\nproviders:\n  # mine\n  anthropic:\n    model: claude # model\n";
+    let (_home, session, agent, path) = picked_goose(initial);
+    let target = target();
+    let picked = fs::read_to_string(&path).expect("picked");
+    for comment in ["# top", "# inline", "# active", "# mine", "# model"] {
+        assert!(picked.contains(comment), "{comment}: {picked}");
+    }
+    agent.set_model(&session, &target, None).expect("clear");
+    let cleared = fs::read_to_string(&path).expect("cleared");
+    for comment in ["# top", "# inline", "# mine", "# model"] {
+        assert!(cleared.contains(comment), "{comment}: {cleared}");
+    }
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick again");
+    let picked_again = fs::read_to_string(&path).expect("picked again");
+    for comment in ["# top", "# inline", "# mine", "# model"] {
+        assert!(picked_again.contains(comment), "{comment}: {picked_again}");
+    }
+    agent.disconnect(&session, false).expect("disconnect");
+    let disconnected = fs::read_to_string(path).expect("disconnected");
+    for comment in ["# top", "# inline", "# mine", "# model"] {
+        assert!(disconnected.contains(comment), "{comment}: {disconnected}");
+    }
 }

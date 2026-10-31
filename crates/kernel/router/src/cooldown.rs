@@ -870,7 +870,7 @@ enum Failure {
 }
 
 fn failure_kind(error: &PluginError) -> Option<Failure> {
-    if !error.cools() {
+    if !error.cools() || !crate::decision::rests(error) {
         return None;
     }
     if error.is_credit() {

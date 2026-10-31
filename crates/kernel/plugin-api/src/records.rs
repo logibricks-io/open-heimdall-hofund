@@ -2030,12 +2030,103 @@ pub struct AgentDescription {
     model_key: Option<&'static str>,
     model_file: Option<&'static str>,
     model_prefix: Option<&'static str>,
+    restore_model_on_clear: bool,
+    model_table: Option<&'static str>,
     effort_key: Option<&'static str>,
     effort_file: Option<&'static str>,
     visible: Visible,
     route: AgentRoute,
     requires: &'static [crate::id::SurfaceId],
     credential: Option<AgentCredential>,
+    active_provider: Option<AgentActiveProvider>,
+    binary_not_go: bool,
+}
+
+/// An agent that names the provider it uses in one key and keeps each
+/// provider's model in an entry of a providers map, with an older layout of
+/// two flat keys.
+///
+/// A pick on a file that has `key` or the map holding `entry` sets `key` to
+/// `value`, writes the model under `entry`, and removes the flat keys. A file
+/// with neither gets `legacy_provider = value` and `legacy_model = model`. The
+/// model the agent uses is read under the provider `key` names, else
+/// `legacy_provider`, and is hofund's only when that provider is `value`.
+/// Clearing removes `key`, both flat keys and `entry`, and keeps other
+/// providers' entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AgentActiveProvider {
+    key: &'static str,
+    value: &'static str,
+    entry: &'static str,
+    legacy_provider: &'static str,
+    legacy_model: &'static str,
+}
+
+impl AgentActiveProvider {
+    /// An active-provider layout. Generated code calls this.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a field is empty or `entry` has no parent map.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_static(
+        key: &'static str,
+        value: &'static str,
+        entry: &'static str,
+        legacy_provider: &'static str,
+        legacy_model: &'static str,
+    ) -> Self {
+        assert!(!key.is_empty(), "active provider key is empty");
+        assert!(!value.is_empty(), "active provider value is empty");
+        assert!(!entry.is_empty(), "active provider entry is empty");
+        assert!(
+            !legacy_provider.is_empty(),
+            "active provider legacy_provider is empty"
+        );
+        assert!(
+            !legacy_model.is_empty(),
+            "active provider legacy_model is empty"
+        );
+        Self {
+            key,
+            value,
+            entry,
+            legacy_provider,
+            legacy_model,
+        }
+    }
+
+    /// Key naming the provider the agent uses.
+    #[must_use]
+    pub const fn key(&self) -> &'static str {
+        self.key
+    }
+
+    /// Provider name that is hofund.
+    #[must_use]
+    pub const fn value(&self) -> &'static str {
+        self.value
+    }
+
+    /// Dotted path of hofund's entry in the providers map.
+    #[must_use]
+    pub const fn entry(&self) -> &'static str {
+        self.entry
+    }
+
+    /// Flat key naming the provider in the older layout.
+    #[must_use]
+    pub const fn legacy_provider(&self) -> &'static str {
+        self.legacy_provider
+    }
+
+    /// Flat key holding the model in the older layout.
+    #[must_use]
+    pub const fn legacy_model(&self) -> &'static str {
+        self.legacy_model
+    }
 }
 
 /// Where an agent reads hofund's key from the OS credential store instead of
@@ -2180,13 +2271,33 @@ impl AgentDescription {
             model_key,
             model_file: None,
             model_prefix: None,
+            restore_model_on_clear: false,
+            model_table: None,
             effort_key,
             effort_file: None,
             visible,
             route,
             requires,
             credential: None,
+            active_provider: None,
+            binary_not_go: false,
         }
+    }
+
+    /// Keeps the model in an active-provider layout, as `layout` says.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_active_provider(mut self, layout: AgentActiveProvider) -> Self {
+        self.active_provider = Some(layout);
+        self
+    }
+
+    /// Treats a Go program of the agent's binary name as another tool.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_binary_not_go(mut self) -> Self {
+        self.binary_not_go = true;
+        self
     }
 
     /// Stores hofund's key in the OS credential store, as `credential` says.
@@ -2212,6 +2323,23 @@ impl AgentDescription {
     pub const fn with_model_prefix(mut self, prefix: &'static str) -> Self {
         assert!(!prefix.is_empty(), "model prefix is empty");
         self.model_prefix = Some(prefix);
+        self
+    }
+
+    /// Restores the pre-connect model value when the model is cleared.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_model_restore_on_clear(mut self, restore: bool) -> Self {
+        self.restore_model_on_clear = restore;
+        self
+    }
+
+    /// Sets the table whose entries a gateway model value must name.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_model_table(mut self, table: &'static str) -> Self {
+        assert!(!table.is_empty(), "model table is empty");
+        self.model_table = Some(table);
         self
     }
 
@@ -2272,6 +2400,18 @@ impl AgentDescription {
         self.model_prefix
     }
 
+    /// Whether clearing the model restores its pre-connect value.
+    #[must_use]
+    pub const fn restore_model_on_clear(&self) -> bool {
+        self.restore_model_on_clear
+    }
+
+    /// Table whose entries a gateway model value must name.
+    #[must_use]
+    pub const fn model_table(&self) -> Option<&'static str> {
+        self.model_table
+    }
+
     /// Optional effort key.
     #[must_use]
     pub const fn effort_key(&self) -> Option<&'static str> {
@@ -2306,6 +2446,19 @@ impl AgentDescription {
     #[must_use]
     pub const fn credential(&self) -> Option<&AgentCredential> {
         self.credential.as_ref()
+    }
+
+    /// The active-provider layout the model is kept in, if any.
+    #[must_use]
+    pub const fn active_provider(&self) -> Option<&AgentActiveProvider> {
+        self.active_provider.as_ref()
+    }
+
+    /// Whether a Go program on `PATH` with the agent's binary name is another
+    /// tool rather than the agent.
+    #[must_use]
+    pub const fn binary_not_go(&self) -> bool {
+        self.binary_not_go
     }
 }
 

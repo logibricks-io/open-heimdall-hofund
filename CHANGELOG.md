@@ -29,8 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sequential `response.create` turns replay through the authenticated HTTP
   handler, with socket-local two-turn history, local warmups, SSE and unary
   event mapping, metadata/rate-limit frames, bounded error frames, and an
-  8 MiB read limit. A foreign `Origin` cannot open a socket. Interrupts,
-  disconnect cancellation, and shutdown drain remain for P0-1c.
+  8 MiB read limit. A foreign `Origin` cannot open a socket.
+- Responses WebSocket interrupts and graceful drain (P0-1c): a matching
+  `response.interrupt` cancels the upstream turn, returns accepted followed by
+  incomplete/interrupted, suppresses later turn writes, and holds no history;
+  an unknown or idle interrupt fails. Client disconnect cancels the upstream
+  request. Shutdown rejects new sockets with 503, closes idle sockets 1001 and
+  busy sockets after their turns, waits for the socket drain, and cuts sockets
+  that outlast its deadline.
+- Responses over a WebSocket on `/backend-api/codex/responses` (P0-1e, #481):
+  inbound surfaces can declare exact Responses socket paths, and every turn
+  replays through the full router, including surface fallback. Codex agent
+  wiring now writes `model_providers.hofund.supports_websockets = true` so the
+  client uses socket-local continuation instead of reuploading whole history.
 - Agent keys in the OS credential store (Z1): an agent descriptor may
   declare a `[credential]` item (URL and Windows target templates, literal
   account and label). The engine stores hofund's key there through a
@@ -66,18 +77,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hofund's key as the `Authorization` header, `skip_canonical_filtering`,
   one `models[]` entry per route, and `dynamic_models: false` only while a
   route is listed (Goose rejects an empty static list it may not
-  discover). Two deviations from the reference, by design: the provider
+  discover). One deviation from the reference, by design: the provider
   file is written at connect rather than only on a pick, so Goose lists
-  one more provider until disconnect removes it; and clearing the model
-  puts back the user's `active_provider` instead of deleting it. A pick
-  writes `active_provider: hofund` and `providers.hofund.{enabled,
-  configured, model}` (the bare route). User keys in `hofund.json` (extra
-  headers, `timeout_seconds`) are kept. Not yet: the legacy
-  `GOOSE_PROVIDER`/`GOOSE_MODEL` layout (#450), per-model reasoning and
-  `context_limit` (#451), `GOOSE_THINKING_EFFORT` (#452), a pick changed
-  in Goose (#453), WSL homes (#454), telling the pressly migration tool
-  apart (#455), and dropping a stale `dynamic_models` once every route is
-  gone (#456).
+  one more provider until disconnect removes it. A pick writes
+  `active_provider: hofund` and `providers.hofund.{enabled, configured,
+  model}` in the current layout, or `GOOSE_PROVIDER`/`GOOSE_MODEL` in the
+  legacy layout. User keys in `hofund.json` (extra headers,
+  `timeout_seconds`) are kept. Not yet: per-model reasoning and
+  `context_limit` (#451), `GOOSE_THINKING_EFFORT` (#452), and WSL homes
+  (#454).
 - agent.toml: `[[file]] env_os = ["linux", "macos"]` limits `env_override`
   to the named systems, and `env_replaces` is checked only against their
   paths (part of #411); a `json` slot with `with_models = true` is written
@@ -88,7 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absolute `GROK_HOME`), leaving the user's own model tables alone. A model
   pick writes `[models] default` and turns xAI's remote campaigns off
   (`[features] campaigns = false`), since a launch campaign would override the
-  default; clearing it drops the default (#433) and puts back the user's
+  default; clearing it drops the default (as the reference does) and puts back the user's
   campaigns setting. No catalog display names, context windows or reasoning
   efforts yet (#447), and WSL homes are not wired (#448).
 - Kimi Code agent (G12): `hofund agent connect kimi` writes
@@ -96,8 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one `[models."hofund/<route>"]` table per route (128000 context, tool
   use) to `~/.kimi-code/config.toml` (or under an absolute
   `KIMI_CODE_HOME`), leaving the user's own providers and models alone. A
-  model pick writes `default_model`; clearing it drops the key (#433) and
-  disconnect puts back the user's. No per-model catalog values yet (#441),
+  model pick writes `default_model`; clearing it puts back the user's value
+  while its model table remains. No per-model catalog values yet (#441),
   and the older kimi-cli's `~/.kimi` is not written (#442). The conformance
   kit's TOML user edit is now a
   top-level key, so it no longer lands inside a table hofund owns.
@@ -123,7 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the default profile's `settings.json` (VS Code Stable only), each route at
   the gateway's `/v1/chat/completions` with the token as its `Authorization`
   header. A model pick writes `chat.defaultModel` as the route id; clearing
-  the model drops it (#433) and disconnect puts back the user's value.
+  the model or disconnecting puts back the user's value.
 - Agent descriptions can write gateway text and nested objects inside model
   entries (`{ key, template }`, `{ key, object = [...] }`), and a key part
   may be quoted to hold a dot (`'"chat.defaultModel"'`). A file nothing is
@@ -705,6 +713,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Failover decisions (P0-3c) follow the reference order: the default
+  `failover.statuses` is 401, 402, 403, 404, 408, 429, and 500 to 599; retired
+  models, edge blocks, credit, quota, unserved models, refusals, request
+  shapes, unsupported parameters, and region replies fail over by body words on
+  any 4xx; a context overflow asks only members that may hold the request and
+  is otherwise returned to the client; a response-protection refusal skips the
+  provider's other accounts; an unexplained error on a member whose known window
+  is too small is reported as a prompt too long. Overflow, shape, refusal, and
+  protection replies do not rest the member.
 - Daemon integration tests now bound every HTTP request (60 s, no idle
   pooled connections) and every daemon shutdown (60 s), so a stalled
   request fails with a message instead of hanging the Windows runner
@@ -925,6 +942,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Goose model picks retain the config's current or legacy layout, remove stale
+  flat keys from the current layout, and clear/disconnect by removing only
+  hofund's active-provider and provider entries; other providers and YAML
+  comments survive (#450).
+- Goose `configured_model` follows `active_provider` with the legacy provider
+  and model fallbacks, and no longer reports hofund's model while another
+  provider is active (#453).
+- Goose detection rejects the pressly migration binary through bounded,
+  shell-free Go build-info inspection (#455). The answer is cached by the
+  binary's path, size and modification time; a probe that outlasts one
+  second counts as the agent and its late answer serves the next check.
+- Agent descriptors gain `binary_not_go` and an `[active_provider]` table
+  (`AgentActiveProvider` in the plugin API), so the Goose layouts above are
+  declared in its `agent.toml` rather than named in the agent kernel.
+- `Slot::JsonWithModels` removes its previous value when the visible route
+  list becomes empty, including from the connect snapshot, so Goose no longer
+  retains stale `dynamic_models: false` (#456).
+- Clearing a model restores the user's previous value for VS Code, Droid, and
+  Qwen Code, and removes the key when no previous value exists. Kimi Code
+  restores its previous `default_model` only while the matching model table
+  exists, and status reports a stale hofund default whose table is gone (#433,
+  #443).
 - Agent config edits keep user comments: JSONC uses span-aware replacements,
   insertions, and removals; block-style YAML edits touched lines in place;
   TOML removal transfers a key's leading comment to the next visible item or

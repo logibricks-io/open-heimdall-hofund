@@ -103,6 +103,29 @@ fn request_shaped_errors_and_statuses_do_not_cool() {
 }
 
 #[test]
+fn c11_late_rests_only_for_vendor_faults() {
+    let (book, id, _) = fixture();
+    for error in [
+        PluginError::interrupted("upstream connection reset"),
+        PluginError::status_error(502, "output is longer than max_tokens"),
+        PluginError::status_error(502, "content too long; please try again later"),
+    ] {
+        assert!(book.record_failure(&id, &error).is_some(), "{error}");
+    }
+    for message in [
+        "prompt is too long: about 120 tokens",
+        "Illegal API invocation from an unapproved channel",
+        "response protection is unavailable",
+        "an empty reply (the model answered nothing; try again)",
+    ] {
+        let error = PluginError::status_error(502, message);
+        assert_eq!(book.record_failure(&id, &error), None, "{message}");
+    }
+    let shape = PluginError::status_error(400, "Unknown parameter: tools");
+    assert_eq!(book.record_failure(&id, &shape), None);
+}
+
+#[test]
 fn rate_limit_uses_retry_hint_and_does_not_stretch_its_ladder() {
     let (book, id, clock) = fixture();
     let first =

@@ -21,10 +21,25 @@ pub struct AgentToml {
     pub files: Vec<FileToml>,
     #[serde(default, rename = "set")]
     pub sets: Vec<SetToml>,
-    pub model: Option<KeyToml>,
+    pub model: Option<ModelToml>,
     pub model_prefix: Option<String>,
     pub effort: Option<KeyToml>,
     pub credential: Option<CredentialToml>,
+    pub active_provider: Option<ActiveProviderToml>,
+    #[serde(default)]
+    pub binary_not_go: bool,
+}
+
+/// The model kept under a provider the agent names in one key, with an older
+/// layout of two flat keys.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveProviderToml {
+    pub key: String,
+    pub value: String,
+    pub entry: String,
+    pub legacy_provider: String,
+    pub legacy_model: String,
 }
 
 /// An OS credential store item the agent reads hofund's key from.
@@ -214,6 +229,16 @@ pub struct KeyToml {
     pub key: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelToml {
+    pub file: String,
+    pub key: String,
+    #[serde(default)]
+    pub restore_on_clear: bool,
+    pub table: Option<String>,
+}
+
 fn gateway() -> String {
     "gateway".to_owned()
 }
@@ -236,6 +261,53 @@ pub fn parse(
         inbound_ids,
     )?;
     Ok(agent)
+}
+
+fn validate_active_provider(
+    agent: &AgentToml,
+    layout: &ActiveProviderToml,
+    source: &str,
+) -> Result<(), String> {
+    for (name, value) in [
+        ("key", &layout.key),
+        ("value", &layout.value),
+        ("entry", &layout.entry),
+        ("legacy_provider", &layout.legacy_provider),
+        ("legacy_model", &layout.legacy_model),
+    ] {
+        if value.is_empty() {
+            return Err(error(
+                source,
+                format!("active_provider.{name}"),
+                "must not be empty",
+            ));
+        }
+    }
+    if layout.value.contains('.') {
+        return Err(error(
+            source,
+            "active_provider.value",
+            "must not contain `.`",
+        ));
+    }
+    if !layout.entry.contains('.') {
+        return Err(error(
+            source,
+            "active_provider.entry",
+            "must be an entry inside a providers map",
+        ));
+    }
+    let Some(model) = &agent.model else {
+        return Err(error(source, "active_provider", "needs `[model]`"));
+    };
+    if model.key != format!("{}.model", layout.entry) {
+        return Err(error(
+            source,
+            "active_provider.entry",
+            "must be the parent of `model.key`",
+        ));
+    }
+    Ok(())
 }
 
 fn validate(
@@ -279,6 +351,17 @@ fn validate(
             "model_prefix",
             "must be non-empty and end with `/`",
         ));
+    }
+    if let Some(layout) = &agent.active_provider {
+        validate_active_provider(agent, layout, source)?;
+    }
+    if let Some(model) = &agent.model
+        && let Some(table) = &model.table
+    {
+        if agent.model_prefix.is_none() {
+            return Err(error(source, "model.table", "requires model_prefix"));
+        }
+        valid_key(table, source, "model.table")?;
     }
     if let VisibleToml::Name(name) = &agent.visible
         && name != "all"
@@ -462,15 +545,22 @@ fn validate(
                 "catalog_models requires a JSON file",
             ));
         }
-        if matches!(
-            &set.slot,
-            SlotToml::Json(_) | SlotToml::ModelArray(_) | SlotToml::Append(_)
-        ) && !matches!(file.kind.as_str(), "json" | "yaml")
+        if matches!(&set.slot, SlotToml::Json(_))
+            && !matches!(file.kind.as_str(), "json" | "yaml" | "toml")
         {
             return Err(error(
                 source,
                 format!("{field}.slot"),
-                "json, model_array, and append require a JSON or YAML file",
+                "json requires a JSON, YAML, or TOML file",
+            ));
+        }
+        if matches!(&set.slot, SlotToml::ModelArray(_) | SlotToml::Append(_))
+            && !matches!(file.kind.as_str(), "json" | "yaml")
+        {
+            return Err(error(
+                source,
+                format!("{field}.slot"),
+                "model_array and append require a JSON or YAML file",
             ));
         }
         if matches!(&set.slot, SlotToml::ModelMap(_))
@@ -537,19 +627,25 @@ fn validate(
     if let Some(credential) = &agent.credential {
         validate_credential(credential, agent, &file_ids, source)?;
     }
-    for (field, key) in [("model", &agent.model), ("effort", &agent.effort)] {
-        if let Some(key) = key {
-            if key.key.is_empty() {
-                return Err(error(source, format!("{field}.key"), "must not be empty"));
-            }
-            valid_key(&key.key, source, &format!("{field}.key"))?;
-            if !file_ids.contains(key.file.as_str()) {
-                return Err(error(
-                    source,
-                    format!("{field}.file"),
-                    format!("references unknown file id `{}`", key.file),
-                ));
-            }
+    let model = agent
+        .model
+        .as_ref()
+        .map(|key| ("model", key.file.as_str(), key.key.as_str()));
+    let effort = agent
+        .effort
+        .as_ref()
+        .map(|key| ("effort", key.file.as_str(), key.key.as_str()));
+    for (field, file, key) in [model, effort].into_iter().flatten() {
+        if key.is_empty() {
+            return Err(error(source, format!("{field}.key"), "must not be empty"));
+        }
+        valid_key(key, source, &format!("{field}.key"))?;
+        if !file_ids.contains(file) {
+            return Err(error(
+                source,
+                format!("{field}.file"),
+                format!("references unknown file id `{file}`"),
+            ));
         }
     }
     Ok(())
@@ -1118,6 +1214,12 @@ pub fn render(agent: &AgentToml) -> (String, String) {
     ));
     if let Some(model) = &agent.model {
         output.push_str(&format!(".with_model_file({:?})", model.file));
+        if model.restore_on_clear {
+            output.push_str(".with_model_restore_on_clear(true)");
+        }
+        if let Some(table) = &model.table {
+            output.push_str(&format!(".with_model_table({table:?})"));
+        }
     }
     if let Some(prefix) = &agent.model_prefix {
         output.push_str(&format!(".with_model_prefix({prefix:?})"));
@@ -1134,6 +1236,15 @@ pub fn render(agent: &AgentToml) -> (String, String) {
             credential.label,
             credential.windows_target,
         ));
+    }
+    if let Some(layout) = &agent.active_provider {
+        output.push_str(&format!(
+            ".with_active_provider(hofund_plugin_api::AgentActiveProvider::from_static({:?}, {:?}, {:?}, {:?}, {:?}))",
+            layout.key, layout.value, layout.entry, layout.legacy_provider, layout.legacy_model,
+        ));
+    }
+    if agent.binary_not_go {
+        output.push_str(".with_binary_not_go()");
     }
     output.push_str(";\n");
     (static_name, output)
@@ -1338,6 +1449,50 @@ key = "effort"
     }
 
     #[test]
+    fn b7_active_provider_and_binary_not_go_are_validated_and_rendered() {
+        let table = "\n[active_provider]\nkey = \"active\"\nvalue = \"hofund\"\nentry = \"providers.hofund\"\nlegacy_provider = \"P\"\nlegacy_model = \"M\"\n";
+        let with_model = |text: String| {
+            text.replace(
+                "[model]\nfile = \"config\"\nkey = \"model\"",
+                "[model]\nfile = \"config\"\nkey = \"providers.hofund.model\"",
+            )
+            .replace(
+                "route = \"gateway\"",
+                "route = \"gateway\"\nbinary_not_go = true",
+            )
+        };
+        let agent = validate(&with_model(base() + table)).expect("active provider");
+        let source = render(&agent).1;
+        assert!(source.contains(
+            ".with_active_provider(hofund_plugin_api::AgentActiveProvider::from_static(\"active\", \"hofund\", \"providers.hofund\", \"P\", \"M\"))"
+        ));
+        assert!(source.contains(".with_binary_not_go()"));
+        let plain = render(&validate(&base()).expect("plain")).1;
+        assert!(!plain.contains(".with_active_provider("));
+        assert!(!plain.contains(".with_binary_not_go()"));
+
+        // The entry must hold the model key.
+        reject(base() + table, "active_provider.entry");
+        // A provider name with a dot would split into a nested key.
+        reject(
+            with_model(base() + &table.replace("value = \"hofund\"", "value = \"a.b\"")),
+            "active_provider.value",
+        );
+        reject(
+            with_model(base() + &table.replace("legacy_model = \"M\"", "legacy_model = \"\"")),
+            "active_provider.legacy_model",
+        );
+        reject(
+            with_model(
+                base() + &table.replace("entry = \"providers.hofund\"", "entry = \"hofund\""),
+            ),
+            "active_provider.entry",
+        );
+        let without_model = base().replace("[model]\nfile = \"config\"\nkey = \"model\"\n", "");
+        reject(without_model + table, "active_provider");
+    }
+
+    #[test]
     fn credential_is_validated_and_rendered() {
         let table = "\n[credential]\nfile = \"config\"\nurl = \"{v1}\"\naccount = \"Bearer\"\nlabel = \"app\"\nwindows_target = \"app:url={v1}\"\n";
         let text = base() + table;
@@ -1504,12 +1659,12 @@ key = "effort"
             source.contains("hofund_plugin_api::Slot::Json(\"false\")"),
             "{source}"
         );
-        reject(
-            with_slot("{ json = \"false\", with_models = true }")
+        validate(
+            &with_slot("{ json = \"false\", with_models = true }")
                 .replace("kind = \"json\"", "kind = \"toml\"")
                 .replace("config.json", "config.toml"),
-            "require a JSON or YAML file",
-        );
+        )
+        .expect("json slot with models in TOML");
     }
 
     #[test]
@@ -1535,7 +1690,7 @@ key = "effort"
         let toml = with_slot("{ json = \"false\" }")
             .replace("kind = \"json\"", "kind = \"toml\"")
             .replace("config.json", "config.toml");
-        reject(toml.clone(), "require a JSON or YAML file");
+        validate(&toml).expect("json slot in TOML");
         reject(
             toml.replace("{ json = \"false\" }", array),
             "require a JSON or YAML file",
