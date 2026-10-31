@@ -201,15 +201,18 @@ MemberCooledEvent.cause
 MemberCooledEvent.error
 MemberCooledEvent.failures
 MemberCooledEvent.member_id
+MemberCooledEvent.model
 MemberCooledEvent.remaining_ms
 MemberCooledEvent.retry_after_ms
 MemberCooledEvent.status
 MemberRecoveredEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 MemberRecoveredEvent.member_id
+MemberRecoveredEvent.model
 MemberRecoveredEvent.ready
 MemberSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 MemberSummary.id
 MemberSummary.ready
+MemberSummary.resting_models
 ModelEntry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 ModelEntry.context
 ModelEntry.display_name
@@ -267,6 +270,7 @@ ProviderSummary.kind
 ProviderSummary.model_count
 ProviderSummary.protocol
 ProviderSummary.ready
+ProviderSummary.resting_models
 ProviderTestRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProviderTestRequest.models
 ProviderTestRequest.version
@@ -292,6 +296,7 @@ RequestFinishedEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seri
 RequestFinishedEvent.duration_ms
 RequestFinishedEvent.input_tokens
 RequestFinishedEvent.member
+RequestFinishedEvent.model
 RequestFinishedEvent.output_tokens
 RequestFinishedEvent.request_id
 RequestFinishedEvent.status_class
