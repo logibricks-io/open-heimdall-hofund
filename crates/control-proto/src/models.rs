@@ -51,11 +51,27 @@ impl Default for ModelListResponse {
 }
 
 /// One client-facing route model.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RouteModel {
     /// Route model id.
     pub id: String,
+    /// Registered member-ordering strategy.
+    #[serde(default = "default_routing")]
+    pub routing: String,
+}
+
+impl Default for RouteModel {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            routing: default_routing(),
+        }
+    }
+}
+
+fn default_routing() -> String {
+    "smart".to_owned()
 }
 
 /// Route model list response.

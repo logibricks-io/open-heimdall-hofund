@@ -242,7 +242,7 @@ fn json_snapshots_round_trip() {
     let mut routes = RouteModelListResponse::default();
     routes
         .models
-        .push(dto!(RouteModel, id: "default".to_owned()));
+        .push(dto!(RouteModel, id: "default".to_owned(), routing: "weight".to_owned()));
     snapshot("route-model-list-response", &routes);
 
     let mut agents = AgentListResponse::default();

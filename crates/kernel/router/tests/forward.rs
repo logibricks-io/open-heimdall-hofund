@@ -72,6 +72,8 @@ fn hop(
         wire_model: wire.map(str::to_owned),
         max_output_tokens: None,
         context_window: None,
+        weight: 1,
+        free: false,
     }
 }
 
@@ -271,6 +273,8 @@ async fn a_member_without_forward_is_passed_over_as_unsupported() {
             wire_model: None,
             max_output_tokens: None,
             context_window: None,
+            weight: 1,
+            free: false,
         }],
     );
     let only_plain = Router::from_hops(routes, FailoverPolicy::default());

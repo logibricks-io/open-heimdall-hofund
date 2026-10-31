@@ -359,6 +359,7 @@ impl ControlState for DaemonControl {
             .map(|route| {
                 let mut model = RouteModel::default();
                 model.id = route.model.clone();
+                model.routing = route.routing.clone();
                 model
             })
             .collect();

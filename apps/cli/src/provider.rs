@@ -273,6 +273,21 @@ pub(crate) async fn model_show(config: &Path, id: &str) -> Result<String, String
     }
 }
 
+/// `hofund routes`: configured route models and their strategy names.
+pub(crate) async fn routes(config: &Path) -> Result<String, String> {
+    let client = client(config).await?;
+    let response = client.route_models().await.map_err(failure)?;
+    Ok(render_routes(&response.models))
+}
+
+fn render_routes(models: &[hofund_control_client::hofund_control_proto::RouteModel]) -> String {
+    let mut out = String::from("model\trouting");
+    for model in models {
+        out.push_str(&format!("\n{}\t{}", model.id, model.routing));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -280,11 +295,12 @@ mod tests {
     use hofund_control_client::ClientError;
     use hofund_control_client::hofund_control_proto::{
         ControlError, ControlErrorKind, ErrorEnvelope, ModelEntry, ModelListResponse, PickEdit,
-        PicksForm, PicksResponse, PicksSetRequest, ProviderSummary,
+        PicksForm, PicksResponse, PicksSetRequest, ProviderSummary, RouteModel,
     };
 
     use super::{
-        PICKS_ATTEMPTS, PicksApi, edit_picks, picks_request, refresh_summary, render_show,
+        PICKS_ATTEMPTS, PicksApi, edit_picks, picks_request, refresh_summary, render_routes,
+        render_show,
     };
 
     /// A picks server whose state another writer changes before each of the
@@ -478,6 +494,20 @@ mod tests {
         assert_eq!(
             refresh_summary("p", &response),
             "1 models from p\n+ newly listed, taken by its auto-include rules: n\n! gone from its list, so no longer picked: g, h"
+        );
+    }
+
+    #[test]
+    fn a9_routes_print_the_routing_name() {
+        let mut first = RouteModel::default();
+        first.id = "first".to_owned();
+        first.routing = "weight".to_owned();
+        let mut second = RouteModel::default();
+        second.id = "second".to_owned();
+        let models = vec![first, second];
+        assert_eq!(
+            render_routes(&models),
+            "model\trouting\nfirst\tweight\nsecond\tsmart"
         );
     }
 

@@ -394,7 +394,7 @@ Connect, timeout, and interrupted-body errors follow `failover.connect_errors`.
 
 ## What is intentionally absent
 
-- Routing strategies other than ordered failover.
+- Measurement-based smart, usage, pace, fast, and cheap routing strategies.
 - A running process does not reload configuration. The daemon publishes the
   route table as an `ArcSwap` snapshot at startup. A panic in a member
   publishes a snapshot that omits that member. In-flight requests keep the
