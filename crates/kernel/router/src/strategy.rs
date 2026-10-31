@@ -680,4 +680,49 @@ mod tests {
         }
         assert_eq!(apply(&strategy, "pool", &seats, &state), [0, 1, 2, 3]);
     }
+
+    fn picks(state: &StrategyState, pool: &str, seats: &[Seat], turns: usize) -> Vec<String> {
+        let strategy = state.registry().find("weight").expect("weight");
+        (0..turns)
+            .map(|_| keys(seats, &apply(&strategy, pool, seats, state))[0].clone())
+            .collect()
+    }
+
+    #[test]
+    fn a6_equal_weights_tie_goes_to_the_listed_first() {
+        let state = StrategyState::with_builtins();
+        let seats = seats(&["a", "b"]);
+        assert_eq!(picks(&state, "pool", &seats, 4), ["a", "b", "a", "b"]);
+    }
+
+    #[test]
+    fn a6_rounds_are_kept_per_pool_and_forget_restarts_one() {
+        let state = StrategyState::with_builtins();
+        let seats = seats(&["a", "b"]);
+        assert_eq!(picks(&state, "first", &seats, 1), ["a"]);
+        assert_eq!(picks(&state, "second", &seats, 1), ["a"]);
+        state.forget("first");
+        assert_eq!(picks(&state, "first", &seats, 1), ["a"]);
+        assert_eq!(picks(&state, "second", &seats, 1), ["b"]);
+    }
+
+    #[test]
+    fn a6_a_member_no_longer_listed_leaves_the_round() {
+        let state = StrategyState::with_builtins();
+        let mut both = seats(&["a", "b"]);
+        both[1].weight = 3;
+        assert_eq!(picks(&state, "pool", &both, 1), ["b"]);
+        // b leaves the pool: its negative current weight is dropped, so
+        // it starts again from zero when it comes back.
+        assert_eq!(picks(&state, "pool", &both[..1], 1), ["a"]);
+        assert_eq!(picks(&state, "pool", &both, 1), ["b"]);
+    }
+
+    #[test]
+    fn a1_unknown_name_orders_as_listed() {
+        let state = StrategyState::with_builtins();
+        let seats = seats(&["a", "b", "c"]);
+        assert_eq!(state.order("no-such-routing", "pool", &seats), [0, 1, 2]);
+        assert_eq!(state.order("", "pool", &seats), [0, 1, 2]);
+    }
 }
