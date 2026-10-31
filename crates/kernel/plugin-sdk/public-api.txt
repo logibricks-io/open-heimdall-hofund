@@ -188,12 +188,15 @@ transport::Reply::fn body (& self) -> & [u8]
 transport::Reply::fn into_body (self) -> Vec < u8 >
 transport::Reply::fn status (& self) -> u16
 transport::fn carried_error (body : & [u8] , allocation_quota_rate : bool) -> Option < PluginError >
+transport::fn credit_soon (body : & [u8]) -> bool
 transport::fn is_allocation_quota_rate (status : u16 , body : & [u8]) -> bool
 transport::fn is_context_overflow_error (status : u16 , body : & [u8]) -> bool
 transport::fn is_credit_error (status : u16 , body : & [u8]) -> bool
 transport::fn is_quota_error (status : u16 , body : & [u8]) -> bool
+transport::fn parse_reset_after_headers (headers : & http :: HeaderMap , now : std :: time :: SystemTime ,) -> Option < Duration >
 transport::fn parse_retry_after (value : & str , now : std :: time :: SystemTime) -> Option < Duration >
 transport::fn parse_retry_after_headers (headers : & http :: HeaderMap , now : std :: time :: SystemTime ,) -> Option < Duration >
+transport::fn reset_after_from_body (body : & [u8] , now : std :: time :: SystemTime) -> Option < Duration >
 transport::fn retry_after_from_body (body : & [u8]) -> Option < Duration >
 transport::fn status_for_error (body : & [u8]) -> u16
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse

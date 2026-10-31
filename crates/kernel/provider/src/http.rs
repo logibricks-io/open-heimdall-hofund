@@ -7,7 +7,9 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
 use hofund_ir::Request;
-use hofund_plugin_sdk::transport::parse_retry_after_headers;
+use hofund_plugin_sdk::transport::{
+    parse_reset_after_headers, parse_retry_after, parse_retry_after_headers,
+};
 use hofund_quirks::Profile;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -20,6 +22,17 @@ pub(crate) use crate::stream::{map_body, map_transport, message_from};
 
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     parse_retry_after_headers(headers, std::time::SystemTime::now())
+}
+
+fn explicit_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after(value, std::time::SystemTime::now()))
+}
+
+pub(crate) fn reset_after(headers: &HeaderMap) -> Option<Duration> {
+    parse_reset_after_headers(headers, std::time::SystemTime::now())
 }
 
 /// Where an API key is written.
@@ -551,7 +564,8 @@ async fn send<'a>(
     let mut token_retried = false;
     while !response.status().is_success() {
         let status = response.status();
-        let retry_after = retry_after(response.headers());
+        let retry_after = explicit_retry_after(response.headers());
+        let reset_after = reset_after(response.headers());
         let bytes = response.bytes().await.unwrap_or_default();
         if status.as_u16() == 400 && !root_retried && hofund_quirks::root_union_refusal(&bytes) {
             let (folded, changed) = hofund_quirks::fold_encoded(codec.id(), &body);
@@ -591,6 +605,7 @@ async fn send<'a>(
             return Err(refusal(
                 status.as_u16(),
                 retry_after,
+                reset_after,
                 &bytes,
                 upstream.allocation_quota_rate,
             ));
@@ -607,9 +622,16 @@ async fn send<'a>(
 
 async fn response_error(response: reqwest::Response, allocation_quota_rate: bool) -> ProviderError {
     let status = response.status();
-    let retry_after = retry_after(response.headers());
+    let retry_after = explicit_retry_after(response.headers());
+    let reset_after = reset_after(response.headers());
     let bytes = response.bytes().await.unwrap_or_default();
-    refusal(status.as_u16(), retry_after, &bytes, allocation_quota_rate)
+    refusal(
+        status.as_u16(),
+        retry_after,
+        reset_after,
+        &bytes,
+        allocation_quota_rate,
+    )
 }
 
 /// The error for an upstream refusal: classified from its words, with the
@@ -617,11 +639,28 @@ async fn response_error(response: reqwest::Response, allocation_quota_rate: bool
 fn refusal(
     status: u16,
     retry_after: Option<Duration>,
+    reset_after: Option<Duration>,
     bytes: &[u8],
     allocation_quota_rate: bool,
 ) -> ProviderError {
     let error = ProviderError::response_for(status, bytes, allocation_quota_rate);
-    match retry_after.or_else(|| hofund_plugin_sdk::transport::retry_after_from_body(bytes)) {
+    let credit = error.is_credit();
+    let named_reset =
+        hofund_plugin_sdk::transport::reset_after_from_body(bytes, std::time::SystemTime::now())
+            .or(reset_after);
+    let error = match named_reset.filter(|_| credit) {
+        Some(after) => error.with_reset_after(after),
+        None => error,
+    };
+    let error = if credit && hofund_plugin_sdk::transport::credit_soon(bytes) {
+        error.with_credit_soon()
+    } else {
+        error
+    };
+    let retry = retry_after
+        .or_else(|| (!credit).then_some(named_reset).flatten())
+        .or_else(|| hofund_plugin_sdk::transport::retry_after_from_body(bytes));
+    match retry {
         Some(after) => error.with_retry_after(after),
         None => error,
     }
@@ -768,15 +807,15 @@ mod tests {
     fn a8_refusal_takes_its_wait_from_headers_then_from_its_words() {
         let body = br#"{"error":{"message":"Rate limit reached. Please try again in 20s."}}"#;
         assert_eq!(
-            super::refusal(429, None, body, false).retry_after(),
+            super::refusal(429, None, None, body, false).retry_after(),
             Some(Duration::from_secs(20))
         );
         assert_eq!(
-            super::refusal(429, Some(Duration::from_secs(5)), body, false).retry_after(),
+            super::refusal(429, Some(Duration::from_secs(5)), None, body, false).retry_after(),
             Some(Duration::from_secs(5))
         );
         assert_eq!(
-            super::refusal(429, None, br#"{"error":"busy"}"#, false).retry_after(),
+            super::refusal(429, None, None, br#"{"error":"busy"}"#, false).retry_after(),
             None
         );
     }
@@ -784,10 +823,10 @@ mod tests {
     #[test]
     fn a4_refusal_reads_an_allocation_quota_as_a_rate_only_when_asked() {
         let body = br#"{"error":{"code":"insufficient_quota","message":"Allocated quota exceeded, please increase your quota limit."}}"#;
-        let rate = super::refusal(429, None, body, true);
+        let rate = super::refusal(429, None, None, body, true);
         assert_eq!(rate.kind, crate::ProviderErrorKind::Status);
         assert!(!rate.is_credit());
-        let plain = super::refusal(429, None, body, false);
+        let plain = super::refusal(429, None, None, body, false);
         assert!(
             plain.is_credit() || plain.kind != crate::ProviderErrorKind::Status,
             "{plain:?}"

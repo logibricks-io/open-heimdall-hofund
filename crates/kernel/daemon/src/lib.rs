@@ -41,6 +41,7 @@ mod models;
 mod models_state;
 mod one_shot;
 mod registry;
+mod rests;
 mod runtime;
 mod sign_in;
 mod subscriptions;
@@ -701,7 +702,7 @@ fn router(
     config: &Config,
     path: &Path,
     max_idle_per_host: Option<usize>,
-    models_host: Option<&mut ModelsHost>,
+    mut models_host: Option<&mut ModelsHost>,
     cooldowns: Arc<Cooldowns>,
     registry: &Arc<dyn DaemonRegistry>,
     subscriptions: &subscriptions::Subscriptions,
@@ -716,7 +717,7 @@ fn router(
         Some(Arc::clone(&cooldowns)),
         registry,
     )?;
-    if let Some(host) = models_host {
+    if let Some(host) = models_host.as_deref_mut() {
         for (id, instance) in &instances {
             host.register_instance(
                 id.clone(),
@@ -729,7 +730,7 @@ fn router(
         .iter()
         .map(|(id, provider)| (membership::member_id(id), provider.fingerprint.clone()))
         .collect();
-    let (routes, policy) = route_plan(config);
+    let (routes, policy) = route_plan(config, models_host.as_deref());
     let (members, expanded) = subscriptions::expand(&built, &routes, subscriptions)?;
     let (snapshot, table) =
         membership::open_with_table(&members, expanded, policy.clone(), cooldowns)?;
@@ -746,18 +747,19 @@ fn router(
 
 fn route_plan(
     config: &Config,
+    models_host: Option<&ModelsHost>,
 ) -> (
     BTreeMap<String, Vec<membership::PlannedHop>>,
     FailoverPolicy,
 ) {
-    let caps: BTreeMap<&str, u64> = config
+    let configured: BTreeMap<&str, &hofund_config::Provider> = config
         .providers
         .iter()
-        .filter_map(|provider| {
-            provider
-                .max_output_tokens
-                .map(|cap| (provider.id.as_str(), cap))
-        })
+        .map(|provider| (provider.id.as_str(), provider))
+        .collect();
+    let caps: BTreeMap<&str, u64> = configured
+        .iter()
+        .filter_map(|(id, provider)| provider.max_output_tokens.map(|cap| (*id, cap)))
         .collect();
     let mut routes = BTreeMap::new();
     for route in &config.routes {
@@ -765,6 +767,13 @@ fn route_plan(
         for upstream in &route.upstreams {
             match &upstream.target {
                 UpstreamTarget::Provider(provider) => {
+                    let model = upstream.model.as_deref().unwrap_or(&route.model);
+                    let listed = models_host
+                        .and_then(|host| listed_model(host.cached(provider).models, model));
+                    let manual = configured
+                        .get(provider.as_str())
+                        .is_some_and(|provider| provider.free);
+                    let free = free_hop(manual, listed.as_ref());
                     list.push(membership::PlannedHop {
                         provider: provider.clone(),
                         subscription: None,
@@ -773,6 +782,9 @@ fn route_plan(
                         max_output_tokens: upstream
                             .max_output_tokens
                             .or_else(|| caps.get(provider.as_str()).copied()),
+                        routing: route.routing.clone(),
+                        weight: upstream.weight.unwrap_or(1),
+                        free,
                     });
                 }
                 UpstreamTarget::Subscription(subscription) => {
@@ -782,6 +794,9 @@ fn route_plan(
                         member_id: None,
                         wire_model: upstream.model.clone(),
                         max_output_tokens: upstream.max_output_tokens,
+                        routing: route.routing.clone(),
+                        weight: upstream.weight.unwrap_or(1),
+                        free: false,
                     });
                 }
             }
@@ -793,6 +808,21 @@ fn route_plan(
         statuses: config.failover.statuses.clone(),
     };
     (routes, policy)
+}
+
+/// The catalog entry for `model`, matched without regard to case as the
+/// reference's free-model lookup does.
+fn listed_model(
+    models: Vec<hofund_plugin_api::ModelSpec>,
+    model: &str,
+) -> Option<hofund_plugin_api::ModelSpec> {
+    models
+        .into_iter()
+        .find(|listed| listed.id().eq_ignore_ascii_case(model))
+}
+
+fn free_hop(manual: bool, listed: Option<&hofund_plugin_api::ModelSpec>) -> bool {
+    manual || listed.is_some_and(hofund_plugin_api::ModelSpec::costs_nothing)
 }
 
 #[derive(Clone, Copy)]
@@ -1621,6 +1651,63 @@ mod tests {
 
     fn registry() -> std::sync::Arc<dyn super::DaemonRegistry> {
         std::sync::Arc::new(super::RegistryAdapter)
+    }
+
+    #[test]
+    fn free_hop_uses_manual_catalog_and_zero_price_flags() {
+        let free = hofund_plugin_api::ModelSpec::new("free", None)
+            .expect("model")
+            .with_free(true);
+        let zero = hofund_plugin_api::ModelSpec::new("zero", None)
+            .expect("model")
+            .with_prices(0, 0, 0);
+        let paid = hofund_plugin_api::ModelSpec::new("paid", None)
+            .expect("model")
+            .with_prices(1, 2, 0);
+        // A false catalog flag does not hide an all-zero price.
+        let flagged_paid_zero = hofund_plugin_api::ModelSpec::new("paid", None)
+            .expect("model")
+            .with_prices(0, 0, 0)
+            .with_free(false);
+        let flagged_paid = hofund_plugin_api::ModelSpec::new("paid", None)
+            .expect("model")
+            .with_prices(0, 1, 0)
+            .with_free(false);
+
+        assert!(super::free_hop(true, None));
+        assert!(super::free_hop(false, Some(&free)));
+        assert!(super::free_hop(false, Some(&zero)));
+        assert!(!super::free_hop(false, Some(&paid)));
+        assert!(super::free_hop(false, Some(&flagged_paid_zero)));
+        assert!(!super::free_hop(false, Some(&flagged_paid)));
+        assert!(!super::free_hop(false, None));
+    }
+
+    #[test]
+    fn a7_catalog_lookup_for_free_ignores_model_case() {
+        let models = vec![
+            hofund_plugin_api::ModelSpec::new("Other", None).expect("model"),
+            hofund_plugin_api::ModelSpec::new("Mixed-Case", None)
+                .expect("model")
+                .with_free(true),
+        ];
+        let found = super::listed_model(models.clone(), "mixed-case").expect("listed");
+        assert_eq!(found.id(), "Mixed-Case");
+        assert!(super::free_hop(false, Some(&found)));
+        assert!(super::listed_model(models, "absent").is_none());
+    }
+
+    #[test]
+    fn route_plan_carries_routing_weight_and_free_flag() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\nfree = true\n[[routes]]\nmodel = \"demo\"\nrouting = \"weight\"\nupstreams = [{ provider = \"one\", weight = 3 }]\n",
+        )
+        .expect("config");
+        let (routes, _) = super::route_plan(&config, None);
+        let hop = &routes["demo"][0];
+        assert_eq!(hop.routing, "weight");
+        assert_eq!(hop.weight, 3);
+        assert!(hop.free);
     }
 
     #[test]

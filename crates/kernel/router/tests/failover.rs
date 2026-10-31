@@ -150,6 +150,8 @@ fn router_with_windows(members: Vec<(Arc<dyn Member>, Option<u64>)>) -> Router {
             wire_model: None,
             max_output_tokens: None,
             context_window,
+            weight: 1,
+            free: false,
         })
         .collect();
     Router::from_hops(

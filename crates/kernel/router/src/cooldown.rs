@@ -4,10 +4,11 @@
 //!
 //! | Event | Cooldown and ladder |
 //! | --- | --- |
-//! | Generic failure | Starts at 1 minute and doubles for each consecutive failure since the last success, capped at 10 minutes. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses. |
+//! | Generic failure | Starts at 1 minute and doubles after an ended generic rest, capped at 10 minutes. A failure during an active generic rest keeps its rung. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses. |
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. |
 //! | Exhausted quota | Uses the header retry hint capped at 1 hour, or 15 minutes without a positive hint. |
-//! | HTTP 402 | Uses 30 minutes, or the retry hint capped at 1 hour when that is longer. |
+//! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Success and manual removal restart the ladder. |
+//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A later observation showing the window renewed lifts the rest. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
 //!
@@ -26,11 +27,45 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use hofund_plugin_api::{MemberId, PluginError, PluginErrorKind, QuotaObservation};
+use serde::{Deserialize, Serialize};
 
 const RECOVERY_CAPACITY: usize = 1_024;
+const CREDIT_RESET_MAX: Duration = Duration::from_secs(35 * 24 * 60 * 60);
+const WINDOWED_CREDIT_DEFAULT: Duration = Duration::from_secs(5 * 60 * 60);
+const CREDIT_LADDER: [Duration; 6] = [
+    Duration::from_secs(30 * 60),
+    Duration::from_secs(2 * 60 * 60),
+    Duration::from_secs(8 * 60 * 60),
+    Duration::from_secs(24 * 60 * 60),
+    Duration::from_secs(3 * 24 * 60 * 60),
+    Duration::from_secs(7 * 24 * 60 * 60),
+];
+
+/// One API-key credit-ladder rest stored by the daemon.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedRest {
+    /// Stable member id in its display form.
+    pub member: String,
+    /// Wall-clock end of the rest, including an already ended rest.
+    pub until: SystemTime,
+    /// One-based credit-ladder rung.
+    pub rung: u32,
+}
+
+impl PersistedRest {
+    /// Creates one rest for persistence or restoration.
+    #[must_use]
+    pub fn new(member: String, until: SystemTime, rung: u32) -> Self {
+        Self {
+            member,
+            until,
+            rung,
+        }
+    }
+}
 
 /// Timing and capacity limits for member cooldowns.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +79,7 @@ pub struct CooldownPolicy {
     pub rate_max: Duration,
     /// Time after a rest when its idle ladder history is forgotten.
     pub rate_forget: Duration,
-    /// Maximum HTTP retry hint for every failure cause.
+    /// Maximum HTTP retry hint for rate-limit and quota failures.
     pub retry_after_max: Duration,
     /// Cooldown for an exhausted quota without a positive retry hint.
     pub quota_default: Duration,
@@ -163,6 +198,9 @@ struct State {
     failures: u32,
     rate_failures: u32,
     rate_until: Option<Instant>,
+    credit_rung: u32,
+    credit_until: Option<Instant>,
+    credit_ladder: bool,
     /// Cause of the most recent rest kept; it outlives the rest's expiry.
     last_cause: Option<CooldownCause>,
     idle_since: Option<Instant>,
@@ -177,6 +215,9 @@ impl State {
             failures: 0,
             rate_failures: 0,
             rate_until: None,
+            credit_rung: 0,
+            credit_until: None,
+            credit_ladder: false,
             last_cause: None,
             idle_since: None,
             touched: now,
@@ -193,6 +234,8 @@ impl State {
 
 struct Book {
     states: HashMap<MemberId, State>,
+    windowed_credit: HashSet<MemberId>,
+    credit_windows: HashMap<MemberId, CreditWindow>,
     next_revision: u64,
     recoveries: VecDeque<(MemberId, CooldownCause)>,
 }
@@ -226,9 +269,158 @@ impl Cooldowns {
             clock,
             book: Mutex::new(Book {
                 states: HashMap::new(),
+                windowed_credit: HashSet::new(),
+                credit_windows: HashMap::new(),
                 next_revision: 1,
                 recoveries: VecDeque::new(),
             }),
+        }
+    }
+
+    /// Enables full-window credit handling for one subscription account.
+    pub fn configure_credit_window(&self, id: &MemberId) {
+        self.lock().windowed_credit.insert(id.clone());
+    }
+
+    /// Records when an account's full account-wide windows renew and lifts
+    /// a windowed account's credit or quota rest when a later observation
+    /// finds them renewing sooner than the one before. A rate or generic
+    /// rest stays.
+    ///
+    /// `reset` is the last positive reset among the full windows; it also
+    /// bounds a later credit rest. `unknown` says a full window gave no
+    /// reset, which counts as renewing later than any known reset.
+    pub fn observe_credit_window(&self, id: &MemberId, reset: Option<Duration>, unknown: bool) {
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        if !book.windowed_credit.contains(id) {
+            return;
+        }
+        let current = CreditWindow {
+            until: positive_hint(reset).map(|after| saturating_deadline(now, after)),
+            unknown,
+        };
+        let renewed = book
+            .credit_windows
+            .insert(id.clone(), current)
+            .is_some_and(|previous| previous.renews_later_than(current));
+        let lifting = book
+            .states
+            .get(id)
+            .and_then(|state| state.cooling.as_ref())
+            .filter(|cooling| {
+                renewed
+                    && matches!(
+                        cooling.cause,
+                        CooldownCause::Credit | CooldownCause::Quota | CooldownCause::Observed
+                    )
+                    && now < cooling.until
+            })
+            .map(|cooling| cooling.cause);
+        if let Some(cause) = lifting {
+            let revision = next_revision(&mut book);
+            let state = book.states.get_mut(id).expect("existing credit state");
+            state.cooling = None;
+            state.credit_rung = 0;
+            state.credit_until = None;
+            state.credit_ladder = false;
+            state.last_cause = None;
+            state.idle_since = Some(now);
+            state.touched = now;
+            state.revision = revision;
+            recover(&mut book, id.clone(), cause);
+        }
+    }
+
+    /// Returns API-key credit-ladder rests, including ended rests retained
+    /// for their rung, with wall-clock deadlines.
+    #[must_use]
+    pub fn credit_snapshot(&self, now_wall: SystemTime) -> Vec<PersistedRest> {
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        let mut rests = book
+            .states
+            .iter()
+            .filter(|(id, state)| {
+                id.subscription().is_none()
+                    && state.last_cause == Some(CooldownCause::Credit)
+                    && state.credit_ladder
+                    && state.credit_rung > 0
+            })
+            .filter_map(|(id, state)| {
+                let until = state.credit_until?;
+                if now.saturating_duration_since(until) > CREDIT_RESET_MAX {
+                    return None;
+                }
+                let until = if until >= now {
+                    now_wall.checked_add(until.duration_since(now))
+                } else {
+                    now_wall.checked_sub(now.duration_since(until))
+                }?;
+                Some(PersistedRest::new(id.to_string(), until, state.credit_rung))
+            })
+            .collect::<Vec<_>>();
+        rests.sort_by(|left, right| left.member.cmp(&right.member));
+        rests
+    }
+
+    /// Restores persisted API-key credit rests for configured members.
+    /// Existing in-process member state always wins over the persisted row.
+    pub fn restore_credit(
+        &self,
+        rests: Vec<PersistedRest>,
+        configured: &HashSet<MemberId>,
+        now_wall: SystemTime,
+    ) {
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        let configured = configured
+            .iter()
+            .map(|id| (id.to_string(), id))
+            .collect::<HashMap<_, _>>();
+        for rest in rests {
+            if rest.rung == 0 {
+                continue;
+            }
+            let rung = rest
+                .rung
+                .min(u32::try_from(CREDIT_LADDER.len()).unwrap_or(u32::MAX));
+            let Some(id) = configured.get(&rest.member) else {
+                continue;
+            };
+            if id.subscription().is_some()
+                || book.states.contains_key(*id)
+                || book.states.len() >= self.policy.max_entries
+            {
+                continue;
+            }
+            let (until, active) = match rest.until.duration_since(now_wall) {
+                Ok(left) => (saturating_deadline(now, left.min(CREDIT_LADDER[5])), true),
+                Err(error) if error.duration() <= CREDIT_RESET_MAX => {
+                    (now.checked_sub(error.duration()).unwrap_or(now), false)
+                }
+                Err(_) => continue,
+            };
+            let revision = next_revision(&mut book);
+            let mut state = State::new(now, revision);
+            state.credit_rung = rung;
+            state.credit_until = Some(until);
+            state.credit_ladder = true;
+            state.last_cause = Some(CooldownCause::Credit);
+            if active {
+                state.cooling = Some(cooling(
+                    now,
+                    until.saturating_duration_since(now),
+                    CooldownCause::Credit,
+                    rung,
+                ));
+            } else {
+                state.idle_since = Some(until);
+            }
+            book.states.insert((*id).clone(), state);
         }
     }
 
@@ -244,13 +436,14 @@ impl Cooldowns {
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         let failure = failure?;
+        let credit = credit_context(&book, id, now);
         let revision = next_revision(&mut book);
         let Some(state) = self.entry_for_insert(&mut book, id, now, revision) else {
             // A full book of active rests can consume a revision without inserting.
             let mut state = State::new(now, 0);
-            return Some(self.apply_failure(&mut state, failure, now, error));
+            return Some(self.apply_failure(&mut state, failure, now, error, credit));
         };
-        let applied = self.apply_failure(state, failure, now, error);
+        let applied = self.apply_failure(state, failure, now, error, credit);
         drop(book);
         self.emit(id, &applied, now);
         Some(applied)
@@ -408,6 +601,8 @@ impl Cooldowns {
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         book.states.retain(|id, _| members.contains(id));
+        book.windowed_credit.retain(|id| members.contains(id));
+        book.credit_windows.retain(|id, _| members.contains(id));
     }
 
     /// Removes one member after its provider identity changes.
@@ -418,6 +613,8 @@ impl Cooldowns {
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         book.states.remove(id);
+        book.windowed_credit.remove(id);
+        book.credit_windows.remove(id);
     }
 
     /// Drains pending one-per-rest recovery events, oldest first.
@@ -433,6 +630,7 @@ impl Cooldowns {
         failure: Failure,
         now: Instant,
         error: &PluginError,
+        credit: CreditContext,
     ) -> Cooling {
         let mut candidate = match failure {
             Failure::Generic(cause) => Self::generic(state, now, &self.policy, cause),
@@ -444,17 +642,7 @@ impl Cooldowns {
                     });
                 cooling(now, duration, CooldownCause::Quota, state.failures)
             }
-            Failure::Credit => {
-                let retry = positive_hint(error.retry_after())
-                    .unwrap_or_default()
-                    .min(self.policy.retry_after_max);
-                cooling(
-                    now,
-                    self.policy.credit.max(retry),
-                    CooldownCause::Credit,
-                    state.failures,
-                )
-            }
+            Failure::Credit => self.credit(state, now, error, credit),
         };
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
@@ -463,7 +651,59 @@ impl Cooldowns {
         if matches!(failure, Failure::RateLimit) {
             state.rate_until = Some(applied.until);
         }
+        if matches!(failure, Failure::Credit) && applied.cause == CooldownCause::Credit {
+            state.credit_until = Some(applied.until);
+        }
         applied
+    }
+
+    fn credit(
+        &self,
+        state: &mut State,
+        now: Instant,
+        error: &PluginError,
+        context: CreditContext,
+    ) -> Cooling {
+        let reset = positive_hint(error.reset_after()).map(|after| after.min(CREDIT_RESET_MAX));
+        let retry = positive_hint(error.retry_after());
+        let (duration, rung, on_ladder) = if context.subscription && !context.windowed {
+            (self.policy.credit, 0, false)
+        } else if let Some(after) = reset {
+            (after, 0, false)
+        } else if context.windowed {
+            let duration = context
+                .window_reset
+                .map(|until| until.saturating_duration_since(now))
+                .filter(|after| !after.is_zero())
+                .unwrap_or_else(|| {
+                    retry
+                        .filter(|after| *after > WINDOWED_CREDIT_DEFAULT)
+                        .unwrap_or(WINDOWED_CREDIT_DEFAULT)
+                });
+            (duration.min(CREDIT_RESET_MAX), 0, false)
+        } else if retry.is_some() || error.credit_soon() {
+            (self.policy.credit, 0, false)
+        } else {
+            let continuing = state.last_cause == Some(CooldownCause::Credit)
+                && state.credit_ladder
+                && state.credit_rung > 0
+                && state.credit_until.is_some();
+            let rung = if continuing {
+                let next = if state.active(now) {
+                    state.credit_rung
+                } else {
+                    state.credit_rung.saturating_add(1)
+                };
+                next.min(u32::try_from(CREDIT_LADDER.len()).unwrap_or(u32::MAX))
+            } else {
+                1
+            };
+            let index = usize::try_from(rung - 1).unwrap_or(0);
+            (CREDIT_LADDER[index], rung, true)
+        };
+        state.credit_rung = rung;
+        state.credit_ladder = on_ladder;
+        cooling(now, duration, CooldownCause::Credit, rung)
     }
 
     fn entry_for_insert<'a>(
@@ -499,7 +739,13 @@ impl Cooldowns {
         policy: &CooldownPolicy,
         cause: CooldownCause,
     ) -> Cooling {
-        state.failures = state.failures.saturating_add(1);
+        let resting = matches!(
+            state.last_cause,
+            Some(CooldownCause::Failure | CooldownCause::Panic)
+        ) && state.active(now);
+        if !resting || state.failures == 0 {
+            state.failures = state.failures.saturating_add(1);
+        }
         let duration = ladder(policy.base, policy.generic_max, state.failures);
         cooling(now, duration, cause, state.failures)
     }
@@ -567,10 +813,11 @@ impl Cooldowns {
             }
             let history =
                 state.failures > 0 || state.rate_failures > 0 || state.rate_until.is_some();
-            history
+            let ordinary = history
                 && state
                     .idle_since
-                    .is_none_or(|since| now.saturating_duration_since(since) < forget)
+                    .is_none_or(|since| now.saturating_duration_since(since) < forget);
+            ordinary || (state.credit_ladder && state.credit_rung > 0)
         });
     }
 
@@ -591,6 +838,53 @@ impl Cooldowns {
             "member_cooldown"
         );
         metrics::counter!("hofund_member_cooldowns", "cause" => cause).increment(1);
+    }
+}
+
+/// The renewal of an account's full account-wide windows, as last read.
+#[derive(Clone, Copy)]
+struct CreditWindow {
+    /// The last known positive reset among the full windows.
+    until: Option<Instant>,
+    /// Whether a full window gave no reset.
+    unknown: bool,
+}
+
+impl CreditWindow {
+    /// Whether this reading renews later than `current`: a full window with
+    /// no reset renews latest, no full window renews at once, and readings
+    /// within a second of each other count as the same.
+    fn renews_later_than(self, current: Self) -> bool {
+        match (self.unknown, current.unknown) {
+            (_, true) => false,
+            (true, false) => true,
+            (false, false) => match (self.until, current.until) {
+                (Some(_), None) => true,
+                (Some(before), Some(after)) => {
+                    before.saturating_duration_since(after) > Duration::from_secs(1)
+                }
+                (None, _) => false,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CreditContext {
+    subscription: bool,
+    windowed: bool,
+    window_reset: Option<Instant>,
+}
+
+fn credit_context(book: &Book, id: &MemberId, now: Instant) -> CreditContext {
+    CreditContext {
+        subscription: id.subscription().is_some(),
+        windowed: book.windowed_credit.contains(id),
+        window_reset: book
+            .credit_windows
+            .get(id)
+            .and_then(|window| window.until)
+            .filter(|until| *until > now),
     }
 }
 
