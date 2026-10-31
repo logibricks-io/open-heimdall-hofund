@@ -56,6 +56,7 @@ pub use hofund_plugin_api::{
 mod catalog;
 mod credential;
 mod edit;
+mod goose;
 mod jsonc_edit;
 mod store;
 mod yaml_edit;
@@ -391,7 +392,9 @@ pub trait AgentAdapter: Sync {
     /// Keys the user added are kept. `force` writes the backup bytes and
     /// discards later edits. The backup is deleted only after the restored
     /// bytes are read back and match. When no backup exists the call returns
-    /// [`DisconnectOutcome`] with `changed: false`.
+    /// [`DisconnectOutcome`] with `changed: false`. Goose instead follows its
+    /// clear-active-provider convention: the active and legacy provider/model
+    /// keys and hofund's providers entry are removed, other providers kept.
     ///
     /// # Errors
     ///

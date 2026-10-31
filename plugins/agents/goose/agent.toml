@@ -93,15 +93,16 @@ slot = { model_array = { fields = [
 
 # dynamic_models false keeps Goose to the routes above. Goose refuses a
 # provider whose static list is empty and that may not ask the gateway, so
-# with no route the key is left out and Goose lists the gateway's /v1/models.
+# with no route any earlier key is removed and Goose lists /v1/models.
 [[set]]
 file = "provider"
 key = "dynamic_models"
 slot = { json = "false", with_models = true }
 
-# Goose uses active_provider and that provider's entry in the providers map.
-# A pick makes hofund the active provider; clearing the model puts back the
-# user's active_provider and drops hofund's entry.
+# In the current layout a pick makes hofund the active provider and writes its
+# providers entry, removing the legacy flat keys. A config with neither a
+# providers map nor active_provider instead gets GOOSE_PROVIDER and GOOSE_MODEL.
+# Clear and disconnect remove the pick and hofund's entry, keeping other providers.
 [[set]]
 file = "config"
 key = "active_provider"

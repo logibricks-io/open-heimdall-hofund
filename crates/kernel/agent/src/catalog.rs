@@ -17,6 +17,7 @@ use crate::edit::{
     Assignment, FileKind, Shared, get, is_empty_document, is_empty_json, owned_part, remove_keys,
     render, string_at, strip_owned,
 };
+use crate::goose;
 use crate::store::{
     backup_once, clear_markers, created_here, delete_verified, marker_present, read_optional,
     remove_empty_parents, revert_path, unified_diff, write_atomic, write_verified,
@@ -237,6 +238,7 @@ struct Rendered {
     before: Option<Vec<u8>>,
     after: Vec<u8>,
     assignments: Vec<Assignment>,
+    removed: Vec<&'static str>,
     /// Model keys whose snapshot value must match the written file.
     pinned: Vec<(&'static str, Option<String>)>,
 }
@@ -326,11 +328,17 @@ impl Engine {
     }
 
     fn detect(&self, session: &Session) -> bool {
-        binary_on_path(session, self.binary)
-            || self
-                .locations
-                .iter()
-                .any(|location| location.path.is_file())
+        if self
+            .locations
+            .iter()
+            .any(|location| location.path.is_file())
+        {
+            return true;
+        }
+        let Some(binary) = binary_on_path(session, self.binary) else {
+            return false;
+        };
+        self.id != "goose" || goose::binary_detected(&binary)
     }
 
     fn read(&self) -> Result<Vec<ConfigFile>, AgentError> {
@@ -374,7 +382,13 @@ impl Engine {
         }
         for file in rendered {
             if marker_present(&file.path) {
-                snapshot_wrote(&file.path, file.kind, &file.assignments, &file.pinned)?;
+                snapshot_wrote(
+                    &file.path,
+                    file.kind,
+                    &file.assignments,
+                    &file.removed,
+                    &file.pinned,
+                )?;
             }
         }
         Ok(with_change(plan, stored))
@@ -416,6 +430,21 @@ impl Engine {
             return Ok(Plan::new(Vec::new()));
         };
         let text = utf8(&chosen.path, &before)?;
+        if self.id == "goose" {
+            let after = remove_keys(chosen.kind, text, goose::CLEAR_KEYS)
+                .map_err(|error| annotate(&chosen.path, error))?;
+            if after == before {
+                return Ok(Plan::new(Vec::new()));
+            }
+            write_atomic(&chosen.path, &after)?;
+            let diff = unified_diff(&chosen.path, &before, &after);
+            return Ok(Plan::new(vec![FileChange::new(
+                chosen.path,
+                before,
+                after,
+                diff,
+            )]));
+        }
         let current =
             get(chosen.kind, text, model.key).map_err(|error| annotate(&chosen.path, error))?;
         if current.is_none() {
@@ -452,6 +481,14 @@ impl Engine {
                 None => None,
             };
             let model = self.model.filter(|model| model.file == file);
+            if self.id == "goose" && file == "config" && !matches!(choice, Choice::Keep) {
+                if let Some(file) =
+                    self.render_goose(path, &before, text, &sets, target, choice)?
+                {
+                    rendered.push(file);
+                }
+                continue;
+            }
             let stripped = match (choice, model, text) {
                 (Choice::Clear, Some(model), Some(text)) => {
                     let keys = self.model_keys(model);
@@ -475,11 +512,19 @@ impl Engine {
                     shared: None,
                 });
             }
+            let removed: Vec<&'static str> = sets
+                .iter()
+                .filter(|set| self.remove_with_models(set, target))
+                .map(|set| set.key)
+                .collect();
             // A file nothing is written to is left as it is: a missing one
             // stays missing, so a settings file that holds only the model key
             // is not created until a model is picked, and an existing one
             // keeps its bytes (comments included) unless a clear drops keys.
-            if assignments.is_empty() && (before.is_none() || !matches!(choice, Choice::Clear)) {
+            if assignments.is_empty()
+                && removed.is_empty()
+                && (before.is_none() || !matches!(choice, Choice::Clear))
+            {
                 continue;
             }
             // Clear renders over the original text so the keys it keeps stay
@@ -512,6 +557,10 @@ impl Engine {
                 after = remove_keys(kind, utf8(&path, &written)?, &leftover)
                     .map_err(|error| annotate(&path, error))?;
             }
+            if !removed.is_empty() {
+                after = remove_keys(kind, utf8(&path, &after)?, &removed)
+                    .map_err(|error| annotate(&path, error))?;
+            }
             let pinned = match model {
                 Some(model) => self.pinned(&path, kind, text, &after, model, choice)?,
                 None => Vec::new(),
@@ -522,10 +571,98 @@ impl Engine {
                 before,
                 after,
                 assignments,
+                removed,
                 pinned,
             });
         }
         Ok(rendered)
+    }
+
+    fn render_goose(
+        &self,
+        path: PathBuf,
+        before: &Option<Vec<u8>>,
+        text: Option<&str>,
+        sets: &[&EngineSet],
+        target: &GatewayTarget,
+        choice: Choice<'_>,
+    ) -> Result<Option<Rendered>, AgentError> {
+        let kind = FileKind::Yaml;
+        let mut assignments = Vec::new();
+        let mut removed = Vec::new();
+        match choice {
+            Choice::Set(id) => {
+                let new_layout = text
+                    .map(|text| {
+                        goose::new_layout(kind, text).map_err(|error| annotate(&path, error))
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                if new_layout {
+                    assignments = self.assignments_for(sets, kind, target, text, choice);
+                    if let Some(model) = self.model {
+                        assignments.push(Assignment {
+                            key: model.key,
+                            value: self.prefixed(id),
+                            raw_json: false,
+                            shared: None,
+                        });
+                    }
+                    removed = vec!["GOOSE_PROVIDER", "GOOSE_MODEL"];
+                } else {
+                    assignments = vec![
+                        Assignment {
+                            key: "GOOSE_PROVIDER",
+                            value: "hofund".to_owned(),
+                            raw_json: false,
+                            shared: None,
+                        },
+                        Assignment {
+                            key: "GOOSE_MODEL",
+                            value: self.prefixed(id),
+                            raw_json: false,
+                            shared: None,
+                        },
+                    ];
+                }
+            }
+            Choice::Clear => {
+                if before.is_none() {
+                    return Ok(None);
+                }
+                removed = goose::CLEAR_KEYS.to_vec();
+            }
+            Choice::Keep => return Ok(None),
+        }
+        let mut after = if assignments.first().is_some_and(|assignment| {
+            assignment.key == "active_provider" && matches!(choice, Choice::Set(_))
+        }) {
+            let active =
+                render(kind, text, &assignments[..1]).map_err(|error| annotate(&path, error))?;
+            render(kind, Some(utf8(&path, &active)?), &assignments[1..])
+                .map_err(|error| annotate(&path, error))?
+        } else {
+            render(kind, text, &assignments).map_err(|error| annotate(&path, error))?
+        };
+        if !removed.is_empty() {
+            after = remove_keys(kind, utf8(&path, &after)?, &removed)
+                .map_err(|error| annotate(&path, error))?;
+        }
+        Ok(Some(Rendered {
+            path,
+            kind,
+            before: before.clone(),
+            after,
+            assignments,
+            removed,
+            pinned: Vec::new(),
+        }))
+    }
+
+    fn remove_with_models(&self, set: &EngineSet, target: &GatewayTarget) -> bool {
+        matches!(set.slot, ApiSlot::JsonWithModels(_))
+            && self.route == AgentRoute::Gateway
+            && !self.models(target).iter().any(|model| !model.is_empty())
     }
 
     /// The model keys whose snapshot value follows the written file.
@@ -670,6 +807,16 @@ impl Engine {
             };
             let text = utf8(&path, &bytes)?;
             for set in sets {
+                if self.remove_with_models(set, target) {
+                    if get(kind, text, set.key)
+                        .map_err(|error| annotate(&path, error))?
+                        .is_some()
+                    {
+                        connected = false;
+                        break;
+                    }
+                    continue;
+                }
                 let Some(expected) = self.slot_value(set, kind, target, Some(text), Choice::Keep)
                 else {
                     continue;
@@ -724,6 +871,11 @@ impl Engine {
         for location in &self.locations {
             let path = &location.path;
             if !marker_present(path) {
+                continue;
+            }
+            if self.id == "goose" && location.file == "config" {
+                disconnect_goose_config(path, location.kind, &preserve)?;
+                changed = true;
                 continue;
             }
             if force {
@@ -860,6 +1012,10 @@ impl Engine {
                 return Ok(None);
             };
             let text = utf8(&chosen.path, &bytes)?;
+            if self.id == "goose" {
+                return goose::configured_model(chosen.kind, text)
+                    .map_err(|error| annotate(&chosen.path, error));
+            }
             return string_at(chosen.kind, text, model.key)
                 .map_err(|error| annotate(&chosen.path, error));
         }
@@ -1450,6 +1606,7 @@ fn snapshot_wrote(
     path: &Path,
     kind: FileKind,
     assignments: &[Assignment],
+    removed: &[&str],
     pinned: &[(&'static str, Option<String>)],
 ) -> Result<(), AgentError> {
     let previous = read_optional(&sibling_wrote(path))?;
@@ -1480,6 +1637,10 @@ fn snapshot_wrote(
         let set = render(kind, Some(utf8(path, &wrote)?), &values)
             .map_err(|error| annotate(path, error))?;
         wrote = remove_keys(kind, utf8(path, &set)?, &removed)
+            .map_err(|error| annotate(path, error))?;
+    }
+    if !removed.is_empty() {
+        wrote = remove_keys(kind, utf8(path, &wrote)?, removed)
             .map_err(|error| annotate(path, error))?;
     }
     write_atomic(&sibling_wrote(path), &wrote)
@@ -1700,24 +1861,51 @@ fn preserve_dirs(session: &Session) -> Vec<PathBuf> {
     dirs
 }
 
+fn disconnect_goose_config(
+    path: &Path,
+    kind: FileKind,
+    preserve: &[PathBuf],
+) -> Result<(), AgentError> {
+    let Some(before) = read_optional(path)? else {
+        clear_markers(path)?;
+        return Ok(());
+    };
+    let text = utf8(path, &before)?;
+    let after =
+        remove_keys(kind, text, goose::CLEAR_KEYS).map_err(|error| annotate(path, error))?;
+    let remove_file = created_here(path) && is_empty_document(kind, &after)?;
+    if remove_file {
+        delete_verified(path)?;
+    } else if after != before {
+        write_verified(path, &after)?;
+    }
+    clear_markers(path)?;
+    if remove_file {
+        remove_empty_parents(path, preserve)?;
+    }
+    Ok(())
+}
+
 fn annotate(path: &Path, error: AgentError) -> AgentError {
     AgentError::message(format!("{}: {error}", path.display()))
 }
 
-fn binary_on_path(session: &Session, name: &str) -> bool {
-    let Some(path) = session.path.as_deref() else {
-        return false;
-    };
+fn binary_on_path(session: &Session, name: &str) -> Option<PathBuf> {
+    let path = session.path.as_deref()?;
     for directory in std::env::split_paths(path) {
-        if directory.join(name).is_file() {
-            return true;
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
         }
         #[cfg(windows)]
-        if directory.join(format!("{name}.exe")).is_file() {
-            return true;
+        {
+            let candidate = directory.join(format!("{name}.exe"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]
