@@ -905,6 +905,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Embedded daemon shutdown publishes `shutdown_started`, closes live control
+  event streams, and bounds the control listener's graceful drain (#273).
+- The configuration watcher matches the on-disk file name after a
+  differently-cased path is used on a case-insensitive file system (#278).
 - Anthropic host checks match `anthropic.com` and its subdomains only, so a
   lookalike host such as `evilanthropic.com` no longer gets official Anthropic
   credential placement or model-list handling.

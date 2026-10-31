@@ -412,7 +412,7 @@ impl Control {
                 })
                 .await
         });
-        Ok(Running::new(local_addr, shutdown, task))
+        Ok(Running::new(local_addr, shutdown, task).with_control_drain())
     }
 
     /// Binds a Unix socket and serves control routes to same-user peers.
@@ -511,7 +511,9 @@ impl Control {
             while connections.join_next().await.is_some() {}
             Ok(())
         });
-        Ok(Running::new(DEFAULT_CONTROL_ADDR, shutdown, task).with_resource(cleanup))
+        Ok(Running::new(DEFAULT_CONTROL_ADDR, shutdown, task)
+            .with_control_drain()
+            .with_resource(cleanup))
     }
 }
 

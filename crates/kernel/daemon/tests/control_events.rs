@@ -144,3 +144,63 @@ async fn daemon_stream_starts_with_a_snapshot_and_closes_on_token_rotation() {
     assert_eq!(events[0].0, format!("{boot}:control=1"));
     support::shutdown(running).await;
 }
+
+#[tokio::test]
+async fn embedded_shutdown_publishes_shutdown_started_and_closes_live_stream() {
+    let dir = Scratch::new("embedded-shutdown");
+    let running = start(&dir.0).await;
+    let mut stream = support::client()
+        .get(url(&running, "/v1/hofund/events"))
+        .bearer_auth(token(&dir.0))
+        .send()
+        .await
+        .expect("events");
+    assert_eq!(stream.status(), reqwest::StatusCode::OK);
+    let (snapshot, _) = read_events(&mut stream, 1).await;
+    assert_eq!(snapshot[0].1, "snapshot");
+
+    tokio::time::timeout(Duration::from_secs(10), running.shutdown())
+        .await
+        .expect("shutdown finishes with a live event stream");
+    let (events, ended) = read_events(&mut stream, usize::MAX).await;
+    assert!(ended, "the event stream ends after shutdown_started");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1, "shutdown_started");
+    match &events[0].2.payload {
+        EventPayload::ShutdownStarted(event) => assert!(event.draining),
+        other => panic!("expected shutdown_started, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn shutdown_closes_a_control_request_that_outlasts_the_drain_bound() {
+    use tokio::io::AsyncWriteExt;
+
+    let dir = Scratch::new("stuck-drain");
+    let running = start(&dir.0).await;
+    let addr = running.control_local_addr().expect("control");
+    let mut stuck = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect control");
+    // A request whose body never finishes keeps the connection in flight,
+    // so only the drain bound can end it.
+    let head = format!(
+        "POST /v1/hofund/config/validate HTTP/1.1\r\nHost: {addr}\r\n\
+         Authorization: Bearer {}\r\nContent-Type: application/json\r\n\
+         Content-Length: 1000\r\n\r\n{{",
+        token(&dir.0)
+    );
+    stuck.write_all(head.as_bytes()).await.expect("send head");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(10), running.shutdown())
+        .await
+        .expect("shutdown is bounded with a stuck control request");
+    assert!(
+        started.elapsed() >= Duration::from_secs(3),
+        "the stuck request is given the drain budget, not cut at once: {:?}",
+        started.elapsed()
+    );
+    drop(stuck);
+}
