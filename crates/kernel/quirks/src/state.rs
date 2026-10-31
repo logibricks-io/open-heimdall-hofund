@@ -5,12 +5,14 @@ use hofund_ir::fold_object_root;
 use serde_json::Value;
 
 use crate::json::{self, Edit};
+use crate::passthrough::without_passthrough_if;
 
 /// Learned request-shape refusals for one provider instance.
 #[derive(Debug, Default)]
 pub struct RequestState {
     root_unions: Mutex<BTreeSet<String>>,
     token_field: Mutex<Option<TokenField>>,
+    passthrough: Mutex<BTreeSet<String>>,
 }
 
 /// The Chat Completions reply-length field.
@@ -55,6 +57,29 @@ impl RequestState {
             .token_field
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wanted.other());
+    }
+
+    /// Remembers a refused passthrough member and returns whether it is new.
+    /// An empty field names the whole passthrough object.
+    pub fn learn_passthrough(&self, field: &str) -> bool {
+        self.passthrough
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(field.to_owned())
+    }
+
+    pub(crate) fn strip_passthrough(&self, protocol: &str, body: &[u8]) -> (Vec<u8>, bool) {
+        if protocol != "openai-responses" {
+            return (body.to_vec(), false);
+        }
+        let refused = self
+            .passthrough
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if refused.is_empty() {
+            return (body.to_vec(), false);
+        }
+        without_passthrough_if(body, |field| refused.contains(field))
     }
 
     fn folds_root(&self, model: &str) -> bool {

@@ -10,11 +10,15 @@
 //! reaches this code: the gateway takes it out first, so what is relayed is
 //! the caller's own sign-in.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hofund_plugin_api::{Body, BodyStream, PluginError};
 use hofund_plugin_sdk::json::{self, Value, json};
-use hofund_plugin_sdk::{HeaderMap, HttpRequest, HttpResponse, text_response};
+use hofund_plugin_sdk::{
+    HeaderMap, HttpRequest, HttpResponse, refused_passthrough, text_response, without_passthrough,
+};
 
 use crate::input::{self, sealed};
 use crate::{Kernel, entry, error_response, ids, json_response};
@@ -75,11 +79,51 @@ const DROPPED: [&str; 10] = [
     "accept-encoding",
 ];
 
-/// Answers `request` under [`PREFIX`].
-pub(crate) async fn serve(
+/// Passthrough members each upstream base has refused.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct State {
+    refused: Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>,
+}
+
+impl State {
+    fn strip(&self, base: &str, body: &[u8]) -> Option<Vec<u8>> {
+        let refused = self.refused.lock().ok()?;
+        let fields = refused.get(base)?;
+        let mut out = body.to_vec();
+        let mut changed = false;
+        for field in fields {
+            let (next, removed) = without_passthrough(&out, field);
+            out = next;
+            changed |= removed;
+        }
+        changed.then_some(out)
+    }
+
+    fn learn(&self, base: &str, field: &str) -> bool {
+        self.refused
+            .lock()
+            .map(|mut refused| {
+                refused
+                    .entry(base.to_owned())
+                    .or_default()
+                    .insert(field.to_owned())
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// Answers `request` under [`PREFIX`] without retaining refusals.
+#[cfg(test)]
+pub(crate) async fn serve(kernel: &dyn Kernel, bases: Bases, request: HttpRequest) -> HttpResponse {
+    serve_with_state(kernel, bases, request, &State::default()).await
+}
+
+/// Answers `request` under [`PREFIX`], retaining refused passthrough members.
+pub(crate) async fn serve_with_state(
     kernel: &dyn Kernel,
     bases: Bases,
     mut request: HttpRequest,
+    state: &State,
 ) -> HttpResponse {
     if wants_websocket(request.headers()) {
         return text_response(426, "hofund serves Codex over HTTP; use HTTP");
@@ -122,7 +166,7 @@ pub(crate) async fn serve(
             *request.body_mut() = Body::from(body);
         }
     }
-    relay(kernel, bases, &rest, request).await
+    relay(kernel, bases, &rest, request, state).await
 }
 
 /// Whether the request asks to become a websocket.
@@ -521,22 +565,47 @@ fn outbound(
     Ok(call)
 }
 
+const REFUSAL_CAP: usize = 1024 * 1024;
+
 /// The request as it came, to the upstream, and the answer as it streams.
 async fn relay(
     kernel: &dyn Kernel,
     bases: Bases,
     rest: &str,
-    request: HttpRequest,
+    mut request: HttpRequest,
+    state: &State,
 ) -> HttpResponse {
     let base = base_for(bases, request.headers(), rest);
+    let turn =
+        matches!(rest, "/responses" | "/responses/compact") && request.method().as_str() == "POST";
+    if turn && let Some(body) = state.strip(base, request.body().bytes()) {
+        *request.body_mut() = Body::from(body);
+    }
     let headers = relayed_headers(request.headers());
-    let sent = match outbound(base, rest, &request, headers) {
-        Ok(call) => kernel.send(call, None).await,
-        Err(failure) => Err(failure),
-    };
-    match sent {
-        Ok(response) => response,
-        Err(failure) => error_response(&failure),
+    loop {
+        let sent = match outbound(base, rest, &request, headers.clone()) {
+            Ok(call) => kernel.send(call, None).await,
+            Err(failure) => Err(failure),
+        };
+        let response = match sent {
+            Ok(response) => response,
+            Err(failure) => return error_response(&failure),
+        };
+        if !turn || response.status().as_u16() != 400 {
+            return response;
+        }
+        let (parts, body) = response.into_parts();
+        let Some(body) = read_up_to(body, REFUSAL_CAP).await else {
+            return error(502, "the upstream refusal could not be read");
+        };
+        if let Some(field) = refused_passthrough(&body) {
+            let (stripped, changed) = without_passthrough(request.body().bytes(), &field);
+            if changed && state.learn(base, &field) {
+                *request.body_mut() = Body::from(stripped);
+                continue;
+            }
+        }
+        return HttpResponse::from_parts(parts, BodyStream::from_bytes(body));
     }
 }
 
