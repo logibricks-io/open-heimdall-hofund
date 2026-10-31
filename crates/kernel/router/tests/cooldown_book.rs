@@ -1428,7 +1428,11 @@ fn b3f_renewal_ten_minutes_sooner_lifts_rest() {
     book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
     book.record_failure(&id, &credit_error())
         .expect("window rest");
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR - 10 * MINUTE)), false);
+    book.observe_credit_window(
+        &id,
+        Some(Duration::from_secs(3 * HOUR - 10 * MINUTE)),
+        false,
+    );
     assert_eq!(book.cooling(&id), None);
 }
 

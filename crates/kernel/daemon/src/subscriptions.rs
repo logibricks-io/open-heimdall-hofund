@@ -845,9 +845,15 @@ mod tests {
             &hofund_plugin_api::PluginError::credit_status(402, "out"),
         );
         assert!(credit_left(&cooldowns, &id) > 5 * HOUR - Duration::from_secs(60));
-        super::apply_windows(&cooldowns, &id, &plugin, &[full_window("weekly", Some(HOUR))]);
+        super::apply_windows(
+            &cooldowns,
+            &id,
+            &plugin,
+            &[full_window("weekly", Some(HOUR))],
+        );
         assert!(cooldowns.cooling(&id).is_none_or(|rest| {
-            rest.until().saturating_duration_since(std::time::Instant::now())
+            rest.until()
+                .saturating_duration_since(std::time::Instant::now())
                 <= HOUR + Duration::from_secs(1)
         }));
     }
