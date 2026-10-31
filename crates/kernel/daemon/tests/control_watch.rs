@@ -1,5 +1,7 @@
 //! L6c: the configuration watcher inside a running daemon.
 
+mod support;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -61,7 +63,7 @@ impl Daemon {
         Self {
             base: format!("http://{}", running.control_local_addr().expect("control")),
             running,
-            http: reqwest::Client::new(),
+            http: support::client(),
             token,
             path,
             _dirs: (config_dir, runtime_dir),
@@ -173,7 +175,7 @@ async fn watcher_invalid_edit_keeps_last_good_and_emits_config_rejected() {
     }
     assert_eq!(daemon.config().await.generation, 2);
     drop(stream);
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }
 
 #[tokio::test]
@@ -215,5 +217,5 @@ async fn watcher_skips_daemon_write_when_revisions_match() {
     assert_eq!(status.generation, 2);
     assert_eq!(status.runtime_revision, revision(&candidate));
     drop(stream);
-    daemon.running.shutdown().await;
+    support::shutdown(daemon.running).await;
 }

@@ -1,5 +1,7 @@
 //! Persistent model state and configured-instance reuse against local mocks.
 
+mod support;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -271,7 +273,7 @@ async fn persisted_chat_fix_v1_survives_restart_and_reaches_the_router() {
         .await
         .expect("daemon restart");
     let token = std::fs::read_to_string(directory.join("hofund.token")).expect("token");
-    let response = reqwest::Client::new()
+    let response = support::client()
         .post(format!("http://{}/v1/chat/completions", running.local_addr))
         .bearer_auth(token.trim())
         .json(&json!({"model": "demo", "messages": [{"role": "user", "content": "hi"}]}))
@@ -279,7 +281,7 @@ async fn persisted_chat_fix_v1_survives_restart_and_reaches_the_router() {
         .await
         .expect("route request");
     assert_eq!(response.status(), 200);
-    running.shutdown().await;
+    support::shutdown(running).await;
     server.verify().await;
     let _ = std::fs::remove_dir_all(directory);
 }

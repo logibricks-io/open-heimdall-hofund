@@ -1,5 +1,7 @@
 //! Daemon event stream over TCP.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -104,7 +106,7 @@ async fn read_events(
 async fn daemon_stream_starts_with_a_snapshot_and_closes_on_token_rotation() {
     let dir = Scratch::new("rotate");
     let running = start(&dir.0).await;
-    let client = reqwest::Client::new();
+    let client = support::client();
     let mut stream = client
         .get(url(&running, "/v1/hofund/events"))
         .bearer_auth(token(&dir.0))
@@ -140,5 +142,5 @@ async fn daemon_stream_starts_with_a_snapshot_and_closes_on_token_rotation() {
     assert_eq!(names, ["token_rotated"]);
     assert!(ended, "the stream ends after token_rotated");
     assert_eq!(events[0].0, format!("{boot}:control=1"));
-    running.shutdown().await;
+    support::shutdown(running).await;
 }

@@ -3,6 +3,8 @@
 //! The upstream is a local socket that holds the rest of the body until the
 //! client has seen the first chunk, so a buffered body would time out here.
 
+mod support;
+
 use std::time::Duration;
 
 use hofund_daemon::start_for_test;
@@ -67,7 +69,7 @@ async fn an_azure_chat_stream_reaches_the_client_before_the_upstream_finishes() 
     let running = start_for_test(&config).await.expect("start");
     let token = std::fs::read_to_string(dir.path().join("hofund.token")).expect("token");
 
-    let mut response = reqwest::Client::new()
+    let mut response = support::client()
         .post(format!("http://{}/v1/chat/completions", running.local_addr))
         .bearer_auth(token.trim())
         .json(&serde_json::json!({
@@ -105,5 +107,5 @@ async fn an_azure_chat_stream_reaches_the_client_before_the_upstream_finishes() 
         !head.contains("\r\nauthorization:"),
         "a bearer header leaked"
     );
-    running.shutdown().await;
+    support::shutdown(running).await;
 }

@@ -1,5 +1,7 @@
 //! Refresh scheduling, picks, and per-base state against local mocks.
 
+mod support;
+
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -753,7 +755,7 @@ async fn running_refresh_starts_and_stops_on_shutdown() {
     })
     .await
     .expect("refresh tick");
-    running.shutdown().await;
+    support::shutdown(running).await;
     let stopped = server.received_requests().await.expect("requests").len();
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert_eq!(
