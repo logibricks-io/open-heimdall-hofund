@@ -7,6 +7,7 @@
 
 pub mod control;
 mod endpoints;
+mod prev_response;
 mod relisten;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
@@ -64,6 +65,7 @@ struct Inner {
     tokens: TokenState,
     codecs: HashMap<String, Arc<dyn Codec>>,
     usage: Arc<Ledger>,
+    prev: prev_response::PrevStore,
     surfaces: Vec<Arc<dyn InboundSurface>>,
     /// Optional request-topic emitter. Absent when control is off.
     request_events: Option<Arc<dyn RequestEvents>>,
@@ -357,6 +359,7 @@ impl Gateway {
                 tokens: TokenState::new(token, token_file),
                 codecs,
                 usage,
+                prev: prev_response::PrevStore::new(),
                 surfaces: Vec::new(),
                 request_events: None,
                 surface_http: None,
@@ -763,7 +766,8 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                         String::new(),
                         PluginError::status_error(404, error.to_string()),
                     ),
-                    RouterError::Ambiguous { .. } => (
+                    RouterError::Ambiguous { .. }
+                    | RouterError::PreviousResponseNotFound { .. } => (
                         String::new(),
                         PluginError::status_error(400, error.to_string()),
                     ),
@@ -1027,6 +1031,15 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     } else {
         bytes
     };
+    let expansion = (codec.id() == "openai-responses")
+        .then(|| app.prev.expand(&prev_response::request_scope(), &bytes));
+    let bytes = expansion
+        .as_ref()
+        .map_or(bytes, |expansion| Bytes::from(expansion.body.clone()));
+    let ask = expansion
+        .as_ref()
+        .and_then(|expansion| expansion.ask.clone());
+    let capture = expansion.and_then(|expansion| expansion.capture);
     let model_request = match codec.decode_request(&bytes) {
         Ok(model_request) => model_request,
         Err(error) => {
@@ -1051,7 +1064,11 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         },
     );
     let router = app.snapshot.load();
-    match router.dispatch(&model_request, codec.id()).await {
+    let attempt = ask.as_ref().map(|ask| ask.attempt());
+    match router
+        .dispatch_with_attempt(&model_request, codec.id(), attempt)
+        .await
+    {
         Ok(routed) => {
             success(
                 app,
@@ -1062,6 +1079,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 routed.completion,
                 started,
                 &mut track,
+                capture,
             )
             .await
         }
@@ -1118,7 +1136,9 @@ async fn count_tokens(
         Err(error) => {
             let (status, message) = match error {
                 RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string()),
-                RouterError::Ambiguous { .. } => (StatusCode::BAD_REQUEST, error.to_string()),
+                RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
+                    (StatusCode::BAD_REQUEST, error.to_string())
+                }
                 RouterError::Upstream { error, .. } => {
                     (status_of(&error), error.message().to_owned())
                 }
@@ -1254,9 +1274,11 @@ async fn success(
     completion: Completion,
     started: Instant,
     track: &mut RequestTrack,
+    capture: Option<prev_response::Capture>,
 ) -> Response {
     let meta = UsageMeta::new(request, upstream, started);
     let member = Some(upstream.to_owned());
+    let capture = prev_response::ReplyCapture::new(capture);
     match completion {
         Completion::Unary(response) => {
             let input = response
@@ -1270,8 +1292,17 @@ async fn success(
             write_usage(&app.usage, &meta, Some((input, output)), StatusCode::OK);
             let status = StatusCode::OK;
             let encoded = codec.encode_response_for(request, &response);
+            let mut capture = capture;
             let (status, body) = match encoded {
-                Ok(bytes) => (status, json_response(status, bytes)),
+                Ok(bytes) => {
+                    if let Some(capture) = capture.as_mut() {
+                        capture.push(&bytes);
+                    }
+                    if let Some(capture) = capture.take() {
+                        capture.finish();
+                    }
+                    (status, json_response(status, bytes))
+                }
                 Err(error) => {
                     let status = StatusCode::BAD_GATEWAY;
                     (status, coded(codec.as_ref(), status, &error.to_string()))
@@ -1307,6 +1338,7 @@ async fn success(
                 },
                 Box::new(on_error),
             );
+            let body = capture_stream(body, capture);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, codec.stream_content_type())
@@ -1323,6 +1355,7 @@ async fn success(
                 body,
                 track,
                 member,
+                capture,
             )
             .await
         }
@@ -1343,6 +1376,7 @@ async fn raw_body(
     mut body: BodyStream,
     track: &mut RequestTrack,
     member: Option<String>,
+    capture: Option<prev_response::ReplyCapture>,
 ) -> Response {
     let content_type = codec.response_content_type(request.stream);
     if request.stream {
@@ -1442,6 +1476,7 @@ async fn raw_body(
                 }
             },
         );
+        let stream = capture_stream(stream, capture);
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, content_type)
@@ -1475,6 +1510,10 @@ async fn raw_body(
         output.and_then(|value| u64::try_from(value).ok()),
     );
     let body = codec.rewrite_model(&bytes, &request.model, upstream_model);
+    if let Some(mut capture) = capture {
+        capture.push(&body);
+        capture.finish();
+    }
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, codec.response_content_type(false))
@@ -1490,8 +1529,19 @@ fn failure(
     started: Instant,
     track: &mut RequestTrack,
 ) -> Response {
+    if let RouterError::PreviousResponseNotFound { id } = &error {
+        write_usage(
+            &app.usage,
+            &UsageMeta::new(request, "", started),
+            None,
+            StatusCode::BAD_REQUEST,
+        );
+        track.end_with(None, StatusCode::BAD_REQUEST.as_u16(), None, None);
+        return json_response(StatusCode::BAD_REQUEST, prev_response::not_found_body(id));
+    }
     let (status, upstream, message) = match error {
         RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, String::new(), error.to_string()),
+        RouterError::PreviousResponseNotFound { .. } => unreachable!(),
         RouterError::Ambiguous { .. } => {
             (StatusCode::BAD_REQUEST, String::new(), error.to_string())
         }
@@ -1552,6 +1602,38 @@ struct RecordOnEnd {
 }
 
 type ErrorFrame = Box<dyn Fn(&PluginError) -> Vec<u8> + Send>;
+
+fn capture_stream<S>(
+    incoming: S,
+    capture: Option<prev_response::ReplyCapture>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+{
+    futures_util::stream::unfold(
+        (Box::pin(incoming), capture, true),
+        |(mut incoming, mut capture, mut normal)| async move {
+            match incoming.next().await {
+                Some(Ok(chunk)) => {
+                    if let Some(capture) = capture.as_mut() {
+                        capture.push(&chunk);
+                    }
+                    Some((Ok(chunk), (incoming, capture, normal)))
+                }
+                Some(Err(error)) => {
+                    normal = false;
+                    Some((Err(error), (incoming, capture, normal)))
+                }
+                None => {
+                    if normal && let Some(capture) = capture.take() {
+                        capture.finish();
+                    }
+                    None
+                }
+            }
+        },
+    )
+}
 
 fn sse_body(
     incoming: Pin<Box<dyn Stream<Item = Result<StreamEvent, PluginError>> + Send>>,

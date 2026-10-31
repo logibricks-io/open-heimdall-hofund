@@ -7,6 +7,7 @@
 //! polls, which is the backpressure.
 
 mod anthropic;
+mod attempt;
 mod billing;
 mod error;
 mod generative;
@@ -18,11 +19,12 @@ mod stream;
 mod wire;
 
 pub use anthropic::Anthropic;
+pub use attempt::{AttemptHook, AttemptRoute};
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;
 pub use http::{Credential, Endpoint, pooled_reqwest};
 pub use models::{both_auth_applies, both_auth_refused, parse_model_rows};
-pub use openai_compat::{OpenAiCompat, OpenAiProtocol};
+pub use openai_compat::{OpenAiCompat, OpenAiProtocol, responses_kept_by_host};
 pub use wire::{ModelPlan, Wire, credential_for};
 
 pub use hofund_plugin_api::{
@@ -64,6 +66,11 @@ pub trait Provider: Send + Sync {
     /// Stable id for routes and usage rows.
     fn id(&self) -> &str;
 
+    /// Route facts available to an encoded-body attempt hook.
+    fn attempt_route(&self) -> AttemptRoute {
+        AttemptRoute::default()
+    }
+
     /// Counts input tokens for `request`.
     ///
     /// The default is [`CountOutcome::Unsupported`]. An adapter that has a
@@ -103,6 +110,24 @@ pub trait Provider: Send + Sync {
         request: Request,
         inbound_protocol: &str,
     ) -> Result<Completion, ProviderError>;
+
+    /// Executes with an observer for the encoded per-attempt body.
+    ///
+    /// Adapters that support body-level continuation override this method. The
+    /// default preserves the behavior of every other adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::execute`].
+    async fn execute_with_attempt(
+        &self,
+        request: Request,
+        inbound_protocol: &str,
+        hook: Option<&dyn AttemptHook>,
+    ) -> Result<Completion, ProviderError> {
+        let _ = hook;
+        self.execute(request, inbound_protocol).await
+    }
 
     /// Posts `body` to `path` under this adapter's base URL and returns the
     /// answer unchanged.
