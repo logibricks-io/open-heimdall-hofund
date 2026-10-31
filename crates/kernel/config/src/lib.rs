@@ -888,6 +888,7 @@ fn normalized_account_weights(
     subscription: &RawSubscription,
 ) -> Result<BTreeMap<String, u64>, ConfigError> {
     let mut weights = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     for (account, weight) in &subscription.account_weights {
         let account = account.trim().to_lowercase();
         if account.is_empty() {
@@ -902,14 +903,14 @@ fn normalized_account_weights(
                 subscription = subscription.id
             )));
         }
-        if *weight == 1 {
-            continue;
-        }
-        if weights.insert(account.clone(), *weight).is_some() {
+        if !seen.insert(account.clone()) {
             return Err(ConfigError::Invalid(format!(
                 "subscription `{subscription}` repeats account weight `{account}` with different casing",
                 subscription = subscription.id
             )));
+        }
+        if *weight > 1 {
+            weights.insert(account, *weight);
         }
     }
     Ok(weights)
@@ -1580,6 +1581,8 @@ mod tests {
             ("\"zero\" = 0", "weight 0"),
             ("\" \" = 2", "empty account weight"),
             ("\"Name\" = 2\n\"name\" = 3", "repeats account weight"),
+            ("\"Name\" = 1\n\"name\" = 3", "repeats account weight"),
+            ("\"Name\" = 3\n\"name\" = 1", "repeats account weight"),
         ] {
             let error = load(&format!(
                 "[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\n[subscriptions.account_weights]\n{table}\n"
