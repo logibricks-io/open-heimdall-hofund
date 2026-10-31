@@ -35,6 +35,7 @@ use hofund_router::{
 use tower::Service;
 
 use crate::DaemonError;
+use crate::offline::{NetworkCheck, Offline, SystemNetwork};
 
 #[derive(Clone)]
 pub(crate) struct BuiltProvider {
@@ -46,12 +47,15 @@ pub(crate) struct BuiltProvider {
     /// Preset id from configuration. Empty when the provider has no preset.
     pub preset_id: String,
     pub fingerprint: String,
+    /// API root the provider is reached at. Empty when unknown.
+    pub base_url: String,
 }
 
 pub(crate) struct Table {
     hops: Mutex<BTreeMap<String, Vec<HopSpec>>>,
     policy: Mutex<FailoverPolicy>,
     cooldowns: Arc<Cooldowns>,
+    offline: Arc<Offline>,
     strategies: Arc<StrategyState>,
     measurements: Mutex<Option<Arc<dyn Measurements>>>,
     snapshot: Snapshot,
@@ -61,6 +65,7 @@ struct HopSpec {
     member: Arc<LiveMember>,
     wire_model: Option<String>,
     max_output_tokens: Option<u64>,
+    context_window: Option<u64>,
     routing: String,
     weight: u64,
     free: bool,
@@ -133,7 +138,9 @@ struct Guard<S> {
 struct Cooldown<S> {
     inner: S,
     id: MemberId,
+    provider: String,
     cooldowns: Arc<Cooldowns>,
+    offline: Arc<Offline>,
 }
 
 struct MemberObserve {
@@ -169,7 +176,19 @@ pub(crate) fn open(
     policy: FailoverPolicy,
     cooldowns: Arc<Cooldowns>,
 ) -> Result<Snapshot, DaemonError> {
-    let table = build_table(built, routes, policy, cooldowns)?;
+    open_checking(built, routes, policy, cooldowns, Arc::new(SystemNetwork))
+}
+
+/// [`open`] with the network check a test supplies.
+#[cfg(test)]
+pub(crate) fn open_checking(
+    built: &BTreeMap<String, BuiltProvider>,
+    routes: BTreeMap<String, Vec<PlannedHop>>,
+    policy: FailoverPolicy,
+    cooldowns: Arc<Cooldowns>,
+    network: Arc<dyn NetworkCheck>,
+) -> Result<Snapshot, DaemonError> {
+    let table = build_table(built, routes, policy, cooldowns, network)?;
     let snapshot = table.snapshot.clone();
     let owner = Arc::clone(&table) as Arc<dyn std::any::Any + Send + Sync>;
     Ok(snapshot.hold(owner))
@@ -181,7 +200,7 @@ pub(crate) fn open_with_table(
     policy: FailoverPolicy,
     cooldowns: Arc<Cooldowns>,
 ) -> Result<(Snapshot, Arc<Table>), DaemonError> {
-    let table = build_table(built, routes, policy, cooldowns)?;
+    let table = build_table(built, routes, policy, cooldowns, Arc::new(SystemNetwork))?;
     Ok((table.snapshot.clone(), table))
 }
 
@@ -190,6 +209,7 @@ fn build_table(
     routes: BTreeMap<String, Vec<PlannedHop>>,
     policy: FailoverPolicy,
     cooldowns: Arc<Cooldowns>,
+    network: Arc<dyn NetworkCheck>,
 ) -> Result<Arc<Table>, DaemonError> {
     let strategies = Arc::new(StrategyState::with_builtins());
     let snapshot = Snapshot::new(
@@ -201,6 +221,7 @@ fn build_table(
         hops: Mutex::new(BTreeMap::new()),
         policy: Mutex::new(policy),
         cooldowns,
+        offline: Arc::new(Offline::new(network)),
         strategies,
         measurements: Mutex::new(None),
         snapshot,
@@ -216,6 +237,11 @@ fn build_specs(
     built: &BTreeMap<String, BuiltProvider>,
     routes: BTreeMap<String, Vec<PlannedHop>>,
 ) -> Result<BTreeMap<String, Vec<HopSpec>>, DaemonError> {
+    table.offline.set_hosts(
+        built
+            .iter()
+            .map(|(id, provider)| (id.as_str(), provider.base_url.as_str())),
+    );
     let mut stored = BTreeMap::new();
     let mut seen_ids: BTreeMap<String, String> = BTreeMap::new();
     for (model, planned) in routes {
@@ -253,10 +279,12 @@ fn build_specs(
                     hop.member_id.clone(),
                     subscription,
                     Arc::clone(&table.cooldowns),
+                    Arc::clone(&table.offline),
                     Arc::downgrade(table),
                 )),
                 wire_model: hop.wire_model,
                 max_output_tokens: hop.max_output_tokens,
+                context_window: hop.context_window,
                 routing: hop.routing,
                 weight: hop.weight,
                 free: hop.free,
@@ -278,6 +306,9 @@ pub(crate) struct PlannedHop {
     pub member_id: Option<MemberId>,
     pub wire_model: Option<String>,
     pub max_output_tokens: Option<u64>,
+    /// Input context window of the hop's model, from the provider's model
+    /// list, when it is known.
+    pub context_window: Option<u64>,
     pub routing: String,
     pub weight: u64,
     pub free: bool,
@@ -314,7 +345,7 @@ impl Table {
                         member: Arc::clone(&spec.member) as Arc<dyn Member>,
                         wire_model: spec.wire_model.clone(),
                         max_output_tokens: spec.max_output_tokens,
-                        context_window: None,
+                        context_window: spec.context_window,
                         weight: spec.weight,
                         free: spec.free,
                     })
@@ -347,6 +378,7 @@ impl LiveMember {
         id: Option<MemberId>,
         subscription: bool,
         cooldowns: Arc<Cooldowns>,
+        offline: Arc<Offline>,
         reload: Weak<Table>,
     ) -> Self {
         let id = id.unwrap_or_else(|| member_id(route_id));
@@ -364,7 +396,9 @@ impl LiveMember {
         let stack = Cooldown {
             inner: guard,
             id: id.clone(),
+            provider: route_id.to_owned(),
             cooldowns,
+            offline,
         };
         Self {
             id,
@@ -540,7 +574,9 @@ where
     fn call(&mut self, job: Job) -> Self::Future {
         let mut inner = self.inner.clone();
         let id = self.id.clone();
+        let provider = self.provider.clone();
         let cooldowns = Arc::clone(&self.cooldowns);
+        let offline = Arc::clone(&self.offline);
         let model = job.model().to_owned();
         let revision = if model.is_empty() {
             cooldowns.revision(&id)
@@ -551,12 +587,33 @@ where
         // chat, and an endpoint it does not have says nothing about the member.
         let is_side = matches!(job, Job::Count(..) | Job::Forward(..));
         Box::pin(async move {
-            match inner.call(job).await {
+            let outcome = inner.call(job).await;
+            // Any reply, an error status too, says the network reached an
+            // upstream; a 502 made up for a connection never made does not.
+            let answered = match &outcome {
+                Ok(_) => true,
+                Err(error) => {
+                    error.kind() == hofund_plugin_api::PluginErrorKind::Status
+                        && !crate::offline::no_connection(error)
+                }
+            };
+            if answered {
+                offline.heard();
+            }
+            match outcome {
                 Ok(Out::Execute(completion)) => Ok(Out::Execute(record_completion(
                     completion, id, model, cooldowns, revision,
                 ))),
                 Ok(out @ (Out::Count(_) | Out::Forward(_))) => Ok(out),
                 Err(error) => {
+                    if (!is_side || count_cools(&error))
+                        && offline.offline_failure(&provider, &error).await
+                    {
+                        // This computer has no network: the provider is as
+                        // good as it was, so it does not rest.
+                        tracing::info!(member = %id, "no network here; the member does not rest");
+                        return Err(error);
+                    }
                     if !is_side || count_cools(&error) {
                         if model.is_empty() {
                             cooldowns.record_failure(&id, &error);
@@ -959,8 +1016,11 @@ fn kebab_of(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuiltProvider, PlannedHop, open};
+    use super::{BuiltProvider, PlannedHop, open, open_checking};
+    use crate::offline::NetworkCheck;
     use std::collections::BTreeMap;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -968,7 +1028,7 @@ mod tests {
     use async_trait::async_trait;
     use hofund_plugin_api::{RawAnswer, RawBody, Request};
     use hofund_provider::{Completion, Provider, ProviderError};
-    use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy};
+    use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
 
     fn cooldowns() -> Arc<Cooldowns> {
         Arc::new(Cooldowns::with_clock(
@@ -1050,6 +1110,7 @@ mod tests {
                 plugin_id: "boom".to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                base_url: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1061,6 +1122,7 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                context_window: None,
                 routing: "smart".to_owned(),
                 weight: 1,
                 free: false,
@@ -1141,6 +1203,7 @@ mod tests {
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: "openai".to_owned(),
                 fingerprint: String::new(),
+                base_url: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1152,6 +1215,7 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                context_window: None,
                 routing: "smart".to_owned(),
                 weight: 1,
                 free: false,
@@ -1223,6 +1287,7 @@ mod tests {
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                base_url: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1234,6 +1299,7 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                context_window: None,
                 routing: "smart".to_owned(),
                 weight: 1,
                 free: false,
@@ -1304,6 +1370,7 @@ mod tests {
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                base_url: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1315,6 +1382,7 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                context_window: None,
                 routing: "smart".to_owned(),
                 weight: 1,
                 free: false,
@@ -1355,6 +1423,7 @@ mod tests {
                     plugin_id: "openai-compat".to_owned(),
                     preset_id: String::new(),
                     fingerprint: String::new(),
+                    base_url: String::new(),
                 },
             );
         }
@@ -1368,6 +1437,7 @@ mod tests {
                     member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
+                    context_window: None,
                     routing: "smart".to_owned(),
                     weight: 1,
                     free: false,
@@ -1378,6 +1448,7 @@ mod tests {
                     member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
+                    context_window: None,
                     routing: "smart".to_owned(),
                     weight: 1,
                     free: false,
@@ -1399,6 +1470,7 @@ mod tests {
             plugin_id: id.to_owned(),
             preset_id: String::new(),
             fingerprint: String::new(),
+            base_url: String::new(),
         }
     }
 
@@ -1412,6 +1484,7 @@ mod tests {
                     member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
+                    context_window: None,
                     routing: "smart".to_owned(),
                     weight: 1,
                     free: false,
@@ -1605,6 +1678,163 @@ mod tests {
         assert_eq!(routed.upstream_id, "first");
         assert_eq!(first_hits.load(Ordering::SeqCst), 2);
         assert_eq!(second_hits.load(Ordering::SeqCst), 3);
+    }
+
+    fn windowed(hops: &[(&str, Option<u64>)]) -> BTreeMap<String, Vec<PlannedHop>> {
+        let mut routes = route(&hops.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+        for (hop, (_, window)) in routes
+            .get_mut("demo")
+            .expect("demo route")
+            .iter_mut()
+            .zip(hops)
+        {
+            hop.context_window = *window;
+        }
+        routes
+    }
+
+    fn scripted(
+        id: &'static str,
+        hits: &Arc<AtomicUsize>,
+        answers: Vec<Result<Completion, ProviderError>>,
+    ) -> BuiltProvider {
+        built_member(
+            id,
+            Arc::new(Scripted {
+                id,
+                hits: Arc::clone(hits),
+                answers: std::sync::Mutex::new(answers.into_iter().collect()),
+            }),
+        )
+    }
+
+    /// A request the estimate puts at `tokens` input tokens.
+    fn sized(tokens: usize) -> Request {
+        let mut request = Request::new("demo");
+        let text = hofund_plugin_api::ContentPart::text("x".repeat(tokens * 4));
+        let part = serde_json::to_value(text).expect("part");
+        let message =
+            serde_json::json!({ "role": hofund_plugin_api::Role::User, "content": [part] });
+        request
+            .messages
+            .push(serde_json::from_value(message).expect("message"));
+        request
+    }
+
+    #[tokio::test]
+    async fn b10a_a_vague_400_on_an_oversized_request_is_reported_as_too_long() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                scripted(
+                    "first",
+                    &first,
+                    vec![Err(ProviderError::status(
+                        400,
+                        "Invalid request parameters",
+                    ))],
+                ),
+            ),
+            (
+                "second".to_owned(),
+                scripted("second", &second, vec![Ok(raw_ok())]),
+            ),
+        ]);
+        let snapshot = open(
+            &built,
+            windowed(&[("first", Some(100)), ("second", Some(100))]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        let error = match snapshot.load().dispatch(&sized(120), "openai-chat").await {
+            Ok(_) => panic!("an oversized request should be reported as too long"),
+            Err(error) => error,
+        };
+        let hofund_router::RouterError::Upstream { upstream_id, error } = error else {
+            panic!("upstream error");
+        };
+        assert_eq!(upstream_id, "first");
+        assert_eq!(error.status(), Some(400));
+        assert!(
+            error.message().starts_with(
+                "prompt is too long: about 120 tokens, more than demo's context window of 100"
+            ),
+            "{}",
+            error.message()
+        );
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(second.load(Ordering::SeqCst), 0);
+        // Not a rest: the member answers a request it holds.
+        assert!(
+            snapshot
+                .load()
+                .cooldowns()
+                .expect("cooldowns")
+                .cooling(&super::member_id("first"))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn b10b_a_member_known_too_small_is_skipped_after_an_overflow() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let small = Arc::new(AtomicUsize::new(0));
+        let roomy = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                scripted(
+                    "first",
+                    &first,
+                    vec![Err(ProviderError::status(
+                        400,
+                        "prompt is too long: 200 tokens > 150 maximum",
+                    ))],
+                ),
+            ),
+            (
+                "small".to_owned(),
+                scripted("small", &small, vec![Ok(raw_ok())]),
+            ),
+            (
+                "roomy".to_owned(),
+                scripted("roomy", &roomy, vec![Ok(raw_ok())]),
+            ),
+        ]);
+        let snapshot = open(
+            &built,
+            windowed(&[
+                ("first", Some(150)),
+                ("small", Some(150)),
+                ("roomy", Some(1000)),
+            ]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        let routed = snapshot
+            .load()
+            .dispatch(&sized(160), "openai-chat")
+            .await
+            .expect("a member with room answers");
+        assert_eq!(routed.upstream_id, "roomy");
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(small.load(Ordering::SeqCst), 0);
+        assert_eq!(roomy.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn b10c_the_hop_window_comes_from_the_model_list() {
+        let listed = hofund_plugin_api::ModelSpec::new("demo", None)
+            .expect("model")
+            .with_context(128_000);
+        assert_eq!(crate::hop_window(Some(&listed)), Some(128_000));
+        let unknown = hofund_plugin_api::ModelSpec::new("demo", None).expect("model");
+        assert_eq!(crate::hop_window(Some(&unknown)), None);
+        assert_eq!(crate::hop_window(None), None);
     }
 
     struct Observing {
@@ -2082,5 +2312,230 @@ mod tests {
                 .expect("dispatch");
             assert_eq!(routed.upstream_id, expected);
         }
+    }
+
+    /// A network check with a set answer that records the hosts it was given.
+    struct FakeNetwork {
+        online: std::sync::atomic::AtomicBool,
+        asked: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl crate::offline::NetworkCheck for FakeNetwork {
+        fn online(&self, hosts: Vec<String>) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+            self.asked.lock().expect("asked").push(hosts);
+            let online = self.online.load(Ordering::SeqCst);
+            Box::pin(async move { online })
+        }
+    }
+
+    fn network(online: bool) -> Arc<FakeNetwork> {
+        Arc::new(FakeNetwork {
+            online: std::sync::atomic::AtomicBool::new(online),
+            asked: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn reached_at(
+        id: &'static str,
+        base_url: &str,
+        hits: &Arc<AtomicUsize>,
+        answers: Vec<Result<Completion, ProviderError>>,
+    ) -> BuiltProvider {
+        let mut built = built_member(
+            id,
+            Arc::new(Scripted {
+                id,
+                hits: Arc::clone(hits),
+                answers: std::sync::Mutex::new(answers.into_iter().collect()),
+            }),
+        );
+        built.base_url = base_url.to_owned();
+        built
+    }
+
+    fn cooling(snapshot: &Snapshot, id: &str) -> bool {
+        snapshot
+            .load()
+            .cooldowns()
+            .expect("cooldowns")
+            .cooling(&super::member_id(id))
+            .is_some()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn b8a_offline_connection_failures_rest_no_member() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let refused = || Err(ProviderError::connect("refused"));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                reached_at("first", "https://a.example.com/v1", &first, vec![refused()]),
+            ),
+            (
+                "second".to_owned(),
+                reached_at(
+                    "second",
+                    "https://b.example.com/v1",
+                    &second,
+                    vec![refused()],
+                ),
+            ),
+        ]);
+        let check = network(false);
+        let snapshot = open_checking(
+            &built,
+            route(&["first", "second"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+            Arc::clone(&check) as Arc<dyn NetworkCheck>,
+        )
+        .expect("snapshot");
+
+        let error = match snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+        {
+            Ok(_) => panic!("every member failed to connect"),
+            Err(error) => error,
+        };
+        let hofund_router::RouterError::Upstream { upstream_id, error } = error else {
+            panic!("upstream error");
+        };
+        // The next member was still asked, and the last failure is the client's.
+        assert_eq!(upstream_id, "second");
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Connect);
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(second.load(Ordering::SeqCst), 1);
+        assert!(!cooling(&snapshot, "first"));
+        assert!(!cooling(&snapshot, "second"));
+        // One check, kept for the second failure; it dialed the other provider.
+        assert_eq!(
+            *check.asked.lock().expect("asked"),
+            vec![vec!["b.example.com:443".to_owned()]]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn b8b_online_connection_failures_rest_as_before() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                reached_at(
+                    "first",
+                    "https://a.example.com/v1",
+                    &first,
+                    vec![Err(ProviderError::connect("refused"))],
+                ),
+            ),
+            (
+                "second".to_owned(),
+                reached_at(
+                    "second",
+                    "https://b.example.com/v1",
+                    &second,
+                    vec![Ok(raw_ok())],
+                ),
+            ),
+        ]);
+        let check = network(true);
+        let snapshot = open_checking(
+            &built,
+            route(&["first", "second"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+            Arc::clone(&check) as Arc<dyn NetworkCheck>,
+        )
+        .expect("snapshot");
+        let routed = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("failover");
+        assert_eq!(routed.upstream_id, "second");
+        assert!(cooling(&snapshot, "first"));
+        assert_eq!(check.asked.lock().expect("asked").len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn b8c_a_recent_answer_skips_the_network_check() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([(
+            "first".to_owned(),
+            reached_at(
+                "first",
+                "https://a.example.com/v1",
+                &first,
+                vec![Ok(raw_ok()), Err(ProviderError::connect("refused"))],
+            ),
+        )]);
+        let check = network(false);
+        let snapshot = open_checking(
+            &built,
+            route(&["first"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+            Arc::clone(&check) as Arc<dyn NetworkCheck>,
+        )
+        .expect("snapshot");
+        snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("answered");
+        tokio::time::advance(crate::offline::HEARD_FRESH - Duration::from_millis(1)).await;
+        assert!(
+            snapshot
+                .load()
+                .dispatch(&Request::new("demo"), "openai-chat")
+                .await
+                .is_err()
+        );
+        // Heard 15 s ago at most: the network is fine and the member rests.
+        assert!(check.asked.lock().expect("asked").is_empty());
+        assert!(cooling(&snapshot, "first"));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn b8d_an_error_status_counts_as_an_answer() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([(
+            "first".to_owned(),
+            reached_at(
+                "first",
+                "https://a.example.com/v1",
+                &first,
+                vec![
+                    Err(ProviderError::status(500, "upstream broke")),
+                    Err(ProviderError::connect("refused")),
+                ],
+            ),
+        )]);
+        let check = network(false);
+        let snapshot = open_checking(
+            &built,
+            route(&["first"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+            Arc::clone(&check) as Arc<dyn NetworkCheck>,
+        )
+        .expect("snapshot");
+        assert!(
+            snapshot
+                .load()
+                .dispatch(&Request::new("demo"), "openai-chat")
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let _ = snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await;
+        // The 500 was a reply: the network is up, so nobody was asked.
+        assert_eq!(first.load(Ordering::SeqCst), 2);
+        assert!(check.asked.lock().expect("asked").is_empty());
     }
 }
