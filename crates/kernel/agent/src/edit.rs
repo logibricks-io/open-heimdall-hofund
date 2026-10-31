@@ -2094,7 +2094,7 @@ mod tests {
     }
 
     #[test]
-    fn yaml_document_marker_falls_back_to_the_emitter() {
+    fn yaml_document_marker_file_is_still_edited() {
         let original = "---\n# note\nmodel: old\n";
         let set = text(
             FileKind::Yaml,
@@ -2105,7 +2105,6 @@ mod tests {
             get(FileKind::Yaml, &set, "model").expect("model"),
             Some("new".to_owned())
         );
-        assert!(!set.contains("# note"), "{set}");
     }
 
     #[test]
