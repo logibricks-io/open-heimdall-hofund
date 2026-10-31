@@ -716,6 +716,36 @@ mod tests {
     }
 
     #[test]
+    fn a8_refusal_takes_its_wait_from_headers_then_from_its_words() {
+        let body = br#"{"error":{"message":"Rate limit reached. Please try again in 20s."}}"#;
+        assert_eq!(
+            super::refusal(429, None, body, false).retry_after(),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            super::refusal(429, Some(Duration::from_secs(5)), body, false).retry_after(),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            super::refusal(429, None, br#"{"error":"busy"}"#, false).retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn a4_refusal_reads_an_allocation_quota_as_a_rate_only_when_asked() {
+        let body = br#"{"error":{"code":"insufficient_quota","message":"Allocated quota exceeded, please increase your quota limit."}}"#;
+        let rate = super::refusal(429, None, body, true);
+        assert_eq!(rate.kind, crate::ProviderErrorKind::Status);
+        assert!(!rate.is_credit());
+        let plain = super::refusal(429, None, body, false);
+        assert!(
+            plain.is_credit() || plain.kind != crate::ProviderErrorKind::Status,
+            "{plain:?}"
+        );
+    }
+
+    #[test]
     fn a_dropped_tool_is_noted_once() {
         let name = format!("once-{}", std::process::id());
         assert!(note_dropped(&name));

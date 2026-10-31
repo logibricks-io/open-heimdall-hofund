@@ -1755,6 +1755,9 @@ mod tests {
             assert!(super::pace_words(body), "{body}");
             assert!(!is_quota_error(429, body.as_bytes()), "{body}");
         }
+        for body in ["rate limit", "rate-limit", "ratelimit", "rate_limit"] {
+            assert!(super::pace_words(body), "{body}");
+        }
     }
 
     #[test]

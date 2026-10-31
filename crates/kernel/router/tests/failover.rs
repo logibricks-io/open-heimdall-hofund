@@ -77,6 +77,12 @@ impl Member for Fake {
                     usage: None,
                     extensions: hofund_ir::Extensions::new(),
                 })),
+                // Usage without a stop does not commit the stream.
+                Ok(StreamEvent::MessageDelta(hofund_ir::MessageDelta {
+                    stop: None,
+                    usage: None,
+                    extensions: hofund_ir::Extensions::new(),
+                })),
                 Err(
                     PluginError::status_error(502, "the reply ended with finish_reason \"error\"")
                         .without_cooldown(),
