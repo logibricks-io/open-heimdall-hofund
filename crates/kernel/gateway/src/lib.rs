@@ -9,6 +9,7 @@ pub mod control;
 mod endpoints;
 mod prev_response;
 mod relisten;
+mod responses_ws;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 #[doc(hidden)]
@@ -423,7 +424,9 @@ impl Gateway {
         if !self.inner.surfaces.is_empty() {
             routes = routes.fallback(dispatch_surface);
         }
-        routes.with_state(Arc::clone(&self.inner))
+        routes
+            .with_state(Arc::clone(&self.inner))
+            .layer(axum::middleware::from_fn(responses_ws::path_guard))
     }
 
     /// Binds `listen` and serves until [`Running`] shuts down.
@@ -688,13 +691,22 @@ fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
         .route("/v1/models", get(models));
     let generative =
         inner.codecs.contains_key(GENERATIVE_UNARY) || inner.codecs.contains_key(GENERATIVE_STREAM);
+    let responses = inner
+        .codecs
+        .values()
+        .any(|codec| codec.id() == ProtocolId::OPENAI_RESPONSES.as_str());
     let paths: Vec<String> = inner.codecs.keys().cloned().collect();
     let messages = paths.iter().any(|path| path == "/v1/messages");
     for path in paths {
-        if path.contains('{') {
+        if path.contains('{') || responses && responses_ws::is_responses_path(&path) {
             continue;
         }
         routes = routes.route(&path, post(complete));
+    }
+    if responses {
+        routes = routes
+            .route("/v1/responses", post(complete).get(responses_ws::get))
+            .route("/responses", post(complete).get(responses_ws::get));
     }
     if messages {
         routes = routes.route("/v1/messages/count_tokens", post(complete));
@@ -704,7 +716,7 @@ fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
             .route(GENERATIVE_CATCHALL, post(complete))
             .route(GENERATIVE_LIST, get(generative_models));
     }
-    routes
+    routes.fallback(not_found)
 }
 
 /// The gateway's codec routes, run in process for an inbound surface.
@@ -844,7 +856,17 @@ fn forwarded_tokens(body: &[u8]) -> (Option<i64>, Option<i64>) {
     (input, count("/usage/output_tokens"))
 }
 
+async fn not_found(request: Request) -> Response {
+    if responses_ws::wants_socket(request.method(), request.headers()) {
+        return responses_ws::upgrade_required();
+    }
+    text_response(StatusCode::NOT_FOUND, "not found")
+}
+
 async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Response {
+    if responses_ws::wants_socket(request.method(), request.headers()) {
+        return responses_ws::upgrade_required();
+    }
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let Some(surface) = app.surfaces.iter().find(|surface| {
@@ -1035,10 +1057,15 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         return count_tokens(app, headers, uri, request, GENERATIVE_UNARY, Some(model)).await;
     }
     let matched = match_generate(&path);
+    let codec_path = if path == "/responses" {
+        "/v1/responses"
+    } else {
+        path.as_str()
+    };
     let codec_key = matched
         .as_ref()
         .map(|route| route.key)
-        .unwrap_or(path.as_str());
+        .unwrap_or(codec_path);
     let Some(codec) = app.codecs.get(codec_key).cloned() else {
         return text_response(StatusCode::NOT_FOUND, "not found");
     };
