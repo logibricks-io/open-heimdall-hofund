@@ -850,3 +850,87 @@ fn a2_crlf_and_comment_led_sse_replies_are_kept() {
     assert_eq!(turn.items.len(), 2);
     assert_eq!(turn.items[1]["content"], "yo");
 }
+
+#[test]
+fn a2_a_reply_led_by_a_blank_crlf_line_is_read_as_sse() {
+    let store = PrevStore::new();
+    capture(
+        &store,
+        "s",
+        r#"{"model":"demo","input":"hi"}"#,
+        b"\r\nevent: response.completed\r\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_lead\",\"status\":\"completed\",\"output\":[]}}\r\n\r\n",
+    );
+    assert!(store.get("s", "resp_lead").is_some());
+}
+
+#[test]
+fn a_reply_cut_at_the_cap_stays_cut_for_later_chunks() {
+    let store = PrevStore::new();
+    let expansion = store.expand("s", br#"{"model":"demo","input":"hi"}"#);
+    let mut capture = ReplyCapture::new(expansion.capture).expect("capture");
+    let whole = raw_response("resp_after_cut", "ok", "completed");
+    capture.limit = whole.len();
+    capture.push(&vec![b' '; whole.len() + 1]);
+    capture.push(&whole);
+    capture.finish();
+    assert!(store.get("s", "resp_after_cut").is_none());
+}
+
+fn kept_on_route(store: &PrevStore, route: &str) -> String {
+    let expansion = store.expand("s", br#"{"model":"demo","store":true,"input":"first"}"#);
+    let attempt = keeping_attempt(route);
+    expansion.ask.expect("ask").attempt().answered(&attempt);
+    let mut capture = ReplyCapture::new(expansion.capture).expect("capture");
+    capture.push(&raw_response("resp_kept", "one", "completed"));
+    capture.finish();
+    "resp_kept".to_owned()
+}
+
+fn keeping_attempt(route: &str) -> Attempt {
+    Attempt {
+        member: MemberAttempt {
+            protocol: RESPONSES.to_owned(),
+            route: route.to_owned(),
+            keeps_responses: true,
+            ..MemberAttempt::default()
+        },
+        inbound_protocol: RESPONSES.to_owned(),
+    }
+}
+
+#[test]
+fn a10_delta_only_on_the_route_that_answered_and_an_unchanged_item_count() {
+    let store = PrevStore::new();
+    let id = kept_on_route(&store, "same\0key");
+    let next = format!(
+        r#"{{"model":"demo","store":true,"previous_response_id":"{id}","input":"second"}}"#
+    );
+    let expansion = store.expand("s", next.as_bytes());
+    let hook = expansion.ask.expect("ask").attempt();
+    let body = expansion.body;
+
+    let delta = hook
+        .prepare(&keeping_attempt("same\0key"), &body)
+        .expect("delta on the answering route");
+    let delta: Value = serde_json::from_slice(&delta).expect("delta JSON");
+    assert_eq!(delta["previous_response_id"], "resp_kept");
+    assert_eq!(delta["input"].as_array().expect("items").len(), 1);
+
+    assert!(
+        hook.prepare(&keeping_attempt("other\0key"), &body)
+            .is_none(),
+        "another provider or key gets the whole conversation"
+    );
+
+    let mut changed: Value = serde_json::from_slice(&body).expect("body JSON");
+    changed["input"]
+        .as_array_mut()
+        .expect("items")
+        .push(json!({"type":"message","role":"user","content":"extra"}));
+    let changed = serde_json::to_vec(&changed).expect("changed");
+    assert!(
+        hook.prepare(&keeping_attempt("same\0key"), &changed)
+            .is_none(),
+        "a body whose item count moved is sent whole"
+    );
+}
