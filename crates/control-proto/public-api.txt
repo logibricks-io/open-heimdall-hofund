@@ -198,10 +198,12 @@ ListenerRelistenFailedEvent.running
 ListenerRelistenFailedEvent.runtime_revision
 MemberCooledEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 MemberCooledEvent.cause
+MemberCooledEvent.error
 MemberCooledEvent.failures
 MemberCooledEvent.member_id
 MemberCooledEvent.remaining_ms
 MemberCooledEvent.retry_after_ms
+MemberCooledEvent.status
 MemberRecoveredEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 MemberRecoveredEvent.member_id
 MemberRecoveredEvent.ready

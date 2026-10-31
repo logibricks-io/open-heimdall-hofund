@@ -43,3 +43,4 @@ slot = { append = { each = "model", owner = [
 [model]
 file = "settings"
 key = "sessionDefaultSettings.model"
+restore_on_clear = true

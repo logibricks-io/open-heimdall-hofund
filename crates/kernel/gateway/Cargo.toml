@@ -12,7 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait = "0.1.92"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 futures-util = "0.3.34"
 hofund-codec = { workspace = true }
 hofund-control-proto = { workspace = true }
@@ -45,4 +45,5 @@ hofund-usage = { workspace = true }
 serde_json = "1.0.154"
 tempfile = { workspace = true }
 tokio = { version = "1.54.1", features = ["io-util", "macros", "rt-multi-thread", "test-util"] }
+tokio-tungstenite = "0.29.0"
 tower = "0.5.3"

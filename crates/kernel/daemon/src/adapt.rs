@@ -93,13 +93,23 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
         PluginErrorKind::Decode => ProviderError::decode(error.message()),
         PluginErrorKind::Unsupported => ProviderError::unsupported(error.message()),
         PluginErrorKind::Auth => ProviderError::auth(error.message()),
-        PluginErrorKind::Quota => ProviderError::quota(error.message()),
+        PluginErrorKind::Quota => {
+            let mut quota = ProviderError::quota(error.message());
+            quota.status = error.status();
+            quota
+        }
         PluginErrorKind::Config => ProviderError::config(error.message()),
         PluginErrorKind::Cancelled => ProviderError::cancelled(error.message()),
         PluginErrorKind::Io => ProviderError::io(error.message()),
         PluginErrorKind::Internal => ProviderError::internal(error.message()),
         _ => ProviderError::decode(error.message()),
     };
+    if error.is_credit() {
+        converted = ProviderError::credit_status(error.status().unwrap_or(402), error.message());
+    }
+    if !error.cools() {
+        converted = converted.without_cooldown();
+    }
     if let Some(after) = error.retry_after() {
         converted = converted.with_retry_after(after);
     }

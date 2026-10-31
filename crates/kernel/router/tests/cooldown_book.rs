@@ -784,3 +784,29 @@ fn rate_ladder_resets_during_active_non_rate_rest_after_forget() {
     assert_eq!(next.cause(), CooldownCause::RateLimit);
     assert_eq!(next.failures(), 1);
 }
+
+#[test]
+fn a1_short_reset_rest_uses_the_stated_minute() {
+    let (book, id, clock) = fixture();
+    let error = PluginError::status_error(429, "usage limit resets in 1 minutes")
+        .with_retry_after(Duration::from_secs(MINUTE));
+    let cooling = book.record_failure(&id, &error).expect("rate rest");
+    assert_eq!(cooling.cause(), CooldownCause::RateLimit);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+}
+
+#[test]
+fn a10_rest_carries_status_and_300_vendor_characters() {
+    let (book, id, _) = fixture();
+    // Repeated "service" wording checks a character-safe cut.
+    let words = "\u{670d}\u{52a1}".repeat(400);
+    let error = PluginError::status_error(500, words);
+    let cooling = book.record_failure(&id, &error).expect("failure rest");
+    assert_eq!(cooling.status(), Some(500));
+    assert_eq!(cooling.error().chars().count(), 300);
+    assert!(cooling.error().starts_with("\u{670d}\u{52a1}"));
+    let entries = book.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1.status(), Some(500));
+    assert_eq!(entries[0].1.error(), cooling.error());
+}

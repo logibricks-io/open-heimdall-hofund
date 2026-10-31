@@ -940,7 +940,7 @@ fn scratch() -> Scratch {
 }
 
 #[test]
-fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
+fn shipped_vscode_clear_restores_previous_default_model() {
     let home = scratch();
     let session = Session::new(&*home);
     let dir = home.join(".config").join("Code").join("User");
@@ -955,7 +955,8 @@ fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
     fs::write(&settings, settings_text).expect("seed settings");
     let target = target();
     let agent = adapter("vscode", TargetOs::Linux);
-    agent.apply(&session, &target).expect("apply");
+    let plan = agent.apply(&session, &target).expect("apply");
+    assert_eq!(plan.changes().len(), 1, "{plan:?}");
     let read = |path: &Path| -> serde_json::Value {
         hofund_kit_agent::parse_jsonc(
             std::str::from_utf8(&fs::read(path).expect("read")).expect("UTF-8"),
@@ -993,7 +994,7 @@ fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
     assert!(agent.status(&session, &target).expect("status").connected());
     agent.set_model(&session, &target, None).expect("clear");
     let json = read(&settings);
-    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["chat.defaultModel"], "mine");
     assert_eq!(
         json["chat"],
         serde_json::json!({ "agent": { "enabled": true } })
@@ -1002,15 +1003,96 @@ fn shipped_vscode_pick_sets_the_dotted_default_model_key() {
         .set_model(&session, &target, Some("route-a"))
         .expect("pick again");
     agent.disconnect(&session, false).expect("disconnect");
-    // The models file comes back byte for byte; settings gets the user's
-    // default model back beside their other keys.
     assert_eq!(fs::read_to_string(&models).expect("models"), models_text);
-    let json = read(&settings);
-    assert_eq!(json["chat.defaultModel"], "mine");
     assert_eq!(
-        json["chat"],
-        serde_json::json!({ "agent": { "enabled": true } })
+        fs::read_to_string(&settings).expect("settings"),
+        settings_text
     );
+}
+
+#[test]
+fn shipped_vscode_clear_without_previous_default_model_removes_key() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(&settings, "{\"editor.fontSize\": 14}\n");
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["editor.fontSize"], 14);
+}
+
+#[test]
+fn shipped_vscode_clear_with_an_empty_previous_default_model_removes_key() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(
+        &settings,
+        "{\"chat.defaultModel\": \"\", \"editor.fontSize\": 14}\n",
+    );
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["editor.fontSize"], 14);
+}
+
+#[test]
+fn shipped_vscode_clear_does_not_restore_a_previous_gateway_model() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(
+        &settings,
+        "{\"chat.defaultModel\": \"route-a\", \"editor.fontSize\": 14}\n",
+    );
+    let target = target_with(&["route-a", "route-b"]);
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-b"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(json.get("chat.defaultModel"), None);
+    assert_eq!(json["editor.fontSize"], 14);
+}
+
+#[test]
+fn shipped_vscode_clear_then_disconnect_restores_once() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let settings = home.join(".config/Code/User/settings.json");
+    write(&settings, "{\"chat.defaultModel\": \"mine\"}\n");
+    let target = target();
+    let agent = adapter("vscode", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    agent.set_model(&session, &target, None).expect("clear");
+    let mut edited: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(edited["chat.defaultModel"], "mine");
+    edited["note"] = serde_json::json!("keep");
+    write(&settings, &edited.to_string());
+    agent.disconnect(&session, false).expect("disconnect");
+    let restored: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+    assert_eq!(restored["chat.defaultModel"], "mine");
+    assert_eq!(restored["note"], "keep");
+    assert!(!agent.disconnect(&session, false).expect("again").changed());
 }
 
 #[test]
@@ -1069,6 +1151,7 @@ fn shipped_qwen_pick_points_the_session_at_the_gateway_entry() {
     assert!(agent.status(&session, &target).expect("status").connected());
     agent.set_model(&session, &target, None).expect("clear");
     let json = read();
+    assert_eq!(json["model"]["name"], "mine");
     assert_eq!(json["model"]["baseUrl"], "https://mine.example.test/v1");
     assert_eq!(json["security"]["auth"]["selectedType"], "qwen-oauth");
     agent.disconnect(&session, false).expect("disconnect");
@@ -1076,6 +1159,33 @@ fn shipped_qwen_pick_points_the_session_at_the_gateway_entry() {
         read(),
         serde_json::from_str::<serde_json::Value>(original).expect("original")
     );
+}
+
+#[test]
+fn shipped_droid_clear_restores_previous_default_model() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".factory/settings.json");
+    write(
+        &path,
+        "{\"sessionDefaultSettings\":{\"model\":\"custom:mine\"},\"theme\":\"dark\"}\n",
+    );
+    let target = target();
+    let agent = adapter("droid", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let picked: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    assert_eq!(
+        picked["sessionDefaultSettings"]["model"],
+        "custom:hofund/route-a"
+    );
+    agent.set_model(&session, &target, None).expect("clear");
+    let cleared: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    assert_eq!(cleared["sessionDefaultSettings"]["model"], "custom:mine");
+    assert_eq!(cleared["theme"], "dark");
 }
 
 const CLINE_PROVIDERS: &str = r#"{
@@ -1256,7 +1366,7 @@ max_context_size = 262144
 "#;
 
 #[test]
-fn shipped_kimi_pick_sets_default_model_and_disconnect_gives_it_back() {
+fn shipped_kimi_clear_restores_default_model_when_table_exists() {
     let home = scratch();
     let session = Session::new(&*home);
     let path = home.join(".kimi-code").join("config.toml");
@@ -1300,9 +1410,11 @@ fn shipped_kimi_pick_sets_default_model_and_disconnect_gives_it_back() {
         Some("hofund/route-a")
     );
     assert!(agent.status(&session, &target).expect("status").connected());
-    // Clearing drops the key (#433); disconnect puts back the user's.
     agent.set_model(&session, &target, None).expect("clear");
-    assert!(!read().contains_key("default_model"));
+    assert_eq!(
+        read()["default_model"].as_str(),
+        Some("kimi-code/kimi-for-coding")
+    );
     let cleared_text = fs::read_to_string(&path).expect("clear");
     assert!(cleared_text.contains("# my model choice"), "{cleared_text}");
     agent
@@ -1315,6 +1427,57 @@ fn shipped_kimi_pick_sets_default_model_and_disconnect_gives_it_back() {
     );
     agent.disconnect(&session, false).expect("disconnect");
     assert_eq!(fs::read_to_string(&path).expect("read"), KIMI_CONFIG);
+}
+
+#[test]
+fn shipped_kimi_clear_drops_default_model_when_table_is_gone() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".kimi-code").join("config.toml");
+    write(&path, KIMI_CONFIG);
+    let target = target();
+    let agent = adapter("kimi", TargetOs::Linux);
+    agent
+        .set_model(&session, &target, Some("route-a"))
+        .expect("pick");
+    let without_user_model = KIMI_CONFIG
+        .split("[models.\"kimi-code/kimi-for-coding\"]")
+        .next()
+        .expect("prefix");
+    write(&path, without_user_model);
+    agent.set_model(&session, &target, None).expect("clear");
+    let config: toml::Table =
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml");
+    assert!(!config.contains_key("default_model"));
+}
+
+#[test]
+fn shipped_kimi_status_reports_stale_hofund_default() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".kimi-code").join("config.toml");
+    write(&path, KIMI_CONFIG);
+    let agent = adapter("kimi", TargetOs::Linux);
+    agent
+        .set_model(
+            &session,
+            &target_with(&["route-a", "route-b"]),
+            Some("route-a"),
+        )
+        .expect("pick");
+    let remaining = target_with(&["route-b"]);
+    agent.apply(&session, &remaining).expect("route removed");
+    let config: toml::Table =
+        toml::from_str(&fs::read_to_string(&path).expect("read")).expect("toml");
+    assert_eq!(config["default_model"].as_str(), Some("hofund/route-a"));
+    assert!(config["models"].get("hofund/route-b").is_some());
+    assert!(config["models"].get("hofund/route-a").is_none());
+    assert!(
+        !agent
+            .status(&session, &remaining)
+            .expect("status")
+            .connected()
+    );
 }
 
 const GROK_CONFIG: &str = r#"[models]

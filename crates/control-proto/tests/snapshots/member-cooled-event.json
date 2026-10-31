@@ -11,7 +11,9 @@
       "cause": "rate_limit",
       "retry_after_ms": 1000,
       "remaining_ms": 900,
-      "failures": 2
+      "failures": 2,
+      "status": 500,
+      "error": "vendor failure"
     }
   }
 }

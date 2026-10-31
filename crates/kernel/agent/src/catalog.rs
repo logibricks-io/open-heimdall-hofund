@@ -32,6 +32,8 @@ use crate::{active_provider, go_binary};
 struct ModelKey {
     file: &'static str,
     key: &'static str,
+    restore_on_clear: bool,
+    table: Option<&'static str>,
 }
 
 /// An adapter backed by a compiled static agent description.
@@ -229,7 +231,7 @@ enum Choice<'a> {
     Keep,
     /// Write this route model.
     Set(&'a str),
-    /// Drop the model so the connect default applies.
+    /// Clear the route pick, restoring a previous model when declared.
     Clear,
 }
 
@@ -293,7 +295,12 @@ impl Engine {
         let model = description
             .model_key()
             .zip(model_file)
-            .map(|(key, file)| ModelKey { file, key });
+            .map(|(key, file)| ModelKey {
+                file,
+                key,
+                restore_on_clear: description.restore_model_on_clear(),
+                table: description.model_table(),
+            });
         Ok(Self {
             id: description.id().as_str(),
             display_name: description.display_name(),
@@ -417,8 +424,8 @@ impl Engine {
         self.apply_with(target, Choice::Set(id))
     }
 
-    /// Drops the model key. A connected agent is re-applied so the snapshot
-    /// follows; a disconnected one is edited in place without a backup.
+    /// Clears the route pick. A connected agent is re-applied so the snapshot
+    /// follows; a disconnected one only drops the key, without a backup.
     fn clear_model(&self, target: &GatewayTarget, model: ModelKey) -> Result<Plan, AgentError> {
         let chosen = self
             .chosen()?
@@ -543,8 +550,9 @@ impl Engine {
                     .into_iter()
                     .filter(|key| !assignments.iter().any(|assignment| assignment.key == *key))
                     .collect();
-                // A pair goes back to the pick the user had before connect.
-                let picked = self.picked_before(&path, kind, &leftover)?;
+                // Model and pair keys go back to the picks the user had before connect.
+                let picked =
+                    self.picked_before(&path, kind, &leftover, target, utf8(&path, &after)?)?;
                 // A key inside a restored pair came back with it.
                 let leftover: Vec<&'static str> = leftover
                     .into_iter()
@@ -729,19 +737,38 @@ impl Engine {
             .collect()
     }
 
-    /// The pre-connect values of the pair keys among `keys`, read from the
-    /// connect backup. A key the backup lacks is not listed.
+    /// The pre-connect values of the model and pair keys among `keys`, read
+    /// from the connect backup. A key the backup lacks is not listed.
     fn picked_before(
         &self,
         path: &Path,
         kind: FileKind,
         keys: &[&'static str],
+        target: &GatewayTarget,
+        current: &str,
     ) -> Result<Vec<Assignment>, AgentError> {
         let Some(backup) = read_optional(&sibling_bak(path))? else {
             return Ok(Vec::new());
         };
         let backup = utf8(path, &backup)?;
         let mut picked = Vec::new();
+        if let Some(model) = self
+            .model
+            .filter(|model| model.restore_on_clear && keys.contains(&model.key))
+            && let Some(value) =
+                get(kind, backup, model.key).map_err(|error| annotate(path, error))?
+            && !value.is_empty()
+            && !self.gateway_model(target, &value)
+            && Self::model_table_has(kind, current, model.table, &value)
+                .map_err(|error| annotate(path, error))?
+        {
+            picked.push(Assignment {
+                key: model.key,
+                raw_json: typed(kind, backup, model.key, &value),
+                shared: None,
+                value,
+            });
+        }
         for set in &self.sets {
             if !matches!(set.slot, ApiSlot::ModelPair { .. }) || !keys.contains(&set.key) {
                 continue;
@@ -758,6 +785,32 @@ impl Engine {
             }
         }
         Ok(picked)
+    }
+
+    /// Whether `value` names a gateway route. A prefixed route id starts
+    /// with the prefix, so the prefix test covers it.
+    fn gateway_model(&self, target: &GatewayTarget, value: &str) -> bool {
+        self.model_prefix
+            .is_some_and(|prefix| value.starts_with(prefix))
+            || self.models(target).iter().any(|id| id == value)
+    }
+
+    fn model_table_has(
+        kind: FileKind,
+        text: &str,
+        table: Option<&'static str>,
+        value: &str,
+    ) -> Result<bool, AgentError> {
+        let Some(table) = table else {
+            return Ok(true);
+        };
+        let Some(entries) = get(kind, text, table)? else {
+            return Ok(false);
+        };
+        let Ok(serde_json::Value::Object(entries)) = serde_json::from_str(&entries) else {
+            return Ok(false);
+        };
+        Ok(entries.contains_key(value))
     }
 
     /// The model key and the tier keys that follow it in the model file.
@@ -812,7 +865,10 @@ impl Engine {
         for chosen in self.chosen()? {
             paths.push(chosen.path.clone());
             let Chosen {
-                path, kind, sets, ..
+                file,
+                path,
+                kind,
+                sets,
             } = chosen;
             if !connected {
                 continue;
@@ -864,6 +920,20 @@ impl Engine {
                     connected = false;
                     break;
                 }
+            }
+            if connected
+                && let Some(model) = self
+                    .model
+                    .filter(|model| model.file == file && model.table.is_some())
+                && let Some(value) =
+                    string_at(kind, text, model.key).map_err(|error| annotate(&path, error))?
+                && self
+                    .model_prefix
+                    .is_some_and(|prefix| value.starts_with(prefix))
+                && !Self::model_table_has(kind, text, model.table, &value)
+                    .map_err(|error| annotate(&path, error))?
+            {
+                connected = false;
             }
         }
         if connected && let Some(credential) = self.credential()? {

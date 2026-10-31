@@ -417,9 +417,10 @@ pub trait AgentAdapter: Sync {
     /// Points the agent's model setting at `model`, a gateway route model.
     ///
     /// An agent that is not connected is connected first, as [`Self::apply`]
-    /// does, so the model is reachable. `None` drops the setting: a connected
-    /// agent gets what a plain connect picks (the sole route model, when there
-    /// is exactly one), and a disconnected one only loses the key. A later
+    /// does, so the model is reachable. `None` clears the route pick: a
+    /// connected agent restores its pre-connect model when declared, otherwise
+    /// it gets what a plain connect picks (the sole route model, when there is
+    /// exactly one). A disconnected one only loses the key. A later
     /// [`Self::disconnect`] restores the pre-connect model.
     ///
     /// # Errors

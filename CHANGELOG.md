@@ -17,7 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole once. Unknown ids on translating or subscription routes return the
   OpenAI-shaped 400 error. History expires after six hours and is lost on
   restart; upstream `store: false` remains the default when omitted.
-
+- Responses over a WebSocket on `/v1/responses` and `/responses` (P0-1b):
+  sequential `response.create` turns replay through the authenticated HTTP
+  handler, with socket-local two-turn history, local warmups, SSE and unary
+  event mapping, metadata/rate-limit frames, bounded error frames, and an
+  8 MiB read limit. A foreign `Origin` cannot open a socket. Interrupts,
+  disconnect cancellation, and shutdown drain remain for P0-1c.
 - Agent keys in the OS credential store (Z1): an agent descriptor may
   declare a `[credential]` item (URL and Windows target templates, literal
   account and label). The engine stores hofund's key there through a
@@ -72,7 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absolute `GROK_HOME`), leaving the user's own model tables alone. A model
   pick writes `[models] default` and turns xAI's remote campaigns off
   (`[features] campaigns = false`), since a launch campaign would override the
-  default; clearing it drops the default (#433) and puts back the user's
+  default; clearing it drops the default (as the reference does) and puts back the user's
   campaigns setting. No catalog display names, context windows or reasoning
   efforts yet (#447), and WSL homes are not wired (#448).
 - Kimi Code agent (G12): `hofund agent connect kimi` writes
@@ -80,8 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one `[models."hofund/<route>"]` table per route (128000 context, tool
   use) to `~/.kimi-code/config.toml` (or under an absolute
   `KIMI_CODE_HOME`), leaving the user's own providers and models alone. A
-  model pick writes `default_model`; clearing it drops the key (#433) and
-  disconnect puts back the user's. No per-model catalog values yet (#441),
+  model pick writes `default_model`; clearing it puts back the user's value
+  while its model table remains. No per-model catalog values yet (#441),
   and the older kimi-cli's `~/.kimi` is not written (#442). The conformance
   kit's TOML user edit is now a
   top-level key, so it no longer lands inside a table hofund owns.
@@ -107,7 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the default profile's `settings.json` (VS Code Stable only), each route at
   the gateway's `/v1/chat/completions` with the token as its `Authorization`
   header. A model pick writes `chat.defaultModel` as the route id; clearing
-  the model drops it (#433) and disconnect puts back the user's value.
+  the model or disconnecting puts back the user's value.
 - Agent descriptions can write gateway text and nested objects inside model
   entries (`{ key, template }`, `{ key, object = [...] }`), and a key part
   may be quoted to hold a dot (`'"chat.defaultModel"'`). A file nothing is
@@ -926,6 +931,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Slot::JsonWithModels` removes its previous value when the visible route
   list becomes empty, including from the connect snapshot, so Goose no longer
   retains stale `dynamic_models: false` (#456).
+- Clearing a model restores the user's previous value for VS Code, Droid, and
+  Qwen Code, and removes the key when no previous value exists. Kimi Code
+  restores its previous `default_model` only while the matching model table
+  exists, and status reports a stale hofund default whose table is gone (#433,
+  #443).
 - Agent config edits keep user comments: JSONC uses span-aware replacements,
   insertions, and removals; block-style YAML edits touched lines in place;
   TOML removal transfers a key's leading comment to the next visible item or
@@ -958,6 +968,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   planned allowance, a 5xx quota code, or another 4xx naming a used-up limit.
   Per-minute and short-wait rate limits, `insufficient_quota`, and credit
   refusals stay out. Quota errors keep their HTTP status for failover.
+- Error classification now decodes escaped JSON strings before matching,
+  distinguishes short rate limits from longer quota windows, recognizes
+  context-overflow wording, and marks credit refusals at any 4xx so they fail
+  over and rest as credit. Errors carried by successful unary bodies or streams
+  take the status their words imply; a pre-content `finish_reason: "error"`
+  fails over without cooling the member. Cooldown records and control events
+  now carry the upstream status and up to 300 characters of vendor wording.
 - `Retry-After` keeps fractional seconds, and `*ratelimit*reset*` headers in
   RFC 3339, Go duration, or Unix-time form are read when it is absent; the
   longest wins and the router still caps the wait.

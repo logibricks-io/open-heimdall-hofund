@@ -145,6 +145,7 @@ pub(crate) struct Upstream {
     url: String,
     headers: HeaderMap,
     quirks: Option<&'static Profile>,
+    allocation_quota_rate: bool,
 }
 
 impl std::fmt::Debug for Upstream {
@@ -222,6 +223,7 @@ impl Upstream {
             url,
             headers,
             quirks: endpoint.quirks,
+            allocation_quota_rate: matches!(endpoint.preset.as_deref(), Some("qwen" | "qwen-cn")),
         })
     }
 }
@@ -438,13 +440,20 @@ pub(crate) struct Sent<'a> {
     streaming: bool,
     cross_protocol: bool,
     codec: &'a dyn Codec,
+    allocation_quota_rate: bool,
 }
 
 impl Sent<'_> {
     /// Reads or streams the successful response into a completion.
     pub(crate) async fn complete(self) -> Result<Completion, ProviderError> {
         if !self.cross_protocol {
-            return raw_completion(self.response, self.streaming, self.codec).await;
+            return raw_completion(
+                self.response,
+                self.streaming,
+                self.codec,
+                self.allocation_quota_rate,
+            )
+            .await;
         }
         // Cross-protocol only. Extensions are stripped on the way back.
         if self.streaming {
@@ -456,6 +465,11 @@ impl Sent<'_> {
             Ok(Completion::Stream(Box::pin(events)))
         } else {
             let bytes = self.response.bytes().await.map_err(map_body)?;
+            if let Some(error) =
+                hofund_plugin_sdk::transport::carried_error(&bytes, self.allocation_quota_rate)
+            {
+                return Err(ProviderError::from_plugin(error));
+            }
             let mut decoded = self
                 .codec
                 .decode_response(&bytes)
@@ -522,14 +536,15 @@ async fn send<'a>(
         if refused {
             response = send_json(upstream, url, whole).await?;
             if !response.status().is_success() {
-                return Err(response_error(response).await);
+                return Err(response_error(response, upstream.allocation_quota_rate).await);
             }
         } else {
-            let error = ProviderError::response(status.as_u16(), &bytes);
-            return Err(match retry_after {
-                Some(after) => error.with_retry_after(after),
-                None => error,
-            });
+            return Err(refusal(
+                status.as_u16(),
+                retry_after,
+                &bytes,
+                upstream.allocation_quota_rate,
+            ));
         }
     }
     Ok(Sent {
@@ -537,15 +552,27 @@ async fn send<'a>(
         streaming,
         cross_protocol,
         codec,
+        allocation_quota_rate: upstream.allocation_quota_rate,
     })
 }
 
-async fn response_error(response: reqwest::Response) -> ProviderError {
+async fn response_error(response: reqwest::Response, allocation_quota_rate: bool) -> ProviderError {
     let status = response.status();
     let retry_after = retry_after(response.headers());
     let bytes = response.bytes().await.unwrap_or_default();
-    let error = ProviderError::response(status.as_u16(), &bytes);
-    match retry_after {
+    refusal(status.as_u16(), retry_after, &bytes, allocation_quota_rate)
+}
+
+/// The error for an upstream refusal: classified from its words, with the
+/// wait its headers or, failing those, its words name.
+fn refusal(
+    status: u16,
+    retry_after: Option<Duration>,
+    bytes: &[u8],
+    allocation_quota_rate: bool,
+) -> ProviderError {
+    let error = ProviderError::response_for(status, bytes, allocation_quota_rate);
+    match retry_after.or_else(|| hofund_plugin_sdk::transport::retry_after_from_body(bytes)) {
         Some(after) => error.with_retry_after(after),
         None => error,
     }
@@ -555,11 +582,16 @@ pub(crate) async fn raw_completion(
     response: reqwest::Response,
     streaming: bool,
     codec: &dyn Codec,
+    allocation_quota_rate: bool,
 ) -> Result<Completion, ProviderError> {
     if streaming {
         return raw_stream(response, codec).await;
     }
     let bytes = response.bytes().await.map_err(map_body)?;
+    if let Some(error) = hofund_plugin_sdk::transport::carried_error(&bytes, allocation_quota_rate)
+    {
+        return Err(ProviderError::from_plugin(error));
+    }
     Ok(Completion::Raw(Box::pin(futures_util::stream::once(
         async move { Ok(bytes) },
     ))))
@@ -585,19 +617,29 @@ async fn raw_stream(
                     }
                 };
                 buffered.push(chunk);
-                if events.is_empty() {
-                    continue;
-                }
-                if let Some(error) = crate::stream::failure_of(events.first().expect("event")) {
+                if let Some(error) = events.iter().find_map(crate::stream::failure_of) {
                     return Err(error);
                 }
-                break;
+                if events.iter().any(stream_commits) {
+                    break;
+                }
             }
         }
     }
     let head = futures_util::stream::iter(buffered.into_iter().map(Ok));
     let rest = incoming.map(map_chunk);
     Ok(Completion::Raw(Box::pin(head.chain(rest))))
+}
+
+fn stream_commits(event: &hofund_ir::StreamEvent) -> bool {
+    match event {
+        hofund_ir::StreamEvent::MessageStart(_)
+        | hofund_ir::StreamEvent::ContentBlockStart(_)
+        | hofund_ir::StreamEvent::ContentBlockStop(_)
+        | hofund_ir::StreamEvent::Ping(_) => false,
+        hofund_ir::StreamEvent::MessageDelta(delta) => delta.stop.is_some(),
+        _ => true,
+    }
 }
 
 /// Reqwest's read timeout sits 50ms past the kernel's idle deadline, so the
@@ -671,6 +713,36 @@ mod tests {
         assert_eq!(parse_retry_after("invalid", now), None);
         assert_eq!(parse_retry_after("0", now), None);
         assert_eq!(parse_retry_after(&httpdate::fmt_http_date(now), now), None);
+    }
+
+    #[test]
+    fn a8_refusal_takes_its_wait_from_headers_then_from_its_words() {
+        let body = br#"{"error":{"message":"Rate limit reached. Please try again in 20s."}}"#;
+        assert_eq!(
+            super::refusal(429, None, body, false).retry_after(),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            super::refusal(429, Some(Duration::from_secs(5)), body, false).retry_after(),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            super::refusal(429, None, br#"{"error":"busy"}"#, false).retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn a4_refusal_reads_an_allocation_quota_as_a_rate_only_when_asked() {
+        let body = br#"{"error":{"code":"insufficient_quota","message":"Allocated quota exceeded, please increase your quota limit."}}"#;
+        let rate = super::refusal(429, None, body, true);
+        assert_eq!(rate.kind, crate::ProviderErrorKind::Status);
+        assert!(!rate.is_credit());
+        let plain = super::refusal(429, None, body, false);
+        assert!(
+            plain.is_credit() || plain.kind != crate::ProviderErrorKind::Status,
+            "{plain:?}"
+        );
     }
 
     #[test]

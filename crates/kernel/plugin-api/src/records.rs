@@ -2030,6 +2030,8 @@ pub struct AgentDescription {
     model_key: Option<&'static str>,
     model_file: Option<&'static str>,
     model_prefix: Option<&'static str>,
+    restore_model_on_clear: bool,
+    model_table: Option<&'static str>,
     effort_key: Option<&'static str>,
     effort_file: Option<&'static str>,
     visible: Visible,
@@ -2269,6 +2271,8 @@ impl AgentDescription {
             model_key,
             model_file: None,
             model_prefix: None,
+            restore_model_on_clear: false,
+            model_table: None,
             effort_key,
             effort_file: None,
             visible,
@@ -2319,6 +2323,23 @@ impl AgentDescription {
     pub const fn with_model_prefix(mut self, prefix: &'static str) -> Self {
         assert!(!prefix.is_empty(), "model prefix is empty");
         self.model_prefix = Some(prefix);
+        self
+    }
+
+    /// Restores the pre-connect model value when the model is cleared.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_model_restore_on_clear(mut self, restore: bool) -> Self {
+        self.restore_model_on_clear = restore;
+        self
+    }
+
+    /// Sets the table whose entries a gateway model value must name.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_model_table(mut self, table: &'static str) -> Self {
+        assert!(!table.is_empty(), "model table is empty");
+        self.model_table = Some(table);
         self
     }
 
@@ -2377,6 +2398,18 @@ impl AgentDescription {
     #[must_use]
     pub const fn model_prefix(&self) -> Option<&'static str> {
         self.model_prefix
+    }
+
+    /// Whether clearing the model restores its pre-connect value.
+    #[must_use]
+    pub const fn restore_model_on_clear(&self) -> bool {
+        self.restore_model_on_clear
+    }
+
+    /// Table whose entries a gateway model value must name.
+    #[must_use]
+    pub const fn model_table(&self) -> Option<&'static str> {
+        self.model_table
     }
 
     /// Optional effort key.

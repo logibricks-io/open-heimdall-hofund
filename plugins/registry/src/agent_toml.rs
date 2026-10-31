@@ -21,7 +21,7 @@ pub struct AgentToml {
     pub files: Vec<FileToml>,
     #[serde(default, rename = "set")]
     pub sets: Vec<SetToml>,
-    pub model: Option<KeyToml>,
+    pub model: Option<ModelToml>,
     pub model_prefix: Option<String>,
     pub effort: Option<KeyToml>,
     pub credential: Option<CredentialToml>,
@@ -229,6 +229,16 @@ pub struct KeyToml {
     pub key: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelToml {
+    pub file: String,
+    pub key: String,
+    #[serde(default)]
+    pub restore_on_clear: bool,
+    pub table: Option<String>,
+}
+
 fn gateway() -> String {
     "gateway".to_owned()
 }
@@ -344,6 +354,14 @@ fn validate(
     }
     if let Some(layout) = &agent.active_provider {
         validate_active_provider(agent, layout, source)?;
+    }
+    if let Some(model) = &agent.model
+        && let Some(table) = &model.table
+    {
+        if agent.model_prefix.is_none() {
+            return Err(error(source, "model.table", "requires model_prefix"));
+        }
+        valid_key(table, source, "model.table")?;
     }
     if let VisibleToml::Name(name) = &agent.visible
         && name != "all"
@@ -602,19 +620,25 @@ fn validate(
     if let Some(credential) = &agent.credential {
         validate_credential(credential, agent, &file_ids, source)?;
     }
-    for (field, key) in [("model", &agent.model), ("effort", &agent.effort)] {
-        if let Some(key) = key {
-            if key.key.is_empty() {
-                return Err(error(source, format!("{field}.key"), "must not be empty"));
-            }
-            valid_key(&key.key, source, &format!("{field}.key"))?;
-            if !file_ids.contains(key.file.as_str()) {
-                return Err(error(
-                    source,
-                    format!("{field}.file"),
-                    format!("references unknown file id `{}`", key.file),
-                ));
-            }
+    let model = agent
+        .model
+        .as_ref()
+        .map(|key| ("model", key.file.as_str(), key.key.as_str()));
+    let effort = agent
+        .effort
+        .as_ref()
+        .map(|key| ("effort", key.file.as_str(), key.key.as_str()));
+    for (field, file, key) in [model, effort].into_iter().flatten() {
+        if key.is_empty() {
+            return Err(error(source, format!("{field}.key"), "must not be empty"));
+        }
+        valid_key(key, source, &format!("{field}.key"))?;
+        if !file_ids.contains(file) {
+            return Err(error(
+                source,
+                format!("{field}.file"),
+                format!("references unknown file id `{file}`"),
+            ));
         }
     }
     Ok(())
@@ -1183,6 +1207,12 @@ pub fn render(agent: &AgentToml) -> (String, String) {
     ));
     if let Some(model) = &agent.model {
         output.push_str(&format!(".with_model_file({:?})", model.file));
+        if model.restore_on_clear {
+            output.push_str(".with_model_restore_on_clear(true)");
+        }
+        if let Some(table) = &model.table {
+            output.push_str(&format!(".with_model_table({table:?})"));
+        }
     }
     if let Some(prefix) = &agent.model_prefix {
         output.push_str(&format!(".with_model_prefix({prefix:?})"));
