@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Route members now carry the context window their provider's model list
+  gives the model, so a vague 400 or 5xx on a request well past that window
+  (1.2 times) is reported as too long, and after an overflow a member known to
+  be too small is skipped (P0-3b3 b10, #490).
 - Quota windows (P0-5a): a kernel quota store keeps each subscription
   card with its windows, absolute reset times, `runsOutAt`, cached `asOf`
   fallbacks, deferred reads, and last-served times from the usage ledger,

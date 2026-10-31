@@ -334,6 +334,7 @@ pub(crate) fn expand(
                     member_id: Some(member.id.clone()),
                     wire_model: hop.wire_model.clone(),
                     max_output_tokens: hop.max_output_tokens,
+                    context_window: hop.context_window,
                     routing: hop.routing.clone(),
                     weight: state.config.account_weight(member.account.as_str()),
                     free: hop.free,
