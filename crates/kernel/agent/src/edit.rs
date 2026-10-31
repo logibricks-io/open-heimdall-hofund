@@ -2076,6 +2076,39 @@ mod tests {
     }
 
     #[test]
+    fn jsonc_set_and_clear_keep_comments() {
+        let original = "{\n  // pick\n  \"model\": \"old\",\n  /* keep */ \"theme\": \"dark\"\n}\n";
+        let set = text(
+            FileKind::Json,
+            Some(original),
+            &[assign("model", "new", false)],
+        );
+        assert_eq!(
+            set,
+            "{\n  // pick\n  \"model\": \"new\",\n  /* keep */ \"theme\": \"dark\"\n}\n"
+        );
+        let cleared = remove_keys(FileKind::Json, &set, &["model"]).expect("clear");
+        let cleared = String::from_utf8(cleared).expect("UTF-8");
+        assert!(cleared.contains("/* keep */"), "{cleared}");
+        assert!(!cleared.contains("model"), "{cleared}");
+    }
+
+    #[test]
+    fn yaml_document_marker_falls_back_to_the_emitter() {
+        let original = "---\n# note\nmodel: old\n";
+        let set = text(
+            FileKind::Yaml,
+            Some(original),
+            &[assign("model", "new", false)],
+        );
+        assert_eq!(
+            get(FileKind::Yaml, &set, "model").expect("model"),
+            Some("new".to_owned())
+        );
+        assert!(!set.contains("# note"), "{set}");
+    }
+
+    #[test]
     fn toml_comment_above_removed_key_is_kept() {
         let original = "# model choice\ndefault_model = \"mine\"\ndefault_thinking = true\n";
         let cleared = remove_keys(FileKind::Toml, original, &["default_model"]).expect("clear");
