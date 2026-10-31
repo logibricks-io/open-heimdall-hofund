@@ -228,6 +228,48 @@ fn shift(event: StreamEvent, offset: u32) -> StreamEvent {
     }
 }
 
+/// The error a committed refusal event is when it is not handed over.
+///
+/// A provider passes a refusal error that follows shown thinking through as
+/// an event so a gateway with another member can hand it on. Without one, or
+/// once the answer began, the client gets the protocol's own error frame, as
+/// before, never the upstream's raw payload. The status follows the upstream
+/// error-word rule: invalid or too-long words are 400, the rest 502.
+pub(super) fn refusal_failure(event: &StreamEvent) -> Option<PluginError> {
+    if !refusal_error(event) {
+        return None;
+    }
+    let StreamEvent::Unknown(unknown) = event else {
+        return None;
+    };
+    let message = ["/error/message", "/message", "/response/error/message"]
+        .into_iter()
+        .find_map(|path| unknown.payload.pointer(path).and_then(|value| value.as_str()))
+        .unwrap_or("upstream stream failed")
+        .to_owned();
+    let text = unknown.payload.to_string().to_lowercase();
+    let status = if text.contains("invalid")
+        || text.contains("context_length")
+        || text.contains("too long")
+    {
+        400
+    } else {
+        502
+    };
+    Some(PluginError::status_error(status, message).without_cooldown())
+}
+
+/// Turns committed refusal events into errors for a stream nobody takes over.
+pub(super) fn refusals_fail(incoming: EventStream) -> EventStream {
+    Box::pin(incoming.map(|item| match item {
+        Ok(event) => match refusal_failure(&event) {
+            Some(error) => Err(error),
+            None => Ok(event),
+        },
+        Err(error) => Err(error),
+    }))
+}
+
 fn refused(event: &StreamEvent) -> bool {
     refusal_error(event)
         || matches!(
@@ -354,6 +396,13 @@ impl State {
                     self.fail(&error);
                 }
                 Some(Ok(event)) => {
+                    if (self.tracker.spoke || self.continuation.is_none())
+                        && let Some(error) = refusal_failure(&event)
+                    {
+                        self.flush_held();
+                        self.fail(&error);
+                        continue;
+                    }
                     if !self.tracker.spoke && refused(&event) {
                         let Some(continuation) = self.continuation.take() else {
                             self.flush_held();

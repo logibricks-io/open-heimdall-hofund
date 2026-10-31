@@ -612,3 +612,60 @@ async fn b9l_responses_refusal_error_hands_over() {
     );
     assert_eq!((first.hits(), second.hits()), (1, 1));
 }
+
+fn thought_then_error(code: &str) -> Vec<StreamEvent> {
+    vec![
+        start(),
+        thinking_block(0),
+        thinking(0, "first thought"),
+        error_event(code),
+    ]
+}
+
+fn error_frame_not_raw(body: &str) {
+    assert!(body.contains("refused"), "{body}");
+    assert!(!body.contains("\"code\":\"content_filter\""), "{body}");
+}
+
+#[tokio::test]
+async fn b9m_lone_member_refusal_error_is_the_protocol_error_frame() {
+    let first = Scripted::events("first", thought_then_error("content_filter"));
+    let (app, _dir) = gateway(vec![Arc::clone(&first)]);
+    let (status, body) = call(app, "/v1/messages", MESSAGES).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("first thought"), "{body}");
+    assert!(body.contains("event: error"), "{body}");
+    error_frame_not_raw(&body);
+}
+
+#[tokio::test]
+async fn b9n_refusal_error_after_text_is_the_protocol_error_frame() {
+    let first = Scripted::events(
+        "first",
+        vec![
+            start(),
+            text_block(0),
+            text(0, "said"),
+            error_event("content_filter"),
+        ],
+    );
+    let second = Scripted::events("second", answer());
+    let (app, _dir) = gateway(vec![Arc::clone(&first), Arc::clone(&second)]);
+    let (status, body) = call(app, "/v1/chat/completions", CHAT).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("said"), "{body}");
+    error_frame_not_raw(&body);
+    assert_eq!((first.hits(), second.hits()), (1, 0));
+}
+
+#[tokio::test]
+async fn b9o_last_handed_member_refusal_error_is_the_protocol_error_frame() {
+    let first = Scripted::events("first", thought_then_refusal(0));
+    let second = Scripted::events("second", thought_then_error("content_filter"));
+    let (app, _dir) = gateway(vec![Arc::clone(&first), Arc::clone(&second)]);
+    let (status, body) = call(app, "/v1/messages", MESSAGES).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("event: error"), "{body}");
+    error_frame_not_raw(&body);
+    assert_eq!((first.hits(), second.hits()), (1, 1));
+}

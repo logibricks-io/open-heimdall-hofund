@@ -1477,7 +1477,12 @@ async fn success(
                         Box::new(on_error),
                     ))
                 } else {
-                    Box::pin(sse_body(events, encoder, record, Box::new(on_error)))
+                    Box::pin(sse_body(
+                        refusal_handover::refusals_fail(events),
+                        encoder,
+                        record,
+                        Box::new(on_error),
+                    ))
                 };
             let body = capture_stream(body, capture);
             Response::builder()
