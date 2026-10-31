@@ -371,7 +371,7 @@ async fn leading_failed_responses_stream_is_a_status_error() {
         Err(error) => error,
     };
     assert_eq!(same.kind, ProviderErrorKind::Status);
-    assert_eq!(same.status, Some(502));
+    assert_eq!(same.status, Some(529));
     assert_eq!(same.message, "overloaded");
 
     let foreign = provider
@@ -383,7 +383,7 @@ async fn leading_failed_responses_stream_is_a_status_error() {
     };
     let error = stream.next().await.expect("item").expect_err("status");
     assert_eq!(error.kind, ProviderErrorKind::Status);
-    assert_eq!(error.status, Some(502));
+    assert_eq!(error.status, Some(529));
     assert_eq!(error.message, "overloaded");
 }
 
@@ -1236,4 +1236,77 @@ async fn a11_provider_does_not_resend_after_other_statuses() {
         .await;
     assert!(outcome.is_err());
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}
+
+#[tokio::test]
+async fn a6_nonstreamed_200_error_fails_as_its_mapped_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "error": {
+                "message": "Rate limit reached on tokens per min (TPM)",
+                "code": "rate_limit_exceeded"
+            }
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompat::new(OpenAiProtocol::Chat, Endpoint::new("relay", server.uri()))
+        .expect("provider");
+    for inbound in ["openai-chat", "anthropic-messages"] {
+        let error = provider
+            .execute(user_request(false), inbound)
+            .await
+            .err()
+            .expect("carried error");
+        assert_eq!(error.status, Some(429), "{inbound}");
+        assert!(!error.is_credit(), "{inbound}");
+    }
+}
+
+#[tokio::test]
+async fn a7_finish_reason_error_fails_raw_and_translated_streams() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"error\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompat::new(OpenAiProtocol::Chat, Endpoint::new("relay", server.uri()))
+        .expect("provider");
+    let error = provider
+        .execute(user_request(true), "openai-chat")
+        .await
+        .err()
+        .expect("raw finish error");
+    assert_eq!(error.status, Some(502));
+    assert!(!error.cools());
+
+    let completion = provider
+        .execute(user_request(true), "anthropic-messages")
+        .await
+        .expect("translated stream");
+    let Completion::Stream(mut events) = completion else {
+        panic!("stream");
+    };
+    let error = loop {
+        match events.next().await {
+            Some(Ok(_)) => continue,
+            Some(Err(error)) => break error,
+            None => panic!("finish error"),
+        }
+    };
+    assert_eq!(error.status, Some(502));
+    assert!(!error.cools());
 }

@@ -47,7 +47,9 @@ AgentDescription::const fn id (& self) -> & PluginId
 AgentDescription::const fn model_file (& self) -> Option < & 'static str >
 AgentDescription::const fn model_key (& self) -> Option < & 'static str >
 AgentDescription::const fn model_prefix (& self) -> Option < & 'static str >
+AgentDescription::const fn model_table (& self) -> Option < & 'static str >
 AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: SurfaceId]
+AgentDescription::const fn restore_model_on_clear (& self) -> bool
 AgentDescription::const fn route (& self) -> AgentRoute
 AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
 AgentDescription::const fn visible (& self) -> Visible
@@ -55,6 +57,8 @@ AgentDescription::const fn with_credential (mut self , credential : AgentCredent
 AgentDescription::const fn with_effort_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_prefix (mut self , prefix : & 'static str) -> Self
+AgentDescription::const fn with_model_restore_on_clear (mut self , restore : bool) -> Self
+AgentDescription::const fn with_model_table (mut self , table : & 'static str) -> Self
 AgentFactory
 AgentFactory::Config
 AgentFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn AgentIntegration > , BuildError >
@@ -454,14 +458,18 @@ Plan::fn is_empty (& self) -> bool
 Plan::fn new (changes : Vec < FileChange >) -> Self
 PluginError
 PluginError #[non_exhaustive] derives(Debug, Error)
+PluginError::const fn cools (& self) -> bool
+PluginError::const fn is_credit (& self) -> bool
 PluginError::const fn kind (& self) -> PluginErrorKind
 PluginError::const fn retry_after (& self) -> Option < Duration >
 PluginError::const fn status (& self) -> Option < u16 >
+PluginError::const fn without_cooldown (mut self) -> Self
 PluginError::fn auth (message : impl Into < String >) -> Self
 PluginError::fn cancelled (message : impl Into < String >) -> Self
 PluginError::fn cause (& self) -> Option < & (dyn Error + 'static) >
 PluginError::fn config (message : impl Into < String >) -> Self
 PluginError::fn connect (message : impl Into < String >) -> Self
+PluginError::fn credit_status (status : u16 , message : impl Into < String >) -> Self
 PluginError::fn decode (message : impl Into < String >) -> Self
 PluginError::fn internal (message : impl Into < String >) -> Self
 PluginError::fn interrupted (message : impl Into < String >) -> Self

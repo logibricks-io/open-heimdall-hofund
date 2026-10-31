@@ -27,6 +27,7 @@ struct Case {
     refreshed_token: String,
     #[serde(default)]
     configured_model: Option<String>,
+    connected: Option<bool>,
     only: Option<Vec<String>>,
 }
 
@@ -47,8 +48,9 @@ const OPERATING_SYSTEMS: [(&str, TargetOs); 3] = [
 /// tree, and an `after/` tree containing the files changed by connect. Status
 /// is checked before apply, after apply, and after forced disconnect. The
 /// optional `configured_model` case field is checked after apply; absent means
-/// no configured model. This helper panics with the agent and case names when
-/// a contract fails.
+/// no configured model. Optional `connected` overrides the expected applied
+/// status, which otherwise must be connected. This helper panics with the agent
+/// and case names when a contract fails.
 /// `UPDATE_GOLDEN=1` rewrites `after/`, then moves identical three-OS cases to
 /// `all/` and removes their duplicates. `scratch` is a caller-owned directory
 /// whose lifetime must cover the entire conformance run.
@@ -403,7 +405,11 @@ fn run_case(description: &'static AgentDescription, os: TargetOs, case_dir: &Pat
         );
     }
     let connected = adapter.status(&session, &target).expect("applied status");
-    assert!(connected.connected(), "{label}: not connected after apply");
+    assert_eq!(
+        connected.connected(),
+        case.connected.unwrap_or(true),
+        "{label}: unexpected connection status after apply"
+    );
     assert_eq!(
         adapter
             .configured_model(&session)
@@ -1274,6 +1280,7 @@ refreshed_token = "refreshed-token"
             token: "old-token".to_owned(),
             refreshed_token: "refreshed-token".to_owned(),
             configured_model: None,
+            connected: None,
             only: None,
         };
         let values = gateway_values(&case);
