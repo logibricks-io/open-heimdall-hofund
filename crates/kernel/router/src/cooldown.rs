@@ -4,26 +4,28 @@
 //!
 //! | Event | Cooldown and ladder |
 //! | --- | --- |
-//! | Generic failure | Starts at 1 minute and doubles after an ended generic rest, capped at 10 minutes. A failure during an active generic rest keeps its rung. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses. |
-//! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. |
-//! | Exhausted quota | Uses the header retry hint capped at 1 hour, or 15 minutes without a positive hint. |
-//! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Success and manual removal restart the ladder. |
+//! | Generic failure | Starts at 1 minute and doubles after an ended generic rest, capped at 10 minutes. A failure during an active generic rest keeps its rung. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses. An unserved model uses this ladder on its own key. Other model failures also count on both keys and move to the model ladder when its count passes the member's, so sibling answers do not restart it. |
+//! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. A refusal saying the requested model's credentials are cooling uses a model-local ladder. |
+//! | Exhausted quota | Uses the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording scopes the rest to that model. |
+//! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Model-cooling wording keys the ladder by model. Success and manual removal restart the ladder. |
 //! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A later observation showing the window renewed lifts the rest. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
-//! request-shaped HTTP 4xx errors do not cool a member. A new failure,
-//! observation, or panic never shortens an existing longer cooldown. Idle
+//! request-shaped HTTP 4xx errors do not cool a member. A new failure or panic
+//! replaces the current rest, even with an earlier deadline; a passive
+//! observation keeps the longer rest. Idle
 //! ladder history is forgotten after `rate_forget`; active rests never expire
-//! as idle state. The book holds at most `max_entries` members and evicts
-//! expired entries, then the least-recently-touched idle entry, on insertion.
+//! as idle state. The book holds at most `max_entries` member/model states and
+//! evicts expired entries, then the least-recently-touched idle entry, on
+//! insertion.
 //!
 //! Routing keeps ready members first in configured order, then keeps only the
-//! cooling member whose rest ends soonest as a probe. Configured order breaks a
-//! tie, other cooling members are skipped for that request, and a route with one
-//! member always tries that member. If every member is cooling, only the
-//! soonest probe is tried.
+//! cooling member/model pair whose rest ends soonest as a probe. Configured
+//! order breaks a tie, other cooling pairs are skipped for that request, and a
+//! route with one member always tries that member. If every member is cooling
+//! for the requested model, only the soonest probe is tried.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -49,6 +51,9 @@ const CREDIT_LADDER: [Duration; 6] = [
 pub struct PersistedRest {
     /// Stable member id in its display form.
     pub member: String,
+    /// Model whose credit ladder rests alone, or `None` for the whole member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Wall-clock end of the rest, including an already ended rest.
     pub until: SystemTime,
     /// One-based credit-ladder rung.
@@ -56,11 +61,23 @@ pub struct PersistedRest {
 }
 
 impl PersistedRest {
-    /// Creates one rest for persistence or restoration.
+    /// Creates one member-wide rest for persistence or restoration.
     #[must_use]
     pub fn new(member: String, until: SystemTime, rung: u32) -> Self {
         Self {
             member,
+            model: None,
+            until,
+            rung,
+        }
+    }
+
+    /// Creates one model-scoped rest for persistence or restoration.
+    #[must_use]
+    pub fn for_model(member: String, model: String, until: SystemTime, rung: u32) -> Self {
+        Self {
+            member,
+            model: Some(model),
             until,
             rung,
         }
@@ -232,15 +249,30 @@ impl State {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CooldownKey {
+    member: MemberId,
+    model: Option<String>,
+}
+
+impl CooldownKey {
+    fn new(member: &MemberId, model: Option<&str>) -> Self {
+        Self {
+            member: member.clone(),
+            model: model.map(str::to_owned),
+        }
+    }
+}
+
 struct Book {
-    states: HashMap<MemberId, State>,
+    states: HashMap<CooldownKey, State>,
     windowed_credit: HashSet<MemberId>,
     credit_windows: HashMap<MemberId, CreditWindow>,
     next_revision: u64,
-    recoveries: VecDeque<(MemberId, CooldownCause)>,
+    recoveries: VecDeque<(CooldownKey, CooldownCause)>,
 }
 
-/// Thread-safe cooldown state keyed by stable member id.
+/// Thread-safe cooldown state keyed by stable member id and optional model.
 ///
 /// Sharing this book in an [`Arc`] keeps breaker state when a router snapshot
 /// replaces every member instance. The reference gateway's ladders are kept
@@ -305,9 +337,10 @@ impl Cooldowns {
             .credit_windows
             .insert(id.clone(), current)
             .is_some_and(|previous| previous.renews_later_than(current));
+        let key = CooldownKey::new(id, None);
         let lifting = book
             .states
-            .get(id)
+            .get(&key)
             .and_then(|state| state.cooling.as_ref())
             .filter(|cooling| {
                 renewed
@@ -320,7 +353,7 @@ impl Cooldowns {
             .map(|cooling| cooling.cause);
         if let Some(cause) = lifting {
             let revision = next_revision(&mut book);
-            let state = book.states.get_mut(id).expect("existing credit state");
+            let state = book.states.get_mut(&key).expect("existing credit state");
             state.cooling = None;
             state.credit_rung = 0;
             state.credit_until = None;
@@ -329,12 +362,12 @@ impl Cooldowns {
             state.idle_since = Some(now);
             state.touched = now;
             state.revision = revision;
-            recover(&mut book, id.clone(), cause);
+            recover(&mut book, key, cause);
         }
     }
 
     /// Returns API-key credit-ladder rests, including ended rests retained
-    /// for their rung, with wall-clock deadlines.
+    /// for their rung, with wall-clock deadlines and optional model scopes.
     #[must_use]
     pub fn credit_snapshot(&self, now_wall: SystemTime) -> Vec<PersistedRest> {
         let now = (self.clock)();
@@ -343,13 +376,13 @@ impl Cooldowns {
         let mut rests = book
             .states
             .iter()
-            .filter(|(id, state)| {
-                id.subscription().is_none()
+            .filter(|(key, state)| {
+                key.member.subscription().is_none()
                     && state.last_cause == Some(CooldownCause::Credit)
                     && state.credit_ladder
                     && state.credit_rung > 0
             })
-            .filter_map(|(id, state)| {
+            .filter_map(|(key, state)| {
                 let until = state.credit_until?;
                 if now.saturating_duration_since(until) > CREDIT_RESET_MAX {
                     return None;
@@ -359,15 +392,27 @@ impl Cooldowns {
                 } else {
                     now_wall.checked_sub(now.duration_since(until))
                 }?;
-                Some(PersistedRest::new(id.to_string(), until, state.credit_rung))
+                Some(match &key.model {
+                    Some(model) => PersistedRest::for_model(
+                        key.member.to_string(),
+                        model.clone(),
+                        until,
+                        state.credit_rung,
+                    ),
+                    None => PersistedRest::new(key.member.to_string(), until, state.credit_rung),
+                })
             })
             .collect::<Vec<_>>();
-        rests.sort_by(|left, right| left.member.cmp(&right.member));
+        rests.sort_by(|left, right| {
+            left.member
+                .cmp(&right.member)
+                .then_with(|| left.model.cmp(&right.model))
+        });
         rests
     }
 
     /// Restores persisted API-key credit rests for configured members.
-    /// Existing in-process member state always wins over the persisted row.
+    /// Existing in-process state for the same member/model key wins.
     pub fn restore_credit(
         &self,
         rests: Vec<PersistedRest>,
@@ -391,8 +436,9 @@ impl Cooldowns {
             let Some(id) = configured.get(&rest.member) else {
                 continue;
             };
+            let key = CooldownKey::new(id, rest.model.as_deref());
             if id.subscription().is_some()
-                || book.states.contains_key(*id)
+                || book.states.contains_key(&key)
                 || book.states.len() >= self.policy.max_entries
             {
                 continue;
@@ -420,86 +466,183 @@ impl Cooldowns {
             } else {
                 state.idle_since = Some(until);
             }
-            book.states.insert((*id).clone(), state);
+            book.states.insert(key, state);
         }
     }
 
-    /// Records a failed call and returns its cooldown, if the error cools.
+    /// Records a failed call without a model scope and returns its cooldown.
     ///
     /// Interrupted bodies use the generic failure policy
     /// (`reference: internal/gateway/fallback.go:1347-1355`). At the capacity
     /// bound, a failure that cannot evict an idle entry returns its untracked
     /// cooling decision without inserting it; active rests are never evicted.
     pub fn record_failure(&self, id: &MemberId, error: &PluginError) -> Option<Cooling> {
+        self.record_failure_at(id, None, error)
+    }
+
+    /// Records a failed call for `model`, narrowing only errors whose wording
+    /// or generic-failure ladder belongs to that model.
+    pub fn record_failure_for_model(
+        &self,
+        id: &MemberId,
+        model: &str,
+        error: &PluginError,
+    ) -> Option<Cooling> {
+        self.record_failure_at(id, Some(model), error)
+    }
+
+    fn record_failure_at(
+        &self,
+        id: &MemberId,
+        model: Option<&str>,
+        error: &PluginError,
+    ) -> Option<Cooling> {
         let failure = failure_kind(error);
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         let failure = failure?;
+        let model = model.filter(|model| !model.is_empty());
+        let model_only = model.is_some()
+            && (matches!(
+                failure,
+                Failure::RateLimit | Failure::Quota | Failure::Credit
+            ) && crate::decision::model_cooling(error)
+                || crate::decision::model_unserved(error));
+        if let Some(model) = model
+            && matches!(failure, Failure::Generic(_))
+            && !model_only
+        {
+            let applied = self.generic_model(&mut book, id, model, failure, now, error);
+            drop(book);
+            self.emit_for_model(id, Some(model), &applied, now);
+            return Some(applied);
+        }
+        let key = CooldownKey::new(id, model_only.then_some(model).flatten());
         let credit = credit_context(&book, id, now);
         let revision = next_revision(&mut book);
-        let Some(state) = self.entry_for_insert(&mut book, id, now, revision) else {
+        let Some(state) = self.entry_for_insert(&mut book, &key, now, revision) else {
             // A full book of active rests can consume a revision without inserting.
             let mut state = State::new(now, 0);
             return Some(self.apply_failure(&mut state, failure, now, error, credit));
         };
         let applied = self.apply_failure(state, failure, now, error, credit);
         drop(book);
-        self.emit(id, &applied, now);
+        self.emit(&key, &applied, now);
         Some(applied)
     }
 
-    /// Clears all cooldown and ladder state after a successful call.
-    ///
-    /// A missing member is never inserted. Clearing an existing member removes
-    /// its entry, and a later call cannot inherit its revision.
+    /// Clears every cooldown and ladder state for the member. This is also the
+    /// manual-clear operation for all of its model rests.
     pub fn record_success(&self, id: &MemberId) {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        if let Some(state) = book.states.remove(id)
-            && let Some(cooling) = state.cooling
-        {
-            recover(&mut book, id.clone(), cooling.cause);
+        let keys = book
+            .states
+            .keys()
+            .filter(|key| key.member == *id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(state) = book.states.remove(&key)
+                && let Some(cooling) = state.cooling
+            {
+                recover(&mut book, key, cooling.cause);
+            }
         }
     }
 
-    /// Captures the member's state revision before starting a call.
+    /// Clears only one model's cooldown and ladder state after its success.
+    /// A sibling answer also restarts the member's generic-failure count, but
+    /// does not lift its active rest or touch its rate and credit ladders.
+    pub fn record_success_for_model(&self, id: &MemberId, model: &str) {
+        self.clear_scoped(id, Some(model), None);
+    }
+
+    /// Captures the member-wide state revision before starting a call.
     ///
     /// Pass the returned revision to [`Self::record_success_if_unchanged`] when
     /// the call succeeds so it cannot erase a newer failure, panic, or
-    /// observation. Zero means the member has no entry.
+    /// observation. Zero means the member has no member-wide entry.
     #[must_use]
     pub fn revision(&self, id: &MemberId) -> u64 {
+        self.scoped_revision(id, None)
+    }
+
+    /// Captures the newest member/model revision before starting its call.
+    #[must_use]
+    pub fn revision_for_model(&self, id: &MemberId, model: &str) -> u64 {
+        self.scoped_revision(id, Some(model))
+    }
+
+    fn scoped_revision(&self, id: &MemberId, model: Option<&str>) -> u64 {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        let revision = book.states.get(id).map_or(0, |state| state.revision);
-        if let Some(state) = book.states.get_mut(id) {
-            state.touched = now;
+        let key = CooldownKey::new(id, model);
+        let member = CooldownKey::new(id, None);
+        let revision = if model.is_some() {
+            [&key, &member].into_iter().fold(0, |newest, key| {
+                newest.max(book.states.get(key).map_or(0, |state| state.revision))
+            })
+        } else {
+            book.states.get(&key).map_or(0, |state| state.revision)
+        };
+        for key in std::iter::once(&key).chain(model.is_some().then_some(&member)) {
+            if let Some(state) = book.states.get_mut(key) {
+                state.touched = now;
+            }
         }
         revision
     }
 
-    /// Records success only if no failure, panic, or observation landed during
-    /// the call that captured `revision`.
-    ///
-    /// The book-wide revision guard prevents an older successful call from
-    /// clearing newer state, including state recreated after a missing capture.
-    /// Success never inserts a missing entry.
+    /// Records member-wide success only if its entry has not changed.
     pub fn record_success_if_unchanged(&self, id: &MemberId, revision: u64) {
+        self.clear_scoped(id, None, Some(revision));
+    }
+
+    /// Records model success only if that model's entry has not changed.
+    pub fn record_success_for_model_if_unchanged(&self, id: &MemberId, model: &str, revision: u64) {
+        self.clear_scoped(id, Some(model), Some(revision));
+    }
+
+    fn clear_scoped(&self, id: &MemberId, model: Option<&str>, revision: Option<u64>) {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        if revision != 0
-            && book
-                .states
-                .get(id)
-                .is_some_and(|state| state.revision == revision)
-            && let Some(state) = book.states.remove(id)
+        let key = CooldownKey::new(id, model);
+        let member = CooldownKey::new(id, None);
+        let stale = match (model, revision) {
+            (_, None) => false,
+            (None, Some(revision)) => {
+                revision == 0
+                    || !book
+                        .states
+                        .get(&key)
+                        .is_some_and(|state| state.revision == revision)
+            }
+            (Some(_), Some(revision)) => {
+                revision == 0
+                    || [&key, &member].into_iter().any(|key| {
+                        book.states
+                            .get(key)
+                            .is_some_and(|state| state.revision > revision)
+                    })
+            }
+        };
+        if stale {
+            return;
+        }
+        if let Some(state) = book.states.remove(&key)
             && let Some(cooling) = state.cooling
         {
-            recover(&mut book, id.clone(), cooling.cause);
+            recover(&mut book, key, cooling.cause);
+        }
+        if model.is_some()
+            && let Some(state) = book.states.get_mut(&member)
+        {
+            state.failures = 0;
         }
     }
 
@@ -508,15 +651,16 @@ impl Cooldowns {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
+        let key = CooldownKey::new(id, None);
         let revision = next_revision(&mut book);
-        let Some(state) = self.entry_for_insert(&mut book, id, now, revision) else {
+        let Some(state) = self.entry_for_insert(&mut book, &key, now, revision) else {
             let mut state = State::new(now, 0);
             return Self::generic(&mut state, now, &self.policy, CooldownCause::Panic);
         };
         let candidate = Self::generic(state, now, &self.policy, CooldownCause::Panic);
         let applied = apply(state, candidate);
         drop(book);
-        self.emit(id, &applied, now);
+        self.emit(&key, &applied, now);
         applied
     }
 
@@ -532,39 +676,67 @@ impl Cooldowns {
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         let duration = observation_rest(&self.policy, observation)?;
+        let key = CooldownKey::new(id, None);
         let revision = next_revision(&mut book);
-        let Some(state) = self.entry_for_insert(&mut book, id, now, revision) else {
+        let Some(state) = self.entry_for_insert(&mut book, &key, now, revision) else {
             return Some(cooling(now, duration, CooldownCause::Observed, 0));
         };
-        let applied = apply(
+        let applied = apply_observation(
             state,
             cooling(now, duration, CooldownCause::Observed, state.failures),
         );
         drop(book);
-        self.emit(id, &applied, now);
+        self.emit(&key, &applied, now);
         Some(applied)
     }
 
-    /// Returns the active cooldown, or `None` when it has expired.
+    /// Returns the active member-wide cooldown, or `None` when it has expired.
     #[must_use]
     pub fn cooling(&self, id: &MemberId) -> Option<Cooling> {
+        self.cooling_at(id, None)
+    }
+
+    /// Returns the longer active member-wide or model-specific cooldown.
+    #[must_use]
+    pub fn cooling_for_model(&self, id: &MemberId, model: &str) -> Option<Cooling> {
+        self.cooling_at(id, Some(model))
+    }
+
+    fn cooling_at(&self, id: &MemberId, model: Option<&str>) -> Option<Cooling> {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        let cooling = book
-            .states
-            .get(id)
-            .and_then(|state| state.cooling.clone())
-            .filter(|cooling| now < cooling.until);
-        if let Some(state) = book.states.get_mut(id) {
-            state.touched = now;
+        let member = CooldownKey::new(id, None);
+        let specific = model.map(|model| CooldownKey::new(id, Some(model)));
+        let mut cooling = None;
+        for key in std::iter::once(&member).chain(specific.iter()) {
+            if let Some(state) = book.states.get_mut(key) {
+                state.touched = now;
+                if let Some(candidate) =
+                    state.cooling.as_ref().filter(|cooling| now < cooling.until)
+                    && cooling
+                        .as_ref()
+                        .is_none_or(|current: &Cooling| current.until < candidate.until)
+                {
+                    cooling = Some(candidate.clone());
+                }
+            }
         }
         cooling
     }
 
-    /// Returns active cooldowns for a future routing view.
+    /// Returns active member-wide cooldowns for a future routing view.
     #[must_use]
     pub fn entries(&self) -> Vec<(MemberId, Cooling)> {
+        self.scoped_entries()
+            .into_iter()
+            .filter_map(|(id, model, cooling)| model.is_none().then_some((id, cooling)))
+            .collect()
+    }
+
+    /// Returns every active member-wide and model-specific cooldown.
+    #[must_use]
+    pub fn scoped_entries(&self) -> Vec<(MemberId, Option<String>, Cooling)> {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
@@ -574,15 +746,20 @@ impl Cooldowns {
         let mut entries = book
             .states
             .iter()
-            .filter_map(|(id, state)| {
+            .filter_map(|(key, state)| {
                 state
                     .cooling
                     .as_ref()
                     .filter(|cooling| now < cooling.until)
-                    .map(|cooling| (id.clone(), cooling.clone()))
+                    .map(|cooling| (key.member.clone(), key.model.clone(), cooling.clone()))
             })
             .collect::<Vec<_>>();
-        entries.sort_by_key(|(id, _)| id.to_string());
+        entries.sort_by(|left, right| {
+            left.0
+                .to_string()
+                .cmp(&right.0.to_string())
+                .then_with(|| left.1.cmp(&right.1))
+        });
         entries
     }
 
@@ -600,28 +777,96 @@ impl Cooldowns {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        book.states.retain(|id, _| members.contains(id));
+        book.states.retain(|key, _| members.contains(&key.member));
         book.windowed_credit.retain(|id| members.contains(id));
         book.credit_windows.retain(|id, _| members.contains(id));
     }
 
     /// Removes one member after its provider identity changes.
     ///
-    /// The changed identity drops an active rest without a recovery event.
+    /// The changed identity drops active rests without recovery events.
     pub fn remove(&self, id: &MemberId) {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        book.states.remove(id);
+        book.states.retain(|key, _| key.member != *id);
         book.windowed_credit.remove(id);
         book.credit_windows.remove(id);
     }
 
-    /// Drains pending one-per-rest recovery events, oldest first.
-    ///
-    /// The queue retains at most 1,024 events and drops the oldest on overflow.
+    /// Drains pending recovery events without their model scopes, oldest first.
+    /// Callers that route model rests should use [`Self::drain_scoped_recoveries`].
     pub fn drain_recoveries(&self) -> Vec<(MemberId, CooldownCause)> {
-        self.lock().recoveries.drain(..).collect()
+        self.drain_scoped_recoveries()
+            .into_iter()
+            .map(|(id, _, cause)| (id, cause))
+            .collect()
+    }
+
+    /// Drains pending one-per-rest recovery events with their model scopes.
+    /// The queue retains at most 1,024 events and drops the oldest on overflow.
+    pub fn drain_scoped_recoveries(&self) -> Vec<(MemberId, Option<String>, CooldownCause)> {
+        self.lock()
+            .recoveries
+            .drain(..)
+            .map(|(key, cause)| (key.member, key.model, cause))
+            .collect()
+    }
+
+    fn generic_model(
+        &self,
+        book: &mut Book,
+        id: &MemberId,
+        model: &str,
+        failure: Failure,
+        now: Instant,
+        error: &PluginError,
+    ) -> Cooling {
+        let member = CooldownKey::new(id, None);
+        let specific = CooldownKey::new(id, Some(model));
+        let revision = next_revision(book);
+        let _ = self.entry_for_insert(book, &member, now, revision);
+        let _ = self.entry_for_insert(book, &specific, now, revision);
+        let backing_off = [&member, &specific].into_iter().any(|key| {
+            book.states.get(key).is_some_and(|state| {
+                state.active(now)
+                    && matches!(
+                        state.last_cause,
+                        Some(CooldownCause::Failure | CooldownCause::Panic)
+                    )
+            })
+        });
+        if !backing_off {
+            for key in [&member, &specific] {
+                if let Some(state) = book.states.get_mut(key) {
+                    state.failures = state.failures.saturating_add(1);
+                }
+            }
+        }
+        let member_failures = book
+            .states
+            .get(&member)
+            .map_or(0, |state| state.failures)
+            .max(1);
+        let model_failures = book.states.get(&specific).map_or(0, |state| state.failures);
+        let (target, failures) = if model_failures > member_failures {
+            (specific, model_failures)
+        } else {
+            (member, member_failures)
+        };
+        let Failure::Generic(cause) = failure else {
+            unreachable!("generic model failure");
+        };
+        let duration = ladder(self.policy.base, self.policy.generic_max, failures);
+        let mut candidate = cooling(now, duration, cause, failures);
+        candidate.status = error.status();
+        candidate.error = error.message().trim().chars().take(300).collect();
+        if let Some(state) = book.states.get_mut(&target) {
+            state.idle_since = None;
+            apply(state, candidate)
+        } else {
+            candidate
+        }
     }
 
     fn apply_failure(
@@ -709,12 +954,12 @@ impl Cooldowns {
     fn entry_for_insert<'a>(
         &self,
         book: &'a mut Book,
-        id: &MemberId,
+        key: &CooldownKey,
         now: Instant,
         revision: u64,
     ) -> Option<&'a mut State> {
-        if book.states.contains_key(id) {
-            let state = book.states.get_mut(id).expect("existing state");
+        if book.states.contains_key(key) {
+            let state = book.states.get_mut(key).expect("existing state");
             state.revision = revision;
             state.touched = now;
             return Some(state);
@@ -725,12 +970,12 @@ impl Cooldowns {
                 .iter()
                 .filter(|(_, state)| !state.active(now))
                 .min_by_key(|(_, state)| state.touched)
-                .map(|(id, _)| id.clone());
+                .map(|(key, _)| key.clone());
             let oldest = oldest?;
             book.states.remove(&oldest);
         }
-        book.states.insert(id.clone(), State::new(now, revision));
-        book.states.get_mut(id)
+        book.states.insert(key.clone(), State::new(now, revision));
+        book.states.get_mut(key)
     }
 
     fn generic(
@@ -786,7 +1031,7 @@ impl Cooldowns {
 
     fn maintain_locked(&self, book: &mut Book, now: Instant) {
         let mut recovered = Vec::new();
-        for (id, state) in &mut book.states {
+        for (key, state) in &mut book.states {
             if state
                 .cooling
                 .as_ref()
@@ -794,7 +1039,7 @@ impl Cooldowns {
                 && let Some(cooling) = state.cooling.take()
             {
                 state.idle_since = Some(cooling.until);
-                recovered.push((id.clone(), cooling.cause));
+                recovered.push((key.clone(), cooling.cause));
             }
             if state.rate_until.is_some_and(|until| {
                 now.saturating_duration_since(until) >= self.policy.rate_forget
@@ -803,8 +1048,8 @@ impl Cooldowns {
                 state.rate_failures = 0;
             }
         }
-        for (id, cause) in recovered {
-            recover(book, id, cause);
+        for (key, cause) in recovered {
+            recover(book, key, cause);
         }
         let forget = self.policy.rate_forget;
         book.states.retain(|_, state| {
@@ -827,11 +1072,16 @@ impl Cooldowns {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn emit(&self, id: &MemberId, cooling: &Cooling, now: Instant) {
+    fn emit_for_model(&self, id: &MemberId, model: Option<&str>, cooling: &Cooling, now: Instant) {
+        self.emit(&CooldownKey::new(id, model), cooling, now);
+    }
+
+    fn emit(&self, key: &CooldownKey, cooling: &Cooling, now: Instant) {
         let duration_ms = u128_as_u64(cooling.until.saturating_duration_since(now).as_millis());
         let cause = cooling.cause.as_str();
         tracing::info!(
-            "member.id" = %id,
+            "member.id" = %key.member,
+            model = key.model.as_deref().unwrap_or(""),
             cause,
             duration_ms,
             failures = cooling.failures,
@@ -903,6 +1153,9 @@ fn failure_kind(error: &PluginError) -> Option<Failure> {
     if error.is_credit() {
         return Some(Failure::Credit);
     }
+    if crate::decision::model_unserved(error) {
+        return Some(Failure::Generic(CooldownCause::Failure));
+    }
     match error.kind() {
         PluginErrorKind::Connect
         | PluginErrorKind::Timeout
@@ -937,11 +1190,11 @@ fn next_revision(book: &mut Book) -> u64 {
     revision
 }
 
-fn recover(book: &mut Book, id: MemberId, cause: CooldownCause) {
+fn recover(book: &mut Book, key: CooldownKey, cause: CooldownCause) {
     if book.recoveries.len() == RECOVERY_CAPACITY {
         book.recoveries.pop_front();
     }
-    book.recoveries.push_back((id, cause));
+    book.recoveries.push_back((key, cause));
 }
 
 fn ladder(base: Duration, cap: Duration, failures: u32) -> Duration {
@@ -1002,10 +1255,17 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
     }
 }
 
-/// Keeps whichever rest ends later, with its own cause and failure count
-/// (reference: internal/gateway/routing.go restSlow keeps the longer note).
-/// A candidate ending at the same instant replaces the current rest.
+/// Failure events replace the deadline, cause, and note, including with a
+/// shorter rest (`reference: internal/gateway/routing.go:1440-1456`).
 fn apply(state: &mut State, candidate: Cooling) -> Cooling {
+    state.cooling = Some(candidate.clone());
+    state.last_cause = Some(candidate.cause);
+    candidate
+}
+
+/// Passive observations keep whichever rest ends later, with its own cause
+/// and failure count. A candidate ending at the same instant replaces it.
+fn apply_observation(state: &mut State, candidate: Cooling) -> Cooling {
     let applied = match &state.cooling {
         Some(current) if current.until > candidate.until => current.clone(),
         _ => candidate,

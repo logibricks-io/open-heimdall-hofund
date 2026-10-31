@@ -84,7 +84,16 @@ struct ProviderCall {
 enum Job {
     Execute(Request, String, Option<Arc<dyn AttemptHook>>, Attempt),
     Count(Request, String),
-    Forward(String, RawBody),
+    Forward(String, RawBody, String),
+}
+
+impl Job {
+    fn model(&self) -> &str {
+        match self {
+            Self::Execute(request, ..) | Self::Count(request, ..) => &request.model,
+            Self::Forward(_, _, model) => model,
+        }
+    }
 }
 
 struct AttemptAdapter {
@@ -434,8 +443,20 @@ impl Member for LiveMember {
     }
 
     async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, PluginError> {
+        self.forward_for_model(path, body, "").await
+    }
+
+    async fn forward_for_model(
+        &self,
+        path: &str,
+        body: RawBody,
+        model: &str,
+    ) -> Result<RawAnswer, PluginError> {
         let mut stack = self.stack.clone();
-        match stack.call(Job::Forward(path.to_owned(), body)).await {
+        match stack
+            .call(Job::Forward(path.to_owned(), body, model.to_owned()))
+            .await
+        {
             Ok(Out::Forward(answer)) => Ok(answer),
             Ok(Out::Execute(_)) => Err(PluginError::internal("member returned a completion")),
             Ok(Out::Count(_)) => Err(PluginError::internal("member returned a count")),
@@ -498,19 +519,28 @@ where
         let mut inner = self.inner.clone();
         let id = self.id.clone();
         let cooldowns = Arc::clone(&self.cooldowns);
-        let revision = cooldowns.revision(&id);
+        let model = job.model().to_owned();
+        let revision = if model.is_empty() {
+            cooldowns.revision(&id)
+        } else {
+            cooldowns.revision_for_model(&id, &model)
+        };
         // A count or a forwarded call is a side call: it is never a served
         // chat, and an endpoint it does not have says nothing about the member.
         let is_side = matches!(job, Job::Count(..) | Job::Forward(..));
         Box::pin(async move {
             match inner.call(job).await {
                 Ok(Out::Execute(completion)) => Ok(Out::Execute(record_completion(
-                    completion, id, cooldowns, revision,
+                    completion, id, model, cooldowns, revision,
                 ))),
                 Ok(out @ (Out::Count(_) | Out::Forward(_))) => Ok(out),
                 Err(error) => {
                     if !is_side || count_cools(&error) {
-                        cooldowns.record_failure(&id, &error);
+                        if model.is_empty() {
+                            cooldowns.record_failure(&id, &error);
+                        } else {
+                            cooldowns.record_failure_for_model(&id, &model, &error);
+                        }
                     }
                     Err(error)
                 }
@@ -590,7 +620,7 @@ impl Service<Job> for ProviderCall {
                         .map_err(into_plugin)?;
                     Ok(Out::Count(map_count(outcome)))
                 }
-                Job::Forward(path, body) => {
+                Job::Forward(path, body, _) => {
                     let answer = provider.forward(&path, body).await.map_err(into_plugin)?;
                     Ok(Out::Forward(answer))
                 }
@@ -626,21 +656,27 @@ fn watch_completion(
 fn record_completion(
     completion: Completion,
     id: MemberId,
+    model: String,
     cooldowns: Arc<Cooldowns>,
     revision: u64,
 ) -> Completion {
     match completion {
         Completion::Stream(stream) => Completion::Stream(Box::pin(OutcomeStream::new(
-            stream, id, cooldowns, revision,
+            stream, id, model, cooldowns, revision,
         ))),
         Completion::Raw(body) => Completion::Raw(BodyStream::from_stream(OutcomeStream::new(
             body_to_stream(body),
             id,
+            model,
             cooldowns,
             revision,
         ))),
         other => {
-            cooldowns.record_success_if_unchanged(&id, revision);
+            if model.is_empty() {
+                cooldowns.record_success_if_unchanged(&id, revision);
+            } else {
+                cooldowns.record_success_for_model_if_unchanged(&id, &model, revision);
+            }
             other
         }
     }
@@ -649,16 +685,24 @@ fn record_completion(
 struct OutcomeStream<S> {
     inner: Pin<Box<S>>,
     id: MemberId,
+    model: String,
     cooldowns: Arc<Cooldowns>,
     revision: u64,
     succeeded: bool,
 }
 
 impl<S> OutcomeStream<S> {
-    fn new(inner: S, id: MemberId, cooldowns: Arc<Cooldowns>, revision: u64) -> Self {
+    fn new(
+        inner: S,
+        id: MemberId,
+        model: String,
+        cooldowns: Arc<Cooldowns>,
+        revision: u64,
+    ) -> Self {
         Self {
             inner: Box::pin(inner),
             id,
+            model,
             cooldowns,
             revision,
             succeeded: false,
@@ -677,14 +721,27 @@ where
         match this.inner.as_mut().poll_next(context) {
             Poll::Ready(Some(Ok(item))) => {
                 if !this.succeeded {
-                    this.cooldowns
-                        .record_success_if_unchanged(&this.id, this.revision);
+                    if this.model.is_empty() {
+                        this.cooldowns
+                            .record_success_if_unchanged(&this.id, this.revision);
+                    } else {
+                        this.cooldowns.record_success_for_model_if_unchanged(
+                            &this.id,
+                            &this.model,
+                            this.revision,
+                        );
+                    }
                     this.succeeded = true;
                 }
                 Poll::Ready(Some(Ok(item)))
             }
             Poll::Ready(Some(Err(error))) => {
-                this.cooldowns.record_failure(&this.id, &error);
+                if this.model.is_empty() {
+                    this.cooldowns.record_failure(&this.id, &error);
+                } else {
+                    this.cooldowns
+                        .record_failure_for_model(&this.id, &this.model, &error);
+                }
                 Poll::Ready(Some(Err(error)))
             }
             other => other,

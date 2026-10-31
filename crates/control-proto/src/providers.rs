@@ -48,6 +48,9 @@ pub struct ProviderSummary {
     pub ready: bool,
     /// Number of currently listed models.
     pub model_count: u64,
+    /// Models with an active model-specific rest on this provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resting_models: Vec<String>,
 }
 
 /// Provider list response.

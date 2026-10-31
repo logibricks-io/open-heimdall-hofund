@@ -199,6 +199,7 @@ fn json_snapshots_round_trip() {
         protocol: "example-protocol".to_owned(),
         ready: true,
         model_count: 2,
+        resting_models: Vec::new(),
     ));
     snapshot("provider-list-response", &providers);
 
@@ -339,6 +340,7 @@ fn json_snapshots_round_trip() {
     initial.members.push(dto!(MemberSummary,
         id: "member-1".to_owned(),
         ready: true,
+        resting_models: Vec::new(),
     ));
     initial.cursors = vec![
         EventCursor::new(Topic::Control, 12),
@@ -383,6 +385,7 @@ fn json_snapshots_round_trip() {
 
     let mut cooled = MemberCooledEvent::default();
     cooled.member_id = "member-1".to_owned();
+    cooled.model = Some("model-a".to_owned());
     cooled.cause = CooldownReason::RateLimit;
     cooled.retry_after_ms = Some(1000);
     cooled.remaining_ms = Some(900);
@@ -394,6 +397,7 @@ fn json_snapshots_round_trip() {
         "member-recovered-event",
         EventPayload::MemberRecovered(dto!(MemberRecoveredEvent,
             member_id: "member-1".to_owned(),
+            model: Some("model-a".to_owned()),
             ready: true,
         )),
     );
@@ -419,6 +423,7 @@ fn json_snapshots_round_trip() {
         EventPayload::RequestFinished(dto!(RequestFinishedEvent,
             request_id: "request-1".to_owned(),
             member: Some("member-1".to_owned()),
+            model: "model-a".to_owned(),
             status_class: StatusClass::Success,
             duration_ms: 20,
             input_tokens: Some(10),
@@ -484,6 +489,48 @@ fn a10_member_cooled_event_carries_status_and_vendor_words() {
     let decoded: MemberCooledEvent = serde_json::from_slice(older).expect("older event");
     assert_eq!(decoded.status, None);
     assert!(decoded.error.is_empty());
+}
+
+#[test]
+fn b5g_status_usage_and_request_events_show_the_model_scope() {
+    let mut member = MemberSummary::default();
+    member.resting_models = vec!["model-a".to_owned()];
+    assert_eq!(
+        serde_json::to_value(&member).expect("member json")["resting_models"][0],
+        "model-a"
+    );
+    let mut provider = ProviderSummary::default();
+    provider.resting_models = vec!["model-a".to_owned()];
+    assert_eq!(
+        serde_json::to_value(&provider).expect("provider json")["resting_models"][0],
+        "model-a"
+    );
+
+    let mut cooled = MemberCooledEvent::default();
+    cooled.model = Some("model-a".to_owned());
+    assert_eq!(
+        serde_json::to_value(&cooled).expect("cooled json")["model"],
+        "model-a"
+    );
+    let mut recovered = MemberRecoveredEvent::default();
+    recovered.model = Some("model-a".to_owned());
+    assert_eq!(
+        serde_json::to_value(&recovered).expect("recovered json")["model"],
+        "model-a"
+    );
+
+    let mut finished = RequestFinishedEvent::default();
+    finished.model = "model-a".to_owned();
+    assert_eq!(
+        serde_json::to_value(&finished).expect("request json")["model"],
+        "model-a"
+    );
+    let mut usage = UsageRow::default();
+    usage.model = "model-a".to_owned();
+    assert_eq!(
+        serde_json::to_value(&usage).expect("usage json")["model"],
+        "model-a"
+    );
 }
 
 #[test]

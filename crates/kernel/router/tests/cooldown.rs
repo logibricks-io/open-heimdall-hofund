@@ -258,6 +258,44 @@ async fn all_cooling_members_reduce_to_the_soonest_probe() {
 }
 
 #[tokio::test]
+async fn b5e_model_rests_order_each_member_model_pair_independently() {
+    let (book, seen) = fixture();
+    for (id, seconds) in [("first", 300), ("third", 60)] {
+        let error = PluginError::status_error(
+            429,
+            "All credentials for model model-a are cooling down via provider upstream",
+        )
+        .with_retry_after(Duration::from_secs(seconds));
+        book.record_failure_for_model(&member_id(id), "model-a", &error)
+            .expect("model rest");
+    }
+    let members = vec![
+        fake("first", &seen, Behavior::Unary),
+        fake("second", &seen, Behavior::Fail),
+        fake("third", &seen, Behavior::Unary),
+    ];
+    let mut routes = BTreeMap::new();
+    routes.insert("model-a".to_owned(), members.clone());
+    routes.insert("model-b".to_owned(), members);
+    let router = Router::new(routes, FailoverPolicy::default()).with_cooldowns(Arc::clone(&book));
+
+    let routed = router
+        .dispatch(&Request::new("model-a"), "inbound")
+        .await
+        .expect("model-a");
+    assert_eq!(routed.upstream_id, "third");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second", "third"]);
+
+    seen.lock().expect("seen").clear();
+    let routed = router
+        .dispatch(&Request::new("model-b"), "inbound")
+        .await
+        .expect("model-b");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+}
+
+#[tokio::test]
 async fn a8_ready_members_follow_strategy_then_one_soonest_probe() {
     let (book, seen) = fixture();
     cool(&book, "third", 60);
@@ -329,4 +367,31 @@ async fn a8_route_strategy_sees_weight_free_and_rest_of_each_member() {
             vec![(3, false, false), (1, false, true), (1, true, false)]
         )]
     );
+}
+
+#[tokio::test]
+async fn b5e_routing_reads_the_rest_of_the_hop_wire_model() {
+    let (book, seen) = fixture();
+    let error = PluginError::status_error(
+        429,
+        "All credentials for model wire-a are cooling down via provider upstream",
+    )
+    .with_retry_after(Duration::from_secs(300));
+    book.record_failure_for_model(&member_id("first"), "wire-a", &error)
+        .expect("model rest");
+    let mut first = Hop::new(fake("first", &seen, Behavior::Unary));
+    first.wire_model = Some("wire-a".to_owned());
+    let hops = vec![first, Hop::new(fake("second", &seen, Behavior::Unary))];
+    let router = Router::from_routes(
+        BTreeMap::from([("alias".to_owned(), Route::new(hops))]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(book);
+
+    let routed = router
+        .dispatch(&Request::new("alias"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
 }

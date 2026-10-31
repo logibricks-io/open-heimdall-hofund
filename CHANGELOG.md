@@ -28,7 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Chat token fields now follow the original request and OpenAI's
   `max_completion_tokens` convention (V-5). A refusal naming the other field
   triggers one retry and is remembered per provider for subsequent requests.
-
+- Per-model rests (P0-3b2): model-cooling and unserved-model refusals now rest
+  only the affected member/model pair, with independent rate, generic, and
+  persisted credit ladders. Routing probes are selected per pair, model success
+  clears only that model, and status, usage, and request events expose the
+  model scope. Failure events replace rest deadlines like the reference, while
+  passive observations keep the longer rest.
 - Routing strategy core (P0-2a): route-level `order`, `rotate`, smooth
   weighted round robin, and free-first ordering, with per-route and per-account
   weights, manual/catalog/zero-price free detection, and strategy state kept

@@ -8,6 +8,7 @@
     "event": "member_recovered",
     "data": {
       "member_id": "member-1",
+      "model": "model-a",
       "ready": true
     }
   }
