@@ -17,14 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole once. Unknown ids on translating or subscription routes return the
   OpenAI-shaped 400 error. History expires after six hours and is lost on
   restart; upstream `store: false` remains the default when omitted.
-
 - Responses over a WebSocket on `/v1/responses` and `/responses` (P0-1b):
   sequential `response.create` turns replay through the authenticated HTTP
   handler, with socket-local two-turn history, local warmups, SSE and unary
   event mapping, metadata/rate-limit frames, bounded error frames, and an
   8 MiB read limit. A foreign `Origin` cannot open a socket. Interrupts,
   disconnect cancellation, and shutdown drain remain for P0-1c.
-
 - Agent keys in the OS credential store (Z1): an agent descriptor may
   declare a `[credential]` item (URL and Windows target templates, literal
   account and label). The engine stores hofund's key there through a
