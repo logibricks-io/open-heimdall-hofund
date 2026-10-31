@@ -21,8 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sequential `response.create` turns replay through the authenticated HTTP
   handler, with socket-local two-turn history, local warmups, SSE and unary
   event mapping, metadata/rate-limit frames, bounded error frames, and an
-  8 MiB read limit. A foreign `Origin` cannot open a socket. Interrupts,
-  disconnect cancellation, and shutdown drain remain for P0-1c.
+  8 MiB read limit. A foreign `Origin` cannot open a socket.
+- Responses WebSocket interrupts and graceful drain (P0-1c): a matching
+  `response.interrupt` cancels the upstream turn, returns accepted followed by
+  incomplete/interrupted, suppresses later turn writes, and holds no history;
+  an unknown or idle interrupt fails. Client disconnect cancels the upstream
+  request. Shutdown rejects new sockets with 503, closes idle sockets 1001 and
+  busy sockets after their turns, waits for the socket drain, and cuts sockets
+  that outlast its deadline.
 - Agent keys in the OS credential store (Z1): an agent descriptor may
   declare a `[credential]` item (URL and Windows target templates, literal
   account and label). The engine stores hofund's key there through a

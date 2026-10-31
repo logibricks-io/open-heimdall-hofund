@@ -1,5 +1,6 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
@@ -9,9 +10,11 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use futures_util::StreamExt;
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
 use hofund_plugin_api::responses_ws as wire;
 use serde_json::{Map, Value, json};
+use tokio::sync::{Mutex as AsyncMutex, watch};
 use tower::ServiceExt;
 
 use super::{
@@ -23,6 +26,117 @@ const ERROR_BODY_LIMIT: usize = 1024 * 1024;
 const RESPONSES_PATH: &str = "/v1/responses";
 const RESPONSES_ALIAS: &str = "/responses";
 const CUT_REASON: &str = "the reply ended before response.completed";
+const RESTARTING: &str = "hofund is restarting";
+const SOCKET_AWAY: u8 = 1;
+const SOCKET_CUT: u8 = 2;
+
+pub(super) struct SocketRegistry {
+    state: Mutex<RegistryState>,
+    count: watch::Sender<usize>,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    closing: bool,
+    next_id: u64,
+    sessions: HashMap<u64, watch::Sender<u8>>,
+}
+
+impl Default for SocketRegistry {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(RegistryState::default()),
+            count: watch::channel(0).0,
+        }
+    }
+}
+
+impl SocketRegistry {
+    pub(super) fn ending(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .closing
+    }
+
+    fn register(self: &Arc<Self>) -> Option<SocketRegistration> {
+        let (lifecycle, receiver) = watch::channel(0);
+        let id = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.closing {
+                return None;
+            }
+            state.next_id += 1;
+            let id = state.next_id;
+            state.sessions.insert(id, lifecycle);
+            self.count.send_replace(state.sessions.len());
+            id
+        };
+        Some(SocketRegistration {
+            id,
+            registry: Arc::clone(self),
+            lifecycle: receiver,
+        })
+    }
+
+    pub(super) fn drain(&self) {
+        let sessions = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.closing = true;
+            state
+                .sessions
+                .values()
+                .cloned()
+                .collect::<Vec<watch::Sender<u8>>>()
+        };
+        for session in sessions {
+            session.send_replace(SOCKET_AWAY);
+        }
+    }
+
+    pub(super) fn cut(&self) {
+        let sessions = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .sessions
+            .values()
+            .cloned()
+            .collect::<Vec<watch::Sender<u8>>>();
+        for session in sessions {
+            session.send_replace(SOCKET_CUT);
+        }
+    }
+
+    pub(super) async fn wait(&self) {
+        let mut count = self.count.subscribe();
+        let _ = count.wait_for(|count| *count == 0).await;
+    }
+}
+
+struct SocketRegistration {
+    id: u64,
+    registry: Arc<SocketRegistry>,
+    lifecycle: watch::Receiver<u8>,
+}
+
+impl Drop for SocketRegistration {
+    fn drop(&mut self) {
+        let mut state = self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.sessions.remove(&self.id);
+        self.registry.count.send_replace(state.sessions.len());
+    }
+}
 
 pub(super) fn is_responses_path(path: &str) -> bool {
     path == RESPONSES_PATH || path == RESPONSES_ALIAS
@@ -58,6 +172,9 @@ pub(super) async fn get(State(app): State<Arc<Inner>>, request: Request<Body>) -
             .header(header::ALLOW, "POST")
             .body(Body::empty())
             .unwrap_or_else(|_| text_response(StatusCode::METHOD_NOT_ALLOWED, "use POST"));
+    }
+    if app.sockets.ending() {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, RESTARTING);
     }
     if !origin_matches_host(request.headers()) {
         return text_response(
@@ -109,14 +226,25 @@ fn origin_matches_host(headers: &HeaderMap) -> bool {
         .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
 }
 
-async fn serve_socket(app: Arc<Inner>, origin: Parts, socket: WebSocket) {
+async fn serve_socket(app: Arc<Inner>, origin: Parts, mut socket: WebSocket) {
+    let Some(registration) = app.sockets.register() else {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: close_code::AWAY,
+                reason: Utf8Bytes::from(RESTARTING),
+            })))
+            .await;
+        return;
+    };
+    let lifecycle = registration.lifecycle.clone();
+    let _registration = registration;
     SocketSession {
         app,
         origin,
         held: VecDeque::new(),
         stats: SocketStats::default(),
     }
-    .run(socket)
+    .run(socket, lifecycle)
     .await;
 }
 
@@ -149,6 +277,88 @@ struct HeldTurn {
     items: Vec<Value>,
 }
 
+type SocketSink = Arc<AsyncMutex<SplitSink<WebSocket, Message>>>;
+type SocketMessages = VecDeque<Result<Message, axum::Error>>;
+
+#[derive(Clone)]
+struct SocketWriter {
+    sink: SocketSink,
+    cancelled: Option<Arc<AtomicBool>>,
+}
+
+impl SocketWriter {
+    fn new(sink: SplitSink<WebSocket, Message>) -> Self {
+        Self {
+            sink: Arc::new(AsyncMutex::new(sink)),
+            cancelled: None,
+        }
+    }
+
+    fn for_turn(&self, run: &Arc<TurnRun>) -> Self {
+        Self {
+            sink: Arc::clone(&self.sink),
+            cancelled: Some(Arc::clone(&run.cancelled)),
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancelled
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
+    }
+}
+
+struct TurnRun {
+    ids: Mutex<Vec<String>>,
+    cancelled: Arc<AtomicBool>,
+    cancel: watch::Sender<bool>,
+}
+
+impl TurnRun {
+    fn new() -> Self {
+        Self {
+            ids: Mutex::new(Vec::new()),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancel: watch::channel(false).0,
+        }
+    }
+
+    fn subscribe(&self) -> watch::Receiver<bool> {
+        self.cancel.subscribe()
+    }
+
+    fn note(&self, id: &str) {
+        if id.is_empty() {
+            return;
+        }
+        let mut ids = self
+            .ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !ids.iter().any(|known| known == id) {
+            ids.push(id.to_owned());
+        }
+    }
+
+    fn interrupt(&self, id: &str) -> bool {
+        let matched = self
+            .ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|known| known == id);
+        if matched {
+            self.cancel();
+        }
+        matched
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.cancel.send_replace(true);
+    }
+}
+
 struct SocketSession {
     app: Arc<Inner>,
     origin: Parts,
@@ -168,16 +378,39 @@ impl SocketSession {
         self.held.iter().rev().find(|turn| turn.id == id)
     }
 
-    async fn run(mut self, mut socket: WebSocket) {
+    async fn run(mut self, socket: WebSocket, mut lifecycle: watch::Receiver<u8>) {
+        let (sink, mut incoming) = socket.split();
+        let writer = SocketWriter::new(sink);
+        let mut queued = SocketMessages::new();
         loop {
-            // P0-1c: select the socket-level shutdown signal beside this receive.
-            let Some(message) = socket.recv().await else {
+            let signal = *lifecycle.borrow_and_update();
+            if signal != 0 {
+                if signal != SOCKET_CUT {
+                    let _ = close(&writer, close_code::AWAY, RESTARTING).await;
+                }
+                break;
+            }
+            let message = match queued.pop_front() {
+                Some(message) => Some(message),
+                None => {
+                    tokio::select! {
+                        message = incoming.next() => message,
+                        _ = lifecycle.changed() => {
+                            if *lifecycle.borrow_and_update() != SOCKET_CUT {
+                                let _ = close(&writer, close_code::AWAY, RESTARTING).await;
+                            }
+                            break;
+                        }
+                    }
+                }
+            };
+            let Some(message) = message else {
                 break;
             };
             let text = match message {
                 Ok(Message::Text(text)) => text,
                 Ok(Message::Binary(_)) => {
-                    let _ = close(&mut socket, close_code::UNSUPPORTED, "text frames only").await;
+                    let _ = close(&writer, close_code::UNSUPPORTED, "text frames only").await;
                     break;
                 }
                 Ok(Message::Close(_)) | Err(_) => break,
@@ -190,9 +423,20 @@ impl SocketSession {
                 Some(value) => value.get("type").and_then(Value::as_str).map(str::to_owned),
                 None => names_create(text.as_str()).then(|| "response.create".to_owned()),
             };
+            if kind.as_deref() == Some("response.interrupt") {
+                let id = parsed
+                    .as_ref()
+                    .and_then(|value| value.get("response_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !send_json(&writer, &interrupt_reply("response.interrupt.failed", id)).await {
+                    break;
+                }
+                continue;
+            }
             if kind.as_deref() != Some("response.create") {
                 if !send_local_error(
-                    &mut socket,
+                    &writer,
                     "unsupported_message",
                     "only response.create is supported on this socket",
                     Some("type"),
@@ -207,7 +451,7 @@ impl SocketSession {
             self.stats.bytes_received += text.len() as u64;
             let Some(value) = parsed else {
                 if !send_local_error(
-                    &mut socket,
+                    &writer,
                     "invalid_json",
                     "response.create is not a JSON object",
                     None,
@@ -218,43 +462,125 @@ impl SocketSession {
                 }
                 continue;
             };
-            // P0-1c: a per-turn cancellation token wraps this replay and its writes.
-            if !self.turn(&mut socket, value).await {
-                break;
+            let prepared = match self.prepare(value) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    if !send_local_error(&writer, error.code, &error.message, error.param).await {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            match self
+                .drive_turn(
+                    prepared,
+                    &writer,
+                    &mut incoming,
+                    &mut queued,
+                    &mut lifecycle,
+                )
+                .await
+            {
+                DriveResult::Disconnected => break,
+                DriveResult::Interrupted { away } => {
+                    if away {
+                        let _ = close(&writer, close_code::AWAY, RESTARTING).await;
+                        break;
+                    }
+                }
+                DriveResult::Finished { mapped, away } => {
+                    if !mapped.connected {
+                        break;
+                    }
+                    if mapped.cut {
+                        let _ = close(&writer, close_code::ERROR, CUT_REASON).await;
+                        break;
+                    }
+                    if let Some(held) = mapped.held {
+                        self.keep(held);
+                    }
+                    if away {
+                        let _ = close(&writer, close_code::AWAY, RESTARTING).await;
+                        break;
+                    }
+                }
             }
         }
         self.stats.log();
     }
 
-    async fn turn(&mut self, socket: &mut WebSocket, value: Value) -> bool {
-        let prepared = match self.prepare(value) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return send_local_error(socket, error.code, &error.message, error.param).await;
-            }
-        };
-        match prepared {
-            Prepared::Warmup { input, model } => self.warmup(socket, input, model).await,
-            Prepared::Replay { body, input } => {
-                self.stats.bytes_sent += body.len() as u64;
-                let request = replay_request(&self.origin, &body);
-                let router = codec_routes(&self.app).with_state(Arc::clone(&self.app));
-                let response = match router.oneshot(request).await {
-                    Ok(response) => response,
-                    Err(never) => match never {},
-                };
-                let mapped = map_response(socket, response, input).await;
-                if !mapped.connected {
-                    return false;
+    async fn drive_turn(
+        &mut self,
+        prepared: Prepared,
+        writer: &SocketWriter,
+        incoming: &mut SplitStream<WebSocket>,
+        queued: &mut SocketMessages,
+        lifecycle: &mut watch::Receiver<u8>,
+    ) -> DriveResult {
+        if let Prepared::Replay { body, .. } = &prepared {
+            self.stats.bytes_sent += body.len() as u64;
+        }
+        let run = Arc::new(TurnRun::new());
+        let turn_writer = writer.for_turn(&run);
+        let cancelled = run.subscribe();
+        let mut task = tokio::spawn(run_prepared(
+            Arc::clone(&self.app),
+            self.origin.clone(),
+            prepared,
+            turn_writer,
+            Arc::clone(&run),
+            cancelled,
+        ));
+        let mut away = *lifecycle.borrow_and_update() == SOCKET_AWAY;
+        loop {
+            tokio::select! {
+                outcome = &mut task => {
+                    return match outcome {
+                        Ok(mapped) => DriveResult::Finished { mapped, away },
+                        Err(_) => DriveResult::Disconnected,
+                    };
                 }
-                if mapped.cut {
-                    let _ = close(socket, close_code::ERROR, CUT_REASON).await;
-                    return false;
+                message = incoming.next() => {
+                    let Some(message) = message else {
+                        run.cancel();
+                        let _ = task.await;
+                        return DriveResult::Disconnected;
+                    };
+                    if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                        run.cancel();
+                        let _ = task.await;
+                        return DriveResult::Disconnected;
+                    }
+                    if let Some(id) = interrupt_id(&message) {
+                        if run.interrupt(&id) {
+                            let _ = task.await;
+                            if !send_json(writer, &interrupt_reply("response.interrupt.accepted", &id)).await
+                                || !send_json(writer, &interrupted_reply(&id)).await
+                            {
+                                return DriveResult::Disconnected;
+                            }
+                            return DriveResult::Interrupted { away };
+                        }
+                        if !send_json(writer, &interrupt_reply("response.interrupt.failed", &id)).await {
+                            return DriveResult::Disconnected;
+                        }
+                    } else {
+                        queued.push_back(message);
+                    }
                 }
-                if let Some(held) = mapped.held {
-                    self.keep(held);
+                _ = lifecycle.changed() => {
+                    let signal = *lifecycle.borrow_and_update();
+                    match signal {
+                        SOCKET_CUT => {
+                            run.cancel();
+                            task.abort();
+                            let _ = task.await;
+                            return DriveResult::Disconnected;
+                        }
+                        SOCKET_AWAY => away = true,
+                        _ => {}
+                    }
                 }
-                true
             }
         }
     }
@@ -296,49 +622,125 @@ impl SocketSession {
         })?;
         Ok(Prepared::Replay { body, input })
     }
+}
 
-    async fn warmup(
-        &mut self,
-        socket: &mut WebSocket,
-        input: Vec<Value>,
-        model: Option<Value>,
-    ) -> bool {
-        let id = format!("resp_{}", next_request_id());
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs());
-        let mut response = Map::new();
-        response.insert("id".to_owned(), Value::String(id.clone()));
-        response.insert("object".to_owned(), Value::String("response".to_owned()));
-        response.insert("created_at".to_owned(), json!(created_at));
-        response.insert("status".to_owned(), Value::String("in_progress".to_owned()));
-        response.insert("output".to_owned(), Value::Array(Vec::new()));
-        if let Some(model) = model {
-            response.insert("model".to_owned(), model);
+enum DriveResult {
+    Disconnected,
+    Interrupted { away: bool },
+    Finished { mapped: MappedTurn, away: bool },
+}
+
+fn interrupt_id(message: &Result<Message, axum::Error>) -> Option<String> {
+    let Message::Text(text) = message.as_ref().ok()? else {
+        return None;
+    };
+    let value = serde_json::from_slice::<Value>(text.as_bytes()).ok()?;
+    (value.get("type").and_then(Value::as_str) == Some("response.interrupt")).then(|| {
+        value
+            .get("response_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    })
+}
+
+fn interrupt_reply(kind: &str, id: &str) -> Value {
+    json!({"type": kind, "response_id": id})
+}
+
+fn interrupted_reply(id: &str) -> Value {
+    json!({
+        "type": "response.incomplete",
+        "response": {
+            "id": id,
+            "object": "response",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "interrupted"},
+            "output": [],
+        },
+    })
+}
+
+async fn run_prepared(
+    app: Arc<Inner>,
+    origin: Parts,
+    prepared: Prepared,
+    writer: SocketWriter,
+    run: Arc<TurnRun>,
+    mut cancelled: watch::Receiver<bool>,
+) -> MappedTurn {
+    let work = async move {
+        match prepared {
+            Prepared::Warmup { input, model } => warmup(&writer, &run, input, model).await,
+            Prepared::Replay { body, input } => {
+                let request = replay_request(&origin, &body);
+                let router = codec_routes(&app).with_state(Arc::clone(&app));
+                let response = match router.oneshot(request).await {
+                    Ok(response) => response,
+                    Err(never) => match never {},
+                };
+                map_response(&writer, response, input, &run).await
+            }
         }
-        if !send_json(
-            socket,
-            &json!({"type": "response.created", "response": response}),
-        )
-        .await
-        {
-            return false;
-        }
-        response.insert("status".to_owned(), Value::String("completed".to_owned()));
-        response.insert(
-            "usage".to_owned(),
-            json!({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}),
-        );
-        if !send_json(
-            socket,
-            &json!({"type": "response.completed", "response": response}),
-        )
-        .await
-        {
-            return false;
-        }
-        self.keep(HeldTurn { id, items: input });
-        true
+    };
+    tokio::pin!(work);
+    tokio::select! {
+        biased;
+        _ = cancelled.wait_for(|cancelled| *cancelled) => MappedTurn {
+            held: None,
+            cut: false,
+            connected: true,
+        },
+        mapped = &mut work => mapped,
+    }
+}
+
+async fn warmup(
+    writer: &SocketWriter,
+    run: &Arc<TurnRun>,
+    input: Vec<Value>,
+    model: Option<Value>,
+) -> MappedTurn {
+    let id = format!("resp_{}", next_request_id());
+    run.note(&id);
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let mut response = Map::new();
+    response.insert("id".to_owned(), Value::String(id.clone()));
+    response.insert("object".to_owned(), Value::String("response".to_owned()));
+    response.insert("created_at".to_owned(), json!(created_at));
+    response.insert("status".to_owned(), Value::String("in_progress".to_owned()));
+    response.insert("output".to_owned(), Value::Array(Vec::new()));
+    if let Some(model) = model {
+        response.insert("model".to_owned(), model);
+    }
+    if !send_json(
+        writer,
+        &json!({"type": "response.created", "response": response}),
+    )
+    .await
+    {
+        return MappedTurn {
+            held: None,
+            cut: false,
+            connected: false,
+        };
+    }
+    response.insert("status".to_owned(), Value::String("completed".to_owned()));
+    response.insert(
+        "usage".to_owned(),
+        json!({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}),
+    );
+    let connected = send_json(
+        writer,
+        &json!({"type": "response.completed", "response": response}),
+    )
+    .await;
+    MappedTurn {
+        held: connected.then_some(HeldTurn { id, items: input }),
+        cut: false,
+        connected,
     }
 }
 
@@ -470,18 +872,31 @@ struct MappedTurn {
     connected: bool,
 }
 
-#[derive(Default)]
 struct TurnEvents {
     id: String,
     items: Vec<Value>,
     ended: bool,
     completed: bool,
+    run: Arc<TurnRun>,
+}
+
+impl TurnEvents {
+    fn new(run: &Arc<TurnRun>) -> Self {
+        Self {
+            id: String::new(),
+            items: Vec::new(),
+            ended: false,
+            completed: false,
+            run: Arc::clone(run),
+        }
+    }
 }
 
 async fn map_response(
-    socket: &mut WebSocket,
+    writer: &SocketWriter,
     response: Response<Body>,
     input: Vec<Value>,
+    run: &Arc<TurnRun>,
 ) -> MappedTurn {
     let status = response.status();
     let headers = response.headers().clone();
@@ -495,11 +910,11 @@ async fn map_response(
         return MappedTurn {
             held: None,
             cut: false,
-            connected: send_json(socket, &frame).await,
+            connected: send_json(writer, &frame).await,
         };
     }
     if stream {
-        return map_stream(socket, response.into_body(), &headers, input).await;
+        return map_stream(writer, response.into_body(), &headers, input, run).await;
     }
     let body = read_body(response.into_body(), None).await;
     let Ok(response) = serde_json::from_slice::<Value>(&body) else {
@@ -511,7 +926,7 @@ async fn map_response(
         return MappedTurn {
             held: None,
             cut: false,
-            connected: send_json(socket, &frame).await,
+            connected: send_json(writer, &frame).await,
         };
     };
     if response.get("object").and_then(Value::as_str) != Some("response")
@@ -528,19 +943,19 @@ async fn map_response(
         return MappedTurn {
             held: None,
             cut: false,
-            connected: send_json(socket, &frame).await,
+            connected: send_json(writer, &frame).await,
         };
     }
-    if !send_header_frames(socket, &headers).await {
+    if !send_header_frames(writer, &headers).await {
         return MappedTurn {
             held: None,
             cut: false,
             connected: false,
         };
     }
-    let mut events = TurnEvents::default();
+    let mut events = TurnEvents::new(run);
     let mut connected = send_event(
-        socket,
+        writer,
         &headers,
         &mut events,
         &json!({"type": "response.created", "response": response}),
@@ -555,7 +970,7 @@ async fn map_response(
             .enumerate()
         {
             connected = send_event(
-                socket,
+                writer,
                 &headers,
                 &mut events,
                 &json!({"type": "response.output_item.done", "output_index": index, "item": item}),
@@ -573,7 +988,7 @@ async fn map_response(
             _ => "response.completed",
         };
         connected = send_event(
-            socket,
+            writer,
             &headers,
             &mut events,
             &json!({"type": kind, "response": response}),
@@ -584,12 +999,13 @@ async fn map_response(
 }
 
 async fn map_stream(
-    socket: &mut WebSocket,
+    writer: &SocketWriter,
     body: Body,
     headers: &HeaderMap,
     input: Vec<Value>,
+    run: &Arc<TurnRun>,
 ) -> MappedTurn {
-    if !send_header_frames(socket, headers).await {
+    if !send_header_frames(writer, headers).await {
         return MappedTurn {
             held: None,
             cut: false,
@@ -598,7 +1014,7 @@ async fn map_stream(
     }
     let mut stream = body.into_data_stream();
     let mut parser = SseParser::default();
-    let mut events = TurnEvents::default();
+    let mut events = TurnEvents::new(run);
     let mut connected = true;
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else {
@@ -606,7 +1022,7 @@ async fn map_stream(
         };
         parser.push(&chunk);
         while let Some(data) = parser.next() {
-            if !send_event_bytes(socket, headers, &mut events, &data).await {
+            if !send_event_bytes(writer, headers, &mut events, &data).await {
                 connected = false;
                 break;
             }
@@ -616,7 +1032,7 @@ async fn map_stream(
         }
     }
     if connected && let Some(data) = parser.finish() {
-        connected = send_event_bytes(socket, headers, &mut events, &data).await;
+        connected = send_event_bytes(writer, headers, &mut events, &data).await;
     }
     let cut = connected && !events.ended;
     let mut mapped = finish_mapping(events, input, connected);
@@ -642,7 +1058,7 @@ fn finish_mapping(events: TurnEvents, mut input: Vec<Value>, connected: bool) ->
 }
 
 async fn send_event_bytes(
-    socket: &mut WebSocket,
+    writer: &SocketWriter,
     headers: &HeaderMap,
     events: &mut TurnEvents,
     data: &[u8],
@@ -654,11 +1070,11 @@ async fn send_event_bytes(
     let Ok(value) = serde_json::from_slice::<Value>(trimmed) else {
         return true;
     };
-    send_event(socket, headers, events, &value).await
+    send_event(writer, headers, events, &value).await
 }
 
 async fn send_event(
-    socket: &mut WebSocket,
+    writer: &SocketWriter,
     headers: &HeaderMap,
     events: &mut TurnEvents,
     value: &Value,
@@ -681,7 +1097,7 @@ async fn send_event(
         _ => {}
     }
     let value = with_gateway_etag(value.clone(), headers);
-    send_json(socket, &value).await
+    send_json(writer, &value).await
 }
 
 fn with_gateway_etag(mut value: Value, headers: &HeaderMap) -> Value {
@@ -708,12 +1124,13 @@ fn note_id(events: &mut TurnEvents, value: &Value) {
         .filter(|id| !id.is_empty())
     {
         events.id = id.to_owned();
+        events.run.note(id);
     }
 }
 
-async fn send_header_frames(socket: &mut WebSocket, headers: &HeaderMap) -> bool {
+async fn send_header_frames(writer: &SocketWriter, headers: &HeaderMap) -> bool {
     for frame in header_frames(headers) {
-        if !send_json(socket, &frame).await {
+        if !send_json(writer, &frame).await {
             return false;
         }
     }
@@ -882,7 +1299,7 @@ fn error_frame(status: StatusCode, headers: &HeaderMap, error: Value) -> Value {
 }
 
 async fn send_local_error(
-    socket: &mut WebSocket,
+    writer: &SocketWriter,
     code: &str,
     message: &str,
     param: Option<&str>,
@@ -898,24 +1315,33 @@ async fn send_local_error(
         error.insert("param".to_owned(), Value::String(param.to_owned()));
     }
     send_json(
-        socket,
+        writer,
         &json!({"type": "error", "status": 400, "error": error}),
     )
     .await
 }
 
-async fn send_json(socket: &mut WebSocket, value: &Value) -> bool {
-    match serde_json::to_string(value) {
-        Ok(text) => socket
-            .send(Message::Text(Utf8Bytes::from(text)))
-            .await
-            .is_ok(),
-        Err(_) => false,
+async fn send_json(writer: &SocketWriter, value: &Value) -> bool {
+    if writer.cancelled() {
+        return false;
     }
+    let Ok(text) = serde_json::to_string(value) else {
+        return false;
+    };
+    let mut sink = writer.sink.lock().await;
+    if writer.cancelled() {
+        return false;
+    }
+    sink.send(Message::Text(Utf8Bytes::from(text)))
+        .await
+        .is_ok()
 }
 
-async fn close(socket: &mut WebSocket, code: u16, reason: &'static str) -> Result<(), axum::Error> {
-    socket
+async fn close(writer: &SocketWriter, code: u16, reason: &'static str) -> Result<(), axum::Error> {
+    writer
+        .sink
+        .lock()
+        .await
         .send(Message::Close(Some(CloseFrame {
             code,
             reason: Utf8Bytes::from(reason),
