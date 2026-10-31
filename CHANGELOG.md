@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Thinking-only refusal handover (P0-3b3 b9, #496): streamed Anthropic
+  Messages, Chat Completions, and Responses requests now try the next member
+  after a refusal or refusal error when only reasoning has been emitted, then
+  splice that member's answer into the same reply. Anthropic blocks are closed
+  and reindexed, Responses start frames are dropped while output and sequence
+  indexes continue, and Chat chunks pass through. Text or tool output commits
+  the stream, last-member and no-output behavior is unchanged, repeated
+  handovers accumulate indexes, and policy refusals do not cool the member.
 - Quota windows (P0-5a): a kernel quota store keeps each subscription
   card with its windows, absolute reset times, `runsOutAt`, cached `asOf`
   fallbacks, deferred reads, and last-served times from the usage ledger,

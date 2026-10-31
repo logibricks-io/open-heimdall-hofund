@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use bytes::Bytes;
 use hofund_codec::{
     AnthropicMessages, Codec, CodecError, Converse, GenerativeLanguage, OpenAiChat,
-    OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS,
+    OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS, refusal_error,
 };
 use hofund_plugin_api::{
     BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle, PluginError,
@@ -1269,6 +1269,7 @@ async fn decoded(
             decoder: codec.stream_decoder(),
             pending: VecDeque::new(),
             finished: false,
+            committed: false,
         };
         return Ok(Completion::Stream(Box::pin(futures_util::stream::unfold(
             events,
@@ -1340,6 +1341,7 @@ struct Events {
     decoder: Box<dyn StreamDecoder>,
     pending: VecDeque<Result<StreamEvent, PluginError>>,
     finished: bool,
+    committed: bool,
 }
 
 impl Events {
@@ -1379,12 +1381,17 @@ impl Events {
     fn take_pending(&mut self) -> Option<Result<StreamEvent, PluginError>> {
         loop {
             let mut item = self.pending.pop_front()?;
-            if let Ok(event) = &item
-                && let Some(error) = failure_of(event)
-            {
-                self.pending.clear();
-                self.finished = true;
-                return Some(Err(error));
+            if let Ok(event) = &item {
+                let refusal = refusal_error(event);
+                if self.committed && refusal {
+                    return Some(item);
+                }
+                if let Some(error) = failure_of(event) {
+                    self.pending.clear();
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                self.committed |= stream_commits(event);
             }
             if let Ok(event) = &mut item {
                 if matches!(event, StreamEvent::Unknown(_)) {
@@ -1421,13 +1428,18 @@ fn failure_of(event: &StreamEvent) -> Option<PluginError> {
         .unwrap_or_else(|| "upstream stream failed".to_owned());
     let body = serde_json::to_vec(&unknown.payload).unwrap_or_default();
     let status = status_for_error(&body);
-    if is_credit_error(status, &body) {
-        Some(PluginError::credit_status(status, message))
+    let error = if is_credit_error(status, &body) {
+        PluginError::credit_status(status, message)
     } else if is_quota_error(status, &body) {
-        Some(PluginError::quota_status(status, message))
+        PluginError::quota_status(status, message)
     } else {
-        Some(PluginError::status_error(status, message))
-    }
+        PluginError::status_error(status, message)
+    };
+    Some(if refusal_error(event) {
+        error.without_cooldown()
+    } else {
+        error
+    })
 }
 
 fn pointer(value: &serde_json::Value, path: &str) -> Option<String> {
@@ -1585,7 +1597,7 @@ mod tests {
     use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
 
     use super::{
-        AwsSigner, Method, Path, Target, classify_count, consume_fields, converse_call,
+        AwsSigner, Events, Method, Path, Target, classify_count, consume_fields, converse_call,
         endpoint_unsupported, failure_of, host_header, message_from, omit_max_tokens, path_segment,
         rewritten, route, sigv4, strip_billing_header, url_for,
     };
@@ -1721,6 +1733,38 @@ mod tests {
         assert_eq!(error.kind(), PluginErrorKind::Status);
         assert_eq!(error.status(), Some(502));
         assert_eq!(error.message(), "boom");
+    }
+
+    #[tokio::test]
+    async fn b9_committed_refusal_error_keeps_its_event() {
+        let bytes = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thought\"}}]}\n\n",
+            "data: {\"error\":{\"code\":\"content_filter\",\"message\":\"refused\"}}\n\n"
+        );
+        let mut events = Events {
+            body: hofund_plugin_api::BodyStream::from_bytes(bytes.as_bytes()),
+            decoder: OpenAiChat.stream_decoder(),
+            pending: std::collections::VecDeque::new(),
+            finished: false,
+            committed: false,
+        };
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(StreamEvent::ContentBlockStart(_)))
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(StreamEvent::ThinkingDelta(_)))
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(StreamEvent::Unknown(_)))
+        ));
+        let event = StreamEvent::Unknown(hofund_ir::UnknownEvent {
+            name: "error".to_owned(),
+            payload: serde_json::json!({"error":{"code":"content_filter"}}),
+        });
+        assert!(!failure_of(&event).expect("refusal").cools());
     }
 
     #[test]
