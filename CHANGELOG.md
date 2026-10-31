@@ -954,6 +954,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   planned allowance, a 5xx quota code, or another 4xx naming a used-up limit.
   Per-minute and short-wait rate limits, `insufficient_quota`, and credit
   refusals stay out. Quota errors keep their HTTP status for failover.
+- Error classification now decodes escaped JSON strings before matching,
+  distinguishes short rate limits from longer quota windows, recognizes
+  context-overflow wording, and marks credit refusals at any 4xx so they fail
+  over and rest as credit. Errors carried by successful unary bodies or streams
+  take the status their words imply; a pre-content `finish_reason: "error"`
+  fails over without cooling the member. Cooldown records and control events
+  now carry the upstream status and up to 300 characters of vendor wording.
 - `Retry-After` keeps fractional seconds, and `*ratelimit*reset*` headers in
   RFC 3339, Go duration, or Unix-time form are read when it is absent; the
   longest wins and the router still caps the wait.

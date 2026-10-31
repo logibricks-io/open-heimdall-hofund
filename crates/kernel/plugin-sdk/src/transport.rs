@@ -455,12 +455,14 @@ fn status_failure(status: u16, retry_after: Option<Duration>, body: &[u8]) -> Pl
     } else {
         snippet
     };
-    let error = if is_quota_error(status, body) {
+    let error = if is_credit_error(status, body) {
+        PluginError::credit_status(status, message)
+    } else if is_quota_error(status, body) {
         PluginError::quota_status(status, message)
     } else {
         PluginError::status_error(status, message)
     };
-    match retry_after {
+    match retry_after.or_else(|| retry_after_from_body(body)) {
         Some(after) => error.with_retry_after(after),
         None => error,
     }
@@ -476,12 +478,11 @@ fn status_failure(status: u16, retry_after: Option<Duration>, body: &[u8]) -> Pl
 /// used-up limit, or a 429 naming a planned allowance is quota.
 #[must_use]
 pub fn is_quota_error(status: u16, body: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
-    let insufficient_quota = text.contains("insufficient_quota");
+    let text = error_text(body);
     if status == 402 {
-        return used_up_words(&text) && !credit_words(&text) && !insufficient_quota;
+        return used_up_words(&text) && !credit_words(&text) && !credit_codes(&text);
     }
-    if credit_words(&text) && (status != 429 || broke_words(&text)) || insufficient_quota {
+    if is_credit_error(status, body) {
         return false;
     }
     if status == 429 {
@@ -503,6 +504,270 @@ pub fn is_quota_error(status: u16, body: &[u8]) -> bool {
     }
 }
 
+/// Whether an upstream refusal says the account has no credit left.
+#[must_use]
+pub fn is_credit_error(status: u16, body: &[u8]) -> bool {
+    let text = error_text(body);
+    if status == 402 && used_up_words(&text) && !credit_words(&text) && !credit_codes(&text) {
+        return false;
+    }
+    status == 402
+        || credit_words(&text) && (status != 429 || broke_words(&text))
+        || credit_codes(&text)
+}
+
+/// Whether an enabled provider's allocated-quota wording means a short rate limit.
+#[must_use]
+pub fn is_allocation_quota_rate(status: u16, body: &[u8]) -> bool {
+    if status != 429 {
+        return false;
+    }
+    let text = error_text(body);
+    if text.contains("free allocated quota") || long_words(&without_urls(&text)) {
+        return false;
+    }
+    text.contains("allocated quota exceeded, please increase your quota limit")
+        || text.contains("insufficient_quota")
+}
+
+/// Whether a successful response body contains only an upstream error.
+#[must_use]
+pub fn carried_error(body: &[u8], allocation_quota_rate: bool) -> Option<PluginError> {
+    if !error_body(body) {
+        return None;
+    }
+    let status = status_for_error(body);
+    let message = String::from_utf8_lossy(body)
+        .trim()
+        .chars()
+        .take(STATUS_SNIPPET)
+        .collect::<String>();
+    let error = if allocation_quota_rate && is_allocation_quota_rate(status, body) {
+        PluginError::status_error(status, message)
+    } else if is_credit_error(status, body) {
+        PluginError::credit_status(status, message)
+    } else if is_quota_error(status, body) {
+        PluginError::quota_status(status, message)
+    } else {
+        PluginError::status_error(status, message)
+    };
+    Some(match retry_after_from_body(body) {
+        Some(after) => error.with_retry_after(after),
+        None => error,
+    })
+}
+
+/// The status an upstream error carried without one stands for.
+#[must_use]
+pub fn status_for_error(body: &[u8]) -> u16 {
+    let text = error_text(body);
+    if is_context_overflow_error(400, body) {
+        400
+    } else if text.contains("overloaded") {
+        529
+    } else if credit_words(&text) && !text.contains("rate") {
+        402
+    } else if text.contains("rate_limit")
+        || text.contains("rate limit")
+        || text.contains("too many")
+        || quota_said(&text)
+    {
+        429
+    } else if text.contains("invalid")
+        || text.contains("context_length")
+        || text.contains("too long")
+    {
+        400
+    } else {
+        502
+    }
+}
+
+/// Whether an error with no status says out of quota or slow down. The
+/// caller has already ruled out an input that is too long.
+fn quota_said(text: &str) -> bool {
+    [
+        "quota",
+        "insufficient",
+        "balance",
+        "credit",
+        "billing",
+        "out of budget",
+        "budget exceeded",
+        "budget exhausted",
+        "exceeded",
+        "too many requests",
+        "overloaded",
+    ]
+    .into_iter()
+    .any(|word| text.contains(word))
+        || optional_separator(text, "rate", "limit")
+        || optional_separator(text, "usage", "limit")
+        || optional_separator(text, "limit", "reached")
+        || contains_then(text, "hit your ", "limit")
+        || limit_resets(text)
+        // Balance, allowance, arrears, throttling, frequency, frequent, pace,
+        // plan, usage, and ceiling wording.
+        || [
+            "\u{4f59}\u{989d}",
+            "\u{989d}\u{5ea6}",
+            "\u{6b20}\u{8d39}",
+            "\u{9650}\u{6d41}",
+            "\u{9891}\u{7387}",
+            "\u{9891}\u{7e41}",
+            "\u{901f}\u{7387}",
+            "\u{5957}\u{9910}",
+            "\u{7528}\u{91cf}",
+            "\u{4e0a}\u{9650}",
+        ]
+        .into_iter()
+        .any(|word| text.contains(word))
+}
+
+fn error_body(body: &[u8]) -> bool {
+    let Ok(serde_json::Value::Object(object)) = serde_json::from_slice(body) else {
+        return false;
+    };
+    let Some(error) = object.get("error") else {
+        return false;
+    };
+    let carries = match error {
+        serde_json::Value::String(text) => !text.trim().is_empty(),
+        serde_json::Value::Object(error) => ["message", "type", "code", "status"]
+            .into_iter()
+            .any(|key| error.get(key).is_some_and(|value| !value.is_null())),
+        _ => false,
+    };
+    if !carries {
+        return false;
+    }
+    if ["choices", "content", "candidates"]
+        .into_iter()
+        .any(|key| object.get(key).is_some_and(non_empty_array))
+    {
+        return false;
+    }
+    let status = object.get("status").and_then(serde_json::Value::as_str);
+    !object.get("output").is_some_and(non_empty_array) || status == Some("failed")
+}
+
+fn non_empty_array(value: &serde_json::Value) -> bool {
+    value.as_array().is_some_and(|items| !items.is_empty())
+}
+
+/// Whether a refusal says the input exceeds the model's context.
+#[must_use]
+pub fn is_context_overflow_error(status: u16, body: &[u8]) -> bool {
+    if !matches!(status, 400 | 413 | 422) {
+        return false;
+    }
+    let text = error_text(body);
+    if pace_words(&text) {
+        return false;
+    }
+    if [
+        "context_length_exceeded",
+        "prompt is too long",
+        "input is too long",
+        "maximum context length",
+        "reduce the length of the messages",
+        "maximum allowed input length",
+        "available context size",
+        "greater than the context length",
+        "context window exceeds limit",
+        "exceeded model token limit",
+        "configured context size",
+        "prompt too long",
+        "prompt exceeds max length",
+        "context_window_exceeded",
+        "range of input length should be",
+        "token limit exceeded",
+    ]
+    .into_iter()
+    .any(|phrase| text.contains(phrase))
+        || (text.contains("context")
+            && ["exceed", "too long", "maximum", "beyond"]
+                .into_iter()
+                .any(|word| text.contains(word)))
+        || (text.contains("input token") && text.contains("exceed") && text.contains("limit"))
+    {
+        return true;
+    }
+    // Input subjects and length, excess, and too-many wording.
+    let subjects = [
+        "\u{5185}\u{5bb9}",
+        "\u{8f93}\u{5165}",
+        "\u{6587}\u{672c}",
+        "\u{63d0}\u{793a}\u{8bcd}",
+        "prompt",
+        "\u{95ee}\u{9898}",
+        "\u{5bf9}\u{8bdd}",
+        "\u{6d88}\u{606f}",
+    ];
+    let too_long = ["\u{592a}\u{957f}", "\u{8fc7}\u{957f}", "\u{8d85}\u{957f}"];
+    if subjects.iter().any(|subject| {
+        too_long
+            .iter()
+            .any(|words| contains_then(&text, subject, words))
+    }) {
+        return true;
+    }
+    // Character-count excess wording.
+    if text.contains("\u{5b57}\u{6570}\u{592a}\u{591a}")
+        || text.contains("\u{5b57}\u{6570}\u{8fc7}\u{591a}")
+    {
+        return true;
+    }
+    let exceeded = ["\u{8d85}\u{8fc7}", "\u{8d85}\u{51fa}"];
+    let lengths = [
+        "\u{957f}\u{5ea6}",
+        "token",
+        "\u{4ee4}\u{724c}",
+        "\u{5b57}\u{6570}",
+    ];
+    subjects.iter().any(|subject| {
+        exceeded.iter().any(|excess| {
+            lengths.iter().any(|length| {
+                contains_then(&text, subject, excess) && contains_then(&text, excess, length)
+            })
+        })
+    }) || ["\u{8f93}\u{5165}", "\u{63d0}\u{793a}\u{8bcd}", "prompt"]
+        .into_iter()
+        .any(|subject| {
+            text.contains(subject)
+                && exceeded.iter().any(|excess| text.contains(excess))
+                && lengths.iter().any(|length| text.contains(length))
+        })
+}
+
+fn pace_words(text: &str) -> bool {
+    optional_separator(text, "rate", "limit")
+        || ["minute", "hour", "day"]
+            .into_iter()
+            .any(|unit| text.contains(&format!("per {unit}")))
+        || has_word(text, &["tpm", "tpd"])
+        || text.contains("please wait")
+        || text.contains("try again later")
+        || text.contains("throttl")
+        // Pace, frequency, throttling, concurrency, and retry-later wording.
+        || [
+            "\u{901f}\u{7387}",
+            "\u{9891}\u{7e41}",
+            "\u{9891}\u{7387}",
+            "\u{9650}\u{6d41}",
+            "\u{5e76}\u{53d1}",
+            "\u{6bcf}\u{79d2}",
+            "\u{6bcf}\u{5206}\u{949f}",
+            "\u{6bcf}\u{5c0f}\u{65f6}",
+            "\u{6bcf}\u{5929}",
+            "\u{6bcf}\u{65e5}",
+            "\u{7a0d}\u{540e}\u{518d}\u{8bd5}",
+            "\u{7a0d}\u{540e}\u{91cd}\u{8bd5}",
+        ]
+        .into_iter()
+        .any(|words| text.contains(words))
+}
+
 fn used_up_words(text: &str) -> bool {
     text.contains("quota")
         || text.contains("out of budget")
@@ -514,6 +779,11 @@ fn used_up_words(text: &str) -> bool {
         || limit_resets(text)
         || contains_then(text, "exceeded", "plan")
         || contains_then(text, "exceeded", "limit")
+        // Allowance, usage, plan, and ceiling wording.
+        || text.contains("\u{989d}\u{5ea6}")
+        || text.contains("\u{7528}\u{91cf}")
+        || text.contains("\u{5957}\u{9910}")
+        || text.contains("\u{4e0a}\u{9650}")
 }
 
 fn planned_words(text: &str) -> bool {
@@ -527,6 +797,11 @@ fn planned_words(text: &str) -> bool {
         || ["daily", "weekly", "monthly"]
             .into_iter()
             .any(|word| text.contains(word))
+        // Allowance, usage, plan, and exhausted-limit wording.
+        || text.contains("\u{989d}\u{5ea6}")
+        || text.contains("\u{7528}\u{91cf}")
+        || text.contains("\u{5957}\u{9910}")
+        || text.contains("\u{9650}\u{989d}\u{5df2}\u{7528}\u{5b8c}")
 }
 
 fn rate_words(text: &str) -> bool {
@@ -534,6 +809,11 @@ fn rate_words(text: &str) -> bool {
         || optional_separator(text, "frequency", "limit")
         || text.contains("too many requests")
         || minute_words(text)
+        // Frequency, too frequent, overly frequent, and pace wording.
+        || text.contains("\u{9891}\u{7387}")
+        || text.contains("\u{592a}\u{9891}\u{7e41}")
+        || text.contains("\u{8fc7}\u{4e8e}\u{9891}\u{7e41}")
+        || text.contains("\u{901f}\u{7387}")
 }
 
 fn minute_limit(text: &str) -> bool {
@@ -552,6 +832,9 @@ fn minute_words(text: &str) -> bool {
         || ["token", "call", "request"]
             .into_iter()
             .any(|kind| text.contains(&format!("{kind} rate limit")))
+        // Per-minute and per-second wording.
+        || text.contains("\u{6bcf}\u{5206}\u{949f}")
+        || text.contains("\u{6bcf}\u{79d2}")
 }
 
 fn long_words(text: &str) -> bool {
@@ -561,10 +844,21 @@ fn long_words(text: &str) -> bool {
         || ["hour", "day", "week", "month"]
             .into_iter()
             .any(|unit| optional_separator(text, "per", unit))
-        || ["hour", "hourly", "daily", "weekly", "monthly"]
+        || has_word(text, &["hour", "hours"])
+        || ["hourly", "daily", "weekly", "monthly"]
             .into_iter()
             .any(|word| text.contains(word))
         || has_word(text, &["rpd", "tpd", "rph", "tph"])
+        // Used allowance, usage, plan, exhausted limit, and long-window wording.
+        || text.contains("\u{989d}\u{5ea6}\u{5df2}\u{7528}")
+        || text.contains("\u{7528}\u{91cf}")
+        || text.contains("\u{5957}\u{9910}")
+        || text.contains("\u{9650}\u{989d}\u{5df2}\u{7528}\u{5b8c}")
+        || text.contains("\u{5c0f}\u{65f6}")
+        || text.contains("\u{6bcf}\u{5929}")
+        || text.contains("\u{6bcf}\u{65e5}")
+        || text.contains("\u{6bcf}\u{5468}")
+        || text.contains("\u{6bcf}\u{6708}")
 }
 
 fn credit_words(text: &str) -> bool {
@@ -580,6 +874,12 @@ fn credit_words(text: &str) -> bool {
         ]
         .into_iter()
         .any(|word| text.contains(word))
+        // Balance, arrears, and top-up wording.
+        || text.contains("\u{4f59}\u{989d}")
+        || text.contains("\u{6b20}\u{8d39}")
+        || text.contains("\u{5145}\u{503c}")
+        || (text.contains("\u{8d26}\u{6237}")
+            && (text.contains("\u{4e0d}\u{8db3}") || text.contains("\u{505c}")))
 }
 
 fn broke_words(text: &str) -> bool {
@@ -594,6 +894,23 @@ fn broke_words(text: &str) -> bool {
         ]
         .into_iter()
         .any(|phrase| text.contains(phrase))
+        // Insufficient balance or points, arrears, and please-top-up wording.
+        || text.contains("\u{4f59}\u{989d}\u{4e0d}\u{8db3}")
+        || text.contains("\u{79ef}\u{5206}\u{4e0d}\u{8db3}")
+        || text.contains("\u{6b20}\u{8d39}")
+        || text.contains("\u{8bf7}\u{5145}\u{503c}")
+}
+
+fn credit_codes(text: &str) -> bool {
+    [
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+        "organization_usage_limit_exceeded",
+    ]
+    .into_iter()
+    .any(|code| text.contains(code))
 }
 
 fn quota_codes(text: &str) -> bool {
@@ -617,25 +934,152 @@ fn resets_at(text: &str) -> bool {
         && (text.contains("utc") || text.contains("gmt"))
 }
 
+/// The retry delay stated in an error body, independent of its headers.
+#[must_use]
+pub fn retry_after_from_body(body: &[u8]) -> Option<Duration> {
+    back_in(&error_text(body))
+}
+
+fn back_in(text: &str) -> Option<Duration> {
+    resets_after(text).or_else(|| span_written(text, &["try again in"]))
+}
+
+fn resets_after(text: &str) -> Option<Duration> {
+    if let Some(after) = span_written(text, &["reset in", "resets in"]) {
+        return Some(after);
+    }
+    if let Some(tail) = after_any(text, &["quota will reset after"]) {
+        let written = tail
+            .trim_start()
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_digit() || matches!(character, '.' | 'h' | 'm' | 's')
+            })
+            .collect::<String>();
+        if let Some(after) =
+            parse_duration(&written).filter(|after| !after.is_zero() && *after <= LONGEST_WRITTEN)
+        {
+            return Some(after);
+        }
+    }
+    soon_written(text)
+}
+
+/// The furthest off a reset written in words is believed.
+const LONGEST_WRITTEN: Duration = Duration::from_hours(7 * 24);
+
+fn soon_written(text: &str) -> Option<Duration> {
+    for tail in [
+        "reset in",
+        "reset after",
+        "resets in",
+        "resets after",
+        "try again in",
+        "retry in",
+        "retry after",
+    ]
+    .into_iter()
+    .filter_map(|prefix| after_any(text, &[prefix]))
+    {
+        let tail = tail.trim_start();
+        let end = tail
+            .char_indices()
+            .take_while(|(_, character)| character.is_ascii_digit() || *character == '.')
+            .map(|(index, character)| index + character.len_utf8())
+            .last()
+            .unwrap_or(0);
+        let Ok(seconds) = tail[..end].parse::<f64>() else {
+            continue;
+        };
+        let unit = tail[end..].trim_start();
+        let matched = ["seconds", "second", "secs", "sec", "s"]
+            .into_iter()
+            .find(|candidate| unit.starts_with(candidate));
+        if matched.is_some_and(|candidate| {
+            unit[candidate.len()..]
+                .chars()
+                .next()
+                .is_none_or(|character| !character.is_alphabetic())
+        }) {
+            return nanos_duration(seconds * 1_000_000_000.0);
+        }
+    }
+    // Seconds and minutes followed by an after marker.
+    for (unit, factor) in [("\u{79d2}", 1.0), ("\u{5206}\u{949f}", 60.0)] {
+        for (index, _) in text.match_indices(unit) {
+            let mut after = &text[index + unit.len()..];
+            after = after.trim_start();
+            after = after.strip_prefix("\u{949f}").unwrap_or(after).trim_start();
+            after = after.strip_prefix("\u{4e4b}").unwrap_or(after).trim_start();
+            if !after.starts_with("\u{540e}") {
+                continue;
+            }
+            let before = text[..index].trim_end();
+            let start = before
+                .char_indices()
+                .rev()
+                .take_while(|(_, character)| character.is_ascii_digit())
+                .map(|(index, _)| index)
+                .last()
+                .unwrap_or(before.len());
+            let Ok(count) = before[start..].parse::<f64>() else {
+                continue;
+            };
+            let seconds = count * factor;
+            return nanos_duration(seconds * 1_000_000_000.0);
+        }
+    }
+    None
+}
+
+fn span_written(text: &str, prefixes: &[&str]) -> Option<Duration> {
+    let mut rest = after_any(text, prefixes)?.trim_start();
+    let mut seconds = 0_u64;
+    let mut terms = 0_u8;
+    let mut previous_rank = 0_u8;
+    loop {
+        let number_end = rest
+            .char_indices()
+            .take_while(|(_, character)| character.is_ascii_digit())
+            .map(|(index, character)| index + character.len_utf8())
+            .last()
+            .unwrap_or(0);
+        if number_end == 0 {
+            break;
+        }
+        let number = rest[..number_end].parse::<u64>().ok()?;
+        rest = rest[number_end..].trim_start();
+        let unit_end = rest
+            .char_indices()
+            .take_while(|(_, character)| character.is_ascii_alphabetic())
+            .map(|(index, character)| index + character.len_utf8())
+            .last()
+            .unwrap_or(0);
+        let (factor, rank) = match &rest[..unit_end] {
+            "d" | "day" | "days" => (86_400, 1),
+            "h" | "hr" | "hrs" | "hour" | "hours" => (3_600, 2),
+            "m" | "min" | "mins" | "minute" | "minutes" => (60, 3),
+            _ => break,
+        };
+        if rank <= previous_rank {
+            break;
+        }
+        previous_rank = rank;
+        seconds = seconds.saturating_add(number.saturating_mul(factor));
+        terms += 1;
+        rest = rest[unit_end..].trim_start();
+    }
+    (terms > 0 && seconds <= LONGEST_WRITTEN.as_secs()).then_some(Duration::from_secs(seconds))
+}
+
+fn after_any<'a>(text: &'a str, prefixes: &[&str]) -> Option<&'a str> {
+    prefixes
+        .iter()
+        .find_map(|prefix| text.find(prefix).map(|index| &text[index + prefix.len()..]))
+}
+
 fn back_soon(text: &str) -> bool {
-    ["retry in", "try again in", "resets in"]
-        .into_iter()
-        .filter_map(|phrase| text.find(phrase).map(|index| &text[index + phrase.len()..]))
-        .any(|tail| {
-            !tail.contains("hour")
-                && !tail.contains("day")
-                && !tail.contains("week")
-                && !tail.contains("month")
-                && !tail.split_whitespace().take(8).any(|token| {
-                    let unit = token.trim_start_matches(|character: char| {
-                        character.is_ascii_digit() || character == '.'
-                    });
-                    matches!(
-                        unit.trim_matches(|character: char| !character.is_alphabetic()),
-                        "h" | "hr" | "hrs" | "d" | "w"
-                    )
-                })
-        })
+    back_in(text).is_some_and(|after| !after.is_zero() && after <= Duration::from_secs(240))
 }
 
 fn optional_separator(text: &str, left: &str, right: &str) -> bool {
@@ -691,6 +1135,14 @@ fn without_urls(text: &str) -> String {
     }
     output.push_str(rest);
     output
+}
+
+fn error_text(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| serde_json::to_string(&value).ok())
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned())
+        .to_ascii_lowercase()
 }
 
 pub(crate) async fn read_body(
@@ -926,8 +1378,9 @@ mod tests {
     use hofund_plugin_api::{CredentialStyle, HeaderName, PluginErrorKind, SecretString};
 
     use super::{
-        Call, backoff, classify, is_quota_error, parse_retry_after, parse_retry_after_headers,
-        retries, text_response,
+        Call, backoff, carried_error, classify, is_allocation_quota_rate,
+        is_context_overflow_error, is_credit_error, is_quota_error, parse_retry_after,
+        parse_retry_after_headers, retries, retry_after_from_body, text_response,
     };
 
     fn secret(value: &str) -> SecretString {
@@ -1145,6 +1598,343 @@ mod tests {
         assert!(!is_quota_error(402, b"Payment required"));
         assert!(!is_quota_error(500, b"quota service unavailable"));
         assert!(!is_quota_error(400, b"invalid request"));
+    }
+
+    #[test]
+    fn a1_short_reset_is_rate_and_sets_the_retry_delay() {
+        assert_eq!(
+            super::span_written("reset in 1 minutes", &["reset in"]),
+            Some(Duration::from_secs(60))
+        );
+        let frequency =
+            "Usage has exceeded the frequency limit. Your usage limit will reset in 1 minutes.";
+        for body in [
+            frequency,
+            "Usage limit exceeded, try again in 30 seconds",
+            "Daily usage limit hit. Retry after 20s.",
+            "Usage limit resets in 45 secs",
+            "\u{7528}\u{91cf}\u{8d85}\u{51fa}\u{9891}\u{7387}\u{9650}\u{5236}\u{ff0c}\u{8bf7} 1 \u{5206}\u{949f}\u{540e}\u{91cd}\u{8bd5}",
+            "\u{989d}\u{5ea6}\u{5df2}\u{7528}\u{5b8c}\u{ff0c}30\u{79d2}\u{540e}\u{518d}\u{8bd5}",
+        ] {
+            assert!(
+                !is_quota_error(429, body.as_bytes()),
+                "{body}: retry={:?}",
+                retry_after_from_body(body.as_bytes())
+            );
+            assert!(!is_credit_error(429, body.as_bytes()), "{body}");
+        }
+        for body in [
+            "Your usage limit will reset in 5 hours",
+            "Your usage limit will reset in 0h 30min",
+            "Daily free limit reached on model x. Try again in 23h 59m",
+            "You've hit your usage limit.",
+            "You exceeded your current quota, please check your plan and billing details",
+        ] {
+            assert!(is_quota_error(429, body.as_bytes()), "{body}");
+        }
+        let credit = "Insufficient balance. Please try again in 30 seconds";
+        assert!(is_credit_error(429, credit.as_bytes()));
+        assert!(!is_quota_error(403, b"frequency limit"));
+        assert!(!is_credit_error(403, b"frequency limit"));
+        assert_eq!(
+            retry_after_from_body(frequency.as_bytes()),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            retry_after_from_body(b"try again in 30 seconds"),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            retry_after_from_body(b"retry after 20s"),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            retry_after_from_body(b"resets in 45 secs"),
+            Some(Duration::from_secs(45))
+        );
+        // One minute and thirty seconds in Chinese wording.
+        assert_eq!(
+            retry_after_from_body("\u{8bf7} 1 \u{5206}\u{949f}\u{540e}\u{91cd}\u{8bd5}".as_bytes()),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            retry_after_from_body("30\u{79d2}\u{540e}\u{518d}\u{8bd5}".as_bytes()),
+            Some(Duration::from_secs(30))
+        );
+        let error = classify(429, None, frequency.as_bytes().to_vec()).expect_err("rate");
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn a2_frequency_words_are_rate_limits() {
+        for body in [
+            "Usage has exceeded the frequency limit",
+            "\u{8bf7}\u{6c42}\u{9891}\u{7387}\u{8fc7}\u{9ad8}",
+            "\u{8bf7}\u{6c42}\u{592a}\u{9891}\u{7e41}",
+        ] {
+            assert!(!is_quota_error(429, body.as_bytes()), "{body}");
+        }
+    }
+
+    #[test]
+    fn a3_minute_quotas_are_rate_but_long_windows_stay_quota() {
+        for body in [
+            r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","details":[{"quotaId":"GenerateContentPaidTierInputTokensPerModelPerMinute"}]}}"#,
+            r#"{"error":{"message":"Quota exceeded for aiplatform.googleapis.com/generate_content_requests_per_minute_per_project_per_base_model"}}"#,
+            r#"{"error":{"message":"Requests have exceeded token rate limit. See https://aka.ms/oai/quotaincrease"}}"#,
+            r#"{"error":{"message":"Your requests exceeded the call rate limit. Visit https://aka.ms/oai/quotaincrease"}}"#,
+            r#"{"error":{"message":"Rate limit exceeded. See https://example.test/docs/quota"}}"#,
+        ] {
+            assert!(!is_quota_error(429, body.as_bytes()), "{body}");
+        }
+        for body in [
+            r#"{"error":{"details":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}}"#,
+            "Rate limit reached on tokens per day (TPD)",
+            "Rate limit exceeded: free-models-per-day. Add 10 credits to unlock more",
+        ] {
+            assert!(is_quota_error(429, body.as_bytes()), "{body}");
+        }
+        let allocated = b"Allocated quota exceeded, please increase your quota limit.";
+        assert!(is_allocation_quota_rate(429, allocated));
+        assert!(!is_allocation_quota_rate(
+            429,
+            b"Free allocated quota exceeded."
+        ));
+        assert!(!is_allocation_quota_rate(
+            429,
+            b"hour allocated quota exceeded."
+        ));
+        assert!(is_allocation_quota_rate(
+            429,
+            br#"{"error":{"type":"insufficient_quota"}}"#
+        ));
+    }
+
+    #[test]
+    fn a4_chinese_pace_and_input_length_are_classified() {
+        for body in [
+            "\u{5185}\u{5bb9}\u{592a}\u{957f}\u{4e86}\u{ff0c}\u{8bf7}\u{7cbe}\u{7b80}\u{8f93}\u{5165}",
+            "Prompt \u{8d85}\u{957f}",
+            "token\u{6570}\u{91cf}\u{8d85}\u{8fc7}\u{4e0a}\u{9650}\u{3002}\u{5bf9}\u{8bdd}\u{5386}\u{53f2}+\u{95ee}\u{9898}\u{7684}\u{5b57}\u{6570}\u{592a}\u{591a}",
+            "\u{8f93}\u{5165}\u{8fc7}\u{957f}\u{ff0c}\u{8bf7}\u{7f29}\u{77ed}\u{540e}\u{91cd}\u{8bd5}",
+            "\u{8f93}\u{5165}\u{957f}\u{5ea6}\u{8d85}\u{8fc7}\u{9650}\u{5236}",
+            "\u{8f93}\u{5165}\u{5185}\u{5bb9}\u{8d85}\u{8fc7}\u{6a21}\u{578b}\u{6700}\u{5927}token\u{6570}",
+            "\u{63d0}\u{793a}\u{8bcd}\u{8d85}\u{51fa}\u{6700}\u{5927}\u{957f}\u{5ea6}",
+            "\u{8bf7}\u{6c42}\u{5185}\u{5bb9}\u{8fc7}\u{957f}",
+        ] {
+            assert!(is_context_overflow_error(400, body.as_bytes()), "{body}");
+        }
+        for body in [
+            "\u{5185}\u{5bb9}\u{592a}\u{957f}\u{ff0c}\u{5df2}\u{8fbe}\u{5230}\u{901f}\u{7387}\u{9650}\u{5236}",
+            "\u{8bf7}\u{6c42}\u{8fc7}\u{4e8e}\u{9891}\u{7e41}\u{ff0c}\u{8f93}\u{5165}\u{5185}\u{5bb9}\u{8fc7}\u{957f}\u{8bf7}\u{7a0d}\u{540e}\u{518d}\u{8bd5}",
+            "\u{8f93}\u{5165}token\u{6570}\u{8d85}\u{8fc7}\u{6bcf}\u{5206}\u{949f}\u{9650}\u{5236}",
+            "\u{8f93}\u{5165}\u{8fc7}\u{957f}\u{ff1a}\u{5df2}\u{8d85}\u{8fc7}\u{5e76}\u{53d1}\u{4e0a}\u{9650}",
+            "\u{6bcf}\u{65e5}token\u{6570}\u{91cf}\u{8d85}\u{8fc7}\u{4e0a}\u{9650}",
+            "token\u{6570}\u{91cf}\u{8d85}\u{8fc7}\u{4e0a}\u{9650}",
+            "\u{8d85}\u{51fa}\u{6700}\u{5927}\u{957f}\u{5ea6}",
+            "\u{8f93}\u{51fa}\u{8fc7}\u{957f}\u{ff0c}\u{8bf7}\u{8c03}\u{5c0f} max_tokens",
+            "\u{8bf7}\u{6c42}\u{4f53}\u{8fc7}\u{5927}",
+        ] {
+            assert!(!is_context_overflow_error(400, body.as_bytes()), "{body}");
+        }
+        for body in [
+            "\u{8bf7}\u{6c42}\u{8fc7}\u{4e8e}\u{9891}\u{7e41}",
+            "\u{8bf7}\u{6c42}\u{9891}\u{7e41}",
+            "\u{5df2}\u{8fbe}\u{5230}\u{901f}\u{7387}\u{9650}\u{5236}",
+            "\u{8bf7}\u{6c42}\u{9891}\u{7387}\u{8fc7}\u{9ad8}",
+            "\u{5df2}\u{89e6}\u{53d1}\u{9650}\u{6d41}",
+            "\u{5e76}\u{53d1}\u{8fc7}\u{9ad8}",
+            "\u{6bcf}\u{79d2}\u{9650}\u{5236}",
+            "\u{6bcf}\u{5206}\u{949f}\u{9650}\u{5236}",
+            "\u{6bcf}\u{5c0f}\u{65f6}\u{9650}\u{5236}",
+            "\u{6bcf}\u{5929}\u{9650}\u{5236}",
+            "\u{6bcf}\u{65e5}\u{9650}\u{5236}",
+            "\u{8bf7}\u{7a0d}\u{540e}\u{518d}\u{8bd5}",
+            "\u{8bf7}\u{7a0d}\u{540e}\u{91cd}\u{8bd5}",
+        ] {
+            assert!(super::pace_words(body), "{body}");
+            assert!(!is_quota_error(429, body.as_bytes()), "{body}");
+        }
+        for body in ["rate limit", "rate-limit", "ratelimit", "rate_limit"] {
+            assert!(super::pace_words(body), "{body}");
+        }
+    }
+
+    #[test]
+    fn a4_only_frequency_and_pace_words_are_rate_words() {
+        for body in [
+            "\u{8bf7}\u{6c42}\u{8fc7}\u{4e8e}\u{9891}\u{7e41}",
+            "\u{8bf7}\u{6c42}\u{592a}\u{9891}\u{7e41}",
+            "\u{8bf7}\u{6c42}\u{9891}\u{7387}\u{8fc7}\u{9ad8}",
+            "\u{5df2}\u{8fbe}\u{5230}\u{901f}\u{7387}\u{9650}\u{5236}",
+            "\u{6bcf}\u{5206}\u{949f}\u{9650}\u{5236}",
+            "\u{6bcf}\u{79d2}\u{9650}\u{5236}",
+        ] {
+            assert!(super::rate_words(body), "{body}");
+        }
+        // Frequent, throttled, concurrency, per hour, per day, and
+        // try-later wording only rule out an overflow.
+        for body in [
+            "\u{8bf7}\u{6c42}\u{9891}\u{7e41}",
+            "\u{5df2}\u{89e6}\u{53d1}\u{9650}\u{6d41}",
+            "\u{5e76}\u{53d1}\u{8fc7}\u{9ad8}",
+            "\u{6bcf}\u{5c0f}\u{65f6}\u{9650}\u{5236}",
+            "\u{6bcf}\u{5929}\u{9650}\u{5236}",
+            "\u{6bcf}\u{65e5}\u{9650}\u{5236}",
+            "\u{8bf7}\u{7a0d}\u{540e}\u{518d}\u{8bd5}",
+            "\u{8bf7}\u{7a0d}\u{540e}\u{91cd}\u{8bd5}",
+        ] {
+            assert!(!super::rate_words(body), "{body}");
+        }
+    }
+
+    #[test]
+    fn a8_an_error_without_a_status_maps_its_words() {
+        let said = |message: &str| {
+            super::status_for_error(
+                serde_json::json!({ "error": { "message": message } })
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        assert_eq!(said("context_length_exceeded"), 400);
+        assert_eq!(said("The model is overloaded"), 529);
+        assert_eq!(said("Your credit balance is too low"), 402);
+        assert_eq!(said("credit rate limit"), 429);
+        assert_eq!(said("You exceeded your current quota"), 429);
+        assert_eq!(said("Budget exceeded for this key"), 429);
+        assert_eq!(said("insufficient_quota"), 429);
+        assert_eq!(said("Limit reached, resets at noon"), 429);
+        assert_eq!(said("Too many tokens"), 429);
+        // Throttled, frequent, and ceiling wording.
+        assert_eq!(said("\u{5df2}\u{89e6}\u{53d1}\u{9650}\u{6d41}"), 429);
+        assert_eq!(said("\u{8bf7}\u{6c42}\u{9891}\u{7e41}"), 429);
+        assert_eq!(said("\u{8fbe}\u{5230}\u{4e0a}\u{9650}"), 429);
+        // Concurrency wording says nothing the status table reads.
+        assert_eq!(said("\u{5e76}\u{53d1}\u{8fc7}\u{9ad8}"), 502);
+        assert_eq!(said("invalid tool schema"), 400);
+        assert_eq!(said("upstream exploded"), 502);
+    }
+
+    #[test]
+    fn a1_written_waits_past_a_week_or_unreadable_are_skipped() {
+        assert_eq!(
+            retry_after_from_body(b"usage limit resets in 7d"),
+            Some(Duration::from_hours(7 * 24))
+        );
+        assert_eq!(retry_after_from_body(b"usage limit resets in 8d"), None);
+        assert_eq!(
+            retry_after_from_body(b"quota will reset after 3h19m30s"),
+            Some(Duration::from_secs(3 * 3_600 + 19 * 60 + 30))
+        );
+        assert_eq!(retry_after_from_body(b"quota will reset after 200h"), None);
+        assert_eq!(
+            retry_after_from_body(b"try again in a moment, or retry after 20s"),
+            Some(Duration::from_secs(20))
+        );
+        // A word wait, then thirty seconds in Chinese wording.
+        assert_eq!(
+            retry_after_from_body(
+                "retry in a moment, 30\u{79d2}\u{540e}\u{518d}\u{8bd5}".as_bytes()
+            ),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn a5_credit_is_marked_at_every_client_error_status() {
+        for (status, body) in [
+            (429, r#"{"error":{"type":"insufficient_quota"}}"#),
+            (429, r#"{"error":{"code":"credit_balance_exhausted"}}"#),
+            (
+                429,
+                r#"{"error":{"code":"organization_spend_limit_exceeded"}}"#,
+            ),
+            (429, r#"{"error":{"code":"project_spend_limit_exceeded"}}"#),
+            (
+                429,
+                r#"{"error":{"code":"organization_usage_limit_exceeded"}}"#,
+            ),
+            (402, "Insufficient Balance"),
+            (400, "Your credit balance is too low"),
+            (429, "Credits exhausted"),
+            (400, "\u{4f59}\u{989d}\u{4e0d}\u{8db3}"),
+            (
+                409,
+                "\u{79ef}\u{5206}\u{4e0d}\u{8db3}\u{ff0c}\u{8bf7}\u{5145}\u{503c}",
+            ),
+            (422, "\u{8bf7}\u{5145}\u{503c}\u{540e}\u{91cd}\u{8bd5}"),
+        ] {
+            assert!(is_credit_error(status, body.as_bytes()), "{status} {body}");
+            let error = classify(status, None, body.as_bytes().to_vec()).expect_err("credit");
+            assert!(error.is_credit(), "{status} {body}");
+            assert_eq!(error.status(), Some(status));
+        }
+        let quota = classify(
+            402,
+            None,
+            b"You've reached your weekly standard usage limit".to_vec(),
+        )
+        .expect_err("quota");
+        assert!(!quota.is_credit());
+        assert_eq!(quota.kind(), PluginErrorKind::Quota);
+    }
+
+    #[test]
+    fn a6_success_body_error_gets_its_mapped_status() {
+        for (body, status, credit) in [
+            (
+                r#"{"error":{"message":"Rate limit reached on tokens per min (TPM)"}}"#,
+                429,
+                false,
+            ),
+            (
+                r#"{"error":{"message":"You exceeded your current quota","type":"insufficient_quota"}}"#,
+                429,
+                true,
+            ),
+            (
+                r#"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens exceeded your per-minute rate limit"}}"#,
+                429,
+                false,
+            ),
+            (
+                r#"{"id":"r1","object":"response","status":"failed","output":[],"error":{"code":"rate_limit_exceeded","message":"Rate limit reached"}}"#,
+                429,
+                false,
+            ),
+            (r#"{"error":{"message":"something unknown"}}"#, 502, false),
+        ] {
+            let error = carried_error(body.as_bytes(), false).expect("carried error");
+            assert_eq!(error.status(), Some(status), "{body}");
+            assert_eq!(error.is_credit(), credit, "{body}");
+        }
+        for body in [
+            r#"{"choices":[{"message":{"content":"hi"}}],"error":null}"#,
+            r#"{"error":{}}"#,
+            r#"{"error":""}"#,
+            r#"{"object":"response","status":"completed","output":[{"type":"message"}],"error":null}"#,
+            "not json",
+        ] {
+            assert!(carried_error(body.as_bytes(), false).is_none(), "{body}");
+        }
+    }
+
+    #[test]
+    fn a9_json_unicode_escapes_are_decoded_before_classification() {
+        let escaped = br#"{"error":{"message":"\u4f59\u989d\u4e0d\u8db3"}}"#;
+        let plain = "\u{4f59}\u{989d}\u{4e0d}\u{8db3}";
+        assert_eq!(
+            is_credit_error(400, escaped),
+            is_credit_error(400, plain.as_bytes())
+        );
+        assert!(is_credit_error(400, escaped));
+        let pace = br#"{"error":{"message":"\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41"}}"#;
+        assert!(!is_quota_error(429, pace));
+        assert!(!is_quota_error(
+            429,
+            "\u{8bf7}\u{6c42}\u{8fc7}\u{4e8e}\u{9891}\u{7e41}".as_bytes()
+        ));
     }
 
     #[test]

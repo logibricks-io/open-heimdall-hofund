@@ -425,6 +425,8 @@ impl Runtime {
                         event.remaining_ms = remaining;
                         event.retry_after_ms = remaining;
                         event.failures = cooling.failures();
+                        event.status = cooling.status();
+                        event.error = cooling.error().to_owned();
                         bus.emit(EventPayload::MemberCooled(event));
                     }
                 }

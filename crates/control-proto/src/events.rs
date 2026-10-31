@@ -355,6 +355,12 @@ pub struct MemberCooledEvent {
     pub remaining_ms: Option<u64>,
     /// Consecutive failure count.
     pub failures: u32,
+    /// Upstream status that caused the cooldown, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Upstream words, capped at 300 characters.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 impl Default for MemberCooledEvent {
@@ -365,6 +371,8 @@ impl Default for MemberCooledEvent {
             retry_after_ms: None,
             remaining_ms: None,
             failures: 0,
+            status: None,
+            error: String::new(),
         }
     }
 }
