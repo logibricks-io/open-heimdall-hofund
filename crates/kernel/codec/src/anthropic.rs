@@ -659,7 +659,9 @@ fn encode_tool(tool: &Tool) -> Result<Value, CodecError> {
     if let Some(description) = &tool.description {
         object.insert("description".to_owned(), Value::String(description.clone()));
     }
-    object.insert("input_schema".to_owned(), tool.input_schema.clone());
+    let mut input_schema = tool.input_schema.clone();
+    hofund_ir::fold_object_root(&mut input_schema);
+    object.insert("input_schema".to_owned(), input_schema);
     tool.extensions.merge_into(&mut object);
     Ok(Value::Object(object))
 }

@@ -111,6 +111,7 @@ pub fn openai_compat(
     let style = credential_style(endpoint.credential);
     let headers = endpoint.headers.clone();
     let quirks = endpoint.quirks;
+    let preset = endpoint.preset.clone();
     let secret =
         (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
     let allocation_quota_rate = matches!(endpoint.preset.as_deref(), Some("qwen" | "qwen-cn"));
@@ -129,6 +130,7 @@ pub fn openai_compat(
             .credential(style)
             .headers(headers)
             .quirks(quirks)
+            .preset(preset)
             .allocation_quota_rate(allocation_quota_rate),
         secret,
         counts: false,
@@ -281,6 +283,7 @@ pub fn anthropic(
     let style = messages_credential_style(endpoint.credential);
     let headers = endpoint.headers.clone();
     let quirks = endpoint.quirks;
+    let preset = endpoint.preset.clone();
     let secret =
         (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
     let adapter = Arc::new(Anthropic::new(endpoint).map_err(build_error)?);
@@ -293,7 +296,8 @@ pub fn anthropic(
         target: Target::new(ProtocolId::ANTHROPIC_MESSAGES, base)
             .credential(style)
             .headers(headers)
-            .quirks(quirks),
+            .quirks(quirks)
+            .preset(preset),
         secret,
         counts: true,
         bridged,
@@ -373,13 +377,15 @@ pub fn generative(
     let style = generative_credential_style(endpoint.credential);
     let headers = endpoint.headers.clone();
     let quirks = endpoint.quirks;
+    let preset = endpoint.preset.clone();
     let secret =
         (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
     let adapter = Arc::new(Generative::new(endpoint).map_err(build_error)?);
     let target = Target::new(ProtocolId::GENERATIVE_LANGUAGE, adapter.base())
         .credential(style)
         .headers(headers)
-        .quirks(quirks);
+        .quirks(quirks)
+        .preset(preset);
     Ok(Arc::new(Direct {
         http: host.http().clone(),
         target,
