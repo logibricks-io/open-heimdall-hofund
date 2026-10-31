@@ -583,12 +583,13 @@ impl ModelSpec {
         (self.input_price, self.output_price, self.cache_read_price)
     }
 
-    /// Whether an explicit free flag or a known all-zero price makes the
-    /// model free. An explicit false flag takes precedence over prices.
+    /// Whether a catalog free flag or a known all-zero price makes the model
+    /// free. A false flag does not hide an all-zero price, as in the
+    /// reference.
     #[must_use]
     pub const fn costs_nothing(&self) -> bool {
-        if let Some(free) = self.free {
-            return free;
+        if matches!(self.free, Some(true)) {
+            return true;
         }
         matches!(
             (self.input_price, self.output_price, self.cache_read_price),
@@ -2598,7 +2599,7 @@ mod tests {
             .with_context(0)
             .with_max_output(0)
             .with_web_search("unsupported")
-            .with_prices(0, 0, 0)
+            .with_prices(0, 1, 0)
             .with_free(false);
         assert_eq!(unknown.context(), 0);
         assert_eq!(unknown.max_output(), 0);
@@ -2606,6 +2607,25 @@ mod tests {
         assert_eq!(unknown.web_search(), None);
         assert_eq!(unknown.free(), Some(false));
         assert!(!unknown.costs_nothing());
+    }
+
+    #[test]
+    fn a7_free_flag_alone_or_zero_prices_make_a_model_free() {
+        let flagged = ModelSpec::new("flagged", None)
+            .expect("model")
+            .with_free(true);
+        assert!(flagged.costs_nothing());
+        let flagged_priced = ModelSpec::new("flagged", None)
+            .expect("model")
+            .with_prices(1, 1, 1)
+            .with_free(true);
+        assert!(flagged_priced.costs_nothing());
+        let zero = ModelSpec::new("zero", None)
+            .expect("model")
+            .with_prices(0, 0, 0)
+            .with_free(false);
+        assert!(zero.costs_nothing());
+        assert!(!ModelSpec::new("bare", None).expect("model").costs_nothing());
     }
 
     #[test]

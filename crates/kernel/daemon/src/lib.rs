@@ -768,12 +768,8 @@ fn route_plan(
             match &upstream.target {
                 UpstreamTarget::Provider(provider) => {
                     let model = upstream.model.as_deref().unwrap_or(&route.model);
-                    let listed = models_host.and_then(|host| {
-                        host.cached(provider)
-                            .models
-                            .into_iter()
-                            .find(|listed| listed.id() == model)
-                    });
+                    let listed = models_host
+                        .and_then(|host| listed_model(host.cached(provider).models, model));
                     let manual = configured
                         .get(provider.as_str())
                         .is_some_and(|provider| provider.free);
@@ -812,6 +808,17 @@ fn route_plan(
         statuses: config.failover.statuses.clone(),
     };
     (routes, policy)
+}
+
+/// The catalog entry for `model`, matched without regard to case as the
+/// reference's free-model lookup does.
+fn listed_model(
+    models: Vec<hofund_plugin_api::ModelSpec>,
+    model: &str,
+) -> Option<hofund_plugin_api::ModelSpec> {
+    models
+        .into_iter()
+        .find(|listed| listed.id().eq_ignore_ascii_case(model))
 }
 
 fn free_hop(manual: bool, listed: Option<&hofund_plugin_api::ModelSpec>) -> bool {
@@ -1657,17 +1664,37 @@ mod tests {
         let paid = hofund_plugin_api::ModelSpec::new("paid", None)
             .expect("model")
             .with_prices(1, 2, 0);
-        let explicitly_paid = hofund_plugin_api::ModelSpec::new("paid", None)
+        // A false catalog flag does not hide an all-zero price.
+        let flagged_paid_zero = hofund_plugin_api::ModelSpec::new("paid", None)
             .expect("model")
             .with_prices(0, 0, 0)
+            .with_free(false);
+        let flagged_paid = hofund_plugin_api::ModelSpec::new("paid", None)
+            .expect("model")
+            .with_prices(0, 1, 0)
             .with_free(false);
 
         assert!(super::free_hop(true, None));
         assert!(super::free_hop(false, Some(&free)));
         assert!(super::free_hop(false, Some(&zero)));
         assert!(!super::free_hop(false, Some(&paid)));
-        assert!(!super::free_hop(false, Some(&explicitly_paid)));
+        assert!(super::free_hop(false, Some(&flagged_paid_zero)));
+        assert!(!super::free_hop(false, Some(&flagged_paid)));
         assert!(!super::free_hop(false, None));
+    }
+
+    #[test]
+    fn a7_catalog_lookup_for_free_ignores_model_case() {
+        let models = vec![
+            hofund_plugin_api::ModelSpec::new("Other", None).expect("model"),
+            hofund_plugin_api::ModelSpec::new("Mixed-Case", None)
+                .expect("model")
+                .with_free(true),
+        ];
+        let found = super::listed_model(models.clone(), "mixed-case").expect("listed");
+        assert_eq!(found.id(), "Mixed-Case");
+        assert!(super::free_hop(false, Some(&found)));
+        assert!(super::listed_model(models, "absent").is_none());
     }
 
     #[test]

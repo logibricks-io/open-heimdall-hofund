@@ -485,9 +485,8 @@ fn identity(members: usize) -> Vec<usize> {
 }
 
 fn rotate(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
-    if seats.len() < 2 {
-        return identity(seats.len());
-    }
+    // The turn advances for a single member too, as in the reference, so a
+    // pool that grows keeps counting from the requests it already routed.
     let start = least_held(pool, seats, state);
     (0..seats.len())
         .map(|offset| (start + offset) % seats.len())
@@ -716,6 +715,18 @@ mod tests {
         // it starts again from zero when it comes back.
         assert_eq!(picks(&state, "pool", &both[..1], 1), ["a"]);
         assert_eq!(picks(&state, "pool", &both, 1), ["b"]);
+    }
+
+    #[test]
+    fn a5_rotate_counts_turns_while_the_pool_has_one_member() {
+        let state = StrategyState::with_builtins();
+        let strategy = state.registry().find("rotate").expect("rotate");
+        let one = seats(&["a"]);
+        assert_eq!(apply(&strategy, "pool", &one, &state), [0]);
+        // One request already went to the pool, so the next starts one along.
+        let two = seats(&["a", "b"]);
+        assert_eq!(apply(&strategy, "pool", &two, &state), [1, 0]);
+        assert!(apply(&strategy, "empty", &[], &state).is_empty());
     }
 
     #[test]
