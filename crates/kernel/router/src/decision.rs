@@ -261,13 +261,13 @@ pub(crate) fn rests(error: &PluginError) -> bool {
         .is_none_or(|status| status != 413 && !shape_refused(status, message) && !outgrown(error))
 }
 
-/// Whether a 429 says only the requested model's pooled credentials cooled.
+/// Whether a refusal says only the requested model's pooled credentials
+/// cooled. The caller scopes it to the model only when the refusal is a rate
+/// limit, exhausted quota, or credit refusal (`reference:
+/// internal/gateway/routing.go:1475-1477`, `modelCooledDown`); a bare
+/// `model_cooldown` code without the sentence rests the member.
 pub(crate) fn model_cooling(error: &PluginError) -> bool {
-    if error.status() != Some(429) {
-        return false;
-    }
-    let text = words_of(error.message());
-    MODEL_COOLING.is_match(&text) || text.to_ascii_lowercase().contains("model_cooldown")
+    MODEL_COOLING.is_match(&words_of(error.message()))
 }
 
 /// Whether the member does not serve this model, rather than being out of

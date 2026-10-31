@@ -504,7 +504,11 @@ impl Cooldowns {
         let failure = failure?;
         let model = model.filter(|model| !model.is_empty());
         let model_only = model.is_some()
-            && (crate::decision::model_cooling(error) || crate::decision::model_unserved(error));
+            && (matches!(
+                failure,
+                Failure::RateLimit | Failure::Quota | Failure::Credit
+            ) && crate::decision::model_cooling(error)
+                || crate::decision::model_unserved(error));
         if let Some(model) = model
             && matches!(failure, Failure::Generic(_))
             && !model_only

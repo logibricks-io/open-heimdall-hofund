@@ -261,8 +261,11 @@ async fn all_cooling_members_reduce_to_the_soonest_probe() {
 async fn b5e_model_rests_order_each_member_model_pair_independently() {
     let (book, seen) = fixture();
     for (id, seconds) in [("first", 300), ("third", 60)] {
-        let error = PluginError::status_error(429, "model_cooldown")
-            .with_retry_after(Duration::from_secs(seconds));
+        let error = PluginError::status_error(
+            429,
+            "All credentials for model model-a are cooling down via provider upstream",
+        )
+        .with_retry_after(Duration::from_secs(seconds));
         book.record_failure_for_model(&member_id(id), "model-a", &error)
             .expect("model rest");
     }

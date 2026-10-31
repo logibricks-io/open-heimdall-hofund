@@ -1516,7 +1516,6 @@ fn b5a_model_cooldown_rests_only_the_named_or_requested_model() {
             "All credentials for the requested model are cooling down",
             120,
         ),
-        ("model_cooldown", MINUTE),
     ] {
         let (book, id, clock) = fixture();
         let error =
@@ -1624,7 +1623,10 @@ fn b5d_unserved_model_uses_its_own_generic_ladder() {
 #[test]
 fn b5f_model_success_and_manual_clear_have_distinct_scopes() {
     let (book, id, _) = fixture();
-    let error = PluginError::status_error(429, "model_cooldown");
+    let error = PluginError::status_error(
+        429,
+        "All credentials for model model-a are cooling down via provider upstream",
+    );
     book.record_failure_for_model(&id, "model-a", &error)
         .expect("model-a");
     book.record_failure_for_model(&id, "model-b", &error)
@@ -1666,5 +1668,48 @@ fn b5_generic_model_ladder_survives_sibling_answers() {
         Duration::from_secs(2 * MINUTE)
     );
     assert!(book.cooling(&id).is_none());
+    assert!(book.cooling_for_model(&id, "model-b").is_none());
+}
+
+#[test]
+fn b5a_bare_model_cooldown_code_rests_the_whole_member() {
+    // Reference modelCooledDown reads the sentence, not the code.
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(429, r#"{"error":{"code":"model_cooldown"}}"#);
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("member rest");
+    assert!(book.cooling(&id).is_some());
+    assert_eq!(book.scoped_entries()[0].1, None);
+}
+
+#[test]
+fn b5a_model_cooling_sentence_on_a_generic_failure_rests_the_member_ladder() {
+    // Only quota, credit, and rate refusals are scoped by the sentence.
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(
+        503,
+        "All credentials for model model-a are cooling down via provider upstream",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("generic rest");
+    assert!(book.cooling_for_model(&id, "model-a").is_some());
+    assert!(
+        book.scoped_entries()
+            .iter()
+            .any(|(_, model, _)| model.is_none())
+    );
+}
+
+#[test]
+fn b5a_model_cooling_sentence_on_a_credit_refusal_rests_only_the_model() {
+    let (book, id, _) = fixture();
+    let error = PluginError::credit_status(
+        402,
+        "All credentials for model model-a are cooling down (last error: insufficient balance)",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("model credit rest");
+    assert!(book.cooling(&id).is_none());
+    assert!(book.cooling_for_model(&id, "model-a").is_some());
     assert!(book.cooling_for_model(&id, "model-b").is_none());
 }
