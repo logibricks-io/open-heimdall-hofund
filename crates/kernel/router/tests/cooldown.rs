@@ -368,3 +368,30 @@ async fn a8_route_strategy_sees_weight_free_and_rest_of_each_member() {
         )]
     );
 }
+
+#[tokio::test]
+async fn b5e_routing_reads_the_rest_of_the_hop_wire_model() {
+    let (book, seen) = fixture();
+    let error = PluginError::status_error(
+        429,
+        "All credentials for model wire-a are cooling down via provider upstream",
+    )
+    .with_retry_after(Duration::from_secs(300));
+    book.record_failure_for_model(&member_id("first"), "wire-a", &error)
+        .expect("model rest");
+    let mut first = Hop::new(fake("first", &seen, Behavior::Unary));
+    first.wire_model = Some("wire-a".to_owned());
+    let hops = vec![first, Hop::new(fake("second", &seen, Behavior::Unary))];
+    let router = Router::from_routes(
+        BTreeMap::from([("alias".to_owned(), Route::new(hops))]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(book);
+
+    let routed = router
+        .dispatch(&Request::new("alias"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}

@@ -1713,3 +1713,86 @@ fn b5a_model_cooling_sentence_on_a_credit_refusal_rests_only_the_model() {
     assert!(book.cooling_for_model(&id, "model-a").is_some());
     assert!(book.cooling_for_model(&id, "model-b").is_none());
 }
+
+#[test]
+fn b5f_model_success_reads_the_newest_of_member_and_model_revisions() {
+    let (book, id, _) = fixture();
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "model-a", &unserved)
+        .expect("model rest");
+    book.record_failure(&id, &PluginError::status_error(500, "upstream down"))
+        .expect("member rest");
+    let revision = book.revision_for_model(&id, "model-a");
+    book.record_success_for_model_if_unchanged(&id, "model-a", revision);
+    assert!(
+        book.scoped_entries()
+            .iter()
+            .all(|(_, model, _)| model.is_none()),
+        "the model rest clears once its call saw every revision"
+    );
+}
+
+#[test]
+fn b5f_stale_model_success_keeps_a_newer_model_failure() {
+    let (book, id, _) = fixture();
+    book.record_failure(&id, &PluginError::status_error(500, "upstream down"))
+        .expect("member rest");
+    let revision = book.revision_for_model(&id, "model-a");
+    assert_ne!(revision, 0);
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "model-a", &unserved)
+        .expect("model rest");
+    book.record_success_for_model_if_unchanged(&id, "model-a", revision);
+    assert!(
+        book.scoped_entries()
+            .iter()
+            .any(|(_, model, _)| model.as_deref() == Some("model-a")),
+        "a success that started before the model failure must not clear it"
+    );
+}
+
+#[test]
+fn b5h_remove_drops_the_member_model_rests_too() {
+    let (book, id, _) = fixture();
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "model-a", &unserved)
+        .expect("model rest");
+    book.remove(&id);
+    assert!(book.cooling_for_model(&id, "model-a").is_none());
+    assert!(book.scoped_entries().is_empty());
+}
+
+#[test]
+fn b5b_an_empty_model_name_rests_the_whole_member() {
+    let (book, id, _) = fixture();
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "", &unserved)
+        .expect("member rest");
+    assert!(book.cooling(&id).is_some());
+    assert_eq!(book.scoped_entries()[0].1, None);
+}
+
+#[test]
+fn b5e_model_view_reports_the_later_of_member_and_model_rests() {
+    let (book, id, clock) = fixture();
+    let model = PluginError::status_error(
+        429,
+        "All credentials for model model-a are cooling down via provider upstream",
+    )
+    .with_retry_after(Duration::from_secs(300));
+    book.record_failure_for_model(&id, "model-a", &model)
+        .expect("model rest");
+    book.record_failure(
+        &id,
+        &PluginError::status_error(429, "slow down").with_retry_after(Duration::from_secs(90)),
+    )
+    .expect("member rest");
+    assert_eq!(
+        remaining_model(&book, &id, "model-a", &clock),
+        Duration::from_secs(300)
+    );
+    assert_eq!(
+        remaining_model(&book, &id, "model-b", &clock),
+        Duration::from_secs(90)
+    );
+}
