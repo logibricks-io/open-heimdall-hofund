@@ -10,9 +10,10 @@
 //! A leading BOM is removed and the rest is spliced on that same path. An
 //! event larger than 1 MiB is scanned once for a model string in the held
 //! prefix. When that string is complete it is spliced and the rest of the
-//! event is streamed unchanged. When it is not, or when a finished event
-//! cannot be parsed, the bytes are forwarded unchanged and
-//! `hofund_model_rewrite_skipped_total` counts the reason.
+//! event is streamed unchanged. When it is not, or when an event cannot be
+//! parsed, the bytes are forwarded unchanged and
+//! `hofund_model_rewrite_skipped_total` counts the reason. A final event with
+//! complete JSON data is spliced even without its blank-line terminator.
 
 use hofund_ir::{StreamEvent, Usage};
 
@@ -31,7 +32,7 @@ pub trait RawTap: Send {
     /// Observes `chunk` and returns the bytes to forward.
     fn push(&mut self, chunk: &[u8]) -> Vec<u8>;
 
-    /// Flushes a trailing partial frame unchanged and closes it.
+    /// Flushes and closes a trailing partial frame, splicing complete JSON.
     fn finish(&mut self) -> Vec<u8>;
 
     /// Input and output tokens seen so far.
@@ -237,7 +238,18 @@ impl<'p> EventBuf<'p> {
                     out.extend(rest);
                 }
             },
-            Kind::Sse | Kind::Undecided => {
+            Kind::Sse => {
+                let mut raw = match splice_sse_event(&rest, self.paths, &self.quoted_to) {
+                    Ok(rewritten) => rewritten,
+                    Err(_) => {
+                        note_skip("partial");
+                        rest
+                    }
+                };
+                terminate_event(&mut raw);
+                out.extend(raw);
+            }
+            Kind::Undecided => {
                 note_skip("partial");
                 let mut raw = rest;
                 terminate_event(&mut raw);
@@ -275,7 +287,16 @@ impl<'p> EventBuf<'p> {
                 }
                 return out;
             };
-            out.extend(self.take_event(end));
+            if end <= self.cap {
+                out.extend(self.take_event(end));
+                continue;
+            }
+            let rest = self.pending.split_off(end);
+            out.extend(self.overflow_pending());
+            self.overflowing = false;
+            self.tail.clear();
+            self.reset_line();
+            self.pending = rest;
         }
     }
 
@@ -1404,6 +1425,60 @@ mod tests {
             }),
             vec!["partial"]
         );
+    }
+
+    #[test]
+    fn a_complete_unterminated_sse_event_is_spliced_before_flushing() {
+        let mut tap = OpenAiChat.raw_tap("client-model", "mapped-upstream-model");
+        assert!(
+            tap.push(br#"data: {"model":"upstream-snapshot","choices":[]}"#)
+                .is_empty()
+        );
+        assert_eq!(
+            tap.finish(),
+            b"data: {\"model\":\"client-model\",\"choices\":[]}\n\n"
+        );
+    }
+
+    #[test]
+    fn oversize_splicing_is_independent_of_chunk_boundaries() {
+        const CAP: usize = 1 << 20;
+        let mut event = br#"data: {"pad":""#.to_vec();
+        event.extend(std::iter::repeat_n(b'q', CAP));
+        event.extend_from_slice(br#"","model":"upstream-snapshot"}"#);
+        event.extend_from_slice(b"\n\n");
+
+        for size in [1, 16 * 1024, CAP - 13, CAP + 64, event.len()] {
+            let mut tap = OpenAiChat.raw_tap("client-model", "mapped-upstream-model");
+            let mut out = Vec::new();
+            for chunk in event.chunks(size) {
+                out.extend(tap.push(chunk));
+            }
+            out.extend(tap.finish());
+            assert_eq!(out, event, "chunk size {size}");
+        }
+    }
+
+    #[test]
+    fn an_oversize_event_with_its_model_in_the_prefix_is_spliced_at_any_chunking() {
+        const CAP: usize = 1 << 20;
+        let build = |model: &str| {
+            let mut event = format!(r#"data: {{"model":"{model}","pad":""#).into_bytes();
+            event.extend(std::iter::repeat_n(b'q', CAP));
+            event.extend_from_slice(b"\"}\n\n");
+            event
+        };
+        let event = build("upstream-snapshot");
+        let expected = build("client-model");
+        for size in [1, 16 * 1024, CAP - 13, CAP + 64, event.len()] {
+            let mut tap = OpenAiChat.raw_tap("client-model", "mapped-upstream-model");
+            let mut out = Vec::new();
+            for chunk in event.chunks(size) {
+                out.extend(tap.push(chunk));
+            }
+            out.extend(tap.finish());
+            assert!(out == expected, "chunk size {size}");
+        }
     }
 
     #[test]
