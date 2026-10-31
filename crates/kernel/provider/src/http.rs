@@ -386,6 +386,29 @@ pub(crate) async fn execute(
     execute_at(upstream, &url, codec, request, prepare, inbound_protocol).await
 }
 
+pub(crate) async fn execute_with_attempt(
+    upstream: &Upstream,
+    codec: &dyn Codec,
+    request: Request,
+    prepare: Option<Prepare>,
+    inbound_protocol: &str,
+    route: &crate::AttemptRoute,
+    hook: Option<&dyn crate::AttemptHook>,
+) -> Result<Completion, ProviderError> {
+    let url = upstream.url.clone();
+    finish(
+        upstream,
+        &url,
+        codec,
+        request,
+        prepare,
+        inbound_protocol,
+        route,
+        hook,
+    )
+    .await
+}
+
 /// Posts `request` to `url` with the upstream's headers.
 ///
 /// The Generative Language adapter builds a URL per model. Every Chat,
@@ -398,7 +421,17 @@ pub(crate) async fn execute_at(
     prepare: Option<Prepare>,
     inbound_protocol: &str,
 ) -> Result<Completion, ProviderError> {
-    finish(upstream, url, codec, request, prepare, inbound_protocol).await
+    finish(
+        upstream,
+        url,
+        codec,
+        request,
+        prepare,
+        inbound_protocol,
+        &crate::AttemptRoute::default(),
+        None,
+    )
+    .await
 }
 
 /// A successful upstream response waiting for its body to be completed.
@@ -447,6 +480,7 @@ impl Sent<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish(
     upstream: &Upstream,
     url: &str,
@@ -454,13 +488,25 @@ async fn finish(
     request: Request,
     prepare: Option<Prepare>,
     inbound_protocol: &str,
+    route: &crate::AttemptRoute,
+    hook: Option<&dyn crate::AttemptHook>,
 ) -> Result<Completion, ProviderError> {
-    send(upstream, url, codec, request, prepare, inbound_protocol)
-        .await?
-        .complete()
-        .await
+    send(
+        upstream,
+        url,
+        codec,
+        request,
+        prepare,
+        inbound_protocol,
+        route,
+        hook,
+    )
+    .await?
+    .complete()
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send<'a>(
     upstream: &Upstream,
     url: &str,
@@ -468,25 +514,38 @@ async fn send<'a>(
     request: Request,
     prepare: Option<Prepare>,
     inbound_protocol: &str,
+    route: &crate::AttemptRoute,
+    hook: Option<&dyn crate::AttemptHook>,
 ) -> Result<Sent<'a>, ProviderError> {
     let cross_protocol = codec.id() != inbound_protocol;
     let streaming = request.stream;
-    let body = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
-    let response = send_json(upstream, url, body).await?;
-    let status = response.status();
-    if !status.is_success() {
+    let whole = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
+    let shortened = hook.and_then(|hook| hook.prepare(route, &whole));
+    let delta = shortened.is_some();
+    let body = shortened.unwrap_or_else(|| whole.clone());
+    let mut response = send_json(upstream, url, body).await?;
+    if !response.status().is_success() {
+        let status = response.status();
         let retry_after = retry_after(response.headers());
         let bytes = response.bytes().await.unwrap_or_default();
-        let error =
-            ProviderError::response_for(status.as_u16(), &bytes, upstream.allocation_quota_rate);
-        return Err(
-            match retry_after
-                .or_else(|| hofund_plugin_sdk::transport::retry_after_from_body(&bytes))
-            {
-                Some(after) => error.with_retry_after(after),
-                None => error,
-            },
-        );
+        let refused = delta
+            && matches!(status.as_u16(), 400 | 404 | 422)
+            && hook.is_some_and(|hook| {
+                hook.refused(route, status.as_u16(), &bytes[..bytes.len().min(1 << 20)])
+            });
+        if refused {
+            response = send_json(upstream, url, whole).await?;
+            if !response.status().is_success() {
+                return Err(response_error(response, upstream.allocation_quota_rate).await);
+            }
+        } else {
+            return Err(refusal(
+                status.as_u16(),
+                retry_after,
+                &bytes,
+                upstream.allocation_quota_rate,
+            ));
+        }
     }
     Ok(Sent {
         response,
@@ -495,6 +554,28 @@ async fn send<'a>(
         codec,
         allocation_quota_rate: upstream.allocation_quota_rate,
     })
+}
+
+async fn response_error(response: reqwest::Response, allocation_quota_rate: bool) -> ProviderError {
+    let status = response.status();
+    let retry_after = retry_after(response.headers());
+    let bytes = response.bytes().await.unwrap_or_default();
+    refusal(status.as_u16(), retry_after, &bytes, allocation_quota_rate)
+}
+
+/// The error for an upstream refusal: classified from its words, with the
+/// wait its headers or, failing those, its words name.
+fn refusal(
+    status: u16,
+    retry_after: Option<Duration>,
+    bytes: &[u8],
+    allocation_quota_rate: bool,
+) -> ProviderError {
+    let error = ProviderError::response_for(status, bytes, allocation_quota_rate);
+    match retry_after.or_else(|| hofund_plugin_sdk::transport::retry_after_from_body(bytes)) {
+        Some(after) => error.with_retry_after(after),
+        None => error,
+    }
 }
 
 pub(crate) async fn raw_completion(

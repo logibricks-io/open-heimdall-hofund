@@ -9,8 +9,6 @@ binary = "zed"
 # entry cannot name a different override variable per OS (#411). Source:
 # https://zed.dev/docs/configuring-zed and
 # https://zed.dev/docs/ai/llm-providers (OpenAI API Compatible).
-# Comments in the file are lost while connected and come back on an exact
-# disconnect (#461).
 [[file]]
 id = "settings"
 kind = "json"

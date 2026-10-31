@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Responses continuation history (P0-1a): `/v1/responses` now resolves
+  `previous_response_id` in a caller-scoped, bounded in-memory LRU before
+  decoding and routing. Unary and SSE replies are captured without delaying
+  streaming; translated routes receive whole history, same-protocol relays can
+  send a delta with explicit `store: true`, and a refused delta is retried
+  whole once. Unknown ids on translating or subscription routes return the
+  OpenAI-shaped 400 error. History expires after six hours and is lost on
+  restart; upstream `store: false` remains the default when omitted.
+
 - Agent keys in the OS credential store (Z1): an agent descriptor may
   declare a `[credential]` item (URL and Windows target templates, literal
   account and label). The engine stores hofund's key there through a
@@ -35,8 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user's choice. Golden conformance now runs credential agents against an
   in-memory store and checks the item through connect, refresh and both
   disconnects. Not yet: XDG and APPDATA overrides (#411), catalog windows
-  and reasoning effort (#459), the restart notice (#460), keeping
-  JSONC comments while connected (#461).
+  and reasoning effort (#459), and the restart notice (#460).
 - Goose agent (G14): `hofund agent connect goose` writes hofund's own
   custom provider, `custom_providers/hofund.json` beside Goose's
   `config.yaml` (`~/.config/goose`, or `$XDG_CONFIG_HOME/goose` when it is
@@ -56,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `context_limit` (#451), `GOOSE_THINKING_EFFORT` (#452), a pick changed
   in Goose (#453), WSL homes (#454), telling the pressly migration tool
   apart (#455), and dropping a stale `dynamic_models` once every route is
-  gone (#456); YAML comments are lost on a pick (#414).
+  gone (#456).
 - agent.toml: `[[file]] env_os = ["linux", "macos"]` limits `env_override`
   to the named systems, and `env_replaces` is checked only against their
   paths (part of #411); a `json` slot with `with_models = true` is written
@@ -76,9 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use) to `~/.kimi-code/config.toml` (or under an absolute
   `KIMI_CODE_HOME`), leaving the user's own providers and models alone. A
   model pick writes `default_model`; clearing it drops the key (#433) and
-  disconnect puts back the user's. No
-  per-model catalog values yet (#441), a user comment right above `default_model` is lost when it is cleared (#444), and the older kimi-cli's `~/.kimi` is
-  not written (#442). The conformance kit's TOML user edit is now a
+  disconnect puts back the user's. No per-model catalog values yet (#441),
+  and the older kimi-cli's `~/.kimi` is not written (#442). The conformance
+  kit's TOML user edit is now a
   top-level key, so it no longer lands inside a table hofund owns.
 
 - Cline agent (G11): `hofund agent connect cline` lists each route as
@@ -141,14 +149,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefix are the user's and are kept; an empty prefix owns the whole map and
   disconnect restores the original. TOML entries are written as typed tables.
 - Agent descriptions can edit YAML files (G1): `kind = "yaml"` in an
-  `agent.toml` file entry. Edits re-emit the file, so comments and layout are
-  not kept; disconnecting restores the original bytes from the backup.
+  `agent.toml` file entry. Block-style edits keep comments and untouched
+  lines; touched flow collections, tags, anchors, and aliases use the emitter.
 - Hermes Agent (G3): `hofund agent connect hermes` writes `providers.hofund`
   (name, `base_url` with `/v1`, `api_key`, `api_mode` `chat_completions`, and
   one `models` row per route) to `~/.hermes/config.yaml`
   (`%LOCALAPPDATA%\hermes\config.yaml` on Windows). It does not pick a model
-  or honor `HERMES_HOME` yet (#411, #412), and YAML comments are not kept
-  (#414).
+  or honor `HERMES_HOME` yet (#411, #412).
 - Pi agent (G3): `hofund agent connect pi` writes `providers.hofund` (name,
   `baseUrl` with `/v1`, `api` `openai-completions`, `apiKey`, session affinity
   headers on, and one `models` entry per route) to `~/.pi/agent/models.json`,
@@ -905,6 +912,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Agent config edits keep user comments: JSONC uses span-aware replacements,
+  insertions, and removals; block-style YAML edits touched lines in place;
+  TOML removal transfers a key's leading comment to the next visible item or
+  the document trailer. Repeated applies advance the snapshot through the
+  same formatting path, preserving exact disconnect restores (#414, #444,
+  #461).
+- Embedded daemon shutdown publishes `shutdown_started`, closes live control
+  event streams, and bounds the control listener's graceful drain (#273).
+- The configuration watcher matches the on-disk file name after a
+  differently-cased path is used on a case-insensitive file system (#278).
 - Raw SSE model rewriting now covers a complete JSON payload in an
   unterminated final event, and the 1 MiB oversize decision is independent of
   upstream chunk boundaries (#33, #34).

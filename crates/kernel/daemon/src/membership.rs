@@ -24,10 +24,12 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_host::ObserveBackend;
 use hofund_provider::{
-    Completion as ProviderCompletion, CountOutcome as ProviderCount, Provider, ProviderError,
-    ProviderErrorKind,
+    AttemptHook as ProviderAttemptHook, Completion as ProviderCompletion,
+    CountOutcome as ProviderCount, Provider, ProviderError, ProviderErrorKind,
 };
-use hofund_router::{Cooldowns, FailoverPolicy, Hop, Member, Router, Snapshot};
+use hofund_router::{
+    Attempt, AttemptHook, Cooldowns, FailoverPolicy, Hop, Member, MemberAttempt, Router, Snapshot,
+};
 use tower::Service;
 
 use crate::DaemonError;
@@ -63,6 +65,8 @@ struct LiveMember {
     plugin_id: String,
     preset_id: String,
     protocol: &'static str,
+    route: hofund_provider::AttemptRoute,
+    subscription: bool,
     failed: Arc<AtomicU64>,
     stack: Cooldown<Guard<ProviderCall>>,
 }
@@ -73,9 +77,24 @@ struct ProviderCall {
 }
 
 enum Job {
-    Execute(Request, String),
+    Execute(Request, String, Option<Arc<dyn AttemptHook>>, Attempt),
     Count(Request, String),
     Forward(String, RawBody),
+}
+
+struct AttemptAdapter {
+    hook: Arc<dyn AttemptHook>,
+    info: Attempt,
+}
+
+impl ProviderAttemptHook for AttemptAdapter {
+    fn prepare(&self, _route: &hofund_provider::AttemptRoute, body: &[u8]) -> Option<Vec<u8>> {
+        self.hook.prepare(&self.info, body)
+    }
+
+    fn refused(&self, _route: &hofund_provider::AttemptRoute, status: u16, body: &[u8]) -> bool {
+        self.hook.refused(&self.info, status, body)
+    }
 }
 
 enum Out {
@@ -205,11 +224,13 @@ fn build_specs(
                     hop.provider
                 ))
             })?;
+            let subscription = hop.member_id.is_some();
             specs.push(HopSpec {
                 member: Arc::new(LiveMember::new(
                     built,
                     &hop.provider,
                     hop.member_id.clone(),
+                    subscription,
                     Arc::clone(&table.cooldowns),
                     Arc::downgrade(table),
                 )),
@@ -277,6 +298,7 @@ impl LiveMember {
         built: &BuiltProvider,
         route_id: &str,
         id: Option<MemberId>,
+        subscription: bool,
         cooldowns: Arc<Cooldowns>,
         reload: Weak<Table>,
     ) -> Self {
@@ -303,6 +325,8 @@ impl LiveMember {
             plugin_id: built.plugin_id.clone(),
             preset_id: built.preset_id.clone(),
             protocol: built.protocol,
+            route: built.adapter.attempt_route(),
+            subscription,
             failed,
             stack,
         }
@@ -335,9 +359,37 @@ impl Member for LiveMember {
         self.protocol
     }
 
+    fn attempt(&self) -> MemberAttempt {
+        MemberAttempt {
+            provider_id: self.route_id.clone(),
+            protocol: self.protocol.to_owned(),
+            base_url: self.route.base_url.clone(),
+            route: self.route.route.clone(),
+            keeps_responses: self.route.keeps_responses,
+            subscription: self.subscription,
+            plugin: !self.plugin_id.is_empty(),
+        }
+    }
+
     async fn execute(&self, request: Request, inbound: &str) -> Result<Completion, PluginError> {
+        self.execute_with_attempt(request, inbound, None).await
+    }
+
+    async fn execute_with_attempt(
+        &self,
+        request: Request,
+        inbound: &str,
+        hook: Option<Arc<dyn AttemptHook>>,
+    ) -> Result<Completion, PluginError> {
+        let info = Attempt {
+            member: self.attempt(),
+            inbound_protocol: inbound.to_owned(),
+        };
         let mut stack = self.stack.clone();
-        match stack.call(Job::Execute(request, inbound.to_owned())).await {
+        match stack
+            .call(Job::Execute(request, inbound.to_owned(), hook, info))
+            .await
+        {
             Ok(Out::Execute(completion)) => Ok(completion),
             Ok(Out::Count(_)) => Err(PluginError::internal("member returned a count")),
             Ok(Out::Forward(_)) => Err(PluginError::internal("member returned an answer")),
@@ -495,9 +547,16 @@ impl Service<Job> for ProviderCall {
         let provider = Arc::clone(&self.provider);
         Box::pin(async move {
             match job {
-                Job::Execute(request, inbound) => {
+                Job::Execute(request, inbound, hook, info) => {
+                    let adapter = hook.map(|hook| AttemptAdapter { hook, info });
                     let completion = provider
-                        .execute(request, &inbound)
+                        .execute_with_attempt(
+                            request,
+                            &inbound,
+                            adapter
+                                .as_ref()
+                                .map(|adapter| adapter as &dyn ProviderAttemptHook),
+                        )
                         .await
                         .map_err(into_plugin)?;
                     Ok(Out::Execute(map_completion(completion)))

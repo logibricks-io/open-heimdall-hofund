@@ -311,3 +311,39 @@ async fn provider_ready_reflects_shared_cooldowns() {
     support::shutdown(running).await;
     server.verify().await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_shutdown_closes_a_control_request_that_outlasts_the_drain_bound() {
+    use tokio::io::AsyncWriteExt;
+
+    let dir = Scratch::new("unix-stuck-drain");
+    let running = start_unix(&dir.0, "listen = \"127.0.0.1:0\"\n").await;
+    let socket = running
+        .control_socket_path()
+        .expect("control socket")
+        .to_path_buf();
+    let mut stuck = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("connect control socket");
+    // A request whose body never finishes keeps the connection in flight,
+    // so only the drain bound can end it.
+    let head = format!(
+        "POST /v1/hofund/config/validate HTTP/1.1\r\nHost: hofund-control\r\n\
+         Authorization: Bearer {}\r\nContent-Type: application/json\r\n\
+         Content-Length: 1000\r\n\r\n{{",
+        token(&dir.0)
+    );
+    stuck.write_all(head.as_bytes()).await.expect("send head");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let started = std::time::Instant::now();
+    tokio::time::timeout(std::time::Duration::from_secs(10), running.shutdown())
+        .await
+        .expect("shutdown is bounded with a stuck control request");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(3),
+        "the stuck request is given the drain budget, not cut at once: {:?}",
+        started.elapsed()
+    );
+    drop(stuck);
+}

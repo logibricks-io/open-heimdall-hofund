@@ -12,8 +12,8 @@ use hofund_ir::{
     ToolCallPart,
 };
 use hofund_provider::{
-    Anthropic, Completion, CountOutcome, Credential, Endpoint, Generative, OpenAiCompat,
-    OpenAiProtocol, Provider, ProviderErrorKind,
+    Anthropic, AttemptHook, AttemptRoute, Completion, CountOutcome, Credential, Endpoint,
+    Generative, OpenAiCompat, OpenAiProtocol, Provider, ProviderErrorKind,
 };
 use hofund_quirks::named;
 use serde_json::{Value, json};
@@ -1126,6 +1126,116 @@ async fn generative_count_reads_total_tokens_and_a_missing_method_is_unsupported
         .await
         .expect("missing");
     assert!(matches!(outcome, CountOutcome::Unsupported));
+}
+
+struct DeltaRequest;
+
+impl Match for DeltaRequest {
+    fn matches(&self, request: &MockRequest) -> bool {
+        serde_json::from_slice::<Value>(&request.body)
+            .ok()
+            .is_some_and(|body| body["previous_response_id"] == "resp_up1")
+    }
+}
+
+struct WholeRequest;
+
+impl Match for WholeRequest {
+    fn matches(&self, request: &MockRequest) -> bool {
+        serde_json::from_slice::<Value>(&request.body)
+            .ok()
+            .is_some_and(|body| body.get("previous_response_id").is_none())
+    }
+}
+
+struct Shorten;
+
+impl AttemptHook for Shorten {
+    fn prepare(&self, _route: &AttemptRoute, body: &[u8]) -> Option<Vec<u8>> {
+        let mut body: Value = serde_json::from_slice(body).ok()?;
+        body["input"] = json!([]);
+        body["previous_response_id"] = json!("resp_up1");
+        serde_json::to_vec(&body).ok()
+    }
+
+    fn refused(&self, _route: &AttemptRoute, status: u16, body: &[u8]) -> bool {
+        matches!(status, 400 | 404 | 422)
+            && String::from_utf8_lossy(body).contains("previous_response")
+    }
+}
+
+/// Says every failure is a refusal, so only the provider's own status filter decides.
+struct AnyRefusal;
+
+impl AttemptHook for AnyRefusal {
+    fn prepare(&self, route: &AttemptRoute, body: &[u8]) -> Option<Vec<u8>> {
+        Shorten.prepare(route, body)
+    }
+
+    fn refused(&self, _route: &AttemptRoute, _status: u16, _body: &[u8]) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn a11_provider_resends_the_whole_body_after_a_refused_delta() {
+    for status in [400, 404, 422] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(DeltaRequest)
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_body_string(r#"{"error":{"code":"previous_response_not_found"}}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(WholeRequest)
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "resp_up2",
+                "status": "completed",
+                "output": [{"type":"message","role":"assistant","content":[{"type":"output_text","text":"whole"}]}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = Endpoint::new("primary", format!("{}/v1", server.uri()));
+        let provider = OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).expect("provider");
+        let completion = provider
+            .execute_with_attempt(user_request(false), "openai-responses", Some(&Shorten))
+            .await
+            .expect("whole retry");
+        assert_eq!(text_of(completion).await, "whole", "{status}");
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 2, "{status}");
+        let whole: Value = serde_json::from_slice(&requests[1].body).expect("whole JSON");
+        assert!(whole["input"].to_string().contains("hi"));
+    }
+}
+
+#[tokio::test]
+async fn a11_provider_does_not_resend_after_other_statuses() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(409)
+                .set_body_string(r#"{"error":{"code":"previous_response_not_found"}}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = Endpoint::new("primary", format!("{}/v1", server.uri()));
+    let provider = OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).expect("provider");
+    let outcome = provider
+        .execute_with_attempt(user_request(false), "openai-responses", Some(&AnyRefusal))
+        .await;
+    assert!(outcome.is_err());
+    assert_eq!(server.received_requests().await.expect("requests").len(), 1);
 }
 
 #[tokio::test]

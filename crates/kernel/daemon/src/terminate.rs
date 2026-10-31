@@ -71,7 +71,7 @@ impl ConsoleEvent {
 }
 
 /// The drain budget after a console close, logoff or shutdown event.
-const CONSOLE_DRAIN: Duration = Duration::from_secs(4);
+const CONSOLE_DRAIN: Duration = hofund_gateway::CONTROL_DRAIN;
 
 /// Serves until a termination signal or a control shutdown, drains, and
 /// reports why it stopped.

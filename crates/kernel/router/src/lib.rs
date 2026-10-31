@@ -8,6 +8,7 @@
 //! The daemon adapts each member into a service and wraps that service in the
 //! kernel layers.
 
+mod attempt;
 mod cooldown;
 mod member;
 mod snapshot;
@@ -21,6 +22,7 @@ use hofund_ir::{StreamEvent, estimate_input_tokens};
 use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
 use tracing::Instrument;
 
+pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::Member;
@@ -227,6 +229,21 @@ impl Router {
         request: &Request,
         inbound_protocol: &str,
     ) -> Result<Routed, RouterError> {
+        self.dispatch_with_attempt(request, inbound_protocol, None)
+            .await
+    }
+
+    /// Dispatches with callbacks for each concrete member attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch`], or an attempt rejection.
+    pub async fn dispatch_with_attempt(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        hook: Option<Arc<dyn AttemptHook>>,
+    ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         if let Some(cooldowns) = &self.cooldowns {
@@ -238,9 +255,25 @@ impl Router {
             let mut attempt = request.clone();
             apply_wire(&mut attempt, hop, &resolved.bare);
             let upstream_model = attempt.model.clone();
-            let result = call_member(hop, index, inbound_protocol, attempt).await;
+            let info = Attempt {
+                member: hop.member.attempt(),
+                inbound_protocol: inbound_protocol.to_owned(),
+            };
+            if let Some(hook) = hook.as_ref()
+                && let Err(error) = hook.before(&info)
+            {
+                return Err(match error {
+                    AttemptError::PreviousResponseNotFound { id } => {
+                        RouterError::PreviousResponseNotFound { id }
+                    }
+                });
+            }
+            let result = call_member(hop, index, inbound_protocol, attempt, hook.clone()).await;
             match result {
                 Ok(completion) => {
+                    if let Some(hook) = hook.as_ref() {
+                        hook.answered(&info);
+                    }
                     let completion = if asked == upstream_model {
                         completion
                     } else {
@@ -518,6 +551,12 @@ pub enum RouterError {
         /// `provider/route` names, comma-separated.
         candidates: String,
     },
+    /// An attempt cannot resolve the response id the client named.
+    #[error("Previous response with id '{id}' not found.")]
+    PreviousResponseNotFound {
+        /// Client-supplied response id.
+        id: String,
+    },
     /// The upstreams that were tried failed.
     #[error("upstream `{upstream_id}` failed: {error}")]
     Upstream {
@@ -632,11 +671,16 @@ async fn call_member(
     index: usize,
     inbound_protocol: &str,
     attempt: Request,
+    hook: Option<Arc<dyn AttemptHook>>,
 ) -> Result<Completion, PluginError> {
     let span = member_span(hop, index, inbound_protocol);
     let started = Instant::now();
     let result = async {
-        match hop.member.execute(attempt, inbound_protocol).await {
+        match hop
+            .member
+            .execute_with_attempt(attempt, inbound_protocol, hook)
+            .await
+        {
             Ok(completion) => accept(completion).await,
             Err(error) => Err(error),
         }

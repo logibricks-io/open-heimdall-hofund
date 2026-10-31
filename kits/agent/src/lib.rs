@@ -11,7 +11,7 @@
 mod conformance;
 mod credential;
 
-pub use conformance::conformance;
+pub use conformance::{conformance, parse_jsonc};
 pub use credential::MemoryCredentialStore;
 pub use hofund_plugin_host::{
     RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler, RecordingSecrets,
