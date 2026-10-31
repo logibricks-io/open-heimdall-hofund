@@ -491,8 +491,7 @@ async fn map_response(
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.to_ascii_lowercase().contains("event-stream"));
     if !status.is_success() {
-        let body = read_body(response.into_body(), Some(ERROR_BODY_LIMIT)).await;
-        let frame = http_error_frame(status, &headers, &body);
+        let frame = http_error_reply(response).await;
         return MappedTurn {
             held: None,
             cut: false,
@@ -822,6 +821,15 @@ fn rate_limits_frame(headers: &HeaderMap) -> Option<Value> {
         event.insert("credits".to_owned(), Value::Object(credits));
     }
     Some(Value::Object(event))
+}
+
+/// The error frame for a reply that failed, its body read up to
+/// [`ERROR_BODY_LIMIT`].
+async fn http_error_reply(response: Response<Body>) -> Value {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = read_body(response.into_body(), Some(ERROR_BODY_LIMIT)).await;
+    http_error_frame(status, &headers, &body)
 }
 
 fn http_error_frame(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> Value {

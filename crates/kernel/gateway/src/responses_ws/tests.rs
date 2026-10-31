@@ -906,6 +906,16 @@ async fn b9_http_errors_keep_shape_headers_and_bound_the_body() {
     )
     .await;
     assert_eq!(capped.len(), ERROR_BODY_LIMIT);
+    let huge = Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(Body::from(vec![b'x'; ERROR_BODY_LIMIT + 100]))
+        .expect("reply");
+    let frame = http_error_reply(huge).await;
+    assert_eq!(frame["status"], 500);
+    assert_eq!(
+        frame["error"]["message"].as_str().expect("message").len(),
+        ERROR_BODY_LIMIT
+    );
 
     let (fake, _calls, replies) = Fake::new("primary");
     replies
