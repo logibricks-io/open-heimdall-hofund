@@ -277,8 +277,6 @@ async fn apply_writes_exact_bytes_publishes_and_reports_one_generation_everywher
     // An explicit reload at an equal revision still republishes.
     let (status, body) = client.reload(&applied.disk_revision).await;
     assert_eq!(ok(status, &body).generation, 3);
-    // An open stream would hold the graceful drain of the control listener.
-    drop(stream);
     support::shutdown(running).await;
 }
 
@@ -350,8 +348,6 @@ async fn apply_bad_toml_is_422_rejected_and_never_echoes_config_text() {
     assert_eq!(status.generation, 1);
     let rendered = format!("{status:?}");
     assert!(!rendered.contains(SECRET), "{rendered}");
-    // An open stream would hold the graceful drain of the control listener.
-    drop(stream);
     support::shutdown(running).await;
 }
 
@@ -410,8 +406,6 @@ async fn pending_restart_fields_agree_across_response_status_and_events() {
         }
         other => panic!("expected config_reloaded/snapshot_published pairs, got {other:?}"),
     }
-    // An open stream would hold the graceful drain of the control listener.
-    drop(stream);
     support::shutdown(running).await;
 }
 
@@ -615,7 +609,6 @@ async fn config_text_never_in_events_status_or_errors() {
     assert_eq!(status.generation, 2);
     let rendered = format!("{status:?}");
     assert!(!rendered.contains(SECRET), "{rendered}");
-    drop(stream);
     support::shutdown(running).await;
 }
 
@@ -796,7 +789,6 @@ async fn relisten_failure_publishes_rest_and_reports_not_applied() {
         Some(target.to_string())
     );
     assert_eq!(running.listen_addr(), target);
-    drop(stream);
     support::shutdown(running).await;
 }
 
@@ -891,6 +883,5 @@ async fn reload_listen_with_hofund_addr_reports_not_applied_env_override() {
         ] => assert_eq!(first.not_applied, applied.not_applied),
         other => panic!("expected config_reloaded/snapshot_published pairs, got {other:?}"),
     }
-    drop(stream);
     support::shutdown(running).await;
 }

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Responses continuation history (P0-1a): `/v1/responses` now resolves
+  `previous_response_id` in a caller-scoped, bounded in-memory LRU before
+  decoding and routing. Unary and SSE replies are captured without delaying
+  streaming; translated routes receive whole history, same-protocol relays can
+  send a delta with explicit `store: true`, and a refused delta is retried
+  whole once. Unknown ids on translating or subscription routes return the
+  OpenAI-shaped 400 error. History expires after six hours and is lost on
+  restart; upstream `store: false` remains the default when omitted.
+
 - Agent keys in the OS credential store (Z1): an agent descriptor may
   declare a `[credential]` item (URL and Windows target templates, literal
   account and label). The engine stores hofund's key there through a
@@ -909,6 +918,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the document trailer. Repeated applies advance the snapshot through the
   same formatting path, preserving exact disconnect restores (#414, #444,
   #461).
+- Embedded daemon shutdown publishes `shutdown_started`, closes live control
+  event streams, and bounds the control listener's graceful drain (#273).
+- The configuration watcher matches the on-disk file name after a
+  differently-cased path is used on a case-insensitive file system (#278).
+- Raw SSE model rewriting now covers a complete JSON payload in an
+  unterminated final event, and the 1 MiB oversize decision is independent of
+  upstream chunk boundaries (#33, #34).
+- Codex retries a 401 identified only by `error.code = token_expired`. Gemini
+  refresh jobs mark a refused sign-in lapsed even when their caller is
+  cancelled, and token replies without `expires_in` use a one-hour lifetime
+  with the existing refresh margin (#298, #331, #332).
 - Anthropic host checks match `anthropic.com` and its subdomains only, so a
   lookalike host such as `evilanthropic.com` no longer gets official Anthropic
   credential placement or model-list handling.

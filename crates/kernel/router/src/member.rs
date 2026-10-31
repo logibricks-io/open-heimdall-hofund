@@ -9,6 +9,8 @@ use hofund_plugin_api::{
     Completion, CountOutcome, MemberId, PluginError, RawAnswer, RawBody, Request,
 };
 
+use crate::{AttemptHook, MemberAttempt};
+
 /// One upstream the router may call.
 ///
 /// `id` is stable across snapshots. `route_id` is the configured provider id
@@ -34,6 +36,16 @@ pub trait Member: Send + Sync {
     /// Codec id this member speaks. Compared with the inbound protocol.
     fn protocol(&self) -> &str;
 
+    /// Per-attempt facts. Adapters with upstream route metadata override this.
+    fn attempt(&self) -> MemberAttempt {
+        MemberAttempt {
+            provider_id: self.route_id().to_owned(),
+            protocol: self.protocol().to_owned(),
+            plugin: !self.plugin_id().is_empty(),
+            ..MemberAttempt::default()
+        }
+    }
+
     /// Executes `request`.
     ///
     /// `inbound` is the client codec id. The daemon's layer chain applies the
@@ -45,6 +57,21 @@ pub trait Member: Send + Sync {
     ///
     /// Returns [`PluginError`] when the upstream cannot produce a completion.
     async fn execute(&self, request: Request, inbound: &str) -> Result<Completion, PluginError>;
+
+    /// Executes with a per-request attempt hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::execute`].
+    async fn execute_with_attempt(
+        &self,
+        request: Request,
+        inbound: &str,
+        hook: Option<std::sync::Arc<dyn AttemptHook>>,
+    ) -> Result<Completion, PluginError> {
+        let _ = hook;
+        self.execute(request, inbound).await
+    }
 
     /// Counts input tokens.
     ///
