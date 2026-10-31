@@ -143,10 +143,9 @@ struct State {
 
 /// Explicit quota cache and history state for one daemon.
 pub struct QuotaStore {
-    root: PathBuf,
+    root: Option<PathBuf>,
     clock: Arc<dyn Fn() -> SystemTime + Send + Sync>,
     state: Mutex<State>,
-    persistent: bool,
 }
 
 impl QuotaStore {
@@ -159,9 +158,11 @@ impl QuotaStore {
     /// Creates a store that never touches the filesystem.
     #[must_use]
     pub fn in_memory() -> Self {
-        let mut store = Self::with_clock(PathBuf::new(), Arc::new(SystemTime::now));
-        store.persistent = false;
-        store
+        Self {
+            root: None,
+            clock: Arc::new(SystemTime::now),
+            state: Mutex::new(State::default()),
+        }
     }
 
     /// Loads state with an injected wall clock.
@@ -186,10 +187,9 @@ impl QuotaStore {
             state.history = history;
         }
         Self {
-            root,
+            root: Some(root),
             clock,
             state: Mutex::new(state),
-            persistent: true,
         }
     }
 
@@ -250,7 +250,9 @@ impl QuotaStore {
             state.records.push(record);
         }
         note_history(&mut state, &quota, read_at, now);
-        save_state(&self.root, &state);
+        if let Some(root) = &self.root {
+            save_state(root, &state);
+        }
     }
 
     /// Records a deferred read. No upstream request was made.
@@ -1051,6 +1053,53 @@ mod tests {
     }
 
     #[test]
+    fn q1e_plugin_window_zero_cap_is_used_up() {
+        let zero = PluginWindow::new("day", 0, Some(0), None).expect("zero cap");
+        let zero = WindowInfo::from_plugin(&zero);
+        assert_eq!(zero.span.used, 100.0);
+        assert_eq!(zero.span.remaining, 0.0);
+        let full = PluginWindow::new("day", 10, Some(10), None).expect("full");
+        let full = WindowInfo::from_plugin(&full);
+        assert_eq!(full.span.used, 100.0);
+        assert_eq!(full.span.remaining, 0.0);
+    }
+
+    #[test]
+    fn q1f_in_memory_store_never_writes_files() {
+        let store = QuotaStore::in_memory();
+        assert!(store.root.is_none());
+        store.record_success(
+            quota("in-memory-probe", "a"),
+            vec![info("day", 1.0, None)],
+            at(1_900_000_000),
+        );
+        assert!(!Path::new("quotas.json").exists());
+        assert!(!Path::new("quota-history.json").exists());
+        assert_eq!(store.report(&[]).len(), 1);
+    }
+
+    #[test]
+    fn q3f_success_takes_a_past_read_time_clamps_a_future_one_and_clears_as_of() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = QuotaStore::new(dir.path());
+        let now = at(1_900_000_000);
+        let mut future = quota("p", "a");
+        future.read_at = Some(quota_time(now + Duration::from_secs(3600)));
+        future.as_of = Some(quota_time(at(1_800_000_000)));
+        store.record_success(future, vec![info("day", 10.0, None)], now);
+        let report = store.report(&[]);
+        assert_eq!(report[0].read_at, Some(quota_time(now)));
+        assert_eq!(report[0].as_of, None);
+        let mut past = quota("p", "a");
+        past.read_at = Some(quota_time(now - Duration::from_secs(60)));
+        store.record_success(past, vec![info("day", 10.0, None)], now);
+        assert_eq!(
+            store.report(&[])[0].read_at,
+            Some(quota_time(now - Duration::from_secs(60)))
+        );
+    }
+
+    #[test]
     fn q2a_relative_reset_uses_injected_clock() {
         let dir = tempfile::tempdir().expect("tempdir");
         let now = at(1_900_000_000);
@@ -1279,6 +1328,26 @@ mod tests {
     }
 
     #[test]
+    fn q6h_history_replaces_a_reading_within_thirty_seconds() {
+        let points = add_point(vec![point(0, 90.0, None)], point(10, 89.0, None));
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].at, quota_time(at(10)));
+        assert_eq!(points[0].left, 89.0);
+        let points = add_point(points, point(60, 88.0, None));
+        assert_eq!(points.len(), 2);
+    }
+
+    #[test]
+    fn q6i_cycle_without_resets_is_a_refill_and_a_passed_reset_is_a_boundary() {
+        assert!(new_cycle(&point(0, 20.0, None), &point(60, 30.0, None)));
+        assert!(!new_cycle(&point(0, 20.0, None), &point(60, 24.0, None)));
+        let reset = at(100);
+        let before = point(0, 20.0, Some(reset));
+        assert!(new_cycle(&before, &point(100, 20.0, Some(reset))));
+        assert!(!new_cycle(&before, &point(99, 20.0, Some(reset))));
+    }
+
+    #[test]
     fn q6e_history_enforces_retention_and_point_cap() {
         let now = at(1_900_000_000);
         let old = now - HISTORY_RETENTION - Duration::from_secs(1);
@@ -1482,6 +1551,24 @@ mod tests {
                 .iter()
                 .all(|entry| entry.member != "unknown")
         );
+    }
+
+    #[test]
+    fn q9d_held_allowance_frees_after_reset_and_matches_scope_case_insensitively() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = QuotaStore::new(dir.path());
+        let now = at(1_900_000_000);
+        let reset = now + Duration::from_secs(60);
+        store.record_success(
+            quota("p", "a"),
+            vec![info("model", 100.0, Some(reset)).with_scope_model("Model-A")],
+            now,
+        );
+        let allowance = &store.allowances(now)[0];
+        assert!(!allowance.available("model-a", now));
+        assert!(!allowance.available("MODEL-A", now));
+        assert!(allowance.available("model-b", now));
+        assert!(allowance.available("model-a", reset));
     }
 
     #[test]

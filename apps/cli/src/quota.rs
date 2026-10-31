@@ -1159,8 +1159,8 @@ mod tests {
 
     use super::{
         QuotaCommand, Step, Target, Waiter, go_duration, new_run, parse, parse_go_duration,
-        plan_term, points_cell, render_history, render_list, reset_clock, resolve, round_wait,
-        until_short, window_cell,
+        plan_term, points_cell, reading_cell, render_history, render_list, reset_clock, resolve,
+        round_wait, until_short, window_cell,
     };
 
     fn zone() -> FixedOffset {
@@ -1314,6 +1314,23 @@ mod tests {
         );
         let empty = render_list(Vec::new(), &[], true, &known, &now()).expect("json");
         assert_eq!(empty, "[]", "an empty report is an empty array for scripts");
+    }
+
+    #[test]
+    fn q7m_reading_cell_names_a_handed_back_reading_after_two_minutes() {
+        let read = later(TimeDelta::minutes(-3));
+        assert_eq!(
+            reading_cell(None, Some(&read), &[], &now()),
+            "  read 3m ago"
+        );
+        let read = later(TimeDelta::minutes(-2));
+        assert_eq!(
+            reading_cell(None, Some(&read), &[], &now()),
+            "  read 2m ago"
+        );
+        let fresh = later(TimeDelta::seconds(-90));
+        assert_eq!(reading_cell(None, Some(&fresh), &[], &now()), "");
+        assert_eq!(reading_cell(None, None, &[], &now()), "");
     }
 
     #[test]
