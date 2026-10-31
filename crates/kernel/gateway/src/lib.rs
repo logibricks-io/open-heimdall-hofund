@@ -668,7 +668,6 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.request_shutdown();
         for task in self.attached.drain(..) {
             task.abort();
         }

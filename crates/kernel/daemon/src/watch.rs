@@ -416,6 +416,17 @@ mod tests {
     }
 
     #[test]
+    fn resolve_targets_the_on_disk_spelling_of_a_differently_cased_name() {
+        let (dir, path) = scratch();
+        let upper = dir.path().join("HOFUND.TOML");
+        let targets = Targets::resolve(&upper).expect("targets");
+        assert!(targets.matches(&path), "the on-disk name is watched");
+        // The given spelling is matched only when no entry has it.
+        let missing = Targets::resolve(&dir.path().join("Other.toml")).expect("targets");
+        assert!(missing.matches(&dir.path().join("Other.toml")));
+    }
+
+    #[test]
     fn on_disk_name_prefers_exact_then_ascii_case_and_keeps_unmatched() {
         let entries = |names: &[&str]| {
             names
@@ -437,6 +448,15 @@ mod tests {
                 entries(&["other.toml", "hofund.toml"]),
             ),
             "hofund.toml"
+        );
+        // Two case variants with no exact match: the first listed wins, so
+        // the choice does not drift as later entries are read.
+        assert_eq!(
+            on_disk_name(
+                std::ffi::OsStr::new("Hofund.toml"),
+                entries(&["HOFUND.TOML", "hofund.toml"]),
+            ),
+            "HOFUND.TOML"
         );
         assert_eq!(
             on_disk_name(
