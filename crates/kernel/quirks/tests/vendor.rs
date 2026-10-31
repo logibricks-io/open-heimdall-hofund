@@ -640,3 +640,43 @@ fn v2_deepseek_token_field() {
         body
     );
 }
+
+#[test]
+fn v2_is_ark_hosts_match_reference() {
+    // Reference draw_volcengine_test isArk hosts, plus a non-Volcengine
+    // ark.* host.
+    for (base, ark) in [
+        ("https://ark.cn-beijing.volces.com/api/v3", true),
+        ("https://ark.cn-beijing.volces.com/api/plan/v3", true),
+        ("https://ark.ap-southeast.volces.com/api/v3", true),
+        ("https://open.volces.com/api/v3", false),
+        ("https://ark.example.com/api/v3", false),
+    ] {
+        let got = sampling(
+            "kimi-k3",
+            None,
+            base,
+            "openai-chat",
+            r#""temperature":0.6,"top_p":0.95"#,
+        );
+        if ark {
+            no_sampling(&got);
+        } else {
+            assert_eq!(got["temperature"], 0.6, "{base}");
+            assert_eq!(got["top_p"], 0.95, "{base}");
+        }
+    }
+}
+
+#[test]
+fn v2_locked_sampling_k24_keeps_temperature() {
+    // Reference kimiLockedSamplingModel: K2 locks from minor 5 on.
+    let got = sampling(
+        "kimi-k2.4",
+        Some("moonshot"),
+        "https://api.moonshot.ai/v1",
+        "openai-chat",
+        r#""temperature":0.6"#,
+    );
+    assert_eq!(got["temperature"], 0.6);
+}

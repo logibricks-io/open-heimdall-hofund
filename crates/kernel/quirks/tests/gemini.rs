@@ -165,3 +165,21 @@ fn v3_gemini_tool_types_drops_booleans_and_extension_keys() {
     let generative = text(apply(body, "generative-language"));
     assert_eq!(generative, body);
 }
+
+#[test]
+fn v3_gemini_named_by_bare_prefix() {
+    // Reference geminiNamed: last path segment, lowercased, starts with
+    // "gemini" (no separator required).
+    for model in ["gemini", "models/Gemini", "relay/geminipro"] {
+        let body = format!(
+            r#"{{"model":"{model}","tools":[{{"type":"function","function":{{"name":"f","parameters":{{"properties":{{"any":{{}}}}}}}}}}]}}"#
+        );
+        let got: Value = serde_json::from_slice(&apply(&body, "openai-chat")).expect("JSON");
+        assert_eq!(
+            got["tools"][0]["function"]["parameters"]["properties"]["any"]["type"], "string",
+            "{model}"
+        );
+    }
+    let body = r#"{"model":"agemini","tools":[{"type":"function","function":{"name":"f","parameters":{"properties":{"any":{}}}}}]}"#;
+    assert_eq!(text(apply(body, "openai-chat")), body);
+}

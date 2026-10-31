@@ -113,3 +113,15 @@ fn v4_root_union_folded_where_refused() {
         assert!(!changed);
     }
 }
+
+#[test]
+fn v4_responses_namespace_tools_folded() {
+    // Reference foldTools: a Responses namespace's own tools are folded.
+    let body = br#"{"model":"m","tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"f","parameters":{"anyOf":[{"type":"object","properties":{"a":{"type":"string"}}}]}}]}]}"#;
+    let (folded, changed) = fold_encoded("openai-responses", body);
+    assert!(changed);
+    let value: Value = serde_json::from_slice(&folded).expect("JSON");
+    let parameters = &value["tools"][0]["tools"][0]["parameters"];
+    assert_eq!(parameters["type"], "object");
+    assert!(parameters.get("anyOf").is_none());
+}
