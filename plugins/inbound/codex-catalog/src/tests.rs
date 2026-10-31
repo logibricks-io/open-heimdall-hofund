@@ -134,6 +134,14 @@ fn the_route_is_codexs() {
 }
 
 #[test]
+fn e2_surface_declares_only_the_backend_responses_socket() {
+    assert_eq!(
+        CodexCatalog.responses_websocket_paths(),
+        ["/backend-api/codex/responses"]
+    );
+}
+
+#[test]
 fn every_model_is_an_entry_codex_loads() {
     let gateway = Gateway::listing(&json!([
         {"id": "seer", "object": "model", "owned_by": "hofund"},

@@ -64,6 +64,7 @@ static ROUTES: [RouteSpec; 3] = [
     RouteSpec::from_static(Method::Get, backend::PREFIX),
     RouteSpec::from_static(Method::Post, backend::PREFIX),
 ];
+static RESPONSES_SOCKET_PATHS: [&str; 1] = ["/backend-api/codex/responses"];
 
 /// The Codex surface: the catalog, and the ChatGPT backend under `/backend-api/codex`.
 #[derive(Clone, Copy, Debug)]
@@ -77,6 +78,10 @@ impl InboundSurface for CodexCatalog {
 
     fn routes(&self) -> &'static [RouteSpec] {
         &ROUTES
+    }
+
+    fn responses_websocket_paths(&self) -> &'static [&'static str] {
+        &RESPONSES_SOCKET_PATHS
     }
 
     async fn handle(

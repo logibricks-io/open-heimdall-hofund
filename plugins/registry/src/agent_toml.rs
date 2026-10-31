@@ -545,15 +545,22 @@ fn validate(
                 "catalog_models requires a JSON file",
             ));
         }
-        if matches!(
-            &set.slot,
-            SlotToml::Json(_) | SlotToml::ModelArray(_) | SlotToml::Append(_)
-        ) && !matches!(file.kind.as_str(), "json" | "yaml")
+        if matches!(&set.slot, SlotToml::Json(_))
+            && !matches!(file.kind.as_str(), "json" | "yaml" | "toml")
         {
             return Err(error(
                 source,
                 format!("{field}.slot"),
-                "json, model_array, and append require a JSON or YAML file",
+                "json requires a JSON, YAML, or TOML file",
+            ));
+        }
+        if matches!(&set.slot, SlotToml::ModelArray(_) | SlotToml::Append(_))
+            && !matches!(file.kind.as_str(), "json" | "yaml")
+        {
+            return Err(error(
+                source,
+                format!("{field}.slot"),
+                "model_array and append require a JSON or YAML file",
             ));
         }
         if matches!(&set.slot, SlotToml::ModelMap(_))
@@ -1652,12 +1659,12 @@ key = "effort"
             source.contains("hofund_plugin_api::Slot::Json(\"false\")"),
             "{source}"
         );
-        reject(
-            with_slot("{ json = \"false\", with_models = true }")
+        validate(
+            &with_slot("{ json = \"false\", with_models = true }")
                 .replace("kind = \"json\"", "kind = \"toml\"")
                 .replace("config.json", "config.toml"),
-            "require a JSON or YAML file",
-        );
+        )
+        .expect("json slot with models in TOML");
     }
 
     #[test]
@@ -1683,7 +1690,7 @@ key = "effort"
         let toml = with_slot("{ json = \"false\" }")
             .replace("kind = \"json\"", "kind = \"toml\"")
             .replace("config.json", "config.toml");
-        reject(toml.clone(), "require a JSON or YAML file");
+        validate(&toml).expect("json slot in TOML");
         reject(
             toml.replace("{ json = \"false\" }", array),
             "require a JSON or YAML file",

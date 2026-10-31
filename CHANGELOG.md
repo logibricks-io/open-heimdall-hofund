@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request. Shutdown rejects new sockets with 503, closes idle sockets 1001 and
   busy sockets after their turns, waits for the socket drain, and cuts sockets
   that outlast its deadline.
+- Responses over a WebSocket on `/backend-api/codex/responses` (P0-1e, #481):
+  inbound surfaces can declare exact Responses socket paths, and every turn
+  replays through the full router, including surface fallback. Codex agent
+  wiring now writes `model_providers.hofund.supports_websockets = true` so the
+  client uses socket-local continuation instead of reuploading whole history.
 - Agent keys in the OS credential store (Z1): an agent descriptor may
   declare a `[credential]` item (URL and Windows target templates, literal
   account and label). The engine stores hofund's key there through a
