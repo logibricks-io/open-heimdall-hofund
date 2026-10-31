@@ -152,6 +152,8 @@ fn fixture(members: &[(&'static str, Option<&str>, Answer)]) -> Fixture {
             wire_model: wire.map(str::to_owned),
             max_output_tokens: None,
             context_window: None,
+            weight: 1,
+            free: false,
         })
         .collect();
     let mut routes = BTreeMap::new();

@@ -9,7 +9,9 @@ use hofund_ir::{ContentPart, Message, Request, Response, Role};
 use hofund_plugin_api::{
     CountOutcome, MemberId, MemberKey, PluginError, PluginId, PresetId, QuotaObservation,
 };
-use hofund_router::{Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Member, Router};
+use hofund_router::{
+    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Route, Router,
+};
 
 struct Fake {
     id: &'static str,
@@ -252,4 +254,30 @@ async fn all_cooling_members_reduce_to_the_soonest_probe() {
         .expect("dispatch");
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}
+
+#[tokio::test]
+async fn a8_ready_members_follow_strategy_then_one_soonest_probe() {
+    let (book, seen) = fixture();
+    cool(&book, "third", 60);
+    let mut hops = vec![
+        Hop::new(fake("first", &seen, Behavior::Fail)),
+        Hop::new(fake("second", &seen, Behavior::Unary)),
+        Hop::new(fake("third", &seen, Behavior::Unary)),
+    ];
+    hops[0].weight = 3;
+    hops[1].weight = 1;
+    hops[2].weight = 4;
+    let router = Router::from_routes(
+        BTreeMap::from([("demo".to_owned(), Route::new(hops).with_routing("weight"))]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(book);
+
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first", "second"]);
 }

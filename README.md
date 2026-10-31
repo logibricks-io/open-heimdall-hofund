@@ -106,6 +106,40 @@ hofund config check --config examples/hofund.toml
 loads. When it does not, the message starts with that path. `hofund --help`
 and `hofund <command> --help` print that command's usage.
 
+### Routing
+
+A route accepts `routing = "smart"`, `"order"`, `"rotate"`, `"usage"`,
+`"pace"`, `"weight"`, `"free"`, `"fast"`, or `"cheap"`; the default is
+`smart`. `order` keeps the listed order, `rotate` advances a per-route turn,
+`weight` uses smooth weighted round robin, and `free` puts free models first
+in their listed order. In this release `smart`, `usage`, `pace`, `fast`, and
+`cheap` also preserve the listed order; their measurement-based ordering is
+P0-2b. `cheap` is accepted only for a multi-upstream route or a subscription
+account group. Unknown strategy names are configuration errors.
+
+Set a mapped upstream's `weight` to an integer of at least 1. A missing weight
+or an explicit 1 is the default and is not retained as a separate setting.
+Subscription account weights use lower-cased account ids and the same default:
+
+```toml
+[[routes]]
+model = "demo"
+routing = "weight"
+upstreams = [{ provider = "primary", weight = 3 }, "backup"]
+
+# [subscriptions.account_weights]
+# "work@example.com" = 3
+# "backup@example.com" = 1
+```
+
+Set `free = true` on a provider to mark all its models free. Without that
+flag, a cached catalog model's explicit free flag wins; with no such flag, a
+known input/output/cache-read price of zero also makes it free. A route using
+`free` with no free members behaves as `order`.
+
+Ready members always follow the selected strategy before one cooling probe.
+`hofund routes` prints each route model and its strategy name.
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for the crate graph, the

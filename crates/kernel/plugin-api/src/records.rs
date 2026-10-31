@@ -346,6 +346,10 @@ pub struct ModelSpec {
     efforts: Vec<String>,
     web_search: Option<String>,
     service_tiers: Vec<String>,
+    free: Option<bool>,
+    input_price: Option<u64>,
+    output_price: Option<u64>,
+    cache_read_price: Option<u64>,
 }
 
 impl ModelSpec {
@@ -374,6 +378,10 @@ impl ModelSpec {
             efforts: Vec::new(),
             web_search: None,
             service_tiers: Vec::new(),
+            free: None,
+            input_price: None,
+            output_price: None,
+            cache_read_price: None,
         })
     }
 
@@ -388,6 +396,23 @@ impl ModelSpec {
     #[must_use]
     pub fn with_max_output(mut self, max_output: u64) -> Self {
         self.max_output = max_output;
+        self
+    }
+
+    /// Sets the catalog's explicit free-model flag.
+    #[must_use]
+    pub const fn with_free(mut self, free: bool) -> Self {
+        self.free = Some(free);
+        self
+    }
+
+    /// Sets input, output, and cache-read prices in millionths of a dollar
+    /// per million tokens.
+    #[must_use]
+    pub const fn with_prices(mut self, input: u64, output: u64, cache_read: u64) -> Self {
+        self.input_price = Some(input);
+        self.output_price = Some(output);
+        self.cache_read_price = Some(cache_read);
         self
     }
 
@@ -544,6 +569,31 @@ impl ModelSpec {
     #[must_use]
     pub fn service_tiers(&self) -> &[String] {
         &self.service_tiers
+    }
+
+    /// The catalog's explicit free-model flag, when one was reported.
+    #[must_use]
+    pub const fn free(&self) -> Option<bool> {
+        self.free
+    }
+
+    /// Input, output, and cache-read prices, each when known.
+    #[must_use]
+    pub const fn prices(&self) -> (Option<u64>, Option<u64>, Option<u64>) {
+        (self.input_price, self.output_price, self.cache_read_price)
+    }
+
+    /// Whether an explicit free flag or a known all-zero price makes the
+    /// model free. An explicit false flag takes precedence over prices.
+    #[must_use]
+    pub const fn costs_nothing(&self) -> bool {
+        if let Some(free) = self.free {
+            return free;
+        }
+        matches!(
+            (self.input_price, self.output_price, self.cache_read_price),
+            (Some(0), Some(0), Some(0))
+        )
     }
 }
 
@@ -2525,7 +2575,8 @@ mod tests {
             .with_decides(true)
             .with_efforts(vec!["low".to_owned(), "high".to_owned()])
             .with_web_search("native")
-            .with_service_tiers(vec!["default".to_owned()]);
+            .with_service_tiers(vec!["default".to_owned()])
+            .with_prices(0, 0, 0);
         assert_eq!(model.context(), 32_000);
         assert_eq!(model.max_output(), 4096);
         assert_eq!(model.input_modalities(), ["text", "image"]);
@@ -2538,16 +2589,23 @@ mod tests {
         assert_eq!(model.efforts(), ["low", "high"]);
         assert_eq!(model.web_search(), Some("native"));
         assert_eq!(model.service_tiers(), ["default"]);
+        assert_eq!(model.free(), None);
+        assert_eq!(model.prices(), (Some(0), Some(0), Some(0)));
+        assert!(model.costs_nothing());
 
         let unknown = ModelSpec::new("model", None)
             .expect("model")
             .with_context(0)
             .with_max_output(0)
-            .with_web_search("unsupported");
+            .with_web_search("unsupported")
+            .with_prices(0, 0, 0)
+            .with_free(false);
         assert_eq!(unknown.context(), 0);
         assert_eq!(unknown.max_output(), 0);
         assert_eq!(unknown.image_input(), None);
         assert_eq!(unknown.web_search(), None);
+        assert_eq!(unknown.free(), Some(false));
+        assert!(!unknown.costs_nothing());
     }
 
     #[test]

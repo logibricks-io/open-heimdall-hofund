@@ -28,7 +28,8 @@ use hofund_provider::{
     CountOutcome as ProviderCount, Provider, ProviderError, ProviderErrorKind,
 };
 use hofund_router::{
-    Attempt, AttemptHook, Cooldowns, FailoverPolicy, Hop, Member, MemberAttempt, Router, Snapshot,
+    Attempt, AttemptHook, Cooldowns, FailoverPolicy, Hop, Member, MemberAttempt, Route, Router,
+    Snapshot, strategy::StrategyState,
 };
 use tower::Service;
 
@@ -50,6 +51,7 @@ pub(crate) struct Table {
     hops: Mutex<BTreeMap<String, Vec<HopSpec>>>,
     policy: Mutex<FailoverPolicy>,
     cooldowns: Arc<Cooldowns>,
+    strategies: Arc<StrategyState>,
     snapshot: Snapshot,
 }
 
@@ -57,6 +59,9 @@ struct HopSpec {
     member: Arc<LiveMember>,
     wire_model: Option<String>,
     max_output_tokens: Option<u64>,
+    routing: String,
+    weight: u64,
+    free: bool,
 }
 
 struct LiveMember {
@@ -175,13 +180,17 @@ fn build_table(
     policy: FailoverPolicy,
     cooldowns: Arc<Cooldowns>,
 ) -> Result<Arc<Table>, DaemonError> {
+    let strategies = Arc::new(StrategyState::with_builtins());
     let snapshot = Snapshot::new(
-        Router::from_hops(BTreeMap::new(), policy.clone()).with_cooldowns(Arc::clone(&cooldowns)),
+        Router::from_hops(BTreeMap::new(), policy.clone())
+            .with_strategies(Arc::clone(&strategies))
+            .with_cooldowns(Arc::clone(&cooldowns)),
     );
     let table = Arc::new(Table {
         hops: Mutex::new(BTreeMap::new()),
         policy: Mutex::new(policy),
         cooldowns,
+        strategies,
         snapshot,
     });
     let stored = build_specs(&table, built, routes)?;
@@ -236,6 +245,9 @@ fn build_specs(
                 )),
                 wire_model: hop.wire_model,
                 max_output_tokens: hop.max_output_tokens,
+                routing: hop.routing,
+                weight: hop.weight,
+                free: hop.free,
             });
         }
         stored.insert(model, specs);
@@ -254,6 +266,9 @@ pub(crate) struct PlannedHop {
     pub member_id: Option<MemberId>,
     pub wire_model: Option<String>,
     pub max_output_tokens: Option<u64>,
+    pub routing: String,
+    pub weight: u64,
+    pub free: bool,
 }
 
 impl Table {
@@ -283,14 +298,20 @@ impl Table {
                         wire_model: spec.wire_model.clone(),
                         max_output_tokens: spec.max_output_tokens,
                         context_window: None,
+                        weight: spec.weight,
+                        free: spec.free,
                     })
                     .collect();
-                (model.clone(), list)
+                let routing = specs.first().map_or("smart", |spec| spec.routing.as_str());
+                (model.clone(), Route::new(list).with_routing(routing))
             })
             .collect();
         let policy = self.policy.lock().expect("failover policy").clone();
-        self.snapshot
-            .store(Router::from_hops(routes, policy).with_cooldowns(Arc::clone(&self.cooldowns)));
+        self.snapshot.store(
+            Router::from_routes(routes, policy)
+                .with_strategies(Arc::clone(&self.strategies))
+                .with_cooldowns(Arc::clone(&self.cooldowns)),
+        );
     }
 }
 
@@ -946,6 +967,9 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                routing: "smart".to_owned(),
+                weight: 1,
+                free: false,
             }],
         );
         let snapshot =
@@ -1034,6 +1058,9 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                routing: "smart".to_owned(),
+                weight: 1,
+                free: false,
             }],
         );
         let snapshot =
@@ -1113,6 +1140,9 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                routing: "smart".to_owned(),
+                weight: 1,
+                free: false,
             }],
         );
         let snapshot =
@@ -1191,6 +1221,9 @@ mod tests {
                 member_id: None,
                 wire_model: None,
                 max_output_tokens: None,
+                routing: "smart".to_owned(),
+                weight: 1,
+                free: false,
             }],
         );
         let snapshot =
@@ -1241,6 +1274,9 @@ mod tests {
                     member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
+                    routing: "smart".to_owned(),
+                    weight: 1,
+                    free: false,
                 },
                 PlannedHop {
                     provider: "my-provider".to_owned(),
@@ -1248,6 +1284,9 @@ mod tests {
                     member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
+                    routing: "smart".to_owned(),
+                    weight: 1,
+                    free: false,
                 },
             ],
         );
@@ -1279,6 +1318,9 @@ mod tests {
                     member_id: None,
                     wire_model: None,
                     max_output_tokens: None,
+                    routing: "smart".to_owned(),
+                    weight: 1,
+                    free: false,
                 })
                 .collect(),
         )])
@@ -1896,5 +1938,55 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(book.cooling(&super::member_id("cancelled")), None);
+    }
+
+    #[tokio::test]
+    async fn weighted_rounds_survive_republished_snapshots() {
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                built_member(
+                    "first",
+                    Arc::new(Scripted {
+                        id: "first",
+                        hits: Arc::new(AtomicUsize::new(0)),
+                        answers: std::sync::Mutex::new(
+                            [Ok(raw_ok()), Ok(raw_ok()), Ok(raw_ok())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                    }),
+                ),
+            ),
+            (
+                "second".to_owned(),
+                built_member(
+                    "second",
+                    Arc::new(Scripted {
+                        id: "second",
+                        hits: Arc::new(AtomicUsize::new(0)),
+                        answers: std::sync::Mutex::new([Ok(raw_ok())].into_iter().collect()),
+                    }),
+                ),
+            ),
+        ]);
+        let mut routes = route(&["first", "second"]);
+        for hop in routes.get_mut("demo").expect("route") {
+            hop.routing = "weight".to_owned();
+            hop.weight = if hop.provider == "first" { 3 } else { 1 };
+        }
+        let (snapshot, table) =
+            super::open_with_table(&built, routes, FailoverPolicy::default(), cooldowns())
+                .expect("snapshot");
+
+        for expected in ["first", "first", "second", "first"] {
+            table.publish();
+            let routed = snapshot
+                .load()
+                .dispatch(&Request::new("demo"), "openai-chat")
+                .await
+                .expect("dispatch");
+            assert_eq!(routed.upstream_id, expected);
+        }
     }
 }

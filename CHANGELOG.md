@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Routing strategy core (P0-2a): route-level `order`, `rotate`, smooth
+  weighted round robin, and free-first ordering, with per-route and per-account
+  weights, manual/catalog/zero-price free detection, and strategy state kept
+  across configuration snapshots. `smart`, `usage`, `pace`, `fast`, and `cheap`
+  are registered and validated but preserve listed order until P0-2b. Ready
+  members retain strategy order before the single cooling probe, and
+  `hofund routes` prints each route's strategy.
+
 - Responses continuation history (P0-1a): `/v1/responses` now resolves
   `previous_response_id` in a caller-scoped, bounded in-memory LRU before
   decoding and routing. Unary and SSE replies are captured without delaying

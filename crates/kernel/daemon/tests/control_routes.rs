@@ -241,7 +241,7 @@ async fn route_models_in_config_order() {
     let server = MockServer::start().await;
     let dir = Scratch::new("route-models");
     let source = format!(
-        "{}[[routes]]\nmodel = \"z-last\"\nupstreams = [\"chat\"]\n[[routes]]\nmodel = \"a-first\"\nupstreams = [\"chat\"]\n[[routes]]\nmodel = \"middle\"\nupstreams = [\"chat\"]\n",
+        "{}[[routes]]\nmodel = \"z-last\"\nrouting = \"rotate\"\nupstreams = [\"chat\"]\n[[routes]]\nmodel = \"a-first\"\nupstreams = [\"chat\"]\n[[routes]]\nmodel = \"middle\"\nupstreams = [\"chat\"]\n",
         provider_config(&server.uri())
     );
     let running = start_tcp(&dir.0, &source).await;
@@ -260,6 +260,9 @@ async fn route_models_in_config_order() {
         &response.bytes().await.expect("route model body"),
     )
     .expect("route model list");
+    assert_eq!(list.models[0].routing, "rotate");
+    assert_eq!(list.models[1].routing, "smart");
+    assert_eq!(list.models[2].routing, "smart");
     let ids = list
         .models
         .into_iter()

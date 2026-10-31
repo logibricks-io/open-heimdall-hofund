@@ -2,7 +2,8 @@
   "version": 1,
   "models": [
     {
-      "id": "default"
+      "id": "default",
+      "routing": "weight"
     }
   ]
 }

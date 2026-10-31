@@ -319,6 +319,9 @@ pub(crate) fn expand(
                     member_id: Some(member.id.clone()),
                     wire_model: hop.wire_model.clone(),
                     max_output_tokens: hop.max_output_tokens,
+                    routing: hop.routing.clone(),
+                    weight: state.config.account_weight(member.account.as_str()),
+                    free: hop.free,
                 });
                 built.entry(key).or_insert(member.built);
             }
@@ -443,6 +446,7 @@ impl QuotaPolls {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
@@ -609,6 +613,38 @@ mod tests {
             routed(&snapshot),
             vec![plain(), member("x"), member("y"), member("z"), member("a")]
         );
+    }
+
+    #[tokio::test]
+    async fn account_weights_expand_with_stable_member_ids() {
+        let dir = tempfile::tempdir().expect("dir");
+        write_accounts(dir.path(), &[("work", "Work"), ("other", "Other")]);
+        let mut config = config("");
+        config.routes[0].routing = "weight".to_owned();
+        config.subscriptions[0]
+            .account_weights
+            .insert("work".to_owned(), 3);
+        let subscriptions = states(dir.path(), &config);
+        subscriptions
+            .get(PLUGIN)
+            .expect("subscription")
+            .resolve(&cooldowns())
+            .await;
+        let (routes, _) = crate::route_plan(&config, None);
+        let (_, expanded) =
+            super::expand(&BTreeMap::new(), &routes, &subscriptions).expect("expanded routes");
+
+        let work = expanded["demo"]
+            .iter()
+            .find(|hop| hop.member_id.as_ref() == Some(&member("work")))
+            .expect("work hop");
+        let other = expanded["demo"]
+            .iter()
+            .find(|hop| hop.member_id.as_ref() == Some(&member("other")))
+            .expect("other hop");
+        assert_eq!(work.weight, 3);
+        assert_eq!(other.weight, 1);
+        assert_eq!(work.routing, "weight");
     }
 
     #[tokio::test]

@@ -107,6 +107,8 @@ fn hop(id: &'static str, wire: Option<&str>, seen: &Arc<Mutex<Vec<String>>>, cou
         wire_model: wire.map(str::to_owned),
         max_output_tokens: None,
         context_window: None,
+        weight: 1,
+        free: false,
     }
 }
 
@@ -128,6 +130,8 @@ fn capped(
         wire_model: None,
         max_output_tokens: Some(8192),
         context_window: None,
+        weight: 1,
+        free: false,
     }
 }
 
@@ -302,6 +306,8 @@ fn answering(
         wire_model: wire.map(str::to_owned),
         max_output_tokens: None,
         context_window: None,
+        weight: 1,
+        free: false,
     }
 }
 

@@ -100,6 +100,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::ProviderAutoInclude { id, rules } => {
                 provider_edit::auto_include(config, &id, &rules).await
             }
+            Command::Routes => provider::routes(config).await,
             Command::ModelList => provider::model_list(config).await,
             Command::ModelShow { id } => provider::model_show(config, &id).await,
             Command::Version
@@ -192,6 +193,7 @@ enum Command {
         id: String,
         rules: Vec<String>,
     },
+    Routes,
     ModelList,
     ModelShow {
         id: String,
@@ -226,6 +228,7 @@ enum HelpTopic {
     SubscriptionRefresh,
     SubscriptionQuota,
     Provider,
+    Routes,
     Model,
 }
 
@@ -392,6 +395,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             ));
         }
         ["provider", ..] => return Err(help_text(HelpTopic::Provider)),
+        ["routes"] => Command::Routes,
         ["model", "list"] => Command::ModelList,
         ["model", "show", id] => Command::ModelShow {
             id: (*id).to_owned(),
@@ -477,6 +481,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["subscription", "quota", ..] => HelpTopic::SubscriptionQuota,
         ["subscription", ..] => HelpTopic::Subscription,
         ["provider", ..] => HelpTopic::Provider,
+        ["routes", ..] => HelpTopic::Routes,
         ["model", ..] => HelpTopic::Model,
         _ => {
             return Err(format!(
@@ -517,6 +522,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::SubscriptionRefresh => subscription::REFRESH_HELP,
         HelpTopic::SubscriptionQuota => subscription::QUOTA_HELP,
         HelpTopic::Provider => PROVIDER_HELP,
+        HelpTopic::Routes => ROUTES_HELP,
         HelpTopic::Model => MODEL_HELP,
     };
     body.to_owned()
@@ -568,6 +574,7 @@ commands:
                                   show or set the model-list refresh
   provider auto-include <id> [<rule>...|none]
                                   show or set the auto-include rules
+  routes                          list route models and routing strategies
   model list                      list the models routes serve
   model show <id>                 print one routed model
 
@@ -786,6 +793,12 @@ renaming a provider is not supported yet. `rm` does not move agents or
 routes off the provider; a route that still names it fails the apply.
 `add` does not fetch the model list; `refresh <id>` does. Without a
 running daemon, the edit applies in one-shot hofundd under the config lock.
+";
+
+const ROUTES_HELP: &str = "\
+usage: hofund routes [--config PATH]
+
+Print each configured route model and its routing strategy.
 ";
 
 const MODEL_HELP: &str = "\
@@ -1196,6 +1209,7 @@ mod tests {
             command(&["provider", "models", "p", "-h"]),
             Ok(Command::Help(HelpTopic::Provider))
         );
+        assert_eq!(command(&["routes"]), Ok(Command::Routes));
         assert_eq!(command(&["model", "list"]), Ok(Command::ModelList));
         assert_eq!(
             command(&["model", "show", "chat/a"]),
@@ -1214,6 +1228,7 @@ mod tests {
         for (topic, needle) in [
             (vec!["provider"], "not both"),
             (vec!["provider", "models"], "three"),
+            (vec!["routes"], "routing strategy"),
             (vec!["model"], "route"),
         ] {
             let help = help_text(help_topic(&topic).expect("topic"));

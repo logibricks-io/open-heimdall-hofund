@@ -405,15 +405,20 @@ ModelList::fn with_source_url (mut self , url : impl Into < String >) -> Self
 ModelSpec
 ModelSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 ModelSpec::const fn context (& self) -> u64
+ModelSpec::const fn costs_nothing (& self) -> bool
 ModelSpec::const fn decides (& self) -> bool
 ModelSpec::const fn draws (& self) -> bool
 ModelSpec::const fn films (& self) -> bool
+ModelSpec::const fn free (& self) -> Option < bool >
 ModelSpec::const fn image_input (& self) -> Option < bool >
 ModelSpec::const fn max_output (& self) -> u64
+ModelSpec::const fn prices (& self) -> (Option < u64 > , Option < u64 > , Option < u64 >)
 ModelSpec::const fn with_decides (mut self , decides : bool) -> Self
 ModelSpec::const fn with_draws (mut self , draws : bool) -> Self
 ModelSpec::const fn with_films (mut self , films : bool) -> Self
+ModelSpec::const fn with_free (mut self , free : bool) -> Self
 ModelSpec::const fn with_image_input (mut self , image_input : Option < bool >) -> Self
+ModelSpec::const fn with_prices (mut self , input : u64 , output : u64 , cache_read : u64) -> Self
 ModelSpec::fn display_name (& self) -> Option < & str >
 ModelSpec::fn efforts (& self) -> & [String]
 ModelSpec::fn endpoints (& self) -> & [String]

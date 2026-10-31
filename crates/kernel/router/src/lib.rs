@@ -13,6 +13,7 @@ mod cooldown;
 mod decision;
 mod member;
 mod snapshot;
+pub mod strategy;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -76,14 +77,61 @@ pub struct Hop {
     pub max_output_tokens: Option<u64>,
     /// Input context window, when the route or catalog knows it.
     pub context_window: Option<u64>,
+    /// Relative request share under weighted routing.
+    pub weight: u64,
+    /// Whether this model costs nothing on this member.
+    pub free: bool,
+}
+
+impl Hop {
+    /// A hop with no model overrides, weight one, and no free-model marking.
+    #[must_use]
+    pub fn new(member: Arc<dyn Member>) -> Self {
+        Self {
+            member,
+            wire_model: None,
+            max_output_tokens: None,
+            context_window: None,
+            weight: 1,
+            free: false,
+        }
+    }
+}
+
+/// One named route pool.
+#[derive(Clone)]
+pub struct Route {
+    /// Members in configured order.
+    pub hops: Vec<Hop>,
+    /// Registered routing strategy name.
+    pub routing: String,
+}
+
+impl Route {
+    /// A pool using smart routing.
+    #[must_use]
+    pub fn new(hops: Vec<Hop>) -> Self {
+        Self {
+            hops,
+            routing: "smart".to_owned(),
+        }
+    }
+
+    /// Sets the registered strategy name.
+    #[must_use]
+    pub fn with_routing(mut self, routing: impl Into<String>) -> Self {
+        self.routing = routing.into();
+        self
+    }
 }
 
 /// A model-to-upstream table.
 pub struct Router {
-    routes: BTreeMap<String, Vec<Hop>>,
+    routes: BTreeMap<String, Route>,
     providers: BTreeSet<String>,
     policy: FailoverPolicy,
     cooldowns: Option<Arc<Cooldowns>>,
+    strategies: Arc<strategy::StrategyState>,
 }
 
 /// A counted input.
@@ -100,6 +148,10 @@ struct Resolved {
     hops: Vec<Hop>,
     /// Name sent when a hop has no wire model.
     bare: String,
+    /// Stable state key for this route pool.
+    pool: String,
+    /// Strategy configured for this route pool.
+    routing: String,
 }
 
 impl Router {
@@ -111,27 +163,29 @@ impl Router {
         let routes = routes
             .into_iter()
             .map(|(model, members)| {
-                let hops = members
-                    .into_iter()
-                    .map(|member| Hop {
-                        member,
-                        wire_model: None,
-                        max_output_tokens: None,
-                        context_window: None,
-                    })
-                    .collect();
+                let hops = members.into_iter().map(Hop::new).collect();
                 (model, hops)
             })
             .collect();
         Self::from_hops(routes, policy)
     }
 
-    /// Builds a router from hops that may rename the model per member.
+    /// Builds a smart-routing router from hops that may rename the model per member.
     #[must_use]
     pub fn from_hops(routes: BTreeMap<String, Vec<Hop>>, policy: FailoverPolicy) -> Self {
+        let routes = routes
+            .into_iter()
+            .map(|(model, hops)| (model, Route::new(hops)))
+            .collect();
+        Self::from_routes(routes, policy)
+    }
+
+    /// Builds a router from named route pools.
+    #[must_use]
+    pub fn from_routes(routes: BTreeMap<String, Route>, policy: FailoverPolicy) -> Self {
         let mut providers = BTreeSet::new();
-        for hops in routes.values() {
-            for hop in hops {
+        for route in routes.values() {
+            for hop in &route.hops {
                 providers.insert(hop.member.route_id().to_owned());
             }
         }
@@ -140,7 +194,15 @@ impl Router {
             providers,
             policy,
             cooldowns: None,
+            strategies: Arc::new(strategy::StrategyState::with_builtins()),
         }
+    }
+
+    /// Shares strategy rounds with later snapshots of this route table.
+    #[must_use]
+    pub fn with_strategies(mut self, strategies: Arc<strategy::StrategyState>) -> Self {
+        self.strategies = strategies;
+        self
     }
 
     /// Shares cooldown state with this router and later snapshots.
@@ -161,8 +223,8 @@ impl Router {
     pub fn member_ids(&self) -> Vec<MemberId> {
         let mut seen = BTreeSet::new();
         let mut ids = Vec::new();
-        for hops in self.routes.values() {
-            for hop in hops {
+        for route in self.routes.values() {
+            for hop in &route.hops {
                 if seen.insert(hop.member.id().to_string()) {
                     ids.push(hop.member.id().clone());
                 }
@@ -176,7 +238,7 @@ impl Router {
     pub fn models(&self) -> Vec<String> {
         self.routes
             .iter()
-            .filter(|(_, providers)| !providers.is_empty())
+            .filter(|(_, route)| !route.hops.is_empty())
             .map(|(model, _)| model.clone())
             .collect()
     }
@@ -222,9 +284,7 @@ impl Router {
     ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
-        if let Some(cooldowns) = &self.cooldowns {
-            resolved.hops = order_hops(resolved.hops, cooldowns);
-        }
+        resolved.hops = self.order_hops(&resolved);
         let policy = self.policy.clone();
         let input_tokens = estimate_input_tokens(request);
         let mut last = None;
@@ -331,9 +391,7 @@ impl Router {
         inbound_protocol: &str,
     ) -> Result<InputCount, RouterError> {
         let mut resolved = self.resolve(&request.model)?;
-        if let Some(cooldowns) = &self.cooldowns {
-            resolved.hops = order_hops(resolved.hops, cooldowns);
-        }
+        resolved.hops = self.order_hops(&resolved);
         let policy = self.policy.clone();
         let mut last = None;
         let mut unsupported = false;
@@ -399,9 +457,7 @@ impl Router {
     /// body cannot be built or a member fails in a way that is not retried.
     pub async fn forward(&self, call: &Forward) -> Result<Forwarded, RouterError> {
         let mut resolved = self.resolve(call.model())?;
-        if let Some(cooldowns) = &self.cooldowns {
-            resolved.hops = order_hops(resolved.hops, cooldowns);
-        }
+        resolved.hops = self.order_hops(&resolved);
         let mut last = None;
         for (index, hop) in resolved.hops.iter().enumerate() {
             let upstream_model = hop
@@ -443,11 +499,48 @@ impl Router {
         }
     }
 
+    fn order_hops(&self, resolved: &Resolved) -> Vec<Hop> {
+        let ordered = if resolved.hops.len() < 2 {
+            resolved.hops.clone()
+        } else {
+            let seats = resolved
+                .hops
+                .iter()
+                .map(|hop| {
+                    let mut seat = strategy::Seat::new(hop.member.id().to_string());
+                    seat.weight = hop.weight;
+                    seat.free = hop.free;
+                    seat.resting = self
+                        .cooldowns
+                        .as_ref()
+                        .is_some_and(|cooldowns| cooldowns.cooling(hop.member.id()).is_some());
+                    seat
+                })
+                .collect::<Vec<_>>();
+            self.strategies
+                .order(&resolved.routing, &resolved.pool, &seats)
+                .into_iter()
+                .map(|index| resolved.hops[index].clone())
+                .collect()
+        };
+        if let Some(cooldowns) = &self.cooldowns {
+            order_hops(ordered, cooldowns)
+        } else {
+            ordered
+        }
+    }
+
     fn resolve(&self, asked: &str) -> Result<Resolved, RouterError> {
-        if let Some(hops) = self.routes.get(asked).filter(|hops| !hops.is_empty()) {
+        if let Some(route) = self
+            .routes
+            .get(asked)
+            .filter(|route| !route.hops.is_empty())
+        {
             return Ok(Resolved {
-                hops: hops.clone(),
+                hops: route.hops.clone(),
                 bare: asked.to_owned(),
+                pool: asked.to_owned(),
+                routing: route.routing.clone(),
             });
         }
         if let Some((provider_id, model)) = asked.split_once('/')
@@ -469,8 +562,8 @@ impl Router {
 
     fn matching(&self, mut pred: impl FnMut(&str, &Hop) -> bool) -> Vec<(String, Hop)> {
         let mut found = Vec::new();
-        for (route_model, hops) in &self.routes {
-            for hop in hops {
+        for (route_model, route) in &self.routes {
+            for hop in &route.hops {
                 if pred(route_model, hop) {
                     found.push((route_model.clone(), hop.clone()));
                 }
@@ -490,6 +583,8 @@ impl Router {
             1 => Ok(Resolved {
                 hops: vec![found.into_iter().next().expect("one hop").1],
                 bare: bare.to_owned(),
+                pool: asked.to_owned(),
+                routing: "smart".to_owned(),
             }),
             _ => Err(RouterError::Ambiguous {
                 model: asked.to_owned(),

@@ -101,6 +101,14 @@ api_key = "replace-me-too"
 # base_url = "my-resource"
 # api_key = "env:AZURE_OPENAI_API_KEY"
 
+# Routing defaults to smart. order, rotate, weight, and free are implemented;
+# smart, usage, pace, fast, and cheap currently keep the listed order until
+# P0-2b. cheap is valid only on a multi-upstream or subscription group.
+# Weights are integers of at least 1; omitted and 1 are the default. Provider
+# free = true marks every model free; cached catalog free flags and all-zero
+# prices are used otherwise. Account weights go in [subscriptions.account_weights]
+# with lower-cased account ids as keys. hofund routes prints the strategy names.
 [[routes]]
 model = "demo"
-upstreams = ["primary", "backup"]
+routing = "weight"
+upstreams = [{ provider = "primary", weight = 3 }, "backup"]
