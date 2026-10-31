@@ -6,8 +6,9 @@ scope, and account scope. They are separate from upstream provider credentials.
 ## Storage and the default key
 
 The store is `caller-keys.json` beside the configured token file. It is written
-atomically with owner-only permissions (`0600` on Unix), and one process-wide
-lock covers each read-modify-write sequence. A running gateway rereads it for
+atomically with owner-only permissions (`0600` on Unix). Each read-modify-write
+sequence holds an in-process lock and an exclusive file lock on
+`caller-keys.json.lock`, so the CLI and the daemon never overwrite each other. A running gateway rereads it for
 authentication, so rotation, disable, removal, and scope edits take effect
 without a restart.
 

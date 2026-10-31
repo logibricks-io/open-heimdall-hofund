@@ -175,7 +175,7 @@ impl KeyStore {
 
     /// Lists keys in their stored order, migrating the legacy token first.
     pub fn list(&self) -> Result<Vec<Key>, SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         let keys = self.load_migrated()?;
         Ok(keys.into_iter().filter(|key| !key.removed).collect())
     }
@@ -185,7 +185,7 @@ impl KeyStore {
         if secret.is_empty() {
             return Ok(None);
         }
-        let _guard = lock();
+        let _guard = self.lock()?;
         let keys = self.load_migrated()?;
         let digest = secret_digest(secret);
         let mut matched = None;
@@ -205,7 +205,7 @@ impl KeyStore {
         if secret.is_empty() {
             return Ok(false);
         }
-        let _guard = lock();
+        let _guard = self.lock()?;
         let keys = self.load_migrated()?;
         let digest = secret_digest(secret);
         Ok(keys
@@ -215,7 +215,7 @@ impl KeyStore {
 
     /// Whether `id` names an enabled key.
     pub fn on(&self, id: &str) -> Result<bool, SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         let keys = self.load_migrated()?;
         Ok(keys
             .iter()
@@ -224,7 +224,7 @@ impl KeyStore {
 
     /// Adds a key with a generated secret or a caller-supplied one.
     pub fn add(&self, name: &str, own: Option<&str>) -> Result<KeyWithSecret, SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         let mut keys = self.load_migrated()?;
         let name = clean_name(name)?;
         let secret = match own {
@@ -245,7 +245,7 @@ impl KeyStore {
 
     /// Rotates a key while retaining its id, name, scopes, and enabled state.
     pub fn rotate(&self, id: &str) -> Result<KeyWithSecret, SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         let mut keys = self.load_migrated()?;
         let index = find(&keys, id)?;
         let secret = generated_secret()?;
@@ -261,7 +261,7 @@ impl KeyStore {
 
     /// Rotates the default key, preserving the `token rotate` contract.
     pub fn rotate_default(&self) -> Result<KeyWithSecret, SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         let keys = self.load_migrated()?;
         let id = keys
             .iter()
@@ -290,7 +290,7 @@ impl KeyStore {
 
     /// Removes a key. A removed default leaves a migration tombstone.
     pub fn remove(&self, id: &str) -> Result<(), SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         let mut keys = self.load_migrated()?;
         let index = find(&keys, id)?;
         let is_default = keys[index].is_default;
@@ -310,7 +310,7 @@ impl KeyStore {
 
     /// Moves a key to a one-based place in the list without changing the default mirror.
     pub fn move_key(&self, id: &str, place: usize) -> Result<(), SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         let mut keys = self.load_migrated()?;
         let index = find(&keys, id)?;
         if place == 0 || place > keys.len() {
@@ -388,7 +388,7 @@ impl KeyStore {
         if was == now {
             return Ok(0);
         }
-        let _guard = lock();
+        let _guard = self.lock()?;
         let mut keys = self.load_migrated()?;
         let old = format!("{provider}/{was}").to_lowercase();
         let mut moved = 0;
@@ -408,7 +408,7 @@ impl KeyStore {
 
     /// Rewrites exact model ids after a model move; wildcard patterns stay unchanged.
     pub fn move_model(&self, from: &str, to: &str) -> Result<(), SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         let mut keys = self.load_migrated()?;
         let mut changed = false;
         for key in &mut keys {
@@ -441,13 +441,13 @@ impl KeyStore {
 
     /// Exports the complete hashed key records for a backup.
     pub fn export(&self) -> Result<Vec<Key>, SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         self.load_migrated()
     }
 
     /// Restores hashed key records atomically.
     pub fn restore(&self, keys: &[Key]) -> Result<(), SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         self.save(keys)
     }
 
@@ -456,11 +456,33 @@ impl KeyStore {
         id: &str,
         change: impl FnOnce(&mut Key) -> Result<(), SecretError>,
     ) -> Result<(), SecretError> {
-        let _guard = lock();
+        let _guard = self.lock()?;
         let mut keys = self.load_migrated()?;
         let index = find(&keys, id)?;
         change(&mut keys[index])?;
         self.save(&keys)
+    }
+
+    fn lock(&self) -> Result<StoreGuard, SecretError> {
+        let thread = STORE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let path = lock_path(&self.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| SecretError::File(error.to_string()))?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|error| SecretError::File(error.to_string()))?;
+        file.lock()
+            .map_err(|error| SecretError::File(error.to_string()))?;
+        Ok(StoreGuard {
+            _file: file,
+            _thread: thread,
+        })
     }
 
     fn load_migrated(&self) -> Result<Vec<Key>, SecretError> {
@@ -507,10 +529,17 @@ impl KeyStore {
     }
 }
 
-fn lock() -> std::sync::MutexGuard<'static, ()> {
-    STORE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Holds the in-process lock and the cross-process lock on `<store>.lock`
+/// for one read-modify-write; the CLI and the daemon both write the store.
+struct StoreGuard {
+    _file: fs::File,
+    _thread: std::sync::MutexGuard<'static, ()>,
+}
+
+fn lock_path(store: &Path) -> PathBuf {
+    let mut name = store.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
 }
 
 fn find(keys: &[Key], id: &str) -> Result<usize, SecretError> {
@@ -984,5 +1013,65 @@ mod tests {
                 .expect("auth")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn k15_lock_file_serialises_writers_across_processes() {
+        let (_dir, store) = scratch();
+        store.list().expect("migrate");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path(store.path()))
+            .expect("lock file");
+        assert_eq!(
+            lock_path(store.path())
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("caller-keys.json.lock")
+        );
+        lock.lock().expect("hold the lock as another process would");
+        let writer = KeyStore::beside_token(store.token_file().path().to_path_buf());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let added = writer.add("Second", Some("second-secret-123"));
+            done_tx.send(()).ok();
+            added
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "a writer waits while another process holds the lock"
+        );
+        store_raw_add(store.path(), "held-by-other");
+        lock.unlock().expect("release");
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("writer proceeds once the lock is released");
+        handle.join().expect("writer thread").expect("add");
+        let names: Vec<String> = store
+            .list()
+            .expect("list")
+            .into_iter()
+            .map(|key| key.name)
+            .collect();
+        assert!(names.contains(&"held-by-other".to_owned()), "{names:?}");
+        assert!(names.contains(&"Second".to_owned()), "{names:?}");
+    }
+
+    /// Appends a record the way another process would while holding the lock.
+    fn store_raw_add(path: &Path, name: &str) {
+        let mut keys: Vec<Key> =
+            serde_json::from_slice(&fs::read(path).expect("store")).expect("keys");
+        keys.push(Key {
+            id: format!("raw-{name}"),
+            name: name.to_owned(),
+            secret_hash: hash_hex(name),
+            masked: mask(name),
+            ..Key::default()
+        });
+        fs::write(path, serde_json::to_string_pretty(&keys).expect("json")).expect("write");
     }
 }
