@@ -455,10 +455,13 @@ Plan::fn new (changes : Vec < FileChange >) -> Self
 PluginError
 PluginError #[non_exhaustive] derives(Debug, Error)
 PluginError::const fn cools (& self) -> bool
+PluginError::const fn credit_soon (& self) -> bool
 PluginError::const fn is_credit (& self) -> bool
 PluginError::const fn kind (& self) -> PluginErrorKind
+PluginError::const fn reset_after (& self) -> Option < Duration >
 PluginError::const fn retry_after (& self) -> Option < Duration >
 PluginError::const fn status (& self) -> Option < u16 >
+PluginError::const fn with_credit_soon (mut self) -> Self
 PluginError::const fn without_cooldown (mut self) -> Self
 PluginError::fn auth (message : impl Into < String >) -> Self
 PluginError::fn cancelled (message : impl Into < String >) -> Self
@@ -477,6 +480,7 @@ PluginError::fn status_error (status : u16 , message : impl Into < String >) -> 
 PluginError::fn timeout (message : impl Into < String >) -> Self
 PluginError::fn transport (message : impl Into < String >) -> Self
 PluginError::fn unsupported (message : impl Into < String >) -> Self
+PluginError::fn with_reset_after (mut self , after : Duration) -> Self
 PluginError::fn with_retry_after (mut self , after : Duration) -> Self
 PluginError::fn with_source (mut self , source : impl Error + Send + Sync + 'static) -> Self
 PluginErrorKind

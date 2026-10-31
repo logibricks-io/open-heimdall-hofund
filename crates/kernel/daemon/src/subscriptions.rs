@@ -236,6 +236,9 @@ impl SubscriptionState {
         cooldowns: &Arc<Cooldowns>,
     ) -> Result<SubscriptionMember, DaemonError> {
         let id = MemberId::from_parts(self.plugin.clone(), account.clone());
+        if self.plugin.as_str() == "codex" {
+            cooldowns.configure_credit_window(&id);
+        }
         let host = hofund_plugin_host::runtime_host_with_observe_for(
             PluginKind::Subscription,
             self.plugin.clone(),
@@ -344,6 +347,21 @@ pub(crate) fn apply_windows(
     plugin: &PluginId,
     windows: &[QuotaWindow],
 ) -> bool {
+    let now = SystemTime::now();
+    let full_reset = windows
+        .iter()
+        .filter(|window| {
+            window.blocking()
+                && window.scope_model().is_none()
+                && window.limit().is_some_and(|limit| window.used() >= limit)
+        })
+        .filter_map(|window| {
+            window
+                .resets_at()
+                .and_then(|reset| reset.duration_since(now).ok())
+        })
+        .min();
+    cooldowns.observe_credit_window(member, full_reset);
     let mut cooled = false;
     for window in windows {
         if !window.blocking() || window.scope_model().is_some() {
@@ -360,7 +378,7 @@ pub(crate) fn apply_windows(
             .with_limit(limit);
         if let Some(after) = window
             .resets_at()
-            .and_then(|reset| reset.duration_since(SystemTime::now()).ok())
+            .and_then(|reset| reset.duration_since(now).ok())
         {
             observation = observation.with_window_reset(after);
         }

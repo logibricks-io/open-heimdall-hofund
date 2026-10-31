@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Credit-rest ladders and persistence (P0-3b1): API-key credit refusals now
+  climb 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, and a repeating 7-day
+  rung after ended rests, with flat retry/soon shapes and named resets capped
+  at 35 days. Key ladder deadlines and rungs persist atomically in `rests.json`.
+  ChatGPT/Codex account 402s use body/header resets, full-window renewal, long
+  retry hints, or five hours, and renewed-window observations lift them. Other
+  subscription accounts stay flat, and generic failures no longer climb while
+  their own rest is active.
 - Responses continuation history (P0-1a): `/v1/responses` now resolves
   `previous_response_id` in a caller-scoped, bounded in-memory LRU before
   decoding and routing. Unary and SSE replies are captured without delaying

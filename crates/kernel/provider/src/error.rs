@@ -20,7 +20,10 @@ pub struct ProviderError {
     pub status: Option<u16>,
     /// The upstream-directed retry delay, when it sent one.
     pub retry_after: Option<Duration>,
+    /// The delay until a reset named by the upstream, when it sent one.
+    pub reset_after: Option<Duration>,
     credit: bool,
+    credit_soon: bool,
     cooldown: bool,
 }
 
@@ -90,7 +93,9 @@ impl ProviderError {
             message: message.into(),
             status: Some(status),
             retry_after: None,
+            reset_after: None,
             credit: false,
+            credit_soon: false,
             cooldown: true,
         }
     }
@@ -115,7 +120,9 @@ impl ProviderError {
                 message,
                 status: Some(status),
                 retry_after: None,
+                reset_after: None,
                 credit: false,
+                credit_soon: false,
                 cooldown: true,
             }
         } else {
@@ -137,6 +144,7 @@ impl ProviderError {
         let status = error.status();
         let message = error.message().to_owned();
         let credit = error.is_credit();
+        let credit_soon = error.credit_soon();
         let cooldown = error.cools();
         let mut converted = match kind {
             hofund_plugin_api::PluginErrorKind::Connect => Self::connect(message),
@@ -161,9 +169,13 @@ impl ProviderError {
         };
         converted.status = status.or(converted.status);
         converted.credit = credit;
+        converted.credit_soon = credit_soon;
         converted.cooldown = cooldown;
         if let Some(after) = error.retry_after() {
             converted = converted.with_retry_after(after);
+        }
+        if let Some(after) = error.reset_after() {
+            converted = converted.with_reset_after(after);
         }
         converted
     }
@@ -229,6 +241,26 @@ impl ProviderError {
         self.retry_after
     }
 
+    /// Attaches the delay until a reset named by the upstream.
+    #[must_use]
+    pub fn with_reset_after(mut self, after: Duration) -> Self {
+        self.reset_after = Some(after);
+        self
+    }
+
+    /// The delay until a reset named by the upstream, when one was supplied.
+    #[must_use]
+    pub const fn reset_after(&self) -> Option<Duration> {
+        self.reset_after
+    }
+
+    /// Marks a credit refusal that can pass soon or for a smaller request.
+    #[must_use]
+    pub const fn with_credit_soon(mut self) -> Self {
+        self.credit_soon = true;
+        self
+    }
+
     /// Marks a failed response shape that must not cool the member.
     #[must_use]
     pub const fn without_cooldown(mut self) -> Self {
@@ -240,6 +272,12 @@ impl ProviderError {
     #[must_use]
     pub const fn is_credit(&self) -> bool {
         self.credit
+    }
+
+    /// Whether the credit refusal can pass soon or for a smaller request.
+    #[must_use]
+    pub const fn credit_soon(&self) -> bool {
+        self.credit_soon
     }
 
     /// Whether a failure should cool the member.
@@ -254,7 +292,9 @@ impl ProviderError {
             message: message.into(),
             status: None,
             retry_after: None,
+            reset_after: None,
             credit: false,
+            credit_soon: false,
             cooldown: true,
         }
     }
