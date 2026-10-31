@@ -422,7 +422,10 @@ mod tests {
             (400, "Unknown parameter: tools"),
             (400, "Unrecognized request argument supplied: foo"),
             (422, "invalid request error trace_id: 0123456789abcdef01"),
-            (400, "This model is only supported in v1/responses and not in v1/chat/completions."),
+            (
+                400,
+                "This model is only supported in v1/responses and not in v1/chat/completions.",
+            ),
         ] {
             let error = PluginError::status_error(status, message);
             assert!(allows(&error, false, &none()), "{status} {message}");
@@ -473,7 +476,11 @@ mod tests {
     fn too_long_unsaid_cuts_the_vendor_text() {
         let said = format!("prompt is too long {}", "x".repeat(300));
         let error = unsaid(502, &said, 1000).expect("inferred");
-        let quoted = error.message().split("answered 502: ").nth(1).expect("quoted");
+        let quoted = error
+            .message()
+            .split("answered 502: ")
+            .nth(1)
+            .expect("quoted");
         assert_eq!(quoted.chars().count(), 202);
         assert!(quoted.ends_with("\u{2026})"));
     }
