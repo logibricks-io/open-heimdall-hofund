@@ -8,11 +8,15 @@
 pub mod control;
 mod endpoints;
 mod prev_response;
+mod quotas;
 mod relisten;
 mod responses_ws;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 #[doc(hidden)]
+pub use quotas::{
+    QuotaAccess, QuotaCaller, QuotaScope, QuotaScopeHook, QuotaSource, tell_everything,
+};
 pub use relisten::BindHook;
 pub use relisten::{Relisten, RelistenError};
 
@@ -74,6 +78,10 @@ struct Inner {
     /// Shared in-flight counter surfaced on control status and snapshots.
     in_flight: Arc<AtomicU64>,
     sockets: Arc<responses_ws::SocketRegistry>,
+    /// Quota report and history source. Absent until attached.
+    quota_source: Option<Arc<dyn QuotaSource>>,
+    /// What each caller of the quota routes may be told.
+    quota_scope: QuotaScopeHook,
 }
 
 struct TokenState {
@@ -379,6 +387,8 @@ impl Gateway {
                 surface_http: None,
                 in_flight: Arc::new(AtomicU64::new(0)),
                 sockets: Arc::new(responses_ws::SocketRegistry::default()),
+                quota_source: None,
+                quota_scope: tell_everything(),
             }),
         }
     }
@@ -420,6 +430,25 @@ impl Gateway {
         let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
         inner.request_events = Some(events);
         inner.in_flight = in_flight;
+        self
+    }
+
+    /// Serves `GET /v1/hofund/quotas` and `GET /v1/hofund/quotas/history`
+    /// from `source`, telling every token holder everything until
+    /// [`Self::with_quota_scope`] narrows it. Call before [`Self::bind`].
+    #[must_use]
+    pub fn with_quotas(mut self, source: Arc<dyn QuotaSource>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
+        inner.quota_source = Some(source);
+        self
+    }
+
+    /// Sets what each caller of the quota routes may be told. Has no effect
+    /// unless [`Self::with_quotas`] is also called. Call before [`Self::bind`].
+    #[must_use]
+    pub fn with_quota_scope(mut self, scope: QuotaScopeHook) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
+        inner.quota_scope = scope;
         self
     }
 
@@ -703,6 +732,9 @@ impl Drop for Running {
 /// The complete outer request path, also used to replay a socket turn.
 fn request_router(app: &Arc<Inner>) -> axum::Router {
     let mut routes = codec_routes(app);
+    if app.quota_source.is_some() {
+        routes = quotas::routes(routes);
+    }
     if !app.surfaces.is_empty() {
         routes = routes.fallback(dispatch_surface);
     }

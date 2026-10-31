@@ -41,6 +41,7 @@ mod models;
 mod models_state;
 mod offline;
 mod one_shot;
+mod quotas;
 mod registry;
 mod rests;
 mod runtime;
@@ -444,6 +445,11 @@ async fn start_inner(
     )
     .with_surfaces(registry.surfaces())
     .with_surface_http(surface_http(&config, max_idle_per_host));
+    let quotas = Arc::new(quotas::DaemonQuotas::new(
+        Arc::clone(&runtime),
+        Arc::clone(&usage),
+    ));
+    gateway = gateway.with_quotas(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
     if let Some(bus) = &control_bus {
         gateway = gateway.with_request_events(
             Arc::new(events::RequestBridge::new(Arc::clone(bus))),
@@ -516,6 +522,7 @@ async fn start_inner(
                 shutdown_request,
             )
             .with_agent_hooks(options.agent_session, Some(token_generation))
+            .with_quotas(Arc::clone(&quotas))
             .with_events(Arc::clone(&events))
             .with_in_flight(Arc::clone(&in_flight)),
         );
