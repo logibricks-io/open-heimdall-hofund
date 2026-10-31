@@ -1932,6 +1932,8 @@ mod tests {
             let body = serde_json::json!({"error": {"message": message}}).to_string();
             assert!(endpoint_unsupported(body.as_bytes()), "{message}");
         }
+        let coded = serde_json::json!({"error": {"message": "unsupported", "code": "bad_request"}});
+        assert!(endpoint_unsupported(coded.to_string().as_bytes()));
         for message in ["unsupported image type png", "messages: field required", ""] {
             let body = serde_json::json!({"error": {"message": message}}).to_string();
             assert!(!endpoint_unsupported(body.as_bytes()), "{message}");

@@ -748,7 +748,10 @@ fn missing_expires_in_refreshes_after_default_window() {
         || tokens::refresh_for_test(host.context().clone(), TOKEN_URL.to_owned(), id.clone());
     block_on(async {
         cache.get(&clock, &id, refresh).await.expect("first");
-        clock.advance(tokens::DEFAULT_EXPIRY - tokens::REFRESH_MARGIN - Duration::from_secs(1));
+        // Without `expires_in` a token is taken to last an hour.
+        clock.advance(
+            Duration::from_secs(60 * 60) - tokens::REFRESH_MARGIN - Duration::from_secs(1),
+        );
         cache.get(&clock, &id, refresh).await.expect("cached");
         assert_eq!(posts_to(&host, TOKEN_URL).len(), 1);
         clock.advance(Duration::from_secs(1));

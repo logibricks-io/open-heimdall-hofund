@@ -24,7 +24,7 @@ pub(crate) const LAPSED_REASON: &str = "Google refused the stored sign-in; sign 
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(2 * 60);
 
 /// How long an access token lasts when the reply omits `expires_in`.
-pub(crate) const DEFAULT_EXPIRY: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_EXPIRY: Duration = Duration::from_secs(60 * 60);
 
 const LEASE_WAIT: Duration = Duration::from_secs(30);
 
