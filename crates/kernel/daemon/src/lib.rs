@@ -449,7 +449,7 @@ async fn start_inner(
         .map(|_| Arc::new(events::EventBus::new()));
     let in_flight = Arc::new(AtomicU64::new(0));
     let mut gateway = Gateway::with_token_file(
-        snapshot,
+        snapshot.clone(),
         token.clone(),
         token_path.clone(),
         inbound_codecs(),
@@ -536,6 +536,7 @@ async fn start_inner(
                 token_path.clone(),
                 shutdown_request,
             )
+            .with_router(snapshot)
             .with_agent_hooks(options.agent_session, Some(token_generation))
             .with_quotas(Arc::clone(&quotas))
             .with_events(Arc::clone(&events))
@@ -726,9 +727,15 @@ pub(crate) struct Instance {
     model_list: bool,
 }
 
+fn effective_at_once(configured: Option<u64>, declared: u64) -> u64 {
+    configured.unwrap_or(declared)
+}
+
 /// Providers built from one configuration.
 pub(crate) struct Built {
     pub(crate) built: BTreeMap<String, membership::BuiltProvider>,
+    /// Effective accounts-at-once limits, keyed by provider id.
+    pub(crate) limits: BTreeMap<String, u64>,
     /// Keyed by provider id.
     pub(crate) instances: HashMap<String, Instance>,
 }
@@ -746,7 +753,11 @@ fn router(
         Arc<hofund_router::quota::QuotaStore>,
     ),
 ) -> Result<RouterParts, DaemonError> {
-    let Built { built, instances } = providers(
+    let Built {
+        built,
+        limits,
+        instances,
+    } = providers(
         config,
         path,
         max_idle_per_host,
@@ -777,7 +788,7 @@ fn router(
             )
         })
         .collect();
-    let (routes, policy) = route_plan(config, models_host.as_deref(), Some(&built));
+    let (routes, policy) = route_plan(config, models_host.as_deref(), Some(&built), &limits);
     let (members, expanded) = subscriptions::expand(&built, &routes, subscriptions)?;
     let (snapshot, table) = membership::open_with_table_and_affinity(
         &members,
@@ -802,6 +813,7 @@ fn route_plan(
     config: &Config,
     models_host: Option<&ModelsHost>,
     built: Option<&BTreeMap<String, membership::BuiltProvider>>,
+    limits: &BTreeMap<String, u64>,
 ) -> (
     BTreeMap<String, Vec<membership::PlannedHop>>,
     FailoverPolicy,
@@ -824,6 +836,7 @@ fn route_plan(
             .collect(),
         models_host,
         built,
+        limits,
     };
     let mut routes = BTreeMap::new();
     for route in &config.routes {
@@ -854,6 +867,7 @@ struct RoutePlanContext<'a> {
     routes: BTreeMap<&'a str, &'a hofund_config::Route>,
     models_host: Option<&'a ModelsHost>,
     built: Option<&'a BTreeMap<String, membership::BuiltProvider>>,
+    limits: &'a BTreeMap<String, u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -939,6 +953,9 @@ fn expand_route(
                     provider: String::new(),
                     subscription: Some(subscription.clone()),
                     member_id: None,
+                    at_once_group: subscription.clone(),
+                    at_once: 0,
+                    rank: 0,
                     wire_model: upstream.model.clone(),
                     max_output_tokens: upstream.max_output_tokens,
                     context_window: None,
@@ -1058,11 +1075,15 @@ fn push_provider(
             .map(|key| (Some(key.member.clone()), key.weight))
             .collect()
     };
-    for (member_id, key_weight) in candidates {
+    let at_once = context.limits.get(id).copied().unwrap_or(0);
+    for (rank, (member_id, key_weight)) in candidates.into_iter().enumerate() {
         out.push(membership::PlannedHop {
             provider: id.to_owned(),
             subscription: None,
             member_id,
+            at_once_group: id.to_owned(),
+            at_once,
+            rank,
             wire_model: model.clone(),
             max_output_tokens: max_output_tokens.or(provider_cap),
             context_window: hop_window(listed.as_ref()),
@@ -1171,6 +1192,7 @@ fn providers(
     let limits = http_limits(config, max_idle_per_host);
     let timeouts = (config.connect_timeout, config.read_timeout);
     let mut built = BTreeMap::new();
+    let mut at_once_limits = BTreeMap::new();
     let mut instances = HashMap::new();
     for provider in &config.providers {
         let planned = match models_host {
@@ -1179,6 +1201,10 @@ fn providers(
         };
         let protocol = protocol_of(planned.wire);
         let plugin_id = plugin_for(provider, &planned, registry);
+        at_once_limits.insert(
+            provider.id.clone(),
+            effective_at_once(provider.at_once, registry.upstream_max_accounts(&plugin_id)),
+        );
         let (several, mut keys) = provider_keys::enabled(provider, protocol)?;
         if keys.is_empty() && provider.key_entries().is_empty() {
             keys.push(provider_keys::ResolvedKey {
@@ -1269,7 +1295,11 @@ fn providers(
             instances.insert(instance_id, instance);
         }
     }
-    Ok(Built { built, instances })
+    Ok(Built {
+        built,
+        limits: at_once_limits,
+        instances,
+    })
 }
 
 fn provider_fingerprint(
@@ -2012,6 +2042,8 @@ fn show<E: std::fmt::Display>(error: E) -> DaemonError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::check;
 
     fn registry() -> std::sync::Arc<dyn super::DaemonRegistry> {
@@ -2068,7 +2100,7 @@ mod tests {
             "[[providers]]\nid = \"one\"\npreset = \"openai\"\nfree = true\n[[routes]]\nmodel = \"demo\"\nrouting = \"weight\"\nupstreams = [{ provider = \"one\", weight = 3 }]\n",
         )
         .expect("config");
-        let (routes, _) = super::route_plan(&config, None, None);
+        let (routes, _) = super::route_plan(&config, None, None, &BTreeMap::new());
         let hop = &routes["demo"][0];
         assert_eq!(hop.routing, "weight");
         assert_eq!(hop.weight, 3);
@@ -2081,7 +2113,7 @@ mod tests {
             "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nsink = true\nupstreams = [{ provider = \"one\" }]\n",
         )
         .expect("config");
-        let (routes, _) = super::route_plan(&config, None, None);
+        let (routes, _) = super::route_plan(&config, None, None, &BTreeMap::new());
         assert!(routes["demo"][0].sink);
     }
 
@@ -2105,7 +2137,7 @@ mod tests {
         )
         .expect("providers");
         assert_eq!(built.built.len(), 2);
-        let (routes, _) = super::route_plan(&config, None, Some(&built.built));
+        let (routes, _) = super::route_plan(&config, None, Some(&built.built), &built.limits);
         let hops = &routes["demo"];
         assert_eq!(hops.len(), 2);
         assert_eq!(
@@ -2145,7 +2177,7 @@ mod tests {
             &registry,
         )
         .expect("providers");
-        let (routes, _) = super::route_plan(&config, None, Some(&built.built));
+        let (routes, _) = super::route_plan(&config, None, Some(&built.built), &built.limits);
         assert_eq!(routes["demo"][0].member_id, None);
         assert!(built.built.contains_key("one"));
     }
@@ -2178,7 +2210,7 @@ mod tests {
             "#,
         )
         .expect("fallback group config");
-        let (routes, _) = super::route_plan(&config, None, None);
+        let (routes, _) = super::route_plan(&config, None, None, &BTreeMap::new());
         let hops = &routes["demo"];
         assert_eq!(
             hops.iter()
@@ -2197,7 +2229,7 @@ mod tests {
             "[[providers]]\nid = \"one\"\npreset = \"openai\"\npatience = \"off\"\n[[routes]]\nmodel = \"demo\"\npatience = 90\nupstreams = [{ provider = \"one\" }]\n[[routes]]\nmodel = \"plain\"\nupstreams = [{ provider = \"one\" }]\n",
         )
         .expect("config");
-        let (routes, _) = super::route_plan(&config, None, None);
+        let (routes, _) = super::route_plan(&config, None, None, &BTreeMap::new());
         assert_eq!(
             routes["demo"][0].patience,
             Some(std::time::Duration::from_secs(90))
@@ -2224,11 +2256,11 @@ mod tests {
             .with_context(64_000);
         let bare = hofund_plugin_api::ModelSpec::new("bare", None).expect("model");
         host.seed_models("one", &[sized, bare]);
-        let (routes, _) = super::route_plan(&config, Some(&host), None);
+        let (routes, _) = super::route_plan(&config, Some(&host), None, &BTreeMap::new());
         let hops = &routes["Demo"];
         assert_eq!(hops[0].context_window, Some(64_000));
         assert_eq!(hops[1].context_window, None);
-        let (routes, _) = super::route_plan(&config, None, None);
+        let (routes, _) = super::route_plan(&config, None, None, &BTreeMap::new());
         assert_eq!(routes["Demo"][0].context_window, None);
     }
 

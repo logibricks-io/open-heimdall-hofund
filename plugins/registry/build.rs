@@ -24,6 +24,7 @@ struct Listed {
     path: String,
     package: String,
     feature: String,
+    max_accounts: u64,
     routes: Vec<DeclaredRoute>,
     fragments: Vec<FragmentToml>,
 }
@@ -189,6 +190,19 @@ fn parse_list(workspace: &Path, text: &str) -> Result<Vec<Listed>, String> {
         if field(&declared, "id")? != id || field(&declared, "kind")? != kind {
             return Err(format!("{path}/plugin.toml does not match plugins.toml"));
         }
+        let max_accounts = declared
+            .get("max_accounts")
+            .map(|value| {
+                value
+                    .as_integer()
+                    .and_then(|value| u64::try_from(value).ok())
+                    .map(|value| value.min(1000))
+                    .ok_or_else(|| {
+                        format!("{path}/plugin.toml max_accounts must be a nonnegative integer")
+                    })
+            })
+            .transpose()?
+            .unwrap_or(0);
         let routes = routes_of(&id, &declared)?;
         if kind == "inbound" && routes.is_empty() {
             return Err(format!("{id} declares no routes"));
@@ -200,6 +214,7 @@ fn parse_list(workspace: &Path, text: &str) -> Result<Vec<Listed>, String> {
             path,
             package,
             feature,
+            max_accounts,
             routes,
             fragments,
         });
@@ -509,6 +524,7 @@ fn check_features(listed: &[Listed]) -> Result<(), String> {
 fn emit(listed: &[Listed], builtins: &[FragmentToml]) -> String {
     let mut routes = String::new();
     let mut calls = String::new();
+    let mut accounts = String::new();
     let mut presets = String::new();
     let mut aliases = String::new();
     for plugin in listed {
@@ -523,6 +539,10 @@ fn emit(listed: &[Listed], builtins: &[FragmentToml]) -> String {
         calls.push_str(&format!(
             "        #[cfg(feature = \"{}\")]\n        (hofund_plugin_api::PluginKind::{kind}, \"{}\", {rust_name}::contribute()),\n",
             plugin.feature, plugin.id
+        ));
+        accounts.push_str(&format!(
+            "        #[cfg(feature = \"{}\")]\n        ({:?}, {:?}, {}),\n",
+            plugin.feature, plugin.kind, plugin.id, plugin.max_accounts
         ));
         for route in &plugin.routes {
             routes.push_str(&format!(
@@ -680,6 +700,16 @@ pub struct CompiledAlias {{
     pub preset: &'static str,
     /// Default target region.
     pub region: Option<&'static str>,
+}}
+
+/// The `max_accounts` declaration for a linked provider or subscription.
+#[must_use]
+pub fn declared_max_accounts(kind: &str, id: &str) -> Option<u64> {{
+    const DECLARED: &[(&str, &str, u64)] = &[
+{accounts}    ];
+    DECLARED.iter().copied().find(|(listed_kind, listed_id, _)| {{
+        *listed_kind == kind && *listed_id == id
+    }}).map(|(_, _, limit)| limit)
 }}
 
 /// Routes for the features enabled on this build.

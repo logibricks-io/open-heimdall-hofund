@@ -209,6 +209,8 @@ pub struct RequestEnd {
     pub input_tokens: Option<u64>,
     /// Output tokens when reported.
     pub output_tokens: Option<u64>,
+    /// Why conversation affinity kept or released the previous answerer.
+    pub reason: Option<String>,
 }
 
 /// Receives request start and finish summaries for the control `requests` topic.
@@ -228,6 +230,7 @@ struct RequestTrack {
     in_flight: Arc<AtomicU64>,
     request_id: String,
     model: String,
+    reason: Option<String>,
     started: Instant,
     active: bool,
     finished: bool,
@@ -249,6 +252,7 @@ impl RequestTrack {
             in_flight,
             request_id: start.request_id,
             model: start.route,
+            reason: None,
             started: Instant::now(),
             active: true,
             finished: false,
@@ -302,6 +306,7 @@ impl RequestTrack {
             duration_ms,
             input_tokens,
             output_tokens,
+            reason: self.reason.clone(),
         });
     }
 
@@ -312,6 +317,7 @@ impl RequestTrack {
             in_flight: Arc::clone(&self.in_flight),
             request_id: self.request_id.clone(),
             model: self.model.clone(),
+            reason: self.reason.clone(),
             started: self.started,
             active: self.active,
             finished: self.finished,
@@ -1643,6 +1649,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 &routed.upstream_model,
                 routed.completion,
                 continuation,
+                routed.affinity_reason,
                 started,
                 &identity,
                 &mut track,
@@ -1761,6 +1768,7 @@ fn held_response(
                                 &routed.upstream_model,
                                 routed.completion,
                                 continuation,
+                                routed.affinity_reason,
                                 state.started,
                                 &state.identity,
                                 state.track.as_mut().expect("held request track"),
@@ -2060,11 +2068,13 @@ async fn success(
     upstream_model: &str,
     completion: Completion,
     continuation: Option<hofund_router::RouteContinuation>,
+    affinity_reason: Option<String>,
     started: Instant,
     identity: &Identity,
     track: &mut RequestTrack,
     capture: Option<prev_response::Capture>,
 ) -> Response {
+    track.reason = affinity_reason;
     let mut meta = UsageMeta::new(request, upstream, started, identity);
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
@@ -2940,6 +2950,7 @@ mod request_event_tests {
             in_flight: Arc::clone(&counter),
             request_id: "r1".into(),
             model: "demo".into(),
+            reason: None,
             started: std::time::Instant::now(),
             active: true,
             finished: false,
@@ -2981,6 +2992,7 @@ mod request_event_tests {
                 in_flight: Arc::clone(&counter),
                 request_id: "r-drop".into(),
                 model: "demo".into(),
+                reason: None,
                 started: std::time::Instant::now(),
                 active: true,
                 finished: false,
