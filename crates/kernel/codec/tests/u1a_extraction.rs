@@ -77,3 +77,30 @@ fn u1a_9_normalize_cache_write_hour_only() {
     assert_eq!(five, Some(0));
     assert_eq!(hour, Some(4000));
 }
+
+#[test]
+fn u1a_11_normalize_cache_write_total_never_below_its_parts() {
+    let (total, five, hour) = normalize_cache_write(Some(10), Some(20), Some(30));
+    assert_eq!(total, Some(50));
+    assert_eq!(five, Some(20));
+    assert_eq!(hour, Some(30));
+}
+
+#[test]
+fn u1a_12_anthropic_encode_writes_the_ttl_split() {
+    let body = br#"{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":3000,"cache_creation":{"ephemeral_5m_input_tokens":1000,"ephemeral_1h_input_tokens":2000}}}"#;
+    let response = AnthropicMessages.decode_response(body).expect("decode");
+    let encoded = AnthropicMessages
+        .encode_response(&response)
+        .expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    assert_eq!(value["usage"]["cache_creation_input_tokens"], 3000);
+    assert_eq!(
+        value["usage"]["cache_creation"]["ephemeral_5m_input_tokens"],
+        1000
+    );
+    assert_eq!(
+        value["usage"]["cache_creation"]["ephemeral_1h_input_tokens"],
+        2000
+    );
+}

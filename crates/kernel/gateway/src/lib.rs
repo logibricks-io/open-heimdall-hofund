@@ -3098,7 +3098,33 @@ mod request_event_tests {
 
 #[cfg(test)]
 mod forwarded_token_tests {
-    use super::{forwarded_details, forwarded_tokens};
+    use super::{forwarded_details, forwarded_tokens, reasoning_hidden};
+
+    #[test]
+    fn u1a_13_forwarded_reasoning_is_read_for_chat_and_responses() {
+        let chat = forwarded_details(
+            br#"{"usage":{"prompt_tokens":3,"completion_tokens_details":{"reasoning_tokens":7}}}"#,
+            Some(3),
+        );
+        assert_eq!(chat.reasoning_tokens, Some(7));
+        let responses = forwarded_details(
+            br#"{"usage":{"input_tokens":3,"output_tokens_details":{"reasoning_tokens":8}}}"#,
+            Some(3),
+        );
+        assert_eq!(responses.reasoning_tokens, Some(8));
+    }
+
+    #[test]
+    fn u1a_14_reasoning_hidden_needs_streamed_reasoning_without_a_count() {
+        let chat = hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str();
+        let responses = hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str();
+        assert!(!reasoning_hidden(chat, false, None));
+        assert!(!reasoning_hidden(responses, false, Some(0)));
+        assert!(reasoning_hidden(chat, true, None));
+        assert!(reasoning_hidden(chat, true, Some(0)));
+        assert!(!reasoning_hidden(chat, true, Some(5)));
+        assert!(reasoning_hidden(responses, true, Some(5)));
+    }
 
     #[test]
     fn tokens_are_read_from_the_first_field_that_has_a_positive_count() {
