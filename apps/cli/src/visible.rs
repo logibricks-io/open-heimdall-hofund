@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use hofund_control_client::hofund_control_proto::{
-    AgentHiddenSetRequest, AgentModelsResponse, AgentPickedOnlyRequest, AgentVisibleSetRequest,
+    AgentHiddenSetRequest, AgentListResponse, AgentModelsResponse, AgentPickedOnlyRequest,
+    AgentVisibleSetRequest,
 };
 
 use crate::commands::{client, failure};
@@ -23,6 +24,32 @@ pub(crate) async fn models(
     }
     let response = client.agent_models(agent).await.map_err(failure)?;
     Ok(render_models(&response))
+}
+
+/// `hofund models <token>`: the agent's model list when `token` names an
+/// agent the daemon knows (ignoring case), otherwise the catalog entry for
+/// the model `token`. The agent list comes from the daemon, so the CLI does
+/// not link the plugin registry; when no daemon answers, `token` is a model.
+pub(crate) async fn models_or_agent(config: &Path, token: &str) -> Result<String, String> {
+    let agent = match client(config).await {
+        Ok(client) => match client.agents().await {
+            Ok(list) => agent_named(&list, token),
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
+    match agent {
+        Some(agent) => models(config, &agent, &[], &[]).await,
+        None => crate::models::list(config, Some(token)).await,
+    }
+}
+
+/// Canonical agent id in `list` matching `token`, ignoring case.
+fn agent_named(list: &AgentListResponse, token: &str) -> Option<String> {
+    list.agents
+        .iter()
+        .find(|agent| agent.id.eq_ignore_ascii_case(token))
+        .map(|agent| agent.id.clone())
 }
 
 pub(crate) async fn visible(
@@ -87,8 +114,24 @@ fn render_models(response: &AgentModelsResponse) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{hidden_after, render_models, visibility_names};
-    use hofund_control_client::hofund_control_proto::AgentModelsResponse;
+    use super::{agent_named, hidden_after, render_models, visibility_names};
+    use hofund_control_client::hofund_control_proto::{
+        AgentListResponse, AgentModelsResponse, AgentSummary,
+    };
+
+    #[test]
+    fn g2_17_models_token_matches_a_daemon_agent_ignoring_case() {
+        let mut list = AgentListResponse::default();
+        let mut agent = AgentSummary::default();
+        agent.id = "fixture-agent".to_owned();
+        list.agents.push(agent);
+        assert_eq!(
+            agent_named(&list, "Fixture-AGENT"),
+            Some("fixture-agent".to_owned())
+        );
+        assert_eq!(agent_named(&list, "fixture"), None);
+        assert_eq!(agent_named(&list, "demo-model"), None);
+    }
 
     #[test]
     fn g2_12_cli_models_render_lists_shown_and_hidden() {

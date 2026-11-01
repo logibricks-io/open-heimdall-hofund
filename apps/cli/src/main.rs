@@ -104,7 +104,10 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             }
             Command::GatewayKey(command) => gateway_key::run(config, &command).await,
             Command::ProviderList => provider::list(config).await,
-            Command::Models { model } => models::list(config, model.as_deref()).await,
+            Command::Models { model: Some(token) } => {
+                visible::models_or_agent(config, &token).await
+            }
+            Command::Models { model: None } => models::list(config, None).await,
             Command::ModelsRefresh => models::refresh(config).await,
             Command::ProviderShow { id } => provider::show(config, &id).await,
             Command::ProviderTest { id, models } => provider::test(config, &id, &models).await,
@@ -474,15 +477,8 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             hide: Vec::new(),
             unhide: owned(ids),
         },
-        ["models", token] => match canonical_agent(token) {
-            Some(agent) => Command::AgentModels {
-                agent: agent.to_owned(),
-                hide: Vec::new(),
-                unhide: Vec::new(),
-            },
-            None => Command::Models {
-                model: Some((*token).to_owned()),
-            },
+        ["models", token] => Command::Models {
+            model: Some((*token).to_owned()),
         },
         ["accounts", rest @ ..] => match accounts::parse(rest) {
             Some(parsed) => Command::Accounts(parsed?),
@@ -706,14 +702,6 @@ fn agent_model(pairs: &[&str]) -> Result<Option<String>, String> {
         model = Some((value != "default").then(|| value.to_owned()));
     }
     Ok(model.flatten())
-}
-
-/// Canonical agent id when `name` matches a compiled agent, ignoring case.
-fn canonical_agent(name: &str) -> Option<&'static str> {
-    hofund_plugin_registry::agents().iter().find_map(|agent| {
-        let id = agent.id().as_str();
-        id.eq_ignore_ascii_case(name).then_some(id)
-    })
 }
 
 fn owned(values: &[&str]) -> Vec<String> {
@@ -1453,13 +1441,11 @@ mod tests {
     }
 
     #[test]
-    fn g2_17_models_agent_id_lists_the_agent() {
+    fn g2_17_models_token_parses_for_runtime_agent_lookup() {
         assert_eq!(
             command(&["models", "Claude-Code"]),
-            Ok(Command::AgentModels {
-                agent: "claude-code".to_owned(),
-                hide: Vec::new(),
-                unhide: Vec::new(),
+            Ok(Command::Models {
+                model: Some("Claude-Code".to_owned()),
             })
         );
         assert_eq!(

@@ -1721,7 +1721,6 @@ dependencies = [
  "hofund-config",
  "hofund-control-client",
  "hofund-model-catalog",
- "hofund-plugin-registry",
  "hofund-secrets",
  "http",
  "serde_json",

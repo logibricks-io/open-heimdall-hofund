@@ -67,7 +67,6 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-config",
             "hofund-control-client",
             "hofund-model-catalog",
-            "hofund-plugin-registry",
             "hofund-secrets",
         ],
         "hofund-codec" => &["hofund-ir"],
