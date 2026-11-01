@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Routing decision trace with bounded in-memory rings, `GET /v1/hofund/route`,
   `GET /v1/hofund/route/session`, `GET /v1/hofund/route/unrouted`, and `hofund route`
-  (feature-parity rows 4.13 and 12.3).
+  (feature-parity rows 4.13 and 12.3). Continuation hops stay on one open trace until
+  the reply is served; unrouted holds honor 15s show, 30s unknown, and 2m most delays
+  with masking time excluded; group, affinity, and agent labels are recorded when known.
 
 - Agent sign-in switching for Claude Code and Codex: `hofund accounts switch
   <agent> next|<account>`, `hofund accounts import <file>`, a five-minute

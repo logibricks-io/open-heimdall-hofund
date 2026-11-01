@@ -581,6 +581,7 @@ RoutingDecision.candidates
 RoutingDecision.done
 RoutingDecision.error
 RoutingDecision.gateway_key
+RoutingDecision.group
 RoutingDecision.id
 RoutingDecision.moved
 RoutingDecision.request_id

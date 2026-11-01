@@ -11,7 +11,8 @@ use futures_util::stream;
 use hofund_ir::{ContentPart, Message, Request, Response, Role, StreamEvent, TextDelta};
 use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PluginErrorKind, PresetId};
 use hofund_router::{
-    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Member, Router, RouterError, Snapshot,
+    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Member, RouteMeta, RouteTraceBook,
+    Router, RouterError, Snapshot,
 };
 
 struct Fake {
@@ -273,6 +274,62 @@ async fn b9_route_continuation_resumes_in_order() {
     assert!(third_routed.take_continuation().is_none());
     assert_eq!(second.load(Ordering::SeqCst), 1);
     assert_eq!(third.load(Ordering::SeqCst), 1);
+}
+
+async fn dispatch_traced(
+    router: &Router,
+    model: &str,
+    book: &Arc<RouteTraceBook>,
+) -> Result<hofund_router::Routed, RouterError> {
+    let trace = book.begin(RouteMeta {
+        asked: model.to_owned(),
+        ..RouteMeta::default()
+    });
+    router
+        .dispatch_scoped_conversation_with_wait_traced(
+            &Request::new(model),
+            "plain",
+            None,
+            None,
+            None,
+            None,
+            trace,
+        )
+        .await
+}
+
+#[tokio::test]
+async fn r1_8_continuation_keeps_one_open_trace_with_all_tries() {
+    let second = Arc::new(AtomicUsize::new(0));
+    let third = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake("first", &Arc::new(AtomicUsize::new(0)), Kind::StreamOk),
+        fake("second", &second, Kind::StreamOk),
+        fake("third", &third, Kind::StreamOk),
+    ]);
+    let book = RouteTraceBook::new();
+    let mut first = dispatch_traced(&router, "demo", &book)
+        .await
+        .expect("first hop");
+    let open = book.list(&Default::default());
+    assert_eq!(open.decisions.len(), 1);
+    assert!(!open.decisions[0].done);
+    assert_eq!(open.decisions[0].tries.len(), 1);
+
+    let continuation = first.take_continuation().expect("more hops");
+    let mut second_routed = continuation.dispatch().await.expect("second hop");
+    let mid = book.list(&Default::default());
+    assert!(!mid.decisions[0].done);
+    assert_eq!(mid.decisions[0].tries.len(), 2);
+
+    let continuation = second_routed.take_continuation().expect("third hop");
+    let mut third_routed = continuation.dispatch().await.expect("third hop");
+    assert!(third_routed.take_continuation().is_none());
+
+    let done = book.list(&Default::default());
+    assert!(done.decisions[0].done);
+    assert_eq!(done.decisions[0].tries.len(), 3);
+    assert_eq!(done.decisions[0].served_provider, "third");
 }
 
 #[tokio::test]

@@ -41,8 +41,9 @@ pub use patience::WaitHook;
 pub use scope::RouteScope;
 pub use snapshot::Snapshot;
 pub use view::{
-    RouteMeta, RouteTraceBook, RouteTraceHandle, TRACE_KEEP, candidates_from_hops, fail_text,
-    try_status,
+    RouteMeta, RouteTraceBook, RouteTraceHandle, TRACE_KEEP, TraceNow, UNROUTED_MOST,
+    UNROUTED_PHASE_MASKING, UNROUTED_SHOW, UNROUTED_UNKNOWN, UnroutedTimeout, candidates_from_hops,
+    fail_text, try_status, unrouted_timeout_status,
 };
 
 /// Which failures may try the next member.
@@ -631,6 +632,12 @@ impl Router {
         resolved.spent = self.spent(&resolved);
         if let Some(trace) = trace.as_mut() {
             trace.set_routing(&resolved.routing);
+            if resolved.pool_asked {
+                trace.set_group(&resolved.route);
+            }
+            if let Some(affinity) = &ordered.affinity {
+                trace.set_affinity_decision(affinity.reason);
+            }
             let cooling = cooling_labels(self.cooldowns.as_ref(), &resolved);
             trace.set_candidates(candidates_from_hops(
                 &resolved.hops,
@@ -638,6 +645,7 @@ impl Router {
                 &resolved.spent,
                 &cooling,
             ));
+            trace.sync_open();
         }
         let hook = conversation.map_or(hook.clone(), |conversation| {
             Some(Arc::new(affinity::sealed::SealedHook::new(
@@ -1380,6 +1388,7 @@ impl DispatchState {
             match self.round(&asking, &mut busy, &mut ending).await {
                 Ok(Some(answered)) => {
                     let next = answered.index + 1;
+                    let has_continuation = next < self.resolved.hops.len();
                     let affinity_reason = self
                         .affinity
                         .as_ref()
@@ -1393,6 +1402,19 @@ impl DispatchState {
                             .unwrap_or("stand-in");
                         trace.set_moved(&answered.upstream_model, why);
                     }
+                    if has_continuation {
+                        if let Some(trace) = self.trace.as_mut() {
+                            trace.sync_open();
+                        }
+                        let continuation = RouteContinuation { state: self, next };
+                        return Ok(Routed {
+                            upstream_id: answered.upstream_id,
+                            upstream_model: answered.upstream_model,
+                            completion: answered.completion,
+                            affinity_reason,
+                            continuation: Some(continuation),
+                        });
+                    }
                     if let Some(trace) = self.trace.take() {
                         let hop = &self.resolved.hops[answered.index];
                         let member = hop.member.id().to_string();
@@ -1404,14 +1426,12 @@ impl DispatchState {
                             affinity_reason.as_deref(),
                         );
                     }
-                    let continuation = (next < self.resolved.hops.len())
-                        .then(|| RouteContinuation { state: self, next });
                     return Ok(Routed {
                         upstream_id: answered.upstream_id,
                         upstream_model: answered.upstream_model,
                         completion: answered.completion,
                         affinity_reason,
-                        continuation,
+                        continuation: None,
                     });
                 }
                 Ok(None) => {}
@@ -1681,7 +1701,7 @@ impl DispatchState {
 
     fn note_try(
         &mut self,
-        index: usize,
+        _index: usize,
         hop: &Hop,
         upstream_model: &str,
         done: bool,
@@ -1699,7 +1719,7 @@ impl DispatchState {
             status,
             fail,
         ));
-        let _ = index;
+        trace.sync_open();
     }
 
     fn note_skip(&mut self, order: u32, reason: SkipReason) {

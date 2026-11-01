@@ -96,8 +96,10 @@ async fn r1_6_control_route_list_and_session_endpoints() {
     let body = unrouted.bytes().await.expect("body");
     let decoded: hofund_control_proto::UnroutedListResponse =
         decode_response(API_VERSION, &body).expect("decode unrouted");
-    assert_eq!(decoded.holds.len(), 1);
-    assert_eq!(decoded.holds[0].session, "sess-b");
+    assert!(
+        decoded.holds.is_empty(),
+        "holds appear only after the show delay"
+    );
 
     let _ = RouteQuery::parse(Some("limit=5&after=1"));
 }

@@ -194,6 +194,9 @@ pub struct RoutingDecision {
     /// Conversation affinity summary when present.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub affinity: String,
+    /// Routing group id when the client asked a pool route.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
     /// Whether routing finished.
     #[serde(default, skip_serializing_if = "is_false")]
     pub done: bool,

@@ -14,12 +14,31 @@ use hofund_plugin_api::PluginError;
 /// How many decisions each ring retains.
 pub const TRACE_KEEP: usize = 60;
 
+/// How long a pre-route hold waits before the unrouted API lists it.
+pub const UNROUTED_SHOW: Duration = Duration::from_secs(15);
+/// How long a hold may sit in no known wait before timing out.
+pub const UNROUTED_UNKNOWN: Duration = Duration::from_secs(30);
+/// How long a hold may sit before routing, excluding masking time.
+pub const UNROUTED_MOST: Duration = Duration::from_secs(120);
+
+/// Phase label while privacy masking runs; its time does not count toward show or most.
+pub const UNROUTED_PHASE_MASKING: &str = "masking";
+
+/// Milliseconds source for routing trace and unrouted timing.
+pub type TraceNow = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+fn system_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
 /// Metadata supplied before dispatch begins.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RouteMeta {
     /// Client session id when present.
     pub session: String,
-    /// Agent label when known.
+    /// Agent label when known (subagent header, stream client User-Agent, or gateway key name).
     pub agent: String,
     /// Named gateway key id when present.
     pub gateway_key: String,
@@ -32,12 +51,80 @@ pub struct RouteMeta {
 }
 
 /// Shared routing trace storage.
-#[derive(Debug)]
 pub struct RouteTraceBook {
     inner: Mutex<BookState>,
     wait: Condvar,
     next_id: AtomicU64,
     seq: AtomicU64,
+    clock: TraceNow,
+}
+
+#[derive(Debug)]
+struct UnroutedEntry {
+    hold: UnroutedRequest,
+    masking_depth: u32,
+    masking_excused_ms: u64,
+    masking_since_ms: Option<u64>,
+    known_depth: u32,
+    known_excused_ms: u64,
+    known_since_ms: Option<u64>,
+}
+
+impl UnroutedEntry {
+    fn unmasked_elapsed_ms(&self, now_ms: u64) -> u64 {
+        let mut elapsed = now_ms.saturating_sub(self.hold.since_ms);
+        elapsed = elapsed.saturating_sub(self.masking_excused_ms);
+        elapsed = elapsed.saturating_sub(self.known_excused_ms);
+        if self.masking_depth > 0 {
+            elapsed = elapsed.saturating_sub(
+                self.masking_since_ms
+                    .map_or(0, |since| now_ms.saturating_sub(since)),
+            );
+        }
+        if self.known_depth > 0 {
+            elapsed = elapsed.saturating_sub(
+                self.known_since_ms
+                    .map_or(0, |since| now_ms.saturating_sub(since)),
+            );
+        }
+        elapsed
+    }
+
+    fn unknown_elapsed_ms(&self, now_ms: u64) -> u64 {
+        let mut elapsed = now_ms.saturating_sub(self.hold.since_ms);
+        elapsed = elapsed.saturating_sub(self.masking_excused_ms);
+        elapsed = elapsed.saturating_sub(self.known_excused_ms);
+        if self.masking_depth > 0 {
+            elapsed = elapsed.saturating_sub(
+                self.masking_since_ms
+                    .map_or(0, |since| now_ms.saturating_sub(since)),
+            );
+        }
+        if self.known_depth > 0 {
+            elapsed = elapsed.saturating_sub(
+                self.known_since_ms
+                    .map_or(0, |since| now_ms.saturating_sub(since)),
+            );
+        }
+        elapsed
+    }
+}
+
+/// Why a pre-route hold ended with an error response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnroutedTimeout {
+    /// Held too long outside known waits.
+    Unknown,
+    /// Held too long excluding masking.
+    Most,
+}
+
+/// HTTP status the gateway uses for [`UnroutedTimeout`].
+#[must_use]
+pub const fn unrouted_timeout_status(kind: UnroutedTimeout) -> u16 {
+    match kind {
+        UnroutedTimeout::Unknown | UnroutedTimeout::Most => 504,
+    }
 }
 
 #[derive(Debug)]
@@ -46,14 +133,20 @@ struct BookState {
     by_session: std::collections::BTreeMap<String, VecDeque<u64>>,
     by_agent: std::collections::BTreeMap<String, VecDeque<u64>>,
     by_id: std::collections::BTreeMap<u64, RoutingDecision>,
-    unrouted: VecDeque<UnroutedRequest>,
+    unrouted: VecDeque<UnroutedEntry>,
     next_unrouted_id: u64,
 }
 
 impl RouteTraceBook {
-    /// Constructs an empty book.
+    /// Constructs an empty book using the system clock.
     #[must_use]
     pub fn new() -> Arc<Self> {
+        Self::with_clock(Arc::new(system_now_ms))
+    }
+
+    /// Constructs an empty book with an injected clock for tests.
+    #[must_use]
+    pub fn with_clock(clock: TraceNow) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(BookState {
                 global: VecDeque::new(),
@@ -66,17 +159,16 @@ impl RouteTraceBook {
             wait: Condvar::new(),
             next_id: AtomicU64::new(1),
             seq: AtomicU64::new(0),
+            clock,
         })
+    }
+
+    fn now_ms(&self) -> u64 {
+        (self.clock)()
     }
 
     fn bump_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_millis() as u64)
     }
 
     /// Opens a mutable builder for one dispatch.
@@ -90,7 +182,7 @@ impl RouteTraceBook {
                     let mut decision = RoutingDecision::default();
                     decision.id = id;
                     decision.seq = seq;
-                    decision.time_ms = Self::now_ms();
+                    decision.time_ms = self.now_ms();
                     decision.session = meta.session;
                     decision.agent = meta.agent;
                     decision.gateway_key = meta.gateway_key;
@@ -104,16 +196,23 @@ impl RouteTraceBook {
         }
     }
 
-    fn insert(&self, mut decision: RoutingDecision) {
+    fn upsert(&self, mut decision: RoutingDecision, done: bool) {
         decision.seq = self.bump_seq();
-        decision.done = true;
+        decision.done = done;
         let id = decision.id;
         let session = decision.session.clone();
         let agent = decision.agent.clone();
         let mut state = self.inner.lock().expect("route trace lock");
+        let first = !state.by_id.contains_key(&id);
         state.by_id.insert(id, decision);
-        push_ring(&mut state, id, TRACE_KEEP, &session, &agent);
+        if first {
+            push_ring(&mut state, id, TRACE_KEEP, &session, &agent);
+        }
         self.wait.notify_all();
+    }
+
+    fn insert(&self, decision: RoutingDecision) {
+        self.upsert(decision, true);
     }
 
     /// Lists decisions for the management API.
@@ -205,22 +304,168 @@ impl RouteTraceBook {
         let mut state = self.inner.lock().expect("route trace lock");
         let id = state.next_unrouted_id;
         state.next_unrouted_id = state.next_unrouted_id.saturating_add(1);
-        push_unrouted(
+        let mut hold = UnroutedRequest::default();
+        hold.id = id;
+        hold.since_ms = self.now_ms();
+        hold.session = session.to_owned();
+        hold.asked = asked.to_owned();
+        hold.inbound_protocol = inbound_protocol.to_owned();
+        hold.phase = phase.to_owned();
+        push_unrouted_entry(
             &mut state.unrouted,
-            {
-                let mut hold = UnroutedRequest::default();
-                hold.id = id;
-                hold.since_ms = Self::now_ms();
-                hold.session = session.to_owned();
-                hold.asked = asked.to_owned();
-                hold.inbound_protocol = inbound_protocol.to_owned();
-                hold.phase = phase.to_owned();
-                hold
+            UnroutedEntry {
+                hold,
+                masking_depth: 0,
+                masking_excused_ms: 0,
+                masking_since_ms: None,
+                known_depth: 0,
+                known_excused_ms: 0,
+                known_since_ms: None,
             },
             TRACE_KEEP,
         );
         self.bump_seq();
         self.wait.notify_all();
+    }
+
+    fn with_unrouted_session(
+        &self,
+        session: &str,
+        update: impl FnOnce(&mut UnroutedEntry),
+    ) -> bool {
+        if session.is_empty() {
+            return false;
+        }
+        let mut state = self.inner.lock().expect("route trace lock");
+        let Some(entry) = state
+            .unrouted
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.hold.session == session)
+        else {
+            return false;
+        };
+        update(entry);
+        self.bump_seq();
+        self.wait.notify_all();
+        true
+    }
+
+    /// Updates the model name once the body is decoded.
+    pub fn set_unrouted_asked(&self, session: &str, asked: &str) {
+        let _ = self.with_unrouted_session(session, |entry| {
+            entry.hold.asked = asked.to_owned();
+        });
+    }
+
+    /// Sets the phase shown on the unrouted view.
+    pub fn set_unrouted_phase(&self, session: &str, phase: &str) {
+        let _ = self.with_unrouted_session(session, |entry| {
+            entry.hold.phase = phase.to_owned();
+        });
+    }
+
+    /// Marks a known wait whose time counts toward the hold limit but not unknown.
+    pub fn begin_known_wait(&self, session: &str, phase: &str) {
+        let now = self.now_ms();
+        let _ = self.with_unrouted_session(session, |entry| {
+            if !phase.is_empty() {
+                entry.hold.phase = phase.to_owned();
+            }
+            if entry.known_depth == 0 {
+                entry.known_since_ms = Some(now);
+            }
+            entry.known_depth = entry.known_depth.saturating_add(1);
+        });
+    }
+
+    /// Ends one known wait started with [`Self::begin_known_wait`].
+    pub fn end_known_wait(&self, session: &str) {
+        let now = self.now_ms();
+        let _ = self.with_unrouted_session(session, |entry| {
+            if entry.known_depth == 0 {
+                return;
+            }
+            entry.known_depth -= 1;
+            if entry.known_depth == 0
+                && let Some(since) = entry.known_since_ms.take()
+            {
+                entry.known_excused_ms = entry
+                    .known_excused_ms
+                    .saturating_add(now.saturating_sub(since));
+            }
+        });
+    }
+
+    /// Marks privacy masking; its elapsed time does not count toward show or most.
+    pub fn begin_masking(&self, session: &str) {
+        let now = self.now_ms();
+        let _ = self.with_unrouted_session(session, |entry| {
+            entry.hold.phase = UNROUTED_PHASE_MASKING.to_owned();
+            if entry.masking_depth == 0 {
+                entry.masking_since_ms = Some(now);
+            }
+            entry.masking_depth = entry.masking_depth.saturating_add(1);
+        });
+    }
+
+    /// Ends one masking scope started with [`Self::begin_masking`].
+    pub fn end_masking(&self, session: &str) {
+        let now = self.now_ms();
+        let _ = self.with_unrouted_session(session, |entry| {
+            if entry.masking_depth == 0 {
+                return;
+            }
+            entry.masking_depth -= 1;
+            if entry.masking_depth == 0 {
+                if let Some(since) = entry.masking_since_ms.take() {
+                    entry.masking_excused_ms = entry
+                        .masking_excused_ms
+                        .saturating_add(now.saturating_sub(since));
+                }
+                if entry.hold.phase == UNROUTED_PHASE_MASKING {
+                    entry.hold.phase.clear();
+                }
+            }
+        });
+    }
+
+    /// Returns how long until a hold should time out, if any.
+    #[must_use]
+    pub fn unrouted_timeout_after(&self, session: &str) -> Option<(Duration, UnroutedTimeout)> {
+        if session.is_empty() {
+            return None;
+        }
+        let state = self.inner.lock().expect("route trace lock");
+        let now = self.now_ms();
+        let entry = state
+            .unrouted
+            .iter()
+            .rev()
+            .find(|entry| entry.hold.session == session)?;
+        let show_ms = UNROUTED_SHOW.as_millis() as u64;
+        let unknown_ms = UNROUTED_UNKNOWN.as_millis() as u64;
+        let most_ms = UNROUTED_MOST.as_millis() as u64;
+        let unmasked = entry.unmasked_elapsed_ms(now);
+        if unmasked >= most_ms {
+            return Some((Duration::ZERO, UnroutedTimeout::Most));
+        }
+        if entry.known_depth == 0 && entry.unknown_elapsed_ms(now) >= unknown_ms {
+            return Some((Duration::ZERO, UnroutedTimeout::Unknown));
+        }
+        let until_unknown = unknown_ms.saturating_sub(entry.unknown_elapsed_ms(now));
+        let until_most = most_ms.saturating_sub(unmasked);
+        if entry.known_depth == 0 && until_unknown <= until_most {
+            Some((
+                Duration::from_millis(until_unknown.max(show_ms)),
+                UnroutedTimeout::Unknown,
+            ))
+        } else {
+            Some((
+                Duration::from_millis(until_most.max(show_ms)),
+                UnroutedTimeout::Most,
+            ))
+        }
     }
 
     /// Clears unrouted holds for a session once routing begins.
@@ -229,17 +474,24 @@ impl RouteTraceBook {
             return;
         }
         let mut state = self.inner.lock().expect("route trace lock");
-        state.unrouted.retain(|hold| hold.session != session);
+        state.unrouted.retain(|entry| entry.hold.session != session);
         self.bump_seq();
         self.wait.notify_all();
     }
 
-    /// Lists active unrouted holds.
+    /// Lists active unrouted holds visible after the show delay.
     #[must_use]
     pub fn unrouted(&self) -> UnroutedListResponse {
         let state = self.inner.lock().expect("route trace lock");
+        let now = self.now_ms();
+        let show_ms = UNROUTED_SHOW.as_millis() as u64;
         let mut response = UnroutedListResponse::default();
-        response.holds = state.unrouted.iter().cloned().collect();
+        response.holds = state
+            .unrouted
+            .iter()
+            .filter(|entry| entry.unmasked_elapsed_ms(now) >= show_ms)
+            .map(|entry| entry.hold.clone())
+            .collect();
         response
     }
 
@@ -289,7 +541,7 @@ fn push_index(index: &mut VecDeque<u64>, id: u64, keep: usize) {
     }
 }
 
-fn push_unrouted(deque: &mut VecDeque<UnroutedRequest>, value: UnroutedRequest, keep: usize) {
+fn push_unrouted_entry(deque: &mut VecDeque<UnroutedEntry>, value: UnroutedEntry, keep: usize) {
     deque.push_back(value);
     while deque.len() > keep {
         deque.pop_front();
@@ -337,6 +589,22 @@ impl RouteTraceHandle {
     /// Records ordered candidates.
     pub fn set_candidates(&mut self, candidates: Vec<RouteCandidate>) {
         self.builder.decision.candidates = candidates;
+    }
+
+    /// Records the routing group id when the client asked a pool route.
+    pub fn set_group(&mut self, group: &str) {
+        self.builder.decision.group = group.to_owned();
+    }
+
+    /// Records the conversation affinity decision before attempts run.
+    pub fn set_affinity_decision(&mut self, decision: &str) {
+        self.builder.decision.affinity = decision.to_owned();
+    }
+
+    /// Publishes the in-flight decision to the management API.
+    pub fn sync_open(&mut self) {
+        let decision = self.builder.decision.clone();
+        self.book.upsert(decision, false);
     }
 
     /// Marks the decision as unrouted.
@@ -475,7 +743,22 @@ pub fn try_status(error: &PluginError) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RouteMeta, RouteTraceBook, TRACE_KEEP};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use std::time::Duration;
+
+    use super::{
+        RouteMeta, RouteTraceBook, TRACE_KEEP, TraceNow, UNROUTED_MOST, UNROUTED_SHOW,
+        UNROUTED_UNKNOWN, UnroutedTimeout, unrouted_timeout_status,
+    };
+
+    fn test_clock(start: u64) -> (TraceNow, Arc<AtomicU64>) {
+        let millis = Arc::new(AtomicU64::new(start));
+        let shared = Arc::clone(&millis);
+        let clock: TraceNow = Arc::new(move || shared.load(Ordering::SeqCst));
+        (clock, millis)
+    }
 
     #[test]
     fn r1_3_trace_ring_drops_oldest_finished_decisions() {
@@ -511,8 +794,11 @@ mod tests {
 
     #[test]
     fn r1_5_unrouted_hold_lists_and_clears_on_finish() {
-        let book = RouteTraceBook::new();
+        let (clock, now) = test_clock(0);
+        let book = RouteTraceBook::with_clock(clock);
         book.hold_unrouted("s1", "demo", "plain", "waiting");
+        assert!(book.unrouted().holds.is_empty());
+        now.store(UNROUTED_SHOW.as_millis() as u64, Ordering::SeqCst);
         assert_eq!(book.unrouted().holds.len(), 1);
         let handle = book.begin(RouteMeta {
             session: "s1".to_owned(),
@@ -536,5 +822,84 @@ mod tests {
         let row = list.decisions[0].moved.as_ref().expect("moved");
         assert_eq!(row.to, "wire-model");
         assert_eq!(row.why, "stand-in");
+    }
+
+    #[test]
+    fn r1_9_group_and_affinity_decision_are_stored() {
+        let book = RouteTraceBook::new();
+        let mut handle = book.begin(RouteMeta {
+            asked: "pool/demo".to_owned(),
+            ..RouteMeta::default()
+        });
+        handle.set_group("pool/demo");
+        handle.set_affinity_decision("kept previous answerer");
+        handle.sync_open();
+        let row = book.list(&Default::default()).decisions[0].clone();
+        assert_eq!(row.group, "pool/demo");
+        assert_eq!(row.affinity, "kept previous answerer");
+        assert!(!row.done);
+    }
+
+    #[test]
+    fn r1_10_agent_field_is_stored_on_the_decision() {
+        let book = RouteTraceBook::new();
+        let handle = book.begin(RouteMeta {
+            agent: "agent-alpha".to_owned(),
+            asked: "demo".to_owned(),
+            ..RouteMeta::default()
+        });
+        handle.finish(None, None, Some(200), None, None);
+        assert_eq!(
+            book.list(&Default::default()).decisions[0].agent,
+            "agent-alpha"
+        );
+    }
+
+    #[test]
+    fn r1_11_masking_time_does_not_count_toward_show_or_most() {
+        let (clock, now) = test_clock(0);
+        let book = RouteTraceBook::with_clock(clock);
+        book.hold_unrouted("s1", "demo", "plain", "waiting");
+        book.begin_masking("s1");
+        now.store(UNROUTED_MOST.as_millis() as u64, Ordering::SeqCst);
+        assert!(book.unrouted().holds.is_empty());
+        book.end_masking("s1");
+        now.store(
+            UNROUTED_MOST.as_millis() as u64 + UNROUTED_SHOW.as_millis() as u64,
+            Ordering::SeqCst,
+        );
+        assert_eq!(book.unrouted().holds.len(), 1);
+    }
+
+    #[test]
+    fn r1_12_unrouted_show_delay_hides_young_holds() {
+        let (clock, now) = test_clock(0);
+        let book = RouteTraceBook::with_clock(clock);
+        book.hold_unrouted("s1", "demo", "plain", "waiting");
+        assert!(book.unrouted().holds.is_empty());
+        now.store(UNROUTED_SHOW.as_millis() as u64 - 1, Ordering::SeqCst);
+        assert!(book.unrouted().holds.is_empty());
+        now.store(UNROUTED_SHOW.as_millis() as u64, Ordering::SeqCst);
+        assert_eq!(book.unrouted().holds.len(), 1);
+    }
+
+    #[test]
+    fn r1_13_unrouted_most_and_unknown_timeouts_use_504() {
+        let (clock, now) = test_clock(0);
+        let book = RouteTraceBook::with_clock(clock);
+        book.hold_unrouted("s1", "demo", "plain", "waiting");
+        now.store(UNROUTED_UNKNOWN.as_millis() as u64, Ordering::SeqCst);
+        let (wait, kind) = book.unrouted_timeout_after("s1").expect("unknown timeout");
+        assert_eq!(wait, Duration::ZERO);
+        assert_eq!(kind, UnroutedTimeout::Unknown);
+        assert_eq!(unrouted_timeout_status(kind), 504);
+
+        now.store(0, Ordering::SeqCst);
+        book.hold_unrouted("s2", "demo", "plain", "waiting");
+        now.store(UNROUTED_MOST.as_millis() as u64, Ordering::SeqCst);
+        let (wait, kind) = book.unrouted_timeout_after("s2").expect("most timeout");
+        assert_eq!(wait, Duration::ZERO);
+        assert_eq!(kind, UnroutedTimeout::Most);
+        assert_eq!(unrouted_timeout_status(kind), 504);
     }
 }
