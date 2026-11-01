@@ -111,6 +111,7 @@ fn d12h_kept_signature_marks_follow_the_reference_reading() {
         ("toolu_1__tsk4__abcd", "toolu_1__tsk4__abcd"),
         ("toolu_1__tsk__x__ts4__c2ln", "toolu_1__tsk__x"),
         ("toolu_1__tsr4__c2ln", "toolu_1"),
+        ("toolu_1__tsrk1__a__ts4__c2ln", "toolu_1__tsrk1__a"),
         ("\u{e9}__ts4__c2ln", "\u{e9}"),
         ("__ts4__c2ln", "__ts4__c2ln"),
     ] {
