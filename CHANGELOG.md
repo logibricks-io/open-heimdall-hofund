@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape under `.hofund/catalog/`, revalidates with `ETag`, honors a configurable
   mirror URL, falls back to the last cache offline, refreshes in the background,
   applies `[[catalog.overrides]]` from config, enriches `GET /v1/models`, and
-  adds `hofund models` plus `hofund models refresh`.
+  adds `hofund models` plus `hofund models refresh`. Reasoning-toggle provider ids
+  default from quirks when `[catalog]` omits `reasoning_toggle_providers`.
 
 - Key provider balances (P0-5b2): host-known balance readers live in the
   plan-quota provider plugin behind `BalanceQuota`, while custom balance URLs
