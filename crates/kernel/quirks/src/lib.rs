@@ -57,6 +57,14 @@ pub fn named(id: &str) -> Option<&'static Profile> {
     PROFILES.iter().find(|profile| profile.id == id)
 }
 
+/// models.dev provider ids whose APIs accept an explicit `none` reasoning level when the catalog lists a toggle.
+///
+/// The daemon passes this list into the model catalog when `[catalog]` does not set
+/// `reasoning_toggle_providers`.
+pub fn catalog_reasoning_toggle_providers() -> &'static [&'static str] {
+    &["deepseek", "kimi-code-plan-cn", "kimi-code-plan-global"]
+}
+
 /// Applies `profile` to `request`.
 pub fn apply(profile: &Profile, request: &mut Request) {
     for rule in profile.rules {

@@ -100,6 +100,8 @@ struct Inner {
     quota_scope: QuotaScopeHook,
     /// Routing decision history for the management API.
     route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
+    /// models.dev catalog for `/v1/models` enrichment and routing metadata.
+    model_catalog: Option<Arc<hofund_model_catalog::ModelCatalog>>,
 }
 
 struct TokenState {
@@ -482,6 +484,7 @@ impl Gateway {
                 quota_source: None,
                 quota_scope: tell_everything(),
                 route_trace: None,
+                model_catalog: None,
             }),
         }
     }
@@ -566,6 +569,14 @@ impl Gateway {
     #[must_use]
     pub fn route_trace(&self) -> Option<Arc<hofund_router::RouteTraceBook>> {
         self.inner.route_trace.clone()
+    }
+
+    /// Attaches the models.dev catalog used to enrich `/v1/models` listings.
+    #[must_use]
+    pub fn with_model_catalog(mut self, catalog: Arc<hofund_model_catalog::ModelCatalog>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
+        inner.model_catalog = Some(catalog);
+        self
     }
 
     /// The axum router. `/health` is open. Every other route requires a token.
@@ -1460,13 +1471,52 @@ async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
         .load()
         .models_scoped(Some(&route_scope(&identity)))
         .into_iter()
-        .map(|id| serde_json::json!({"id": id, "object": "model", "owned_by": "hofund"}))
+        .map(|id| model_list_entry(&app.model_catalog, &id))
         .collect();
     json_response(
         StatusCode::OK,
         serde_json::to_vec(&serde_json::json!({"object": "list", "data": data}))
             .unwrap_or_else(|_| b"{\"object\":\"list\",\"data\":[]}".to_vec()),
     )
+}
+
+fn model_list_entry(
+    catalog: &Option<Arc<hofund_model_catalog::ModelCatalog>>,
+    id: &str,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({"id": id, "object": "model", "owned_by": "hofund"});
+    let Some(catalog) = catalog else {
+        return value;
+    };
+    let Some(entry) = catalog.resolve(id) else {
+        return value;
+    };
+    if let Some(window) = entry.spec.context_window {
+        value["context_window"] = window.into();
+    }
+    if let Some(output) = entry.spec.max_output {
+        value["max_output_tokens"] = output.into();
+    }
+    if !entry.spec.input_modalities.is_empty() {
+        value["input_modalities"] = serde_json::json!(entry.spec.input_modalities);
+    }
+    if !entry.spec.output_modalities.is_empty() {
+        value["output_modalities"] = serde_json::json!(entry.spec.output_modalities);
+    }
+    if entry.spec.vision {
+        value["vision"] = true.into();
+    }
+    if !entry.spec.reasoning_levels.is_empty() {
+        value["supported_reasoning_levels"] = serde_json::json!(
+            entry
+                .spec
+                .reasoning_levels
+                .iter()
+                .map(|level| serde_json::json!({"effort": level}))
+                .collect::<Vec<_>>()
+        );
+    }
+    value
 }
 
 async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> Response {

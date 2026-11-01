@@ -246,16 +246,17 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-kit-agent` | `hofund-agent`, `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-quirks` |
 | `hofund-router` | `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api` |
-| `hofund-gateway` | `hofund-codec`, `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
+| `hofund-gateway` | `hofund-codec`, `hofund-control-proto`, `hofund-ir`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-config` | — |
+| `hofund-model-catalog` | `hofund-config` |
 | `hofund-control-client` | `hofund-control-proto` |
 | `hofund-control-proto` | — |
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
-| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests) |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests) |
 | `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry` |
-| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-daemon`, `hofund-secrets` |
+| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
 

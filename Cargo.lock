@@ -1720,6 +1720,7 @@ dependencies = [
  "chrono",
  "hofund-config",
  "hofund-control-client",
+ "hofund-model-catalog",
  "hofund-secrets",
  "http",
  "serde_json",
@@ -1796,6 +1797,7 @@ dependencies = [
  "hofund-control-proto",
  "hofund-daemon",
  "hofund-gateway",
+ "hofund-model-catalog",
  "hofund-plugin-api",
  "hofund-plugin-host",
  "hofund-plugin-registry",
@@ -1858,8 +1860,10 @@ dependencies = [
  "chrono",
  "futures-util",
  "hofund-codec",
+ "hofund-config",
  "hofund-control-proto",
  "hofund-ir",
+ "hofund-model-catalog",
  "hofund-plugin-api",
  "hofund-plugin-host",
  "hofund-router",
@@ -1922,6 +1926,21 @@ dependencies = [
  "tempfile",
  "tokio",
  "wiremock",
+]
+
+[[package]]
+name = "hofund-model-catalog"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hofund-config",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
