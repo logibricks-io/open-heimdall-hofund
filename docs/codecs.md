@@ -46,7 +46,11 @@ Messages `output_config.effort` publishes `low` through `max`
 (<https://platform.claude.com/docs/en/build-with-claude/effort>).
 Generative Language `thinkingConfig.thinkingLevel` publishes `minimal`
 through `high`
-(<https://ai.google.dev/gemini-api/docs/thinking>).
+(<https://ai.google.dev/gemini-api/docs/thinking>). On decode, a positive
+`thinkingBudget` maps to low through 4096, medium through 12000, high through
+24000, and xhigh above that. A negative dynamic budget maps to medium, zero to
+none, and `includeThoughts` alone does not request effort. The camelCase and
+snake_case field spellings are both read.
 `ultra` is read as `max` and written as `max`. Levels are not clamped to a
 model; this version has no catalog.
 
@@ -102,8 +106,15 @@ The provider drops every extension bag when the inbound protocol id differs
 from the outbound codec id, before it encodes the upstream body and again on
 the decoded response and stream events. Raw events the decoder does not model
 are dropped on that path too, after a leading upstream failure has been turned
-into an error. A same-protocol call keeps the bag. A caller that encodes with
-a different protocol without going through the provider should call
+into an error. A same-protocol call keeps the bag. On same-protocol Responses
+calls, a 400 naming an unknown member of
+`internal_chat_message_metadata_passthrough` is retried once without that
+member on every input item, or without the whole object when the refusal names
+it directly. The provider remembers refused members and omits them before
+later sends; removal preserves every other byte, repeated refusals are not
+retried, and cross-protocol requests do not use this rule. The refusal parser
+accepts the two upstream wordings and decodes JSON `\u` escapes before matching.
+A caller that encodes with a different protocol without going through the provider should call
 `Request::strip_extensions` (and the response and event equivalents) first.
 Otherwise foreign fields, including caller identifiers, are copied onto the
 other protocol's JSON.
@@ -376,7 +387,14 @@ Chat Completions. Anthropic encode drops it.
 Anthropic thinking is a `thinking` block (`text` + optional `signature`) or a
 `redacted_thinking` block (`data`). An empty signature is omitted and decodes
 as absent. When a thinking part is both redacted and readable, encode writes
-`redacted_thinking` and the readable text is not on the wire.
+`redacted_thinking` and the readable text is not on the wire. Same-protocol
+translation keeps client `cache_control` marks and TTLs on ordinary content,
+but does not write a mark on either thinking block type and adds no marks of
+its own. An invalid sequence that moves from a five-minute mark to a
+one-hour mark drops the client marks instead of rejecting the translation.
+A complete inline thought-signature suffix is removed from tool-call
+and tool-result ids on request decode; a truncated suffix is left alone.
+`tool_choice: any` is rejected when no tools are declared.
 
 Chat Completions stores readable thinking in one `reasoning_content` string.
 Several readable parts are concatenated, in order, with no separator. Signatures

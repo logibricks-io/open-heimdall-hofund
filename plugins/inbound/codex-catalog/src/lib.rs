@@ -34,7 +34,7 @@ use hofund_plugin_sdk::{Contribution, HttpRequest, HttpResponse, async_trait, te
 /// Registers the Codex surface: the catalog and the backend.
 #[must_use]
 pub fn contribute() -> Contribution {
-    Contribution::new().surface(CodexCatalog)
+    Contribution::new().surface(CodexCatalog::default())
 }
 
 /// The most of a catalog Codex reads; past it the whole list fails to load.
@@ -67,8 +67,10 @@ static ROUTES: [RouteSpec; 3] = [
 static RESPONSES_SOCKET_PATHS: [&str; 1] = ["/backend-api/codex/responses"];
 
 /// The Codex surface: the catalog, and the ChatGPT backend under `/backend-api/codex`.
-#[derive(Clone, Copy, Debug)]
-pub struct CodexCatalog;
+#[derive(Clone, Debug, Default)]
+pub struct CodexCatalog {
+    backend: backend::State,
+}
 
 #[async_trait]
 impl InboundSurface for CodexCatalog {
@@ -90,11 +92,18 @@ impl InboundSurface for CodexCatalog {
         request: HttpRequest,
         host: &SurfaceHost,
     ) -> Result<HttpResponse, PluginError> {
-        Ok(dispatch(&Host(host), route.prefix(), request).await)
+        let host = Host(host);
+        if route.prefix() == backend::PREFIX {
+            return Ok(
+                backend::serve_with_state(&host, backend::BASES, request, &self.backend).await,
+            );
+        }
+        Ok(serve(&host, &request).await)
     }
 }
 
 /// Answers `request`, which came in on the route with `prefix`.
+#[cfg(test)]
 async fn dispatch(kernel: &dyn Kernel, prefix: &str, request: HttpRequest) -> HttpResponse {
     if prefix == backend::PREFIX {
         return backend::serve(kernel, backend::BASES, request).await;

@@ -124,6 +124,7 @@ probe::fn stream_report (body : & [u8]) -> Result < ProbeReport , PluginError >
 process::fn find_in (name : BinaryName , path : Option < & OsStr > , pathext : Option < & OsStr >) -> Option < PathBuf >
 process::fn find_program (name : BinaryName) -> Option < PathBuf >
 refresh_form
+refused_passthrough
 register::Contribution derives(Default)
 register::Contribution::fn new () -> Self
 register::Contribution::fn subscription (mut self , factory : impl DynSubscriptionFactory) -> Self
@@ -228,3 +229,4 @@ wire::async fn send (http : & HttpHandle , target : & Target , secret : Option <
 wire::fn converse_call (target : & Target , model : & str , stream : bool , body : Vec < u8 > ,) -> Result < (String , Call) , PluginError >
 wire::fn model_segment (model : & str) -> Result < String , PluginError >
 wire::fn path_segment (text : & str) -> String
+without_passthrough

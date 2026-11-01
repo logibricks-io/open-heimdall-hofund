@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Codex passthrough metadata refusals now use one shared parser and
+  byte-preserving editor on both routed Responses calls and Codex backend
+  relays. A 400 `unknown_parameter` retries once per rejected member, omitting
+  that member (or the whole passthrough) on every input item and remembering
+  the refusal per provider instance or upstream base. Repeated, unrelated,
+  and cross-protocol refusals do not trigger this retry (D-10).
+- Messages translation keeps client `cache_control` marks and TTLs, omits
+  marks on thinking blocks, strips complete thought-signature suffixes from
+  call and result ids, and checks required tool choices (D-12). Generative
+  Language `thinkingConfig` now records levels and budgets as request effort,
+  including snake_case fields and dynamic budgets (D-13).
 - Thinking-only refusal handover (P0-3b3 b9, #496): streamed Anthropic
   Messages, Chat Completions, and Responses requests now try the next member
   after a refusal or refusal error when only reasoning has been emitted, then

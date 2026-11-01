@@ -90,3 +90,102 @@ fn the_original_field_stays_when_the_extension_bag_is_kept() {
     let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
     assert_eq!(value["thinking"]["budget_tokens"], json!(128));
 }
+
+#[test]
+fn d13a_thinking_level_is_recorded_as_request_effort() {
+    for (level, effort) in [
+        ("minimal", Effort::Minimal),
+        ("LOW", Effort::Low),
+        ("medium", Effort::Medium),
+        ("high", Effort::High),
+    ] {
+        let body = format!(
+            r#"{{"contents":[],"generationConfig":{{"thinkingConfig":{{"thinkingLevel":"{level}"}}}}}}"#
+        );
+        assert_eq!(
+            decode_effort(&GenerativeLanguage, body.as_bytes()),
+            Some(effort),
+            "{level}"
+        );
+    }
+}
+
+#[test]
+fn d13b_thinking_budget_maps_to_the_nearest_effort() {
+    for (budget, effort) in [
+        (1, Effort::Low),
+        (512, Effort::Low),
+        (4096, Effort::Low),
+        (4097, Effort::Medium),
+        (12000, Effort::Medium),
+        (12001, Effort::High),
+        (24000, Effort::High),
+        (24001, Effort::Xhigh),
+        (32768, Effort::Xhigh),
+    ] {
+        let body = json!({
+            "contents": [],
+            "generationConfig": {"thinkingConfig": {"thinkingBudget": budget}}
+        })
+        .to_string();
+        assert_eq!(
+            decode_effort(&GenerativeLanguage, body.as_bytes()),
+            Some(effort),
+            "{budget}"
+        );
+    }
+}
+
+#[test]
+fn d13c_a_dynamic_thinking_budget_is_medium_effort() {
+    assert_eq!(
+        decode_effort(
+            &GenerativeLanguage,
+            br#"{"contents":[],"generationConfig":{"thinkingConfig":{"thinkingBudget":-1}}}"#
+        ),
+        Some(Effort::Medium)
+    );
+}
+
+#[test]
+fn d13d_snake_case_thinking_fields_record_effort() {
+    assert_eq!(
+        decode_effort(
+            &GenerativeLanguage,
+            br#"{"contents":[],"generationConfig":{"thinkingConfig":{"thinking_level":"LOW"}}}"#
+        ),
+        Some(Effort::Low)
+    );
+    assert_eq!(
+        decode_effort(
+            &GenerativeLanguage,
+            br#"{"contents":[],"generationConfig":{"thinkingConfig":{"thinking_budget":32768}}}"#
+        ),
+        Some(Effort::Xhigh)
+    );
+}
+
+#[test]
+fn d13e_zero_budget_and_include_thoughts_alone_do_not_invent_effort() {
+    assert_eq!(
+        decode_effort(
+            &GenerativeLanguage,
+            br#"{"contents":[],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}"#
+        ),
+        Some(Effort::None)
+    );
+    assert_eq!(
+        decode_effort(
+            &GenerativeLanguage,
+            br#"{"contents":[],"generationConfig":{"thinkingConfig":{"includeThoughts":true}}}"#
+        ),
+        None
+    );
+    assert_eq!(
+        decode_effort(
+            &GenerativeLanguage,
+            br#"{"contents":[],"generationConfig":{}}"#
+        ),
+        None
+    );
+}

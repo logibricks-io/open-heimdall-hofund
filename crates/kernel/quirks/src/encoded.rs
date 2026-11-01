@@ -63,7 +63,8 @@ pub fn apply_encoded_with_state(
     let model = json::parse(body)
         .and_then(|root| root.get("model").and_then(Node::text).map(str::to_owned))
         .unwrap_or_default();
-    let (body, _) = fold_object_roots(context.base_url, context.protocol, &model, state, body);
+    let (body, _) = state.strip_passthrough(context.protocol, body);
+    let (body, _) = fold_object_roots(context.base_url, context.protocol, &model, state, &body);
     apply_rules(context, state, &body)
 }
 
