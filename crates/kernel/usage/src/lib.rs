@@ -11,10 +11,14 @@ use chrono::{DateTime, Days, Local, NaiveTime, TimeZone};
 use rusqlite::{Connection, params};
 use thiserror::Error;
 
+mod fx;
 mod key;
 mod limits;
+mod price;
+pub use fx::{CnyRate, DisplayCurrency, Fx, RateFetcher};
 pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
+pub use price::{RowPricing, TokenPrice, token_bearing};
 
 /// A reporting window over the ledger.
 ///
@@ -85,6 +89,10 @@ pub struct Totals {
     pub cache_write_1h_tokens: u64,
     /// Sum of reasoning tokens reported in usage.
     pub reasoning_tokens: u64,
+    /// Sum of stored USD costs for priced rows.
+    pub cost_usd: f64,
+    /// Rows with token counts but no stored list price.
+    pub unpriced: u64,
 }
 
 /// A stored request.
@@ -120,6 +128,12 @@ pub struct Row {
     pub reasoning_tokens: Option<i64>,
     /// Whether reasoning streamed without a usage count.
     pub reasoning_hidden: bool,
+    /// Whether a list price was stored for this row.
+    pub priced: bool,
+    /// Stored USD cost when [`Self::priced`] is true.
+    pub cost_usd: Option<f64>,
+    /// List price per million tokens stored on the row.
+    pub price: Option<TokenPrice>,
 }
 
 /// One successful request as routing measurements read it.
@@ -195,6 +209,13 @@ impl Ledger {
             ("cache_write_1h_tokens", "INTEGER"),
             ("reasoning_tokens", "INTEGER"),
             ("reasoning_hidden", "INTEGER NOT NULL DEFAULT 0"),
+            ("priced", "INTEGER NOT NULL DEFAULT 0"),
+            ("cost_usd", "REAL"),
+            ("price_input", "REAL"),
+            ("price_output", "REAL"),
+            ("price_cache_read", "REAL"),
+            ("price_cache_write", "REAL"),
+            ("price_cache_write_1h", "REAL"),
         ] {
             ensure_column(&connection, column, declaration)?;
         }
@@ -226,32 +247,7 @@ impl Ledger {
     ///
     /// Returns [`UsageError`] when the insert fails.
     pub fn record_with_ttft(&self, row: &Row, ttft_ms: Option<i64>) -> Result<(), UsageError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
-        connection
-            .execute(
-                "INSERT INTO requests (
-                    created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
-                    caller_key_id, caller_key_name, caller_issuer_id, ttft_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    row.created_unix,
-                    row.model,
-                    row.upstream,
-                    row.input_tokens,
-                    row.output_tokens,
-                    row.latency_ms,
-                    row.status,
-                    row.caller_key_id,
-                    row.caller_key_name,
-                    row.caller_issuer_id,
-                    ttft_ms,
-                ],
-            )
-            .map(|_| ())
-            .map_err(|error| UsageError(error.to_string()))
+        self.record_with_details(row, ttft_ms, UsageDetails::default(), None)
     }
 
     /// Every row, oldest first.
@@ -269,7 +265,9 @@ impl Ledger {
                 "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
                         caller_key_id, caller_key_name, caller_issuer_id,
                         cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
-                        reasoning_tokens, reasoning_hidden
+                        reasoning_tokens, reasoning_hidden,
+                        priced, cost_usd, price_input, price_output, price_cache_read,
+                        price_cache_write, price_cache_write_1h
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -368,7 +366,9 @@ impl Ledger {
                         COALESCE(SUM(MAX(cache_read_tokens, 0)), 0),
                         COALESCE(SUM(MAX(cache_write_5m_tokens, 0)), 0),
                         COALESCE(SUM(MAX(cache_write_1h_tokens, 0)), 0),
-                        COALESCE(SUM(MAX(reasoning_tokens, 0)), 0)
+                        COALESCE(SUM(MAX(reasoning_tokens, 0)), 0),
+                        COALESCE(SUM(CASE WHEN priced = 1 THEN cost_usd ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN priced = 0 AND (COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) > 0 THEN 1 ELSE 0 END), 0)
                  FROM requests WHERE created_unix >= ?1",
                 params![since],
                 |row| {
@@ -379,6 +379,8 @@ impl Ledger {
                     let cache_write_5m: i64 = row.get(4)?;
                     let cache_write_1h: i64 = row.get(5)?;
                     let reasoning: i64 = row.get(6)?;
+                    let cost: f64 = row.get(7)?;
+                    let unpriced: i64 = row.get(8)?;
                     Ok(Totals {
                         requests: u64::try_from(count).unwrap_or(0),
                         input_tokens: u64::try_from(input).unwrap_or(0),
@@ -387,6 +389,8 @@ impl Ledger {
                         cache_write_5m_tokens: u64::try_from(cache_write_5m).unwrap_or(0),
                         cache_write_1h_tokens: u64::try_from(cache_write_1h).unwrap_or(0),
                         reasoning_tokens: u64::try_from(reasoning).unwrap_or(0),
+                        cost_usd: cost,
+                        unpriced: u64::try_from(unpriced).unwrap_or(0),
                     })
                 },
             )
@@ -396,7 +400,9 @@ impl Ledger {
                 "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
                         caller_key_id, caller_key_name, caller_issuer_id,
                         cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
-                        reasoning_tokens, reasoning_hidden
+                        reasoning_tokens, reasoning_hidden,
+                        priced, cost_usd, price_input, price_output, price_cache_read,
+                        price_cache_write, price_cache_write_1h
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -462,7 +468,24 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         cache_write_1h_tokens: row.get(12)?,
         reasoning_tokens: row.get(13)?,
         reasoning_hidden: row.get::<_, i64>(14)? != 0,
+        priced: row.get::<_, i64>(15)? != 0,
+        cost_usd: row.get(16)?,
+        price: read_price(row, 17)?,
     })
+}
+
+fn read_price(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<Option<TokenPrice>> {
+    let input: Option<f64> = row.get(start)?;
+    if input.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(TokenPrice {
+        input: input.unwrap_or(0.0),
+        output: row.get(start + 1)?,
+        cache_read: row.get(start + 2)?,
+        cache_write: row.get(start + 3)?,
+        cache_write_1h: row.get(start + 4)?,
+    }))
 }
 
 /// Renders `rows` as a fixed-column table.
@@ -645,6 +668,8 @@ mod tests {
                 requests: 3,
                 input_tokens: 1,
                 output_tokens: 5,
+                cost_usd: 0.0,
+                unpriced: 3,
                 ..Totals::default()
             }
         );

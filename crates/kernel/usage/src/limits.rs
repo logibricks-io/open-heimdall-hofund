@@ -36,6 +36,10 @@ pub struct KeyUsage {
     pub cache_read_tokens: u64,
     /// Cache-write tokens (five-minute and one-hour combined).
     pub cache_write_tokens: u64,
+    /// Sum of stored USD costs for priced rows.
+    pub cost_usd: f64,
+    /// Token-bearing rows without a stored list price.
+    pub unpriced: u64,
 }
 
 impl KeyUsage {
@@ -64,6 +68,7 @@ impl Ledger {
         row: &Row,
         ttft_ms: Option<i64>,
         details: UsageDetails,
+        pricing: Option<RowPricing>,
     ) -> Result<(), UsageError> {
         let connection = self
             .connection
@@ -75,8 +80,10 @@ impl Ledger {
                     created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
                     caller_key_id, caller_key_name, caller_issuer_id, ttft_ms,
                     uncached_input_tokens, cache_read_tokens, cache_write_tokens,
-                    cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, reasoning_hidden
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                    cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, reasoning_hidden,
+                    priced, cost_usd, price_input, price_output, price_cache_read, price_cache_write,
+                    price_cache_write_1h
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                 params![
                     row.created_unix,
                     row.model,
@@ -96,6 +103,15 @@ impl Ledger {
                     details.cache_write_1h_tokens,
                     details.reasoning_tokens,
                     i64::from(details.reasoning_hidden),
+                    i64::from(pricing.is_some_and(|pricing| pricing.priced)),
+                    pricing.filter(|pricing| pricing.priced).map(|pricing| pricing.cost_usd),
+                    pricing.filter(|pricing| pricing.priced).map(|pricing| pricing.price.input),
+                    pricing.filter(|pricing| pricing.priced).map(|pricing| pricing.price.output),
+                    pricing.filter(|pricing| pricing.priced).map(|pricing| pricing.price.cache_read),
+                    pricing.filter(|pricing| pricing.priced).map(|pricing| pricing.price.cache_write),
+                    pricing
+                        .filter(|pricing| pricing.priced)
+                        .map(|pricing| pricing.price.cache_write_1h),
                 ],
             )
             .map(|_| ())
@@ -120,7 +136,9 @@ impl Ledger {
                         COALESCE(SUM(MAX(COALESCE(uncached_input_tokens, input_tokens), 0)), 0),
                         COALESCE(SUM(MAX(output_tokens, 0)), 0),
                         COALESCE(SUM(MAX(cache_read_tokens, 0)), 0),
-                        COALESCE(SUM(MAX(cache_write_tokens, 0)), 0)
+                        COALESCE(SUM(MAX(cache_write_tokens, 0)), 0),
+                        COALESCE(SUM(CASE WHEN priced = 1 THEN cost_usd ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN priced = 0 AND (COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) > 0 THEN 1 ELSE 0 END), 0)
                  FROM requests
                  WHERE (caller_key_id = ?1 OR caller_issuer_id = ?1) AND created_unix >= ?2
                    AND (upstream != '' OR status LIKE '2%')",
@@ -131,12 +149,16 @@ impl Ledger {
                     let output: i64 = row.get(2)?;
                     let cache_read: i64 = row.get(3)?;
                     let cache_write: i64 = row.get(4)?;
+                    let cost: f64 = row.get(5)?;
+                    let unpriced: i64 = row.get(6)?;
                     Ok(KeyUsage {
                         calls: u64::try_from(calls).unwrap_or(0),
                         input_tokens: u64::try_from(input).unwrap_or(0),
                         output_tokens: u64::try_from(output).unwrap_or(0),
                         cache_read_tokens: u64::try_from(cache_read).unwrap_or(0),
                         cache_write_tokens: u64::try_from(cache_write).unwrap_or(0),
+                        cost_usd: cost,
+                        unpriced: u64::try_from(unpriced).unwrap_or(0),
                     })
                 },
             )
@@ -181,6 +203,7 @@ mod tests {
                     cache_write_1h_tokens: Some(0),
                     ..UsageDetails::default()
                 },
+                None,
             )
             .expect("cached call");
         ledger.record(&row("429", "")).expect("local refusal");

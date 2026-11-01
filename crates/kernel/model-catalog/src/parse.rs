@@ -79,6 +79,8 @@ pub struct DevPrice {
     pub cache_read: f64,
     #[serde(default, rename = "cache_write")]
     pub cache_write: f64,
+    #[serde(default, rename = "cache_write_1h")]
+    pub cache_write_1h: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -297,6 +299,7 @@ fn dev_price(price: &DevPrice) -> Price {
         output: price.output,
         cache_read: price.cache_read,
         cache_write: price.cache_write,
+        cache_write_1h: price.cache_write_1h.unwrap_or(0.0),
     }
 }
 

@@ -1,0 +1,254 @@
+//! U-1b effective prices, stored costs, and summary totals.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use hofund_config::{ModelPriceOverride, UsageSettings};
+use hofund_model_catalog::{EffectivePricer, ListPriceLookup, ModelCatalog, Price};
+use hofund_usage::{
+    Ledger, Row, RowPricing, TokenPrice, UsageDetails,
+};
+
+struct StubList;
+
+impl ListPriceLookup for StubList {
+    fn list_price(&self, provider_id: &str, model: &str) -> Option<Price> {
+        (provider_id == "listed" && model == "alpha").then_some(Price {
+            input: 1.0,
+            output: 2.0,
+            cache_read: 0.1,
+            cache_write: 0.0,
+            cache_write_1h: 0.0,
+        })
+    }
+}
+
+fn empty_catalog() -> Arc<ModelCatalog> {
+    let dir = tempfile::tempdir().expect("dir");
+    Arc::new(
+        ModelCatalog::open(
+            dir.path(),
+            hofund_config::CatalogSettings::default(),
+            Arc::new(hofund_model_catalog::ReqwestFetcher::new()),
+        )
+        .expect("catalog"),
+    )
+}
+
+fn pricer(settings: UsageSettings) -> EffectivePricer {
+    EffectivePricer::new(settings, empty_catalog(), Arc::new(StubList))
+}
+
+#[test]
+fn u1b_1_custom_provider_model_price_wins() {
+    let mut prices = BTreeMap::new();
+    prices.insert(
+        "relay/demo".to_owned(),
+        ModelPriceOverride {
+            input: 3.0,
+            output: 4.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            cache_write_1h: None,
+        },
+    );
+    let price = pricer(UsageSettings {
+        prices,
+        ..UsageSettings::default()
+    })
+    .resolve("relay", "demo", None, false)
+    .expect("price");
+    assert!((price.input - 3.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn u1b_2_provider_wildcard_price_before_list() {
+    let mut prices = BTreeMap::new();
+    prices.insert(
+        "listed/*".to_owned(),
+        ModelPriceOverride {
+            input: 9.0,
+            output: 9.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            cache_write_1h: None,
+        },
+    );
+    let price = pricer(UsageSettings {
+        prices,
+        ..UsageSettings::default()
+    })
+    .resolve("listed", "alpha", None, false)
+    .expect("price");
+    assert!((price.input - 9.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn u1b_3_list_price_when_no_custom_entry() {
+    let price = pricer(UsageSettings::default())
+        .resolve("listed", "alpha", None, false)
+        .expect("price");
+    assert!((price.input - 1.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn u1b_4_any_provider_model_key() {
+    let mut prices = BTreeMap::new();
+    prices.insert(
+        "*/shared".to_owned(),
+        ModelPriceOverride {
+            input: 5.0,
+            output: 5.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            cache_write_1h: None,
+        },
+    );
+    let price = pricer(UsageSettings {
+        prices,
+        ..UsageSettings::default()
+    })
+    .resolve("other", "shared", None, false)
+    .expect("price");
+    assert!((price.input - 5.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn u1b_5_cache_write_5m_and_1h_split() {
+    let price = TokenPrice {
+        input: 1.0,
+        output: 0.0,
+        cache_read: 0.0,
+        cache_write: 1.0,
+        cache_write_1h: 2.0,
+    };
+    let cost = price.cost_split(0, 0, 0, 1_000_000, 500_000);
+    assert!((cost - 1.5).abs() < 1e-9);
+}
+
+#[test]
+fn u1b_6_reasoning_is_in_output_not_extra() {
+    let price = TokenPrice {
+        input: 0.0,
+        output: 10.0,
+        cache_read: 0.0,
+        cache_write: 0.0,
+        cache_write_1h: 0.0,
+    };
+    let details = UsageDetails {
+        reasoning_tokens: Some(100),
+        ..UsageDetails::default()
+    };
+    let cost = price.cost_for_row(None, Some(1_000_000), details);
+    assert!((cost - 10.0).abs() < 1e-9);
+}
+
+#[test]
+fn u1b_7_stored_price_survives_later_config_change() {
+    let dir = tempfile::tempdir().expect("dir");
+    let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("open");
+    ledger
+        .record_with_details(
+            &Row {
+                created_unix: 1,
+                model: "demo".to_owned(),
+                upstream: "primary".to_owned(),
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(0),
+                latency_ms: 1,
+                status: "200".to_owned(),
+                ..Default::default()
+            },
+            None,
+            UsageDetails::default(),
+            Some(RowPricing {
+                priced: true,
+                cost_usd: 1.25,
+                price: TokenPrice {
+                    input: 1.0,
+                    output: 1.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                    cache_write_1h: 0.0,
+                },
+            }),
+        )
+        .expect("record");
+    let (_, totals) = ledger.summary(None, 10).expect("summary");
+    assert!((totals.cost_usd - 1.25).abs() < f64::EPSILON);
+}
+
+#[test]
+fn u1b_8_unpriced_rows_do_not_add_cost() {
+    let dir = tempfile::tempdir().expect("dir");
+    let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("open");
+    ledger
+        .record_with_details(
+            &Row {
+                created_unix: 1,
+                model: "demo".to_owned(),
+                upstream: "primary".to_owned(),
+                input_tokens: Some(10),
+                output_tokens: Some(10),
+                latency_ms: 1,
+                status: "200".to_owned(),
+                ..Default::default()
+            },
+            None,
+            UsageDetails::default(),
+            None,
+        )
+        .expect("record");
+    let (_, totals) = ledger.summary(None, 10).expect("summary");
+    assert_eq!(totals.cost_usd, 0.0);
+    assert_eq!(totals.unpriced, 1);
+}
+
+#[test]
+fn u1b_9_cny_conversion_uses_configured_rate() {
+    let rate = hofund_usage::Fx::open(tempfile::tempdir().expect("dir").path(), Some(7.0), None);
+    let (amount, _) = rate.convert_usd(hofund_usage::DisplayCurrency::Cny, 2.0);
+    assert!((amount - 14.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn u1b_10_old_database_gains_cost_columns() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("usage.sqlite");
+    rusqlite::Connection::open(&path)
+        .expect("old database")
+        .execute_batch(
+            "CREATE TABLE requests (
+                id INTEGER PRIMARY KEY,
+                created_unix INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                upstream TEXT NOT NULL,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                latency_ms INTEGER NOT NULL,
+                status TEXT NOT NULL
+            );",
+        )
+        .expect("seed");
+    let ledger = Ledger::open(&path).expect("migrate");
+    ledger
+        .record_with_details(
+            &Row {
+                created_unix: 1,
+                model: "demo".to_owned(),
+                upstream: "up".to_owned(),
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                latency_ms: 1,
+                status: "200".to_owned(),
+                ..Default::default()
+            },
+            None,
+            UsageDetails::default(),
+            Some(RowPricing::free()),
+        )
+        .expect("insert");
+    let rows = ledger.rows().expect("rows");
+    assert!(rows[0].priced);
+    assert_eq!(rows[0].cost_usd, Some(0.0));
+}

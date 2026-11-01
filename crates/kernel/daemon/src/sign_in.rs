@@ -1281,6 +1281,7 @@ mod tests {
             }],
             warnings: Vec::new(),
             catalog: CatalogSettings::default(),
+            usage: hofund_config::UsageSettings::default(),
             discover_agent_accounts: false,
         }
     }

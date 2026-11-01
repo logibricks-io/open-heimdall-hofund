@@ -698,6 +698,8 @@ UsageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, 
 UsageResponse.period
 UsageResponse.rows
 UsageResponse.rows_truncated
+UsageResponse.currency
+UsageResponse.cny_per_usd
 UsageResponse.totals
 UsageResponse.version
 UsageRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
@@ -714,6 +716,8 @@ UsageRow.model
 UsageRow.output_tokens
 UsageRow.provider
 UsageRow.reasoning_hidden
+UsageRow.cost
+UsageRow.priced
 UsageRow.reasoning_tokens
 UsageRow.status
 UsageTotals #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
@@ -723,6 +727,8 @@ UsageTotals.cache_write_5m_tokens
 UsageTotals.input_tokens
 UsageTotals.output_tokens
 UsageTotals.reasoning_tokens
+UsageTotals.cost
+UsageTotals.unpriced
 UsageTotals.requests
 WarmupAccountRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
 WarmupAccountRow.account

@@ -48,6 +48,8 @@ pub struct Config {
     pub warnings: Vec<String>,
     /// models.dev catalog mirror, refresh, and per-model overrides.
     pub catalog: CatalogSettings,
+    /// Usage display currency and optional per-model list prices.
+    pub usage: UsageSettings,
 }
 
 /// Failover thresholds.
@@ -149,6 +151,45 @@ pub struct CatalogOverride {
     pub reasoning_levels: Option<Vec<String>>,
     /// Optional list price override.
     pub price: Option<CatalogPriceOverride>,
+}
+
+/// Usage reporting currency and custom list prices.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UsageSettings {
+    /// Whether summaries show USD or convert totals to CNY.
+    pub currency: UsageCurrency,
+    /// Fixed yuan per dollar; when set, live FX is not fetched.
+    pub cny_per_usd: Option<f64>,
+    /// Custom list prices keyed like the reference `ModelPrices` map.
+    pub prices: BTreeMap<String, ModelPriceOverride>,
+}
+
+/// Currency shown on usage summaries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UsageCurrency {
+    #[default]
+    Usd,
+    Cny,
+}
+
+impl UsageCurrency {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Usd => "usd",
+            Self::Cny => "cny",
+        }
+    }
+}
+
+/// USD per million tokens for a configured usage price override.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelPriceOverride {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    pub cache_write_1h: Option<f64>,
 }
 
 /// USD per million tokens for a local price override.
@@ -797,6 +838,7 @@ impl fmt::Debug for Config {
             .field("routes", &self.routes)
             .field("subscriptions", &self.subscriptions)
             .field("catalog", &self.catalog)
+            .field("usage", &self.usage)
             .field("discover_agent_accounts", &self.discover_agent_accounts)
             .field("warnings", &self.warnings)
             .finish()
@@ -1226,6 +1268,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     validate_group_links(&routes)?;
     validate_fallbacks(&providers, &seen, &group_names)?;
     let catalog = catalog_settings(raw.catalog)?;
+    let usage = usage_settings(raw.usage)?;
     Ok(Config {
         listen,
         token_file: raw.token_file,
@@ -1240,6 +1283,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         routes,
         subscriptions,
         catalog,
+        usage,
         discover_agent_accounts,
         warnings,
     })
@@ -1693,6 +1737,90 @@ fn price_micros(value: f64) -> u64 {
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUsage {
+    #[serde(default)]
+    currency: Option<String>,
+    #[serde(default)]
+    cny_per_usd: Option<f64>,
+    #[serde(default)]
+    prices: BTreeMap<String, RawModelPrice>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawModelPrice {
+    input: f64,
+    output: f64,
+    #[serde(default)]
+    cache_read: f64,
+    #[serde(default)]
+    cache_write: f64,
+    #[serde(default)]
+    cache_write_1h: Option<f64>,
+}
+
+fn usage_settings(raw: RawUsage) -> Result<UsageSettings, ConfigError> {
+    let currency = match raw.currency.as_deref().unwrap_or("usd").trim().to_ascii_lowercase().as_str() {
+        "usd" => UsageCurrency::Usd,
+        "cny" | "rmb" => UsageCurrency::Cny,
+        other => {
+            return Err(ConfigError::Invalid(format!(
+                "usage.currency must be usd or cny, not {other:?}"
+            )));
+        }
+    };
+    if let Some(rate) = raw.cny_per_usd
+        && (!rate.is_finite() || rate <= 0.0)
+    {
+        return Err(ConfigError::Invalid(
+            "usage.cny_per_usd must be a positive number".to_owned(),
+        ));
+    }
+    let mut prices = BTreeMap::new();
+    for (key, row) in raw.prices {
+        if key.trim().is_empty() {
+            return Err(ConfigError::Invalid("usage.prices key is empty".to_owned()));
+        }
+        for field in [
+            ("input", row.input),
+            ("output", row.output),
+            ("cache_read", row.cache_read),
+            ("cache_write", row.cache_write),
+        ] {
+            if !field.1.is_finite() || field.1 < 0.0 || field.1 > 1_000_000.0 {
+                return Err(ConfigError::Invalid(format!(
+                    "usage.prices.{key} {} must be between 0 and 1e6",
+                    field.0
+                )));
+            }
+        }
+        if let Some(hour) = row.cache_write_1h
+            && (!hour.is_finite() || hour < 0.0 || hour > 1_000_000.0)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "usage.prices.{key} cache_write_1h must be between 0 and 1e6"
+            )));
+        }
+        prices.insert(
+            key,
+            ModelPriceOverride {
+                input: row.input,
+                output: row.output,
+                cache_read: row.cache_read,
+                cache_write: row.cache_write,
+                cache_write_1h: row.cache_write_1h,
+            },
+        );
+    }
+    Ok(UsageSettings {
+        currency,
+        cny_per_usd: raw.cny_per_usd,
+        prices,
+    })
+}
+
 fn catalog_settings(raw: RawCatalog) -> Result<CatalogSettings, ConfigError> {
     let refresh = match raw.refresh.as_deref() {
         None | Some("") => CatalogSettings::default().refresh,
@@ -2035,6 +2163,8 @@ struct RawFile {
     subscriptions: Vec<RawSubscription>,
     #[serde(default)]
     catalog: RawCatalog,
+    #[serde(default)]
+    usage: RawUsage,
 }
 
 #[derive(Debug, Deserialize)]

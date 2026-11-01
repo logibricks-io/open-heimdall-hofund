@@ -102,6 +102,8 @@ struct Inner {
     route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
     /// models.dev catalog for `/v1/models` enrichment and routing metadata.
     model_catalog: Option<Arc<hofund_model_catalog::ModelCatalog>>,
+    /// Effective list prices for usage rows.
+    pricer: Option<Arc<hofund_model_catalog::EffectivePricer>>,
 }
 
 struct TokenState {
@@ -295,7 +297,10 @@ impl RequestTrack {
 
     fn client_waiting(&mut self, usage: Arc<Ledger>, request: &ModelRequest, identity: &Identity) {
         self.drop_status = 499;
-        self.cancel_usage = Some((usage, UsageMeta::new(request, "", self.started, identity)));
+        self.cancel_usage = Some((
+            usage,
+            UsageMeta::new(request, "", &request.model, self.started, identity),
+        ));
     }
 
     fn end_with(
@@ -348,7 +353,12 @@ impl Drop for RequestTrack {
             if status == 499
                 && let Some((usage, meta)) = self.cancel_usage.take()
             {
-                write_usage(&usage, &meta, None, StatusCode::from_u16(499).expect("499"));
+                write_usage_simple(
+                    &usage,
+                    &meta,
+                    None,
+                    StatusCode::from_u16(499).expect("499"),
+                );
             }
             self.end_with(None, status, None, None);
         } else {
@@ -576,6 +586,17 @@ impl Gateway {
     pub fn with_model_catalog(mut self, catalog: Arc<hofund_model_catalog::ModelCatalog>) -> Self {
         let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
         inner.model_catalog = Some(catalog);
+        self
+    }
+
+    /// Attaches the effective list-price resolver used when recording usage.
+    #[must_use]
+    pub fn with_effective_pricer(
+        mut self,
+        pricer: Arc<hofund_model_catalog::EffectivePricer>,
+    ) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
+        inner.pricer = Some(pricer);
         self
     }
 
@@ -1022,11 +1043,12 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             Ok(reservation) => reservation,
             Err(limits::ReserveFailure::Refused(refusal)) => {
                 let status = StatusCode::TOO_MANY_REQUESTS;
-                write_usage(
-                    &app.usage,
+                write_usage_app(
+                    app.as_ref(),
                     &UsageMeta::new(
                         &ModelRequest::new(call.model()),
                         "",
+                        call.model(),
                         started,
                         &self.identity,
                     ),
@@ -1041,11 +1063,12 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             }
             Err(limits::ReserveFailure::Unavailable) => {
                 let status = StatusCode::SERVICE_UNAVAILABLE;
-                write_usage(
-                    &app.usage,
+                write_usage_app(
+                    app.as_ref(),
                     &UsageMeta::new(
                         &ModelRequest::new(call.model()),
                         "",
+                        call.model(),
                         started,
                         &self.identity,
                     ),
@@ -1060,16 +1083,14 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             }
         };
         let router = app.snapshot.load();
-        let usage = |upstream: &str| UsageMeta {
-            model: call.model().to_owned(),
-            upstream: upstream.to_owned(),
-            started,
-            identity: self.identity.clone(),
-            input: None,
-            output: None,
-            ttft_ms: None,
-            details: hofund_usage::UsageDetails::default(),
-            saw_reasoning: false,
+        let usage = |upstream: &str| {
+            UsageMeta::new(
+                &ModelRequest::new(call.model()),
+                upstream,
+                call.model(),
+                started,
+                &self.identity,
+            )
         };
         match router
             .forward_scoped(&call, Some(&route_scope(&self.identity)))
@@ -1092,7 +1113,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 }
                 let (input, output) = forwarded_tokens(answer.body());
                 meta.details = forwarded_details(answer.body(), input);
-                write_usage(&app.usage, &meta, Some((input, output)), status);
+                write_usage_app(app.as_ref(), &meta, Some((input, output)), status);
                 track.end_with(
                     Some(forwarded.upstream_id),
                     status.as_u16(),
@@ -1129,7 +1150,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                     RouterError::Upstream { upstream_id, error } => (upstream_id, error),
                 };
                 let status = status_of(&error);
-                write_usage(&app.usage, &usage(&upstream), None, status);
+                write_usage_app(app.as_ref(), &usage(&upstream), None, status);
                 let member = (!upstream.is_empty()).then_some(upstream);
                 track.end_with(member, status.as_u16(), None, None);
                 Err(error)
@@ -1160,7 +1181,7 @@ impl ForwardStream {
             return;
         };
         let (input, output) = speech_tokens(&end.tail);
-        write_usage(&end.usage, &end.meta, Some((input, output)), end.status);
+        write_usage_simple(&end.usage, &end.meta, Some((input, output)), end.status);
         end.track.end_with(
             Some(end.member),
             end.status.as_u16(),
@@ -1563,18 +1584,18 @@ fn reserve_for_codec(
     match app.budget.reserve(identity, body_bytes, now) {
         Ok(reservation) => Ok(reservation),
         Err(limits::ReserveFailure::Refused(refusal)) => {
-            write_usage(
-                &app.usage,
-                &UsageMeta::new(request, "", started, identity),
+            write_usage_app(
+                app.as_ref(),
+                &UsageMeta::new(request, "", &request.model, started, identity),
                 None,
                 StatusCode::TOO_MANY_REQUESTS,
             );
             Err(Box::new(limits::refusal_response(codec, &refusal, now)))
         }
         Err(limits::ReserveFailure::Unavailable) => {
-            write_usage(
-                &app.usage,
-                &UsageMeta::new(request, "", started, identity),
+            write_usage_app(
+                app.as_ref(),
+                &UsageMeta::new(request, "", &request.model, started, identity),
                 None,
                 StatusCode::SERVICE_UNAVAILABLE,
             );
@@ -1692,11 +1713,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let model_request = match codec.decode_request(&bytes) {
         Ok(model_request) => model_request,
         Err(error) => {
-            write_usage(
-                &app.usage,
+            write_usage_app(
+                app.as_ref(),
                 &UsageMeta::new(
                     &ModelRequest::new(model_name(&bytes)),
                     "",
+                    model_name(&bytes),
                     started,
                     &identity,
                 ),
@@ -2183,9 +2205,9 @@ fn unrouted_timeout_before_routing(
 ) -> Response {
     let status = StatusCode::from_u16(hofund_router::unrouted_timeout_status(kind))
         .unwrap_or(StatusCode::GATEWAY_TIMEOUT);
-    write_usage(
-        &app.usage,
-        &UsageMeta::new(&ModelRequest::new(String::new()), "", started, identity),
+    write_usage_app(
+        app.as_ref(),
+        &UsageMeta::new(&ModelRequest::new(String::new()), "", "", started, identity),
         None,
         status,
     );
@@ -2361,7 +2383,7 @@ async fn success(
     capture: Option<prev_response::Capture>,
 ) -> Response {
     track.reason = affinity_reason;
-    let mut meta = UsageMeta::new(request, upstream, started, identity);
+    let mut meta = UsageMeta::new(request, upstream, upstream_model, started, identity);
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
     match completion {
@@ -2376,7 +2398,7 @@ async fn success(
             }
             let input = meta.input;
             let output = meta.output;
-            write_usage(&app.usage, &meta, Some((input, output)), StatusCode::OK);
+            write_usage_app(app.as_ref(), &meta, Some((input, output)), StatusCode::OK);
             let status = StatusCode::OK;
             let encoded = codec.encode_response_for(request, &response);
             let mut capture = capture;
@@ -2420,6 +2442,8 @@ async fn success(
                 protocol: codec.id().to_owned(),
                 track: Some(track.take_for_stream()),
                 member,
+                pricer: app.pricer.clone(),
+                provider_free: false,
             };
             let body: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
                 if let Some(continuation) = continuation {
@@ -2452,7 +2476,7 @@ async fn success(
                 match refusal_handover::events(Completion::Raw(body), &codec, &request.model) {
                     Err(error) => {
                         let status = status_of(&error);
-                        write_usage(&app.usage, &meta, None, status);
+                        write_usage_app(app.as_ref(), &meta, None, status);
                         track.end_with(member, status.as_u16(), None, None);
                         coded(codec.as_ref(), status, error.message())
                     }
@@ -2475,6 +2499,8 @@ async fn success(
                             protocol: codec.id().to_owned(),
                             track: Some(track.take_for_stream()),
                             member,
+                            pricer: app.pricer.clone(),
+                            provider_free: false,
                         };
                         let body = refusal_handover::body(
                             events,
@@ -2580,7 +2606,7 @@ async fn raw_body(
         }
     }
     if let Some(error) = failed {
-        write_usage(&app.usage, &meta, None, StatusCode::BAD_GATEWAY);
+        write_usage_app(app.as_ref(), &meta, None, StatusCode::BAD_GATEWAY);
         track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
         return coded(codec.as_ref(), StatusCode::BAD_GATEWAY, error.message());
     }
@@ -2597,8 +2623,8 @@ async fn raw_body(
     let (input, output) = codec.response_tokens(&bytes);
     meta.input = input.or(meta.input);
     meta.output = output.or(meta.output);
-    write_usage(
-        &app.usage,
+    write_usage_app(
+        app.as_ref(),
         &meta,
         Some((meta.input, meta.output)),
         StatusCode::OK,
@@ -2634,9 +2660,9 @@ fn failure(
     track: &mut RequestTrack,
 ) -> Response {
     if let RouterError::PreviousResponseNotFound { id } = &error {
-        write_usage(
-            &app.usage,
-            &UsageMeta::new(request, "", started, identity),
+        write_usage_app(
+            app.as_ref(),
+            &UsageMeta::new(request, "", &request.model, started, identity),
             None,
             StatusCode::BAD_REQUEST,
         );
@@ -2660,9 +2686,9 @@ fn failure(
             error.message().to_owned(),
         ),
     };
-    write_usage(
-        &app.usage,
-        &UsageMeta::new(request, &upstream, started, identity),
+    write_usage_app(
+        app.as_ref(),
+        &UsageMeta::new(request, &upstream, &request.model, started, identity),
         None,
         status,
     );
@@ -2716,6 +2742,8 @@ fn status_of(error: &PluginError) -> StatusCode {
 struct UsageMeta {
     model: String,
     upstream: String,
+    wire_model: String,
+    served_model: String,
     started: Instant,
     identity: Identity,
     input: Option<i64>,
@@ -2726,10 +2754,18 @@ struct UsageMeta {
 }
 
 impl UsageMeta {
-    fn new(request: &ModelRequest, upstream: &str, started: Instant, identity: &Identity) -> Self {
+    fn new(
+        request: &ModelRequest,
+        upstream: &str,
+        wire_model: &str,
+        started: Instant,
+        identity: &Identity,
+    ) -> Self {
         Self {
             model: request.model.clone(),
             upstream: upstream.to_owned(),
+            wire_model: wire_model.to_owned(),
+            served_model: String::new(),
             started,
             identity: identity.clone(),
             input: None,
@@ -2756,6 +2792,8 @@ struct RecordOnEnd {
     protocol: String,
     track: Option<RequestTrack>,
     member: Option<String>,
+    pricer: Option<Arc<hofund_model_catalog::EffectivePricer>>,
+    provider_free: bool,
 }
 
 type ErrorFrame = Box<dyn Fn(&PluginError) -> Vec<u8> + Send>;
@@ -2900,7 +2938,7 @@ where
     E: Fn(&str) -> Vec<u8>,
 {
     fn finish(&mut self, status: StatusCode) {
-        write_usage(
+        write_usage_simple(
             &self.usage,
             &self.meta,
             Some((self.meta.input, self.meta.output)),
@@ -3152,7 +3190,14 @@ fn note_usage(event: &StreamEvent, record: &mut RecordOnEnd) {
 }
 
 fn finish_record(row: &mut RecordOnEnd, status: StatusCode) {
-    write_usage(&row.usage, &row.meta, Some((row.input, row.output)), status);
+    write_usage(
+        &row.usage,
+        &row.meta,
+        Some((row.input, row.output)),
+        status,
+        row.pricer.as_deref(),
+        row.provider_free,
+    );
     if let Some(track) = row.track.as_mut() {
         track.end_with(
             row.member.clone(),
@@ -3163,11 +3208,38 @@ fn finish_record(row: &mut RecordOnEnd, status: StatusCode) {
     }
 }
 
+fn write_usage_simple(
+    usage: &Ledger,
+    meta: &UsageMeta,
+    tokens: Option<(Option<i64>, Option<i64>)>,
+    status: StatusCode,
+) {
+    write_usage(usage, meta, tokens, status, None, false);
+}
+
+fn write_usage_app(
+    app: &Inner,
+    meta: &UsageMeta,
+    tokens: Option<(Option<i64>, Option<i64>)>,
+    status: StatusCode,
+) {
+    write_usage(
+        &app.usage,
+        meta,
+        tokens,
+        status,
+        app.pricer.as_deref(),
+        false,
+    );
+}
+
 fn write_usage(
     usage: &Ledger,
     meta: &UsageMeta,
     tokens: Option<(Option<i64>, Option<i64>)>,
     status: StatusCode,
+    pricer: Option<&hofund_model_catalog::EffectivePricer>,
+    provider_free: bool,
 ) {
     let (input_tokens, output_tokens) = tokens.unwrap_or((None, None));
     if let Some(tokens) = input_tokens.and_then(|value| u64::try_from(value).ok()) {
@@ -3199,7 +3271,32 @@ fn write_usage(
     if details.uncached_input_tokens.is_none() {
         details.uncached_input_tokens = input_tokens;
     }
-    let _ = usage.record_with_details(&row, meta.ttft_ms, details);
+    let pricing = pricer.and_then(|pricer| {
+        if !hofund_usage::token_bearing(input_tokens, output_tokens) {
+            return None;
+        }
+        let served = (!meta.served_model.is_empty()).then_some(meta.served_model.as_str());
+        let list = pricer.resolve(
+            &meta.upstream,
+            &meta.wire_model,
+            served,
+            provider_free,
+        )?;
+        let token_price = hofund_usage::TokenPrice {
+            input: list.input,
+            output: list.output,
+            cache_read: list.cache_read,
+            cache_write: list.cache_write,
+            cache_write_1h: list.cache_write_1h,
+        };
+        let cost = token_price.cost_for_row(input_tokens, output_tokens, details);
+        Some(hofund_usage::RowPricing {
+            priced: true,
+            cost_usd: cost,
+            price: token_price,
+        })
+    });
+    let _ = usage.record_with_details(&row, meta.ttft_ms, details, pricing);
 }
 
 fn as_i64(value: Option<u64>) -> Option<i64> {

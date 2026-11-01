@@ -191,6 +191,7 @@ mod tests {
             discover_agent_accounts: discover,
             warnings: Vec::new(),
             catalog: hofund_config::CatalogSettings::default(),
+            usage: hofund_config::UsageSettings::default(),
         }
     }
 

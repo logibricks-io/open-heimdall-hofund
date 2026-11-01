@@ -174,6 +174,9 @@ async fn usage_route_filters_period_and_totals() {
     assert_eq!(all.totals.requests, 4);
     assert_eq!(all.totals.input_tokens, 1_100);
     assert_eq!(all.totals.output_tokens, 1_103);
+    assert_eq!(all.totals.cost, 0.0);
+    assert_eq!(all.totals.unpriced, 3);
+    assert_eq!(all.currency, "USD");
 
     let month = decoded_usage(usage(&running, &dir.0, "?period=month").await).await;
     assert_eq!(month.period, UsagePeriod::Month);
@@ -409,5 +412,45 @@ async fn mutations_after_shutdown_return_503() {
     }
     let usage = usage(&running, &dir.0, "").await;
     assert_eq!(usage.status(), reqwest::StatusCode::OK, "reads still work");
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn u1b_11_control_usage_summary_includes_cost_and_unpriced() {
+    use hofund_usage::{RowPricing, TokenPrice, UsageDetails};
+
+    let dir = Scratch::new("cost-summary");
+    let now = now_unix();
+    {
+        let ledger = Ledger::open(&dir.0.join("usage.sqlite")).expect("ledger");
+        ledger
+            .record_with_details(
+                &row(now, "priced", Some(1), Some(1)),
+                None,
+                UsageDetails::default(),
+                Some(RowPricing {
+                    priced: true,
+                    cost_usd: 0.5,
+                    price: TokenPrice {
+                        input: 1.0,
+                        output: 1.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                        cache_write_1h: 0.0,
+                    },
+                }),
+            )
+            .expect("priced");
+        ledger
+            .record(&row(now, "open", Some(2), Some(2)))
+            .expect("unpriced");
+    }
+    let running = start_tcp(&dir.0, CONFIG).await;
+    let all = decoded_usage(usage(&running, &dir.0, "").await).await;
+    assert!((all.totals.cost - 0.5).abs() < f64::EPSILON);
+    assert_eq!(all.totals.unpriced, 1);
+    assert_eq!(all.currency, "USD");
+    assert_eq!(all.rows[0].cost, Some(0.5));
+    assert!(all.rows[1].cost.is_none());
     support::shutdown(running).await;
 }

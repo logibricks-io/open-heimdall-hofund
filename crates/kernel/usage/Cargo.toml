@@ -18,6 +18,8 @@ rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"
 thiserror = "2.0.21"
 
 [dev-dependencies]
+hofund-config = { workspace = true }
+hofund-model-catalog = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
