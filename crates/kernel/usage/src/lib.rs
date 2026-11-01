@@ -100,6 +100,8 @@ pub struct Row {
     pub caller_key_id: String,
     /// Authenticated gateway key name, or empty for a legacy caller.
     pub caller_key_name: String,
+    /// Issuer of the authenticated key, or empty for a direct caller.
+    pub caller_issuer_id: String,
 }
 
 /// One successful request as routing measurements read it.
@@ -158,6 +160,7 @@ impl Ledger {
                     status TEXT NOT NULL,
                     caller_key_id TEXT NOT NULL DEFAULT '',
                     caller_key_name TEXT NOT NULL DEFAULT '',
+                    caller_issuer_id TEXT NOT NULL DEFAULT '',
                     ttft_ms INTEGER
                 );",
             )
@@ -165,6 +168,7 @@ impl Ledger {
         for (column, declaration) in [
             ("caller_key_id", "TEXT NOT NULL DEFAULT ''"),
             ("caller_key_name", "TEXT NOT NULL DEFAULT ''"),
+            ("caller_issuer_id", "TEXT NOT NULL DEFAULT ''"),
             ("ttft_ms", "INTEGER"),
             ("uncached_input_tokens", "INTEGER"),
             ("cache_read_tokens", "INTEGER"),
@@ -208,8 +212,8 @@ impl Ledger {
             .execute(
                 "INSERT INTO requests (
                     created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
-                    caller_key_id, caller_key_name, ttft_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    caller_key_id, caller_key_name, caller_issuer_id, ttft_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     row.created_unix,
                     row.model,
@@ -220,6 +224,7 @@ impl Ledger {
                     row.status,
                     row.caller_key_id,
                     row.caller_key_name,
+                    row.caller_issuer_id,
                     ttft_ms,
                 ],
             )
@@ -240,7 +245,7 @@ impl Ledger {
         let mut statement = connection
             .prepare(
                 "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
-                        caller_key_id, caller_key_name
+                        caller_key_id, caller_key_name, caller_issuer_id
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -353,7 +358,7 @@ impl Ledger {
         let mut statement = connection
             .prepare(
                 "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
-                        caller_key_id, caller_key_name
+                        caller_key_id, caller_key_name, caller_issuer_id
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -413,6 +418,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         status: row.get(6)?,
         caller_key_id: row.get(7)?,
         caller_key_name: row.get(8)?,
+        caller_issuer_id: row.get(9)?,
     })
 }
 
@@ -506,6 +512,7 @@ mod tests {
             status: "200".to_owned(),
             caller_key_id: String::new(),
             caller_key_name: String::new(),
+            caller_issuer_id: String::new(),
         }
     }
 
@@ -615,6 +622,7 @@ mod tests {
                 status: "200".to_owned(),
                 caller_key_id: String::new(),
                 caller_key_name: String::new(),
+                caller_issuer_id: String::new(),
             })
             .expect("insert");
         let rows = ledger.rows().expect("rows");
@@ -632,6 +640,7 @@ mod tests {
                 status: "200".to_owned(),
                 caller_key_id: String::new(),
                 caller_key_name: String::new(),
+                caller_issuer_id: String::new(),
             })
             .expect("second");
         let table = ledger.table().expect("table");
@@ -710,6 +719,7 @@ mod tests {
                     status: "200".to_owned(),
                     caller_key_id: String::new(),
                     caller_key_name: String::new(),
+                    caller_issuer_id: String::new(),
                 },
                 Some(12),
             )

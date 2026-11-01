@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Short-lived gateway keys and issuers (P0-4d): issue keys for 1 minute to
+  30 days through `POST /v1/hofund/keys` or `gateway-key issue`, with model,
+  account, read-only, token, and cost constraints. Permitted issuer keys and
+  browser-free direct loopback clients can issue; issued keys are clamped to
+  their issuer's current scopes and expiry, record issuer attribution, and
+  reserve/count spend against both keys. Added masked listing, revocation,
+  expiry/issuer-refusal 401s on every route, hourly-grace pruning, control and
+  CLI issuance, issuer list status, and name-based key on/off.
 - Gateway-key spending limits (P0-4b): up to five token and/or estimated-cost
   caps per key over local calendar windows or absolute N-day/N-hour cycles.
   Cache-aware token sums rebuild from SQLite after restart, in-flight body-size

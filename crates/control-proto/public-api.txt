@@ -203,6 +203,7 @@ GatewayKeyAction::Access
 GatewayKeyAction::Accounts
 GatewayKeyAction::Add
 GatewayKeyAction::Copy
+GatewayKeyAction::Issue
 GatewayKeyAction::Issuer
 GatewayKeyAction::Limit
 GatewayKeyAction::Models
@@ -225,6 +226,7 @@ GatewayKeyLimit.tokens
 GatewayKeyRequest #[non_exhaustive] derives(Clone, PartialEq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 GatewayKeyRequest.accounts
 GatewayKeyRequest.action
+GatewayKeyRequest.cost
 GatewayKeyRequest.id
 GatewayKeyRequest.index
 GatewayKeyRequest.issues
@@ -235,10 +237,13 @@ GatewayKeyRequest.place
 GatewayKeyRequest.quotas
 GatewayKeyRequest.read_only
 GatewayKeyRequest.secret
+GatewayKeyRequest.tokens
+GatewayKeyRequest.ttl_seconds
 GatewayKeyRequest.version
 GatewayKeyRequest::fn for_id (mut self , id : impl Into < String >) -> Self
 GatewayKeyRequest::fn new (action : GatewayKeyAction) -> Self
 GatewayKeyResponse #[non_exhaustive] derives(Clone, PartialEq, Serialize, Deserialize)
+GatewayKeyResponse.issued_id
 GatewayKeyResponse.keys
 GatewayKeyResponse.secret
 GatewayKeyResponse.version
@@ -606,6 +611,7 @@ UsageResponse.rows_truncated
 UsageResponse.totals
 UsageResponse.version
 UsageRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+UsageRow.caller_issuer_id
 UsageRow.caller_key_id
 UsageRow.caller_key_name
 UsageRow.created_at_ms
