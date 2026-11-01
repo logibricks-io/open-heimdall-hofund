@@ -1073,11 +1073,7 @@ fn push_provider(
             .map(|key| (Some(key.member.clone()), key.weight))
             .collect()
     };
-    let at_once = context
-        .limits
-        .get(id)
-        .copied()
-        .unwrap_or(0);
+    let at_once = context.limits.get(id).copied().unwrap_or(0);
     for (rank, (member_id, key_weight)) in candidates.into_iter().enumerate() {
         out.push(membership::PlannedHop {
             provider: id.to_owned(),
