@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use ring::rand::SystemRandom;
-use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use ring::rsa::PublicKeyComponents;
+use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use serde_json::{Number, Value};
 
 pub struct TestIssuer {
@@ -24,11 +24,13 @@ pub struct TestIssuer {
 
 impl TestIssuer {
     pub fn new() -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let pair = Arc::new(generate_key());
         let components = PublicKeyComponents::<Vec<u8>>::from(pair.public());
         let spki = pair.public().as_ref().to_vec();
         Self {
-            url: "https://issuer.test".to_owned(),
+            url: format!("https://issuer-{id}.test"),
             spki,
             modulus: components.n,
             exponent: components.e,
@@ -48,7 +50,10 @@ impl TestIssuer {
     }
 
     pub fn add_key(&self, kid: &str) {
-        self.extra.lock().expect("extra").insert(kid.to_owned(), Arc::clone(&self.pair));
+        self.extra
+            .lock()
+            .expect("extra")
+            .insert(kid.to_owned(), Arc::clone(&self.pair));
     }
 
     pub fn claims(
@@ -63,15 +68,15 @@ impl TestIssuer {
             .unwrap_or(0);
         let mut claims = BTreeMap::from([
             ("iss".to_owned(), Value::String(self.url.clone())),
-            (
-                "aud".to_owned(),
-                Value::String(audience.to_owned()),
-            ),
+            ("aud".to_owned(), Value::String(audience.to_owned())),
             (
                 "sub".to_owned(),
                 Value::String("repo:acme/app:ref:refs/heads/main".to_owned()),
             ),
-            ("repository".to_owned(), Value::String("acme/app".to_owned())),
+            (
+                "repository".to_owned(),
+                Value::String("acme/app".to_owned()),
+            ),
             (
                 "repository_owner".to_owned(),
                 Value::String("acme".to_owned()),
@@ -112,9 +117,7 @@ impl TestIssuer {
         };
         let header = serde_json::json!({"alg":"RS256","typ":"JWT","kid":kid});
         let header = URL_SAFE_NO_PAD.encode(header.to_string());
-        let payload = URL_SAFE_NO_PAD.encode(
-            serde_json::to_string(&claims).expect("claims"),
-        );
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims).expect("claims"));
         let signed = format!("{header}.{payload}");
         let mut signature = vec![0; pair.public().modulus_len()];
         pair.sign(
@@ -129,6 +132,20 @@ impl TestIssuer {
 
     pub fn spki(&self) -> &[u8] {
         &self.spki
+    }
+
+    #[cfg(test)]
+    pub fn verify_token(&self, token: &str) -> Result<(), ring::error::Unspecified> {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use ring::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
+        let parts: Vec<&str> = token.split('.').collect();
+        let signed = format!("{}.{}", parts[0], parts[1]);
+        let sig = URL_SAFE_NO_PAD
+            .decode(parts[2])
+            .map_err(|_| ring::error::Unspecified)?;
+        let key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, self.spki());
+        key.verify(signed.as_bytes(), &sig)
     }
 
     pub fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {

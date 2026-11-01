@@ -92,12 +92,11 @@ impl RuleStore {
         let mut id = [0_u8; 6];
         getrandom(&mut id).map_err(|error| SecretError::Random(error.to_string()))?;
         let id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
-        let audience = rule
-            .audience
-            .trim()
-            .is_empty()
-            .then(|| format!("hofund-{id}"))
-            .unwrap_or_else(|| rule.audience.trim().to_owned());
+        let audience = if rule.audience.trim().is_empty() {
+            format!("hofund-{id}")
+        } else {
+            rule.audience.trim().to_owned()
+        };
         let stored = Rule {
             id,
             key: rule.key,
@@ -117,14 +116,11 @@ impl RuleStore {
     pub fn remove(&self, id: &str) -> Result<(), SecretError> {
         let _guard = lock()?;
         let mut rules = load(&self.path)?;
-        let index = rules
-            .iter()
-            .position(|rule| rule.id == id)
-            .ok_or_else(|| {
-                SecretError::Key(format!(
-                    "no rule has the id {id:?} (hofund gateway-key oidc list)"
-                ))
-            })?;
+        let index = rules.iter().position(|rule| rule.id == id).ok_or_else(|| {
+            SecretError::Key(format!(
+                "no rule has the id {id:?} (hofund gateway-key oidc list)"
+            ))
+        })?;
         rules.remove(index);
         save(&self.path, &rules)
     }
@@ -264,30 +260,20 @@ fn load(path: &Path) -> Result<Vec<Rule>, SecretError> {
 }
 
 fn save(path: &Path, rules: &[Rule]) -> Result<(), SecretError> {
-    let bytes = serde_json::to_vec_pretty(rules).map_err(|error| {
-        SecretError::File(format!("cannot encode {}: {error}", path.display()))
-    })?;
-    let text = String::from_utf8(bytes).map_err(|error| {
-        SecretError::File(format!("cannot encode {}: {error}", path.display()))
-    })?;
+    let bytes = serde_json::to_vec_pretty(rules)
+        .map_err(|error| SecretError::File(format!("cannot encode {}: {error}", path.display())))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| SecretError::File(format!("cannot encode {}: {error}", path.display())))?;
     write_atomic(path, &text)
 }
 
 /// Whether `pattern` matches `value` using the reference's claim glob rules.
 pub fn claim_pattern_matches(pattern: &str, value: &str) -> bool {
-    path_match(pattern, value)
+    path_match_inner(pattern.as_bytes(), value.as_bytes()).unwrap_or_default()
 }
 
 fn claim_pattern_valid(pattern: &str) -> Result<(), ()> {
-    path_match_inner(pattern.as_bytes(), b"").map(|_| ())
-}
-
-/// A small subset of Go `path.Match` semantics for claim patterns.
-fn path_match(pattern: &str, name: &str) -> bool {
-    match path_match_inner(pattern.as_bytes(), name.as_bytes()) {
-        Ok(matched) => matched,
-        Err(()) => false,
-    }
+    path_match_inner(pattern.as_bytes(), b"\x00").map(|_| ())
 }
 
 fn path_match_inner(pattern: &[u8], name: &[u8]) -> Result<bool, ()> {

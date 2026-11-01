@@ -11,5 +11,7 @@ mod verify_tests;
 pub use verify::{match_token, oidc_key_name};
 
 #[cfg(test)]
-pub use verify::{claim_str, reset_oidc_verifier_for_tests, set_fetch_client_for_tests, set_now_for_tests};
-
+pub use verify::{
+    claim_str, lock_oidc_tests, reset_oidc_verifier_for_tests, set_fetch_client_for_tests,
+    set_now_for_tests,
+};

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::Response;
 use axum::routing::post;
 use hofund_secrets::{IssueRequest, MAX_TTL};
@@ -28,10 +28,7 @@ struct ExchangeBody {
     models: Vec<String>,
 }
 
-async fn oidc_issue_key(
-    State(app): State<Arc<Inner>>,
-    request: Request,
-) -> Response {
+async fn oidc_issue_key(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let token = bearer(request.headers())
         .map(str::trim)
         .filter(|token| !token.is_empty())
@@ -141,6 +138,7 @@ mod tests {
     use crate::{Gateway, issue_keys::PeerAddr};
 
     struct Fixture {
+        _guard: tokio::sync::MutexGuard<'static, ()>,
         gateway: Gateway,
         store: Arc<hofund_secrets::KeyStore>,
         rules: RuleStore,
@@ -149,6 +147,7 @@ mod tests {
     }
 
     async fn fixture() -> Fixture {
+        let guard = crate::oidc::lock_oidc_tests().await;
         reset_oidc_verifier_for_tests().await;
         let dir = tempfile::tempdir().expect("temp dir");
         let store = Arc::new(hofund_secrets::KeyStore::beside_token(
@@ -171,6 +170,7 @@ mod tests {
         )
         .with_key_store(Arc::clone(&store));
         Fixture {
+            _guard: guard,
             gateway,
             store,
             rules,
@@ -235,9 +235,7 @@ mod tests {
             .expect("rule");
         let app = fixture.gateway.into_router();
         let token = |aud: &str, over: BTreeMap<String, Value>| {
-            fixture
-                .issuer
-                .sign("k1", fixture.issuer.claims(aud, &over))
+            fixture.issuer.sign("k1", fixture.issuer.claims(aud, &over))
         };
         let (status, body) = post_oidc(
             &app,

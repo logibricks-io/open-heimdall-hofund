@@ -9,7 +9,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hofund_secrets::oidc::{Rule, RuleStore, claim_pattern_matches};
-use ring::signature::{UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
+use ring::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
 use serde_json::Value;
 
 const LEEWAY: Duration = Duration::from_secs(60);
@@ -20,6 +20,15 @@ type FetchClient = Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync>;
 
 static FETCH: Mutex<Option<FetchClient>> = Mutex::new(None);
 static NOW: Mutex<Option<SystemTime>> = Mutex::new(None);
+
+#[cfg(test)]
+static OIDC_TEST_GUARD: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
+
+/// Serializes OIDC unit tests that share JWKS cache and fetch hooks.
+#[cfg(test)]
+pub async fn lock_oidc_tests() -> tokio::sync::MutexGuard<'static, ()> {
+    OIDC_TEST_GUARD.lock().await
+}
 
 /// Verified token claims.
 pub type Claims = BTreeMap<String, Value>;
@@ -44,9 +53,7 @@ pub fn set_now_for_tests(now: Option<SystemTime>) {
 }
 
 fn clock_now() -> SystemTime {
-    NOW.lock()
-        .expect("clock")
-        .unwrap_or_else(SystemTime::now)
+    NOW.lock().expect("clock").unwrap_or_else(SystemTime::now)
 }
 
 /// Shortens an unverified value for errors and logs.
@@ -69,10 +76,7 @@ pub fn claim_str(claims: &Claims, name: &str) -> String {
 }
 
 /// Verifies `token` and returns the first matching rule and its claims.
-pub async fn match_token(
-    token: &str,
-    rules: &RuleStore,
-) -> Result<(Rule, Claims), String> {
+pub async fn match_token(token: &str, rules: &RuleStore) -> Result<(Rule, Claims), String> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return Err("the bearer token isn't a JWT".to_owned());
@@ -94,8 +98,8 @@ pub async fn match_token(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    let claims: Claims = decode_part(parts[1])
-        .map_err(|_| "the token's claims can't be read".to_owned())?;
+    let claims: Claims =
+        decode_part(parts[1]).map_err(|_| "the token's claims can't be read".to_owned())?;
     let iss = claim_str(&claims, "iss").trim_end_matches('/').to_owned();
     let configured = rules
         .list()
@@ -119,27 +123,18 @@ pub async fn match_token(
         .map_err(|_| "the token's signature is not its issuer's".to_owned())?;
     let clock = clock_now();
     let exp = claim_time(&claims, "exp").ok_or_else(|| "the token has no expiry".to_owned())?;
-    if exp
-        .checked_add(LEEWAY)
-        .is_some_and(|limit| clock >= limit)
-    {
+    if exp.checked_add(LEEWAY).is_some_and(|limit| clock >= limit) {
         return Err("the token has expired".to_owned());
     }
     if let Some(nbf) = claim_time(&claims, "nbf")
-        && clock
-            .checked_add(LEEWAY)
-            .is_some_and(|limit| limit < nbf)
+        && clock.checked_add(LEEWAY).is_some_and(|limit| limit < nbf)
     {
         return Err("the token isn't valid yet".to_owned());
     }
     if let Some(iat) = claim_time(&claims, "iat")
-        && clock
-            .checked_add(LEEWAY)
-            .is_some_and(|limit| limit < iat)
+        && clock.checked_add(LEEWAY).is_some_and(|limit| limit < iat)
     {
-        return Err(
-            "the token was issued in the future: check this computer's clock".to_owned(),
-        );
+        return Err("the token was issued in the future: check this computer's clock".to_owned());
     }
     let audiences = audiences(&claims);
     let mismatch = described(&claims, &configured);
@@ -254,16 +249,16 @@ async fn public_key(issuer: &str, kid: &str) -> Result<Vec<u8>, String> {
         let now = clock_now();
         let have = entry.keys.get(kid).cloned();
         let stale = entry.fetched.is_none()
-            || entry
-                .fetched
-                .is_some_and(|fetched| now.duration_since(fetched).unwrap_or(Duration::ZERO) > KEYS_FRESH)
+            || entry.fetched.is_some_and(|fetched| {
+                now.duration_since(fetched).unwrap_or(Duration::ZERO) > KEYS_FRESH
+            })
             || have.is_none();
         if !stale
             || (entry.tried.is_some()
                 && entry.loading.is_none()
-                && entry
-                    .tried
-                    .is_some_and(|tried| now.duration_since(tried).unwrap_or(Duration::ZERO) < REFETCH_GAP))
+                && entry.tried.is_some_and(|tried| {
+                    now.duration_since(tried).unwrap_or(Duration::ZERO) < REFETCH_GAP
+                }))
         {
             drop(sets);
             return have.ok_or_else(|| {
@@ -274,8 +269,8 @@ async fn public_key(issuer: &str, kid: &str) -> Result<Vec<u8>, String> {
                 )
             });
         }
-        if entry.loading.is_some() {
-            let wait = Arc::clone(entry.loading.as_ref().expect("loading"));
+        if let Some(wait) = entry.loading.as_ref() {
+            let wait = Arc::clone(wait);
             drop(sets);
             tokio::time::sleep(Duration::from_millis(10)).await;
             let _ = wait;
@@ -314,10 +309,7 @@ fn default_fetch(url: &str) -> Result<Vec<u8>, String> {
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| error.to_string())?;
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|error| error.to_string())?;
+    let response = client.get(url).send().map_err(|error| error.to_string())?;
     if !response.status().is_success() {
         return Err(format!("{url} answered {}", response.status()));
     }
@@ -407,7 +399,7 @@ pub(super) fn parse_jwks(body: &[u8]) -> Result<HashMap<String, Vec<u8>>, String
         if modulus_bit_len(&n) < 2048 {
             continue;
         }
-        let der = rsa_spki_der(&n, &e);
+        let der = rsa_public_key_der(&n, &e);
         out.insert(kid.to_owned(), der);
     }
     if out.is_empty() {
@@ -418,12 +410,19 @@ pub(super) fn parse_jwks(body: &[u8]) -> Result<HashMap<String, Vec<u8>>, String
 }
 
 fn modulus_bit_len(bytes: &[u8]) -> u32 {
-    let mut bits = u32::try_from(bytes.len()).unwrap_or(0) * 8;
-    if let Some(first) = bytes.first() {
-        let leading = first.leading_zeros();
-        bits -= leading;
+    if bytes.is_empty() {
+        return 0;
     }
-    bits
+    let mut bits = u32::try_from(bytes.len()).unwrap_or(0) * 8;
+    for byte in bytes {
+        if *byte == 0 {
+            bits -= 8;
+        } else {
+            bits -= byte.leading_zeros();
+            return bits;
+        }
+    }
+    0
 }
 
 fn bytes_to_u32(bytes: &[u8]) -> u32 {
@@ -434,14 +433,11 @@ fn bytes_to_u32(bytes: &[u8]) -> u32 {
     value
 }
 
-fn rsa_spki_der(modulus: &[u8], exponent: &[u8]) -> Vec<u8> {
-    let seq = der_sequence(&[
+fn rsa_public_key_der(modulus: &[u8], exponent: &[u8]) -> Vec<u8> {
+    der_sequence(&[
         der_integer(modulus).as_slice(),
         der_integer(exponent).as_slice(),
-    ]);
-    let alg = der_sequence(&[der_oid_rsa_encryption().as_slice(), der_null().as_slice()]);
-    let bit_string = der_bit_string(&seq);
-    der_sequence(&[alg.as_slice(), bit_string.as_slice()])
+    ])
 }
 
 fn der_integer(bytes: &[u8]) -> Vec<u8> {
@@ -450,20 +446,6 @@ fn der_integer(bytes: &[u8]) -> Vec<u8> {
         body.insert(0, 0);
     }
     der_tlv(0x02, &body)
-}
-
-fn der_null() -> Vec<u8> {
-    der_tlv(0x05, &[])
-}
-
-fn der_oid_rsa_encryption() -> Vec<u8> {
-    der_tlv(0x06, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01])
-}
-
-fn der_bit_string(bytes: &[u8]) -> Vec<u8> {
-    let mut body = vec![0];
-    body.extend_from_slice(bytes);
-    der_tlv(0x03, &body)
 }
 
 fn der_sequence(parts: &[&[u8]]) -> Vec<u8> {

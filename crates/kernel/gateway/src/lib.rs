@@ -8,10 +8,10 @@
 pub mod control;
 mod endpoints;
 mod issue_keys;
-mod oidc;
-mod oidc_keys;
 mod limits;
 mod me;
+mod oidc;
+mod oidc_keys;
 mod prev_response;
 mod quotas;
 mod readonly;
@@ -57,8 +57,8 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_host::HttpBackend;
 use hofund_router::{Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
-use hofund_secrets::{Identity, KeyStore};
 use hofund_secrets::oidc::RuleStore;
+use hofund_secrets::{Identity, KeyStore};
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
 use tokio::net::TcpListener;

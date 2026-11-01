@@ -42,7 +42,9 @@ fn parse_add(args: &[&str]) -> Result<Option<Command>, String> {
             match flag {
                 "--key" => draft.key = value.to_owned(),
                 "--repo" => {
-                    draft.claims.insert("repository".to_owned(), value.to_owned());
+                    draft
+                        .claims
+                        .insert("repository".to_owned(), value.to_owned());
                 }
                 "--owner" => {
                     draft
@@ -53,7 +55,9 @@ fn parse_add(args: &[&str]) -> Result<Option<Command>, String> {
                     draft.claims.insert("ref".to_owned(), value.to_owned());
                 }
                 "--environment" => {
-                    draft.claims.insert("environment".to_owned(), value.to_owned());
+                    draft
+                        .claims
+                        .insert("environment".to_owned(), value.to_owned());
                 }
                 "--claim" => {
                     let (name, val) = value.split_once('=').ok_or_else(|| USAGE.to_owned())?;
@@ -156,14 +160,7 @@ mod tests {
         let command = parse(&["oidc", "list"]).expect("parse").expect("command");
         assert_eq!(command, Command::List);
         let command = parse(&[
-            "oidc",
-            "add",
-            "--key",
-            "abc",
-            "--repo",
-            "acme/app",
-            "--ttl",
-            "30m",
+            "oidc", "add", "--key", "abc", "--repo", "acme/app", "--ttl", "30m",
         ])
         .expect("parse")
         .expect("command");
@@ -171,6 +168,9 @@ mod tests {
             panic!("expected add");
         };
         assert_eq!(draft.key, "abc");
-        assert_eq!(draft.claims.get("repository").map(String::as_str), Some("acme/app"));
+        assert_eq!(
+            draft.claims.get("repository").map(String::as_str),
+            Some("acme/app")
+        );
     }
 }
