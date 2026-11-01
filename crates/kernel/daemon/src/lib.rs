@@ -36,6 +36,7 @@ mod control_agents;
 mod control_local;
 pub(crate) mod control_map;
 mod events;
+mod measurements;
 mod membership;
 mod models;
 mod models_state;
@@ -473,6 +474,7 @@ async fn start_inner(
         models_host.attach_events(Arc::clone(bus));
     }
     let models_host = Arc::new(models_host);
+    runtime.attach_measurements(Arc::clone(&usage), Arc::clone(&models_host));
     runtime.attach_models(Arc::clone(&models_host));
     if let Some(bus) = &control_bus {
         runtime.attach_events(Arc::clone(bus));

@@ -23,6 +23,7 @@ use crate::jsonutil::{
     take_bool, take_f64, take_object, take_string, take_u64, to_bytes,
 };
 use crate::openai_chat::openai_error_body;
+use crate::refusal::refusal_reason;
 use crate::sse::{self, SseFrame, SseParser};
 use crate::{Codec, StreamDecoder, StreamEncoder as StreamEncoderTrait};
 
@@ -2578,6 +2579,7 @@ impl Decoder {
         events: &mut Vec<StreamEvent>,
     ) -> Result<(), CodecError> {
         let mut response = take_object(&mut object, "response")?.unwrap_or_default();
+        let refusal = response.get("error").and_then(refusal_reason);
         if !self.started {
             let id = take_string(&mut response, "id")?;
             let model = take_string(&mut response, "model")?;
@@ -2609,8 +2611,12 @@ impl Decoder {
         for index in indexes {
             self.close(index, Extensions::new(), events);
         }
+        let mut stop = stop_from(&status, reason.as_deref(), self.called);
+        if let Some(reason) = refusal {
+            stop.reason = reason;
+        }
         events.push(StreamEvent::MessageDelta(MessageDelta {
-            stop: Some(stop_from(&status, reason.as_deref(), self.called)),
+            stop: Some(stop),
             usage,
             extensions: Extensions::new(),
         }));

@@ -9,6 +9,7 @@ pub mod control;
 mod endpoints;
 mod prev_response;
 mod quotas;
+mod refusal_handover;
 mod relisten;
 mod responses_ws;
 
@@ -844,6 +845,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             started,
             input: None,
             output: None,
+            ttft_ms: None,
         };
         match router.forward(&call).await {
             Ok(forwarded) => {
@@ -1189,7 +1191,16 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         .dispatch_with_attempt(&model_request, codec.id(), attempt)
         .await
     {
-        Ok(routed) => {
+        Ok(mut routed) => {
+            let continuation = (model_request.stream
+                && matches!(
+                    codec.id(),
+                    id if id == ProtocolId::ANTHROPIC_MESSAGES.as_str()
+                        || id == ProtocolId::OPENAI_CHAT.as_str()
+                        || id == ProtocolId::OPENAI_RESPONSES.as_str()
+                ))
+            .then(|| routed.take_continuation())
+            .flatten();
             success(
                 app,
                 codec,
@@ -1197,6 +1208,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 &routed.upstream_id,
                 &routed.upstream_model,
                 routed.completion,
+                continuation,
                 started,
                 &mut track,
                 capture,
@@ -1393,6 +1405,7 @@ async fn success(
     upstream: &str,
     upstream_model: &str,
     completion: Completion,
+    continuation: Option<hofund_router::RouteContinuation>,
     started: Instant,
     track: &mut RequestTrack,
     capture: Option<prev_response::Capture>,
@@ -1446,19 +1459,33 @@ async fn success(
                 }
             };
             // Move the track into the stream so finish runs when the body ends.
-            let body = sse_body(
-                events,
-                encoder,
-                RecordOnEnd {
-                    usage: Arc::clone(&app.usage),
-                    meta,
-                    input: None,
-                    output: None,
-                    track: Some(track.take_for_stream()),
-                    member,
-                },
-                Box::new(on_error),
-            );
+            let record = RecordOnEnd {
+                usage: Arc::clone(&app.usage),
+                meta,
+                input: None,
+                output: None,
+                track: Some(track.take_for_stream()),
+                member,
+            };
+            let body: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
+                if let Some(continuation) = continuation {
+                    Box::pin(refusal_handover::body(
+                        events,
+                        continuation,
+                        Arc::clone(&codec),
+                        request.clone(),
+                        encoder,
+                        record,
+                        Box::new(on_error),
+                    ))
+                } else {
+                    Box::pin(sse_body(
+                        refusal_handover::refusals_fail(events),
+                        encoder,
+                        record,
+                        Box::new(on_error),
+                    ))
+                };
             let body = capture_stream(body, capture);
             Response::builder()
                 .status(StatusCode::OK)
@@ -1467,18 +1494,64 @@ async fn success(
                 .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
         }
         Completion::Raw(body) => {
-            raw_body(
-                app,
-                codec,
-                request,
-                upstream_model,
-                meta,
-                body,
-                track,
-                member,
-                capture,
-            )
-            .await
+            if let Some(continuation) = continuation {
+                match refusal_handover::events(Completion::Raw(body), &codec, &request.model) {
+                    Err(error) => {
+                        let status = status_of(&error);
+                        write_usage(&app.usage, &meta, None, status);
+                        track.end_with(member, status.as_u16(), None, None);
+                        coded(codec.as_ref(), status, error.message())
+                    }
+                    Ok(events) => {
+                        let encoder = codec.stream_encoder_for(request);
+                        let on_error = {
+                            let codec = Arc::clone(&codec);
+                            move |error: &PluginError| {
+                                codec
+                                    .encode_stream_error(status_of(error).as_u16(), error.message())
+                            }
+                        };
+                        let record = RecordOnEnd {
+                            usage: Arc::clone(&app.usage),
+                            meta,
+                            input: None,
+                            output: None,
+                            track: Some(track.take_for_stream()),
+                            member,
+                        };
+                        let body = refusal_handover::body(
+                            events,
+                            continuation,
+                            Arc::clone(&codec),
+                            request.clone(),
+                            encoder,
+                            record,
+                            Box::new(on_error),
+                        );
+                        let body = capture_stream(body, capture);
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(header::CONTENT_TYPE, codec.stream_content_type())
+                            .body(Body::from_stream(body))
+                            .unwrap_or_else(|_| {
+                                text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")
+                            })
+                    }
+                }
+            } else {
+                raw_body(
+                    app,
+                    codec,
+                    request,
+                    upstream_model,
+                    meta,
+                    body,
+                    track,
+                    member,
+                    capture,
+                )
+                .await
+            }
         }
         _ => {
             track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
@@ -1580,6 +1653,7 @@ async fn raw_body(
                         ))
                     }
                     Some(Ok(chunk)) => {
+                        meta.note_first_content();
                         let forwarded = tap.push(&chunk);
                         let (input, output) = tap.tokens();
                         meta.input = input.or(meta.input);
@@ -1714,6 +1788,7 @@ struct UsageMeta {
     started: Instant,
     input: Option<i64>,
     output: Option<i64>,
+    ttft_ms: Option<i64>,
 }
 
 impl UsageMeta {
@@ -1724,6 +1799,14 @@ impl UsageMeta {
             started,
             input: None,
             output: None,
+            ttft_ms: None,
+        }
+    }
+
+    fn note_first_content(&mut self) {
+        if self.ttft_ms.is_none() {
+            self.ttft_ms =
+                Some(i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX));
         }
     }
 }
@@ -1821,6 +1904,14 @@ fn sse_body(
                     }
                     Some(Ok(event)) => {
                         note_usage(&event, &mut record.input, &mut record.output);
+                        if matches!(
+                            event,
+                            StreamEvent::TextDelta(_)
+                                | StreamEvent::ThinkingDelta(_)
+                                | StreamEvent::ToolArgumentsDelta(_)
+                        ) {
+                            record.meta.note_first_content();
+                        }
                         match encoder.push(&event) {
                             Ok(bytes) if bytes.is_empty() => {}
                             Ok(bytes) => {
@@ -1903,7 +1994,7 @@ fn write_usage(
         latency_ms: i64::try_from(meta.started.elapsed().as_millis()).unwrap_or(i64::MAX),
         status: status.as_u16().to_string(),
     };
-    let _ = usage.record(&row);
+    let _ = usage.record_with_ttft(&row, meta.ttft_ms);
 }
 
 fn as_i64(value: Option<u64>) -> Option<i64> {

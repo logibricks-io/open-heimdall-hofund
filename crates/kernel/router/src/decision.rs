@@ -113,6 +113,9 @@ const BLOCKED_HINT: &str = "the provider's network firewall blocked requests fro
 /// A vendor usage-policy code.
 static POLICY_CODE: LazyLock<Regex> = LazyLock::new(|| re("^[a-z]+_policy$"));
 
+/// A provider's input, output, image, or video sensitive-content code.
+static SENSITIVE_CODE: LazyLock<Regex> = LazyLock::new(|| re("SensitiveContentDetected$"));
+
 /// Words that hold a prompt to a usage policy.
 static FLAGGED_WORDS: LazyLock<Regex> = LazyLock::new(|| re("(?i)flagged|usage polic"));
 
@@ -122,6 +125,9 @@ const FILTER_CODES: &[&str] = &[
     "content_filter",
     "content_policy_violation",
     "content_policy_rejected",
+    "sensitive",
+    "data_inspection_failed",
+    "DataInspectionFailed",
     "SAFETY",
     "PROHIBITED_CONTENT",
     "BLOCKLIST",
@@ -231,6 +237,7 @@ pub(crate) fn rests(error: &PluginError) -> bool {
     if too_long(400, message)
         || REFUSED_WORDS.is_match(message)
         || PROTECTION_WORDS.is_match(message)
+        || policy_refusal(message)
         || message.contains(EMPTY_REPLY)
     {
         return false;
@@ -373,6 +380,8 @@ fn policy_refusal(raw: &str) -> bool {
         .unwrap_or_default();
     FILTER_CODES.contains(&code)
         || POLICY_CODE.is_match(code)
+        || SENSITIVE_CODE.is_match(code)
+        || code == "1301" && message.contains("\u{654f}\u{611f}")
         || code == "invalid_prompt" && FLAGGED_WORDS.is_match(message)
         || message.trim() == HIGH_RISK_REFUSAL
 }
@@ -476,6 +485,23 @@ mod tests {
     }
 
     #[test]
+    fn b9_sensitive_refusals_do_not_rest_the_member() {
+        for body in [
+            r#"{"error":{"code":"1301","message":"\u654f\u611f content"}}"#,
+            r#"{"error":{"code":"data_inspection_failed"}}"#,
+            r#"{"code":"DataInspectionFailed"}"#,
+            r#"{"error":{"code":"OutputTextSensitiveContentDetected"}}"#,
+        ] {
+            let error = PluginError::status_error(400, body);
+            assert!(policy_refusal(body), "{body}");
+            assert!(!rests(&error), "{body}");
+        }
+        assert!(!policy_refusal(
+            r#"{"error":{"code":"1301","message":"rate limited"}}"#
+        ));
+    }
+
+    #[test]
     fn every_list_compiles() {
         for list in [
             &QUOTA_WORDS,
@@ -491,6 +517,7 @@ mod tests {
             &CUSTOM_TOOL_REFUSAL,
             &EDGE_BLOCKED,
             &POLICY_CODE,
+            &SENSITIVE_CODE,
             &FLAGGED_WORDS,
         ] {
             assert!(!list.as_str().is_empty());

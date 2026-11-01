@@ -18,6 +18,7 @@ mod jsonutil;
 mod openai_chat;
 mod openai_responses;
 mod passthrough;
+mod refusal;
 mod sse;
 
 pub use anthropic::AnthropicMessages;
@@ -30,6 +31,7 @@ pub use openai_responses::{
     STREAM_WINDOW_HEADER, UNMAPPED_TOOLS, compacts_in_stream_client,
 };
 pub use passthrough::RawTap;
+pub use refusal::refusal_error;
 
 use hofund_ir::{Request, Response, StreamEvent};
 
