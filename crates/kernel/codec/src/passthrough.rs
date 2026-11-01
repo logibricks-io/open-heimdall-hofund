@@ -48,6 +48,145 @@ pub trait RawTap: Send {
     fn tokens(&self) -> (Option<i64>, Option<i64>);
 }
 
+/// How a protocol's event stream says it reached its last event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// Not checked: the stream may end whole without a named last event
+    /// (Chat Completions), or it is not an event stream.
+    Unchecked,
+    /// An event whose name or JSON `type` is `message_stop`, `error`,
+    /// `response.completed`, `response.incomplete` or `response.failed`.
+    Named,
+    /// A named last event, or a chunk with no candidate or with a candidate
+    /// that carries a `finishReason`; the chunk may be wrapped in `response`.
+    Candidate,
+}
+
+/// Watches the complete lines of a relayed event stream for its last event
+/// (`reference: internal/gateway/sniff.go:63-117,249-262`,
+/// `internal/gateway/continuation.go:91-120`).
+#[derive(Debug)]
+pub struct EndWatch {
+    rule: StreamEnd,
+    data: Vec<u8>,
+    reached: bool,
+}
+
+impl EndWatch {
+    /// A watch for `rule`, or `None` when the protocol is not checked.
+    #[must_use]
+    pub fn new(rule: StreamEnd) -> Option<Self> {
+        (rule != StreamEnd::Unchecked).then_some(Self {
+            rule,
+            data: Vec::new(),
+            reached: false,
+        })
+    }
+
+    /// Reads `bytes`, which hold only complete lines.
+    pub fn lines(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        // the last line end closes a line; it does not start an empty one
+        let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+        for line in bytes.split(|byte| *byte == b'\n') {
+            self.line(line.strip_suffix(b"\r").unwrap_or(line));
+        }
+    }
+
+    fn line(&mut self, line: &[u8]) {
+        if line.is_empty() {
+            self.flush();
+            return;
+        }
+        if let Some(name) = line.strip_prefix(b"event:") {
+            // the name says so even when the data is too big to read
+            if last_event(name.trim_ascii()) {
+                self.reached = true;
+            }
+            return;
+        }
+        if let Some(data) = line.strip_prefix(b"data:") {
+            if !self.data.is_empty() {
+                self.data.push(b'\n');
+            }
+            self.data
+                .extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.data.is_empty() {
+            return;
+        }
+        let data = std::mem::take(&mut self.data);
+        if self.ends(data.trim_ascii()) {
+            self.reached = true;
+        }
+    }
+
+    fn ends(&self, data: &[u8]) -> bool {
+        if data == b"[DONE]" {
+            return true;
+        }
+        let Ok(serde_json::Value::Object(object)) = serde_json::from_slice(data) else {
+            return false;
+        };
+        let kind = object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if last_event(kind.as_bytes())
+            || kind.is_empty() && object.get("error").is_some_and(|error| !error.is_null())
+        {
+            return true;
+        }
+        self.rule == StreamEnd::Candidate && candidate_ends(&object)
+    }
+
+    /// Whether the stream reached its last event. Reads an event the body
+    /// ended without a blank line after.
+    #[must_use]
+    pub fn reached(&mut self) -> bool {
+        self.flush();
+        self.reached
+    }
+}
+
+fn last_event(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"message_stop"
+            | b"error"
+            | b"response.completed"
+            | b"response.incomplete"
+            | b"response.failed"
+    )
+}
+
+/// A chunk with no candidate, or one whose candidate has a finish reason.
+/// Usage alone is no end: some hosts send it on every chunk.
+fn candidate_ends(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let chunk = match object.get("response") {
+        Some(serde_json::Value::Object(inner)) => inner,
+        _ => object,
+    };
+    let Some(candidates) = chunk
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return true;
+    };
+    candidates.is_empty()
+        || candidates.iter().any(|candidate| {
+            candidate
+                .get("finishReason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reason| !reason.is_empty())
+        })
+}
+
 pub(crate) struct DecoderTap {
     decoder: Box<dyn StreamDecoder>,
     rewrite: bool,
@@ -1245,7 +1384,7 @@ pub(crate) fn frame_closed(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecoderTap, RawTap, rewrite_all};
+    use super::{DecoderTap, EndWatch, RawTap, StreamEnd, rewrite_all};
     use crate::{
         AnthropicMessages, Codec, Converse, GenerativeLanguage, OpenAiChat, OpenAiResponses,
     };
@@ -1890,6 +2029,144 @@ mod tests {
         let anthropic =
             String::from_utf8(AnthropicMessages.encode_stream_error(429, "slow")).expect("utf-8");
         assert!(anthropic.starts_with("event: error\ndata: "), "{anthropic}");
+    }
+
+    fn reached(rule: StreamEnd, chunks: &[&str]) -> bool {
+        let mut watch = EndWatch::new(rule).expect("checked");
+        for chunk in chunks {
+            watch.lines(chunk.as_bytes());
+        }
+        watch.reached()
+    }
+
+    #[test]
+    fn d22_end_watch_reads_each_named_last_event() {
+        for last in [
+            "event: message_stop\n",
+            "event:error\n",
+            "event: response.completed\n",
+            "event: response.incomplete\n",
+            "event: response.failed\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+            "data: {\"type\":\"error\",\"error\":{}}\n\n",
+            "data: {\"type\":\"response.completed\"}\n\n",
+            "data: {\"type\":\"response.incomplete\"}\n\n",
+            "data: {\"type\":\"response.failed\"}\n\n",
+            "data: [DONE]\n\n",
+            "data:[DONE]\r\n\r\n",
+            "data: {\"error\":{\"message\":\"no\"}}\n\n",
+            "data: {\"type\":\"\",\"error\":\"no\"}\n\n",
+            // the last event short of its blank line
+            "data: {\"type\":\"message_stop\"}",
+        ] {
+            assert!(reached(StreamEnd::Named, &[last]), "{last:?}");
+        }
+        for open in [
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\"}\n\n",
+            "data: {\"type\":\"ping\",\"error\":{}}\n\n",
+            "data: {\"error\":null}\n\n",
+            "data: {\"type\":\"message_st\n",
+            "data: [DONE] later\n\n",
+            ": message_stop\n\n",
+            "data: {\"candidates\":[]}\n\n",
+        ] {
+            assert!(!reached(StreamEnd::Named, &[open]), "{open:?}");
+        }
+        assert!(EndWatch::new(StreamEnd::Unchecked).is_none());
+    }
+
+    #[test]
+    fn d22_end_watch_joins_the_data_lines_of_one_event() {
+        assert!(reached(
+            StreamEnd::Named,
+            &["data: {\"type\":\n", "data: \"message_stop\"}\n", "\n"]
+        ));
+        assert!(!reached(
+            StreamEnd::Named,
+            &["data: {\"type\":\n", "\n", "data: \"message_stop\"}\n\n"]
+        ));
+        // the lines join with a line end, so a number split over two
+        // lines is two numbers, not one
+        assert!(!reached(
+            StreamEnd::Named,
+            &[
+                "data: {\"type\":\"message_stop\",\"n\":1\n",
+                "data: 2}\n",
+                "\n"
+            ]
+        ));
+    }
+
+    #[test]
+    fn d22_end_watch_reads_crlf_lines() {
+        // a CRLF blank line still ends an event, so the ping does not run
+        // into the stop event
+        assert!(reached(
+            StreamEnd::Named,
+            &[
+                "data: {\"type\":\"ping\"}\r\n\r\n",
+                "data: {\"type\":\"message_stop\"}\r\n\r\n"
+            ]
+        ));
+    }
+
+    #[test]
+    fn d22_end_watch_reads_a_candidate_end() {
+        for last in [
+            "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+            "data: {\"candidates\":[{},{\"finishReason\":\"SAFETY\"}]}\n\n",
+            "data: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}]}}\n\n",
+            "data: {\"candidates\":[]}\n\n",
+            "data: {\"usageMetadata\":{}}\n\n",
+            "data: {\"response\":{}}\n\n",
+            "event: message_stop\n",
+        ] {
+            assert!(reached(StreamEnd::Candidate, &[last]), "{last:?}");
+        }
+        for open in [
+            "data: {\"candidates\":[{\"content\":{}}]}\n\n",
+            "data: {\"candidates\":[{\"finishReason\":\"\"}]}\n\n",
+            "data: {\"candidates\":[{\"finishReason\":null}]}\n\n",
+            "data: {\"response\":{\"candidates\":[{}]}}\n\n",
+            "data: [1]\n\n",
+        ] {
+            assert!(!reached(StreamEnd::Candidate, &[open]), "{open:?}");
+        }
+    }
+
+    #[test]
+    fn d22_only_messages_responses_and_generative_streams_are_checked() {
+        assert_eq!(AnthropicMessages.stream_end(), StreamEnd::Named);
+        assert_eq!(OpenAiResponses.stream_end(), StreamEnd::Named);
+        assert_eq!(GenerativeLanguage.stream_end(), StreamEnd::Candidate);
+        assert_eq!(OpenAiChat.stream_end(), StreamEnd::Unchecked);
+        assert_eq!(Converse.stream_end(), StreamEnd::Unchecked);
+    }
+
+    #[test]
+    fn d22_stream_failure_frames_match_the_protocol() {
+        let text = |bytes: Vec<u8>| String::from_utf8(bytes).expect("utf-8");
+        assert_eq!(
+            text(OpenAiChat.encode_stream_failure("cut")),
+            "data: {\"error\":{\"message\":\"cut\",\"type\":\"api_error\"}}\n\n"
+        );
+        assert_eq!(
+            text(OpenAiResponses.encode_stream_failure("cut")),
+            concat!(
+                "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":",
+                "{\"object\":\"response\",\"status\":\"failed\",\"error\":",
+                "{\"code\":\"server_error\",\"message\":\"cut\"}}}\n\n"
+            )
+        );
+        assert_eq!(
+            text(GenerativeLanguage.encode_stream_failure("cut")),
+            "data: {\"error\":{\"code\":502,\"message\":\"cut\",\"status\":\"UNAVAILABLE\"}}\n\n"
+        );
+        assert_eq!(
+            text(AnthropicMessages.encode_stream_failure("cut")),
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"cut\"}}\n\n"
+        );
     }
 
     #[test]

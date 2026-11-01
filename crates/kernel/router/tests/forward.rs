@@ -75,6 +75,8 @@ fn hop(
         patience: Some(Duration::from_secs(60)),
         weight: 1,
         free: false,
+        nearly_spent: false,
+        cold_after: hofund_router::affinity::CACHE_COLD,
     }
 }
 
@@ -277,6 +279,8 @@ async fn a_member_without_forward_is_passed_over_as_unsupported() {
             patience: Some(Duration::from_secs(60)),
             weight: 1,
             free: false,
+            nearly_spent: false,
+            cold_after: hofund_router::affinity::CACHE_COLD,
         }],
     );
     let only_plain = Router::from_hops(routes, FailoverPolicy::default());

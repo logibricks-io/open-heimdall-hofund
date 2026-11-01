@@ -1034,7 +1034,7 @@ async fn b10_bad_frames_get_errors_and_binary_closes_unsupported() {
 }
 
 #[tokio::test]
-async fn b11_cut_replies_close_and_only_completed_replies_are_held() {
+async fn b11_cut_replies_fail_and_only_completed_replies_are_held() {
     let (fake, _calls, replies) = Fake::new("primary");
     replies.lock().expect("replies").extend([
         Reply::chunks(vec![sse(&[json!({
@@ -1051,17 +1051,19 @@ async fn b11_cut_replies_close_and_only_completed_replies_are_held() {
     let dir = tempfile::tempdir().expect("temp dir");
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let server = TestServer::start(gateway_app(vec![fake.member()], None, usage, None)).await;
-    let mut cut = Client::connect(&server, "/v1/responses").await;
-    cut.send(&create(None, json!([user("cut")]))).await;
-    assert_eq!(cut.json().await["type"], "response.created");
-    let close = cut.close().await.expect("close");
-    assert_eq!(
-        close.code,
-        tungstenite::protocol::frame::coding::CloseCode::Error
-    );
-    assert_eq!(close.reason, CUT_REASON);
-
+    // a reply cut before its end is a failed turn, as the HTTP route tells
+    // it, and the socket goes on (`reference:
+    // internal/gateway/responses_ws_test.go:411-435`)
     let mut client = Client::connect(&server, "/v1/responses").await;
+    let cut = client.turn(&create(None, json!([user("cut")]))).await;
+    let failed = cut.last().expect("terminal");
+    assert_eq!(failed["type"], "response.failed");
+    assert_eq!(failed["response"]["error"]["code"], "server_error");
+    assert_eq!(
+        failed["response"]["error"]["message"],
+        "primary: the reply ended before it was complete"
+    );
+
     let unknown_cut = client
         .turn(&create(Some("resp_cut"), json!([user("unknown")])))
         .await;

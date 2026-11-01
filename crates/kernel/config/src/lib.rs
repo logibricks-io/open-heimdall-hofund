@@ -142,6 +142,43 @@ impl fmt::Debug for Value {
     }
 }
 
+/// How long a conversation stays with the member that answered it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stays {
+    /// Stay within a turn and across turns while the prompt cache is warm.
+    #[default]
+    Auto,
+    /// Stay for the whole conversation unless the member must be bypassed.
+    Session,
+    /// Stay only while tool results continue the current turn.
+    Turn,
+    /// Always let routing choose again.
+    Off,
+    /// Never move to another member while the answerer remains configured.
+    Strict,
+}
+
+impl Stays {
+    /// The configuration spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Session => "session",
+            Self::Turn => "turn",
+            Self::Off => "off",
+            Self::Strict => "strict",
+        }
+    }
+}
+
+impl fmt::Display for Stays {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// One upstream endpoint.
 ///
 /// Vendor settings live in [`Self::options`]. This struct does not name them.
@@ -181,6 +218,8 @@ pub struct Provider {
     pub max_output_tokens: Option<u64>,
     /// Whether every model on this provider is free, overriding catalog prices.
     pub free: bool,
+    /// Conversation affinity for routes that do not override it.
+    pub stays: Stays,
     /// Retry budget for a direct request to this provider.
     pub patience: Patience,
     /// Plugin settings. The plugin validates the keys.
@@ -433,6 +472,8 @@ pub struct Subscription {
     pub accounts: Accounts,
     /// Account weights by lower-cased account id. Missing accounts weigh one.
     pub account_weights: BTreeMap<String, u64>,
+    /// Conversation affinity for routes that do not override it.
+    pub stays: Stays,
     /// Vendor host, client id, and any other plugin setting.
     ///
     /// The empty-string rule is the same as [`Provider::options`].
@@ -457,6 +498,10 @@ pub struct Route {
     pub model: String,
     /// Registered member-ordering strategy.
     pub routing: String,
+    /// Conversation affinity for this routing group.
+    pub stays: Stays,
+    /// Whether `stays` was written explicitly rather than defaulted.
+    pub stays_explicit: bool,
     /// Providers tried in order, each with an optional upstream model name.
     pub upstreams: Vec<Upstream>,
     /// How long a request to this route waits for busy members to come
@@ -805,6 +850,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             headers: provider.headers,
             max_output_tokens: provider.max_output_tokens,
             free: provider.free,
+            stays: provider.stays,
             patience,
             options,
             model_list,
@@ -848,6 +894,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             id: subscription.id,
             accounts,
             account_weights,
+            stays: subscription.stays,
             options: prune_table(subscription.options),
         });
     }
@@ -870,6 +917,8 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             )));
         }
         let routing = validated_routing(&route)?;
+        let stays_explicit = route.stays.is_some();
+        let stays = route.stays.unwrap_or_default();
         let patience = patience_of("route", &route.model, route.patience.as_ref())?;
         let mut upstreams = Vec::new();
         for upstream in route.upstreams {
@@ -895,6 +944,8 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         routes.push(Route {
             model: route.model,
             routing,
+            stays,
+            stays_explicit,
             upstreams,
             patience,
         });
@@ -1508,6 +1559,7 @@ struct RawProvider {
     #[serde(default)]
     free: bool,
     #[serde(default)]
+    stays: Stays,
     patience: Option<Value>,
     #[serde(default)]
     options: BTreeMap<String, Value>,
@@ -1539,6 +1591,8 @@ struct RawSubscription {
     accounts: String,
     #[serde(default)]
     account_weights: BTreeMap<String, u64>,
+    #[serde(default)]
+    stays: Stays,
     #[serde(default)]
     options: BTreeMap<String, Value>,
 }
@@ -1618,6 +1672,8 @@ struct RawRoute {
     model: String,
     #[serde(default = "default_smart")]
     routing: String,
+    #[serde(default)]
+    stays: Option<Stays>,
     upstreams: Vec<RawUpstream>,
     patience: Option<Value>,
 }
@@ -1804,6 +1860,61 @@ mod tests {
         assert!(!config.providers[0].free);
         assert_eq!(config.connect_timeout, Duration::from_secs(10));
         assert_eq!(config.read_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn c1a_stays_modes_default_and_unknown_values_are_rejected() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "one"
+            preset = "openai"
+            stays = "session"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            stays = "strict"
+            [[routes]]
+            model = "demo"
+            stays = "turn"
+            upstreams = [{ subscription = "codex" }]
+            "#,
+        )
+        .expect("stays modes");
+        assert_eq!(config.providers[0].stays, super::Stays::Session);
+        assert_eq!(config.subscriptions[0].stays, super::Stays::Strict);
+        assert_eq!(config.routes[0].stays, super::Stays::Turn);
+        assert_eq!(config.routes[0].stays.as_str(), "turn");
+
+        let defaults = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nupstreams = [\"one\"]\n",
+        )
+        .expect("defaults");
+        assert_eq!(defaults.providers[0].stays, super::Stays::Auto);
+        assert_eq!(defaults.routes[0].stays, super::Stays::Auto);
+        for (kind, source) in [
+            (
+                "provider",
+                "[[providers]]\nid = \"one\"\npreset = \"openai\"\nstays = \"sometimes\"\n",
+            ),
+            (
+                "subscription",
+                "[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\nstays = \"sometimes\"\n",
+            ),
+            (
+                "route",
+                "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nstays = \"sometimes\"\nupstreams = [\"one\"]\n",
+            ),
+        ] {
+            let error = load(source).expect_err(kind);
+            assert!(error.to_string().contains("sometimes"), "{kind}: {error}");
+        }
+        for mode in ["auto", "session", "turn", "off", "strict"] {
+            load(&format!(
+                "[[providers]]\nid = \"one\"\npreset = \"openai\"\nstays = \"{mode}\"\n"
+            ))
+            .unwrap_or_else(|error| panic!("mode {mode}: {error}"));
+        }
     }
 
     #[test]

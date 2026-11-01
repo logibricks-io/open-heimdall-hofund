@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control API, and CLI. Replacement preserves key settings and moves rests.
   Per-key concurrency, remote allowances, per-key plans, and reserve-key
   accounts-at-once remain follow-ups. See `docs/provider-keys.md`.
+- Read-only gateway keys and `/me` (P0-4c): read-only keys can read `/health`, quotas,
+  history, and their own key page, while every other HTTP route and Responses
+  WebSocket upgrade is refused with 403 `gateway_key_read_only` before an
+  upstream call. Route coverage is exhaustively tested. `gateway-key add
+  --read-only`, `gateway-key access`, and the `ACCESS` column manage the mode;
+  the default sharing key stays full. The static `/me` page provides
+  placeholder-by-default agent setup, and `/v1/hofund/me` reports only the
+  calling key's limits, usage, top models, and allowed models without secrets.
 - Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
   secret readable, as the reference does, so `gateway-key copy` shows a key
   again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,
@@ -131,6 +139,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are registered and validated at configuration load. Ready members retain
   strategy order before the single cooling probe, and
   `hofund routes` prints each route's strategy.
+- Conversation stays (P0-2c1): providers, subscriptions, and routes accept
+  `stays = "auto" | "session" | "turn" | "off" | "strict"`. Automatic affinity
+  keeps tool turns and useful warm prompt caches, with silent cache-write
+  accounting and one-hour cache variants; strict mode keeps its answerer through
+  rests, spent allowance, and broken replies. Conversation keys distinguish
+  Claude Code subagents, sealed-reasoning refusals get one cleaned retry and
+  per-member filtering, and the latest 512 sticks persist atomically in
+  `affinity.json` with write-behind and a shutdown flush. `hofund routes` now
+  prints the effective stays mode. Return-to-main/order and session spreading
+  remain for P0-2c2.
 
 - Credit-rest ladders and persistence (P0-3b1): API-key credit refusals now
   climb 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, and a repeating 7-day
@@ -1080,6 +1098,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before a short name is rewritten.
 
 ### Fixed
+
+- A relayed Messages, Responses, or Generative Language stream that ends
+  cleanly before its last event (`message_stop`, a `response.*` terminal, a
+  finish reason, or an error) is no longer passed off as a whole reply. The
+  unfinished last line is dropped, the protocol's failure event follows
+  ("<member>: the reply ended before it was complete"; `response.failed` with
+  `server_error` for Responses, `UNAVAILABLE` for Generative Language), and
+  the usage row records 502. A Responses socket turn cut this way ends on that
+  `response.failed` and the socket stays open. A severed stream now ends on the
+  same failure event, so a Chat Completions error says `api_error` (D-22).
+- A 400 or 422 that says a model has no provider behind a router, or that a
+  deployment is not found or does not exist, now fails over to the next member
+  and rests only that model on its key, like other unserved-model refusals
+  (D-24).
 
 - A shorter failure no longer shortens a longer rest: a 429's one-minute rate
   rest arriving beside a 402's half-hour credit rest leaves the credit rest in

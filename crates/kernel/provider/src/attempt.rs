@@ -28,4 +28,10 @@ pub trait AttemptHook: Send + Sync {
         let _ = (route, status, body);
         false
     }
+
+    /// Returns a replacement body for one same-member retry after a refusal.
+    fn retry(&self, route: &AttemptRoute, status: u16, body: &[u8]) -> Option<Vec<u8>> {
+        let _ = (route, status, body);
+        None
+    }
 }

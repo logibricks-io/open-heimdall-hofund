@@ -343,6 +343,8 @@ pub(crate) fn expand(
                     patience: hop.patience,
                     weight: state.config.account_weight(member.account.as_str()),
                     free: hop.free,
+                    stays: hop.stays,
+                    cold_after: hop.cold_after,
                 });
                 built.entry(key).or_insert(member.built);
             }

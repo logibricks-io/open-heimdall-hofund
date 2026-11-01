@@ -159,7 +159,39 @@ known input/output/cache-read price of zero also makes it free. A route using
 `free` with no free members behaves as `order`.
 
 Ready members always follow the selected strategy before one cooling probe.
-`hofund routes` prints each route model and its strategy name.
+`hofund routes` prints each route model, strategy name, and stays mode.
+
+### Conversation stays
+
+`stays` controls whether a conversation returns to the member that answered
+it, allowing the upstream prompt cache to be reused. It accepts `auto`,
+`session`, `turn`, `off`, or `strict` on a provider, subscription, or route;
+the default is `auto`. A single-target route without the setting inherits the
+provider or subscription mode. An explicit route setting, including `auto`,
+wins.
+
+- `auto` always stays within a tool-result turn. Across user turns it stays
+  while the last reply read or wrote at least 1024 cached tokens and the cache
+  is warm. If the upstream reports no cache read or write, the reported prompt
+  tokens count as written. The usual cold limit is 5 minutes, extended to 1
+  hour for Codex subscription accounts, DeepSeek's own API, and cache writes
+  with a one-hour TTL.
+- `session` stays for the whole session; `turn` stays only within the current
+  tool-result turn; `off` always routes again. Resting or nearly-spent members
+  are bypassed under these three modes.
+- `strict` never moves while the answerer remains configured. Resting and
+  spent members are asked anyway, their errors reach the caller, and a broken
+  reply after a 200 keeps the stick. Removing the member releases it.
+
+Conversation identity uses the standard agent session headers, or a hash of
+the first user item, with a separate suffix for Claude Code subagents. Sticks
+last 24 hours. `affinity.json` beside the configuration retains the latest 512
+conversations with debounced atomic writes and a shutdown flush.
+
+If a new member refuses another member's encrypted reasoning or compaction,
+the gateway removes those sealed items and retries once. It remembers the
+refusal per conversation and member so later requests omit the old seals while
+keeping seals created by the new member.
 
 ## Architecture
 

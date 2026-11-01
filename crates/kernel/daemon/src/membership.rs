@@ -59,8 +59,10 @@ pub(crate) struct Table {
     hops: Mutex<BTreeMap<String, Vec<HopSpec>>>,
     policy: Mutex<FailoverPolicy>,
     cooldowns: Arc<Cooldowns>,
+    quotas: Option<Arc<hofund_router::quota::QuotaStore>>,
     offline: Arc<Offline>,
     strategies: Arc<StrategyState>,
+    affinity: hofund_router::affinity::AffinityState,
     measurements: Mutex<Option<Arc<dyn Measurements>>>,
     snapshot: Snapshot,
 }
@@ -74,6 +76,8 @@ struct HopSpec {
     patience: Option<Duration>,
     weight: u64,
     free: bool,
+    stays: hofund_router::affinity::Stays,
+    cold_after: Duration,
 }
 
 struct LiveMember {
@@ -124,6 +128,15 @@ impl ProviderAttemptHook for AttemptAdapter {
 
     fn refused(&self, _route: &hofund_provider::AttemptRoute, status: u16, body: &[u8]) -> bool {
         self.hook.refused(&self.info, status, body)
+    }
+
+    fn retry(
+        &self,
+        _route: &hofund_provider::AttemptRoute,
+        status: u16,
+        body: &[u8],
+    ) -> Option<Vec<u8>> {
+        self.hook.retry(&self.info, status, body)
     }
 }
 
@@ -197,19 +210,54 @@ pub(crate) fn open_checking(
     cooldowns: Arc<Cooldowns>,
     network: Arc<dyn NetworkCheck>,
 ) -> Result<Snapshot, DaemonError> {
-    let table = build_table(built, routes, policy, cooldowns, network)?;
+    let table = build_table(
+        built,
+        routes,
+        policy,
+        cooldowns,
+        network,
+        hofund_router::affinity::AffinityState::in_memory(),
+        None,
+    )?;
     let snapshot = table.snapshot.clone();
     let owner = Arc::clone(&table) as Arc<dyn std::any::Any + Send + Sync>;
     Ok(snapshot.hold(owner))
 }
 
+#[cfg(test)]
 pub(crate) fn open_with_table(
     built: &BTreeMap<String, BuiltProvider>,
     routes: BTreeMap<String, Vec<PlannedHop>>,
     policy: FailoverPolicy,
     cooldowns: Arc<Cooldowns>,
 ) -> Result<(Snapshot, Arc<Table>), DaemonError> {
-    let table = build_table(built, routes, policy, cooldowns, Arc::new(SystemNetwork))?;
+    open_with_table_and_affinity(
+        built,
+        routes,
+        policy,
+        cooldowns,
+        hofund_router::affinity::AffinityState::in_memory(),
+        None,
+    )
+}
+
+pub(crate) fn open_with_table_and_affinity(
+    built: &BTreeMap<String, BuiltProvider>,
+    routes: BTreeMap<String, Vec<PlannedHop>>,
+    policy: FailoverPolicy,
+    cooldowns: Arc<Cooldowns>,
+    affinity: hofund_router::affinity::AffinityState,
+    quotas: Option<Arc<hofund_router::quota::QuotaStore>>,
+) -> Result<(Snapshot, Arc<Table>), DaemonError> {
+    let table = build_table(
+        built,
+        routes,
+        policy,
+        cooldowns,
+        Arc::new(SystemNetwork),
+        affinity,
+        quotas,
+    )?;
     Ok((table.snapshot.clone(), table))
 }
 
@@ -219,19 +267,26 @@ fn build_table(
     policy: FailoverPolicy,
     cooldowns: Arc<Cooldowns>,
     network: Arc<dyn NetworkCheck>,
+    affinity: hofund_router::affinity::AffinityState,
+    quotas: Option<Arc<hofund_router::quota::QuotaStore>>,
 ) -> Result<Arc<Table>, DaemonError> {
     let strategies = Arc::new(StrategyState::with_builtins());
-    let snapshot = Snapshot::new(
-        Router::from_hops(BTreeMap::new(), policy.clone())
-            .with_strategies(Arc::clone(&strategies))
-            .with_cooldowns(Arc::clone(&cooldowns)),
-    );
+    let snapshot = Router::from_hops(BTreeMap::new(), policy.clone())
+        .with_strategies(Arc::clone(&strategies))
+        .with_cooldowns(Arc::clone(&cooldowns))
+        .with_affinity(affinity.clone());
+    let snapshot = Snapshot::new(match &quotas {
+        Some(quotas) => snapshot.with_quotas(Arc::clone(quotas)),
+        None => snapshot,
+    });
     let table = Arc::new(Table {
         hops: Mutex::new(BTreeMap::new()),
         policy: Mutex::new(policy),
         cooldowns,
+        quotas,
         offline: Arc::new(Offline::new(network)),
         strategies,
+        affinity,
         measurements: Mutex::new(None),
         snapshot,
     });
@@ -308,6 +363,8 @@ fn build_specs(
                 patience: hop.patience,
                 weight: hop.weight,
                 free: hop.free,
+                stays: hop.stays,
+                cold_after: hop.cold_after,
             });
         }
         stored.insert(model, specs);
@@ -335,6 +392,8 @@ pub(crate) struct PlannedHop {
     pub patience: Option<Duration>,
     pub weight: u64,
     pub free: bool,
+    pub stays: hofund_router::affinity::Stays,
+    pub cold_after: Duration,
 }
 
 impl Table {
@@ -383,9 +442,14 @@ impl Table {
                         patience: spec.member.patience,
                         weight: spec.weight,
                         free: spec.free,
+                        nearly_spent: false,
+                        cold_after: spec.cold_after,
                     })
                     .collect();
                 let routing = specs.first().map_or("smart", |spec| spec.routing.as_str());
+                let stays = specs
+                    .first()
+                    .map_or(hofund_router::affinity::Stays::Auto, |spec| spec.stays);
                 let patience = specs
                     .first()
                     .map_or(Some(Duration::from_secs(60)), |spec| spec.patience);
@@ -393,6 +457,7 @@ impl Table {
                     model.clone(),
                     Route::new(list)
                         .with_routing(routing)
+                        .with_stays(stays)
                         .with_patience(patience),
                 )
             })
@@ -400,7 +465,11 @@ impl Table {
         let policy = self.policy.lock().expect("failover policy").clone();
         let mut router = Router::from_routes(routes, policy)
             .with_strategies(Arc::clone(&self.strategies))
-            .with_cooldowns(Arc::clone(&self.cooldowns));
+            .with_cooldowns(Arc::clone(&self.cooldowns))
+            .with_affinity(self.affinity.clone());
+        if let Some(quotas) = &self.quotas {
+            router = router.with_quotas(Arc::clone(quotas));
+        }
         if let Some(measurements) = self
             .measurements
             .lock()
@@ -1230,6 +1299,8 @@ mod tests {
                 patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
+                stays: hofund_router::affinity::Stays::Auto,
+                cold_after: hofund_router::affinity::CACHE_COLD,
             }],
         );
         let snapshot =
@@ -1327,6 +1398,8 @@ mod tests {
                 patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
+                stays: hofund_router::affinity::Stays::Auto,
+                cold_after: hofund_router::affinity::CACHE_COLD,
             }],
         );
         let snapshot =
@@ -1415,6 +1488,8 @@ mod tests {
                 patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
+                stays: hofund_router::affinity::Stays::Auto,
+                cold_after: hofund_router::affinity::CACHE_COLD,
             }],
         );
         let snapshot =
@@ -1502,6 +1577,8 @@ mod tests {
                 patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
+                stays: hofund_router::affinity::Stays::Auto,
+                cold_after: hofund_router::affinity::CACHE_COLD,
             }],
         );
         let snapshot =
@@ -1561,6 +1638,8 @@ mod tests {
                     patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
+                    stays: hofund_router::affinity::Stays::Auto,
+                    cold_after: hofund_router::affinity::CACHE_COLD,
                 },
                 PlannedHop {
                     provider: "my-provider".to_owned(),
@@ -1573,6 +1652,8 @@ mod tests {
                     patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
+                    stays: hofund_router::affinity::Stays::Auto,
+                    cold_after: hofund_router::affinity::CACHE_COLD,
                 },
             ],
         );
@@ -1613,6 +1694,8 @@ mod tests {
                     patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
+                    stays: hofund_router::affinity::Stays::Auto,
+                    cold_after: hofund_router::affinity::CACHE_COLD,
                 })
                 .collect(),
         )])
