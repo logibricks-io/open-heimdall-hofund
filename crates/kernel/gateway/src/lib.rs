@@ -39,7 +39,9 @@ use endpoints::{
     GENERATIVE_CATCHALL, inject_target, match_count, match_generate, percent_decode, query_key,
 };
 use futures_util::{Stream, StreamExt};
-use hofund_codec::{Codec, StreamEncoder};
+use hofund_codec::{
+    Codec, SESSION_HEADERS, SUBAGENT_HEADER, StreamEncoder, conversation_key, turn_in,
+};
 use hofund_ir::{Request as ModelRequest, StreamEvent};
 use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
@@ -1185,8 +1187,21 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     );
     let router = app.snapshot.load();
     let attempt = ask.as_ref().map(|ask| ask.attempt());
+    let mut identity_headers = Vec::new();
+    for name in SESSION_HEADERS.iter().copied().chain([SUBAGENT_HEADER]) {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            identity_headers.push((name, value));
+        }
+    }
+    let turn = turn_in(&model_request);
+    let conversation = hofund_router::affinity::Conversation::new(
+        conversation_key(&model_request.model, &identity_headers, &bytes),
+        turn.number,
+        turn.within,
+    )
+    .with_body(bytes.to_vec());
     match router
-        .dispatch_with_attempt(&model_request, codec.id(), attempt)
+        .dispatch_with_context(&model_request, codec.id(), Some(&conversation), attempt)
         .await
     {
         Ok(routed) => {

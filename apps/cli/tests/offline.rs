@@ -1531,7 +1531,7 @@ fn offline_routes_one_shot() {
     let scratch = Scratch::new("127.0.0.1:0", &source);
     assert_eq!(
         scratch.hofund(&["routes"]).ok(),
-        "model\trouting\nm\trotate"
+        "model\trouting\tstays\nm\trotate\tauto"
     );
     scratch.assert_no_daemon_state();
 }

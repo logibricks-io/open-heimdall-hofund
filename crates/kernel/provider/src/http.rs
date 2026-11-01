@@ -562,6 +562,7 @@ async fn send<'a>(
     let mut response = send_json(upstream, url, body.clone()).await?;
     let mut root_retried = false;
     let mut token_retried = false;
+    let mut replacement_retried = false;
     while !response.status().is_success() {
         let status = response.status();
         let retry_after = explicit_retry_after(response.headers());
@@ -590,6 +591,17 @@ async fn send<'a>(
                 response = send_json(upstream, url, body.clone()).await?;
                 continue;
             }
+        }
+        if !replacement_retried
+            && matches!(status.as_u16(), 400 | 404 | 422)
+            && let Some(replacement) = hook.and_then(|hook| {
+                hook.retry(route, status.as_u16(), &bytes[..bytes.len().min(1 << 20)])
+            })
+        {
+            replacement_retried = true;
+            body = replacement;
+            response = send_json(upstream, url, body.clone()).await?;
+            continue;
         }
         let refused = delta
             && matches!(status.as_u16(), 400 | 404 | 422)

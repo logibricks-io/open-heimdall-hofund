@@ -154,6 +154,8 @@ fn fixture(members: &[(&'static str, Option<&str>, Answer)]) -> Fixture {
             context_window: None,
             weight: 1,
             free: false,
+            nearly_spent: false,
+            cold_after: hofund_router::affinity::CACHE_COLD,
         })
         .collect();
     let mut routes = BTreeMap::new();

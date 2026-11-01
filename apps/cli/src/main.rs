@@ -592,7 +592,7 @@ commands:
                                   show or set the model-list refresh
   provider auto-include <id> [<rule>...|none]
                                   show or set the auto-include rules
-  routes                          list route models and routing strategies
+  routes                          list route models, routing strategies, and stays modes
   model list                      list the models routes serve
   model show <id>                 print one routed model
 
@@ -816,7 +816,7 @@ running daemon, the edit applies in one-shot hofundd under the config lock.
 const ROUTES_HELP: &str = "\
 usage: hofund routes [--config PATH]
 
-Print each configured route model and its routing strategy.
+Print each configured route model, its routing strategy, and its stays mode.
 ";
 
 const MODEL_HELP: &str = "\

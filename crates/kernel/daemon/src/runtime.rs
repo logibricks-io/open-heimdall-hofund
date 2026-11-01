@@ -67,6 +67,7 @@ pub(crate) struct Runtime {
     plan: Mutex<Plan>,
     polls: tokio::sync::Mutex<QuotaPolls>,
     quotas: Arc<QuotaStore>,
+    affinity: hofund_router::affinity::AffinityState,
     /// Wakes the subscription task after a publication.
     wake: tokio::sync::Notify,
 }
@@ -103,6 +104,11 @@ impl Runtime {
             quotas: Arc::new(QuotaStore::new(
                 path.parent().unwrap_or_else(|| Path::new(".")),
             )),
+            affinity: hofund_router::affinity::AffinityState::new(
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("affinity.json"),
+            ),
             wake: tokio::sync::Notify::new(),
         })
     }
@@ -132,9 +138,13 @@ impl Runtime {
             &self.path,
             self.max_idle_per_host,
             models_host,
-            Arc::clone(&self.cooldowns),
             &self.registry,
             &subscriptions,
+            (
+                Arc::clone(&self.cooldowns),
+                self.affinity.clone(),
+                Arc::clone(&self.quotas),
+            ),
         )?;
         let configured = fingerprints.keys().cloned().collect::<HashSet<_>>();
         *self.plan.lock().expect("published plan") = Plan {
@@ -452,6 +462,10 @@ impl Runtime {
                 runtime.poll_quotas(tokio::time::Instant::now()).await;
             }
         })
+    }
+
+    pub(crate) fn affinity(&self) -> hofund_router::affinity::AffinityState {
+        self.affinity.clone()
     }
 
     #[cfg(test)]

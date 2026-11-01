@@ -628,6 +628,8 @@ fn raw_app(
             context_window: None,
             weight: 1,
             free: false,
+            nearly_spent: false,
+            cold_after: hofund_router::affinity::CACHE_COLD,
         }],
     );
     let mut codecs = HashMap::new();
@@ -964,6 +966,8 @@ fn protocol_app(members: Vec<Arc<dyn Member>>) -> (axum::Router, tempfile::TempD
             context_window: None,
             weight: 1,
             free: false,
+            nearly_spent: false,
+            cold_after: hofund_router::affinity::CACHE_COLD,
         })
         .collect();
     let routes = BTreeMap::from([("demo".to_owned(), hops)]);

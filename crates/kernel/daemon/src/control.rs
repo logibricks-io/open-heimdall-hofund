@@ -371,6 +371,9 @@ impl ControlState for DaemonControl {
                 let mut model = RouteModel::default();
                 model.id = route.model.clone();
                 model.routing = route.routing.clone();
+                model.stays = super::route_stays(&self.config(), route)
+                    .as_str()
+                    .to_owned();
                 model
             })
             .collect();

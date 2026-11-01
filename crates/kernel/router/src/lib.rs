@@ -8,6 +8,8 @@
 //! The daemon adapts each member into a service and wraps that service in the
 //! kernel layers.
 
+pub mod affinity;
+mod affinity_reply;
 mod attempt;
 mod cooldown;
 mod decision;
@@ -18,7 +20,7 @@ pub mod strategy;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::StreamExt;
 use hofund_ir::{StreamEvent, estimate_input_tokens};
@@ -82,6 +84,10 @@ pub struct Hop {
     pub weight: u64,
     /// Whether this model costs nothing on this member.
     pub free: bool,
+    /// Whether the member's known allowance is nearly spent.
+    pub nearly_spent: bool,
+    /// How long this member's unread prompt cache stays warm.
+    pub cold_after: Duration,
 }
 
 impl Hop {
@@ -95,6 +101,8 @@ impl Hop {
             context_window: None,
             weight: 1,
             free: false,
+            nearly_spent: false,
+            cold_after: affinity::CACHE_COLD,
         }
     }
 }
@@ -106,15 +114,18 @@ pub struct Route {
     pub hops: Vec<Hop>,
     /// Registered routing strategy name.
     pub routing: String,
+    /// Conversation affinity for this pool.
+    pub stays: affinity::Stays,
 }
 
 impl Route {
-    /// A pool using smart routing.
+    /// A pool using smart routing and automatic affinity.
     #[must_use]
     pub fn new(hops: Vec<Hop>) -> Self {
         Self {
             hops,
             routing: "smart".to_owned(),
+            stays: affinity::Stays::Auto,
         }
     }
 
@@ -122,6 +133,13 @@ impl Route {
     #[must_use]
     pub fn with_routing(mut self, routing: impl Into<String>) -> Self {
         self.routing = routing.into();
+        self
+    }
+
+    /// Sets conversation affinity.
+    #[must_use]
+    pub fn with_stays(mut self, stays: affinity::Stays) -> Self {
+        self.stays = stays;
         self
     }
 }
@@ -132,7 +150,10 @@ pub struct Router {
     providers: BTreeSet<String>,
     policy: FailoverPolicy,
     cooldowns: Option<Arc<Cooldowns>>,
+    quotas: Option<Arc<quota::QuotaStore>>,
     strategies: Arc<strategy::StrategyState>,
+    affinity: affinity::AffinityState,
+    sealed: affinity::sealed::SealedState,
 }
 
 /// A counted input.
@@ -153,6 +174,19 @@ struct Resolved {
     pool: String,
     /// Strategy configured for this route pool.
     routing: String,
+    /// Conversation affinity configured for this route pool.
+    stays: affinity::Stays,
+}
+
+struct Ordered {
+    hops: Vec<Hop>,
+    affinity: Option<ReplyRoute>,
+}
+
+struct ReplyRoute {
+    key: String,
+    turn: u64,
+    strict: bool,
 }
 
 impl Router {
@@ -195,8 +229,26 @@ impl Router {
             providers,
             policy,
             cooldowns: None,
+            quotas: None,
             strategies: Arc::new(strategy::StrategyState::with_builtins()),
+            affinity: affinity::AffinityState::in_memory(),
+            sealed: affinity::sealed::SealedState::default(),
         }
+    }
+
+    /// Shares the allowance view with later snapshots of this route table.
+    #[must_use]
+    pub fn with_quotas(mut self, quotas: Arc<quota::QuotaStore>) -> Self {
+        self.quotas = Some(quotas);
+        self
+    }
+
+    /// Shares affinity state with later snapshots of this route table.
+    #[must_use]
+    pub fn with_affinity(mut self, affinity: affinity::AffinityState) -> Self {
+        self.sealed = affinity.sealed();
+        self.affinity = affinity;
+        self
     }
 
     /// Shares strategy rounds with later snapshots of this route table.
@@ -283,9 +335,45 @@ impl Router {
         inbound_protocol: &str,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(request, inbound_protocol, None, hook)
+            .await
+    }
+
+    /// Dispatches with conversation identity and optional attempt callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch`], or an attempt rejection.
+    pub async fn dispatch_with_context(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        conversation: Option<&affinity::Conversation>,
+        hook: Option<Arc<dyn AttemptHook>>,
+    ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(request, inbound_protocol, conversation, hook)
+            .await
+    }
+
+    async fn dispatch_inner(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        conversation: Option<&affinity::Conversation>,
+        hook: Option<Arc<dyn AttemptHook>>,
+    ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
-        resolved.hops = self.order_hops(&resolved);
+        let ordered = self.order_for(&resolved, conversation);
+        let affinity = ordered.affinity;
+        resolved.hops = ordered.hops;
+        let hook = conversation.map_or(hook.clone(), |conversation| {
+            Some(Arc::new(affinity::sealed::SealedHook::new(
+                self.sealed.clone(),
+                conversation,
+                hook.clone(),
+            )) as Arc<dyn AttemptHook>)
+        });
         let policy = self.policy.clone();
         let input_tokens = estimate_input_tokens(request);
         let mut last = None;
@@ -330,6 +418,19 @@ impl Router {
                         completion
                     } else {
                         label_model(completion, asked)
+                    };
+                    let completion = if let Some(affinity) = &affinity {
+                        affinity_reply::watch(
+                            completion,
+                            self.affinity.clone(),
+                            affinity.key.clone(),
+                            affinity.turn,
+                            affinity.strict,
+                            hop.member.id().to_string(),
+                            upstream_model.clone(),
+                        )
+                    } else {
+                        completion
                     };
                     return Ok(Routed {
                         upstream_id: hop.member.route_id().to_owned(),
@@ -501,6 +602,14 @@ impl Router {
     }
 
     fn order_hops(&self, resolved: &Resolved) -> Vec<Hop> {
+        self.order_for(resolved, None).hops
+    }
+
+    fn order_for(
+        &self,
+        resolved: &Resolved,
+        conversation: Option<&affinity::Conversation>,
+    ) -> Ordered {
         let ordered = if resolved.hops.len() < 2 {
             resolved.hops.clone()
         } else {
@@ -526,10 +635,68 @@ impl Router {
                 .map(|index| resolved.hops[index].clone())
                 .collect()
         };
-        if let Some(cooldowns) = &self.cooldowns {
+        let decision = conversation.map(|conversation| {
+            let now = SystemTime::now();
+            let allowances = self
+                .quotas
+                .as_ref()
+                .map(|quotas| quotas.allowances(now))
+                .unwrap_or_default();
+            let candidates = ordered
+                .iter()
+                .map(|hop| {
+                    let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                    let member = hop.member.id().to_string();
+                    let nearly_spent = hop.nearly_spent
+                        || allowances
+                            .iter()
+                            .find(|allowance| allowance.member == member)
+                            .and_then(|allowance| allowance.fullest(model, now))
+                            .is_some_and(|window| window.used >= 90.0);
+                    affinity::Candidate {
+                        member,
+                        model: model.to_owned(),
+                        resting: self.cooldowns.as_ref().is_some_and(|cooldowns| {
+                            cooldowns
+                                .cooling_for_model(hop.member.id(), model)
+                                .is_some()
+                        }),
+                        nearly_spent,
+                        cold_after: hop.cold_after,
+                    }
+                })
+                .collect::<Vec<_>>();
+            self.affinity
+                .order(conversation, resolved.stays, &resolved.routing, &candidates)
+        });
+        let (ordered, strict) = if let Some(decision) = &decision {
+            (
+                decision
+                    .order
+                    .iter()
+                    .map(|index| ordered[*index].clone())
+                    .collect::<Vec<_>>(),
+                decision.strict,
+            )
+        } else {
+            (ordered, false)
+        };
+        let hops = if strict {
+            ordered
+        } else if let Some(cooldowns) = &self.cooldowns {
             order_hops(ordered, cooldowns, &resolved.bare)
         } else {
             ordered
+        };
+        Ordered {
+            hops,
+            affinity: conversation
+                .zip(decision)
+                .map(|(conversation, decision)| ReplyRoute {
+                    key: conversation.key.clone(),
+                    turn: conversation.turn,
+                    strict: decision.strict,
+                }),
         }
     }
 
@@ -544,6 +711,7 @@ impl Router {
                 bare: asked.to_owned(),
                 pool: asked.to_owned(),
                 routing: route.routing.clone(),
+                stays: route.stays,
             });
         }
         if let Some((provider_id, model)) = asked.split_once('/')
@@ -558,17 +726,20 @@ impl Router {
         let found = self.matching(|_, hop| hop.wire_model.as_deref() == Some(asked));
         let bare = found
             .first()
-            .and_then(|(_, hop)| hop.wire_model.clone())
+            .and_then(|(_, hop, _)| hop.wire_model.clone())
             .unwrap_or_else(|| asked.to_owned());
         self.one(asked, &bare, found)
     }
 
-    fn matching(&self, mut pred: impl FnMut(&str, &Hop) -> bool) -> Vec<(String, Hop)> {
+    fn matching(
+        &self,
+        mut pred: impl FnMut(&str, &Hop) -> bool,
+    ) -> Vec<(String, Hop, affinity::Stays)> {
         let mut found = Vec::new();
         for (route_model, route) in &self.routes {
             for hop in &route.hops {
                 if pred(route_model, hop) {
-                    found.push((route_model.clone(), hop.clone()));
+                    found.push((route_model.clone(), hop.clone(), route.stays));
                 }
             }
         }
@@ -579,16 +750,20 @@ impl Router {
         &self,
         asked: &str,
         bare: &str,
-        found: Vec<(String, Hop)>,
+        found: Vec<(String, Hop, affinity::Stays)>,
     ) -> Result<Resolved, RouterError> {
         match found.len() {
             0 => Err(self.missing(asked)),
-            1 => Ok(Resolved {
-                hops: vec![found.into_iter().next().expect("one hop").1],
-                bare: bare.to_owned(),
-                pool: asked.to_owned(),
-                routing: "smart".to_owned(),
-            }),
+            1 => {
+                let (_, hop, stays) = found.into_iter().next().expect("one hop");
+                Ok(Resolved {
+                    hops: vec![hop],
+                    bare: bare.to_owned(),
+                    pool: asked.to_owned(),
+                    routing: "smart".to_owned(),
+                    stays,
+                })
+            }
             _ => Err(RouterError::Ambiguous {
                 model: asked.to_owned(),
                 candidates: candidates(&found),
@@ -715,10 +890,10 @@ fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {
     }
 }
 
-fn candidates(found: &[(String, Hop)]) -> String {
+fn candidates(found: &[(String, Hop, affinity::Stays)]) -> String {
     found
         .iter()
-        .map(|(route, hop)| format!("{}/{}", hop.member.route_id(), route))
+        .map(|(route, hop, _)| format!("{}/{}", hop.member.route_id(), route))
         .collect::<Vec<_>>()
         .join(", ")
 }
