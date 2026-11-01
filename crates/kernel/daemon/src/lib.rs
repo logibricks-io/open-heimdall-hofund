@@ -29,6 +29,7 @@ use hofund_secrets::{KeyStore, TokenFile};
 use hofund_usage::Ledger;
 
 mod adapt;
+mod balances;
 mod config_ops;
 mod config_write;
 mod control;

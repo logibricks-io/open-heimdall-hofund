@@ -38,6 +38,7 @@ mod inbound;
 #[doc(hidden)]
 pub mod kernel;
 
+mod balance;
 #[cfg(not(feature = "kernel"))]
 mod kernel;
 mod plan;
@@ -55,6 +56,9 @@ pub use agent::{
     AgentFactory, AgentIntegration, ConnectionStatus, Credential, CredentialError, CredentialStore,
     DisconnectOutcome, DynAgentFactory, FileChange, GatewayTarget, ImportCtx, ImportedProvider,
     Plan, WriteCtx,
+};
+pub use balance::{
+    BalanceCard, BalancePart, BalanceQuery, BalanceQuota, BalanceSupport, BalanceWallet,
 };
 pub use body::{Body, BodyStream};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};

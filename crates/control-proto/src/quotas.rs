@@ -93,6 +93,9 @@ pub struct Quota {
     /// User-chosen account alias.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub alias: String,
+    /// First key user id when several keys share one account balance.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shared_balance: String,
     /// Router member identity for a plan key. Not part of the wire model.
     #[serde(skip)]
     pub member: String,
