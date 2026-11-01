@@ -125,7 +125,7 @@ impl Codec for OpenAiResponses {
     }
 
     /// The model-name tap, then reasoning items another vendor wrote with
-    /// their text in them made over (see [`made_reasoning`]).
+    /// their text in them made into one summary with no content and no seal.
     fn raw_tap(&self, client_model: &str, upstream_model: &str) -> Box<dyn crate::RawTap> {
         Box::new(crate::reasoning_tidy::ReasoningTap::new(Box::new(
             crate::passthrough::DecoderTap::new(
@@ -138,7 +138,7 @@ impl Codec for OpenAiResponses {
     }
 
     /// The model-name splice, then reasoning items another vendor wrote with
-    /// their text in them made over (see [`made_reasoning`]).
+    /// their text in them made into one summary with no content and no seal.
     fn rewrite_model(&self, bytes: &[u8], client_model: &str, upstream_model: &str) -> Vec<u8> {
         crate::reasoning_tidy::tidy_whole(crate::passthrough::rewrite_all(
             bytes,
