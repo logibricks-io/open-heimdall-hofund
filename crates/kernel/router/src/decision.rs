@@ -420,6 +420,7 @@ mod tests {
             r#"Router: {"error":{"message":"Model id : lab/demo-flash , has no provider supported","type":"invalid_request_error"}}"#,
             r#"{"error":{"code":"DeploymentNotFound","message":"The API deployment for this resource does not exist."}}"#,
             r#"{"error":{"code":"deployment_not_found","message":"gone"}}"#,
+            r#"{"error":{"message":"The API deployment for this resource does not exist."}}"#,
             r#"{"error":{"message":"Deployment not found for ModelName: demo-4o"}}"#,
             r#"{"error":{"message":"The model demo-x does not exist","code":"model_not_found"}}"#,
         ] {

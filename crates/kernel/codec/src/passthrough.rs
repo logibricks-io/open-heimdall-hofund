@@ -2086,6 +2086,29 @@ mod tests {
             StreamEnd::Named,
             &["data: {\"type\":\n", "\n", "data: \"message_stop\"}\n\n"]
         ));
+        // the lines join with a line end, so a number split over two
+        // lines is two numbers, not one
+        assert!(!reached(
+            StreamEnd::Named,
+            &[
+                "data: {\"type\":\"message_stop\",\"n\":1\n",
+                "data: 2}\n",
+                "\n"
+            ]
+        ));
+    }
+
+    #[test]
+    fn d22_end_watch_reads_crlf_lines() {
+        // a CRLF blank line still ends an event, so the ping does not run
+        // into the stop event
+        assert!(reached(
+            StreamEnd::Named,
+            &[
+                "data: {\"type\":\"ping\"}\r\n\r\n",
+                "data: {\"type\":\"message_stop\"}\r\n\r\n"
+            ]
+        ));
     }
 
     #[test]
