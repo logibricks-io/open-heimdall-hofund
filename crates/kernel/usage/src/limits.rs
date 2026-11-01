@@ -65,9 +65,9 @@ impl Ledger {
             .execute(
                 "INSERT INTO requests (
                     created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
-                    caller_key_id, caller_key_name, ttft_ms, uncached_input_tokens,
-                    cache_read_tokens, cache_write_tokens
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    caller_key_id, caller_key_name, caller_issuer_id, ttft_ms,
+                    uncached_input_tokens, cache_read_tokens, cache_write_tokens
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     row.created_unix,
                     row.model,
@@ -78,6 +78,7 @@ impl Ledger {
                     row.status,
                     row.caller_key_id,
                     row.caller_key_name,
+                    row.caller_issuer_id,
                     ttft_ms,
                     details.uncached_input_tokens,
                     details.cache_read_tokens,
@@ -90,6 +91,7 @@ impl Ledger {
 
     /// Sums one key's forwarded usage from `start` onward. Local rows that
     /// never reached an upstream do not count; failed upstream calls do.
+    /// Calls made by keys issued under this key count too.
     ///
     /// # Errors
     ///
@@ -107,7 +109,7 @@ impl Ledger {
                         COALESCE(SUM(MAX(cache_read_tokens, 0)), 0),
                         COALESCE(SUM(MAX(cache_write_tokens, 0)), 0)
                  FROM requests
-                 WHERE caller_key_id = ?1 AND created_unix >= ?2
+                 WHERE (caller_key_id = ?1 OR caller_issuer_id = ?1) AND created_unix >= ?2
                    AND (upstream != '' OR status LIKE '2%')",
                 params![key_id, start],
                 |row| {
@@ -145,6 +147,7 @@ mod tests {
             status: status.to_owned(),
             caller_key_id: "key".to_owned(),
             caller_key_name: "Key".to_owned(),
+            caller_issuer_id: String::new(),
         }
     }
 

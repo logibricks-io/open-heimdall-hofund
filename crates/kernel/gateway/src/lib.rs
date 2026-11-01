@@ -7,6 +7,7 @@
 
 pub mod control;
 mod endpoints;
+mod issue_keys;
 mod limits;
 mod me;
 mod prev_response;
@@ -558,7 +559,12 @@ impl Gateway {
     /// [`Running::relisten`].
     pub async fn bind(self, listen: SocketAddr) -> Result<Running, GatewayError> {
         let sockets = Arc::clone(&self.inner.sockets);
-        serve_relistenable(self.into_router(), listen, sockets).await
+        let prune = self.inner.keys.clone().map(issue_keys::prune_task);
+        let mut running = serve_relistenable(self.into_router(), listen, sockets).await?;
+        if let Some(task) = prune {
+            running = running.with_task(task);
+        }
+        Ok(running)
     }
 }
 
@@ -577,11 +583,14 @@ async fn serve_relistenable(
     let (accept, handle) = relisten::swappable(listener, listen, local_addr);
     let (shutdown, signal) = oneshot::channel();
     let task = tokio::spawn(async move {
-        axum::serve(accept, router)
-            .with_graceful_shutdown(async move {
-                let _ = signal.await;
-            })
-            .await
+        axum::serve(
+            accept,
+            router.into_make_service_with_connect_info::<issue_keys::PeerAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = signal.await;
+        })
+        .await
     });
     let mut running = Running::new(local_addr, shutdown, task);
     running.relisten = Some(handle);
@@ -829,10 +838,14 @@ fn request_router(app: &Arc<Inner>) -> axum::Router {
             Arc::clone(app),
             readonly::guard,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(app),
+            issue_keys::refused_guard,
+        ))
 }
 
 fn request_routes(app: &Arc<Inner>) -> readonly::RouteSet {
-    let mut routes = me::routes(codec_routes(app));
+    let mut routes = issue_keys::routes(me::routes(codec_routes(app)));
     if app.quota_source.is_some() {
         routes = quotas::routes(routes);
     }
@@ -944,7 +957,11 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             RequestStart {
                 request_id: next_request_id(),
                 route: call.model().to_owned(),
-                inbound_protocol: call.path().to_owned(),
+                inbound_protocol: if call.path() == "/audio/speech" {
+                    "speech".to_owned()
+                } else {
+                    call.path().to_owned()
+                },
                 started_at_ms: unix_ms_now(),
             },
         );
@@ -1011,8 +1028,18 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 let answer = forwarded.answer;
                 let status =
                     StatusCode::from_u16(answer.status()).unwrap_or(StatusCode::BAD_GATEWAY);
-                let (input, output) = forwarded_tokens(answer.body());
                 let mut meta = usage(&forwarded.upstream_id);
+                if answer.is_streaming() {
+                    return Ok(streamed_forward(
+                        answer,
+                        Arc::clone(&app.usage),
+                        meta,
+                        &mut track,
+                        forwarded.upstream_id,
+                        status,
+                    ));
+                }
+                let (input, output) = forwarded_tokens(answer.body());
                 meta.details = forwarded_details(answer.body(), input);
                 write_usage(&app.usage, &meta, Some((input, output)), status);
                 track.end_with(
@@ -1058,6 +1085,109 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             }
         }
     }
+}
+
+const SPEECH_TAIL: usize = 16 * 1024;
+
+struct ForwardStream {
+    body: BodyStream,
+    end: Option<ForwardStreamEnd>,
+}
+
+struct ForwardStreamEnd {
+    usage: Arc<Ledger>,
+    meta: UsageMeta,
+    track: RequestTrack,
+    member: String,
+    status: StatusCode,
+    tail: Vec<u8>,
+}
+
+impl ForwardStream {
+    fn finish(&mut self) {
+        let Some(mut end) = self.end.take() else {
+            return;
+        };
+        let (input, output) = speech_tokens(&end.tail);
+        write_usage(&end.usage, &end.meta, Some((input, output)), end.status);
+        end.track.end_with(
+            Some(end.member),
+            end.status.as_u16(),
+            input.and_then(|value| u64::try_from(value).ok()),
+            output.and_then(|value| u64::try_from(value).ok()),
+        );
+    }
+}
+
+impl Drop for ForwardStream {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn streamed_forward(
+    answer: hofund_plugin_api::RawAnswer,
+    usage: Arc<Ledger>,
+    meta: UsageMeta,
+    track: &mut RequestTrack,
+    member: String,
+    status: StatusCode,
+) -> hofund_plugin_api::RawAnswer {
+    let content_type = answer.content_type().map(str::to_owned);
+    let state = ForwardStream {
+        body: answer.into_body_stream(),
+        end: Some(ForwardStreamEnd {
+            usage,
+            meta,
+            track: track.take_for_stream(),
+            member,
+            status,
+            tail: Vec::new(),
+        }),
+    };
+    let body = BodyStream::unfold(state, |mut state| async move {
+        match state.body.next_chunk().await {
+            Some(Ok(chunk)) => {
+                if let Some(end) = &mut state.end {
+                    end.tail.extend_from_slice(&chunk);
+                    if end.tail.len() > SPEECH_TAIL {
+                        let excess = end.tail.len() - SPEECH_TAIL;
+                        end.tail.drain(..excess);
+                    }
+                }
+                Some((Ok(chunk.to_vec()), state))
+            }
+            Some(Err(error)) => {
+                // cut short: the reference counts no tokens for it
+                if let Some(end) = &mut state.end {
+                    end.tail.clear();
+                }
+                state.finish();
+                Some((Err(error), state))
+            }
+            None => {
+                state.finish();
+                None
+            }
+        }
+    });
+    hofund_plugin_api::RawAnswer::streaming(status.as_u16(), content_type, body)
+}
+
+fn speech_tokens(tail: &[u8]) -> (Option<i64>, Option<i64>) {
+    for line in tail.split(|byte| *byte == b'\n').rev() {
+        let line = line.trim_ascii();
+        let line = line.strip_prefix(b"data:").unwrap_or(line).trim_ascii();
+        // the last JSON or SSE data line that carries a usage object, as the
+        // reference reads it: a speech.audio.done event or a vendor's JSON
+        if !line.windows(7).any(|window| window == b"\"usage\"") {
+            continue;
+        }
+        if serde_json::from_slice::<serde_json::Value>(line).is_ok() {
+            return forwarded_tokens(line);
+        }
+    }
+    (None, None)
 }
 
 /// Input and output tokens in a forwarded JSON answer, read the way the
@@ -1761,6 +1891,7 @@ fn authenticate_request(
     if let Some(identity) = inherited {
         return Ok(identity);
     }
+    let mut refused = None;
     if let Some(keys) = &app.keys {
         let query = uri.query().and_then(query_key);
         for secret in [
@@ -1772,16 +1903,21 @@ fn authenticate_request(
         .flatten()
         .chain(query.as_deref())
         {
-            if let Ok(Some(identity)) = keys.authenticate(secret) {
-                return Ok(identity);
+            match keys.check(secret) {
+                Ok(hofund_secrets::KeyAuthentication::Enabled(identity)) => return Ok(identity),
+                Ok(hofund_secrets::KeyAuthentication::Refused(message)) => {
+                    refused.get_or_insert(message);
+                }
+                Ok(hofund_secrets::KeyAuthentication::Unknown) | Err(_) => {}
             }
         }
     } else if authorized(&current_token(app), headers, uri) {
         return Ok(Identity::default());
     }
+    let message = refused.as_deref().unwrap_or("unauthorized");
     let body = match codec {
-        Some(codec) => codec.encode_error(StatusCode::UNAUTHORIZED.as_u16(), "unauthorized"),
-        None => list_error("unauthorized"),
+        Some(codec) => codec.encode_error(StatusCode::UNAUTHORIZED.as_u16(), message),
+        None => list_error(message),
     };
     Err(Box::new(json_response(StatusCode::UNAUTHORIZED, body)))
 }
@@ -2719,6 +2855,7 @@ fn write_usage(
         status: status.as_u16().to_string(),
         caller_key_id: meta.identity.key_id.clone(),
         caller_key_name: meta.identity.key_name.clone(),
+        caller_issuer_id: meta.identity.issuer.clone(),
     };
     let mut details = meta.details;
     if details.uncached_input_tokens.is_none() {

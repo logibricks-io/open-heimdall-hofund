@@ -256,6 +256,9 @@ mod tests {
 
     const REFUSED: &[&str] = &[
         "GET /v1/models",
+        "GET /v1/hofund/keys",
+        "POST /v1/hofund/keys",
+        "DELETE /v1/hofund/keys/{id}",
         "POST /v1/chat/completions",
         "POST /v1/messages",
         "POST /v1/messages/count_tokens",
@@ -458,6 +461,7 @@ mod tests {
                     status: status.to_owned(),
                     caller_key_id: key.clone(),
                     caller_key_name: name.to_owned(),
+                    caller_issuer_id: String::new(),
                 })
                 .expect("usage");
         }

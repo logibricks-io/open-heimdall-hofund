@@ -39,8 +39,7 @@ struct Held {
 /// releases every window exactly once.
 pub(super) struct Reservation {
     budget: Budget,
-    key_id: String,
-    holds: Vec<(i64, u64)>,
+    holds: Vec<(String, i64, u64)>,
 }
 
 impl Drop for Reservation {
@@ -50,9 +49,9 @@ impl Drop for Reservation {
             .held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (start, tokens) in &self.holds {
+        for (key_id, start, tokens) in &self.holds {
             let key = WindowKey {
-                key_id: self.key_id.clone(),
+                key_id: key_id.clone(),
                 start: *start,
             };
             if let Some(current) = held.get_mut(&key) {
@@ -195,46 +194,66 @@ impl Budget {
         body_bytes: usize,
         now: DateTime<Local>,
     ) -> Result<Option<Reservation>, ReserveFailure> {
-        let limits: Vec<&KeyLimit> = identity
-            .limits
-            .iter()
-            .filter(|limit| limit.limited())
-            .collect();
-        if identity.key_id.is_empty() || limits.is_empty() {
+        let mut identities = vec![identity.clone()];
+        if !identity.issuer.is_empty() {
+            identities.push(Identity {
+                key_id: identity.issuer.clone(),
+                key_name: identity.issuer_name.clone(),
+                limits: identity.issuer_limits.clone(),
+                ..Identity::default()
+            });
+        }
+        let mut callers = Vec::new();
+        for caller in identities {
+            let limits: Vec<KeyLimit> = caller
+                .limits
+                .iter()
+                .filter(|limit| limit.limited())
+                .cloned()
+                .collect();
+            if caller.key_id.is_empty() || limits.is_empty() {
+                continue;
+            }
+            let windows: Vec<_> = limits.iter().map(|limit| limit.window(now)).collect();
+            let usage = self.usage_for(&caller.key_id, &windows)?;
+            callers.push((caller, limits, windows, usage));
+        }
+        if callers.is_empty() {
             return Ok(None);
         }
+
         let mut held = self
             .held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let windows: Vec<_> = limits.iter().map(|limit| limit.window(now)).collect();
-        let usage = self.usage_for(&identity.key_id, &windows)?;
         let mut refusal = None;
-        for (index, limit) in limits.iter().enumerate() {
-            let window = windows[index];
-            let current = held
-                .get(&WindowKey {
-                    key_id: identity.key_id.clone(),
-                    start: window.start,
-                })
-                .copied();
-            let status = make_status(limit, window, usage[index], current);
-            let reserved = current.unwrap_or_default();
-            let spent = (limit.tokens > 0
-                && usage[index]
-                    .tokens(limit.cache_reads)
-                    .saturating_add(reserved.tokens)
-                    >= limit.tokens)
-                || (limit.cost > 0.0 && reserved.cost >= limit.cost);
-            if spent
-                && refusal
-                    .as_ref()
-                    .is_none_or(|current: &Refusal| window.reset > current.status.reset)
-            {
-                refusal = Some(Refusal {
-                    status,
-                    key: identity.key_name.clone(),
-                });
+        for (caller, limits, windows, usage) in &callers {
+            for (index, limit) in limits.iter().enumerate() {
+                let window = windows[index];
+                let current = held
+                    .get(&WindowKey {
+                        key_id: caller.key_id.clone(),
+                        start: window.start,
+                    })
+                    .copied();
+                let status = make_status(limit, window, usage[index], current);
+                let reserved = current.unwrap_or_default();
+                let spent = (limit.tokens > 0
+                    && usage[index]
+                        .tokens(limit.cache_reads)
+                        .saturating_add(reserved.tokens)
+                        >= limit.tokens)
+                    || (limit.cost > 0.0 && reserved.cost >= limit.cost);
+                if spent
+                    && refusal
+                        .as_ref()
+                        .is_none_or(|current: &Refusal| window.reset > current.status.reset)
+                {
+                    refusal = Some(Refusal {
+                        status,
+                        key: caller.key_name.clone(),
+                    });
+                }
             }
         }
         if let Some(refusal) = refusal {
@@ -242,23 +261,28 @@ impl Budget {
         }
 
         let mut holds = Vec::new();
-        for (index, window) in windows.iter().enumerate() {
-            if holds.iter().any(|(start, _)| *start == window.start) {
-                continue;
+        for (caller, _limits, windows, usage) in &callers {
+            for (index, window) in windows.iter().enumerate() {
+                if holds
+                    .iter()
+                    .any(|(key_id, start, _)| *start == window.start && key_id == &caller.key_id)
+                {
+                    continue;
+                }
+                let mean_output = usage[index]
+                    .output_tokens
+                    .checked_div(usage[index].calls)
+                    .unwrap_or(0);
+                let estimate = u64::try_from(body_bytes / 4)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(mean_output);
+                holds.push((caller.key_id.clone(), window.start, estimate));
             }
-            let mean_output = usage[index]
-                .output_tokens
-                .checked_div(usage[index].calls)
-                .unwrap_or(0);
-            let estimate = u64::try_from(body_bytes / 4)
-                .unwrap_or(u64::MAX)
-                .saturating_add(mean_output);
-            holds.push((window.start, estimate));
         }
-        for (start, tokens) in &holds {
+        for (key_id, start, tokens) in &holds {
             let current = held
                 .entry(WindowKey {
-                    key_id: identity.key_id.clone(),
+                    key_id: key_id.clone(),
                     start: *start,
                 })
                 .or_default();
@@ -268,7 +292,6 @@ impl Budget {
         drop(held);
         Ok(Some(Reservation {
             budget: self.clone(),
-            key_id: identity.key_id.clone(),
             holds,
         }))
     }
@@ -374,36 +397,61 @@ pub(super) async fn limit_route(State(app): State<Arc<Inner>>, request: Request)
             Err(response) => return *response,
         };
     let now = Local::now();
-    match app.budget.status(&identity, now) {
-        Ok(statuses) => {
-            if statuses.is_empty() {
+    let statuses = match app.budget.status(&identity, now) {
+        Ok(statuses) => statuses,
+        Err(ReserveFailure::Unavailable) => {
+            return json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                list_error("gateway key limits are temporarily unavailable"),
+            );
+        }
+        Err(ReserveFailure::Refused(_)) => unreachable!("status does not refuse"),
+    };
+    let issuer_statuses = if identity.issuer.is_empty() {
+        Vec::new()
+    } else {
+        let issuer = Identity {
+            key_id: identity.issuer.clone(),
+            key_name: identity.issuer_name.clone(),
+            limits: identity.issuer_limits.clone(),
+            ..Identity::default()
+        };
+        match app.budget.status(&issuer, now) {
+            Ok(statuses) => statuses,
+            Err(ReserveFailure::Unavailable) => {
                 return json_response(
-                    StatusCode::OK,
-                    serde_json::to_vec(&serde_json::json!({
-                        "limited": false,
-                        "key": identity.key_name,
-                    }))
-                    .unwrap_or_else(|_| b"{\"limited\":false}".to_vec()),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    list_error("gateway key limits are temporarily unavailable"),
                 );
             }
-            let binding = binding(&statuses);
-            json_response(
-                StatusCode::OK,
-                serde_json::to_vec(&serde_json::json!({
-                    "limited": true,
-                    "key": identity.key_name,
-                    "limit": binding,
-                    "limits": statuses,
-                }))
-                .unwrap_or_else(|_| b"{\"limited\":true}".to_vec()),
-            )
+            Err(ReserveFailure::Refused(_)) => unreachable!("status does not refuse"),
         }
-        Err(ReserveFailure::Unavailable) => json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            list_error("gateway key limits are temporarily unavailable"),
-        ),
-        Err(ReserveFailure::Refused(_)) => unreachable!("status does not refuse"),
+    };
+    let mut out = serde_json::json!({
+        "limited": !statuses.is_empty(),
+        "key": identity.key_name,
+    });
+    let object = out.as_object_mut().expect("limit object");
+    if let Some(expires) = identity.expires {
+        object.insert(
+            "expires".to_owned(),
+            serde_json::json!(hofund_secrets::expiry_text(expires)),
+        );
     }
+    if !statuses.is_empty() {
+        object.insert("limit".to_owned(), serde_json::json!(binding(&statuses)));
+        object.insert("limits".to_owned(), serde_json::json!(statuses));
+    }
+    if !issuer_statuses.is_empty() {
+        object.insert(
+            "issuerLimits".to_owned(),
+            serde_json::json!(issuer_statuses),
+        );
+    }
+    json_response(
+        StatusCode::OK,
+        serde_json::to_vec(&out).unwrap_or_else(|_| b"{\"limited\":false}".to_vec()),
+    )
 }
 
 pub(super) fn observe_usage(meta: &mut super::UsageMeta, usage: &Usage, protocol: &str) {
@@ -655,6 +703,7 @@ mod tests {
                     status: "200".to_owned(),
                     caller_key_id: "key".to_owned(),
                     caller_key_name: "Busy".to_owned(),
+                    caller_issuer_id: String::new(),
                 },
                 None,
                 UsageDetails {
@@ -692,6 +741,7 @@ mod tests {
                 status: "200".to_owned(),
                 caller_key_id: "key".to_owned(),
                 caller_key_name: "Busy".to_owned(),
+                caller_issuer_id: String::new(),
             })
             .expect("record");
         let status = budget.status(&identity, now).expect("status").remove(0);
@@ -803,6 +853,7 @@ mod tests {
                 status: "200".to_owned(),
                 caller_key_id: "key".to_owned(),
                 caller_key_name: "Busy".to_owned(),
+                caller_issuer_id: String::new(),
             })
             .expect("record");
         let held = budget
@@ -816,6 +867,56 @@ mod tests {
             assert_eq!(status.in_flight, 1);
         }
         drop(held);
+    }
+
+    #[test]
+    fn s7_issued_usage_and_reservations_count_against_both_keys() {
+        let (_dir, usage, budget) = fixture();
+        let now = Local::now();
+        let parent = identity(vec![KeyLimit {
+            period: "month".to_owned(),
+            tokens: 10,
+            ..KeyLimit::default()
+        }]);
+        let child = Identity {
+            key_id: "child".to_owned(),
+            key_name: "Sandbox".to_owned(),
+            issuer: parent.key_id.clone(),
+            issuer_name: parent.key_name.clone(),
+            issuer_limits: parent.limits.clone(),
+            ..Identity::default()
+        };
+        let held = budget
+            .reserve(&child, 40, now)
+            .expect("first reservation")
+            .expect("held");
+        let status = budget
+            .status(&parent, now)
+            .expect("issuer status")
+            .remove(0);
+        assert_eq!(status.in_flight, 1);
+        assert_eq!(status.reserved, 10);
+        let error = budget.reserve(&child, 40, now);
+        assert!(matches!(error, Err(ReserveFailure::Refused(_))));
+        drop(held);
+        usage
+            .record(&Row {
+                created_unix: now.timestamp(),
+                model: "demo".to_owned(),
+                upstream: "member".to_owned(),
+                input_tokens: Some(10),
+                output_tokens: Some(0),
+                latency_ms: 1,
+                status: "200".to_owned(),
+                caller_key_id: child.key_id.clone(),
+                caller_key_name: child.key_name.clone(),
+                caller_issuer_id: parent.key_id.clone(),
+            })
+            .expect("issued usage");
+        let status = budget.status(&parent, now).expect("persisted").remove(0);
+        assert_eq!(status.calls, 1);
+        assert_eq!(status.tokens, 10);
+        assert!(budget.reserve(&child, 40, now).is_err());
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 use hofund_plugin_api::{
-    Body, Forward, InboundSurface, Method, PluginError, RawAnswer, RawBody, RouteSpec,
+    Body, BodyStream, Forward, InboundSurface, Method, PluginError, RawAnswer, RawBody, RouteSpec,
 };
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{HttpRequest, async_trait};
@@ -30,11 +30,13 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+type Answer = Result<RawAnswer, fn() -> PluginError>;
+
 /// The stand-in gateway: builds the body for the member model `wire`, keeps
 /// what it saw, and answers with `answer`.
 struct Gateway {
     wire: &'static str,
-    answer: Result<RawAnswer, fn() -> PluginError>,
+    answer: Mutex<Option<Answer>>,
     seen: Mutex<Vec<(String, String, RawBody)>>,
 }
 
@@ -44,23 +46,27 @@ impl Gateway {
     }
 
     fn typed(status: u16, kind: Option<&str>, body: &str) -> Self {
+        Self::with_answer(Ok(RawAnswer::new(
+            status,
+            kind.map(str::to_owned),
+            body.as_bytes().to_vec(),
+        )))
+    }
+
+    fn streaming(kind: Option<&str>, body: BodyStream) -> Self {
+        Self::with_answer(Ok(RawAnswer::streaming(200, kind.map(str::to_owned), body)))
+    }
+
+    fn with_answer(answer: Answer) -> Self {
         Self {
             wire: "vendor-embed",
-            answer: Ok(RawAnswer::new(
-                status,
-                kind.map(str::to_owned),
-                body.as_bytes().to_vec(),
-            )),
+            answer: Mutex::new(Some(answer)),
             seen: Mutex::new(Vec::new()),
         }
     }
 
     fn failing(error: fn() -> PluginError) -> Self {
-        Self {
-            wire: "vendor-embed",
-            answer: Err(error),
-            seen: Mutex::new(Vec::new()),
-        }
+        Self::with_answer(Err(error))
     }
 
     fn seen(&self) -> Vec<(String, String, RawBody)> {
@@ -77,7 +83,12 @@ impl Kernel for Gateway {
             call.path().to_owned(),
             body,
         ));
-        self.answer.clone().map_err(|error| error())
+        self.answer
+            .lock()
+            .expect("answer")
+            .take()
+            .expect("one answer")
+            .map_err(|error| error())
     }
 }
 
@@ -127,10 +138,10 @@ fn parsed(body: &str) -> Value {
 }
 
 #[test]
-fn routes_are_the_four_posts() {
+fn p1_4_01_routes() {
     let routes = Retrieval.routes();
     assert_eq!(Retrieval.id().as_str(), "retrieval");
-    assert_eq!(routes.len(), 4);
+    assert_eq!(routes.len(), 6);
     let pairs: Vec<_> = routes
         .iter()
         .map(|route: &RouteSpec| (route.method(), route.prefix()))
@@ -142,6 +153,8 @@ fn routes_are_the_four_posts() {
             (Method::Post, "/v1/rerank"),
             (Method::Post, "/v1/audio/transcriptions"),
             (Method::Post, "/v1/audio/translations"),
+            (Method::Post, "/v1/audio/speech"),
+            (Method::Post, "/audio/speech"),
         ]
     );
 }
@@ -337,6 +350,132 @@ fn a_bad_speech_form_is_refused_before_the_kernel() {
             json!({"error": {"message": message, "type": "invalid_request_error"}}),
             "{kind:?} {body}"
         );
+    }
+    assert!(gateway.seen().is_empty());
+}
+
+#[test]
+fn p1_4_02_json_validation() {
+    let gateway = Gateway::answering(200, "audio");
+    for body in ["not json", "[1]", "{}", r#"{"model":""}"#, r#"{"model":7}"#] {
+        let (status, kind, answer) = ask(&gateway, "/v1/audio/speech", body);
+        assert_eq!((status, kind.as_str()), (400, "application/json"), "{body}");
+        assert_eq!(parsed(&answer)["error"]["type"], "invalid_request_error");
+    }
+    assert!(gateway.seen().is_empty());
+}
+
+#[test]
+fn p1_4_03_retrieval_forwarding() {
+    let gateway = Gateway::typed(200, Some("audio/wav"), "RIFF");
+    let (status, _, body) = ask(
+        &gateway,
+        "/v1/audio/speech",
+        r#"{"model":"speaker","input":"hello"}"#,
+    );
+    assert_eq!((status, body.as_str()), (200, "RIFF"));
+    let seen = gateway.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "speaker");
+    assert_eq!(seen[0].1, "/audio/speech");
+}
+
+#[test]
+fn p1_4_04_body_passthrough() {
+    let gateway = Gateway::typed(200, Some("application/json"), r#"{"audio_data":"YQ=="}"#);
+    ask(
+        &gateway,
+        "/v1/audio/speech",
+        r#"{"model":"speaker","input":"hello","voice":"coral","voice_id":"voice-custom","ref_audio":[1,2,3],"response_format":"wav","speed":1.25,"stream_format":"sse"}"#,
+    );
+    let sent = &gateway.seen()[0].2;
+    assert_eq!(sent.content_type(), "application/json");
+    assert_eq!(
+        parsed(std::str::from_utf8(sent.bytes()).expect("utf8")),
+        json!({
+            "model": "vendor-embed",
+            "input": "hello",
+            "voice": "coral",
+            "voice_id": "voice-custom",
+            "ref_audio": [1, 2, 3],
+            "response_format": "wav",
+            "speed": 1.25,
+            "stream_format": "sse"
+        })
+    );
+}
+
+#[test]
+fn p1_4_05_incremental_streaming() {
+    let pulls = Arc::new(Mutex::new(0_u8));
+    let stream = BodyStream::unfold((0_u8, Arc::clone(&pulls)), |(at, pulls)| async move {
+        *pulls.lock().expect("pulls") += 1;
+        if at == 2 {
+            return None;
+        }
+        Some((Ok(vec![b'a' + at]), (at + 1, pulls)))
+    });
+    let gateway = Gateway::streaming(Some("audio/mpeg"), stream);
+    block_on(async {
+        let response = serve(
+            &gateway,
+            &post("/v1/audio/speech", None, r#"{"model":"speaker"}"#),
+        )
+        .await;
+        let mut body = response.into_body();
+        let first = body.next_chunk().await.expect("first").expect("chunk");
+        assert_eq!(first.as_ref(), b"a");
+        assert_eq!(*pulls.lock().expect("pulls"), 1);
+    });
+}
+
+#[test]
+fn p1_4_06_content_types() {
+    for (vendor, expected) in [
+        (Some("audio/mpeg"), "audio/mpeg"),
+        (Some("text/event-stream"), "text/event-stream"),
+        (Some("application/json"), "application/json"),
+        (None, "audio/mpeg"),
+    ] {
+        let gateway = Gateway::streaming(vendor, BodyStream::from_bytes(b"audio".to_vec()));
+        let (status, kind, body) = ask(&gateway, "/audio/speech", r#"{"model":"speaker"}"#);
+        assert_eq!(
+            (status, kind.as_str(), body.as_str()),
+            (200, expected, "audio")
+        );
+    }
+}
+
+#[test]
+fn p1_4_10_text_fields_unchanged_without_masking() {
+    let gateway = Gateway::typed(200, Some("audio/mpeg"), "audio");
+    ask(
+        &gateway,
+        "/v1/audio/speech",
+        r#"{"model":"speaker","input":"read exactly this","instructions":"keep this instruction"}"#,
+    );
+    let seen = gateway.seen();
+    let sent = parsed(std::str::from_utf8(seen[0].2.bytes()).expect("utf8"));
+    assert_eq!(sent["input"], "read exactly this");
+    assert_eq!(sent["instructions"], "keep this instruction");
+}
+
+#[test]
+fn p1_4_11_uses_plugin_fetch_forward() {
+    let speech = Gateway::typed(200, Some("audio/mpeg"), "audio");
+    ask(&speech, "/v1/audio/speech", r#"{"model":"speaker"}"#);
+    let embeddings = Gateway::answering(200, "{}");
+    ask(&embeddings, "/v1/embeddings", r#"{"model":"speaker"}"#);
+    assert_eq!(speech.seen()[0].0, embeddings.seen()[0].0);
+    assert_eq!(speech.seen()[0].2, embeddings.seen()[0].2);
+}
+
+#[test]
+fn deeper_speech_paths_are_not_served() {
+    let gateway = Gateway::answering(200, "audio");
+    for path in ["/v1/audio/speech/more", "/audio/speech/more"] {
+        let (status, _, body) = ask(&gateway, path, r#"{"model":"speaker"}"#);
+        assert_eq!((status, body.as_str()), (404, "404 page not found"));
     }
     assert!(gateway.seen().is_empty());
 }

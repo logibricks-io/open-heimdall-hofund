@@ -83,6 +83,9 @@ pub struct UsageRow {
     /// Authenticated gateway key name, absent in older peers.
     #[serde(default)]
     pub caller_key_name: String,
+    /// Issuer of the authenticated key, absent in older peers.
+    #[serde(default)]
+    pub caller_issuer_id: String,
 }
 
 /// Aggregated usage totals.

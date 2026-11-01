@@ -21,6 +21,9 @@ const OWN_PREFIX: &str = "hofund_";
 const STORE_NAME: &str = "caller-keys.json";
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
+mod issue;
+pub use issue::*;
+
 /// A stored spending-limit description.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -146,6 +149,10 @@ pub struct Identity {
     pub expires: Option<i64>,
     /// Issuing key id.
     pub issuer: String,
+    /// Issuing key name, for limit reporting.
+    pub issuer_name: String,
+    /// Current limits of the issuing key.
+    pub issuer_limits: Vec<KeyLimit>,
     /// Whether the key may issue other keys.
     pub issues: bool,
     /// Whether this is the default sharing key.
@@ -245,23 +252,12 @@ impl KeyStore {
     }
 
     /// Authenticates against every stored secret in constant time.
+    /// Use [`Self::check`] when an expiry or issuer refusal message is needed.
     pub fn authenticate(&self, secret: &str) -> Result<Option<Identity>, SecretError> {
-        if secret.is_empty() {
-            return Ok(None);
-        }
-        let _guard = self.lock()?;
-        let keys = self.load_migrated()?;
-        let mut matched = None;
-        for (index, key) in keys.iter().enumerate() {
-            if !key.secret.is_empty() && constant_time_eq(secret.as_bytes(), key.secret.as_bytes())
-            {
-                matched = Some(index);
-            }
-        }
-        Ok(matched.and_then(|index| {
-            let key = &keys[index];
-            (!key.off && !key.removed).then(|| identity(key))
-        }))
+        Ok(match self.check(secret)? {
+            KeyAuthentication::Enabled(identity) => Some(identity),
+            KeyAuthentication::Refused(_) | KeyAuthentication::Unknown => None,
+        })
     }
 
     /// Whether the secret belongs to any stored key, enabled or not.
@@ -276,13 +272,23 @@ impl KeyStore {
         }))
     }
 
-    /// Whether `id` names an enabled key.
+    /// Whether `id` names an enabled, unexpired key whose issuer also lets it in.
     pub fn on(&self, id: &str) -> Result<bool, SecretError> {
         let _guard = self.lock()?;
         let keys = self.load_migrated()?;
-        Ok(keys
-            .iter()
-            .any(|key| key.id == id && !key.off && !key.removed && !key.secret.is_empty()))
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+            });
+        Ok(keys.iter().any(|key| {
+            key.id == id
+                && !key.off
+                && !key.removed
+                && !key.secret.is_empty()
+                && !expired(key, now)
+                && identity_of(key, &keys, now).is_ok()
+        }))
     }
 
     /// Adds a full-access key with a generated secret or a caller-supplied one.
@@ -657,9 +663,10 @@ fn identity(key: &Key) -> Identity {
         read_only: key.read_only,
         expires: key.expires,
         issuer: key.issuer.clone(),
-        issues: key.issues,
+        issues: key.issues && key.issuer.is_empty() && key.expires.is_none(),
         is_default: key.is_default,
         limits: key.limits.clone(),
+        ..Identity::default()
     }
 }
 

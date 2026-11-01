@@ -71,6 +71,7 @@ fn make_router(
         nearly_spent: false,
         fallback: false,
         effort: String::new(),
+        units: Vec::new(),
     };
     let router = Router::from_hops(
         BTreeMap::from([("demo".to_owned(), vec![hop])]),

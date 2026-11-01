@@ -195,6 +195,7 @@ fn fixture() -> Fixture {
         nearly_spent: false,
         fallback: false,
         effort: String::new(),
+        units: Vec::new(),
     };
     let routes = BTreeMap::from([
         ("demo".to_owned(), vec![hop("primary", "account-a")]),

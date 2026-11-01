@@ -4,14 +4,14 @@
 //! starts the HTTP server. The binary parses arguments and calls these
 //! functions.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
-use hofund_config::{Config, ConfigError, UpstreamTarget, Value, load_path};
+use hofund_config::{Config, ConfigError, Fallback, UpstreamTarget, Value, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 use hofund_plugin_api::{
     AgentDescription, BuildContext, DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue,
@@ -24,7 +24,7 @@ pub use hofund_gateway::BindHook;
 pub use hofund_gateway::Running;
 use hofund_provider::{Credential, Endpoint, Provider, Wire};
 use hofund_quirks::named;
-use hofund_router::{Cooldowns, FailoverPolicy, Snapshot};
+use hofund_router::{Cooldowns, FailoverPolicy, Snapshot, Unit};
 use hofund_secrets::{KeyStore, TokenFile};
 use hofund_usage::Ledger;
 
@@ -804,104 +804,39 @@ fn route_plan(
     BTreeMap<String, Vec<membership::PlannedHop>>,
     FailoverPolicy,
 ) {
-    let configured: BTreeMap<&str, &hofund_config::Provider> = config
-        .providers
-        .iter()
-        .map(|provider| (provider.id.as_str(), provider))
-        .collect();
-    let caps: BTreeMap<&str, u64> = configured
-        .iter()
-        .filter_map(|(id, provider)| provider.max_output_tokens.map(|cap| (*id, cap)))
-        .collect();
-    let subscriptions: BTreeMap<&str, &hofund_config::Subscription> = config
-        .subscriptions
-        .iter()
-        .map(|subscription| (subscription.id.as_str(), subscription))
-        .collect();
+    let context = RoutePlanContext {
+        providers: config
+            .providers
+            .iter()
+            .map(|provider| (provider.id.as_str(), provider))
+            .collect(),
+        subscriptions: config
+            .subscriptions
+            .iter()
+            .map(|subscription| (subscription.id.as_str(), subscription))
+            .collect(),
+        routes: config
+            .routes
+            .iter()
+            .map(|route| (route.model.as_str(), route))
+            .collect(),
+        models_host,
+        built,
+    };
     let mut routes = BTreeMap::new();
     for route in &config.routes {
-        let stays = effective_stays(route, &configured, &subscriptions);
-        let mut list = Vec::new();
-        for upstream in &route.upstreams {
-            match &upstream.target {
-                UpstreamTarget::Provider(provider) => {
-                    let model = upstream.model.as_deref().unwrap_or(&route.model);
-                    let listed = models_host
-                        .and_then(|host| listed_model(host.cached(provider).models, model));
-                    let manual = configured
-                        .get(provider.as_str())
-                        .is_some_and(|provider| provider.free);
-                    let free = free_hop(manual, listed.as_ref());
-                    let context_window = hop_window(listed.as_ref());
-                    let mut keys = built
-                        .into_iter()
-                        .flat_map(|built| built.values())
-                        .filter_map(|candidate| {
-                            candidate
-                                .key
-                                .as_ref()
-                                .filter(|key| key.provider == *provider)
-                        })
-                        .collect::<Vec<_>>();
-                    keys.sort_by_key(|key| key.rank);
-                    let candidates = if keys.is_empty()
-                        && (built.is_none_or(|built| built.contains_key(provider))
-                            || configured
-                                .get(provider.as_str())
-                                .is_none_or(|provider| provider.key_entries().is_empty()))
-                    {
-                        vec![(None, upstream.weight.unwrap_or(1))]
-                    } else {
-                        keys.into_iter()
-                            .map(|key| (Some(key.member.clone()), key.weight))
-                            .collect()
-                    };
-                    let cold_after = configured
-                        .get(provider.as_str())
-                        .map_or(hofund_router::affinity::CACHE_COLD, |provider| {
-                            provider_cold_after(provider)
-                        });
-                    for (member_id, weight) in candidates {
-                        list.push(membership::PlannedHop {
-                            provider: provider.clone(),
-                            subscription: None,
-                            member_id,
-                            wire_model: upstream.model.clone(),
-                            max_output_tokens: upstream
-                                .max_output_tokens
-                                .or_else(|| caps.get(provider.as_str()).copied()),
-                            context_window,
-                            routing: route.routing.clone(),
-                            patience: route.patience.duration(),
-                            weight,
-                            free,
-                            stays,
-                            cold_after,
-                        });
-                    }
-                }
-                UpstreamTarget::Subscription(subscription) => {
-                    list.push(membership::PlannedHop {
-                        provider: String::new(),
-                        subscription: Some(subscription.clone()),
-                        member_id: None,
-                        wire_model: upstream.model.clone(),
-                        max_output_tokens: upstream.max_output_tokens,
-                        context_window: None,
-                        routing: route.routing.clone(),
-                        patience: route.patience.duration(),
-                        weight: upstream.weight.unwrap_or(1),
-                        free: false,
-                        stays,
-                        cold_after: if subscription == "codex" {
-                            hofund_router::affinity::CACHE_HOUR
-                        } else {
-                            hofund_router::affinity::CACHE_COLD
-                        },
-                    });
-                }
-            }
-        }
+        let follow_fallback = route.upstreams.len() == 1
+            && matches!(route.upstreams[0].target, UpstreamTarget::Provider(_));
+        let list = expand_route(
+            route,
+            route,
+            &route.model,
+            Vec::new(),
+            follow_fallback,
+            false,
+            &context,
+            &mut BTreeSet::new(),
+        );
         routes.insert(route.model.clone(), list);
     }
     let policy = FailoverPolicy {
@@ -909,6 +844,236 @@ fn route_plan(
         statuses: config.failover.statuses.clone(),
     };
     (routes, policy)
+}
+
+struct RoutePlanContext<'a> {
+    providers: BTreeMap<&'a str, &'a hofund_config::Provider>,
+    subscriptions: BTreeMap<&'a str, &'a hofund_config::Subscription>,
+    routes: BTreeMap<&'a str, &'a hofund_config::Route>,
+    models_host: Option<&'a ModelsHost>,
+    built: Option<&'a BTreeMap<String, membership::BuiltProvider>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_route(
+    route: &hofund_config::Route,
+    root: &hofund_config::Route,
+    bare: &str,
+    parents: Vec<Unit>,
+    follow_fallback: bool,
+    fallback: bool,
+    context: &RoutePlanContext<'_>,
+    seen: &mut BTreeSet<(String, String)>,
+) -> Vec<membership::PlannedHop> {
+    let mut out = Vec::new();
+    for upstream in &route.upstreams {
+        match &upstream.target {
+            UpstreamTarget::Provider(provider) => {
+                push_provider(
+                    root,
+                    bare,
+                    provider,
+                    upstream.model.clone(),
+                    upstream.max_output_tokens,
+                    upstream.weight.unwrap_or(1),
+                    fallback,
+                    parents.clone(),
+                    context,
+                    seen,
+                    &mut out,
+                );
+                if follow_fallback && let Some(config) = context.providers.get(provider.as_str()) {
+                    for fallback in &config.fallback {
+                        match fallback {
+                            Fallback::Model {
+                                provider: fallback_provider,
+                                model,
+                            } => push_provider(
+                                root,
+                                bare,
+                                fallback_provider,
+                                Some(model.clone()),
+                                None,
+                                1,
+                                true,
+                                parents.clone(),
+                                context,
+                                seen,
+                                &mut out,
+                            ),
+                            Fallback::Group(group) => expand_group(
+                                group,
+                                1,
+                                true,
+                                root,
+                                bare,
+                                parents.clone(),
+                                context,
+                                seen,
+                                &mut out,
+                            ),
+                        }
+                    }
+                }
+            }
+            UpstreamTarget::Subscription(subscription) => {
+                let model = upstream.model.as_deref().unwrap_or(bare);
+                if !seen.insert((format!("subscription:{subscription}"), model.to_owned())) {
+                    continue;
+                }
+                let Some(config) = context.subscriptions.get(subscription.as_str()) else {
+                    continue;
+                };
+                let mut units = parents.clone();
+                units.push(Unit {
+                    key: format!("subscription/{subscription}/{model}"),
+                    pool: format!("subscription/{subscription}"),
+                    routing: config.routing.clone(),
+                    weight: upstream.weight.unwrap_or(1),
+                    sink: false,
+                    fallback,
+                });
+                out.push(membership::PlannedHop {
+                    provider: String::new(),
+                    subscription: Some(subscription.clone()),
+                    member_id: None,
+                    wire_model: upstream.model.clone(),
+                    max_output_tokens: upstream.max_output_tokens,
+                    context_window: None,
+                    routing: root.routing.clone(),
+                    sink: root.sink,
+                    patience: root.patience.duration(),
+                    weight: upstream.weight.unwrap_or(1),
+                    free: false,
+                    stays: effective_stays(root, &context.providers, &context.subscriptions),
+                    cold_after: if subscription == "codex" {
+                        hofund_router::affinity::CACHE_HOUR
+                    } else {
+                        hofund_router::affinity::CACHE_COLD
+                    },
+                    units,
+                });
+            }
+            UpstreamTarget::Group(group) => expand_group(
+                group,
+                upstream.weight.unwrap_or(1),
+                fallback,
+                root,
+                bare,
+                parents.clone(),
+                context,
+                seen,
+                &mut out,
+            ),
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_group(
+    id: &str,
+    weight: u64,
+    fallback: bool,
+    root: &hofund_config::Route,
+    bare: &str,
+    mut parents: Vec<Unit>,
+    context: &RoutePlanContext<'_>,
+    seen: &mut BTreeSet<(String, String)>,
+    out: &mut Vec<membership::PlannedHop>,
+) {
+    let name = format!("group/{id}");
+    let group = context.routes[name.as_str()];
+    parents.push(Unit {
+        key: name.clone(),
+        pool: name,
+        routing: group.routing.clone(),
+        weight,
+        sink: group.sink,
+        fallback,
+    });
+    out.extend(expand_route(
+        group, root, bare, parents, false, fallback, context, seen,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_provider(
+    root: &hofund_config::Route,
+    bare: &str,
+    id: &str,
+    model: Option<String>,
+    max_output_tokens: Option<u64>,
+    weight: u64,
+    fallback: bool,
+    mut parents: Vec<Unit>,
+    context: &RoutePlanContext<'_>,
+    seen: &mut BTreeSet<(String, String)>,
+    out: &mut Vec<membership::PlannedHop>,
+) {
+    let (provider_cap, provider_free, cold_after) = context.providers.get(id).map_or(
+        (None, false, hofund_router::affinity::CACHE_COLD),
+        |provider| {
+            (
+                provider.max_output_tokens,
+                provider.free,
+                provider_cold_after(provider),
+            )
+        },
+    );
+    let model_name = model.as_deref().unwrap_or(bare);
+    if !seen.insert((id.to_owned(), model_name.to_owned())) {
+        return;
+    }
+    let listed = context
+        .models_host
+        .and_then(|host| listed_model(host.cached(id).models, model_name));
+    parents.push(Unit {
+        key: format!("provider/{id}/{model_name}"),
+        pool: format!("provider/{id}"),
+        routing: "smart".to_owned(),
+        weight,
+        sink: false,
+        fallback,
+    });
+    let mut keys = context
+        .built
+        .into_iter()
+        .flat_map(|built| built.values())
+        .filter_map(|candidate| candidate.key.as_ref().filter(|key| key.provider == *id))
+        .collect::<Vec<_>>();
+    keys.sort_by_key(|key| key.rank);
+    let candidates = if keys.is_empty()
+        && (context.built.is_none_or(|built| built.contains_key(id))
+            || context
+                .providers
+                .get(id)
+                .is_none_or(|provider| provider.key_entries().is_empty()))
+    {
+        vec![(None, weight)]
+    } else {
+        keys.into_iter()
+            .map(|key| (Some(key.member.clone()), key.weight))
+            .collect()
+    };
+    for (member_id, key_weight) in candidates {
+        out.push(membership::PlannedHop {
+            provider: id.to_owned(),
+            subscription: None,
+            member_id,
+            wire_model: model.clone(),
+            max_output_tokens: max_output_tokens.or(provider_cap),
+            context_window: hop_window(listed.as_ref()),
+            routing: root.routing.clone(),
+            sink: root.sink,
+            patience: root.patience.duration(),
+            weight: key_weight,
+            free: free_hop(provider_free, listed.as_ref()),
+            stays: effective_stays(root, &context.providers, &context.subscriptions),
+            cold_after,
+            units: parents.clone(),
+        });
+    }
 }
 
 pub(crate) fn route_stays(
@@ -945,6 +1110,7 @@ fn effective_stays(
                 .map_or(hofund_config::Stays::Auto, |subscription| {
                     subscription.stays
                 }),
+            UpstreamTarget::Group(_) => hofund_config::Stays::Auto,
         }
     } else {
         hofund_config::Stays::Auto
@@ -1907,6 +2073,16 @@ mod tests {
     }
 
     #[test]
+    fn d3_route_plan_carries_sink_to_provider_hops() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nsink = true\nupstreams = [{ provider = \"one\" }]\n",
+        )
+        .expect("config");
+        let (routes, _) = super::route_plan(&config, None, None);
+        assert!(routes["demo"][0].sink);
+    }
+
+    #[test]
     fn k3_candidates_keep_key_order_ids_and_protocol_filters() {
         let config = hofund_config::load(
             "[[providers]]\nid = \"one\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"first\"\nkey_weight = 2\n[[providers.keys]]\nkey = \"off\"\non = false\n[[providers.keys]]\nkey = \"responses\"\nprotocol = \"openai-responses\"\n[[providers.keys]]\nkey = \"last\"\nweight = 3\n[[routes]]\nmodel = \"demo\"\nrouting = \"weight\"\nupstreams = [{ provider = \"one\", weight = 9 }]\n",
@@ -1969,6 +2145,47 @@ mod tests {
         let (routes, _) = super::route_plan(&config, None, Some(&built.built));
         assert_eq!(routes["demo"][0].member_id, None);
         assert!(built.built.contains_key("one"));
+    }
+
+    #[test]
+    fn d1_fallback_group_expands_whole_in_order_and_deduplicates_members() {
+        let config = hofund_config::load(
+            r#"
+            [[providers]]
+            id = "plan"
+            preset = "openai"
+            fallback = ["group/backup", "a/x"]
+            [[providers]]
+            id = "a"
+            preset = "openai"
+            [[providers]]
+            id = "b"
+            preset = "openai"
+            [[routes]]
+            model = "group/backup"
+            routing = "order"
+            upstreams = [
+              { provider = "plan", model = "m" },
+              { provider = "b", model = "x" },
+              { provider = "a", model = "x" },
+            ]
+            [[routes]]
+            model = "demo"
+            upstreams = [{ provider = "plan", model = "m" }]
+            "#,
+        )
+        .expect("fallback group config");
+        let (routes, _) = super::route_plan(&config, None, None);
+        let hops = &routes["demo"];
+        assert_eq!(
+            hops.iter()
+                .map(|hop| (hop.provider.as_str(), hop.wire_model.as_deref()))
+                .collect::<Vec<_>>(),
+            [("plan", Some("m")), ("b", Some("x")), ("a", Some("x"))]
+        );
+        assert_eq!(hops[1].units[0].key, "group/backup");
+        assert_eq!(hops[1].units[0].routing, "order");
+        assert_eq!(hops[2].units[0].key, "group/backup");
     }
 
     #[test]

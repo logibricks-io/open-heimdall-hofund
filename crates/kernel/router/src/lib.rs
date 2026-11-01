@@ -74,6 +74,23 @@ impl FailoverPolicy {
     }
 }
 
+/// One routing-unit boundary above a hop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unit {
+    /// Stable member key within the parent pool.
+    pub key: String,
+    /// Stable state key for this unit's own routing pool.
+    pub pool: String,
+    /// Strategy used to order this unit's immediate children.
+    pub routing: String,
+    /// This unit's share in its parent pool.
+    pub weight: u64,
+    /// Whether rate-limited children move behind the others in this unit.
+    pub sink: bool,
+    /// Whether this unit was reached through a provider fallback list.
+    pub fallback: bool,
+}
+
 /// One member a route may call, and the model name that member expects.
 #[derive(Clone)]
 pub struct Hop {
@@ -102,6 +119,9 @@ pub struct Hop {
     pub effort: String,
     /// How long this member's unread prompt cache stays warm.
     pub cold_after: Duration,
+    /// Unit boundaries from the outermost direct member to the innermost
+    /// subscription. Empty keeps legacy flat-route behavior.
+    pub units: Vec<Unit>,
 }
 
 impl Hop {
@@ -120,6 +140,7 @@ impl Hop {
             fallback: false,
             effort: String::new(),
             cold_after: affinity::CACHE_COLD,
+            units: Vec::new(),
         }
     }
 }
@@ -136,6 +157,8 @@ pub struct Route {
     /// How long a request to this pool waits for members that failed in a
     /// way that passes to come back. Absent disables the pool's patience.
     pub patience: Option<Duration>,
+    /// Whether rate-limited members with quota left move behind the others.
+    pub sink: bool,
 }
 
 impl Route {
@@ -148,6 +171,7 @@ impl Route {
             routing: "smart".to_owned(),
             stays: affinity::Stays::Auto,
             patience: Some(Duration::from_secs(60)),
+            sink: false,
         }
     }
 
@@ -169,6 +193,13 @@ impl Route {
     #[must_use]
     pub fn with_stays(mut self, stays: affinity::Stays) -> Self {
         self.stays = stays;
+        self
+    }
+
+    /// Sets whether rate-limited members move behind the others.
+    #[must_use]
+    pub fn with_sink(mut self, sink: bool) -> Self {
+        self.sink = sink;
         self
     }
 }
@@ -206,6 +237,8 @@ struct Resolved {
     pool: String,
     /// Strategy configured for this route pool.
     routing: String,
+    /// Whether rate-limited members move behind the others in this pool.
+    sink: bool,
     /// Retry budget: the pool's for a route, the provider's for a direct
     /// request.
     patience: Option<Duration>,
@@ -218,9 +251,26 @@ struct Resolved {
     stays: affinity::Stays,
 }
 
+impl Resolved {
+    fn uses_free(&self) -> bool {
+        self.routing == "free"
+            || self
+                .hops
+                .iter()
+                .flat_map(|hop| &hop.units)
+                .any(|unit| unit.routing == "free")
+    }
+}
+
 struct Ordered {
     hops: Vec<Hop>,
     affinity: Option<ReplyRoute>,
+}
+
+struct RoundMove {
+    pool: String,
+    picked: String,
+    choices: Vec<(String, String)>,
 }
 
 struct ReplyRoute {
@@ -500,6 +550,7 @@ impl Router {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         resolved.hops = scoped_hops(&asked, &resolved, scope)?;
+        self.refresh_free(&mut resolved).await;
         let ordered = self.order_for(&resolved, conversation);
         resolved.hops = ordered.hops;
         resolved.spent = self.spent(&resolved);
@@ -572,6 +623,7 @@ impl Router {
     ) -> Result<InputCount, RouterError> {
         let mut resolved = self.resolve(&request.model)?;
         resolved.hops = scoped_hops(&request.model, &resolved, scope)?;
+        self.refresh_free(&mut resolved).await;
         resolved.hops = self.order_hops(&resolved);
         let policy = self.policy.clone();
         let mut last = None;
@@ -652,6 +704,7 @@ impl Router {
     ) -> Result<Forwarded, RouterError> {
         let mut resolved = self.resolve(call.model())?;
         resolved.hops = scoped_hops(call.model(), &resolved, scope)?;
+        self.refresh_free(&mut resolved).await;
         resolved.hops = self.order_hops(&resolved);
         let mut last = None;
         for (index, hop) in resolved.hops.iter().enumerate() {
@@ -717,6 +770,19 @@ impl Router {
             .collect()
     }
 
+    async fn refresh_free(&self, resolved: &mut Resolved) {
+        if !resolved.uses_free() {
+            return;
+        }
+        let bare = resolved.bare.clone();
+        for hop in &mut resolved.hops {
+            let model = hop.wire_model.as_deref().unwrap_or(&bare);
+            if let Some(free) = hop.member.costs_nothing(model).await {
+                hop.free = free;
+            }
+        }
+    }
+
     fn order_hops(&self, resolved: &Resolved) -> Vec<Hop> {
         self.order_for(resolved, None).hops
     }
@@ -726,51 +792,8 @@ impl Router {
         resolved: &Resolved,
         conversation: Option<&affinity::Conversation>,
     ) -> Ordered {
-        let ordered = if resolved.hops.len() < 2 {
-            resolved.hops.clone()
-        } else {
-            let mut seats = resolved
-                .hops
-                .iter()
-                .map(|hop| {
-                    let mut seat = strategy::Seat::new(hop.member.id().to_string());
-                    seat.account = hop.member.id().account().is_some();
-                    seat.learns = hop.member.learns_allowance();
-                    seat.weight = hop.weight;
-                    seat.free = hop.free;
-                    let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
-                    seat.resting = self.cooldowns.as_ref().is_some_and(|cooldowns| {
-                        cooldowns
-                            .cooling_for_model(hop.member.id(), model)
-                            .is_some()
-                    });
-                    seat
-                })
-                .collect::<Vec<_>>();
-            if let Some(measurements) = &self.measurements {
-                let models = resolved
-                    .hops
-                    .iter()
-                    .map(|hop| {
-                        hop.wire_model
-                            .clone()
-                            .unwrap_or_else(|| resolved.bare.clone())
-                    })
-                    .collect::<Vec<_>>();
-                measurements.weigh(
-                    &mut seats,
-                    &models,
-                    &resolved.pool,
-                    self.strategies.needs(&resolved.routing),
-                    std::time::SystemTime::now(),
-                );
-            }
-            self.strategies
-                .order(&resolved.routing, &resolved.pool, &seats)
-                .into_iter()
-                .map(|index| resolved.hops[index].clone())
-                .collect()
-        };
+        let mut rounds = Vec::new();
+        let ordered = self.order_level(resolved, 0, resolved.hops.clone(), &mut rounds);
         let ordered = if let Some(cooldowns) = &self.cooldowns {
             order_hops(ordered, cooldowns, &resolved.bare)
         } else {
@@ -832,17 +855,38 @@ impl Router {
                     .order(conversation, resolved.stays, &resolved.routing, &candidates);
             (decision, candidates)
         });
-        let ordered = if let Some((decision, _)) = &decision {
-            decision
-                .order
-                .iter()
-                .map(|index| ordered[*index].clone())
-                .collect::<Vec<_>>()
+        let (ordered, strict) = if let Some((decision, _)) = &decision {
+            (
+                decision
+                    .order
+                    .iter()
+                    .map(|index| ordered[*index].clone())
+                    .collect::<Vec<_>>(),
+                decision.strict,
+            )
+        } else {
+            (ordered, false)
+        };
+        if decision.as_ref().is_some_and(|(decision, _)| decision.kept)
+            && let Some(kept) = ordered.first()
+        {
+            let kept_id = kept.member.id().to_string();
+            for round in rounds {
+                if let Some((_, key)) = round.choices.iter().find(|(member, _)| *member == kept_id)
+                {
+                    self.strategies.move_round(&round.pool, &round.picked, key);
+                }
+            }
+        }
+        let hops = if strict {
+            ordered
+        } else if let Some(cooldowns) = &self.cooldowns {
+            order_hops(ordered, cooldowns, &resolved.bare)
         } else {
             ordered
         };
         Ordered {
-            hops: ordered,
+            hops,
             affinity: conversation
                 .zip(decision)
                 .map(|(conversation, (decision, planned))| ReplyRoute {
@@ -852,6 +896,158 @@ impl Router {
                     planned,
                 }),
         }
+    }
+
+    fn order_level(
+        &self,
+        resolved: &Resolved,
+        depth: usize,
+        hops: Vec<Hop>,
+        rounds: &mut Vec<RoundMove>,
+    ) -> Vec<Hop> {
+        let mut groups: Vec<(String, u64, Vec<Hop>)> = Vec::new();
+        for hop in hops {
+            let (unit_key, weight) = hop.units.get(depth).map_or_else(
+                || (format!("hop:{}", hop.member.id()), hop.weight),
+                |unit| (unit.key.clone(), unit.weight),
+            );
+            if let Some((_, _, group)) = groups.iter_mut().find(|(key, _, _)| *key == unit_key) {
+                group.push(hop);
+            } else {
+                groups.push((unit_key, weight, vec![hop]));
+            }
+        }
+        for (_, _, group) in &mut groups {
+            let nested = group[0].units.get(depth + 1).is_some();
+            if nested {
+                *group = self.order_level(resolved, depth + 1, std::mem::take(group), rounds);
+                continue;
+            }
+            let (pool, routing, sink) = group[0].units.get(depth).map_or_else(
+                || (resolved.pool.clone(), "smart".to_owned(), false),
+                |unit| (unit.pool.clone(), unit.routing.clone(), unit.sink),
+            );
+            let leaves = std::mem::take(group)
+                .into_iter()
+                .map(|hop| {
+                    let key = format!("hop:{}", hop.member.id());
+                    (key, hop.weight, vec![hop])
+                })
+                .collect();
+            *group = self.order_units(resolved, &pool, &routing, sink, leaves, rounds);
+        }
+        let (pool, routing, sink) = if depth == 0 {
+            (
+                resolved.pool.clone(),
+                resolved.routing.clone(),
+                resolved.sink,
+            )
+        } else {
+            let unit = &groups[0].2[0].units[depth - 1];
+            (unit.pool.clone(), unit.routing.clone(), unit.sink)
+        };
+        self.order_units(resolved, &pool, &routing, sink, groups, rounds)
+    }
+
+    fn order_units(
+        &self,
+        resolved: &Resolved,
+        pool: &str,
+        routing: &str,
+        sink: bool,
+        groups: Vec<(String, u64, Vec<Hop>)>,
+        rounds: &mut Vec<RoundMove>,
+    ) -> Vec<Hop> {
+        let heads = groups
+            .iter()
+            .map(|(_, _, group)| group[0].clone())
+            .collect::<Vec<_>>();
+        let mut seats = self.seats(resolved, &heads, pool, routing);
+        for ((key, weight, _), seat) in groups.iter().zip(&mut seats) {
+            seat.key.clone_from(key);
+            seat.weight = *weight;
+        }
+        let order = if groups.len() < 2 {
+            (0..groups.len()).collect()
+        } else {
+            self.strategies.order(routing, pool, &seats)
+        };
+        if groups.len() > 1 && routing == "weight" {
+            rounds.push(RoundMove {
+                pool: pool.to_owned(),
+                picked: groups[order[0]].0.clone(),
+                choices: groups
+                    .iter()
+                    .flat_map(|(key, _, group)| {
+                        group
+                            .iter()
+                            .map(|hop| (hop.member.id().to_string(), key.clone()))
+                    })
+                    .collect(),
+            });
+        }
+        let mut ordered = order
+            .into_iter()
+            .flat_map(|index| groups[index].2.clone())
+            .collect::<Vec<_>>();
+        if sink
+            && !matches!(routing, "rotate" | "weight")
+            && let Some(cooldowns) = &self.cooldowns
+        {
+            ordered.sort_by_key(|hop| {
+                let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                cooldowns
+                    .sunk_at(hop.member.id(), model)
+                    .map_or((0, 0), |sequence| (1, sequence))
+            });
+        }
+        ordered
+    }
+
+    fn seats(
+        &self,
+        resolved: &Resolved,
+        hops: &[Hop],
+        pool: &str,
+        routing: &str,
+    ) -> Vec<strategy::Seat> {
+        let mut seats = hops
+            .iter()
+            .map(|hop| {
+                let mut seat = strategy::Seat::new(hop.member.id().to_string());
+                seat.account = hop.member.id().account().is_some();
+                seat.learns = hop.member.learns_allowance();
+                seat.weight = hop.weight;
+                seat.free = hop.free;
+                let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                seat.resting = self.cooldowns.as_ref().is_some_and(|cooldowns| {
+                    cooldowns
+                        .cooling_for_model(hop.member.id(), model)
+                        .is_some()
+                });
+                seat
+            })
+            .collect::<Vec<_>>();
+        if hops.len() > 1
+            && let Some(measurements) = &self.measurements
+        {
+            let models = hops
+                .iter()
+                .map(|hop| {
+                    hop.wire_model
+                        .clone()
+                        .unwrap_or_else(|| resolved.bare.clone())
+                })
+                .collect::<Vec<_>>();
+            measurements.weigh(
+                &mut seats,
+                &models,
+                pool,
+                self.strategies.needs(routing),
+                SystemTime::now(),
+            );
+        }
+        seats
     }
 
     fn resolve(&self, asked: &str) -> Result<Resolved, RouterError> {
@@ -866,6 +1062,7 @@ impl Router {
                 bare: asked.to_owned(),
                 pool: asked.to_owned(),
                 routing: route.routing.clone(),
+                sink: route.sink,
                 stays: route.stays,
                 patience: route.patience,
                 pool_asked: true,
@@ -879,6 +1076,27 @@ impl Router {
                 hop.member.route_id() == provider_id
                     && (route_model == model || hop.wire_model.as_deref() == Some(model))
             });
+            if found.len() == 1
+                && let Some((route_model, primary, stays)) = found.first()
+                && let Some(route) = self.routes.get(route_model)
+                && route
+                    .hops
+                    .iter()
+                    .any(|hop| hop.units.iter().any(|unit| unit.fallback))
+            {
+                return Ok(Resolved {
+                    hops: route.hops.clone(),
+                    route: route_model.clone(),
+                    bare: model.to_owned(),
+                    pool: asked.to_owned(),
+                    routing: "smart".to_owned(),
+                    sink: false,
+                    stays: *stays,
+                    patience: primary.patience,
+                    pool_asked: false,
+                    spent: Vec::new(),
+                });
+            }
             let patience = found.first().and_then(|(_, hop, _)| hop.patience);
             let mut resolved = self.one(asked, model, found)?;
             resolved.patience = patience;
@@ -923,6 +1141,7 @@ impl Router {
                     bare: bare.to_owned(),
                     pool: asked.to_owned(),
                     routing: "smart".to_owned(),
+                    sink: false,
                     stays,
                     patience: None,
                     pool_asked: false,

@@ -190,6 +190,7 @@ fn fixture(answers: Vec<Result<Completion, PluginError>>) -> Fixture {
         nearly_spent: false,
         fallback: false,
         effort: String::new(),
+        units: Vec::new(),
     };
     let snapshot = Snapshot::new(Router::from_hops(
         BTreeMap::from([("demo".to_owned(), vec![hop])]),

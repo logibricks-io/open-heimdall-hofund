@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Short-lived gateway keys and issuers (P0-4d): issue keys for 1 minute to
+  30 days through `POST /v1/hofund/keys` or `gateway-key issue`, with model,
+  account, read-only, token, and cost constraints. Permitted issuer keys and
+  browser-free direct loopback clients can issue; issued keys are clamped to
+  their issuer's current scopes and expiry, record issuer attribution, and
+  reserve/count spend against both keys. Added masked listing, revocation,
+  expiry/issuer-refusal 401s on every route, hourly-grace pruning, control and
+  CLI issuance, issuer list status, and name-based key on/off.
+- Text-to-speech retrieval (P1-4): `POST /v1/audio/speech` and
+  `POST /audio/speech` forward OpenAI-shaped JSON through the existing routed
+  retrieval seam, changing only the member's model id. Audio, SSE, and vendor
+  JSON responses stream incrementally with the upstream content type; SSE
+  `speech.audio.done` usage is read from the final 16 KiB, vendor errors and
+  pre-byte failover retain the other retrieval routes' behavior, and recent
+  calls use operation `speech`.
 - Conversation affinity now returns fallback, ordered-group, and stand-in
   answerers to earlier ready members at the next user turn without crossing
   tool-loop or strict-stay boundaries (P0-2c2, D-14, D-25). Rotate and
@@ -54,6 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the default sharing key stays full. The static `/me` page provides
   placeholder-by-default agent setup, and `/v1/hofund/me` reports only the
   calling key's limits, usage, top models, and allowed models without secrets.
+- Routing group details (P0-2d, #497, #498): providers can fall back to a whole
+  `group/<id>` with per-request deduplication, and routes can nest groups up to
+  eight levels with load-time cycle checks. Subscriptions and nested groups are
+  single weighted units with their own routing and account weights; affinity
+  moves the weighted charge to the member that actually answered. Optional
+  `sink = true` moves rate-limited members with quota left behind their peers
+  until restart or manual clear, including within nested groups. Free routing
+  re-reads provider cache facts and subscription model lists per request, so
+  refreshed free flags and all-zero prices take effect immediately.
 - Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
   secret readable, as the reference does, so `gateway-key copy` shows a key
   again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,

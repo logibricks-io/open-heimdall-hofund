@@ -578,11 +578,12 @@ pub async fn send(
     })
 }
 
-/// The most of a forwarded answer [`forward`] reads: 256 MiB.
+/// The most of a buffered forwarded answer [`forward`] reads: 256 MiB.
 pub const FORWARD_CAP: usize = 256 << 20;
 
 /// Posts `body` to `path` under an OpenAI-style target's base URL and returns
-/// a `2xx` answer unchanged.
+/// a `2xx` answer unchanged. A speech answer is streamed; other answers are
+/// buffered up to [`FORWARD_CAP`].
 ///
 /// The call carries the target's credential and headers and the body's own
 /// `Content-Type`. Only Chat Completions and Responses targets have such a
@@ -593,8 +594,8 @@ pub const FORWARD_CAP: usize = 256 << 20;
 /// # Errors
 ///
 /// Returns `unsupported` as above, [`PluginError`] when the call fails, the
-/// same status error as [`execute`] outside `2xx`, or a decode error when the
-/// answer is larger than [`FORWARD_CAP`].
+/// same status error as [`execute`] outside `2xx`, or a decode error when a
+/// buffered answer is larger than [`FORWARD_CAP`].
 pub async fn forward(
     http: &HttpHandle,
     target: &Target,
@@ -621,6 +622,13 @@ pub async fn forward(
         .get(http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    if path == "/audio/speech" {
+        return Ok(RawAnswer::streaming(
+            status,
+            content_type,
+            response.into_body(),
+        ));
+    }
     let answer = read_capped(response.into_body(), FORWARD_CAP).await?;
     Ok(RawAnswer::new(status, content_type, answer))
 }

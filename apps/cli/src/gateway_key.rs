@@ -22,6 +22,7 @@ usage: hofund gateway-key [list] [--json]
        hofund gateway-key quotas <id> [on | off]
        hofund gateway-key access <id> [read-only | full]
        hofund gateway-key issuer <id> [on | off]
+       hofund gateway-key issue --ttl <duration> [--name <name>] [--models a,b] [--accounts a,b] [--tokens N] [--cost USD] [--read-only] [--from <id>] [--json]
        hofund gateway-key limit <id> [--tokens N --cost USD --per WINDOW --days N --hours N --cache-reads --index N]
        hofund gateway-key reset-limit <id> [N]
 
@@ -85,6 +86,7 @@ pub(crate) enum Command {
         issues: Option<bool>,
     },
     Limits(crate::gateway_key_limit::Command),
+    Issue(crate::gateway_key_issue::Command),
 }
 
 pub(crate) fn parse(
@@ -101,6 +103,14 @@ pub(crate) fn parse(
     }
     let (action, args) = rest.split_first().unwrap_or((&"list", &[][..]));
     let action = *action;
+    if action == "issue" {
+        if secret.is_some() {
+            return Err(HELP.to_owned());
+        }
+        return crate::gateway_key_issue::parse(args, json, read_only)
+            .map(Command::Issue)
+            .map(Some);
+    }
     let one = |_action: &str| -> Result<String, String> {
         if args.len() == 1 && !json && secret.is_none() {
             return Ok(args[0].to_owned());
@@ -190,6 +200,19 @@ pub(crate) async fn run(config: &Path, command: &Command) -> Result<String, Stri
     let client = client(config).await?;
     if let Command::Limits(command) = command {
         return crate::gateway_key_limit::run(&client, command).await;
+    }
+    if let Command::Issue(issue) = command {
+        let request = crate::gateway_key_issue::request(issue)?;
+        let response = client.change_gateway_key(request).await.map_err(failure)?;
+        let secret = response
+            .secret
+            .clone()
+            .ok_or_else(|| "the daemon returned no issued key".to_owned())?;
+        return if issue.json {
+            crate::gateway_key_issue::json(&response, secret)
+        } else {
+            Ok(secret)
+        };
     }
     if let Command::List { json } = command {
         let response = client.gateway_keys().await.map_err(failure)?;
@@ -361,7 +384,7 @@ fn mutation(command: &Command) -> Result<(GatewayKeyRequest, String, Verb), Stri
             request.issues = issues.unwrap_or(false);
             return Ok((request.for_id(id), id.clone(), Verb::Issuer));
         }
-        Command::List { .. } | Command::Limits(_) => {
+        Command::List { .. } | Command::Limits(_) | Command::Issue(_) => {
             return Err("not a gateway-key mutation".to_owned());
         }
     };
@@ -440,8 +463,29 @@ fn account_words(key: &GatewayKey) -> String {
 fn list_table(keys: &[GatewayKey]) -> String {
     let mut out =
         String::from("ID\tNAME\tSTATE\tGATEWAY KEY\tLIMIT\tMODELS\tACCOUNTS\tACCESS\tUNTIL");
+    let now = chrono::Local::now().timestamp();
     for key in keys {
-        let status = if key.off { "disabled" } else { "enabled" };
+        let mut status = if key.off {
+            "disabled".to_owned()
+        } else if key.expires.is_some_and(|expires| expires <= now) {
+            "expired".to_owned()
+        } else if let Some(expires) = key.expires {
+            chrono::DateTime::from_timestamp(expires, 0)
+                .map(|time| {
+                    format!(
+                        "until {}",
+                        time.with_timezone(&chrono::Local).format("%m-%d %H:%M")
+                    )
+                })
+                .unwrap_or_else(|| "until unknown".to_owned())
+        } else {
+            "enabled".to_owned()
+        };
+        if !key.issuer.is_empty() {
+            status.push_str(&format!(" (issued by {})", key.issuer));
+        } else if key.issues {
+            status.push_str(", issues keys");
+        }
         let models = held_models(&key.models, &key.accounts);
         let models = if models.is_empty() {
             "all".to_owned()
@@ -457,7 +501,7 @@ fn list_table(keys: &[GatewayKey]) -> String {
         let limit = crate::gateway_key_limit::column(key);
         let until = key
             .expires
-            .map_or_else(|| "-".to_owned(), |value| value.to_string());
+            .map_or_else(|| "-".to_owned(), hofund_secrets::expiry_text);
         let name: String = key
             .name
             .chars()
@@ -593,6 +637,23 @@ mod tests {
         assert!(table.contains("primary/*"));
         assert!(table.contains("full"));
         assert!(!table.contains("read-only"));
+    }
+
+    #[test]
+    fn s9_list_shows_expiry_expired_issued_by_and_issuer_permission() {
+        let mut child = GatewayKey::default();
+        child.id = "child".to_owned();
+        child.expires = Some(0);
+        child.issuer = "parent".to_owned();
+        let mut parent = GatewayKey::default();
+        parent.id = "parent".to_owned();
+        parent.expires = Some(chrono::Local::now().timestamp() + 3_600);
+        parent.issues = true;
+        let table = list_table(&[child, parent]);
+        assert!(table.contains("expired (issued by parent)"));
+        assert!(table.contains("until "));
+        assert!(table.contains("issues keys"));
+        assert!(table.contains("1970-01-01T00:00:00+00:00"));
     }
 
     #[test]
