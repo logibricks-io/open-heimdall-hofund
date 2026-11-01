@@ -8,7 +8,7 @@
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. A refusal saying the requested model's credentials are cooling uses a model-local ladder. |
 //! | Exhausted quota | Uses the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording scopes the rest to that model. |
 //! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Model-cooling wording keys the ladder by model. Success and manual removal restart the ladder. |
-//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A later observation showing the window renewed lifts the rest. Other subscription accounts stay flat at 30 minutes. |
+//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named; a vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
 //!
@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
-use hofund_plugin_api::{MemberId, PluginError, PluginErrorKind, QuotaObservation};
+use hofund_plugin_api::{MemberId, PluginError, PluginErrorKind, QuotaObservation, QuotaWindow};
 use serde::{Deserialize, Serialize};
 
 const RECOVERY_CAPACITY: usize = 1_024;
@@ -182,6 +182,8 @@ pub struct Cooling {
     /// Whether this quota or credit rest is a guess: the refusal named no
     /// time (reference: internal/gateway/routing.go:1506-1515, `askAt`).
     guessed: bool,
+    /// Whether the refusal itself named this rest's deadline.
+    vendor_timed: bool,
 }
 
 impl Cooling {
@@ -330,36 +332,61 @@ impl Cooldowns {
         self.lock().windowed_credit.insert(id.clone());
     }
 
-    /// Records when an account's full account-wide windows renew and lifts
-    /// a windowed account's credit or quota rest when a later observation
-    /// finds them renewing sooner than the one before. A rate or generic
-    /// rest stays.
-    ///
-    /// `reset` is the last positive reset among the full windows; it also
-    /// bounds a later credit rest. `unknown` says a full window gave no
-    /// reset, which counts as renewing later than any known reset.
-    pub fn observe_credit_window(&self, id: &MemberId, reset: Option<Duration>, unknown: bool) {
+    /// Records a successful account-wide window reading. A renewed full
+    /// window lifts a rest whose deadline was not named by the vendor. A
+    /// vendor-timed rest lifts only when a matching window's reset elapsed
+    /// or moved to a later cycle. A rate or generic rest stays.
+    pub fn observe_credit_window(&self, id: &MemberId, windows: &[QuotaWindow]) {
         let now = (self.clock)();
+        let wall = SystemTime::now();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        if !book.windowed_credit.contains(id) {
+        if !book.windowed_credit.contains(id) || windows.is_empty() {
             return;
         }
+        let mut read = HashMap::new();
+        let mut full = HashMap::new();
+        let mut reset = None;
+        let mut unknown = false;
+        for window in windows.iter().filter(|window| {
+            window.blocking() && window.scope_model().is_none() && window.limit().is_some()
+        }) {
+            let until = window
+                .resets_at()
+                .and_then(|reset| reset.duration_since(wall).ok())
+                .filter(|after| !after.is_zero())
+                .map(|after| saturating_deadline(now, after));
+            read.insert(window.name().to_owned(), until);
+            if window.limit().is_some_and(|limit| window.used() >= limit) {
+                if let Some(until) = until {
+                    full.insert(window.name().to_owned(), until);
+                    reset = Some(reset.map_or(until, |current: Instant| current.max(until)));
+                }
+                unknown |= window.resets_at().is_none();
+            }
+        }
         let current = CreditWindow {
-            until: positive_hint(reset).map(|after| saturating_deadline(now, after)),
+            until: reset,
             unknown,
+            full,
         };
-        let renewed = book
-            .credit_windows
-            .insert(id.clone(), current)
-            .is_some_and(|previous| previous.renews_later_than(current));
+        let (renewed, started_again) =
+            book.credit_windows
+                .get(id)
+                .map_or((false, false), |previous| {
+                    (
+                        !read.is_empty() && previous.renews_later_than(&current),
+                        previous.started_again(&read, now),
+                    )
+                });
+        book.credit_windows.insert(id.clone(), current);
         let key = CooldownKey::new(id, None);
         let lifting = book
             .states
             .get(&key)
             .and_then(|state| state.cooling.as_ref())
             .filter(|cooling| {
-                renewed
+                (cooling.vendor_timed && started_again || !cooling.vendor_timed && renewed)
                     && matches!(
                         cooling.cause,
                         CooldownCause::Credit | CooldownCause::Quota | CooldownCause::Observed
@@ -956,6 +983,7 @@ impl Cooldowns {
                 });
                 let mut candidate = cooling(now, duration, CooldownCause::Quota, state.failures);
                 candidate.guessed = hint.is_none();
+                candidate.vendor_timed = hint.is_some();
                 (candidate, hint.is_some())
             }
             Failure::Credit => {
@@ -1000,28 +1028,37 @@ impl Cooldowns {
         // `named`: the vendor gave this time (reset or retry hint); `guessed`:
         // the rest stands in for a time nobody named (reference:
         // internal/gateway/routing.go:241-262, 1264-1296, 1345).
-        let (duration, rung, on_ladder, named, guessed) =
+        let (duration, rung, on_ladder, named, guessed, vendor_timed) =
             if context.subscription && !context.windowed {
-                (self.policy.credit, 0, false, false, true)
+                (self.policy.credit, 0, false, false, true, false)
             } else if let Some(after) = reset {
-                (after, 0, false, true, false)
+                (after, 0, false, true, false, true)
             } else if context.windowed {
                 // The window's own time is never a guess. A retry hint chosen
                 // here could only replace a same-cause guess made before the
                 // window was configured, the flat subscription rest, which is
                 // always shorter, so it is not marked named.
-                let duration = context
+                let window_after = context
                     .window_reset
                     .map(|until| until.saturating_duration_since(now))
-                    .filter(|after| !after.is_zero())
-                    .unwrap_or_else(|| {
-                        retry
-                            .filter(|after| *after > WINDOWED_CREDIT_DEFAULT)
-                            .unwrap_or(WINDOWED_CREDIT_DEFAULT)
-                    });
-                (duration.min(CREDIT_RESET_MAX), 0, false, false, false)
+                    .filter(|after| !after.is_zero());
+                let duration = window_after.unwrap_or_else(|| {
+                    retry
+                        .filter(|after| *after > WINDOWED_CREDIT_DEFAULT)
+                        .unwrap_or(WINDOWED_CREDIT_DEFAULT)
+                });
+                let vendor_timed = window_after.is_none()
+                    && retry.is_some_and(|after| after > WINDOWED_CREDIT_DEFAULT);
+                (
+                    duration.min(CREDIT_RESET_MAX),
+                    0,
+                    false,
+                    false,
+                    false,
+                    vendor_timed,
+                )
             } else if retry.is_some() || error.credit_soon() {
-                (self.policy.credit, 0, false, false, true)
+                (self.policy.credit, 0, false, false, true, retry.is_some())
             } else {
                 let continuing = state.last_cause == Some(CooldownCause::Credit)
                     && state.credit_ladder
@@ -1038,10 +1075,11 @@ impl Cooldowns {
                     1
                 };
                 let index = usize::try_from(rung - 1).unwrap_or(0);
-                (CREDIT_LADDER[index], rung, true, false, true)
+                (CREDIT_LADDER[index], rung, true, false, true, false)
             };
         let mut candidate = cooling(now, duration, CooldownCause::Credit, rung);
         candidate.guessed = guessed;
+        candidate.vendor_timed = vendor_timed;
         (candidate, named, on_ladder)
     }
 
@@ -1186,19 +1224,21 @@ impl Cooldowns {
 }
 
 /// The renewal of an account's full account-wide windows, as last read.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct CreditWindow {
     /// The last known positive reset among the full windows.
     until: Option<Instant>,
     /// Whether a full window gave no reset.
     unknown: bool,
+    /// Known positive resets by full window name.
+    full: HashMap<String, Instant>,
 }
 
 impl CreditWindow {
     /// Whether this reading renews later than `current`: a full window with
     /// no reset renews latest, no full window renews at once, and readings
     /// within a second of each other count as the same.
-    fn renews_later_than(self, current: Self) -> bool {
+    fn renews_later_than(&self, current: &Self) -> bool {
         match (self.unknown, current.unknown) {
             (_, true) => false,
             (true, false) => true,
@@ -1210,6 +1250,14 @@ impl CreditWindow {
                 (None, _) => false,
             },
         }
+    }
+
+    fn started_again(&self, read: &HashMap<String, Option<Instant>>, now: Instant) -> bool {
+        self.full.iter().any(|(name, reset)| {
+            read.get(name).is_some_and(|current| {
+                *reset <= now || (*current).is_some_and(|current| current > *reset)
+            })
+        })
     }
 }
 
@@ -1379,6 +1427,7 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
         error: String::new(),
         background_probe: false,
         guessed: false,
+        vendor_timed: false,
     }
 }
 
