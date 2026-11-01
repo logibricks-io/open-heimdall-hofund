@@ -1,0 +1,192 @@
+//! Cache-aware usage records and per-key budget sums.
+
+use rusqlite::params;
+
+use super::{Ledger, Row, UsageError};
+
+/// Token details needed by gateway-key budgets but not by the ordinary table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UsageDetails {
+    /// Input tokens that were not served from a cache.
+    pub uncached_input_tokens: Option<i64>,
+    /// Prompt tokens served from a cache.
+    pub cache_read_tokens: Option<i64>,
+    /// Prompt tokens written into a cache.
+    pub cache_write_tokens: Option<i64>,
+}
+
+/// One key's forwarded calls and token sums at or after a window start.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyUsage {
+    /// Number of forwarded calls.
+    pub calls: u64,
+    /// Uncached input tokens.
+    pub input_tokens: u64,
+    /// Output tokens, reasoning included in the protocol's output count.
+    pub output_tokens: u64,
+    /// Cache-read tokens.
+    pub cache_read_tokens: u64,
+    /// Cache-write tokens.
+    pub cache_write_tokens: u64,
+}
+
+impl KeyUsage {
+    /// Tokens counted by a limit with the selected cache-read policy.
+    #[must_use]
+    pub fn tokens(self, cache_reads: bool) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(if cache_reads {
+                self.cache_read_tokens
+            } else {
+                0
+            })
+    }
+}
+
+impl Ledger {
+    /// Inserts a row with cache-aware budget details.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when the insert fails.
+    pub fn record_with_details(
+        &self,
+        row: &Row,
+        ttft_ms: Option<i64>,
+        details: UsageDetails,
+    ) -> Result<(), UsageError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
+        connection
+            .execute(
+                "INSERT INTO requests (
+                    created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
+                    caller_key_id, caller_key_name, ttft_ms, uncached_input_tokens,
+                    cache_read_tokens, cache_write_tokens
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    row.created_unix,
+                    row.model,
+                    row.upstream,
+                    row.input_tokens,
+                    row.output_tokens,
+                    row.latency_ms,
+                    row.status,
+                    row.caller_key_id,
+                    row.caller_key_name,
+                    ttft_ms,
+                    details.uncached_input_tokens,
+                    details.cache_read_tokens,
+                    details.cache_write_tokens,
+                ],
+            )
+            .map(|_| ())
+            .map_err(|error| UsageError(error.to_string()))
+    }
+
+    /// Sums one key's forwarded usage from `start` onward. Local rows that
+    /// never reached an upstream do not count; failed upstream calls do.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when the query fails.
+    pub fn key_usage(&self, key_id: &str, start: i64) -> Result<KeyUsage, UsageError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
+        connection
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(MAX(COALESCE(uncached_input_tokens, input_tokens), 0)), 0),
+                        COALESCE(SUM(MAX(output_tokens, 0)), 0),
+                        COALESCE(SUM(MAX(cache_read_tokens, 0)), 0),
+                        COALESCE(SUM(MAX(cache_write_tokens, 0)), 0)
+                 FROM requests
+                 WHERE caller_key_id = ?1 AND created_unix >= ?2
+                   AND (upstream != '' OR status LIKE '2%')",
+                params![key_id, start],
+                |row| {
+                    let calls: i64 = row.get(0)?;
+                    let input: i64 = row.get(1)?;
+                    let output: i64 = row.get(2)?;
+                    let cache_read: i64 = row.get(3)?;
+                    let cache_write: i64 = row.get(4)?;
+                    Ok(KeyUsage {
+                        calls: u64::try_from(calls).unwrap_or(0),
+                        input_tokens: u64::try_from(input).unwrap_or(0),
+                        output_tokens: u64::try_from(output).unwrap_or(0),
+                        cache_read_tokens: u64::try_from(cache_read).unwrap_or(0),
+                        cache_write_tokens: u64::try_from(cache_write).unwrap_or(0),
+                    })
+                },
+            )
+            .map_err(|error| UsageError(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Row;
+
+    fn row(status: &str, upstream: &str) -> Row {
+        Row {
+            created_unix: 100,
+            model: "demo".to_owned(),
+            upstream: upstream.to_owned(),
+            input_tokens: Some(20),
+            output_tokens: Some(7),
+            latency_ms: 1,
+            status: status.to_owned(),
+            caller_key_id: "key".to_owned(),
+            caller_key_name: "Key".to_owned(),
+        }
+    }
+
+    #[test]
+    fn l3_token_accounting_includes_the_selected_counters() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("usage.sqlite");
+        let ledger = Ledger::open(&path).expect("open");
+        ledger
+            .record_with_details(
+                &row("200", "member"),
+                None,
+                UsageDetails {
+                    uncached_input_tokens: Some(12),
+                    cache_read_tokens: Some(8),
+                    cache_write_tokens: Some(3),
+                },
+            )
+            .expect("cached call");
+        ledger.record(&row("429", "")).expect("local refusal");
+        let failed = Row {
+            status: "500".to_owned(),
+            upstream: "member".to_owned(),
+            ..row("200", "member")
+        };
+        ledger.record(&failed).expect("failed upstream");
+        let other = Row {
+            caller_key_id: "other".to_owned(),
+            ..row("200", "member")
+        };
+        ledger.record(&other).expect("other key");
+        let usage = ledger.key_usage("key", 0).expect("sums");
+        assert_eq!(usage.calls, 2);
+        assert_eq!(usage.input_tokens, 32);
+        assert_eq!(usage.output_tokens, 14);
+        assert_eq!(usage.cache_read_tokens, 8);
+        assert_eq!(usage.cache_write_tokens, 3);
+        assert_eq!(usage.tokens(false), 49);
+        assert_eq!(usage.tokens(true), 57);
+        assert_eq!(ledger.key_usage("key", 101).expect("next").calls, 0);
+        drop(ledger);
+        let reopened = Ledger::open(&path).expect("reopen");
+        assert_eq!(reopened.key_usage("key", 0).expect("persisted"), usage);
+    }
+}

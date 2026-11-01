@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Gateway-key spending limits (P0-4b): up to five token and/or estimated-cost
+  caps per key over local calendar windows or absolute N-day/N-hour cycles.
+  Cache-aware token sums rebuild from SQLite after restart, in-flight body-size
+  reservations hold concurrent requests to every cap, and spent keys receive a
+  pre-upstream 429 with reset/retry headers. `GET /v1/hofund/limit` reports each
+  limit and the binding one. `gateway-key limit` and `reset-limit` manage and
+  reset caps through the control API. Cost caps currently follow the unpriced
+  path: calls add zero cost and are reported as unpriced until model prices land.
 - Provider upstream API keys (K-1): ordered per-key candidates with protocol
   restrictions, weights, independent rests and credit-ladder persistence, and
   member-id-based strategies. Added secret-free key listing, bulk add (with an
