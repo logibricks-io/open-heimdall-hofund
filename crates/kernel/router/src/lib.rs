@@ -46,6 +46,9 @@ pub use view::{
     candidates_from_hops, fail_text, try_status, unrouted_timeout_status,
 };
 
+/// Returns `true` when a hop should be skipped (for example a disabled model).
+pub type MemberSkipFn = Arc<dyn Fn(&str, &str, &str, &str) -> bool + Send + Sync>;
+
 /// Which failures may try the next member.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailoverPolicy {
@@ -233,6 +236,7 @@ pub struct Router {
     affinity: affinity::AffinityState,
     sealed: affinity::sealed::SealedState,
     measurements: Option<Arc<dyn strategy::Measurements>>,
+    member_skip: Option<MemberSkipFn>,
 }
 
 /// A counted input.
@@ -346,6 +350,7 @@ impl Router {
             affinity: affinity::AffinityState::in_memory(),
             sealed: affinity::sealed::SealedState::default(),
             measurements: None,
+            member_skip: None,
         }
     }
 
@@ -383,6 +388,29 @@ impl Router {
     pub fn with_cooldowns(mut self, cooldowns: Arc<Cooldowns>) -> Self {
         self.cooldowns = Some(cooldowns);
         self
+    }
+
+    /// Skips hops for which the closure returns `true`.
+    #[must_use]
+    pub fn with_member_skip(mut self, skip: MemberSkipFn) -> Self {
+        self.member_skip = Some(skip);
+        self
+    }
+
+    fn without_skipped_hops(&self, asked: &str, resolved: &Resolved) -> Vec<Hop> {
+        let Some(skip) = &self.member_skip else {
+            return resolved.hops.clone();
+        };
+        resolved
+            .hops
+            .iter()
+            .filter(|hop| {
+                let provider = hop.member.scope_provider();
+                let wire = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                !skip(&resolved.route, asked, provider, wire)
+            })
+            .cloned()
+            .collect()
     }
 
     /// Cooldown state used to order members, when configured.
@@ -626,6 +654,7 @@ impl Router {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         resolved.hops = scoped_hops(&asked, &resolved, scope)?;
+        resolved.hops = self.without_skipped_hops(&asked, &resolved);
         self.refresh_free(&mut resolved).await;
         let ordered = self.order_for(&resolved, conversation);
         resolved.hops = ordered.hops;
@@ -717,6 +746,7 @@ impl Router {
     ) -> Result<InputCount, RouterError> {
         let mut resolved = self.resolve(&request.model)?;
         resolved.hops = scoped_hops(&request.model, &resolved, scope)?;
+        resolved.hops = self.without_skipped_hops(&request.model, &resolved);
         self.refresh_free(&mut resolved).await;
         resolved.hops = self.order_hops(&resolved);
         let policy = self.policy.clone();
@@ -798,6 +828,7 @@ impl Router {
     ) -> Result<Forwarded, RouterError> {
         let mut resolved = self.resolve(call.model())?;
         resolved.hops = scoped_hops(call.model(), &resolved, scope)?;
+        resolved.hops = self.without_skipped_hops(call.model(), &resolved);
         self.refresh_free(&mut resolved).await;
         resolved.hops = self.order_hops(&resolved);
         let mut last = None;

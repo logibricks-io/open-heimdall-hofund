@@ -25,7 +25,9 @@ thiserror = "2.0.21"
 tracing = "0.1.44"
 
 [dev-dependencies]
+hofund-config = { workspace = true }
 hofund-ir = { workspace = true }
+hofund-model-catalog = { workspace = true }
 hofund-plugin-api = { workspace = true }
 async-trait = "0.1.89"
 bytes = "1.12.0"

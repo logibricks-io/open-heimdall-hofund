@@ -201,6 +201,10 @@ impl ConfigOps {
         Arc::clone(&self.live.read().expect("live config"))
     }
 
+    pub(crate) fn model_catalog(&self) -> Option<Arc<hofund_model_catalog::ModelCatalog>> {
+        self.runtime.model_catalog()
+    }
+
     /// Revision of the bytes on disk now, or empty when unreadable.
     pub(crate) fn disk_revision(&self) -> String {
         std::fs::read(&self.path)
@@ -406,6 +410,10 @@ impl ConfigOps {
         });
         *live = Arc::clone(&next);
         drop(live);
+        self.runtime
+            .refresh_model_catalog(crate::effective_catalog_settings(
+                next.config.catalog.clone(),
+            ));
         let mut event = ConfigReloadedEvent::default();
         event.disk_revision.clone_from(&next.runtime_revision);
         event.runtime_revision.clone_from(&next.runtime_revision);

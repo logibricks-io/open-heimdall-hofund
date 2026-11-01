@@ -234,7 +234,12 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-sdk" => &[],
         "hofund-provider" => &["hofund-ir", "hofund-quirks"],
         "hofund-quirks" => &[],
-        "hofund-router" => &["hofund-ir", "hofund-plugin-api"],
+        "hofund-router" => &[
+            "hofund-config",
+            "hofund-ir",
+            "hofund-model-catalog",
+            "hofund-plugin-api",
+        ],
         "hofund-secrets" => &[],
         "hofund-usage" => &[],
         "xtask" => &[],

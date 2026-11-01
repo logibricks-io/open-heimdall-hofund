@@ -457,6 +457,7 @@ async fn start_inner(
         .with_registry(Arc::clone(&registry));
     account_discovery::import_if_configured(path, &config)?;
     let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
+    runtime.attach_model_catalog(Arc::clone(&model_catalog));
     // Subscription members join before the port opens.
     runtime.refresh_subscriptions().await;
     let cooldowns = snapshot

@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use hofund_config::load_path;
+use hofund_config::{edit_catalog_disabled, load_path};
 use hofund_model_catalog::{FetchResult, ModelCatalog, ReqwestFetcher};
 
 fn data_root(config_path: &Path) -> std::path::PathBuf {
@@ -33,9 +33,14 @@ pub async fn list(config_path: &Path, model: Option<&str>) -> Result<String, Str
         .iter()
         .map(|route| route.model.clone())
         .collect();
+    let visible = hofund_model_catalog::listable_route_models(
+        routes,
+        Some(&catalog),
+        Some(catalog.visibility()),
+    );
     let ids: Vec<String> = match model {
         Some(name) => vec![name.to_owned()],
-        None => routes,
+        None => visible,
     };
     let mut lines = Vec::new();
     for id in ids {
@@ -89,6 +94,46 @@ pub async fn refresh(config_path: &Path) -> Result<String, String> {
         FetchResult::Failed => "model catalog fetch failed with no cache",
     };
     Ok(format!("{message}: {}", catalog.cache_path().display()))
+}
+
+fn config_text(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn write_config(path: &Path, text: &str) -> Result<(), String> {
+    std::fs::write(path, text).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// Adds models to `[catalog].disabled` in the config file.
+pub fn disable(config_path: &Path, patterns: &[String]) -> Result<String, String> {
+    let text = config_text(config_path)?;
+    let updated = edit_catalog_disabled(&text, patterns, &[])
+        .map_err(|error| format!("{}: {error}", config_path.display()))?;
+    write_config(config_path, &updated)?;
+    Ok(format!("disabled: {}", patterns.join(", ")))
+}
+
+/// Removes models from `[catalog].disabled`.
+pub fn enable(config_path: &Path, patterns: &[String]) -> Result<String, String> {
+    let text = config_text(config_path)?;
+    let updated = edit_catalog_disabled(&text, &[], patterns)
+        .map_err(|error| format!("{}: {error}", config_path.display()))?;
+    write_config(config_path, &updated)?;
+    Ok(format!("enabled: {}", patterns.join(", ")))
+}
+
+#[test]
+fn c1b_13_cli_disable_persists_in_config_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = dir.path().join("hofund.toml");
+    std::fs::write(&config, "listen = \"127.0.0.1:9\"\n").expect("config");
+    disable(&config, &["demo".to_owned()]).expect("disable");
+    let text = std::fs::read_to_string(&config).expect("read");
+    assert!(text.contains("[catalog]"));
+    assert!(text.contains("\"demo\""));
+    enable(&config, &["demo".to_owned()]).expect("enable");
+    let cleared = std::fs::read_to_string(&config).expect("read again");
+    assert!(!cleared.contains("\"demo\""));
 }
 
 #[cfg(test)]

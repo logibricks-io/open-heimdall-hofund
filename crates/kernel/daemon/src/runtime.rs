@@ -69,6 +69,7 @@ pub(crate) struct Runtime {
     model_polls: tokio::sync::Mutex<ModelPolls>,
     quotas: Arc<QuotaStore>,
     affinity: hofund_router::affinity::AffinityState,
+    model_catalog: OnceLock<Arc<hofund_model_catalog::ModelCatalog>>,
     /// Wakes the subscription task after a publication.
     wake: tokio::sync::Notify,
 }
@@ -111,8 +112,29 @@ impl Runtime {
                     .unwrap_or_else(|| Path::new("."))
                     .join("affinity.json"),
             ),
+            model_catalog: OnceLock::new(),
             wake: tokio::sync::Notify::new(),
         })
+    }
+
+    pub(crate) fn attach_model_catalog(&self, catalog: Arc<hofund_model_catalog::ModelCatalog>) {
+        let _ = self.model_catalog.set(Arc::clone(&catalog));
+        if let Some(table) = self.table.get() {
+            table.set_model_catalog(catalog);
+        }
+    }
+
+    pub(crate) fn refresh_model_catalog(&self, settings: hofund_config::CatalogSettings) {
+        if let Some(catalog) = self.model_catalog.get() {
+            catalog.replace_settings(settings);
+            if let Some(table) = self.table.get() {
+                table.publish();
+            }
+        }
+    }
+
+    pub(crate) fn model_catalog(&self) -> Option<Arc<hofund_model_catalog::ModelCatalog>> {
+        self.model_catalog.get().cloned()
     }
 
     pub(crate) fn initial_snapshot(

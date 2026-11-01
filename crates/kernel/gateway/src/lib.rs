@@ -10,6 +10,7 @@ mod endpoints;
 mod issue_keys;
 mod limits;
 mod me;
+mod model_list;
 mod oidc;
 mod oidc_keys;
 mod prev_response;
@@ -1071,6 +1072,13 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             details: hofund_usage::UsageDetails::default(),
             saw_reasoning: false,
         };
+        if let Some((status, message)) =
+            model_list::disabled_refusal(&app.model_catalog, call.model())
+        {
+            write_usage(&app.usage, &usage(""), None, status);
+            track.end_with(None, status.as_u16(), None, None);
+            return Err(PluginError::status_error(status.as_u16(), message));
+        }
         match router
             .forward_scoped(&call, Some(&route_scope(&self.identity)))
             .await
@@ -1466,13 +1474,14 @@ async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
             Ok(identity) => identity,
             Err(response) => return *response,
         };
-    let data: Vec<_> = app
-        .snapshot
-        .load()
-        .models_scoped(Some(&route_scope(&identity)))
-        .into_iter()
-        .map(|id| model_list_entry(&app.model_catalog, &id))
-        .collect();
+    let data: Vec<_> = model_list::visible_route_models(
+        &app.snapshot,
+        Some(&route_scope(&identity)),
+        &app.model_catalog,
+    )
+    .into_iter()
+    .map(|id| model_list_entry(&app.model_catalog, &id))
+    .collect();
     json_response(
         StatusCode::OK,
         serde_json::to_vec(&serde_json::json!({"object": "list", "data": data}))
@@ -1531,19 +1540,20 @@ async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> R
             Ok(identity) => identity,
             Err(response) => return *response,
         };
-    let models: Vec<_> = app
-        .snapshot
-        .load()
-        .models_scoped(Some(&route_scope(&identity)))
-        .into_iter()
-        .map(|id| {
-            serde_json::json!({
-                "name": format!("models/{id}"),
-                "displayName": id,
-                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
-            })
+    let models: Vec<_> = model_list::visible_route_models(
+        &app.snapshot,
+        Some(&route_scope(&identity)),
+        &app.model_catalog,
+    )
+    .into_iter()
+    .map(|id| {
+        serde_json::json!({
+            "name": format!("models/{id}"),
+            "displayName": id,
+            "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
         })
-        .collect();
+    })
+    .collect();
     json_response(
         StatusCode::OK,
         serde_json::to_vec(&serde_json::json!({"models": models}))
@@ -1717,6 +1727,17 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         Ok(reservation) => reservation,
         Err(response) => return *response,
     };
+    if let Some((status, message)) =
+        model_list::disabled_refusal(&app.model_catalog, &model_request.model)
+    {
+        write_usage(
+            &app.usage,
+            &UsageMeta::new(&model_request, "", started, &identity),
+            None,
+            status,
+        );
+        return coded(codec.as_ref(), status, &message);
+    }
     // Authenticated request with a decoded body: start the request topic and
     // the in-flight counter before dispatch.
     let request_id = next_request_id();

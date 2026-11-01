@@ -5,6 +5,7 @@ mod http;
 mod parse;
 mod spec;
 mod sync;
+mod visibility;
 
 use std::io;
 use std::path::Path;
@@ -15,17 +16,23 @@ pub use cache::{CACHE_FILE, CacheEnvelope, CacheFile};
 pub use hofund_config::CatalogSettings;
 pub use http::ReqwestFetcher;
 pub use parse::{
-    CatalogIndex, DEFAULT_CATALOG_URL, DevCatalog, ResolvedEntry, build_index, parse_catalog,
+    CatalogIndex, DEFAULT_CATALOG_URL, DevCatalog, ResolvedEntry, build_index, is_deprecated,
+    parse_catalog,
 };
 pub use spec::{LEAST_WINDOW, ModelSpec, Price};
 pub use sync::{CatalogFetcher, FetchResponse, FetchResult, Syncer, envelope_etag, is_stale};
+pub use visibility::{
+    CatalogVisibility, RETIRED_FOR, glob_match, hop_names, listable_route_models, match_patterns,
+    model_names, normalize_patterns,
+};
 
 /// Shared catalog state: disk cache, indexes, and refresh settings.
 pub struct ModelCatalog {
     cache: CacheFile,
-    settings: CatalogSettings,
+    settings: RwLock<CatalogSettings>,
     syncer: Syncer,
     index: RwLock<Option<CatalogIndex>>,
+    visibility: CatalogVisibility,
 }
 
 impl ModelCatalog {
@@ -41,11 +48,13 @@ impl ModelCatalog {
     ) -> io::Result<Arc<Self>> {
         let cache = CacheFile::beside_data_root(data_root);
         let index = cache::load_index(&cache, &settings)?;
+        let visibility = CatalogVisibility::open(settings.clone(), data_root);
         Ok(Arc::new(Self {
             syncer: Syncer::new(cache.clone(), fetcher),
             cache,
-            settings,
+            settings: RwLock::new(settings),
             index: RwLock::new(index),
+            visibility,
         }))
     }
 
@@ -55,11 +64,46 @@ impl ModelCatalog {
     ///
     /// Returns an I/O error when the cache cannot be read.
     pub fn reload(&self) -> io::Result<()> {
-        let index = cache::load_index(&self.cache, &self.settings)?;
+        let settings = self.settings.read().ok().map(|guard| guard.clone());
+        let Some(settings) = settings else {
+            return Ok(());
+        };
+        let index = cache::load_index(&self.cache, &settings)?;
         if let Ok(mut guard) = self.index.write() {
             *guard = index;
         }
+        self.visibility.reload_runtime();
         Ok(())
+    }
+
+    /// List and routing visibility derived from settings and runtime state.
+    #[must_use]
+    pub fn visibility(&self) -> &CatalogVisibility {
+        &self.visibility
+    }
+
+    /// Replaces catalog settings after a configuration publish or reload.
+    pub fn replace_settings(&self, settings: CatalogSettings) {
+        if let Ok(mut guard) = self.settings.write() {
+            *guard = settings.clone();
+        }
+        self.visibility.replace_settings(settings);
+        if let Ok(settings) = self.settings.read().map(|guard| guard.clone())
+            && let Ok(index) = cache::load_index(&self.cache, &settings)
+            && let Ok(mut guard) = self.index.write()
+        {
+            *guard = index;
+        }
+    }
+
+    /// Records that a provider's wire model was retired by the vendor.
+    pub fn retire(&self, provider: &str, model: &str) {
+        self.visibility.retire(provider, model);
+    }
+
+    /// Clears runtime retirement after a successful answer.
+    pub fn unretire(&self, provider: &str, model: &str) {
+        self.visibility.unretire(provider, model);
     }
 
     /// Spec metadata for a route or catalog model id.
@@ -79,8 +123,11 @@ impl ModelCatalog {
 
     /// Settings this catalog was opened with.
     #[must_use]
-    pub fn settings(&self) -> &CatalogSettings {
-        &self.settings
+    pub fn settings(&self) -> CatalogSettings {
+        self.settings
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     /// Path of the backing cache file.
@@ -92,10 +139,11 @@ impl ModelCatalog {
     /// Whether the on-disk cache is older than the configured refresh interval.
     #[must_use]
     pub fn stale(&self) -> bool {
-        if self.settings.refresh == Duration::MAX {
+        let settings = self.settings();
+        if settings.refresh == Duration::MAX {
             return false;
         }
-        is_stale(self.cache.modified(), self.settings.refresh)
+        is_stale(self.cache.modified(), settings.refresh)
     }
 
     /// Fetches when needed and reloads memory indexes. Never required on a request path.
@@ -104,7 +152,8 @@ impl ModelCatalog {
     ///
     /// Returns an error when a new payload cannot be stored and no cache exists.
     pub fn refresh(&self) -> io::Result<FetchResult> {
-        let url = self.settings.fetch_url();
+        let settings = self.settings();
+        let url = settings.fetch_url();
         let result = self.syncer.sync(url)?;
         if matches!(result, FetchResult::Updated | FetchResult::NotModified) {
             self.reload()?;
@@ -116,7 +165,7 @@ impl ModelCatalog {
     pub fn spawn_background(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let catalog = Arc::clone(self);
         tokio::spawn(async move {
-            let poll = catalog.settings.poll;
+            let poll = catalog.settings().poll;
             if poll == Duration::MAX {
                 return;
             }
