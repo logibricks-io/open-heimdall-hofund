@@ -5,7 +5,7 @@ use hofund_plugin_sdk::json::{Value, json};
 
 use crate::{
     add_months, fetch, hex, hmac, json_body, number, percent_encode, sha256, shape_of, time_value,
-    utc_date, unix_seconds, vendor_error, x_date,
+    unix_seconds, utc_date, vendor_error, x_date,
 };
 
 const HOUR: u64 = 3600;
@@ -45,7 +45,9 @@ pub(crate) async fn read_volcengine(
             shape_of(&body)
         )));
     }
-    Ok(vec![PlanCard::new(plan).with_windows(std::mem::take(&mut windows))])
+    Ok(vec![
+        PlanCard::new(plan).with_windows(std::mem::take(&mut windows)),
+    ])
 }
 
 async fn volc_call(
@@ -56,10 +58,7 @@ async fn volc_call(
     region: &str,
 ) -> Result<Vec<u8>, PluginError> {
     let payload = b"{}";
-    let query_text = format!(
-        "Action={}&Version=2024-01-01",
-        percent_encode(action)
-    );
+    let query_text = format!("Action={}&Version=2024-01-01", percent_encode(action));
     let content_sha = sha256(payload);
     let x_date = x_date(query.now());
     let date = &x_date[..8];
@@ -92,8 +91,14 @@ async fn volc_call(
     let (status, body) = fetch(host, call).await?;
     let value = hofund_plugin_sdk::json::from_slice::<Value>(&body).unwrap_or(Value::Null);
     if let Some(error) = value.pointer("/ResponseMetadata/Error")
-        && (error.get("Code").and_then(Value::as_str).is_some_and(|code| !code.is_empty())
-            || error.get("Message").and_then(Value::as_str).is_some_and(|message| !message.is_empty()))
+        && (error
+            .get("Code")
+            .and_then(Value::as_str)
+            .is_some_and(|code| !code.is_empty())
+            || error
+                .get("Message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| !message.is_empty()))
     {
         let code = error.get("Code").and_then(Value::as_str).unwrap_or("");
         let message = error.get("Message").and_then(Value::as_str).unwrap_or("");
@@ -105,7 +110,10 @@ async fn volc_call(
         return Err(if matches!(status, 401 | 403) {
             PluginError::auth(format!("Volcengine {action}: {code} {message}{hint}"))
         } else {
-            PluginError::status_error(status, format!("Volcengine {action}: {code} {message}{hint}"))
+            PluginError::status_error(
+                status,
+                format!("Volcengine {action}: {code} {message}{hint}"),
+            )
         });
     }
     if status >= 300 {
@@ -153,7 +161,11 @@ fn read_coding(result: &Value) -> Vec<PlanWindow> {
 
 fn read_afp(result: &Value) -> (Vec<PlanWindow>, String) {
     let mut out = Vec::new();
-    for (field, level) in [("AFPFiveHour", "session"), ("AFPWeekly", "weekly"), ("AFPMonthly", "monthly")] {
+    for (field, level) in [
+        ("AFPFiveHour", "session"),
+        ("AFPWeekly", "weekly"),
+        ("AFPMonthly", "monthly"),
+    ] {
         let Some(bucket) = result.get(field) else {
             continue;
         };
@@ -166,7 +178,8 @@ fn read_afp(result: &Value) -> (Vec<PlanWindow>, String) {
             let Some(used) = number(bucket.get("Used")) else {
                 continue;
             };
-            let Some(limit) = number(bucket.get("Quota")).or_else(|| number(bucket.get("Total"))) else {
+            let Some(limit) = number(bucket.get("Quota")).or_else(|| number(bucket.get("Total")))
+            else {
                 continue;
             };
             if limit <= 0.0 {
@@ -177,7 +190,8 @@ fn read_afp(result: &Value) -> (Vec<PlanWindow>, String) {
                 .with_count(used, limit, "credits")
         };
         window = window.with_optional_reset(
-            time_value(bucket.get("ResetTime")).or_else(|| time_value(bucket.get("ResetTimestamp"))),
+            time_value(bucket.get("ResetTime"))
+                .or_else(|| time_value(bucket.get("ResetTimestamp"))),
         );
         out.push(window);
     }
@@ -231,7 +245,11 @@ pub(crate) async fn read_tencent(
         .and_then(Value::as_array)
         .map_or(&[][..], Vec::as_slice)
         .iter()
-        .filter(|plan| plan.get("TeamId").and_then(Value::as_str).is_some_and(|id| !id.is_empty()))
+        .filter(|plan| {
+            plan.get("TeamId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        })
         .cloned()
         .collect::<Vec<_>>();
     if plans.is_empty() {
@@ -268,7 +286,10 @@ pub(crate) async fn read_tencent(
                 }
             }
             for field in ["Status", "StopReason", "ProductType"] {
-                if let Some(value) = detail.get(field).filter(|value| !value.as_str().is_some_and(str::is_empty)) {
+                if let Some(value) = detail
+                    .get(field)
+                    .filter(|value| !value.as_str().is_some_and(str::is_empty))
+                {
                     plan[field] = value.clone();
                 }
             }
@@ -367,7 +388,10 @@ async fn tencent_call(
             return Err(if matches!(status, 401 | 403) || !hint.is_empty() {
                 PluginError::auth(format!("Tencent Cloud {action}: {code} {message}{hint}"))
             } else {
-                PluginError::status_error(status, format!("Tencent Cloud {action}: {code} {message}{hint}"))
+                PluginError::status_error(
+                    status,
+                    format!("Tencent Cloud {action}: {code} {message}{hint}"),
+                )
             });
         }
     }
@@ -451,7 +475,10 @@ pub(crate) fn volc_signature(
         "POST\n/\n{query_text}\ncontent-type:application/json\nhost:{VOLC_HOST}\nx-content-sha256:{content_sha}\nx-date:{x_date}\n\n{signed}\n{content_sha}"
     );
     let scope = format!("{date}/{region}/ark/request");
-    let to_sign = format!("HMAC-SHA256\n{x_date}\n{scope}\n{}", sha256(canonical.as_bytes()));
+    let to_sign = format!(
+        "HMAC-SHA256\n{x_date}\n{scope}\n{}",
+        sha256(canonical.as_bytes())
+    );
     let mut key = hmac(secret.as_bytes(), date).to_vec();
     for part in [region, "ark", "request"] {
         key = hmac(&key, part).to_vec();
@@ -481,7 +508,10 @@ pub(crate) fn tc3_signature(
         sha256(payload)
     );
     let scope = format!("{date}/{service}/tc3_request");
-    let to_sign = format!("TC3-HMAC-SHA256\n{timestamp}\n{scope}\n{}", sha256(canonical.as_bytes()));
+    let to_sign = format!(
+        "TC3-HMAC-SHA256\n{timestamp}\n{scope}\n{}",
+        sha256(canonical.as_bytes())
+    );
     let secret = format!("TC3{secret}");
     let mut key = hmac(secret.as_bytes(), &date).to_vec();
     key = hmac(&key, service).to_vec();

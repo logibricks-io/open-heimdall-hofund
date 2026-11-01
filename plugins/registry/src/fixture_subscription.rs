@@ -1,15 +1,15 @@
 //! Test-only subscription fixture for daemon membership and quota polls.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use hofund_plugin_api::{
     AccountId, AccountStatus, BuildError, Completion, ConfigError, DeviceFlow, HostContext,
-    ModelList, ModelSpec, PluginError, PluginId, ProtocolId, QuotaWindow, RawTable, RawValue, Request, Schema,
-    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
-    SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
+    ModelList, ModelSpec, PluginError, PluginId, ProtocolId, QuotaWindow, RawTable, RawValue,
+    Request, Schema, SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof,
+    Subscription, SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
 

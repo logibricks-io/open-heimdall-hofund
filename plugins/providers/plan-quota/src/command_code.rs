@@ -1,12 +1,12 @@
 use std::time::{Duration, SystemTime};
 
-use hofund_plugin_api::{CredentialStyle, HostContext, PlanCard, PlanQuery, PlanWindow, PluginError, SecretString};
-use hofund_plugin_sdk::json::Value;
-use hofund_plugin_sdk::Call;
-
-use crate::{
-    Reader, fetch, json_body, number, time_value, vendor_error,
+use hofund_plugin_api::{
+    CredentialStyle, HostContext, PlanCard, PlanQuery, PlanWindow, PluginError, SecretString,
 };
+use hofund_plugin_sdk::Call;
+use hofund_plugin_sdk::json::Value;
+
+use crate::{Reader, fetch, json_body, number, time_value, vendor_error};
 
 const HOUR: u64 = 3600;
 const DAY: u64 = 24 * HOUR;
@@ -55,11 +55,7 @@ pub(crate) async fn read(
             .get(query.api_key())
             .cloned();
         let fresh = cached.as_ref().is_some_and(|cached| {
-            query
-                .now()
-                .duration_since(cached.at)
-                .unwrap_or_default()
-                < Duration::from_secs(600)
+            query.now().duration_since(cached.at).unwrap_or_default() < Duration::from_secs(600)
         });
         if let Some(cached) = cached.clone().filter(|_| fresh) {
             id = cached.id;
@@ -153,7 +149,10 @@ async fn read_subscription(
     let Some(id) = data.get("planId").and_then(Value::as_str) else {
         return (None, None, String::new());
     };
-    if matches!(data.get("status").and_then(Value::as_str), Some("canceled" | "incomplete_expired")) {
+    if matches!(
+        data.get("status").and_then(Value::as_str),
+        Some("canceled" | "incomplete_expired")
+    ) {
         return (None, None, String::new());
     }
     let renew = data

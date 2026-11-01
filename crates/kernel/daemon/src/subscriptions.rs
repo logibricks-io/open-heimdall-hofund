@@ -534,7 +534,8 @@ impl ModelPolls {
                 if due > now {
                     continue;
                 }
-                self.next.insert(member.id.clone(), now + MODEL_LIST_REFRESH);
+                self.next
+                    .insert(member.id.clone(), now + MODEL_LIST_REFRESH);
                 asked.push(member.id.clone());
                 if let Err(error) = state
                     .instance
@@ -966,13 +967,19 @@ mod tests {
         assert_eq!(hofund_plugin_registry::model_calls(), 2);
         assert!(
             polls
-                .poll(&states, start + super::MODEL_LIST_FIRST + Duration::from_secs(44 * 60))
+                .poll(
+                    &states,
+                    start + super::MODEL_LIST_FIRST + Duration::from_secs(44 * 60)
+                )
                 .await
                 .is_empty()
         );
         hofund_plugin_registry::set_model_fail(true);
         let next = polls
-            .poll(&states, start + super::MODEL_LIST_FIRST + super::MODEL_LIST_REFRESH)
+            .poll(
+                &states,
+                start + super::MODEL_LIST_FIRST + super::MODEL_LIST_REFRESH,
+            )
             .await;
         assert_eq!(next, [member("one"), member("two")]);
         assert_eq!(hofund_plugin_registry::model_calls(), 4);

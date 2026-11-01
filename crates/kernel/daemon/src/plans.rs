@@ -57,8 +57,8 @@ pub(crate) async fn poll(
             }
         }
         let reader = reader.clone();
-        let mut readings = futures_util::stream::iter(jobs.into_iter().enumerate().map(
-            |(index, job)| {
+        let mut readings =
+            futures_util::stream::iter(jobs.into_iter().enumerate().map(|(index, job)| {
                 let reader = reader.clone();
                 let root = root.clone();
                 async move {
@@ -71,11 +71,10 @@ pub(crate) async fn poll(
                     let result = reader.read(&job.query, &host).await;
                     (index, job, result)
                 }
-            },
-        ))
-        .buffer_unordered(READS_AT_ONCE)
-        .collect::<Vec<_>>()
-        .await;
+            }))
+            .buffer_unordered(READS_AT_ONCE)
+            .collect::<Vec<_>>()
+            .await;
         readings.sort_by_key(|(index, _, _)| *index);
         for (_, job, result) in readings {
             record(quotas, job, result);
@@ -128,7 +127,11 @@ fn job(
     } else {
         String::new()
     };
-    let user = if several { key.id.clone() } else { String::new() };
+    let user = if several {
+        key.id.clone()
+    } else {
+        String::new()
+    };
     let member = if several {
         provider_keys::built_id(&provider.id, &key.id)
     } else {
@@ -181,10 +184,7 @@ fn option(provider: &Provider, key: &str) -> Result<String, DaemonError> {
     let Some(value) = provider.options.get(key) else {
         return Ok(String::new());
     };
-    match raw_value(
-        value,
-        Some(("provider", provider.id.as_str(), key)),
-    )? {
+    match raw_value(value, Some(("provider", provider.id.as_str(), key)))? {
         RawValue::String(value) => Ok(value),
         _ => Err(DaemonError::new(format!(
             "provider `{}` option `{key}` must be a string",
@@ -265,7 +265,9 @@ fn transient_error(error: &PluginError) -> bool {
             | PluginErrorKind::Io
             | PluginErrorKind::Internal
             | PluginErrorKind::Quota
-    ) || error.status().is_some_and(|status| status == 429 || status >= 500)
+    ) || error
+        .status()
+        .is_some_and(|status| status == 429 || status >= 500)
 }
 
 #[cfg(test)]

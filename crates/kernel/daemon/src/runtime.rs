@@ -441,11 +441,7 @@ impl Runtime {
             .expect("published plan")
             .subscriptions
             .clone();
-        self.model_polls
-            .lock()
-            .await
-            .poll(&current, now)
-            .await
+        self.model_polls.lock().await.poll(&current, now).await
     }
 
     /// Returns the kept report, or reads every subscription first. A fresh

@@ -268,9 +268,10 @@ impl QuotaStore {
     pub fn has_reading(&self, quota: &Quota) -> bool {
         let key = quota_key(quota);
         let state = self.state.lock().expect("quota store");
-        state.records.iter().any(|record| {
-            quota_key(&record.quota) == key && record.persistent
-        })
+        state
+            .records
+            .iter()
+            .any(|record| quota_key(&record.quota) == key && record.persistent)
     }
 
     /// Records a failed read. A transient failure uses the last good reading.

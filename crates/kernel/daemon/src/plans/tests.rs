@@ -1,4 +1,3 @@
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -21,11 +20,7 @@ mod tests {
     }
 
     fn runtime(dir: &Path, config: &Config) -> Arc<Runtime> {
-        let runtime = Runtime::new(
-            Arc::new(RegistryAdapter),
-            &dir.join("hofund.toml"),
-            Some(0),
-        );
+        let runtime = Runtime::new(Arc::new(RegistryAdapter), &dir.join("hofund.toml"), Some(0));
         runtime.initial_snapshot(config, None).expect("snapshot");
         runtime
     }
@@ -63,7 +58,13 @@ mod tests {
         let runtime = runtime(dir.path(), &config);
         let (kept, _) = runtime.quota_report(true).await;
         assert!(kept.is_empty());
-        assert!(server.received_requests().await.expect("requests").is_empty());
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty()
+        );
 
         let (cards, _) = runtime.quota_report(false).await;
         assert_eq!(cards.len(), 2);
@@ -133,7 +134,10 @@ mod tests {
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].windows[0].used, 20.0);
         assert_eq!(cards[1].windows[0].used, 90.0);
-        assert_eq!(cards[1].member, format!("glm#{}", provider_keys::key_id("second")));
+        assert_eq!(
+            cards[1].member,
+            format!("glm#{}", provider_keys::key_id("second"))
+        );
 
         limited.store(true, Ordering::SeqCst);
         let cards = runtime.quota_report(false).await.0;
@@ -144,7 +148,10 @@ mod tests {
         let before = server.received_requests().await.expect("requests").len();
         let kept = runtime.quota_report(true).await.0;
         assert_eq!(kept.len(), 2);
-        assert_eq!(server.received_requests().await.expect("requests").len(), before);
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            before
+        );
     }
 
     #[tokio::test]
@@ -211,6 +218,10 @@ mod tests {
         server.abort();
         assert_eq!(cards.len(), 31);
         assert_eq!(calls.load(Ordering::SeqCst), 31);
-        assert!(maximum.load(Ordering::SeqCst) <= 8, "too many at once: {}", maximum.load(Ordering::SeqCst));
+        assert!(
+            maximum.load(Ordering::SeqCst) <= 8,
+            "too many at once: {}",
+            maximum.load(Ordering::SeqCst)
+        );
     }
 }

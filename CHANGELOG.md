@@ -25,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep previously proven plans, mixed per-key plans select their own sources,
   and each provider reads at most eight keys at once. Signed-in accounts now
   refresh model lists after two minutes and hourly thereafter, keeping the
-  last good list on failure.
+  last good list on failure. The plugin SDK gains `digest::sha256` and
+  `digest::hmac_sha256` for request signing, and `kit-upstream` re-exports
+  `wiremock` with an IO-enabled `block_on` so plugin tests need no tokio.
 - Short-lived gateway keys and issuers (P0-4d): issue keys for 1 minute to
   30 days through `POST /v1/hofund/keys` or `gateway-key issue`, with model,
   account, read-only, token, and cost constraints. Permitted issuer keys and

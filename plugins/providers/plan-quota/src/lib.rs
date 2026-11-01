@@ -15,7 +15,6 @@ use hofund_plugin_api::{HostContext, PlanCard, PlanQuery, PlanQuota, PlanSupport
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::time::parse_rfc3339;
 use hofund_plugin_sdk::{Call, Contribution};
-use sha2::{Digest, Sha256};
 
 /// Registers the plugin's data-only contribution.
 #[must_use]
@@ -116,9 +115,7 @@ async fn read_source(
         Source::CommandCode {
             credits,
             subscriptions,
-        } => {
-            command_code::read(reader, query, host, &credits, &subscriptions).await
-        }
+        } => command_code::read(reader, query, host, &credits, &subscriptions).await,
         Source::MiniMax(url) => key_plans::read_mini_max(query, host, &url).await,
         Source::Ollama(url) => key_plans::read_ollama(query, host, &url).await,
         Source::StepFun { platform, app } => {
@@ -240,7 +237,10 @@ fn source(query: &PlanQuery) -> Option<Source> {
                     "ap-guangzhou"
                 };
                 return Some(Source::Tencent {
-                    endpoint: override_url(query, "https://tokenhub.tencentcloudapi.com/".to_owned()),
+                    endpoint: override_url(
+                        query,
+                        "https://tokenhub.tencentcloudapi.com/".to_owned(),
+                    ),
                     region: region.to_owned(),
                 });
             }
@@ -263,7 +263,9 @@ fn origin(url: &str) -> String {
         .ok()
         .and_then(|url| {
             let host = url.host_str()?.to_owned();
-            let port = url.port().map_or_else(String::new, |port| format!(":{port}"));
+            let port = url
+                .port()
+                .map_or_else(String::new, |port| format!(":{port}"));
             Some(format!("{}://{host}{port}", url.scheme()))
         })
         .unwrap_or_else(|| url.trim_end_matches('/').to_owned())
@@ -431,30 +433,11 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
+    hex(&hofund_plugin_sdk::digest::sha256(bytes))
 }
 
 fn hmac(key: &[u8], text: &str) -> [u8; 32] {
-    let mut block = [0_u8; 64];
-    if key.len() > block.len() {
-        block[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-    let mut inner = [0x36_u8; 64];
-    let mut outer = [0x5c_u8; 64];
-    for index in 0..64 {
-        inner[index] ^= block[index];
-        outer[index] ^= block[index];
-    }
-    let mut hasher = Sha256::new();
-    hasher.update(inner);
-    hasher.update(text.as_bytes());
-    let inner_hash = hasher.finalize();
-    let mut hasher = Sha256::new();
-    hasher.update(outer);
-    hasher.update(inner_hash);
-    hasher.finalize().into()
+    hofund_plugin_sdk::digest::hmac_sha256(key, text.as_bytes())
 }
 
 fn percent_encode(text: &str) -> String {
@@ -531,10 +514,11 @@ fn add_months(at: SystemTime, months: i64) -> Option<SystemTime> {
     let index = i64::from(month) - 1 + months;
     let year = year + index.div_euclid(12);
     let month = index.rem_euclid(12) + 1;
-    let month_days = days_from_civil(year, month as u32 + 1, 1) - days_from_civil(year, month as u32, 1);
+    let month_days =
+        days_from_civil(year, month as u32 + 1, 1) - days_from_civil(year, month as u32, 1);
     let day = day.min(month_days as u32);
-    let seconds = days_from_civil(year, month as u32, day)
-        + i64::from(hour * 3600 + minute * 60 + second);
+    let seconds =
+        days_from_civil(year, month as u32, day) + i64::from(hour * 3600 + minute * 60 + second);
     UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
 }
 

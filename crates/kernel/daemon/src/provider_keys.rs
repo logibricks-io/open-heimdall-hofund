@@ -288,7 +288,8 @@ pub(crate) fn mutate(
         ProviderKeyAction::Plan => {
             let index = find(&entries, &request.key_id)?;
             let plan = request.plan.trim();
-            entries[index].entry.plan = (!plan.is_empty() && plan != "any").then(|| plan.to_owned());
+            entries[index].entry.plan =
+                (!plan.is_empty() && plan != "any").then(|| plan.to_owned());
         }
         ProviderKeyAction::On => {
             let index = find(&entries, &request.key_id)?;

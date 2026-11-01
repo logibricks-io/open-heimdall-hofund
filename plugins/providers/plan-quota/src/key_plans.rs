@@ -1,9 +1,11 @@
 use std::time::{Duration, SystemTime};
 
-use hofund_plugin_api::{CredentialStyle, HostContext, PlanCard, PlanQuery, PlanWindow, PluginError, SecretString};
+use hofund_plugin_api::{
+    CredentialStyle, HostContext, PlanCard, PlanQuery, PlanWindow, PluginError, SecretString,
+};
+use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{Value, json};
 use hofund_plugin_sdk::oauth::new_state;
-use hofund_plugin_sdk::Call;
 
 use crate::{
     fetch, finite, json_body, number, shape_of, span_name, time_value, vendor_error, vendor_said,
@@ -86,7 +88,11 @@ async fn zhipu_call(
 ) -> Result<(String, Vec<PlanWindow>), PluginError> {
     let (status, body) = fetch(host, zhipu_request(query, url, team)?).await?;
     if status == 401 {
-        let vendor = if url.contains("api.z.ai") { "Z.ai" } else { "Zhipu" };
+        let vendor = if url.contains("api.z.ai") {
+            "Z.ai"
+        } else {
+            "Zhipu"
+        };
         let keys = if vendor == "Z.ai" {
             "https://z.ai/manage-apikey/apikey-list"
         } else {
@@ -106,10 +112,7 @@ async fn zhipu_call(
 fn read_zhipu_body(body: &[u8], team: bool) -> Result<(String, Vec<PlanWindow>), PluginError> {
     let value = json_body(body)?;
     let code = value.get("code").and_then(Value::as_i64);
-    let message = value
-        .get("msg")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let message = value.get("msg").and_then(Value::as_str).unwrap_or("");
     if code.is_some_and(|code| (1000..=1005).contains(&code)) {
         return Err(PluginError::auth(message));
     }
@@ -188,13 +191,13 @@ fn zhipu_term(body: &[u8]) -> Option<(SystemTime, String)> {
         if let Some(until) = zhipu_time(row.get("nextRenewTime").and_then(Value::as_str)) {
             return Some((until, if auto { "auto" } else { "off" }.to_owned()));
         }
-        if !auto
-            && let Some(valid) = row.get("valid").and_then(Value::as_str)
-        {
-            let mut dates = valid.match_indices(|character: char| character.is_ascii_digit());
+        if !auto && let Some(valid) = row.get("valid").and_then(Value::as_str) {
+            let dates = valid.match_indices(|character: char| character.is_ascii_digit());
             let mut found = None;
-            while let Some((start, _)) = dates.next() {
-                let candidate = valid.get(start..).and_then(|rest| rest.get(..19.min(rest.len())));
+            for (start, _) in dates {
+                let candidate = valid
+                    .get(start..)
+                    .and_then(|rest| rest.get(..19.min(rest.len())));
                 if let Some(at) = candidate.and_then(|text| zhipu_time(Some(text))) {
                     found = Some(at);
                 }
@@ -211,7 +214,9 @@ fn zhipu_time(text: Option<&str>) -> Option<SystemTime> {
     let text = text?.trim();
     for candidate in [text.to_owned(), text.replace(' ', "T")] {
         for suffix in ["+08:00", "Z"] {
-            if let Some(at) = hofund_plugin_sdk::time::parse_rfc3339(&format!("{candidate}{suffix}")) {
+            if let Some(at) =
+                hofund_plugin_sdk::time::parse_rfc3339(&format!("{candidate}{suffix}"))
+            {
                 return Some(at);
             }
         }
@@ -248,10 +253,7 @@ fn read_kimi_body(body: &[u8]) -> Result<Vec<PlanWindow>, PluginError> {
         let window = row.get("window").cloned().unwrap_or_else(|| json!({}));
         let detail = row.get("detail").unwrap_or(&window);
         let duration = number(window.get("duration")).unwrap_or(0.0).max(0.0) as u64;
-        let unit = window
-            .get("timeUnit")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let unit = window.get("timeUnit").and_then(Value::as_str).unwrap_or("");
         let seconds = if unit.contains("MINUTE") {
             duration.saturating_mul(60)
         } else if unit.contains("HOUR") {
@@ -285,14 +287,15 @@ fn read_kimi_body(body: &[u8]) -> Result<Vec<PlanWindow>, PluginError> {
             let Some(row) = usages.get(snake).or_else(|| usages.get(camel)) else {
                 continue;
             };
-            let Some(ratio) = number(row.get("used_ratio").or_else(|| row.get("usedRatio")))
-                .and_then(finite)
+            let Some(ratio) =
+                number(row.get("used_ratio").or_else(|| row.get("usedRatio"))).and_then(finite)
             else {
                 continue;
             };
-            if shares.iter().any(|window: &PlanWindow| {
-                window.span() == Some(Duration::from_secs(seconds))
-            }) {
+            if shares
+                .iter()
+                .any(|window: &PlanWindow| window.span() == Some(Duration::from_secs(seconds)))
+            {
                 continue;
             }
             shares.push(
@@ -304,9 +307,9 @@ fn read_kimi_body(body: &[u8]) -> Result<Vec<PlanWindow>, PluginError> {
     }
     if !shares.is_empty() {
         out.retain(|window| {
-            !shares.iter().any(|share| {
-                share.span().is_some() && share.span() == window.span()
-            })
+            !shares
+                .iter()
+                .any(|share| share.span().is_some() && share.span() == window.span())
         });
         out.extend(shares);
         out.sort_by_key(|window| window.span().unwrap_or(Duration::MAX));
@@ -328,9 +331,8 @@ fn counted_window(row: &Value, name: &str, seconds: u64) -> Option<PlanWindow> {
     if limit <= 0.0 {
         return None;
     }
-    let used = number(row.get("used")).or_else(|| {
-        number(row.get("remaining")).map(|remaining| limit - remaining)
-    })?;
+    let used = number(row.get("used"))
+        .or_else(|| number(row.get("remaining")).map(|remaining| limit - remaining))?;
     Some(
         PlanWindow::new(name, (used / limit * 100.0).clamp(0.0, 100.0))
             .with_span(Duration::from_secs(seconds))
@@ -589,8 +591,7 @@ pub(crate) async fn read_ollama(
         {
             let span = until.duration_since(from).unwrap_or_default();
             if (27..=32).contains(&(span.as_secs() / DAY)) {
-                window = PlanWindow::new("Month", window.used())
-                    .with_count(used, allowance, "USD");
+                window = PlanWindow::new("Month", window.used()).with_count(used, allowance, "USD");
             }
             window = window.with_span(span).with_resets_at(until);
         } else {

@@ -40,11 +40,7 @@ impl PlanQuery {
 
     /// Supplies the account access key used by control-plane plan readers.
     #[must_use]
-    pub fn with_access_key(
-        mut self,
-        id: impl Into<String>,
-        secret: impl Into<String>,
-    ) -> Self {
+    pub fn with_access_key(mut self, id: impl Into<String>, secret: impl Into<String>) -> Self {
         self.access_key_id = id.into();
         self.secret_access_key = secret.into();
         self
@@ -205,12 +201,7 @@ impl PlanWindow {
 
     /// Sets the used amount, cap, and unit reported by the vendor.
     #[must_use]
-    pub fn with_count(
-        mut self,
-        amount: f64,
-        limit: f64,
-        unit: impl Into<String>,
-    ) -> Self {
+    pub fn with_count(mut self, amount: f64, limit: f64, unit: impl Into<String>) -> Self {
         self.amount = amount;
         self.limit = limit;
         self.unit = unit.into();

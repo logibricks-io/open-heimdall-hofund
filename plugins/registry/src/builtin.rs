@@ -500,7 +500,9 @@ fn plan_option(raw: &RawTable, key: &str) -> bool {
         return false;
     };
     match key {
-        "access_key_id" | "secret_access_key" => matches!(preset.as_str(), "volcengine" | "tencent-cloud"),
+        "access_key_id" | "secret_access_key" => {
+            matches!(preset.as_str(), "volcengine" | "tencent-cloud")
+        }
         "session_token" => matches!(preset.as_str(), "stepfun" | "stepfun-cn"),
         "organization" | "project" => matches!(preset.as_str(), "zhipu" | "zai"),
         "plan_quota_url" => matches!(

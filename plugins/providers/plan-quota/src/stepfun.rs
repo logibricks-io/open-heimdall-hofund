@@ -89,9 +89,21 @@ fn parse_session(text: &str) -> Result<Session, PluginError> {
         let value: Value = hofund_plugin_sdk::json::from_str(text)
             .map_err(|_| PluginError::config("the platform session is not valid JSON"))?;
         (
-            value.get("access").and_then(Value::as_str).unwrap_or("").to_owned(),
-            value.get("refresh").and_then(Value::as_str).unwrap_or("").to_owned(),
-            value.get("webId").and_then(Value::as_str).unwrap_or("").to_owned(),
+            value
+                .get("access")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            value
+                .get("refresh")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            value
+                .get("webId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
         )
     } else {
         let (access, refresh) = text.split_once("...").ok_or_else(|| {
@@ -100,11 +112,7 @@ fn parse_session(text: &str) -> Result<Session, PluginError> {
         (access.to_owned(), refresh.to_owned(), String::new())
     };
     let access_claims = claims(&access)?;
-    if access_claims
-        .get("activated")
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
+    if access_claims.get("activated").and_then(Value::as_bool) != Some(true) {
         return Err(PluginError::auth("not signed in to StepFun yet"));
     }
     let account = claim_id(access_claims.get("oasis_id"))
@@ -154,13 +162,12 @@ async fn current_session(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(query.api_key())
         .cloned()
-        .ok_or_else(|| PluginError::auth("signed out of StepFun: sign in again in the provider's settings"))?;
+        .ok_or_else(|| {
+            PluginError::auth("signed out of StepFun: sign in again in the provider's settings")
+        })?;
     if !force
         && expires(&session.access).is_some_and(|expires| {
-            expires
-                .duration_since(query.now())
-                .unwrap_or_default()
-                > Duration::from_secs(300)
+            expires.duration_since(query.now()).unwrap_or_default() > Duration::from_secs(300)
         })
     {
         return Ok(session);
