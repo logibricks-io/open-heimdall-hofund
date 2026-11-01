@@ -786,6 +786,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Dependencies: `tokio-tungstenite` 0.30, `base64` 0.23, and `toml` 1.1 in the
+  workspace crates, and the `actions/upload-artifact` v7 and
+  `actions/download-artifact` v8 release workflow actions.
+
 - Failover decisions (P0-3c) follow the reference order: the default
   `failover.statuses` is 401, 402, 403, 404, 408, 429, and 500 to 599; retired
   models, edge blocks, credit, quota, unserved models, refusals, request
