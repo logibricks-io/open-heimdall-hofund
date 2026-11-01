@@ -839,9 +839,8 @@ impl DispatchState {
                         return Err(RouterError::Upstream { upstream_id, error });
                     }
                     if let Some(failure) = patience::busy(&error, index, self.now()) {
-                        if !busy.iter().any(|noted| noted.index == index) {
-                            busy.push(failure);
-                        }
+                        // Each member is asked once a round, so noted once.
+                        busy.push(failure);
                         *ending = Ending::Busy;
                     } else if patience::spent(&error)
                         && !self.resolved.spent.get(index).copied().unwrap_or(false)

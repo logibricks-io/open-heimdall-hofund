@@ -1758,6 +1758,64 @@ mod tests {
         assert_eq!(second_hits.load(Ordering::SeqCst), 3);
     }
 
+    struct Paused;
+
+    impl hofund_router::WaitHook for Paused {
+        fn wait(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(tokio::time::sleep(duration))
+        }
+
+        fn now(&self) -> std::time::Instant {
+            tokio::time::Instant::now().into_std()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn b11_a_published_route_waits_by_its_own_patience() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                scripted(
+                    "first",
+                    &first_hits,
+                    vec![Err(ProviderError::status(503, "busy")), Ok(raw_ok())],
+                ),
+            ),
+            (
+                "second".to_owned(),
+                scripted(
+                    "second",
+                    &second_hits,
+                    vec![Err(ProviderError::status(503, "busy"))],
+                ),
+            ),
+        ]);
+        // The route's 60 seconds cover the 2-second pause; a 1-second
+        // budget would end the request instead.
+        let (snapshot, _table) = super::open_with_table(
+            &built,
+            route(&["first", "second"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        let routed = snapshot
+            .load()
+            .dispatch_with_wait(
+                &Request::new("demo"),
+                "openai-chat",
+                None,
+                Some(Arc::new(Paused)),
+            )
+            .await
+            .expect("answered after the pause");
+        assert_eq!(routed.upstream_id, "first");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    }
+
     fn windowed(hops: &[(&str, Option<u64>)]) -> BTreeMap<String, Vec<PlannedHop>> {
         let mut routes = route(&hops.iter().map(|(id, _)| *id).collect::<Vec<_>>());
         for (hop, (_, window)) in routes
