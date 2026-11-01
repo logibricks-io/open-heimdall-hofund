@@ -119,6 +119,48 @@ impl Runtime {
         })
     }
 
+    /// Same as [`Self::new`], but quota and warm-up scheduling read `clock`.
+    #[cfg(test)]
+    pub(crate) fn new_with_quota_clock(
+        registry: Arc<dyn DaemonRegistry>,
+        path: &Path,
+        max_idle_per_host: Option<usize>,
+        clock: Arc<dyn Fn() -> std::time::SystemTime + Send + Sync>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            registry,
+            cooldowns: Arc::new(Cooldowns::with_clock(
+                CooldownPolicy::default(),
+                Arc::new(|| tokio::time::Instant::now().into_std()),
+            )),
+            rests: Arc::new(Mutex::new(RestStore::new(path))),
+            fingerprints: Mutex::new(HashMap::new()),
+            path: path.to_path_buf(),
+            max_idle_per_host,
+            table: OnceLock::new(),
+            instances: Mutex::new(HashMap::new()),
+            models: OnceLock::new(),
+            config: OnceLock::new(),
+            events: OnceLock::new(),
+            plan: Mutex::new(Plan::default()),
+            polls: tokio::sync::Mutex::new(QuotaPolls::default()),
+            model_polls: tokio::sync::Mutex::new(ModelPolls::default()),
+            quotas: Arc::new(QuotaStore::with_clock(
+                path.parent().unwrap_or_else(|| Path::new(".")),
+                clock,
+            )),
+            affinity: hofund_router::affinity::AffinityState::new(
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("affinity.json"),
+            ),
+            wake: tokio::sync::Notify::new(),
+            warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
+                path, ".hofund",
+            ))),
+        })
+    }
+
     pub(crate) fn initial_snapshot(
         &self,
         config: &Config,

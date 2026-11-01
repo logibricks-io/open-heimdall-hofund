@@ -17,6 +17,11 @@ use crate::creds::{self, Profile};
 /// How long a refresh waits for another holder of the account lease.
 const LEASE_WAIT: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+const WARMUP_DRAIN: Duration = Duration::from_secs(2);
+#[cfg(not(test))]
+const WARMUP_DRAIN: Duration = Duration::from_secs(60);
+
 /// `<state>/accounts/<id>`. An account id is kebab case.
 pub(crate) fn account_dir(host: &HostContext, account: &AccountId) -> Result<PathBuf, PluginError> {
     Ok(host
@@ -165,11 +170,8 @@ async fn run_warmup_process(
     let child = host.spawn_process().spawn_piped(&request).await?;
     child.write_stdin(b"hi\n".to_vec().into()).await?;
     let mut stdout = child.stdout()?;
-    let finished = hofund_plugin_sdk::timeout(
-        Duration::from_secs(60),
-        crate::cli::drain(&mut stdout, last),
-    )
-    .await;
+    let finished =
+        hofund_plugin_sdk::timeout(WARMUP_DRAIN, crate::cli::drain(&mut stdout, last)).await;
     drop(child);
     if finished.is_none() {
         return Err(PluginError::timeout(

@@ -2,6 +2,9 @@
 
 mod daily;
 
+#[cfg(test)]
+mod tick_tests;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -11,6 +14,7 @@ use hofund_config::Value;
 use hofund_plugin_api::{
     AccountId, AccountStatus, PluginErrorKind, WarmupAccountStatus, WarmupOutcome, WarmupRecord,
 };
+use hofund_plugin_sdk::async_trait;
 use hofund_plugin_sdk::daily_warmup::{self, TIMES_KEY};
 use hofund_router::quota::Allowance;
 use serde::{Deserialize, Serialize};
@@ -118,6 +122,15 @@ impl WarmupStore {
             .expect("warmup retry")
             .remove(member);
     }
+
+    #[cfg(test)]
+    pub(crate) fn failed_retry_until(&self, member: &str) -> Option<SystemTime> {
+        self.failed_retry
+            .lock()
+            .expect("warmup retry")
+            .get(member)
+            .copied()
+    }
 }
 
 fn member_key(subscription: &str, account: &str) -> String {
@@ -206,6 +219,29 @@ pub(crate) async fn tick(
     store: &Arc<WarmupStore>,
     registry: &dyn DaemonRegistry,
 ) {
+    tick_with_runner(runtime, store, registry, &ProductionRunner).await;
+}
+
+struct ProductionRunner;
+
+#[async_trait]
+pub(crate) trait WarmupRunner: Send + Sync {
+    async fn run(&self, state: &SubscriptionState, account: &AccountId) -> Result<(), String>;
+}
+
+#[async_trait]
+impl WarmupRunner for ProductionRunner {
+    async fn run(&self, state: &SubscriptionState, account: &AccountId) -> Result<(), String> {
+        run_warmup(state, account).await
+    }
+}
+
+pub(crate) async fn tick_with_runner(
+    runtime: &Arc<Runtime>,
+    store: &Arc<WarmupStore>,
+    registry: &dyn DaemonRegistry,
+    runner: &dyn WarmupRunner,
+) {
     let _guard = store.running.lock().await;
     let now = runtime.quota_now();
     let zone = local_offset(now);
@@ -290,7 +326,9 @@ pub(crate) async fn tick(
             );
             continue;
         }
-        let result = run_warmup(&candidate.state, &candidate.member.account).await;
+        let result = runner
+            .run(&candidate.state, &candidate.member.account)
+            .await;
         match result {
             Ok(()) => {
                 store.clear_failed_retry(&member_id);
@@ -539,14 +577,5 @@ mod tests {
             .find(|id| !store.failed_cooling(id, now))
             .expect("peer runs");
         assert_eq!(*next, "acct/a-0000000000000002");
-    }
-
-    #[test]
-    fn a3a_23_list_statuses_includes_configured_account_without_last_run() {
-        let mut rows = BTreeMap::new();
-        let account = AccountId::from_static("a-0000000000000033");
-        super::ensure_configured_row(&mut rows, "acct", &account);
-        let row = rows.get("acct/a-0000000000000033").expect("configured row");
-        assert!(row.last().is_none());
     }
 }

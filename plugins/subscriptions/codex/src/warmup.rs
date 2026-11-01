@@ -104,4 +104,28 @@ mod tests {
         let list = ModelList::new(vec![spec("alpha"), spec("beta")], None);
         assert_eq!(pick_warmup_model(&list).expect("pick"), "alpha");
     }
+
+    #[test]
+    fn a3a_24_codex_pick_warmup_model_empty_list_errors() {
+        let list = ModelList::new(Vec::new(), None);
+        let error = pick_warmup_model(&list).expect_err("empty");
+        assert!(
+            error
+                .to_string()
+                .contains("no models are known for this account"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a3a_25_codex_warmup_cache_read_price_picks_lower_total_cost() {
+        let list = ModelList::new(
+            vec![
+                spec("cheap-input").with_prices(10, 10, 1_000),
+                spec("cheap-total").with_prices(100, 100, 10),
+            ],
+            None,
+        );
+        assert_eq!(pick_warmup_model(&list).expect("pick"), "cheap-total");
+    }
 }

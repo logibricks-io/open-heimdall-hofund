@@ -743,6 +743,34 @@ fn a3a_20_warmup_empty_stdout_fails_and_removes_credentials_file() {
     host.process().script_piped(warmup_script(None, Vec::new()));
     let error = block_on(sub.daily_warmup(&id, host.context())).expect_err("empty");
     assert_eq!(error.kind(), PluginErrorKind::Transport);
+    assert!(error.to_string().contains("produced no output"), "{error}");
     let account_dir = state(&host).join("accounts").join(id.as_str());
     assert!(!account_dir.join(creds::CREDENTIALS_FILE).exists());
+}
+
+#[test]
+fn a3a_24_warmup_empty_stdout_exits_zero_still_fails_with_no_output_message() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    host.process()
+        .script_piped(PipedScript::new().on_stdin(|_, _| Vec::new()));
+    let error = block_on(sub.daily_warmup(&id, host.context())).expect_err("empty");
+    assert!(error.to_string().contains("produced no output"), "{error}");
+}
+
+#[test]
+fn a3a_25_warmup_timeout_fails_even_when_stdout_has_a_result_line() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    host.process().script_piped(
+        PipedScript::new().line(r#"{"type":"result","is_error":false,"result":"Hi"}"#),
+    );
+    let error = block_on(sub.daily_warmup(&id, host.context())).expect_err("timeout");
+    assert!(error.to_string().contains("did not finish"), "{error}");
 }
