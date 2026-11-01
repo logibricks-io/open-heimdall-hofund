@@ -169,6 +169,7 @@ fn fixture(members: &[(&'static str, Option<&str>, Answer)]) -> Fixture {
             fallback: false,
             effort: String::new(),
             cold_after: hofund_router::affinity::CACHE_COLD,
+            units: Vec::new(),
         })
         .collect();
     let mut routes = BTreeMap::new();

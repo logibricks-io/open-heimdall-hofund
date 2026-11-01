@@ -114,6 +114,7 @@ fn hop(id: &'static str, wire: Option<&str>, seen: &Arc<Mutex<Vec<String>>>, cou
         fallback: false,
         effort: String::new(),
         cold_after: hofund_router::affinity::CACHE_COLD,
+        units: Vec::new(),
     }
 }
 
@@ -142,6 +143,7 @@ fn capped(
         fallback: false,
         effort: String::new(),
         cold_after: hofund_router::affinity::CACHE_COLD,
+        units: Vec::new(),
     }
 }
 
@@ -323,6 +325,7 @@ fn answering(
         fallback: false,
         effort: String::new(),
         cold_after: hofund_router::affinity::CACHE_COLD,
+        units: Vec::new(),
     }
 }
 
