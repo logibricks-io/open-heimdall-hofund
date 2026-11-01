@@ -51,6 +51,8 @@ hofund gateway-key accounts <id> all
 hofund gateway-key quotas <id> on
 hofund gateway-key access <id> full
 hofund gateway-key issuer <id> on
+hofund gateway-key issue --ttl 1h --name Sandbox --models 'primary/*' --tokens 50000
+hofund gateway-key issue --ttl 30m --from <id> --read-only --json
 hofund gateway-key limit <id> --per day --tokens 1000000
 hofund gateway-key limit <id> add 5h --cost 2.50 --cache-reads
 hofund gateway-key limit <id> --per hours --hours 5 --tokens 200k --index 2
@@ -58,23 +60,28 @@ hofund gateway-key limit <id> remove 1
 hofund gateway-key reset-limit <id> [N]
 ```
 
-The list columns are `ID NAME STATE GATEWAY KEY LIMIT MODELS ACCOUNTS ACCESS`,
-as in the reference, plus `UNTIL` until expiry joins `STATE` in P0-4d.
-`GATEWAY KEY` is the masked form.
-`models`, `accounts`, `quotas`, `access`, and `issuer` also work without a value
-to show the current setting. `access <id> read-only|full` changes that access,
-and `add <name> --read-only` sets it at creation. The default sharing key must
-retain full access.
+The list columns are `ID NAME STATE GATEWAY KEY LIMIT MODELS ACCOUNTS ACCESS UNTIL`.
+`GATEWAY KEY` is the masked form. `STATE` shows `until <time>`, `expired`,
+`issued by <id>`, or `issues keys` when those apply; `UNTIL` is the RFC 3339
+expiry. `models`, `accounts`, `quotas`, `access`, and `issuer` also work without
+a value to show the current setting. `access <id> read-only|full` changes that
+access, and `add <name> --read-only` sets it at creation. The default sharing
+key must retain full access. `on` and `off` accept either an id or one exact,
+unambiguous key name. `issue` prints only the new secret unless `--json` is set;
+its lifetime is from one minute through thirty days.
 
 Authentication accepts `Authorization: Bearer <key>`, `x-api-key`,
 `x-goog-api-key`, or `?key=<key>`. One enabled match is enough. Missing, unknown,
-disabled, and removed keys receive 401. Existing loopback behavior is unchanged:
-hofund still requires a key on loopback.
+disabled, and removed keys receive 401. An expired key receives 401 with its
+expiry and `ask for a new one` on every route, including open routes and
+loopback. Existing loopback behavior is otherwise unchanged: hofund still
+requires a key on loopback. The only keyless exception is the short-lived-key
+management route described below.
 
 ## Read-only keys and the key page
 
 A read-only key may use only `GET` or `HEAD` on `/health`, `/me`, `/v1/hofund/me`,
-`/v1/hofund/quotas`, and `/v1/hofund/quotas/history`. Every other route is
+`/v1/hofund/limit`, `/v1/hofund/quotas`, and `/v1/hofund/quotas/history`. Every other route is
 refused before its handler or any upstream call with HTTP 403 and error code
 `gateway_key_read_only` in a `permission_error` envelope. Model lists and calls,
 token counts, writes, inbound surfaces, and both Responses WebSocket upgrades
@@ -106,6 +113,52 @@ The current ledger has no cache or price columns, so those response counters are
 zero. A legacy token without a named-key store, an unknown key, and a disabled
 key receive 401.
 
+## Short-lived keys and issuers
+
+A non-issued, non-expiring, full-access key may be allowed to issue keys with
+`hofund gateway-key issuer <id> on`. Such a key can issue from any address.
+Issued, expiring, read-only, disabled, and unauthorized keys cannot issue.
+Without a key, only a direct loopback client can use the key-management route:
+its peer and `Host` must be loopback, and it must carry no forwarding header,
+`Origin`, `Sec-Fetch-*` mark, or `Mozilla/` user agent. This exception does not
+make any other route keyless.
+
+`POST /v1/hofund/keys` accepts `ttl` as a duration string such as `"1h"` or as
+seconds, plus `name`, `models`, `accounts`, `tokens`, `cost`, and `readOnly`.
+The response is 201 with `Cache-Control: no-store` and contains the secret once.
+`GET /v1/hofund/keys` lists only keys issued by the caller, with masks and an
+`expired` flag. `DELETE /v1/hofund/keys/{id}` revokes a key issued by the
+caller; the local administrator may revoke any issued key. Other keys and other
+issuers' children receive 404.
+
+An issued key never outlives its issuer and cannot exceed its model or account
+scope. Token and cost options become one hour-based limit covering its whole
+life, rounded up to the next hour. Every authentication folds in the issuer's
+current scopes, read-only mode, quota visibility, and expiry. Removing,
+disabling, or expiring the issuer immediately refuses its children with 401.
+An issued key cannot issue children of its own. Expired keys remain for one
+hour so callers receive the expiry message, then are pruned. Pruning also
+removes children of missing issuers and runs on every issue and every ten
+minutes while the gateway serves.
+
+The key's usage rows carry `caller_issuer_id` in addition to its own id and
+name. Its calls count toward both its own limits and its issuer's limits, and
+admission reserves room on both under one lock. `GET /v1/hofund/limit` reports
+`expires` and `issuerLimits` when present.
+
+The stats and management routes currently available are:
+
+| Route | Response |
+| --- | --- |
+| `GET /v1/hofund/me` | The caller's own usage, limits, models, and setup |
+| `GET /v1/hofund/quotas` | Quota cards allowed for the caller |
+| `GET /v1/hofund/quotas/history` | Quota history allowed for the caller |
+| `GET /v1/hofund/limit` | The caller's limits, expiry, and issuer limits |
+| `POST`/`GET /v1/hofund/keys`, `DELETE /v1/hofund/keys/{id}` | Short-lived key issue, masked listing, and revocation |
+
+Usage-summary, request-list, concurrency, card, and MCP-inventory routes do not
+have hofund equivalents yet.
+
 ## Model and account scopes
 
 Model patterns are `<provider>/<model>`, `<provider>/*`, or `group/<name>`.
@@ -123,8 +176,9 @@ providers. Account scopes apply to ordinary calls, token counts, and raw
 forwarded calls. Store helpers rewrite exact account references after an account
 rename and exact model references after a model move.
 
-Usage rows additively gain `caller_key_id` and `caller_key_name`, including rows
-for local refusals. The control usage response carries the same fields.
+Usage rows additively gain `caller_key_id`, `caller_key_name`, and
+`caller_issuer_id`, including rows for local refusals. The control usage
+response carries the same fields.
 
 The `quotas` flag is persisted and exposed on the authenticated identity. It
 will select permitted provider/account quota cards when that API lands.
@@ -151,9 +205,10 @@ Tokens are uncached input, output (reasoning included), and cache writes;
 `--cache-reads` also counts cache reads. SQLite stores the protocol's original
 input total and a separate uncached-input count, plus cache counters, so budget
 reconstruction does not change ordinary usage reporting. A call counts in the
-window where it started. Sums are rebuilt from `caller_key_id` after a restart;
-local rejected rows do not count, while failed upstream calls keep any tokens
-they recorded.
+window where it started. Sums are rebuilt from `caller_key_id` and
+`caller_issuer_id` after a restart, so issued calls count for both keys; local
+rejected rows do not count, while failed upstream calls keep any tokens they
+recorded.
 
 Before dispatch, each in-flight request reserves one quarter of its decoded body
 bytes plus the key's mean output per call in that window. Every limit must have
@@ -168,8 +223,8 @@ named. Token counting routes are not limited.
 `GET /v1/hofund/limit` authenticates the caller and returns only that key's
 status. With no limits it returns `limited: false`. Otherwise `limits` contains
 each limit's calls, tokens, cost, unpriced calls, reservations, caps, remaining
-amounts, start/reset, and spent state, while `limit` is the binding one. Expiry
-and issuer-limit fields arrive with short-lived keys in P0-4d.
+amounts, start/reset, and spent state, while `limit` is the binding one. An
+issued caller also receives `expires` and, when limited, `issuerLimits`.
 
 There are no model prices yet. Cost limits are accepted, but every forwarded
 call is currently unpriced: it adds zero cost and increments `unpriced`, so an
@@ -182,18 +237,13 @@ the model-price work.
 The authenticated control plane provides:
 
 - `GET /v1/hofund/gateway-keys`
-- `POST /v1/hofund/gateway-keys` with an `add`, `rotate`, `rename`, `on`, `off`,
-  `remove`, `move`, `models`, `accounts`, `quotas`, `access`, `issuer`, `limit`,
-  `reset_limit`, or `copy` action; add, rotate, and copy return the secret
+- `POST /v1/hofund/gateway-keys` with an `add`, `issue`, `rotate`, `rename`,
+  `on`, `off`, `remove`, `move`, `models`, `accounts`, `quotas`, `access`,
+  `issuer`, `limit`, `reset_limit`, or `copy` action; add, issue, rotate, and
+  copy return the secret, and issue also returns `issued_id`
 - `GET /v1/hofund/gateway-keys/export` for complete backup records, secrets
   included
 - `POST /v1/hofund/gateway-keys/restore` to replace the store from those records
 
 `hofund-control-client` has typed methods for all four endpoints. Secret-bearing
 requests and responses redact secrets from `Debug` output.
-
-## Later phases
-
-Expiry, issuer ids, and issuer permission flags are stored so older files
-remain forward-compatible. Expiry checks and issuing short-lived keys are
-P0-4d.

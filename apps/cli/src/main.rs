@@ -7,6 +7,7 @@ mod commands;
 mod connect;
 mod events;
 mod gateway_key;
+mod gateway_key_issue;
 mod gateway_key_limit;
 mod local;
 mod provider;
@@ -297,6 +298,12 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             other if words.first() == Some(&"quota") && !matches!(other, "-h" | "--help") => {
                 words.push(other);
             }
+            other
+                if words.starts_with(&["gateway-key", "issue"])
+                    && !matches!(other, "-h" | "--help" | "--read-only" | "--json") =>
+            {
+                words.push(other);
+            }
             "--protocol" if words.starts_with(&["provider", "key-add"]) => {
                 let protocol = iter
                     .next()
@@ -351,7 +358,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             Err(message) => Err(message),
         };
     }
-    let subscription_flags = flags.json || flags.host.is_some() || flags.label.is_some();
+    let subscription_flags = flags.host.is_some() || flags.label.is_some();
     let json = flags.json;
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
@@ -535,7 +542,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let json_elsewhere = json
         && !matches!(
             command,
-            Command::GatewayKey(gateway_key::Command::List { .. })
+            Command::GatewayKey(gateway_key::Command::List { .. } | gateway_key::Command::Issue(_))
         );
     if (subscription_flags || json_elsewhere) && !matches!(command, Command::Subscription(_)) {
         return Err(
@@ -548,10 +555,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     if read_only
         && !matches!(
             command,
-            Command::GatewayKey(gateway_key::Command::Add { .. })
+            Command::GatewayKey(gateway_key::Command::Add { .. } | gateway_key::Command::Issue(_))
         )
     {
-        return Err("--read-only is only valid with gateway-key add".to_owned());
+        return Err("--read-only is only valid with gateway-key add or issue".to_owned());
     }
     if dry_run && !matches!(command, Command::AgentConnect { .. }) {
         return Err("--dry-run is only valid with agent connect".to_owned());
@@ -1612,7 +1619,28 @@ mod tests {
         }
         assert_eq!(
             command(&["gateway-key", "list", "--read-only"]),
-            Err("--read-only is only valid with gateway-key add".to_owned())
+            Err("--read-only is only valid with gateway-key add or issue".to_owned())
         );
+    }
+
+    #[test]
+    fn s9_main_forwards_issue_flags_and_json() {
+        let command = command(&[
+            "gateway-key",
+            "issue",
+            "--ttl",
+            "1h",
+            "--name",
+            "Sandbox",
+            "--read-only",
+            "--json",
+        ])
+        .expect("issue command");
+        let Command::GatewayKey(crate::gateway_key::Command::Issue(issue)) = command else {
+            panic!("not an issue command");
+        };
+        assert_eq!(issue.ttl_seconds, 3_600);
+        assert_eq!(issue.name, "Sandbox");
+        assert!(issue.read_only && issue.json);
     }
 }

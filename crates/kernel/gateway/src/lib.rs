@@ -7,6 +7,7 @@
 
 pub mod control;
 mod endpoints;
+mod issue_keys;
 mod limits;
 mod me;
 mod prev_response;
@@ -558,7 +559,12 @@ impl Gateway {
     /// [`Running::relisten`].
     pub async fn bind(self, listen: SocketAddr) -> Result<Running, GatewayError> {
         let sockets = Arc::clone(&self.inner.sockets);
-        serve_relistenable(self.into_router(), listen, sockets).await
+        let prune = self.inner.keys.clone().map(issue_keys::prune_task);
+        let mut running = serve_relistenable(self.into_router(), listen, sockets).await?;
+        if let Some(task) = prune {
+            running = running.with_task(task);
+        }
+        Ok(running)
     }
 }
 
@@ -577,11 +583,14 @@ async fn serve_relistenable(
     let (accept, handle) = relisten::swappable(listener, listen, local_addr);
     let (shutdown, signal) = oneshot::channel();
     let task = tokio::spawn(async move {
-        axum::serve(accept, router)
-            .with_graceful_shutdown(async move {
-                let _ = signal.await;
-            })
-            .await
+        axum::serve(
+            accept,
+            router.into_make_service_with_connect_info::<issue_keys::PeerAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = signal.await;
+        })
+        .await
     });
     let mut running = Running::new(local_addr, shutdown, task);
     running.relisten = Some(handle);
@@ -829,10 +838,14 @@ fn request_router(app: &Arc<Inner>) -> axum::Router {
             Arc::clone(app),
             readonly::guard,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(app),
+            issue_keys::refused_guard,
+        ))
 }
 
 fn request_routes(app: &Arc<Inner>) -> readonly::RouteSet {
-    let mut routes = me::routes(codec_routes(app));
+    let mut routes = issue_keys::routes(me::routes(codec_routes(app)));
     if app.quota_source.is_some() {
         routes = quotas::routes(routes);
     }
@@ -1878,6 +1891,7 @@ fn authenticate_request(
     if let Some(identity) = inherited {
         return Ok(identity);
     }
+    let mut refused = None;
     if let Some(keys) = &app.keys {
         let query = uri.query().and_then(query_key);
         for secret in [
@@ -1889,16 +1903,21 @@ fn authenticate_request(
         .flatten()
         .chain(query.as_deref())
         {
-            if let Ok(Some(identity)) = keys.authenticate(secret) {
-                return Ok(identity);
+            match keys.check(secret) {
+                Ok(hofund_secrets::KeyAuthentication::Enabled(identity)) => return Ok(identity),
+                Ok(hofund_secrets::KeyAuthentication::Refused(message)) => {
+                    refused.get_or_insert(message);
+                }
+                Ok(hofund_secrets::KeyAuthentication::Unknown) | Err(_) => {}
             }
         }
     } else if authorized(&current_token(app), headers, uri) {
         return Ok(Identity::default());
     }
+    let message = refused.as_deref().unwrap_or("unauthorized");
     let body = match codec {
-        Some(codec) => codec.encode_error(StatusCode::UNAUTHORIZED.as_u16(), "unauthorized"),
-        None => list_error("unauthorized"),
+        Some(codec) => codec.encode_error(StatusCode::UNAUTHORIZED.as_u16(), message),
+        None => list_error(message),
     };
     Err(Box::new(json_response(StatusCode::UNAUTHORIZED, body)))
 }
@@ -2836,6 +2855,7 @@ fn write_usage(
         status: status.as_u16().to_string(),
         caller_key_id: meta.identity.key_id.clone(),
         caller_key_name: meta.identity.key_name.clone(),
+        caller_issuer_id: meta.identity.issuer.clone(),
     };
     let mut details = meta.details;
     if details.uncached_input_tokens.is_none() {
