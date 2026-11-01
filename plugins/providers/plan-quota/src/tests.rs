@@ -1,6 +1,6 @@
 use std::time::{Duration, UNIX_EPOCH};
 
-use hofund_kit_upstream::wiremock::matchers::{header, method, path, query_param};
+use hofund_kit_upstream::wiremock::matchers::{header, header_exists, method, path, query_param};
 use hofund_kit_upstream::wiremock::{Mock, MockServer, ResponseTemplate};
 use hofund_plugin_api::{HostContext, PlanQuery, PluginId};
 use hofund_plugin_sdk::json::{Value, json};
@@ -159,6 +159,37 @@ fn p2_zhipu_reads_windows_team_fallback_and_plan_term() {
             off.0,
             hofund_plugin_sdk::time::parse_rfc3339("2026-12-18T10:00:00+08:00").expect("date")
         );
+
+        let team_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/monitor/usage/quota/limit"))
+            .and(query_param("type", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 200, "success": true,
+                "data": {"level": "team", "limits": [
+                    {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 55}
+                ]}
+            })))
+            .mount(&team_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/monitor/usage/quota/limit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 200, "success": true, "data": {"level": "", "limits": []}
+            })))
+            .mount(&team_server)
+            .await;
+        let fallback = crate::key_plans::read_zhipu(
+            &query(),
+            &host,
+            &format!("{}/api/monitor/usage/quota/limit", team_server.uri()),
+            &team_server.uri(),
+        )
+        .await
+        .expect("Zhipu team plan");
+        assert_eq!(fallback[0].plan(), "GLM Coding Team");
+        assert_eq!(fallback[0].windows().len(), 1);
+        assert_eq!(fallback[0].windows()[0].used(), 55.0);
 
         let team = crate::key_plans::parse_zhipu(br#"{"success":true,"data":{"level":"team","limits":[{"type":"CREDIT_LIMIT","unit":3,"number":0,"percentage":42}]}}"#)
             .expect("team window");
@@ -399,6 +430,10 @@ fn p7_step_fun_reads_windows_term_and_renews_an_expiring_session() {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/step.openapi.devcenter.Dashboard/QueryStepPlanRateLimit"))
+            .and(header(
+                "cookie",
+                format!("Oasis-Token={renewed}...{refresh}").as_str(),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "five_hour_usage_left_rate": 0.6, "five_hour_usage_reset_time": "1790680000",
                 "weekly_usage_left_rate": "0.9", "weekly_usage_reset_time": "1791200000",
@@ -408,6 +443,10 @@ fn p7_step_fun_reads_windows_term_and_renews_an_expiring_session() {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/step.openapi.devcenter.Dashboard/GetStepPlanStatus"))
+            .and(header(
+                "cookie",
+                format!("Oasis-Token={renewed}...{refresh}").as_str(),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"subscription": {"name": "Plus", "expired_at": "1793000000", "auto_renew": true}})))
             .mount(&server)
             .await;
@@ -452,6 +491,7 @@ fn p8_volcengine_signs_and_reads_coding_and_agent_windows() {
         Mock::given(method("POST"))
             .and(path("/"))
             .and(query_param("Action", "GetCodingPlanUsage"))
+            .and(header_exists("x-date"))
             .and(query_param("Version", "2024-01-01"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "ResponseMetadata": {"RequestId": "r1"},
@@ -481,6 +521,7 @@ fn p8_volcengine_signs_and_reads_coding_and_agent_windows() {
         Mock::given(method("POST"))
             .and(path("/"))
             .and(query_param("Action", "GetAFPUsage"))
+            .and(header_exists("x-date"))
             .and(query_param("Version", "2024-01-01"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "ResponseMetadata": {"RequestId": "r2"},
