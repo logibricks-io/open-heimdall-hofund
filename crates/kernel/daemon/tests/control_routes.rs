@@ -283,7 +283,7 @@ async fn provider_ready_reflects_shared_cooldowns() {
         .await;
     let dir = Scratch::new("provider-cooldown");
     let source = format!(
-        "{}[[routes]]\nmodel = \"demo\"\nupstreams = [\"chat\"]\n",
+        "{}[[routes]]\nmodel = \"demo\"\npatience = \"off\"\nupstreams = [\"chat\"]\n",
         provider_config(&server.uri())
     );
     let running = start_tcp(&dir.0, &source).await;

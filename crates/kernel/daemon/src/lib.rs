@@ -807,6 +807,7 @@ fn route_plan(
                             .or_else(|| caps.get(provider.as_str()).copied()),
                         context_window,
                         routing: route.routing.clone(),
+                        patience: route.patience.duration(),
                         weight: upstream.weight.unwrap_or(1),
                         free,
                     });
@@ -820,6 +821,7 @@ fn route_plan(
                         max_output_tokens: upstream.max_output_tokens,
                         context_window: None,
                         routing: route.routing.clone(),
+                        patience: route.patience.duration(),
                         weight: upstream.weight.unwrap_or(1),
                         free: false,
                     });
@@ -1743,6 +1745,24 @@ mod tests {
         assert_eq!(hop.routing, "weight");
         assert_eq!(hop.weight, 3);
         assert!(hop.free);
+    }
+
+    #[test]
+    fn b11_route_plan_carries_the_routes_patience_not_the_providers() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\npatience = \"off\"\n[[routes]]\nmodel = \"demo\"\npatience = 90\nupstreams = [{ provider = \"one\" }]\n[[routes]]\nmodel = \"plain\"\nupstreams = [{ provider = \"one\" }]\n",
+        )
+        .expect("config");
+        let (routes, _) = super::route_plan(&config, None);
+        assert_eq!(
+            routes["demo"][0].patience,
+            Some(std::time::Duration::from_secs(90))
+        );
+        assert_eq!(
+            routes["plain"][0].patience,
+            Some(std::time::Duration::from_secs(60)),
+            "a route's default is 60 seconds whatever its providers say"
+        );
     }
 
     #[test]

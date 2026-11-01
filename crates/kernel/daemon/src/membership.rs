@@ -69,6 +69,7 @@ struct HopSpec {
     max_output_tokens: Option<u64>,
     context_window: Option<u64>,
     routing: String,
+    patience: Option<Duration>,
     weight: u64,
     free: bool,
 }
@@ -292,6 +293,7 @@ fn build_specs(
                 max_output_tokens: hop.max_output_tokens,
                 context_window: hop.context_window,
                 routing: hop.routing,
+                patience: hop.patience,
                 weight: hop.weight,
                 free: hop.free,
             });
@@ -316,6 +318,8 @@ pub(crate) struct PlannedHop {
     /// list, when it is known.
     pub context_window: Option<u64>,
     pub routing: String,
+    /// The route's patience, the same on every hop of one route.
+    pub patience: Option<Duration>,
     pub weight: u64,
     pub free: bool,
 }
@@ -369,7 +373,15 @@ impl Table {
                     })
                     .collect();
                 let routing = specs.first().map_or("smart", |spec| spec.routing.as_str());
-                (model.clone(), Route::new(list).with_routing(routing))
+                let patience = specs
+                    .first()
+                    .map_or(Some(Duration::from_secs(60)), |spec| spec.patience);
+                (
+                    model.clone(),
+                    Route::new(list)
+                        .with_routing(routing)
+                        .with_patience(patience),
+                )
             })
             .collect();
         let policy = self.policy.lock().expect("failover policy").clone();
@@ -1194,6 +1206,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
             }],
@@ -1289,6 +1302,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
             }],
@@ -1375,6 +1389,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
             }],
@@ -1460,6 +1475,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
             }],
@@ -1517,6 +1533,7 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                 },
@@ -1528,6 +1545,7 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                 },
@@ -1566,6 +1584,7 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                 })
@@ -1758,6 +1777,64 @@ mod tests {
         assert_eq!(routed.upstream_id, "first");
         assert_eq!(first_hits.load(Ordering::SeqCst), 2);
         assert_eq!(second_hits.load(Ordering::SeqCst), 3);
+    }
+
+    struct Paused;
+
+    impl hofund_router::WaitHook for Paused {
+        fn wait(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(tokio::time::sleep(duration))
+        }
+
+        fn now(&self) -> std::time::Instant {
+            tokio::time::Instant::now().into_std()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn b11_a_published_route_waits_by_its_own_patience() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                scripted(
+                    "first",
+                    &first_hits,
+                    vec![Err(ProviderError::status(503, "busy")), Ok(raw_ok())],
+                ),
+            ),
+            (
+                "second".to_owned(),
+                scripted(
+                    "second",
+                    &second_hits,
+                    vec![Err(ProviderError::status(503, "busy"))],
+                ),
+            ),
+        ]);
+        // The route's 60 seconds cover the 2-second pause; a 1-second
+        // budget would end the request instead.
+        let (snapshot, _table) = super::open_with_table(
+            &built,
+            route(&["first", "second"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        let routed = snapshot
+            .load()
+            .dispatch_with_wait(
+                &Request::new("demo"),
+                "openai-chat",
+                None,
+                Some(Arc::new(Paused)),
+            )
+            .await
+            .expect("answered after the pause");
+        assert_eq!(routed.upstream_id, "first");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
     }
 
     fn windowed(hops: &[(&str, Option<u64>)]) -> BTreeMap<String, Vec<PlannedHop>> {
