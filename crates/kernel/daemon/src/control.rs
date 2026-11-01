@@ -248,6 +248,19 @@ impl DaemonControl {
                 .keys
                 .set_issuer(&request.id, request.issues)
                 .map_err(key_failure)?,
+            GatewayKeyAction::Limit => self
+                .keys
+                .set_limit(
+                    &request.id,
+                    request.limit.map(stored_limit),
+                    request.index,
+                    unix_now(),
+                )
+                .map_err(key_failure)?,
+            GatewayKeyAction::ResetLimit => self
+                .keys
+                .reset_limits(&request.id, request.index, unix_now())
+                .map_err(key_failure)?,
             GatewayKeyAction::Copy => {
                 secret = Some(self.keys.copy(&request.id).map_err(key_failure)?);
             }
@@ -713,6 +726,14 @@ fn stored_limit(limit: GatewayKeyLimit) -> KeyLimit {
         cache_reads: limit.cache_reads,
         since: limit.since,
     }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 fn key_failure(error: hofund_secrets::SecretError) -> ControlFailure {

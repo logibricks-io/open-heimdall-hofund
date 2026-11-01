@@ -7,6 +7,7 @@ mod commands;
 mod connect;
 mod events;
 mod gateway_key;
+mod gateway_key_limit;
 mod local;
 mod provider;
 mod provider_edit;

@@ -46,6 +46,11 @@ pub trait RawTap: Send {
 
     /// Input and output tokens seen so far.
     fn tokens(&self) -> (Option<i64>, Option<i64>);
+
+    /// Cache-read and cache-write tokens seen so far, when the tap decodes them.
+    fn cache_tokens(&self) -> (Option<i64>, Option<i64>) {
+        (None, None)
+    }
 }
 
 pub(crate) struct DecoderTap {
@@ -54,6 +59,8 @@ pub(crate) struct DecoderTap {
     events: EventBuf<'static>,
     input: Option<i64>,
     output: Option<i64>,
+    cache_read: Option<i64>,
+    cache_write: Option<i64>,
 }
 
 impl DecoderTap {
@@ -80,6 +87,8 @@ impl DecoderTap {
             events: EventBuf::new(paths, client, upstream, cap),
             input: None,
             output: None,
+            cache_read: None,
+            cache_write: None,
         }
     }
 
@@ -91,6 +100,14 @@ impl DecoderTap {
                 _ => None,
             };
             note_usage(usage, &mut self.input, &mut self.output);
+            if let Some(usage) = usage {
+                if let Some(value) = usage.cache_read_tokens {
+                    self.cache_read = i64::try_from(value).ok();
+                }
+                if let Some(value) = usage.cache_write_tokens {
+                    self.cache_write = i64::try_from(value).ok();
+                }
+            }
         }
     }
 }
@@ -128,6 +145,10 @@ impl RawTap for DecoderTap {
 
     fn tokens(&self) -> (Option<i64>, Option<i64>) {
         (self.input, self.output)
+    }
+
+    fn cache_tokens(&self) -> (Option<i64>, Option<i64>) {
+        (self.cache_read, self.cache_write)
     }
 }
 

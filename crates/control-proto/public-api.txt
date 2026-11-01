@@ -204,6 +204,7 @@ GatewayKeyAction::Accounts
 GatewayKeyAction::Add
 GatewayKeyAction::Copy
 GatewayKeyAction::Issuer
+GatewayKeyAction::Limit
 GatewayKeyAction::Models
 GatewayKeyAction::Move
 GatewayKeyAction::Off
@@ -211,6 +212,7 @@ GatewayKeyAction::On
 GatewayKeyAction::Quotas
 GatewayKeyAction::Remove
 GatewayKeyAction::Rename
+GatewayKeyAction::ResetLimit
 GatewayKeyAction::Rotate
 GatewayKeyLimit #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
 GatewayKeyLimit.cache_reads
@@ -224,7 +226,9 @@ GatewayKeyRequest #[non_exhaustive] derives(Clone, PartialEq, Serialize, Deseria
 GatewayKeyRequest.accounts
 GatewayKeyRequest.action
 GatewayKeyRequest.id
+GatewayKeyRequest.index
 GatewayKeyRequest.issues
+GatewayKeyRequest.limit
 GatewayKeyRequest.models
 GatewayKeyRequest.name
 GatewayKeyRequest.place

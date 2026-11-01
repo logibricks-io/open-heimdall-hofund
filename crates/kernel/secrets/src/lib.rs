@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 mod keys;
+mod limits;
 pub use keys::*;
+pub use limits::{LimitWindow, MAX_DAYS, MAX_HOURS, MAX_LIMITS};
 
 /// A failure while resolving or storing a secret.
 #[derive(Debug, Error)]

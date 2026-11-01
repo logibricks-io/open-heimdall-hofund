@@ -21,7 +21,7 @@ const OWN_PREFIX: &str = "hofund_";
 const STORE_NAME: &str = "caller-keys.json";
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
-/// A stored spending-limit description. Enforcement is added by the limits phase.
+/// A stored spending-limit description.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeyLimit {
@@ -76,7 +76,7 @@ pub struct Key {
     pub issuer: String,
     /// Whether this key may issue short-lived keys.
     pub issues: bool,
-    /// Limit descriptions, stored for the limits phase.
+    /// Spending limits enforced by the gateway.
     pub limits: Vec<KeyLimit>,
     /// A removed default remains as a tombstone so migration cannot resurrect it.
     #[serde(skip_serializing_if = "is_false")]
@@ -441,6 +441,28 @@ impl KeyStore {
             key.issues = issues;
             Ok(())
         })
+    }
+
+    /// Sets, appends, or removes one limit. An index of zero replaces the
+    /// first; an index at the current length appends. No index replaces all.
+    pub fn set_limit(
+        &self,
+        id: &str,
+        limit: Option<KeyLimit>,
+        index: Option<usize>,
+        now: i64,
+    ) -> Result<(), SecretError> {
+        self.change(id, |key| super::limits::set_limit(key, limit, index, now))
+    }
+
+    /// Resets one limit, or every limit when `index` is `None`, from `now`.
+    pub fn reset_limits(
+        &self,
+        id: &str,
+        index: Option<usize>,
+        now: i64,
+    ) -> Result<(), SecretError> {
+        self.change(id, |key| super::limits::reset_limits(key, index, now))
     }
 
     /// Rewrites an account reference after an account id or provider-key fingerprint changes.

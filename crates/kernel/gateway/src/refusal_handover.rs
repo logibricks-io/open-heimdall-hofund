@@ -316,7 +316,7 @@ struct State {
 
 impl State {
     fn encode(&mut self, event: &StreamEvent) {
-        note_usage(event, &mut self.record.input, &mut self.record.output);
+        note_usage(event, &mut self.record);
         match self.encoder.push(event) {
             Ok(bytes) => {
                 if !bytes.is_empty() {

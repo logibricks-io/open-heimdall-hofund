@@ -22,6 +22,8 @@ usage: hofund gateway-key [list] [--json]
        hofund gateway-key quotas <id> [on | off]
        hofund gateway-key access <id> [read-only | full]
        hofund gateway-key issuer <id> [on | off]
+       hofund gateway-key limit <id> [--tokens N --cost USD --per WINDOW --days N --hours N --cache-reads --index N]
+       hofund gateway-key reset-limit <id> [N]
 
 Add and rotate print the new secret; copy prints a key's secret again. The
 list shows only a masked form. Secrets are kept readable in caller-keys.json,
@@ -81,6 +83,7 @@ pub(crate) enum Command {
         id: String,
         issues: Option<bool>,
     },
+    Limits(crate::gateway_key_limit::Command),
 }
 
 pub(crate) fn parse(
@@ -91,6 +94,9 @@ pub(crate) fn parse(
     let ["gateway-key", rest @ ..] = words else {
         return Ok(None);
     };
+    if let Some(command) = crate::gateway_key_limit::parse(words, &secret, json)? {
+        return Ok(Some(Command::Limits(command)));
+    }
     let (action, args) = rest.split_first().unwrap_or((&"list", &[][..]));
     let action = *action;
     let one = |_action: &str| -> Result<String, String> {
@@ -179,6 +185,9 @@ fn on_off(value: &str) -> Result<bool, String> {
 
 pub(crate) async fn run(config: &Path, command: &Command) -> Result<String, String> {
     let client = client(config).await?;
+    if let Command::Limits(command) = command {
+        return crate::gateway_key_limit::run(&client, command).await;
+    }
     if let Command::List { json } = command {
         let response = client.gateway_keys().await.map_err(failure)?;
         return if *json {
@@ -344,7 +353,9 @@ fn mutation(command: &Command) -> Result<(GatewayKeyRequest, String, Verb), Stri
             request.issues = issues.unwrap_or(false);
             return Ok((request.for_id(id), id.clone(), Verb::Issuer));
         }
-        Command::List { .. } => return Err("not a gateway-key mutation".to_owned()),
+        Command::List { .. } | Command::Limits(_) => {
+            return Err("not a gateway-key mutation".to_owned());
+        }
     };
     Ok((GatewayKeyRequest::new(action).for_id(id), id.clone(), verb))
 }
@@ -435,7 +446,7 @@ fn list_table(keys: &[GatewayKey]) -> String {
             key.accounts.join(",")
         };
         let access = if key.read_only { "read-only" } else { "full" };
-        let limit = if key.limits.is_empty() { "-" } else { "stored" };
+        let limit = crate::gateway_key_limit::column(key);
         let until = key
             .expires
             .map_or_else(|| "-".to_owned(), |value| value.to_string());
