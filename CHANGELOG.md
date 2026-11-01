@@ -54,6 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the default sharing key stays full. The static `/me` page provides
   placeholder-by-default agent setup, and `/v1/hofund/me` reports only the
   calling key's limits, usage, top models, and allowed models without secrets.
+- Routing group details (P0-2d, #497, #498): providers can fall back to a whole
+  `group/<id>` with per-request deduplication, and routes can nest groups up to
+  eight levels with load-time cycle checks. Subscriptions and nested groups are
+  single weighted units with their own routing and account weights; affinity
+  moves the weighted charge to the member that actually answered. Optional
+  `sink = true` moves rate-limited members with quota left behind their peers
+  until restart or manual clear, including within nested groups. Free routing
+  re-reads provider cache facts and subscription model lists per request, so
+  refreshed free flags and all-zero prices take effect immediately.
 - Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
   secret readable, as the reference does, so `gateway-key copy` shows a key
   again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,

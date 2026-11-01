@@ -157,6 +157,7 @@ fn router_with_windows(members: Vec<(Arc<dyn Member>, Option<u64>)>) -> Router {
             fallback: false,
             effort: String::new(),
             cold_after: hofund_router::affinity::CACHE_COLD,
+            units: Vec::new(),
         })
         .collect();
     Router::from_hops(

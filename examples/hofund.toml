@@ -105,15 +105,18 @@ api_key = "replace-me-too"
 # base_url = "my-resource"
 # api_key = "env:AZURE_OPENAI_API_KEY"
 
-# Routing defaults to smart. order, rotate, weight, and free are implemented;
-# smart, usage, pace, fast, and cheap currently keep the listed order until
-# P0-2b. cheap is valid only on a multi-upstream or subscription group.
-# Weights are integers of at least 1; omitted and 1 are the default. Provider
-# free = true marks every model free; cached catalog free flags and all-zero
-# prices are used otherwise. Account weights go in [subscriptions.account_weights]
-# with lower-cased account ids as keys. hofund routes prints the strategy and
-# stays names. stays is auto, session, turn, off, or strict. A single-target
-# route without stays inherits the provider or subscription setting.
+# Routing defaults to smart. order, rotate, usage, pace, weight, free, fast,
+# and cheap are also implemented. cheap is valid only on a multi-upstream,
+# subscription, or nested group. Weights are integers of at least 1; omitted
+# and 1 are the default. Provider free = true marks every model free; cached
+# catalog free flags and all-zero prices are used otherwise and re-read on
+# each free-routed request. Account weights go in
+# [subscriptions.account_weights] with lower-cased account ids as keys; the
+# subscription's own routing orders its accounts as one unit of the route.
+# hofund routes prints the strategy and stays names. stays is auto, session,
+# turn, off, or strict. A single-target route without stays inherits the
+# provider or subscription setting. Set sink = true to move rate-limited
+# members with quota left behind their peers until restart or manual clear.
 # stays = "auto"
 [[routes]]
 model = "demo"
@@ -125,3 +128,17 @@ upstreams = [{ provider = "primary", weight = 3 }, "backup"]
 # patience applies to its members; their providers' own patience is only for
 # direct requests. Set seconds up to 240, or "off" to fail at once.
 # patience = 60
+#
+# A named group can contain another group, and a provider can fall back to a
+# whole group. Group targets cannot override model or max_output_tokens.
+# [[routes]]
+# model = "group/backup"
+# routing = "order"
+# upstreams = [{ provider = "backup", model = "fallback-model" }]
+# [[routes]]
+# model = "group/nested"
+# routing = "weight"
+# upstreams = [{ group = "backup", weight = 2 }, { provider = "primary", model = "main-model" }]
+# [[providers]]
+# id = "primary"
+# fallback = ["group/backup"]

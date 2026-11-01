@@ -88,6 +88,7 @@ fn fixture() -> Fixture {
             nearly_spent: false,
             fallback: false,
             effort: String::new(),
+            units: Vec::new(),
         }],
     )]);
     let token = store.token_file().read().expect("token");
