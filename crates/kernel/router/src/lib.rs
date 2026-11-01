@@ -1,8 +1,9 @@
 //! Ordered routing and failover across members.
 //!
 //! A model name maps to an ordered list of members. The next member is tried
-//! only when the current one fails before any content stream event or raw
-//! chunk has been produced. This crate does not name vendors or the plugin
+//! when the current one fails before any content stream event or raw chunk has
+//! been produced. A successful result also carries the untried route so the
+//! gateway can resume it after a thinking-only refusal. This crate does not name vendors or the plugin
 //! upstream and host types, and it does not read quirk data. It does not
 //! depend on `tower`.
 //! The daemon adapts each member into a service and wraps that service in the
@@ -58,8 +59,9 @@ impl FailoverPolicy {
     ///
     /// Overflow is ruled out first. Listed statuses, transport failures, credit
     /// refusals, and the body-word classes then follow their independent rules.
-    /// Failover occurs only before a completion or first content stream event
-    /// is returned (`reference: internal/gateway/fallback.go:1487-1517`).
+    /// This policy judges failures before a completion or first content stream
+    /// event is returned (`reference: internal/gateway/fallback.go:1487-1517`).
+    /// A gateway resuming a route makes the separate thinking-only refusal decision.
     #[must_use]
     pub fn allows(&self, error: &PluginError) -> bool {
         decision::allows(error, self.connect_errors, &self.statuses)
@@ -295,92 +297,22 @@ impl Router {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         resolved.hops = self.order_hops(&resolved);
-        let policy = self.policy.clone();
-        let input_tokens = estimate_input_tokens(request);
-        let mut last = None;
-        let mut refused_providers = BTreeSet::new();
-        let mut outgrown = Vec::<(String, String)>::new();
-        let mut needs_room = None;
-        for (index, hop) in resolved.hops.iter().enumerate() {
-            let mut attempt = request.clone();
-            apply_wire(&mut attempt, hop, &resolved.bare);
-            let upstream_model = attempt.model.clone();
-            if refused_providers.contains(hop.member.route_id())
-                || outgrown.iter().any(|(route, model)| {
-                    route == hop.member.route_id() && *model == upstream_model
-                })
-                || needs_room.is_some_and(|tokens| {
-                    hop.context_window
-                        .is_some_and(|window| window > 0 && tokens >= window)
-                })
-            {
-                continue;
-            }
-            let info = Attempt {
-                member: hop.member.attempt(),
-                inbound_protocol: inbound_protocol.to_owned(),
-            };
-            if let Some(hook) = hook.as_ref()
-                && let Err(error) = hook.before(&info)
-            {
-                return Err(match error {
-                    AttemptError::PreviousResponseNotFound { id } => {
-                        RouterError::PreviousResponseNotFound { id }
-                    }
-                });
-            }
-            let result = call_member(hop, index, inbound_protocol, attempt, hook.clone()).await;
-            match result {
-                Ok(completion) => {
-                    if let Some(hook) = hook.as_ref() {
-                        hook.answered(&info);
-                    }
-                    let completion = if asked == upstream_model {
-                        completion
-                    } else {
-                        label_model(completion, asked)
-                    };
-                    return Ok(Routed {
-                        upstream_id: hop.member.route_id().to_owned(),
-                        upstream_model,
-                        completion,
-                    });
-                }
-                Err(error) => {
-                    let upstream_id = hop.member.route_id().to_owned();
-                    let inferred = decision::too_long_unsaid(
-                        &error,
-                        input_tokens,
-                        hop.context_window,
-                        &upstream_model,
-                        &upstream_id,
-                    );
-                    let error = inferred.unwrap_or(error);
-                    if decision::outgrown(&error) {
-                        // As long on every account of this model; another
-                        // member not known to be too small may hold it.
-                        if error.status() != Some(413) {
-                            needs_room = Some(input_tokens);
-                        }
-                        outgrown.push((upstream_id.clone(), upstream_model));
-                        last = Some((upstream_id, error));
-                        continue;
-                    }
-                    if decision::skips_provider(&error) {
-                        // Every account of the provider refuses the same
-                        // content; another provider is asked once.
-                        refused_providers.insert(upstream_id.clone());
-                    } else if !decision::asks_next(&error) && !policy.allows(&error) {
-                        return Err(RouterError::Upstream { upstream_id, error });
-                    }
-                    last = Some((upstream_id, error));
-                }
-            }
+        DispatchState {
+            asked,
+            request: request.clone(),
+            inbound_protocol: inbound_protocol.to_owned(),
+            hook,
+            resolved,
+            policy: self.policy.clone(),
+            input_tokens: estimate_input_tokens(request),
+            last: None,
+            refused_providers: BTreeSet::new(),
+            outgrown: Vec::new(),
+            needs_room: None,
+            missing_detail: self.models().join(", "),
         }
-        match last {
-            Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
-            None => Err(self.missing(&request.model)),
-        }
+        .run(0)
+        .await
     }
 
     /// Counts input tokens for `request`.
@@ -639,6 +571,147 @@ impl Router {
     }
 }
 
+struct DispatchState {
+    asked: String,
+    request: Request,
+    inbound_protocol: String,
+    hook: Option<Arc<dyn AttemptHook>>,
+    resolved: Resolved,
+    policy: FailoverPolicy,
+    input_tokens: u64,
+    last: Option<(String, PluginError)>,
+    refused_providers: BTreeSet<String>,
+    outgrown: Vec<(String, String)>,
+    needs_room: Option<u64>,
+    missing_detail: String,
+}
+
+impl DispatchState {
+    async fn run(mut self, start: usize) -> Result<Routed, RouterError> {
+        for index in start..self.resolved.hops.len() {
+            let hop = self.resolved.hops[index].clone();
+            let mut attempt = self.request.clone();
+            apply_wire(&mut attempt, &hop, &self.resolved.bare);
+            let upstream_model = attempt.model.clone();
+            if self.refused_providers.contains(hop.member.route_id())
+                || self.outgrown.iter().any(|(route, model)| {
+                    route == hop.member.route_id() && *model == upstream_model
+                })
+                || self.needs_room.is_some_and(|tokens| {
+                    hop.context_window
+                        .is_some_and(|window| window > 0 && tokens >= window)
+                })
+            {
+                continue;
+            }
+            let info = Attempt {
+                member: hop.member.attempt(),
+                inbound_protocol: self.inbound_protocol.clone(),
+            };
+            if let Some(hook) = self.hook.as_ref()
+                && let Err(error) = hook.before(&info)
+            {
+                return Err(match error {
+                    AttemptError::PreviousResponseNotFound { id } => {
+                        RouterError::PreviousResponseNotFound { id }
+                    }
+                });
+            }
+            let result = call_member(
+                &hop,
+                index,
+                &self.inbound_protocol,
+                attempt,
+                self.hook.clone(),
+            )
+            .await;
+            match result {
+                Ok(completion) => {
+                    if let Some(hook) = self.hook.as_ref() {
+                        hook.answered(&info);
+                    }
+                    let completion = if self.asked == upstream_model {
+                        completion
+                    } else {
+                        label_model(completion, self.asked.clone())
+                    };
+                    let continuation =
+                        (index + 1 < self.resolved.hops.len()).then(|| RouteContinuation {
+                            state: self,
+                            next: index + 1,
+                        });
+                    return Ok(Routed {
+                        upstream_id: hop.member.route_id().to_owned(),
+                        upstream_model,
+                        completion,
+                        continuation,
+                    });
+                }
+                Err(error) => {
+                    let upstream_id = hop.member.route_id().to_owned();
+                    let inferred = decision::too_long_unsaid(
+                        &error,
+                        self.input_tokens,
+                        hop.context_window,
+                        &upstream_model,
+                        &upstream_id,
+                    );
+                    let error = inferred.unwrap_or(error);
+                    if decision::outgrown(&error) {
+                        // As long on every account of this model; another
+                        // member not known to be too small may hold it.
+                        if error.status() != Some(413) {
+                            self.needs_room = Some(self.input_tokens);
+                        }
+                        self.outgrown.push((upstream_id.clone(), upstream_model));
+                        self.last = Some((upstream_id, error));
+                        continue;
+                    }
+                    if decision::skips_provider(&error) {
+                        // Every account of the provider refuses the same
+                        // content; another provider is asked once.
+                        self.refused_providers.insert(upstream_id.clone());
+                    } else if !decision::asks_next(&error) && !self.policy.allows(&error) {
+                        return Err(RouterError::Upstream { upstream_id, error });
+                    }
+                    self.last = Some((upstream_id, error));
+                }
+            }
+        }
+        match self.last {
+            Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
+            None => {
+                let detail = if self.missing_detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(". Routes: {}", self.missing_detail)
+                };
+                Err(RouterError::NoRoute {
+                    model: self.request.model,
+                    detail,
+                })
+            }
+        }
+    }
+}
+
+/// The untried remainder of a route after a streamed member refuses.
+pub struct RouteContinuation {
+    state: DispatchState,
+    next: usize,
+}
+
+impl RouteContinuation {
+    /// Asks the remaining members in their existing routing order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Router::dispatch`].
+    pub async fn dispatch(self) -> Result<Routed, RouterError> {
+        self.state.run(self.next).await
+    }
+}
+
 /// A successful dispatch.
 pub struct Routed {
     /// Id of the provider that produced the completion.
@@ -649,6 +722,14 @@ pub struct Routed {
     /// The completion. A stream has produced its first content event, a raw
     /// body its first chunk, or either ended empty. An earlier failure is not returned here.
     pub completion: Completion,
+    continuation: Option<RouteContinuation>,
+}
+
+impl Routed {
+    /// Takes the untried remainder, leaving no continuation in this result.
+    pub fn take_continuation(&mut self) -> Option<RouteContinuation> {
+        self.continuation.take()
+    }
 }
 
 /// A forwarded call a member answered.

@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call and result ids, and checks required tool choices (D-12). Generative
   Language `thinkingConfig` now records levels and budgets as request effort,
   including snake_case fields and dynamic budgets (D-13).
+- Thinking-only refusal handover (P0-3b3 b9, #496): streamed Anthropic
+  Messages, Chat Completions, and Responses requests now try the next member
+  after a refusal or refusal error when only reasoning has been emitted, then
+  splice that member's answer into the same reply. Anthropic blocks are closed
+  and reindexed, Responses start frames are dropped while output and sequence
+  indexes continue, and Chat chunks pass through. Text or tool output commits
+  the stream, last-member and no-output behavior is unchanged, repeated
+  handovers accumulate indexes, and policy refusals do not cool the member.
 - Measurement routing (P0-2b): `smart`, `usage`, `pace`, `fast`, and `cheap`
   now use live allowance, token, speed, and price measurements. Smart handles
   allowance tiers, renewals, credit lapse and spending, and per-provider/unit
