@@ -182,6 +182,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-cli" => &[],
         "hofund-codec" => &[],
         "hofund-config" => &[],
+        "hofund-model-catalog" => &[],
         "hofund-control-client" => &[],
         "hofund-control-proto" => &[],
         "hofund-desktop" => &[],
@@ -193,7 +194,9 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-daemon-bin" => &[],
         "hofund-gateway" => &[
             "hofund-codec",
+            "hofund-config",
             "hofund-ir",
+            "hofund-model-catalog",
             "hofund-plugin-api",
             "hofund-router",
             "hofund-secrets",
@@ -282,6 +285,8 @@ const VENDOR_SCAN_PENDING: &[&str] = &[
     "crates/kernel/config",
     // Daemon wiring for vendor plugins, sign-in, and model listing.
     "crates/kernel/daemon",
+    // models.dev provider keys and catalog-specific reasoning toggles.
+    "crates/kernel/model-catalog",
     // Protocol ids and the wire contract.
     "crates/kernel/plugin-api",
     "crates/kernel/plugin-host",
@@ -408,6 +413,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-kit-agent",
         "hofund-kit-subscription",
         "hofund-kit-upstream",
+        "hofund-model-catalog",
         "hofund-plugin-api",
         "hofund-plugin-azure",
         "hofund-plugin-bedrock",

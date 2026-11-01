@@ -17,8 +17,8 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 const FIXTURE: &str = r#"{
-  "openai": {
-    "id": "openai",
+  "acme": {
+    "id": "acme",
     "models": {
       "demo": {
         "id": "demo",
@@ -53,7 +53,7 @@ impl Member for ListedMember {
     }
 
     fn protocol(&self) -> &str {
-        "openai-chat"
+        "demo-chat"
     }
 
     async fn execute(&self, _: ModelRequest, _: &str) -> Result<Completion, PluginError> {

@@ -1260,7 +1260,7 @@ mod tests {
     }
 
     fn test_config() -> hofund_config::Config {
-        use hofund_config::{Accounts, Failover, Stays, Subscription};
+        use hofund_config::{Accounts, CatalogSettings, Failover, Stays, Subscription};
         hofund_config::Config {
             listen: "127.0.0.1:3425".parse().expect("addr"),
             token_file: String::new(),
@@ -1280,6 +1280,7 @@ mod tests {
                 options: BTreeMap::new(),
             }],
             warnings: Vec::new(),
+            catalog: CatalogSettings::default(),
         }
     }
 

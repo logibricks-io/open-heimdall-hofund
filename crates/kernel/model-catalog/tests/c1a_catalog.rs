@@ -34,8 +34,8 @@ impl CatalogFetcher for MockFetcher {
 }
 
 const FIXTURE: &str = r#"{
-  "openai": {
-    "id": "openai",
+  "acme": {
+    "id": "acme",
     "models": {
       "gpt-demo": {
         "id": "gpt-demo",
