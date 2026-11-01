@@ -60,7 +60,7 @@ static SPEC: UpstreamSpec = UpstreamSpec::from_static(
 
 /// The address suffixes [`root`] strips. None ends with another, so at most
 /// one matches and the order does not matter. reference: internal/provider remote gateway endpoints, lines 91-97
-const SUFFIXES: [&str; 13] = [
+const SUFFIXES: [&str; 14] = [
     "/v1/messages/count_tokens",
     "/v1/messages",
     "/v1/chat/completions",
@@ -70,6 +70,7 @@ const SUFFIXES: [&str; 13] = [
     "/v1/rerank",
     "/v1/audio/transcriptions",
     "/v1/audio/translations",
+    "/v1/audio/speech",
     "/v1/images/generations",
     "/v1/images/edits",
     "/v1/videos",

@@ -65,7 +65,7 @@ fn has(names: &[String], name: &str) -> bool {
 }
 
 #[test]
-fn the_address_is_put_at_the_gateway_root_however_it_was_typed() {
+fn p1_4_12_auxiliary_route_surface() {
     for (typed, expected) in [
         ("192.168.1.20:3425", ROOT),
         ("  http://192.168.1.20:3425/  ", ROOT),
@@ -80,6 +80,7 @@ fn the_address_is_put_at_the_gateway_root_however_it_was_typed() {
         ("http://192.168.1.20:3425/v1/rerank", ROOT),
         ("http://192.168.1.20:3425/v1/audio/transcriptions", ROOT),
         ("http://192.168.1.20:3425/v1/audio/translations", ROOT),
+        ("http://192.168.1.20:3425/v1/audio/speech", ROOT),
         ("http://192.168.1.20:3425/v1/images/generations", ROOT),
         ("http://192.168.1.20:3425/v1/images/edits", ROOT),
         ("http://192.168.1.20:3425/v1/videos", ROOT),

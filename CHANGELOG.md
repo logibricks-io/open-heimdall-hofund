@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Text-to-speech retrieval (P1-4): `POST /v1/audio/speech` and
+  `POST /audio/speech` forward OpenAI-shaped JSON through the existing routed
+  retrieval seam, changing only the member's model id. Audio, SSE, and vendor
+  JSON responses stream incrementally with the upstream content type; SSE
+  `speech.audio.done` usage is read from the final 16 KiB, vendor errors and
+  pre-byte failover retain the other retrieval routes' behavior, and recent
+  calls use operation `speech`.
 - Conversation affinity now returns fallback, ordered-group, and stand-in
   answerers to earlier ready members at the next user turn without crossing
   tool-loop or strict-stay boundaries (P0-2c2, D-14, D-25). Rotate and
