@@ -3,7 +3,8 @@
   "models": [
     {
       "id": "default",
-      "routing": "weight"
+      "routing": "weight",
+      "stays": "auto"
     }
   ]
 }

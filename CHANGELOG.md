@@ -123,6 +123,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are registered and validated at configuration load. Ready members retain
   strategy order before the single cooling probe, and
   `hofund routes` prints each route's strategy.
+- Conversation stays (P0-2c1): providers, subscriptions, and routes accept
+  `stays = "auto" | "session" | "turn" | "off" | "strict"`. Automatic affinity
+  keeps tool turns and useful warm prompt caches, with silent cache-write
+  accounting and one-hour cache variants; strict mode keeps its answerer through
+  rests, spent allowance, and broken replies. Conversation keys distinguish
+  Claude Code subagents, sealed-reasoning refusals get one cleaned retry and
+  per-member filtering, and the latest 512 sticks persist atomically in
+  `affinity.json` with write-behind and a shutdown flush. `hofund routes` now
+  prints the effective stays mode. Return-to-main/order and session spreading
+  remain for P0-2c2.
 
 - Credit-rest ladders and persistence (P0-3b1): API-key credit refusals now
   climb 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, and a repeating 7-day

@@ -40,7 +40,10 @@ use endpoints::{
     GENERATIVE_CATCHALL, inject_target, match_count, match_generate, percent_decode, query_key,
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
-use hofund_codec::{Codec, StreamEncoder, compacts_in_stream_client};
+use hofund_codec::{
+    Codec, SESSION_HEADERS, SUBAGENT_HEADER, StreamEncoder, compacts_in_stream_client,
+    conversation_key, turn_in,
+};
 use hofund_ir::{Request as ModelRequest, StreamEvent, too_long, words_of};
 use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
@@ -1286,6 +1289,19 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     );
     let router = app.snapshot.load();
     let attempt = ask.as_ref().map(|ask| ask.attempt());
+    let mut identity_headers = Vec::new();
+    for name in SESSION_HEADERS.iter().copied().chain([SUBAGENT_HEADER]) {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            identity_headers.push((name, value));
+        }
+    }
+    let turn = turn_in(&model_request);
+    let conversation = hofund_router::affinity::Conversation::new(
+        conversation_key(&model_request.model, &identity_headers, &bytes),
+        turn.number,
+        turn.within,
+    )
+    .with_body(bytes.to_vec());
     let (wait, notice) = GatewayWait::channel();
     let mut dispatch: DispatchFuture = Box::pin({
         let request = model_request.clone();
@@ -1293,7 +1309,14 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         let scope = route_scope(&identity);
         async move {
             router
-                .dispatch_scoped_with_wait(&request, &protocol, Some(&scope), attempt, Some(wait))
+                .dispatch_scoped_conversation_with_wait(
+                    &request,
+                    &protocol,
+                    Some(&scope),
+                    Some(&conversation),
+                    attempt,
+                    Some(wait),
+                )
                 .await
         }
     });

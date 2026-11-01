@@ -474,6 +474,7 @@ ResyncRequiredEvent.topic
 RouteModel #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 RouteModel.id
 RouteModel.routing
+RouteModel.stays
 RouteModelListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 RouteModelListResponse.models
 RouteModelListResponse.version

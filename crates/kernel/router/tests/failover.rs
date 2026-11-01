@@ -153,6 +153,8 @@ fn router_with_windows(members: Vec<(Arc<dyn Member>, Option<u64>)>) -> Router {
             patience: Some(std::time::Duration::from_secs(60)),
             weight: 1,
             free: false,
+            nearly_spent: false,
+            cold_after: hofund_router::affinity::CACHE_COLD,
         })
         .collect();
     Router::from_hops(
