@@ -20,6 +20,7 @@ const MEMBERS: &[&str] = &[
     "crates/kernel/agent",
     "crates/kernel/codec",
     "crates/kernel/config",
+    "crates/kernel/model-catalog",
     "crates/control-client",
     "crates/control-proto",
     "crates/kernel/daemon",
@@ -62,9 +63,15 @@ const MEMBERS: &[&str] = &[
 fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &["hofund-config", "hofund-plugin-api"],
-        "hofund-cli" => &["hofund-config", "hofund-control-client", "hofund-secrets"],
+        "hofund-cli" => &[
+            "hofund-config",
+            "hofund-control-client",
+            "hofund-model-catalog",
+            "hofund-secrets",
+        ],
         "hofund-codec" => &["hofund-ir"],
         "hofund-config" => &[],
+        "hofund-model-catalog" => &["hofund-config"],
         "hofund-control-client" => &["hofund-control-proto"],
         "hofund-control-proto" => &[],
         "hofund-daemon-bin" => &[
@@ -79,6 +86,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-config",
             "hofund-control-proto",
             "hofund-gateway",
+            "hofund-model-catalog",
             "hofund-plugin-api",
             "hofund-plugin-host",
             "hofund-plugin-registry",
@@ -93,6 +101,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-codec",
             "hofund-control-proto",
             "hofund-ir",
+            "hofund-model-catalog",
             "hofund-plugin-api",
             "hofund-plugin-host",
             "hofund-router",

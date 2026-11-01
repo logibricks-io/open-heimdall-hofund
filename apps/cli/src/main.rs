@@ -11,6 +11,7 @@ mod gateway_key_issue;
 mod gateway_key_limit;
 mod gateway_key_oidc;
 mod local;
+mod models;
 mod provider;
 mod provider_edit;
 mod quota;
@@ -94,6 +95,8 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             }
             Command::GatewayKey(command) => gateway_key::run(config, &command).await,
             Command::ProviderList => provider::list(config).await,
+            Command::Models { model } => models::list(config, model.as_deref()).await,
+            Command::ModelsRefresh => models::refresh(config).await,
             Command::ProviderShow { id } => provider::show(config, &id).await,
             Command::ProviderTest { id, models } => provider::test(config, &id, &models).await,
             Command::ProviderRefresh { id } => provider::refresh(config, &id).await,
@@ -175,6 +178,11 @@ enum Command {
     Subscription(SubscriptionCommand),
     /// `quota`, `quota history`, and `quota wait`.
     Quota(quota::QuotaCommand),
+    /// `models` and `models refresh`.
+    Models {
+        model: Option<String>,
+    },
+    ModelsRefresh,
     ProviderList,
     ProviderShow {
         id: String,
@@ -412,6 +420,11 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
+        },
+        ["models", "refresh"] => Command::ModelsRefresh,
+        ["models"] => Command::Models { model: None },
+        ["models", model] => Command::Models {
+            model: Some((*model).to_owned()),
         },
         ["provider", "list"] => Command::ProviderList,
         ["provider", "show", id] => Command::ProviderShow {
@@ -737,6 +750,8 @@ commands:
   quota [<provider>...] [--json]  print what is left of each subscription
   quota wait <provider|account> [--timeout <duration>] [--quiet]
   quota history [<provider|account>...] [--days <n>] [--json]
+  models [<model>]                show catalog spec and prices for route models
+  models refresh                  refetch the models.dev catalog cache
   provider list                   list providers
   provider show <id>              print a provider, its listed models and picks
   provider test <id> [<model>...] probe a provider's models

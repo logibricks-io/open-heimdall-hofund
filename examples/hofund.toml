@@ -11,6 +11,20 @@
 
 listen = "127.0.0.1:3425"
 
+# Optional models.dev catalog settings. The cache lives under `.hofund/catalog/`
+# beside this file. Overrides win over the fetched catalog.
+# [catalog]
+# mirror = "https://models.dev/api.json"
+# refresh = "24h"
+# poll = "1h"
+#
+# [[catalog.overrides]]
+# model = "demo"
+# context = 128000
+# output = 8192
+# vision = true
+# reasoning_levels = ["low", "medium", "high"]
+
 [[providers]]
 id = "primary"
 protocol = "openai-chat"

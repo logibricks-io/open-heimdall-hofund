@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicU64;
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
 use hofund_config::{Config, ConfigError, Fallback, UpstreamTarget, Value, load_path};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
+use hofund_model_catalog::{ModelCatalog, ReqwestFetcher};
 use hofund_plugin_api::{
     AgentDescription, BuildContext, DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue,
     UpstreamProvider,
@@ -430,6 +431,20 @@ async fn start_inner(
     key_store.list().map_err(show)?;
     let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
     let usage = Arc::new(Ledger::open(&beside(path, &config.usage_file)).map_err(show)?);
+    let data_root = catalog_data_root(path, control_session.as_ref());
+    let catalog_fetcher = Arc::new(ReqwestFetcher::new().map_err(|error| show(error.to_string()))?);
+    let model_catalog = ModelCatalog::open(&data_root, config.catalog.clone(), catalog_fetcher)
+        .map_err(|error| show(error.to_string()))?;
+    if model_catalog.stale() {
+        let refresh = Arc::clone(&model_catalog);
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || refresh.refresh()).await;
+            if let Ok(Err(error)) = result {
+                tracing::warn!(?error, "initial model catalog refresh failed");
+            }
+        });
+    }
+    let _catalog_refresh = model_catalog.spawn_background();
     let runtime = runtime::Runtime::new(Arc::clone(&registry), path, max_idle_per_host);
     let mut models_host = ModelsHost::new(config.connect_timeout, config.read_timeout)
         .with_state_root(beside(path, ".hofund"))
@@ -463,6 +478,7 @@ async fn start_inner(
         Arc::clone(&usage),
     ));
     gateway = gateway.with_quotas(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
+    gateway = gateway.with_model_catalog(model_catalog);
     if let Some(bus) = &control_bus {
         gateway = gateway.with_request_events(
             Arc::new(events::RequestBridge::new(Arc::clone(bus))),
@@ -2034,6 +2050,15 @@ fn beside(config_path: &Path, value: &str) -> PathBuf {
             .unwrap_or_else(|| Path::new("."))
             .join(path)
     }
+}
+
+fn catalog_data_root(
+    config_path: &Path,
+    control_session: Option<&control_local::ControlSession>,
+) -> PathBuf {
+    control_session
+        .map(control_local::ControlSession::state_root)
+        .unwrap_or_else(|| beside(config_path, ".hofund"))
 }
 
 fn show<E: std::fmt::Display>(error: E) -> DaemonError {
