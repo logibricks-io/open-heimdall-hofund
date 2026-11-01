@@ -557,10 +557,13 @@ api_key = "k"
 model = "m"
 upstreams = ["p"]
 [agents.visible]
-Codex = ["p"]
+Fixture-Agent = [" p ", "p", "", "q"]
 "#,
         )
         .expect("loads mixed case key");
-        assert!(err.agents.visible.contains_key("codex"));
+        assert_eq!(
+            err.agents.visible.get("fixture-agent"),
+            Some(&vec!["p".to_owned(), "q".to_owned()])
+        );
     }
 }

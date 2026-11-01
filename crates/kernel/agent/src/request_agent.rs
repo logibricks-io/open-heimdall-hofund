@@ -234,4 +234,36 @@ mod tests {
         let unmatched = [("user-agent", "unmatched/1.0")];
         assert_eq!(request_agent_id(unmatched, "other", &[&AGENT]), None);
     }
+
+    static PREFIXED: AgentDescription =
+        description("prefixed-agent", "pa").with_client_prefixes(&["acp-ext"]);
+
+    static BINARY: AgentDescription = description("binary-agent", "binx");
+
+    static UPPER: AgentDescription =
+        description("upper-agent", "upper").with_request_agent_header("X-Upper-Agent-Id");
+
+    #[test]
+    fn g2_18_prefixes_binary_header_case_and_blank_header() {
+        let prefixed = [("user-agent", "acp-ext-tool/1")];
+        assert_eq!(
+            request_agent_id(prefixed, "gateway", &[&PREFIXED]),
+            Some("prefixed-agent".to_owned())
+        );
+        let binary = [("user-agent", "binx-cli/2")];
+        assert_eq!(
+            request_agent_id(binary, "gateway", &[&BINARY]),
+            Some("binary-agent".to_owned())
+        );
+        let upper = [("x-upper-agent-id", "upper-agent")];
+        assert_eq!(
+            request_agent_id(upper, "gateway", &[&UPPER]),
+            Some("upper-agent".to_owned())
+        );
+        let blank = [("x-fixture-agent-id", "  "), ("user-agent", "fixture/1.0")];
+        assert_eq!(
+            request_agent_id(blank, "gateway", &[&HOST, &AGENT]),
+            Some("fixture-agent".to_owned())
+        );
+    }
 }
