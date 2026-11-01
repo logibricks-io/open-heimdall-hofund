@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use hofund_config::user_config_path;
+use hofund_control_client::hofund_control_proto::ProviderKeyAction;
 use subscription::{SubscriptionCommand, SubscriptionFlags};
 
 fn main() -> ExitCode {
@@ -98,6 +99,16 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::ProviderAdd { id, pairs } => provider_edit::add(config, &id, &pairs).await,
             Command::ProviderSet { id, pairs } => provider_edit::set(config, &id, &pairs).await,
             Command::ProviderKey { id, key } => provider_edit::key(config, &id, &key).await,
+            Command::ProviderKeys { id } => provider::keys(config, &id).await,
+            Command::ProviderKeyAdd { id, keys, protocol } => {
+                provider::key_add(config, &id, &keys, &protocol).await
+            }
+            Command::ProviderKeyEdit {
+                id,
+                action,
+                key_id,
+                value,
+            } => provider::key_edit(config, &id, action, &key_id, &value).await,
             Command::ProviderRemove { id } => provider_edit::remove(config, &id).await,
             Command::ProviderRefreshEvery { id, interval } => {
                 provider_edit::refresh_every(config, &id, interval.as_deref()).await
@@ -190,6 +201,20 @@ enum Command {
         id: String,
         key: String,
     },
+    ProviderKeys {
+        id: String,
+    },
+    ProviderKeyAdd {
+        id: String,
+        keys: Vec<String>,
+        protocol: String,
+    },
+    ProviderKeyEdit {
+        id: String,
+        action: ProviderKeyAction,
+        key_id: String,
+        value: String,
+    },
     /// `provider rm`, `remove`, and `delete`.
     ProviderRemove {
         id: String,
@@ -254,6 +279,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut flags = SubscriptionFlags::default();
     let mut words = Vec::new();
     let mut operands_only = false;
+    let mut key_protocol = None;
     let mut iter = arguments.iter();
     while let Some(argument) = iter.next() {
         if operands_only {
@@ -270,6 +296,12 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             }
             other if words.first() == Some(&"quota") && !matches!(other, "-h" | "--help") => {
                 words.push(other);
+            }
+            "--protocol" if words.starts_with(&["provider", "key-add"]) => {
+                let protocol = iter
+                    .next()
+                    .ok_or_else(|| "--protocol needs a protocol".to_owned())?;
+                key_protocol = Some(protocol.as_str());
             }
             "--dry-run" => dry_run = true,
             "--force" => force = true,
@@ -302,6 +334,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             }
             other => words.push(other),
         }
+    }
+    if let Some(protocol) = key_protocol {
+        let at = 3.min(words.len());
+        words.splice(at..at, ["--protocol", protocol]);
     }
     let config = config.unwrap_or_else(user_config_path);
     if help || words.first() == Some(&"help") {
@@ -404,6 +440,67 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["provider", "key", id, key] => Command::ProviderKey {
             id: (*id).to_owned(),
             key: (*key).to_owned(),
+        },
+        ["provider", "keys", id] => Command::ProviderKeys {
+            id: (*id).to_owned(),
+        },
+        ["provider", "key-add", id, "--protocol", protocol, keys @ ..] if !keys.is_empty() => {
+            Command::ProviderKeyAdd {
+                id: (*id).to_owned(),
+                keys: owned(keys),
+                protocol: (*protocol).to_owned(),
+            }
+        }
+        ["provider", "key-add", id, keys @ ..] if !keys.is_empty() => Command::ProviderKeyAdd {
+            id: (*id).to_owned(),
+            keys: owned(keys),
+            protocol: String::new(),
+        },
+        ["provider", "key-remove", id, first, rest @ ..] if !rest.is_empty() => {
+            let mut ids = vec![(*first).to_owned()];
+            ids.extend(owned(rest));
+            Command::ProviderKeyEdit {
+                id: (*id).to_owned(),
+                action: ProviderKeyAction::RemoveMany,
+                key_id: String::new(),
+                value: ids.join(" "),
+            }
+        }
+        [
+            "provider",
+            verb @ ("key-remove" | "key-on" | "key-off" | "key-use"),
+            id,
+            key_id,
+        ] => {
+            let action = match *verb {
+                "key-remove" => ProviderKeyAction::Remove,
+                "key-on" => ProviderKeyAction::On,
+                "key-off" => ProviderKeyAction::Off,
+                _ => ProviderKeyAction::Use,
+            };
+            Command::ProviderKeyEdit {
+                id: (*id).to_owned(),
+                action,
+                key_id: (*key_id).to_owned(),
+                value: String::new(),
+            }
+        }
+        [
+            "provider",
+            verb @ ("key-rename" | "key-replace" | "key-weight" | "key-protocol"),
+            id,
+            key_id,
+            value,
+        ] => Command::ProviderKeyEdit {
+            id: (*id).to_owned(),
+            action: match *verb {
+                "key-rename" => ProviderKeyAction::Rename,
+                "key-replace" => ProviderKeyAction::Replace,
+                "key-weight" => ProviderKeyAction::Weight,
+                _ => ProviderKeyAction::Protocol,
+            },
+            key_id: (*key_id).to_owned(),
+            value: (*value).to_owned(),
         },
         ["provider", "rm" | "remove" | "delete", id] => Command::ProviderRemove {
             id: (*id).to_owned(),
@@ -624,7 +721,9 @@ commands:
   provider add <id> [<key>] [k=v...]
                                   add a provider to the config
   provider set <id> k=v...        change a provider's config fields
-  provider key <id> <key>         set a provider's API key
+  provider key <id> <key>         set a provider's first API key
+  provider keys <id>              list a provider's API keys
+  provider key-add <id> <keys...> add API keys (see provider --help)
   provider rm <id>                remove a provider (also remove, delete)
   provider refresh-every <id> [<interval>|off]
                                   show or set the model-list refresh
@@ -814,6 +913,16 @@ usage: hofund provider list [--config PATH]
        hofund provider add <id> [<key>] [k=v...] [--config PATH]
        hofund provider set <id> k=v... [--config PATH]
        hofund provider key <id> <key> [--config PATH]
+       hofund provider keys <id> [--config PATH]
+       hofund provider key-add <id> [--protocol P] <keys...> [--config PATH]
+       hofund provider key-remove <id> <key-id>... [--config PATH]
+       hofund provider key-on <id> <key-id> [--config PATH]
+       hofund provider key-off <id> <key-id> [--config PATH]
+       hofund provider key-use <id> <key-id> [--config PATH]
+       hofund provider key-rename <id> <key-id> <name> [--config PATH]
+       hofund provider key-replace <id> <key-id> <key> [--config PATH]
+       hofund provider key-weight <id> <key-id> <0-1000> [--config PATH]
+       hofund provider key-protocol <id> <key-id> <protocol|any> [--config PATH]
        hofund provider rm <id> [--config PATH]
        hofund provider refresh-every <id> [<interval>|off] [--config PATH]
        hofund provider auto-include <id> [<rule>...|none] [--config PATH]
@@ -836,6 +945,16 @@ tries. Put `--` before an id that starts with `--`.
 Without a running daemon, picks and refetches run in one-shot hofundd under
 the provider's model-state lock, so concurrent commands do not lose edits.
 A pick edit that cannot be saved exits 1.
+
+`keys` lists upstream API keys by fingerprint and mask, never the full key.
+`key-add` accepts several keys separated by lines, whitespace, commas, or
+semicolons and reports added and already-present counts. `key-use` makes a
+key first. `key-replace` keeps its settings and moves rests to the new
+fingerprint. `key-remove` with several ids removes them at once and reports
+the count. `key-weight` sets a key's share under weighted routing (0 resets
+to 1). `key-protocol` limits a key to one codec, `any` clears it; `key-add
+--protocol` sets it on the added keys. Removing or disabling the last
+enabled key is refused.
 
 `add`, `set`, `key`, `rm`, `refresh-every`, and `auto-include` edit the
 provider's [[providers]] entry in the config, keeping comments and layout,
@@ -1188,6 +1307,72 @@ mod tests {
 
     fn command(values: &[&str]) -> Result<Command, String> {
         parse(&words(values)).map(|(_, command)| command)
+    }
+
+    #[test]
+    fn k6_provider_key_commands_parse() {
+        assert_eq!(
+            command(&["provider", "keys", "p"]),
+            Ok(Command::ProviderKeys { id: "p".to_owned() })
+        );
+        assert_eq!(
+            command(&["provider", "key-add", "p", "a,b", "c"]),
+            Ok(Command::ProviderKeyAdd {
+                id: "p".to_owned(),
+                keys: words(&["a,b", "c"]),
+                protocol: String::new(),
+            })
+        );
+        assert_eq!(
+            command(&["provider", "key-add", "p", "a", "--protocol", "openai-chat"]),
+            Ok(Command::ProviderKeyAdd {
+                id: "p".to_owned(),
+                keys: words(&["a"]),
+                protocol: "openai-chat".to_owned(),
+            })
+        );
+        assert_eq!(
+            command(&["provider", "key-remove", "p", "0123456789", "abcdefabcd"]),
+            Ok(Command::ProviderKeyEdit {
+                id: "p".to_owned(),
+                action: super::ProviderKeyAction::RemoveMany,
+                key_id: String::new(),
+                value: "0123456789 abcdefabcd".to_owned(),
+            })
+        );
+        for (verb, action) in [
+            ("key-remove", super::ProviderKeyAction::Remove),
+            ("key-on", super::ProviderKeyAction::On),
+            ("key-off", super::ProviderKeyAction::Off),
+            ("key-use", super::ProviderKeyAction::Use),
+        ] {
+            assert_eq!(
+                command(&["provider", verb, "p", "0123456789"]),
+                Ok(Command::ProviderKeyEdit {
+                    id: "p".to_owned(),
+                    action,
+                    key_id: "0123456789".to_owned(),
+                    value: String::new(),
+                })
+            );
+        }
+        for (verb, action, value) in [
+            ("key-rename", super::ProviderKeyAction::Rename, "Team"),
+            ("key-replace", super::ProviderKeyAction::Replace, "new-key"),
+            ("key-weight", super::ProviderKeyAction::Weight, "3"),
+            ("key-protocol", super::ProviderKeyAction::Protocol, "any"),
+        ] {
+            assert_eq!(
+                command(&["provider", verb, "p", "0123456789", value]),
+                Ok(Command::ProviderKeyEdit {
+                    id: "p".to_owned(),
+                    action,
+                    key_id: "0123456789".to_owned(),
+                    value: value.to_owned(),
+                })
+            );
+        }
+        assert!(command(&["provider", "key-add", "p"]).is_err());
     }
 
     #[test]

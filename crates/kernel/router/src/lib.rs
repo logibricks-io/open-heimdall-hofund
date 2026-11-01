@@ -718,7 +718,7 @@ impl Router {
                 .hops
                 .iter()
                 .map(|hop| {
-                    let mut seat = strategy::Seat::new(hop.member.route_id());
+                    let mut seat = strategy::Seat::new(hop.member.id().to_string());
                     seat.account = hop.member.id().account().is_some();
                     seat.learns = hop.member.learns_allowance();
                     seat.weight = hop.weight;

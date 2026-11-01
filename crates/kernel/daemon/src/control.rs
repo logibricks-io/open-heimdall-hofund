@@ -10,11 +10,12 @@ use hofund_control_proto::{
     AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
     ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse,
-    PicksResponse, PicksSetRequest, ProviderListResponse, ProviderSummary, ProviderTestRequest,
-    ProviderTestResponse, ProviderTestResult, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery,
-    QuotaResponse, RouteModel, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod,
-    UsageQuery, UsageResponse, UsageRow, UsageTotals,
+    PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
+    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteModel,
+    RouteModelListResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
+    UsageTotals,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -400,6 +401,60 @@ impl ControlState for DaemonControl {
             })
             .collect();
         Box::pin(async move { Ok(response) })
+    }
+
+    fn provider_keys(&self, id: String) -> ControlFuture<'_, ProviderKeysResponse> {
+        let result = self
+            .provider_exists(&id)
+            .map_err(ControlFailure::from)
+            .and_then(|()| {
+                let config = self.config();
+                let provider = config
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == id)
+                    .expect("provider existence checked");
+                super::provider_keys::list(provider, &self.cooldowns).map_err(daemon_failure)
+            });
+        Box::pin(async move { result })
+    }
+
+    fn change_provider_key(
+        &self,
+        id: String,
+        request: ProviderKeyRequest,
+    ) -> ControlFuture<'_, ProviderKeysResponse> {
+        Box::pin(async move {
+            self.provider_exists(&id)?;
+            let current = self.ops.get().await?;
+            let mutation =
+                super::provider_keys::mutate(&current.text, &id, &request).map_err(|message| {
+                    ControlFailure::from(ControlError::new(
+                        ControlErrorKind::Unprocessable,
+                        message,
+                        "control",
+                    ))
+                })?;
+            if mutation.changed {
+                self.ops
+                    .apply_with_key_moves(&current.disk_revision, mutation.text, mutation.moves)
+                    .await?;
+            }
+            let config = self.config();
+            let provider = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .expect("provider existence checked");
+            let mut response =
+                super::provider_keys::list(provider, &self.cooldowns).map_err(daemon_failure)?;
+            response.added = mutation.added;
+            response.already_had = mutation.already_had;
+            response.removed = mutation.removed;
+            response.before = mutation.before;
+            response.after = mutation.after;
+            Ok(response)
+        })
     }
 
     fn provider_models(&self, id: String) -> ControlFuture<'_, ModelListResponse> {
