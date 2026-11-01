@@ -176,6 +176,7 @@ pub struct Cooling {
     failures: u32,
     status: Option<u16>,
     error: String,
+    background_probe: bool,
 }
 
 impl Cooling {
@@ -207,6 +208,12 @@ impl Cooling {
     #[must_use]
     pub fn error(&self) -> &str {
         &self.error
+    }
+
+    /// Whether a runtime model-list probe may lift this member-wide rest.
+    #[must_use]
+    pub const fn background_probe(&self) -> bool {
+        self.background_probe
     }
 }
 
@@ -268,6 +275,8 @@ struct Book {
     states: HashMap<CooldownKey, State>,
     windowed_credit: HashSet<MemberId>,
     credit_windows: HashMap<MemberId, CreditWindow>,
+    probe_lifted: HashMap<MemberId, Instant>,
+    probe_missed: HashSet<MemberId>,
     next_revision: u64,
     recoveries: VecDeque<(CooldownKey, CooldownCause)>,
 }
@@ -303,6 +312,8 @@ impl Cooldowns {
                 states: HashMap::new(),
                 windowed_credit: HashSet::new(),
                 credit_windows: HashMap::new(),
+                probe_lifted: HashMap::new(),
+                probe_missed: HashSet::new(),
                 next_revision: 1,
                 recoveries: VecDeque::new(),
             }),
@@ -502,6 +513,7 @@ impl Cooldowns {
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         let failure = failure?;
+        note_probe_failure(&mut book, id, now);
         let model = model.filter(|model| !model.is_empty());
         let model_only = model.is_some()
             && (matches!(
@@ -519,14 +531,23 @@ impl Cooldowns {
             return Some(applied);
         }
         let key = CooldownKey::new(id, model_only.then_some(model).flatten());
+        let background_probe =
+            key.model.is_none() && id.subscription().is_none() && probe_error(error);
         let credit = credit_context(&book, id, now);
         let revision = next_revision(&mut book);
         let Some(state) = self.entry_for_insert(&mut book, &key, now, revision) else {
             // A full book of active rests can consume a revision without inserting.
             let mut state = State::new(now, 0);
-            return Some(self.apply_failure(&mut state, failure, now, error, credit));
+            return Some(self.apply_failure(
+                &mut state,
+                failure,
+                now,
+                error,
+                credit,
+                background_probe,
+            ));
         };
-        let applied = self.apply_failure(state, failure, now, error, credit);
+        let applied = self.apply_failure(state, failure, now, error, credit, background_probe);
         drop(book);
         self.emit(&key, &applied, now);
         Some(applied)
@@ -538,6 +559,7 @@ impl Cooldowns {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
+        forget_probe_guard(&mut book, id);
         let keys = book
             .states
             .keys()
@@ -551,6 +573,39 @@ impl Cooldowns {
                 recover(&mut book, key, cooling.cause);
             }
         }
+    }
+
+    /// Whether a real failure has disabled background probes for this member.
+    #[must_use]
+    pub fn probe_allowed(&self, id: &MemberId) -> bool {
+        !self.lock().probe_missed.contains(id)
+    }
+
+    /// Lifts the matching generic rest after a model-list answer.
+    ///
+    /// A later rest with another deadline wins. This is not a real request
+    /// success, so it starts the 30-minute miss guard instead of clearing it.
+    pub fn lift_probe(&self, id: &MemberId, until: Instant) -> bool {
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        let key = CooldownKey::new(id, None);
+        let matches = book.states.get(&key).is_some_and(|state| {
+            state
+                .cooling
+                .as_ref()
+                .is_some_and(|cooling| cooling.until == until && cooling.background_probe)
+        });
+        if !matches {
+            return false;
+        }
+        if let Some(state) = book.states.remove(&key)
+            && let Some(cooling) = state.cooling
+        {
+            recover(&mut book, key, cooling.cause);
+        }
+        book.probe_lifted.insert(id.clone(), now);
+        true
     }
 
     /// Clears only one model's cooldown and ladder state after its success.
@@ -611,6 +666,7 @@ impl Cooldowns {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
+        forget_probe_guard(&mut book, id);
         let key = CooldownKey::new(id, model);
         let member = CooldownKey::new(id, None);
         let stale = match (model, revision) {
@@ -780,6 +836,8 @@ impl Cooldowns {
         book.states.retain(|key, _| members.contains(&key.member));
         book.windowed_credit.retain(|id| members.contains(id));
         book.credit_windows.retain(|id, _| members.contains(id));
+        book.probe_lifted.retain(|id, _| members.contains(id));
+        book.probe_missed.retain(|id| members.contains(id));
     }
 
     /// Removes one member after its provider identity changes.
@@ -792,6 +850,8 @@ impl Cooldowns {
         book.states.retain(|key, _| key.member != *id);
         book.windowed_credit.remove(id);
         book.credit_windows.remove(id);
+        book.probe_lifted.remove(id);
+        book.probe_missed.remove(id);
     }
 
     /// Drains pending recovery events without their model scopes, oldest first.
@@ -861,6 +921,8 @@ impl Cooldowns {
         let mut candidate = cooling(now, duration, cause, failures);
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
+        candidate.background_probe =
+            target.model.is_none() && id.subscription().is_none() && probe_error(error);
         if let Some(state) = book.states.get_mut(&target) {
             state.idle_since = None;
             apply(state, candidate)
@@ -876,6 +938,7 @@ impl Cooldowns {
         now: Instant,
         error: &PluginError,
         credit: CreditContext,
+        background_probe: bool,
     ) -> Cooling {
         let mut candidate = match failure {
             Failure::Generic(cause) => Self::generic(state, now, &self.policy, cause),
@@ -891,6 +954,7 @@ impl Cooldowns {
         };
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
+        candidate.background_probe = background_probe;
         let applied = apply(state, candidate);
         state.idle_since = None;
         if matches!(failure, Failure::RateLimit) {
@@ -1146,6 +1210,37 @@ enum Failure {
     Credit,
 }
 
+fn note_probe_failure(book: &mut Book, id: &MemberId, now: Instant) {
+    if let Some(lifted) = book.probe_lifted.remove(id)
+        && now.saturating_duration_since(lifted) < Duration::from_secs(30 * 60)
+    {
+        book.probe_missed.insert(id.clone());
+    }
+}
+
+fn forget_probe_guard(book: &mut Book, id: &MemberId) {
+    book.probe_lifted.remove(id);
+    book.probe_missed.remove(id);
+}
+
+fn probe_error(error: &PluginError) -> bool {
+    if error.is_credit()
+        || error.kind() == PluginErrorKind::Quota
+        || error.status() == Some(429)
+        || error.retry_after().is_some()
+    {
+        return false;
+    }
+    match error.kind() {
+        PluginErrorKind::Connect
+        | PluginErrorKind::Timeout
+        | PluginErrorKind::Transport
+        | PluginErrorKind::Interrupted => true,
+        PluginErrorKind::Status => matches!(error.status(), Some(408 | 500..=599)),
+        _ => false,
+    }
+}
+
 fn failure_kind(error: &PluginError) -> Option<Failure> {
     if !error.cools() || !crate::decision::rests(error) {
         return None;
@@ -1252,6 +1347,7 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
         failures,
         status: None,
         error: String::new(),
+        background_probe: false,
     }
 }
 

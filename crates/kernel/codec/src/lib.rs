@@ -26,7 +26,10 @@ pub use converse::Converse;
 pub use error::CodecError;
 pub use generative::{GenerativeLanguage, plain_code_assist_tools, plain_schema};
 pub use openai_chat::OpenAiChat;
-pub use openai_responses::{OpenAiResponses, UNMAPPED_TOOLS};
+pub use openai_responses::{
+    OpenAiResponses, PLUGIN_HOST_PREFIX, STREAM_CLIENT_PREFIXES, STREAM_TURN_METADATA_HEADER,
+    STREAM_WINDOW_HEADER, UNMAPPED_TOOLS, compacts_in_stream_client,
+};
 pub use passthrough::RawTap;
 pub use refusal::refusal_error;
 
