@@ -63,6 +63,18 @@ pub trait DaemonRegistry: Send + Sync {
     fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
         None
     }
+
+    /// Declared concurrent account limit for upstream factory `id`.
+    fn upstream_max_accounts(&self, id: &str) -> u64 {
+        let _ = id;
+        0
+    }
+
+    /// Declared concurrent account limit for subscription factory `id`.
+    fn subscription_max_accounts(&self, id: &str) -> u64 {
+        let _ = id;
+        0
+    }
 }
 
 /// Compatibility adapter backed by the compile-time plugin registry.
@@ -115,6 +127,19 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
         hofund_plugin_registry::balance_quota()
+    }
+
+    fn upstream_max_accounts(&self, id: &str) -> u64 {
+        hofund_plugin_registry::declared_max_accounts("provider", id).unwrap_or_else(|| {
+            hofund_plugin_registry::factory(id).map_or(0, |factory| factory.spec().max_accounts())
+        })
+    }
+
+    fn subscription_max_accounts(&self, id: &str) -> u64 {
+        hofund_plugin_registry::declared_max_accounts("subscription", id).unwrap_or_else(|| {
+            hofund_plugin_registry::subscription(id)
+                .map_or(0, |factory| factory.spec().max_accounts())
+        })
     }
 }
 

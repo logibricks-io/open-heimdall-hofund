@@ -63,6 +63,14 @@ impl DaemonRegistry for LinkedRegistry {
     fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
         hofund_plugin_registry::host_plugin(protocol, host)
     }
+
+    fn plan_quota(&self) -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
+        hofund_plugin_registry::plan_quota()
+    }
+
+    fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
+        hofund_plugin_registry::balance_quota()
+    }
 }
 
 #[cfg(test)]
