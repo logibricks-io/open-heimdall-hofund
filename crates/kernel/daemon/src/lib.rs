@@ -43,6 +43,7 @@ mod models_state;
 mod offline;
 mod one_shot;
 mod probe;
+mod provider_keys;
 mod quotas;
 mod registry;
 mod rests;
@@ -720,6 +721,7 @@ pub(crate) struct Instance {
     pub(crate) adapter: Arc<dyn Provider>,
     pub(crate) upstream: Arc<dyn UpstreamProvider>,
     pub(crate) base_url: String,
+    model_list: bool,
 }
 
 /// Providers built from one configuration.
@@ -753,9 +755,9 @@ fn router(
         registry,
     )?;
     if let Some(host) = models_host.as_deref_mut() {
-        for (id, instance) in &instances {
+        for instance in instances.values().filter(|instance| instance.model_list) {
             host.register_instance(
-                id.clone(),
+                instance.provider.id.clone(),
                 Arc::clone(&instance.upstream),
                 instance.base_url.clone(),
             );
@@ -763,9 +765,17 @@ fn router(
     }
     let fingerprints = built
         .iter()
-        .map(|(id, provider)| (membership::member_id(id), provider.fingerprint.clone()))
+        .map(|(id, provider)| {
+            (
+                provider
+                    .key
+                    .as_ref()
+                    .map_or_else(|| membership::member_id(id), |key| key.member.clone()),
+                provider.fingerprint.clone(),
+            )
+        })
         .collect();
-    let (routes, policy) = route_plan(config, models_host.as_deref());
+    let (routes, policy) = route_plan(config, models_host.as_deref(), Some(&built));
     let (members, expanded) = subscriptions::expand(&built, &routes, subscriptions)?;
     let (snapshot, table) = membership::open_with_table_and_affinity(
         &members,
@@ -789,6 +799,7 @@ fn router(
 fn route_plan(
     config: &Config,
     models_host: Option<&ModelsHost>,
+    built: Option<&BTreeMap<String, membership::BuiltProvider>>,
 ) -> (
     BTreeMap<String, Vec<membership::PlannedHop>>,
     FailoverPolicy,
@@ -822,26 +833,52 @@ fn route_plan(
                         .is_some_and(|provider| provider.free);
                     let free = free_hop(manual, listed.as_ref());
                     let context_window = hop_window(listed.as_ref());
-                    list.push(membership::PlannedHop {
-                        provider: provider.clone(),
-                        subscription: None,
-                        member_id: None,
-                        wire_model: upstream.model.clone(),
-                        max_output_tokens: upstream
-                            .max_output_tokens
-                            .or_else(|| caps.get(provider.as_str()).copied()),
-                        context_window,
-                        routing: route.routing.clone(),
-                        patience: route.patience.duration(),
-                        weight: upstream.weight.unwrap_or(1),
-                        free,
-                        stays,
-                        cold_after: configured
-                            .get(provider.as_str())
-                            .map_or(hofund_router::affinity::CACHE_COLD, |provider| {
-                                provider_cold_after(provider)
-                            }),
-                    });
+                    let mut keys = built
+                        .into_iter()
+                        .flat_map(|built| built.values())
+                        .filter_map(|candidate| {
+                            candidate
+                                .key
+                                .as_ref()
+                                .filter(|key| key.provider == *provider)
+                        })
+                        .collect::<Vec<_>>();
+                    keys.sort_by_key(|key| key.rank);
+                    let candidates = if keys.is_empty()
+                        && (built.is_none_or(|built| built.contains_key(provider))
+                            || configured
+                                .get(provider.as_str())
+                                .is_none_or(|provider| provider.key_entries().is_empty()))
+                    {
+                        vec![(None, upstream.weight.unwrap_or(1))]
+                    } else {
+                        keys.into_iter()
+                            .map(|key| (Some(key.member.clone()), key.weight))
+                            .collect()
+                    };
+                    let cold_after = configured
+                        .get(provider.as_str())
+                        .map_or(hofund_router::affinity::CACHE_COLD, |provider| {
+                            provider_cold_after(provider)
+                        });
+                    for (member_id, weight) in candidates {
+                        list.push(membership::PlannedHop {
+                            provider: provider.clone(),
+                            subscription: None,
+                            member_id,
+                            wire_model: upstream.model.clone(),
+                            max_output_tokens: upstream
+                                .max_output_tokens
+                                .or_else(|| caps.get(provider.as_str()).copied()),
+                            context_window,
+                            routing: route.routing.clone(),
+                            patience: route.patience.duration(),
+                            weight,
+                            free,
+                            stays,
+                            cold_after,
+                        });
+                    }
                 }
                 UpstreamTarget::Subscription(subscription) => {
                     list.push(membership::PlannedHop {
@@ -972,61 +1009,96 @@ fn providers(
             Some(host) => host.planned(provider)?,
             None => plan_using(provider, |id| registry.find_preset(id), registry)?,
         };
-        let endpoint = endpoint_for(provider, &planned)?;
-        let timeout = endpoint.timeout;
         let protocol = protocol_of(planned.wire);
         let plugin_id = plugin_for(provider, &planned, registry);
-        let fingerprint = provider_fingerprint(provider, &endpoint)?;
-        let reused = reuse
-            .and_then(|previous| previous.get(&provider.id))
-            .filter(|previous| {
-                previous.fingerprint == fingerprint
-                    && previous.base_url == planned.base_url
-                    && previous.plugin_id == plugin_id
-                    && previous.timeouts == timeouts
-                    && previous.provider == *provider
-            })
-            .cloned();
-        let instance = match reused {
-            Some(instance) => instance,
-            None => {
-                let adapter = build_plugin(
-                    provider,
-                    &planned,
-                    &endpoint,
-                    path,
-                    limits,
-                    mode,
-                    cooldowns.clone(),
-                    registry,
-                )?;
-                let upstream = adapter.upstream();
-                Instance {
-                    provider: provider.clone(),
-                    timeouts,
-                    plugin_id: plugin_id.clone(),
-                    fingerprint: fingerprint.clone(),
-                    adapter: Arc::new(adapter),
-                    upstream,
-                    base_url: planned.base_url.clone(),
+        let (several, mut keys) = provider_keys::enabled(provider, protocol)?;
+        if keys.is_empty() && provider.key_entries().is_empty() {
+            keys.push(provider_keys::ResolvedKey {
+                entry: hofund_config::ProviderKey {
+                    key: String::new(),
+                    name: String::new(),
+                    on: true,
+                    protocol: None,
+                    weight: 1,
+                },
+                id: String::new(),
+            });
+        }
+        for (rank, key) in keys.into_iter().enumerate() {
+            let instance_id = if several {
+                provider_keys::built_id(&provider.id, &key.id)
+            } else {
+                provider.id.clone()
+            };
+            let mut selected = provider.clone();
+            selected.api_key.clone_from(&key.entry.key);
+            selected.key_name.clone_from(&key.entry.name);
+            selected.key_protocol.clone_from(&key.entry.protocol);
+            selected.key_weight = key.entry.weight;
+            selected.keys.clear();
+            let endpoint = endpoint_for(&selected, &planned)?;
+            let timeout = endpoint.timeout;
+            let fingerprint = provider_fingerprint(&selected, &endpoint)?;
+            let reused = reuse
+                .and_then(|previous| previous.get(&instance_id))
+                .filter(|previous| {
+                    previous.fingerprint == fingerprint
+                        && previous.base_url == planned.base_url
+                        && previous.plugin_id == plugin_id
+                        && previous.timeouts == timeouts
+                        && previous.provider == selected
+                })
+                .cloned();
+            let mut instance = match reused {
+                Some(instance) => instance,
+                None => {
+                    let adapter = build_plugin(
+                        &selected,
+                        &planned,
+                        &endpoint,
+                        path,
+                        limits,
+                        mode,
+                        cooldowns.clone(),
+                        registry,
+                    )?;
+                    let upstream = adapter.upstream();
+                    Instance {
+                        provider: selected,
+                        timeouts,
+                        plugin_id: plugin_id.clone(),
+                        fingerprint: fingerprint.clone(),
+                        adapter: Arc::new(adapter),
+                        upstream,
+                        base_url: planned.base_url.clone(),
+                        model_list: rank == 0,
+                    }
                 }
-            }
-        };
-        built.insert(
-            provider.id.clone(),
-            membership::BuiltProvider {
-                adapter: Arc::clone(&instance.adapter),
-                protocol,
-                timeout,
-                kernel: registry.is_kernel_factory(&plugin_id),
-                plugin_id,
-                preset_id: provider.preset.clone().unwrap_or_default(),
-                fingerprint,
-                patience: provider.patience.duration(),
-                base_url: endpoint.base_url.clone(),
-            },
-        );
-        instances.insert(provider.id.clone(), instance);
+            };
+            instance.model_list = rank == 0;
+            let key_member = several.then(|| provider_keys::KeyMember {
+                provider: provider.id.clone(),
+                member: membership::key_member_id(&provider.id, &key.id),
+                weight: key.entry.weight,
+                rank,
+            });
+            built.insert(
+                instance_id.clone(),
+                membership::BuiltProvider {
+                    adapter: Arc::clone(&instance.adapter),
+                    protocol,
+                    timeout,
+                    kernel: registry.is_kernel_factory(&plugin_id),
+                    plugin_id: plugin_id.clone(),
+                    preset_id: provider.preset.clone().unwrap_or_default(),
+                    fingerprint,
+                    patience: provider.patience.duration(),
+                    base_url: endpoint.base_url.clone(),
+                    key: key_member,
+                },
+            );
+            instances.insert(instance_id, instance);
+        }
     }
     Ok(Built { built, instances })
 }
@@ -1827,11 +1899,76 @@ mod tests {
             "[[providers]]\nid = \"one\"\npreset = \"openai\"\nfree = true\n[[routes]]\nmodel = \"demo\"\nrouting = \"weight\"\nupstreams = [{ provider = \"one\", weight = 3 }]\n",
         )
         .expect("config");
-        let (routes, _) = super::route_plan(&config, None);
+        let (routes, _) = super::route_plan(&config, None, None);
         let hop = &routes["demo"][0];
         assert_eq!(hop.routing, "weight");
         assert_eq!(hop.weight, 3);
         assert!(hop.free);
+    }
+
+    #[test]
+    fn k3_candidates_keep_key_order_ids_and_protocol_filters() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"one\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"first\"\nkey_weight = 2\n[[providers.keys]]\nkey = \"off\"\non = false\n[[providers.keys]]\nkey = \"responses\"\nprotocol = \"openai-responses\"\n[[providers.keys]]\nkey = \"last\"\nweight = 3\n[[routes]]\nmodel = \"demo\"\nrouting = \"weight\"\nupstreams = [{ provider = \"one\", weight = 9 }]\n",
+        )
+        .expect("config");
+        let dir = tempfile::tempdir().expect("dir");
+        let registry = registry();
+        let built = super::providers(
+            &config,
+            &dir.path().join("hofund.toml"),
+            None,
+            super::Mode::Check,
+            None,
+            None,
+            None,
+            &registry,
+        )
+        .expect("providers");
+        assert_eq!(built.built.len(), 2);
+        let (routes, _) = super::route_plan(&config, None, Some(&built.built));
+        let hops = &routes["demo"];
+        assert_eq!(hops.len(), 2);
+        assert_eq!(
+            hops[0].member_id,
+            Some(super::membership::key_member_id(
+                "one",
+                &super::provider_keys::key_id("first")
+            ))
+        );
+        assert_eq!(
+            hops[1].member_id,
+            Some(super::membership::key_member_id(
+                "one",
+                &super::provider_keys::key_id("last")
+            ))
+        );
+        assert_eq!(hops[0].weight, 2);
+        assert_eq!(hops[1].weight, 3);
+    }
+
+    #[test]
+    fn k3_one_enabled_key_keeps_the_provider_member_id() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\napi_key = \"only\"\n[[routes]]\nmodel = \"demo\"\nupstreams = [\"one\"]\n",
+        )
+        .expect("config");
+        let dir = tempfile::tempdir().expect("dir");
+        let registry = registry();
+        let built = super::providers(
+            &config,
+            &dir.path().join("hofund.toml"),
+            None,
+            super::Mode::Check,
+            None,
+            None,
+            None,
+            &registry,
+        )
+        .expect("providers");
+        let (routes, _) = super::route_plan(&config, None, Some(&built.built));
+        assert_eq!(routes["demo"][0].member_id, None);
+        assert!(built.built.contains_key("one"));
     }
 
     #[test]
@@ -1840,7 +1977,7 @@ mod tests {
             "[[providers]]\nid = \"one\"\npreset = \"openai\"\npatience = \"off\"\n[[routes]]\nmodel = \"demo\"\npatience = 90\nupstreams = [{ provider = \"one\" }]\n[[routes]]\nmodel = \"plain\"\nupstreams = [{ provider = \"one\" }]\n",
         )
         .expect("config");
-        let (routes, _) = super::route_plan(&config, None);
+        let (routes, _) = super::route_plan(&config, None, None);
         assert_eq!(
             routes["demo"][0].patience,
             Some(std::time::Duration::from_secs(90))
@@ -1867,11 +2004,11 @@ mod tests {
             .with_context(64_000);
         let bare = hofund_plugin_api::ModelSpec::new("bare", None).expect("model");
         host.seed_models("one", &[sized, bare]);
-        let (routes, _) = super::route_plan(&config, Some(&host));
+        let (routes, _) = super::route_plan(&config, Some(&host), None);
         let hops = &routes["Demo"];
         assert_eq!(hops[0].context_window, Some(64_000));
         assert_eq!(hops[1].context_window, None);
-        let (routes, _) = super::route_plan(&config, None);
+        let (routes, _) = super::route_plan(&config, None, None);
         assert_eq!(routes["Demo"][0].context_window, None);
     }
 

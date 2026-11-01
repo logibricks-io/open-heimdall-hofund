@@ -325,6 +325,49 @@ PicksSetRequest::fn replace (expected_picks_revision : impl Into < String > , id
 PlannedChange #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 PlannedChange.diff
 PlannedChange.path
+ProviderKey #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ProviderKey.id
+ProviderKey.masked
+ProviderKey.name
+ProviderKey.on
+ProviderKey.protocol
+ProviderKey.rest
+ProviderKey.weight
+ProviderKeyAction #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+ProviderKeyAction::Add
+ProviderKeyAction::Off
+ProviderKeyAction::On
+ProviderKeyAction::Protocol
+ProviderKeyAction::Remove
+ProviderKeyAction::RemoveMany
+ProviderKeyAction::Rename
+ProviderKeyAction::Replace
+ProviderKeyAction::Use
+ProviderKeyAction::Weight
+ProviderKeyRequest #[non_exhaustive] derives(Clone, PartialEq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProviderKeyRequest.action
+ProviderKeyRequest.key_id
+ProviderKeyRequest.keys
+ProviderKeyRequest.name
+ProviderKeyRequest.protocol
+ProviderKeyRequest.version
+ProviderKeyRequest.weight
+ProviderKeyRequest::fn for_id (mut self , id : impl Into < String >) -> Self
+ProviderKeyRequest::fn new (action : ProviderKeyAction) -> Self
+ProviderKeyRest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ProviderKeyRest.probed
+ProviderKeyRest.status
+ProviderKeyRest.until_ms
+ProviderKeyRest.why
+ProviderKeysResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ProviderKeysResponse.added
+ProviderKeysResponse.after
+ProviderKeysResponse.already_had
+ProviderKeysResponse.before
+ProviderKeysResponse.keys
+ProviderKeysResponse.provider
+ProviderKeysResponse.removed
+ProviderKeysResponse.version
 ProviderListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProviderListResponse.providers
 ProviderListResponse.version
