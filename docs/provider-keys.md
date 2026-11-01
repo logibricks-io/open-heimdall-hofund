@@ -17,6 +17,7 @@ base_url = "https://relay.example/v1"
 api_key = "env:PERSONAL_KEY"
 key_name = "Personal"
 key_weight = 1
+at_once = 2
 
 [[providers.keys]]
 key = "env:TEAM_KEY"
@@ -61,6 +62,25 @@ cheap routing all operate on keys. Weighted rounds use each key's weight.
 Conversation affinity can stay with the member that answered without a
 key-specific affinity implementation.
 
+## Accounts at once
+
+Optional `at_once` on a provider limits how many keys take requests; the same
+field on a `[[subscriptions]]` entry limits its accounts. It may be 0 through
+1000. Zero means no limit. An absent field uses the plugin's `max_accounts`
+declaration from `plugin.toml` or its SDK spec, and no declaration means no
+limit. A user's zero therefore overrides a nonzero plugin declaration.
+
+The first N members in the user's own order are kept, preferring members that
+are not resting. A resting kept member gives its seat to the first reserve and
+takes it back when ready. Selection happens after the routing strategy orders
+candidates: kept members retain that strategy order, and reserves go after all
+kept candidates. This applies in every routing mode. As with any later
+candidate, a failure that rests nobody can still pass one request to a reserve.
+
+Conversation affinity moves off a reserve when a kept member can take the
+request; strict affinity still holds. `hofund routes` adds `in reserve · N at
+once` rows, and request-finished events carry the affinity reason `reserve`.
+
 ## Commands
 
 ```text
@@ -74,6 +94,7 @@ hofund provider key-rename <provider> <key-id> <name>
 hofund provider key-replace <provider> <key-id> <key>
 hofund provider key-weight <provider> <key-id> <0-1000>
 hofund provider key-protocol <provider> <key-id> <protocol|any>
+hofund provider at-once <provider> [<n>|off|default]
 ```
 
 `key-add` splits pasted keys on lines, whitespace, commas, or semicolons,
@@ -89,9 +110,14 @@ weight, and enabled state, returns the old and new fingerprints, and moves
 rests to the new member id. The control API exposes the same operations at
 `GET` and `POST /v1/hofund/providers/{id}/keys`.
 
+`at-once` sets the limit, `off` stores zero for no limit, and `default` removes
+the user override so the plugin declaration applies. A subscription id edits
+its `[[subscriptions]]` entry through the same revision-checked control path.
+
 ## Follow-ups
 
 Per-key concurrency limits and remote allowance/limit readings are not yet
 implemented. Per-key plan selection is not part of the configuration schema.
-Limiting how many accounts or keys take requests at once, with the remainder
-held as reserve keys, is a separate later task.
+When per-member concurrency lanes land, a full lane must not spill a request to
+a reserve, and a full queue must drop the provider's reserves before returning
+its 429 instead of sending the request to one.

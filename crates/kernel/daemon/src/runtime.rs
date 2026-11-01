@@ -205,7 +205,11 @@ impl Runtime {
     /// instance, so its connection pool and learned state carry over.
     pub(crate) fn prepare(&self, config: &Config) -> Result<Candidate, DaemonError> {
         let reuse = self.instances.lock().expect("provider instances").clone();
-        let Built { built, instances } = providers(
+        let Built {
+            built,
+            limits,
+            instances,
+        } = providers(
             config,
             &self.path,
             self.max_idle_per_host,
@@ -246,8 +250,12 @@ impl Runtime {
             }
             fingerprints.insert(member, provider.fingerprint.clone());
         }
-        let (routes, policy) =
-            route_plan(config, self.models.get().map(AsRef::as_ref), Some(&built));
+        let (routes, policy) = route_plan(
+            config,
+            self.models.get().map(AsRef::as_ref),
+            Some(&built),
+            &limits,
+        );
         // Publication cannot fail after the file is written: every routed
         // provider must already be built.
         for (model, hops) in &routes {

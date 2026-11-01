@@ -165,18 +165,26 @@ pub(crate) enum Edit {
     Set { id: String, fields: Vec<Field> },
     /// The entry removed.
     Remove { id: String },
+    /// Accounts-at-once override; `None` restores the plugin default.
+    AtOnce { id: String, value: Option<u64> },
 }
 
 impl Edit {
     fn id(&self) -> &str {
         match self {
-            Self::Add { id, .. } | Self::Set { id, .. } | Self::Remove { id } => id,
+            Self::Add { id, .. }
+            | Self::Set { id, .. }
+            | Self::Remove { id }
+            | Self::AtOnce { id, .. } => id,
         }
     }
 }
 
 /// Applies `edit` to `text`, keeping everything it does not touch.
 pub(crate) fn edit_text(text: &str, edit: &Edit) -> Result<String, String> {
+    if let Edit::AtOnce { id, value } = edit {
+        return hofund_config::edit_at_once(text, id, *value).map_err(|error| error.to_string());
+    }
     let mut document = text
         .parse::<DocumentMut>()
         .map_err(|error| format!("the config is not valid TOML: {error}"))?;
@@ -205,6 +213,7 @@ pub(crate) fn edit_text(text: &str, edit: &Edit) -> Result<String, String> {
             providers.remove(index);
         }
         (Edit::Set { .. } | Edit::Remove { .. }, None) => return Err(unknown(id)),
+        (Edit::AtOnce { .. }, _) => unreachable!("at-once returned above"),
     }
     Ok(document.to_string())
 }
@@ -516,14 +525,90 @@ fn models_field<'a>(table: &'a Table, key: &str) -> Option<&'a Item> {
     table.get("models")?.as_table_like()?.get(key)
 }
 
-async fn read_table(client: &Client, id: &str) -> Result<DocumentMut, String> {
+async fn read_document(client: &Client) -> Result<DocumentMut, String> {
     let current = client.config().await.map_err(failure)?;
-    let document = current
+    current
         .text
         .parse::<DocumentMut>()
-        .map_err(|error| format!("the config is not valid TOML: {error}"))?;
+        .map_err(|error| format!("the config is not valid TOML: {error}"))
+}
+
+async fn read_table(client: &Client, id: &str) -> Result<DocumentMut, String> {
+    let document = read_document(client).await?;
     provider_table(&document, id)?;
     Ok(document)
+}
+
+fn entry_table<'a>(document: &'a DocumentMut, id: &str) -> Result<&'a Table, String> {
+    ["providers", "subscriptions"]
+        .into_iter()
+        .find_map(|kind| {
+            document
+                .get(kind)
+                .and_then(Item::as_array_of_tables)
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|table| table.get("id").and_then(Item::as_str) == Some(id))
+                })
+        })
+        .ok_or_else(|| unknown(id))
+}
+
+/// `hofund provider at-once <id> [n|off|default]`: show or set how many
+/// accounts or keys take requests, with the rest in reserve.
+pub(crate) async fn at_once(
+    config: &Path,
+    id: &str,
+    value: Option<&str>,
+) -> Result<String, String> {
+    let value = value.map(parse_at_once).transpose()?;
+    let client = client(config).await?;
+    let mut out = String::new();
+    if let Some(value) = value {
+        let edit = Edit::AtOnce {
+            id: id.to_owned(),
+            value,
+        };
+        out = report("saved", id, &apply_edit(&client, &edit).await?);
+        out.push('\n');
+    }
+    let document = read_document(&client).await?;
+    let configured = entry_table(&document, id)?
+        .get("at_once")
+        .and_then(Item::as_integer)
+        .and_then(|value| u64::try_from(value).ok());
+    out.push_str(&at_once_line(id, configured));
+    Ok(out)
+}
+
+fn parse_at_once(value: &str) -> Result<Option<u64>, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "default" | "plugin" => Ok(None),
+        "off" | "none" | "no" | "-" => Ok(Some(0)),
+        _ => {
+            let limit = value.trim().parse::<u64>().map_err(|_| {
+                format!("accounts at once is a whole number, off or default, not `{value}`")
+            })?;
+            if limit > hofund_config::MAX_AT_ONCE {
+                return Err(format!(
+                    "accounts at once is 0 to {}, not {limit}",
+                    hofund_config::MAX_AT_ONCE
+                ));
+            }
+            Ok(Some(limit))
+        }
+    }
+}
+
+fn at_once_line(id: &str, configured: Option<u64>) -> String {
+    match configured {
+        Some(0) => format!("{id}: every account or key takes requests"),
+        Some(limit) => format!(
+            "{id}: {limit} accounts or keys take requests at once; the others wait in reserve"
+        ),
+        None => format!("{id}: accounts at once follows the plugin default"),
+    }
 }
 
 /// `hofund provider refresh-every <id> [<interval>|off]`: show or set how
@@ -624,7 +709,7 @@ mod tests {
 
     use super::{
         ConfigApi, EDIT_ATTEMPTS, Edit, EditError, Field, FieldKey, RENAME_UNSUPPORTED, apply_edit,
-        auto_include_line, edit_text, parse_pairs, refresh_line,
+        at_once_line, auto_include_line, edit_text, parse_at_once, parse_pairs, refresh_line,
     };
 
     const BASE: &str = "# top\nlisten = \"127.0.0.1:0\"\n\n# the chat one\n[[providers]]\n\
@@ -643,6 +728,64 @@ id = \"chat\" # main\nbase_url = \"http://x\"\n[providers.models]\nrefresh = \"o
             id: id.to_owned(),
             fields,
         }
+    }
+
+    #[test]
+    fn d26_7_at_once_cmd_parses_and_writes_number_off_and_default() {
+        assert_eq!(parse_at_once("2"), Ok(Some(2)));
+        assert_eq!(parse_at_once("off"), Ok(Some(0)));
+        assert_eq!(parse_at_once("default"), Ok(None));
+        assert_eq!(parse_at_once("plugin"), Ok(None));
+        for bad in ["-1", "1001", "lots"] {
+            assert!(parse_at_once(bad).is_err(), "{bad}");
+        }
+        let text = "# keep\n[[providers]]\nid = \"p\"\npreset = \"openai\"\n[[subscriptions]]\nid = \"sub\"\naccounts = \"*\"\n";
+        let numbered = edit_text(
+            text,
+            &Edit::AtOnce {
+                id: "p".to_owned(),
+                value: Some(2),
+            },
+        )
+        .expect("number");
+        assert!(numbered.contains("at_once = 2"), "{numbered}");
+        let off = edit_text(
+            &numbered,
+            &Edit::AtOnce {
+                id: "p".to_owned(),
+                value: Some(0),
+            },
+        )
+        .expect("off");
+        assert!(off.contains("at_once = 0"), "{off}");
+        assert_eq!(
+            at_once_line("p", Some(0)),
+            "p: every account or key takes requests"
+        );
+        let subscription = edit_text(
+            &off,
+            &Edit::AtOnce {
+                id: "sub".to_owned(),
+                value: Some(1),
+            },
+        )
+        .expect("subscription");
+        assert_eq!(subscription.matches("at_once = 1").count(), 1);
+        let default = edit_text(
+            &subscription,
+            &Edit::AtOnce {
+                id: "p".to_owned(),
+                value: None,
+            },
+        )
+        .expect("default");
+        assert!(!default.contains("at_once = 0"), "{default}");
+        assert!(default.contains("at_once = 1"), "{default}");
+        assert!(default.starts_with("# keep\n"), "{default}");
+        assert_eq!(
+            at_once_line("p", None),
+            "p: accounts at once follows the plugin default"
+        );
     }
 
     #[test]

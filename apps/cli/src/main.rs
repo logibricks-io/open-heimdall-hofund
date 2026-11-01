@@ -111,6 +111,9 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
                 value,
             } => provider::key_edit(config, &id, action, &key_id, &value).await,
             Command::ProviderRemove { id } => provider_edit::remove(config, &id).await,
+            Command::ProviderAtOnce { id, value } => {
+                provider_edit::at_once(config, &id, value.as_deref()).await
+            }
             Command::ProviderRefreshEvery { id, interval } => {
                 provider_edit::refresh_every(config, &id, interval.as_deref()).await
             }
@@ -219,6 +222,10 @@ enum Command {
     /// `provider rm`, `remove`, and `delete`.
     ProviderRemove {
         id: String,
+    },
+    ProviderAtOnce {
+        id: String,
+        value: Option<String>,
     },
     ProviderRefreshEvery {
         id: String,
@@ -512,6 +519,14 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["provider", "rm" | "remove" | "delete", id] => Command::ProviderRemove {
             id: (*id).to_owned(),
         },
+        ["provider", "at-once" | "accounts-at-once", id] => Command::ProviderAtOnce {
+            id: (*id).to_owned(),
+            value: None,
+        },
+        ["provider", "at-once" | "accounts-at-once", id, value] => Command::ProviderAtOnce {
+            id: (*id).to_owned(),
+            value: Some((*value).to_owned()),
+        },
         ["provider", "refresh-every", id] => Command::ProviderRefreshEvery {
             id: (*id).to_owned(),
             interval: None,
@@ -732,6 +747,8 @@ commands:
   provider keys <id>              list a provider's API keys
   provider key-add <id> <keys...> add API keys (see provider --help)
   provider rm <id>                remove a provider (also remove, delete)
+  provider at-once <id> [<n>|off|default]
+                                  show or set accounts taking requests at once
   provider refresh-every <id> [<interval>|off]
                                   show or set the model-list refresh
   provider auto-include <id> [<rule>...|none]
@@ -931,6 +948,7 @@ usage: hofund provider list [--config PATH]
        hofund provider key-weight <id> <key-id> <0-1000> [--config PATH]
        hofund provider key-protocol <id> <key-id> <protocol|any> [--config PATH]
        hofund provider rm <id> [--config PATH]
+       hofund provider at-once <id> [<n>|off|default] [--config PATH]
        hofund provider refresh-every <id> [<interval>|off] [--config PATH]
        hofund provider auto-include <id> [<rule>...|none] [--config PATH]
 
@@ -963,8 +981,13 @@ to 1). `key-protocol` limits a key to one codec, `any` clears it; `key-add
 --protocol` sets it on the added keys. Removing or disabling the last
 enabled key is refused.
 
-`add`, `set`, `key`, `rm`, `refresh-every`, and `auto-include` edit the
-provider's [[providers]] entry in the config, keeping comments and layout,
+`at-once` keeps the first n keys or accounts taking requests, preferring ones
+not resting, and holds the rest in reserve. `off` stores 0 for no limit;
+`default` removes the user override and follows the plugin. A subscription id
+edits its [[subscriptions]] entry.
+
+`add`, `set`, `key`, `rm`, `at-once`, `refresh-every`, and `auto-include` edit the
+matching config entry, keeping comments and layout,
 and apply it against the revision they read; when another writer changed
 the file first, the edit is rebuilt on a fresh read, up to three tries.
 Fields: preset, protocol, base_url (url), api_key (key), quirks,

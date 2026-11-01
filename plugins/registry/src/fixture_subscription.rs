@@ -20,7 +20,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("fixture-sub"),
     "Fixture Subscription",
     SignInFlowKind::Device,
-);
+)
+.with_max_accounts(2);
 
 struct FixtureFactory;
 

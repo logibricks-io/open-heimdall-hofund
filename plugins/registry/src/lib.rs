@@ -67,7 +67,7 @@ pub use fixture_agent_descriptions::fixture_agents;
 pub use fixture_preset_descriptions::{fixture_aliases, fixture_presets};
 pub use generated::{
     CompiledAlias, CompiledPreset, CompiledRegion, CompiledRoute, compiled_aliases,
-    compiled_presets, compiled_routes,
+    compiled_presets, compiled_routes, declared_max_accounts,
 };
 pub use select::{
     SelectError, Selection, model_plan_of, protocol_for, resolve_region, select, wire_for_protocol,

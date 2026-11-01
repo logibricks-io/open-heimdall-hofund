@@ -757,7 +757,9 @@ SubscriptionSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SubscriptionSpec::const fn display_name (& self) -> & 'static str
 SubscriptionSpec::const fn flow (& self) -> SignInFlowKind
 SubscriptionSpec::const fn from_static (plugin : PluginId , display_name : & 'static str , flow : SignInFlowKind ,) -> Self
+SubscriptionSpec::const fn max_accounts (& self) -> u64
 SubscriptionSpec::const fn plugin (& self) -> & PluginId
+SubscriptionSpec::const fn with_max_accounts (mut self , max_accounts : u64) -> Self
 SurfaceHost
 SurfaceHost #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SurfaceHost::const fn auth (& self) -> AuthResult
@@ -795,8 +797,10 @@ UpstreamSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 UpstreamSpec::const fn credential (& self) -> CredentialStyle
 UpstreamSpec::const fn from_static (plugin : PluginId , protocols : & 'static [ProtocolId] , credential : CredentialStyle , list : ListKind ,) -> Self
 UpstreamSpec::const fn list_kind (& self) -> ListKind
+UpstreamSpec::const fn max_accounts (& self) -> u64
 UpstreamSpec::const fn plugin (& self) -> & PluginId
 UpstreamSpec::const fn protocols (& self) -> & 'static [ProtocolId]
+UpstreamSpec::const fn with_max_accounts (mut self , max_accounts : u64) -> Self
 ValidConfig
 Visible
 Visible #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)

@@ -463,6 +463,9 @@ pub struct RequestFinishedEvent {
     pub input_tokens: Option<u64>,
     /// Output tokens when reported.
     pub output_tokens: Option<u64>,
+    /// Why conversation affinity kept or released the previous answerer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 impl Default for RequestFinishedEvent {
@@ -475,6 +478,7 @@ impl Default for RequestFinishedEvent {
             duration_ms: 0,
             input_tokens: None,
             output_tokens: None,
+            reason: String::new(),
         }
     }
 }

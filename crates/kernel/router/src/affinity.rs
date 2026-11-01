@@ -130,6 +130,8 @@ pub struct Candidate {
     pub effort: String,
     /// Whether the member/model pair is cooling down.
     pub resting: bool,
+    /// The provider's at-once count when this member is in reserve, else zero.
+    pub reserve: usize,
     /// Whether its known allowance is nearly spent.
     pub nearly_spent: bool,
     /// Whether its known allowance is at least 90 percent used.
@@ -155,6 +157,7 @@ impl Candidate {
             model: model.into(),
             effort: String::new(),
             resting: false,
+            reserve: 0,
             nearly_spent: false,
             low_allowance: false,
             fallback: false,
@@ -206,6 +209,8 @@ pub enum Reason {
     Turn,
     /// A useful warm cache kept the answerer.
     Cache,
+    /// The answerer is in reserve, so a kept member takes the conversation.
+    Reserve,
     /// The answerer is cooling down.
     Resting,
     /// The answerer's allowance is nearly spent.
@@ -233,6 +238,7 @@ impl Reason {
             Self::Session => "session",
             Self::Turn => "turn",
             Self::Cache => "cache",
+            Self::Reserve => "reserve",
             Self::Resting => "resting",
             Self::Spent => "spent",
             Self::NewTurn => "new-turn",
@@ -421,7 +427,9 @@ impl AffinityState {
         } else if let Some(index) = at {
             let candidate = &candidates[index];
             let stick = stick.as_ref().expect("stick exists when candidate matches");
-            if candidate.resting {
+            if candidate.reserve > 0 {
+                Reason::Reserve
+            } else if candidate.resting {
                 Reason::Resting
             } else if !conversation.within && rules::back_to_main(candidates, index) {
                 Reason::Main
@@ -1064,6 +1072,23 @@ mod tests {
                 .reason,
             Reason::Cache
         );
+    }
+
+    #[test]
+    fn d26_5_affinity_moves_off_reserve_except_in_strict_mode() {
+        let state = AffinityState::in_memory();
+        state.answered("demo|session", "second", "model", 1, usage(0, 3000));
+        let mut candidates = candidates();
+        candidates[1].reserve = 2;
+        let decision = state.order(&conversation(), Stays::Session, "smart", &candidates);
+        assert_eq!(decision.order, [0, 1]);
+        assert_eq!(decision.reason, Reason::Reserve);
+        assert_eq!(decision.reason.as_str(), "reserve");
+        assert!(!decision.kept);
+        let strict = state.order(&conversation(), Stays::Strict, "smart", &candidates);
+        assert_eq!(strict.order, [1]);
+        assert_eq!(strict.reason, Reason::Strict);
+        assert!(strict.strict);
     }
 
     #[test]

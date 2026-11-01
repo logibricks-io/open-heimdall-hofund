@@ -25,7 +25,7 @@ use hofund_router::quota::{QuotaStore, WindowInfo};
 use tokio::time::Instant;
 
 use crate::membership::{self, BuiltProvider, PlannedHop};
-use crate::{DaemonError, DaemonRegistry, adapt, beside, raw_value, show};
+use crate::{DaemonError, DaemonRegistry, adapt, beside, effective_at_once, raw_value, show};
 
 /// How often the account list is reread.
 pub(crate) const ACCOUNT_TICK: Duration = Duration::from_secs(5);
@@ -57,6 +57,7 @@ pub(crate) struct SubscriptionState {
     root: PathBuf,
     limits: HttpLimits,
     timeouts: (Duration, Duration),
+    at_once: u64,
     members: Mutex<Vec<SubscriptionMember>>,
 }
 
@@ -136,6 +137,10 @@ pub(crate) fn build(
         let instance = factory.validate_and_build(&raw, &host).map_err(|error| {
             DaemonError::new(format!("subscription `{}`: {error}", subscription.id))
         })?;
+        let at_once = effective_at_once(
+            subscription.at_once,
+            registry.subscription_max_accounts(&subscription.id),
+        );
         built.insert(
             subscription.id.clone(),
             Arc::new(SubscriptionState {
@@ -146,6 +151,7 @@ pub(crate) fn build(
                 root: root.clone(),
                 limits,
                 timeouts,
+                at_once,
                 members: Mutex::new(Vec::new()),
             }),
         );
@@ -325,7 +331,7 @@ pub(crate) fn expand(
                     "route `{model}` names unknown subscription `{subscription}`"
                 ))
             })?;
-            for member in state.members() {
+            for (rank, member) in state.members().into_iter().enumerate() {
                 let key = member.key();
                 if providers.contains_key(&key) {
                     return Err(DaemonError::new(format!(
@@ -336,6 +342,9 @@ pub(crate) fn expand(
                     provider: key.clone(),
                     subscription: None,
                     member_id: Some(member.id.clone()),
+                    at_once_group: hop.at_once_group.clone(),
+                    at_once: state.at_once,
+                    rank,
                     wire_model: hop.wire_model.clone(),
                     max_output_tokens: hop.max_output_tokens,
                     context_window: hop.context_window,
@@ -582,6 +591,28 @@ mod tests {
     }
 
     #[test]
+    fn d26_2_at_once_uses_user_value_then_plugin_default_then_no_limit() {
+        assert_eq!(crate::effective_at_once(None, 2), 2);
+        assert_eq!(crate::effective_at_once(Some(3), 2), 3);
+        assert_eq!(crate::effective_at_once(Some(0), 2), 0);
+        assert_eq!(crate::effective_at_once(None, 0), 0);
+        let dir = tempfile::tempdir().expect("dir");
+        let built = states(dir.path(), &config(""));
+        assert_eq!(built.get(PLUGIN).expect("fixture").at_once, 2);
+        let mut disabled = config("");
+        disabled.subscriptions[0].at_once = Some(0);
+        let built = states(dir.path(), &disabled);
+        assert_eq!(built.get(PLUGIN).expect("fixture").at_once, 0);
+        let spec = hofund_plugin_api::SubscriptionSpec::from_static(
+            PluginId::from_static(PLUGIN),
+            "Fixture",
+            SignInFlowKind::Device,
+        )
+        .with_max_accounts(1001);
+        assert_eq!(spec.max_accounts(), 1000);
+    }
+
+    #[test]
     fn spec_kind_matches_instance_flow() {
         let dir = tempfile::tempdir().expect("dir");
         let states = states(dir.path(), &config(""));
@@ -690,7 +721,7 @@ mod tests {
             .expect("subscription")
             .resolve(&cooldowns())
             .await;
-        let (routes, _) = crate::route_plan(&config, None, None);
+        let (routes, _) = crate::route_plan(&config, None, None, &BTreeMap::new());
         let (_, expanded) =
             super::expand(&BTreeMap::new(), &routes, &subscriptions).expect("expanded routes");
 
