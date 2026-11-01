@@ -148,6 +148,24 @@ impl Codec for OpenAiResponses {
         ))
     }
 
+    fn encode_stream_failure(&self, message: &str) -> Vec<u8> {
+        let body = serde_json::json!({
+            "type": "response.failed",
+            "response": {
+                "object": "response",
+                "status": "failed",
+                "error": {"code": "server_error", "message": message},
+            },
+        });
+        let mut out = Vec::new();
+        crate::sse::write_event(&mut out, Some("response.failed"), &body.to_string());
+        out
+    }
+
+    fn stream_end(&self) -> crate::StreamEnd {
+        crate::StreamEnd::Named
+    }
+
     fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
         let mut out = Vec::new();
         let overflow = too_long(status, &words_of(message));
