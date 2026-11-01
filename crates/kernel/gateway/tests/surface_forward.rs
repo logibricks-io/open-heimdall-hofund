@@ -420,8 +420,10 @@ async fn p1_4_08_sse_usage_tail() {
 
 fn vendor_json_speech_usage() -> Result<RawAnswer, PluginError> {
     streamed_speech(vec![
+        b"{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n".to_vec(),
         br#"{"audio":"SUQz"}"#.to_vec(),
         b"\n{\"usage\":{\"input_tokens\":5,\"output_tokens\":7}}\n".to_vec(),
+        b"{\"done\":true}\n".to_vec(),
     ])
 }
 
@@ -435,6 +437,47 @@ async fn p1_4_13_usage_from_last_line_with_usage_whatever_its_type() {
         (rows[0].input_tokens, rows[0].output_tokens),
         (Some(5), Some(7))
     );
+}
+
+fn cut_short_speech() -> Result<RawAnswer, PluginError> {
+    let chunks: Vec<Result<Vec<u8>, PluginError>> = vec![
+        Ok(b"data: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}\n\n".to_vec()),
+        Err(PluginError::status_error(502, "upstream cut")),
+    ];
+    let body = BodyStream::unfold(chunks.into_iter(), |mut chunks| async move {
+        chunks.next().map(|chunk| (chunk, chunks))
+    });
+    Ok(RawAnswer::streaming(
+        200,
+        Some("text/event-stream".to_owned()),
+        body,
+    ))
+}
+
+#[tokio::test]
+async fn p1_4_14_cut_short_stream_counts_no_tokens() {
+    let fixture = fixture(&[("member", None, cut_short_speech)]);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/speech")
+        .header("authorization", "Bearer secret")
+        .body(Body::from("vectors"))
+        .expect("request");
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .is_err()
+    );
+    let rows = fixture.usage.rows().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (None, None));
 }
 
 #[tokio::test]
