@@ -936,6 +936,7 @@ fn raw_app(
             wire_model: Some("upstream".to_owned()),
             max_output_tokens: None,
             context_window: None,
+            patience: Some(std::time::Duration::from_secs(60)),
             weight: 1,
             free: false,
         }],
@@ -1301,6 +1302,7 @@ fn named_app(stream: bool, wire: &str, answer: &'static str) -> (axum::Router, t
             max_output_tokens: None,
             context_window: None,
             weight: 1,
+            patience: Some(std::time::Duration::from_secs(60)),
             free: false,
         }],
     )]);
@@ -1497,6 +1499,7 @@ fn protocol_app(members: Vec<Arc<dyn Member>>) -> (axum::Router, tempfile::TempD
             wire_model: None,
             max_output_tokens: None,
             context_window: None,
+            patience: Some(std::time::Duration::from_secs(60)),
             weight: 1,
             free: false,
         })

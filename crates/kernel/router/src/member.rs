@@ -11,6 +11,10 @@ use hofund_plugin_api::{
 
 use crate::{AttemptHook, MemberAttempt};
 
+/// Proof that a member answered a background model-list request.
+#[derive(Clone, Debug)]
+pub struct ModelListAnswer;
+
 /// One upstream the router may call.
 ///
 /// `id` is stable across snapshots. `route_id` is the configured provider id
@@ -40,6 +44,11 @@ pub trait Member: Send + Sync {
 
     /// Codec id this member speaks. Compared with the inbound protocol.
     fn protocol(&self) -> &str;
+
+    /// Whether a runtime may use this member's model list for rest probes.
+    fn background_probe(&self) -> bool {
+        self.plugin_id().is_empty()
+    }
 
     /// Per-attempt facts. Adapters with upstream route metadata override this.
     fn attempt(&self) -> MemberAttempt {
@@ -93,6 +102,17 @@ pub trait Member: Send + Sync {
     ) -> Result<CountOutcome, PluginError> {
         let _ = (request, inbound);
         Ok(CountOutcome::Unsupported)
+    }
+
+    /// Lists models without counting as a real request or changing a rest.
+    ///
+    /// The default is `unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the list fails or is not available.
+    async fn list_models(&self) -> Result<ModelListAnswer, PluginError> {
+        Err(PluginError::unsupported("this member has no model list"))
     }
 
     /// Posts `body` to `path` under the upstream's base URL.

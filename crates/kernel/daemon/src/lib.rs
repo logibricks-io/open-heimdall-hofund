@@ -42,6 +42,7 @@ mod models;
 mod models_state;
 mod offline;
 mod one_shot;
+mod probe;
 mod quotas;
 mod registry;
 mod rests;
@@ -592,10 +593,12 @@ async fn start_inner(
     );
     let maintenance = runtime.spawn_maintenance();
     let subscriptions = runtime.spawn_subscriptions();
+    let probes = runtime.spawn_probes();
     Ok(running
         .with_task(refresh)
         .with_task(maintenance)
-        .with_task(subscriptions))
+        .with_task(subscriptions)
+        .with_task(probes))
 }
 
 /// Serves until a termination signal or a control shutdown, then drains.
@@ -917,9 +920,11 @@ fn providers(
                 adapter: Arc::clone(&instance.adapter),
                 protocol,
                 timeout,
+                kernel: registry.is_kernel_factory(&plugin_id),
                 plugin_id,
                 preset_id: provider.preset.clone().unwrap_or_default(),
                 fingerprint,
+                patience: provider.patience.duration(),
                 base_url: endpoint.base_url.clone(),
             },
         );

@@ -16,6 +16,10 @@ id = "primary"
 protocol = "openai-chat"
 base_url = "http://127.0.0.1:4000/v1"
 api_key = "replace-me"
+# patience is optional. A direct request to this provider waits out busy
+# failures for 60 seconds by default, with pauses doubling to 30 seconds.
+# Set seconds or a duration up to 240 seconds, or "off" to disable retries.
+# patience = 60
 
 # Point base_url at a local mock. A placeholder key must not be paired with
 # a real vendor host, or a check of this file can send traffic.

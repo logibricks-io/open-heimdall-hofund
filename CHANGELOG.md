@@ -86,6 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Chat token fields now follow the original request and OpenAI's
   `max_completion_tokens` convention (V-5). A refusal naming the other field
   triggers one retry and is remembered per provider for subsequent requests.
+- Single-provider patience and background recovery (P0-3b3): direct provider
+  requests retry busy failures and short rate limits with pauses doubling to 30
+  seconds, bounded by per-provider `patience` (60 seconds by default, at most
+  240 seconds, or `off`). Streaming clients receive SSE comments during waits,
+  disconnects record 499 without another attempt, and terminal failures pass
+  through. Kernel API keys resting after generic outages now answer background
+  model-list probes after 1, 2, 5, then 10 minutes; a response lifts the rest,
+  while a failure within 30 minutes suppresses probes until a real answer.
 - Per-model rests (P0-3b2): model-cooling and unserved-model refusals now rest
   only the affected member/model pair, with independent rate, generic, and
   persisted credit ladders. Routing probes are selected per pair, model success
