@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Read-only gateway keys and `/me` (P0-4c): read-only keys can read `/health`, quotas,
+  history, and their own key page, while every other HTTP route and Responses
+  WebSocket upgrade is refused with 403 `gateway_key_read_only` before an
+  upstream call. Route coverage is exhaustively tested. `gateway-key add
+  --read-only`, `gateway-key access`, and the `ACCESS` column manage the mode;
+  the default sharing key stays full. The static `/me` page provides
+  placeholder-by-default agent setup, and `/v1/hofund/me` reports only the
+  calling key's limits, usage, top models, and allowed models without secrets.
 - Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
   secret readable, as the reference does, so `gateway-key copy` shows a key
   again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,
