@@ -945,6 +945,7 @@ impl Cooldowns {
         credit: CreditContext,
         background_probe: bool,
     ) -> Cooling {
+        let mut ladder = None;
         let (mut candidate, named) = match failure {
             Failure::Generic(cause) => (Self::generic(state, now, &self.policy, cause), false),
             Failure::RateLimit => (self.rate_limit(state, now, error.retry_after()), false),
@@ -957,12 +958,26 @@ impl Cooldowns {
                 candidate.guessed = hint.is_none();
                 (candidate, hint.is_some())
             }
-            Failure::Credit => self.credit(state, now, error, credit),
+            Failure::Credit => {
+                let (candidate, named, on_ladder) = self.credit(state, now, error, credit);
+                ladder = Some(on_ladder);
+                (candidate, named)
+            }
         };
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
         candidate.background_probe = background_probe;
+        let candidate_until = candidate.until;
         let applied = apply(state, candidate, named);
+        // The credit ladder moves only with the rest it wrote: a kept rest
+        // keeps its rung and run (reference: internal/gateway/routing.go:
+        // 1518-1533 leaves the note alone when the rest stands).
+        if let Some(on_ladder) = ladder
+            && applied.until == candidate_until
+        {
+            state.credit_rung = applied.failures;
+            state.credit_ladder = on_ladder;
+        }
         state.idle_since = None;
         if matches!(failure, Failure::RateLimit) {
             state.rate_until = Some(applied.until);
@@ -979,7 +994,7 @@ impl Cooldowns {
         now: Instant,
         error: &PluginError,
         context: CreditContext,
-    ) -> (Cooling, bool) {
+    ) -> (Cooling, bool, bool) {
         let reset = positive_hint(error.reset_after()).map(|after| after.min(CREDIT_RESET_MAX));
         let retry = positive_hint(error.retry_after());
         // `named`: the vendor gave this time (reset or retry hint); `guessed`:
@@ -1025,11 +1040,9 @@ impl Cooldowns {
                 let index = usize::try_from(rung - 1).unwrap_or(0);
                 (CREDIT_LADDER[index], rung, true, false, true)
             };
-        state.credit_rung = rung;
-        state.credit_ladder = on_ladder;
         let mut candidate = cooling(now, duration, CooldownCause::Credit, rung);
         candidate.guessed = guessed;
-        (candidate, named)
+        (candidate, named, on_ladder)
     }
 
     fn entry_for_insert<'a>(

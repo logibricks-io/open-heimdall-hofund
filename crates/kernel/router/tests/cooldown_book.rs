@@ -414,6 +414,44 @@ fn d19_unnamed_shorter_credit_keeps_guessed_rung() {
 }
 
 #[test]
+fn d19_kept_rung_keeps_its_place_on_the_ladder() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error())
+        .expect("first rung");
+    advance(&clock, 30 * MINUTE);
+    book.record_failure(&id, &credit_error())
+        .expect("second rung");
+    let soon = credit_error().with_retry_after(Duration::from_secs(MINUTE));
+    book.record_failure(&id, &soon).expect("kept rung");
+    advance(&clock, 2 * HOUR);
+    let applied = book
+        .record_failure(&id, &credit_error())
+        .expect("third rung");
+    assert_eq!(applied.failures(), 3);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(8 * HOUR));
+}
+
+#[test]
+fn d19_ladder_rung_does_not_replace_a_longer_flat_guess() {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
+    let mut policy = CooldownPolicy::default();
+    policy.credit = Duration::from_secs(2 * HOUR);
+    let book = Cooldowns::with_clock(policy, Arc::new(move || *clock.lock().expect("clock")));
+    let id = MemberId::from_preset(
+        PresetId::from_static("member"),
+        MemberKey::from_static("row"),
+    );
+    let soon = credit_error().with_retry_after(Duration::from_secs(MINUTE));
+    book.record_failure(&id, &soon).expect("flat guess");
+    let applied = book
+        .record_failure(&id, &credit_error())
+        .expect("first rung");
+    assert_eq!(applied.failures(), 0);
+    assert_eq!(remaining(&book, &id, &now), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
 fn d19_named_credit_reset_replaces_guessed_rung() {
     let (book, id, clock) = fixture();
     book.record_failure(&id, &credit_error()).expect("guess");
