@@ -10,9 +10,9 @@ use axum::http::{Request, StatusCode, header};
 use bytes::Bytes;
 use futures_util::stream;
 use hofund_codec::{
-    AnthropicMessages, Codec, CodecError, GenerativeLanguage,
-    OpenAiChat, OpenAiResponses, PLUGIN_HOST_PREFIX, STREAM_CLIENT_PREFIXES,
-    STREAM_TURN_METADATA_HEADER, STREAM_WINDOW_HEADER, StreamDecoder, StreamEncoder,
+    AnthropicMessages, Codec, CodecError, GenerativeLanguage, OpenAiChat, OpenAiResponses,
+    PLUGIN_HOST_PREFIX, STREAM_CLIENT_PREFIXES, STREAM_TURN_METADATA_HEADER, STREAM_WINDOW_HEADER,
+    StreamDecoder, StreamEncoder,
 };
 use hofund_gateway::Gateway;
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY};
@@ -700,11 +700,14 @@ async fn d1d_stream_client_byte_cap_and_overflow_before_stream_start_compact() {
 }
 
 /// A client that keeps ordinary HTTP error behavior.
-const OTHER_CLIENT_UA: &str = "other-agent/1.4.0 ai-sdk/openai";
+const OTHER_CLIENT_UA: &str = "other-agent/1.4.0 js-sdk/2.0";
 
 /// The compacting client's own User-Agent, as it sends it.
 fn stream_client_ua() -> String {
-    format!("{}_cli_rs/0.162.3 (Mac OS 26.6.0; arm64)", STREAM_CLIENT_PREFIXES[0])
+    format!(
+        "{}_cli_rs/0.162.3 (Mac OS 26.6.0; arm64)",
+        STREAM_CLIENT_PREFIXES[0]
+    )
 }
 
 /// The same client behind an ACP extension, in mixed case.
@@ -717,7 +720,13 @@ fn plugin_host_ua() -> String {
     let host: String = PLUGIN_HOST_PREFIX
         .chars()
         .enumerate()
-        .map(|(at, c)| if at % 2 == 0 { c.to_ascii_uppercase() } else { c })
+        .map(|(at, c)| {
+            if at % 2 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
         .collect();
     format!(" {host}/1.0")
 }
