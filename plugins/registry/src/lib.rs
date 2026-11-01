@@ -303,6 +303,15 @@ pub fn subscription(id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
     subscription_in(&contributions(), id)
 }
 
+/// Subscription plugin ids, in contribution order.
+#[must_use]
+pub fn subscription_ids() -> Vec<&'static str> {
+    contributions()
+        .into_iter()
+        .filter_map(|(kind, name, _)| (kind == PluginKind::Subscription).then_some(name))
+        .collect()
+}
+
 fn surface_in(
     contributions: &[(PluginKind, &'static str, hofund_plugin_sdk::Contribution)],
     id: &str,

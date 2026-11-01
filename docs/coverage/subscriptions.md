@@ -55,6 +55,15 @@ Doc URLs were checked on 2026-10-25 (HTTP 200 unless noted). "not found" means n
 | opencode auth plugins | Generic OpenCode auth plugin host | generic | Plugin OAuth method: page to open, then auto-notice or pasted code (SubmitSignInCallback); built-in-to-plugin movers | plugin-owned; plugin-checkin.json | plugin fetch transport (pluginBase); speaks per AI SDK package | plugin usage/check-in hooks | internal/provider/plugins.go, internal/provider/pluginsignin.go, internal/provider/pluginsignin_paste.go, internal/provider/plugin_accounts.go, internal/provider/plugin_checkin.go, internal/provider/plugin_usage.go, internal/provider/plugin_relist.go, internal/provider/plugin_left.go, internal/provider/migrate.go, internal/provider/retired.go, internal/plugin/ | not found (packages at github.com/magpie-community/plugins) | Requires a Bun/JS runtime and running third-party code; this is the gate for 13 retired subscriptions | missing |
 | subscription usage core | Shared quota window model | generic | n/a | n/a | n/a | QuotaWindow type; Usage page cards. hofund (H0d): `QuotaWindow` polls every 5 min per account member, and a spent blocking window cools that member (`crates/kernel/daemon/src/subscriptions.rs`); Partial, verified with mocks only, no usage view | internal/provider/subscription_usage.go, internal/provider/planquota.go, internal/provider/account.go, internal/provider/account_order.go, internal/provider/account_seats.go, internal/provider/forget_account.go, internal/provider/signin_revoked.go | not found | n/a | partial |
 
+## Subscription options
+
+`[[subscriptions]]` already has `routing`, `at_once`, `stays`, and `options`. Two boolean keys in `[subscriptions.options]` control agent sign-in switching:
+
+- `keep_login` (default false). The agent returns to the first account as soon as that account has room, including under in-order routing. The automatic switch (every five minutes) uses the same rule.
+- `switch_only` (default false). Only the agent sign-in moves. Gateway routing stays on the account it already chose, and the sign-in does not follow a spent account back to the first one unless `keep_login` or in-order routing asks it to.
+
+A subscription plugin may also declare that its own sign-in spends the account. That flag lives on the plugin spec, not in config.
+
 ## Priority suggestion
 
 - P1: codex (ChatGPT via Codex backend), claude bridge, copilot (+GHE), gemini Code Assist. These four built-ins are still in magpie core, and the P1 agents use them.

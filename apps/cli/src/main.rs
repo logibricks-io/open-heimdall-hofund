@@ -3,6 +3,7 @@
 //! The binary parses arguments and calls the daemon. It does not route and it
 //! does not encode a protocol.
 
+mod accounts;
 mod commands;
 mod connect;
 mod events;
@@ -20,6 +21,7 @@ mod subscription;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use accounts::AccountsCommand;
 use hofund_config::user_config_path;
 use hofund_control_client::hofund_control_proto::ProviderKeyAction;
 use subscription::{SubscriptionCommand, SubscriptionFlags};
@@ -45,6 +47,7 @@ fn main() -> ExitCode {
         }
         Command::TokenShow => finish(local::token_show(&config)),
         Command::Subscription(command) => hand_over(subscription::run(&config, &command)),
+        Command::Accounts(command) => hand_over(accounts::run(&config, &command)),
         Command::Quota(command) => quota::run(&config, command),
         other => finish(run_control(&config, other)),
     }
@@ -129,7 +132,8 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             | Command::Serve
             | Command::TokenShow
             | Command::Subscription(_)
-            | Command::Quota(_) => Err("not a control command".to_owned()),
+            | Command::Quota(_)
+            | Command::Accounts(_) => Err("not a control command".to_owned()),
         }
     })
 }
@@ -173,6 +177,7 @@ enum Command {
         model: Option<String>,
     },
     Subscription(SubscriptionCommand),
+    Accounts(AccountsCommand),
     /// `quota`, `quota history`, and `quota wait`.
     Quota(quota::QuotaCommand),
     ProviderList,
@@ -412,6 +417,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
+        },
+        ["accounts", rest @ ..] => match accounts::parse(rest) {
+            Some(parsed) => Command::Accounts(parsed?),
+            None => return Err(accounts::ACCOUNTS_HELP.to_owned()),
         },
         ["provider", "list"] => Command::ProviderList,
         ["provider", "show", id] => Command::ProviderShow {

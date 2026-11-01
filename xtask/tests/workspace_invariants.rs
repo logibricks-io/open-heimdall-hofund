@@ -805,6 +805,32 @@ fn vendor_scan_pending_crates_exist_and_still_name_vendors() {
     }
 }
 
+#[test]
+fn agent_login_names_no_vendor() {
+    let root = workspace_root().join("crates/kernel/daemon/src/agent_login");
+    let mut violations = Vec::new();
+    for path in rust_files(&root) {
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        for (index, line) in text.lines().enumerate() {
+            let hits = vendor_hits(line);
+            if !hits.is_empty() {
+                violations.push(format!(
+                    "{}:{} {}",
+                    path.display(),
+                    index + 1,
+                    hits.join(",")
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "agent sign-in switching must read vendor names from plugin declarations:\n{}",
+        violations.join("\n")
+    );
+}
+
 /// Every `presets.toml` inside a kernel crate, as a repo-relative path.
 fn kernel_preset_catalogs(root: &Path) -> Vec<String> {
     let mut found = Vec::new();

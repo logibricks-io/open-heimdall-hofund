@@ -671,3 +671,16 @@ fn find_link_takes_the_first_https_word() {
     assert_eq!(cli::find_link("http://claude.ai/insecure"), None);
     assert_eq!(cli::find_link("https:// nothing"), None);
 }
+
+#[test]
+fn d27_7_write_agent_sign_in_creates_claude_files() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    block_on(sub.write_agent_sign_in(&id, &agent_home, host.context())).expect("switch");
+    assert!(agent_home.join(creds::CREDENTIALS_FILE).is_file());
+    assert!(agent_home.join(creds::PROFILE_FILE).is_file());
+}
