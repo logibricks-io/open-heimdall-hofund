@@ -476,6 +476,14 @@ mod tests {
         let (several, keys) = super::enabled(&config.providers[0], "openai-chat").expect("keys");
         assert!(!several);
         assert_eq!(keys.len(), 1);
+
+        // Two different specs that resolve to the same secret are one key.
+        let name = std::env::var("CARGO_PKG_NAME").expect("cargo sets the package name");
+        let config = load(&format!(
+            "[[providers]]\nid = \"p\"\npreset = \"openai\"\napi_key = \"env:CARGO_PKG_NAME\"\n[[providers.keys]]\nkey = \"{name}\"\n"
+        ))
+        .expect("config");
+        assert_eq!(super::resolve(&config.providers[0]).expect("keys").len(), 1);
     }
 
     fn change(
@@ -578,8 +586,40 @@ mod tests {
             let mut request =
                 hofund_control_proto::ProviderKeyRequest::new(action).for_id(key_id("only"));
             request.keys.clear();
-            assert!(super::mutate(original, "p", &request).is_err());
+            let refused = super::mutate(original, "p", &request).err();
+            if action == hofund_control_proto::ProviderKeyAction::Remove {
+                assert_eq!(
+                    refused.as_deref(),
+                    Some("that is the only key in use; turn another on first")
+                );
+            } else {
+                assert!(refused.is_some());
+            }
         }
+
+        // The only enabled key heads the list; another key that is off does not save it.
+        let with_off = "[[providers]]\nid = \"p\"\npreset = \"openai\"\napi_key = \"only\"\n[[providers.keys]]\nkey = \"spare\"\non = false\n";
+        let request = hofund_control_proto::ProviderKeyRequest::new(
+            hofund_control_proto::ProviderKeyAction::Remove,
+        )
+        .for_id(key_id("only"));
+        assert_eq!(
+            super::mutate(with_off, "p", &request).err().as_deref(),
+            Some("that is the only key in use; turn another on first")
+        );
+    }
+
+    #[test]
+    fn k6e_list_shows_a_single_enabled_key_with_the_provider_rest() {
+        let config = load(
+            "[[providers]]\nid = \"p\"\npreset = \"openai\"\napi_key = \"only\"\n[[providers.keys]]\nkey = \"spare\"\non = false\n",
+        )
+        .expect("config");
+        let cooldowns = hofund_router::Cooldowns::new(hofund_router::CooldownPolicy::default());
+        cooldowns.record_panic(&crate::membership::member_id("p"));
+        let listed = super::list(&config.providers[0], &cooldowns).expect("list");
+        assert_eq!(listed.keys.len(), 2);
+        assert!(listed.keys[0].rest.is_some());
     }
 
     #[test]
@@ -609,6 +649,15 @@ mod tests {
         assert_eq!(provider.api_key, "third");
         assert_eq!(provider.keys.len(), 1);
         assert!(provider.keys[0].key == "second" && !provider.keys[0].on);
+
+        let first_only = change(
+            original,
+            hofund_control_proto::ProviderKeyAction::RemoveMany,
+            "",
+            &[key_id("first").as_str()],
+        );
+        let provider = &load(&first_only.text).expect("first gone").providers[0];
+        assert_eq!(provider.api_key, "third");
 
         let mut none = hofund_control_proto::ProviderKeyRequest::new(
             hofund_control_proto::ProviderKeyAction::RemoveMany,
