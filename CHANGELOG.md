@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control API, and CLI. Replacement preserves key settings and moves rests.
   Per-key concurrency, remote allowances, per-key plans, and reserve-key
   accounts-at-once remain follow-ups. See `docs/provider-keys.md`.
+- Codex compaction parity fixes (D-23): a summary stream that ends before its
+  terminal response, including the equivalent 502 error, now produces a
+  bounded local summary instead of returning partial text or failing the
+  compaction. Generated compaction asks normalize developer instructions to
+  system instructions for vendors without a developer role; ordinary turns
+  keep their original roles.
 - Read-only gateway keys and `/me` (P0-4c): read-only keys can read `/health`, quotas,
   history, and their own key page, while every other HTTP route and Responses
   WebSocket upgrade is refused with 403 `gateway_key_read_only` before an

@@ -58,6 +58,11 @@ pub(crate) fn for_hofund(body: &[u8]) -> (Option<Vec<u8>>, bool) {
     let (changed, compact) = open_summaries(items, true);
     if compact {
         items.retain(|item| kind(item) != "additional_tools");
+        for item in items.iter_mut() {
+            if kind(item) == "message" && text(item, "role") == "developer" {
+                item["role"] = Value::String("system".to_owned());
+            }
+        }
         if let Some(object) = value.as_object_mut() {
             object.insert("tools".to_owned(), json!([]));
             object.insert("tool_choice".to_owned(), json!("auto"));
