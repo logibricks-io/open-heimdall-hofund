@@ -15,7 +15,7 @@ use thiserror::Error;
 
 /// A validated configuration file.
 ///
-/// [`Debug`] redacts `api_key`, every header value, and every options value.
+/// [`Debug`] redacts every provider API key, header value, and options value.
 /// Option keys and header names stay visible. The options table is opaque and
 /// may hold secrets, so values are redacted rather than matched against an
 /// allowlist of safe keys.
@@ -199,6 +199,14 @@ pub struct Provider {
     pub base_url: String,
     /// Credential spec. `env:NAME` reads that variable. Any other value is the key.
     pub api_key: String,
+    /// Display name of the first key.
+    pub key_name: String,
+    /// Only codec the first key works with. Absent allows the provider's codec.
+    pub key_protocol: Option<String>,
+    /// Weighted-routing share of the first key.
+    pub key_weight: u64,
+    /// Additional API keys, in candidate order after the first key.
+    pub keys: Vec<ProviderKey>,
     /// Quirk profile id. Absent when the endpoint needs no profile.
     pub quirks: Option<String>,
     /// Extra request headers.
@@ -220,6 +228,155 @@ pub struct Provider {
     pub options: BTreeMap<String, Value>,
     /// Host-owned model listing settings.
     pub model_list: ModelList,
+}
+
+/// The largest weighted-routing share one API key may have.
+pub const MAX_KEY_WEIGHT: u64 = 1000;
+
+/// The codecs one API key may be restricted to.
+pub const KEY_PROTOCOLS: [&str; 5] = [
+    "openai-chat",
+    "openai-responses",
+    "anthropic-messages",
+    "generative-language",
+    "bedrock-converse",
+];
+
+/// One additional provider API key from `[[providers.keys]]`.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderKey {
+    /// Credential spec. `env:NAME` reads that variable. Any other value is the key.
+    #[serde(default)]
+    pub key: String,
+    /// Display name.
+    #[serde(default)]
+    pub name: String,
+    /// Whether this key is a route candidate.
+    #[serde(default = "default_true")]
+    pub on: bool,
+    /// Only codec this key works with. Absent allows the provider's codec.
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// Weighted-routing share. One is the default.
+    #[serde(default = "default_key_weight")]
+    pub weight: u64,
+}
+
+impl Provider {
+    /// Every nonempty key once, with the first key first and duplicates keeping
+    /// their first position and settings.
+    #[must_use]
+    pub fn key_entries(&self) -> Vec<ProviderKey> {
+        let first = ProviderKey {
+            key: self.api_key.clone(),
+            name: self.key_name.clone(),
+            on: true,
+            protocol: self.key_protocol.clone(),
+            weight: self.key_weight,
+        };
+        let mut seen = BTreeSet::new();
+        std::iter::once(first)
+            .chain(self.keys.iter().cloned())
+            .filter(|key| !key.key.trim().is_empty() && seen.insert(key.key.clone()))
+            .collect()
+    }
+}
+
+/// Replaces one provider's ordered key list while preserving every unrelated
+/// TOML field and each credential spec as written.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Invalid`] when the document is invalid, the provider
+/// is absent, or `keys` is empty.
+pub fn edit_provider_keys(
+    text: &str,
+    provider_id: &str,
+    keys: &[ProviderKey],
+) -> Result<String, ConfigError> {
+    use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+
+    fn set_string(table: &mut Table, field: &str, text: &str) {
+        if text.is_empty() {
+            table.remove(field);
+        } else {
+            table.insert(field, value(text));
+        }
+    }
+
+    let Some((first, additional)) = keys.split_first() else {
+        return Err(ConfigError::Invalid(
+            "a provider must keep one key".to_owned(),
+        ));
+    };
+    let mut document = text
+        .parse::<DocumentMut>()
+        .map_err(|error| ConfigError::Syntax(error.to_string()))?;
+    let table = document
+        .get_mut("providers")
+        .and_then(Item::as_array_of_tables_mut)
+        .and_then(|providers| {
+            providers
+                .iter_mut()
+                .find(|table| table.get("id").and_then(Item::as_str) == Some(provider_id))
+        })
+        .ok_or_else(|| ConfigError::Invalid(format!("unknown provider `{provider_id}`")))?;
+    set_string(table, "api_key", &first.key);
+    set_string(table, "key_name", &first.name);
+    if let Some(protocol) = &first.protocol {
+        table.insert("key_protocol", value(protocol));
+    } else {
+        table.remove("key_protocol");
+    }
+    if first.weight == 1 {
+        table.remove("key_weight");
+    } else {
+        table.insert(
+            "key_weight",
+            value(i64::try_from(first.weight).unwrap_or(i64::MAX)),
+        );
+    }
+    if additional.is_empty() {
+        table.remove("keys");
+    } else {
+        let mut raw = ArrayOfTables::new();
+        for entry in additional {
+            let mut table = Table::new();
+            table.insert("key", value(&entry.key));
+            if !entry.name.is_empty() {
+                table.insert("name", value(&entry.name));
+            }
+            if !entry.on {
+                table.insert("on", value(false));
+            }
+            if let Some(protocol) = &entry.protocol {
+                table.insert("protocol", value(protocol));
+            }
+            if entry.weight != 1 {
+                table.insert(
+                    "weight",
+                    value(i64::try_from(entry.weight).unwrap_or(i64::MAX)),
+                );
+            }
+            raw.push(table);
+        }
+        table.insert("keys", Item::ArrayOfTables(raw));
+    }
+    Ok(document.to_string())
+}
+
+impl fmt::Debug for ProviderKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderKey")
+            .field("key", &"<redacted>")
+            .field("name", &self.name)
+            .field("on", &self.on)
+            .field("protocol", &self.protocol)
+            .field("weight", &self.weight)
+            .finish()
+    }
 }
 
 /// Host-owned model listing settings from `[providers.models]`.
@@ -428,6 +585,10 @@ impl fmt::Debug for Provider {
             .field("protocol", &self.protocol)
             .field("base_url", &self.base_url)
             .field("api_key", &"<redacted>")
+            .field("key_name", &self.key_name)
+            .field("key_protocol", &self.key_protocol)
+            .field("key_weight", &self.key_weight)
+            .field("keys", &self.keys)
             .field("quirks", &self.quirks)
             .field("headers", &RedactedPairs(&self.headers))
             .field("max_output_tokens", &self.max_output_tokens)
@@ -667,9 +828,12 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             )));
         }
         validate_refresh(&provider.id, &provider.models.refresh)?;
+        let key_weight = validate_key_weight(&provider.id, "key_weight", provider.key_weight)?;
         let auto_include = clean_auto_include(&provider.id, &provider.models.auto_include)?;
         let patience = patience_of("provider", &provider.id, provider.patience.as_ref())?;
         let options = options_of(&provider, &mut warnings)?;
+        let key_protocol = validated_key_protocol(&provider.id, provider.key_protocol)?;
+        let keys = validated_keys(&provider.id, provider.keys)?;
         let mut model_list = provider.models;
         model_list.auto_include = auto_include;
         providers.push(Provider {
@@ -678,6 +842,10 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             protocol,
             base_url: provider.base_url,
             api_key: provider.api_key,
+            key_name: provider.key_name,
+            key_protocol,
+            key_weight,
+            keys,
             quirks: provider.quirks,
             headers: provider.headers,
             max_output_tokens: provider.max_output_tokens,
@@ -1139,6 +1307,48 @@ fn default_true() -> bool {
     true
 }
 
+fn default_key_weight() -> u64 {
+    1
+}
+
+/// Zero, like an absent weight, counts as the default share of one.
+fn validate_key_weight(provider: &str, field: &str, weight: u64) -> Result<u64, ConfigError> {
+    if weight <= MAX_KEY_WEIGHT {
+        return Ok(weight.max(1));
+    }
+    Err(ConfigError::Invalid(format!(
+        "provider `{provider}` {field} must be 0 to {MAX_KEY_WEIGHT} (0 counts as 1)"
+    )))
+}
+
+fn validated_key_protocol(
+    provider: &str,
+    protocol: Option<String>,
+) -> Result<Option<String>, ConfigError> {
+    let protocol = protocol.and_then(|protocol| {
+        let protocol = protocol.trim();
+        (!protocol.is_empty()).then(|| protocol.to_owned())
+    });
+    if let Some(protocol) = &protocol
+        && !KEY_PROTOCOLS.contains(&protocol.as_str())
+    {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{provider}` has unknown key protocol `{protocol}`"
+        )));
+    }
+    Ok(protocol)
+}
+
+fn validated_keys(provider: &str, keys: Vec<ProviderKey>) -> Result<Vec<ProviderKey>, ConfigError> {
+    let mut validated = Vec::with_capacity(keys.len());
+    for mut key in keys {
+        key.weight = validate_key_weight(provider, "key weight", key.weight)?;
+        key.protocol = validated_key_protocol(provider, key.protocol)?;
+        validated.push(key);
+    }
+    Ok(validated)
+}
+
 fn default_connect_timeout_ms() -> u64 {
     10_000
 }
@@ -1333,6 +1543,14 @@ struct RawProvider {
     #[serde(default)]
     api_key: String,
     #[serde(default)]
+    key_name: String,
+    #[serde(default)]
+    key_protocol: Option<String>,
+    #[serde(default = "default_key_weight")]
+    key_weight: u64,
+    #[serde(default)]
+    keys: Vec<ProviderKey>,
+    #[serde(default)]
     quirks: Option<String>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
@@ -1406,6 +1624,10 @@ impl fmt::Debug for RawProvider {
             .field("protocol", &self.protocol)
             .field("base_url", &self.base_url)
             .field("api_key", &"<redacted>")
+            .field("key_name", &self.key_name)
+            .field("key_protocol", &self.key_protocol)
+            .field("key_weight", &self.key_weight)
+            .field("keys", &self.keys)
             .field("quirks", &self.quirks)
             .field("headers", &RedactedPairs(&self.headers))
             .field("max_output_tokens", &self.max_output_tokens)
@@ -2605,6 +2827,97 @@ mod tests {
         )
         .expect_err("empty subscription key");
         assert!(error.to_string().contains("empty option key"));
+    }
+
+    #[test]
+    fn k1_provider_keys_validate_deduplicate_and_redact() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "primary"
+            preset = "openai"
+            api_key = "env:FIRST_KEY"
+            key_name = "Personal"
+            key_protocol = "openai-chat"
+            key_weight = 2
+            [[providers.keys]]
+            key = "env:SECOND_KEY"
+            name = "Team"
+            protocol = "openai-responses"
+            weight = 3
+            [[providers.keys]]
+            key = "env:SECOND_KEY"
+            on = false
+            [[providers.keys]]
+            key = "   "
+            [[providers.keys]]
+            key = "env:FIRST_KEY"
+            "#,
+        )
+        .expect("provider keys");
+        let provider = &config.providers[0];
+        let keys = provider.key_entries();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].name, "Personal");
+        assert_eq!(keys[0].protocol.as_deref(), Some("openai-chat"));
+        assert_eq!(keys[0].weight, 2);
+        assert_eq!(keys[1].name, "Team");
+        assert!(keys[1].on);
+        assert_eq!(keys[1].weight, 3);
+        let debug = format!("{config:?} {provider:?} {keys:?}");
+        assert!(!debug.contains("FIRST_KEY"), "{debug}");
+        assert!(!debug.contains("SECOND_KEY"), "{debug}");
+
+        for (field, message) in [
+            ("weight = 1001", "0 to 1000"),
+            ("protocol = \"carrier-pigeon\"", "unknown key protocol"),
+            ("plan = \"paid\"", "unknown field"),
+        ] {
+            let error = load(&format!(
+                "[[providers]]\nid = \"primary\"\npreset = \"openai\"\n[[providers.keys]]\nkey = \"k\"\n{field}\n"
+            ))
+            .expect_err(field);
+            assert!(error.to_string().contains(message), "{field}: {error}");
+        }
+        load(
+            "[[providers]]\nid = \"primary\"\npreset = \"openai\"\napi_key = \"k\"\nkey_weight = 1001\n",
+        )
+        .expect_err("first-key weight");
+        // Zero, like an absent weight, counts as one, as in the reference.
+        let zero = load(
+            "[[providers]]\nid = \"primary\"\npreset = \"openai\"\napi_key = \"k\"\nkey_weight = 0\n[[providers.keys]]\nkey = \"k2\"\nweight = 0\n",
+        )
+        .expect("zero weights");
+        load("[[providers]]\nid = \"primary\"\npreset = \"openai\"\napi_key = \"k\"\nkey_weight = 1000\n")
+            .expect("largest weight");
+        let zero_keys = zero.providers[0].key_entries();
+        assert_eq!(zero_keys[0].weight, 1);
+        assert_eq!(zero_keys[1].weight, 1);
+    }
+
+    #[test]
+    fn k6_config_writes_keep_env_specs_as_written() {
+        let original = r#"[[providers]]
+id = "primary"
+preset = "openai"
+api_key = "env:FIRST_KEY"
+[[providers.keys]]
+key = "env:SECOND_KEY"
+name = "Team"
+protocol = "openai-chat"
+weight = 2
+"#;
+        let config = load(original).expect("original");
+        let mut keys = config.providers[0].key_entries();
+        let promoted = keys.remove(1);
+        keys.insert(0, promoted);
+        let edited = super::edit_provider_keys(original, "primary", &keys).expect("edited");
+        assert!(edited.contains("api_key = \"env:SECOND_KEY\""), "{edited}");
+        assert!(edited.contains("key = \"env:FIRST_KEY\""), "{edited}");
+        let provider = &load(&edited).expect("edited config").providers[0];
+        assert_eq!(provider.key_name, "Team");
+        assert_eq!(provider.key_protocol.as_deref(), Some("openai-chat"));
+        assert_eq!(provider.key_weight, 2);
     }
 
     #[test]

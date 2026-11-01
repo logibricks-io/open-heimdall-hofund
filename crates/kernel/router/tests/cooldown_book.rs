@@ -2213,3 +2213,24 @@ fn b5e_model_view_reports_the_later_of_member_and_model_rests() {
         Duration::from_secs(90)
     );
 }
+
+#[test]
+fn k6_replacement_moves_member_and_model_rests() {
+    let (book, old, _) = fixture();
+    let new = member("new");
+    book.record_failure(&old, &credit_error())
+        .expect("credit rest");
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&old, "model-a", &unserved)
+        .expect("model rest");
+
+    book.move_member(&old, &new);
+
+    assert!(book.cooling(&old).is_none());
+    assert!(book.cooling_for_model(&old, "model-a").is_none());
+    assert!(book.cooling(&new).is_some());
+    assert!(book.cooling_for_model(&new, "model-a").is_some());
+    let rests = book.credit_snapshot(std::time::SystemTime::now());
+    assert_eq!(rests.len(), 1);
+    assert_eq!(rests[0].member, new.to_string());
+}

@@ -264,6 +264,7 @@ impl SubscriptionState {
                 patience: None,
                 kernel: false,
                 base_url: String::new(),
+                key: None,
             },
             id,
             upstream,
@@ -687,7 +688,7 @@ mod tests {
             .expect("subscription")
             .resolve(&cooldowns())
             .await;
-        let (routes, _) = crate::route_plan(&config, None);
+        let (routes, _) = crate::route_plan(&config, None, None);
         let (_, expanded) =
             super::expand(&BTreeMap::new(), &routes, &subscriptions).expect("expanded routes");
 

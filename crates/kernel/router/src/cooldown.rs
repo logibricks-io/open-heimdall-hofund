@@ -886,6 +886,42 @@ impl Cooldowns {
         book.probe_missed.remove(id);
     }
 
+    /// Moves every rest, ladder, and probe record from one stable member id to
+    /// another after an in-place credential replacement.
+    pub fn move_member(&self, was: &MemberId, now: &MemberId) {
+        if was == now {
+            return;
+        }
+        let at = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, at);
+        let moved = book
+            .states
+            .extract_if(|key, _| key.member == *was)
+            .collect::<Vec<_>>();
+        for (key, state) in moved {
+            let moved_key = CooldownKey::new(now, key.model.as_deref());
+            book.states.insert(moved_key, state);
+        }
+        if book.windowed_credit.remove(was) {
+            book.windowed_credit.insert(now.clone());
+        }
+        if let Some(window) = book.credit_windows.remove(was) {
+            book.credit_windows.insert(now.clone(), window);
+        }
+        if let Some(lifted) = book.probe_lifted.remove(was) {
+            book.probe_lifted.insert(now.clone(), lifted);
+        }
+        if book.probe_missed.remove(was) {
+            book.probe_missed.insert(now.clone());
+        }
+        for (key, _) in &mut book.recoveries {
+            if key.member == *was {
+                key.member = now.clone();
+            }
+        }
+    }
+
     /// Drains pending recovery events without their model scopes, oldest first.
     /// Callers that route model rests should use [`Self::drain_scoped_recoveries`].
     pub fn drain_recoveries(&self) -> Vec<(MemberId, CooldownCause)> {
