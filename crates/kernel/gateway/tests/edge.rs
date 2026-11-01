@@ -818,6 +818,17 @@ async fn d21_a_severed_chat_stream_drops_the_half_event_and_ends_done() {
 }
 
 #[tokio::test]
+async fn d21_a_severed_whole_chat_reply_gets_no_done() {
+    let unary = r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#;
+    let (app, usage, dir) = raw_app(vec![br#"{"id":"x","#.to_vec()], true);
+    let (_, content_type, body) = post_raw(app, "/v1/chat/completions", unary).await;
+    assert_ne!(content_type, "text/event-stream", "{body}");
+    assert!(!body.contains("[DONE]"), "{body}");
+    assert_eq!(usage.rows().expect("rows")[0].status, "502");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn d21_severed_mid_line_keeps_the_events_before_it() {
     for wire in ["upstream", "demo"] {
         let parts = vec![
@@ -847,7 +858,10 @@ async fn d21_severed_at_line_end_closes_the_event_before_the_error() {
             body.starts_with("data: {\"a\":1}\n\ndata: {\"error\":"),
             "{wire}: {body}"
         );
-        assert!(chat_error_frame(&body).ends_with("}\n\ndata: [DONE]\n\n"), "{body}");
+        assert!(
+            chat_error_frame(&body).ends_with("}\n\ndata: [DONE]\n\n"),
+            "{body}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

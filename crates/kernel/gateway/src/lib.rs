@@ -2301,6 +2301,8 @@ mod line_hold_tests {
         assert!(whole_data_line(b"  data: 7 "));
         assert!(!whole_data_line(b"data: {\"a\":"));
         assert!(!whole_data_line(b"event: message_stop"));
+        assert!(!whole_data_line(b"{\"a\":1}"));
+        assert!(!whole_data_line(b"[DONE]"));
         assert!(!whole_data_line(b""));
     }
 
