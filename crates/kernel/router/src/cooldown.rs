@@ -280,6 +280,9 @@ impl CooldownKey {
 
 struct Book {
     states: HashMap<CooldownKey, State>,
+    sunk: HashMap<CooldownKey, u64>,
+    spent: HashSet<CooldownKey>,
+    next_sink: u64,
     windowed_credit: HashSet<MemberId>,
     credit_windows: HashMap<MemberId, CreditWindow>,
     probe_lifted: HashMap<MemberId, Instant>,
@@ -317,6 +320,9 @@ impl Cooldowns {
             clock,
             book: Mutex::new(Book {
                 states: HashMap::new(),
+                sunk: HashMap::new(),
+                spent: HashSet::new(),
+                next_sink: 1,
                 windowed_credit: HashSet::new(),
                 credit_windows: HashMap::new(),
                 probe_lifted: HashMap::new(),
@@ -396,6 +402,7 @@ impl Cooldowns {
             .map(|cooling| cooling.cause);
         if let Some(cause) = lifting {
             let revision = next_revision(&mut book);
+            book.spent.remove(&key);
             let state = book.states.get_mut(&key).expect("existing credit state");
             state.cooling = None;
             state.credit_rung = 0;
@@ -567,9 +574,13 @@ impl Cooldowns {
             key.model.is_none() && id.subscription().is_none() && probe_error(error);
         let credit = credit_context(&book, id, now);
         let revision = next_revision(&mut book);
+        if matches!(failure, Failure::Quota | Failure::Credit) {
+            book.spent.insert(key.clone());
+        }
         let Some(state) = self.entry_for_insert(&mut book, &key, now, revision) else {
             // A full book of active rests can consume a revision without inserting.
             let mut state = State::new(now, 0);
+            note_sink(&mut book, &key, failure);
             return Some(self.apply_failure(
                 &mut state,
                 failure,
@@ -580,6 +591,7 @@ impl Cooldowns {
             ));
         };
         let applied = self.apply_failure(state, failure, now, error, credit, background_probe);
+        note_sink(&mut book, &key, failure);
         drop(book);
         self.emit(&key, &applied, now);
         Some(applied)
@@ -605,6 +617,20 @@ impl Cooldowns {
                 recover(&mut book, key, cooling.cause);
             }
         }
+        book.sunk.retain(|key, _| key.member != *id);
+        book.spent.retain(|key| key.member != *id);
+    }
+
+    /// Sequence in which this member or model last rate limited with quota
+    /// left. A model-specific mark wins over a member-wide mark.
+    #[must_use]
+    pub fn sunk_at(&self, id: &MemberId, model: &str) -> Option<u64> {
+        let book = self.lock();
+        let specific = CooldownKey::new(id, Some(model));
+        book.sunk
+            .get(&specific)
+            .or_else(|| book.sunk.get(&CooldownKey::new(id, None)))
+            .copied()
     }
 
     /// Whether a real failure has disabled background probes for this member.
@@ -722,6 +748,7 @@ impl Cooldowns {
         if stale {
             return;
         }
+        book.spent.remove(&key);
         if let Some(state) = book.states.remove(&key)
             && let Some(cooling) = state.cooling
         {
@@ -765,6 +792,7 @@ impl Cooldowns {
         self.maintain_locked(&mut book, now);
         let duration = observation_rest(&self.policy, observation)?;
         let key = CooldownKey::new(id, None);
+        book.spent.insert(key.clone());
         let revision = next_revision(&mut book);
         let Some(state) = self.entry_for_insert(&mut book, &key, now, revision) else {
             return Some(cooling(now, duration, CooldownCause::Observed, 0));
@@ -866,6 +894,8 @@ impl Cooldowns {
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         book.states.retain(|key, _| members.contains(&key.member));
+        book.sunk.retain(|key, _| members.contains(&key.member));
+        book.spent.retain(|key| members.contains(&key.member));
         book.windowed_credit.retain(|id| members.contains(id));
         book.credit_windows.retain(|id, _| members.contains(id));
         book.probe_lifted.retain(|id, _| members.contains(id));
@@ -880,6 +910,8 @@ impl Cooldowns {
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         book.states.retain(|key, _| key.member != *id);
+        book.sunk.retain(|key, _| key.member != *id);
+        book.spent.retain(|key| key.member != *id);
         book.windowed_credit.remove(id);
         book.credit_windows.remove(id);
         book.probe_lifted.remove(id);
@@ -1395,6 +1427,15 @@ fn failure_kind(error: &PluginError) -> Option<Failure> {
         | PluginErrorKind::Internal => None,
         _ => None,
     }
+}
+
+fn note_sink(book: &mut Book, key: &CooldownKey, failure: Failure) {
+    if book.spent.contains(key) || !matches!(failure, Failure::RateLimit) {
+        return;
+    }
+    let sequence = book.next_sink;
+    book.next_sink = book.next_sink.wrapping_add(1);
+    book.sunk.insert(key.clone(), sequence);
 }
 
 fn next_revision(book: &mut Book) -> u64 {

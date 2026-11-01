@@ -106,6 +106,8 @@ pub struct Needs {
     pub speed: bool,
     /// Current catalog prices.
     pub price: bool,
+    /// Current free-model flags and prices.
+    pub free: bool,
 }
 
 /// A member-ordering callback.
@@ -373,6 +375,7 @@ impl StrategyState {
                 usage: strategy.by_use,
                 speed: strategy.by_speed,
                 price: strategy.by_price,
+                free: strategy.by_free,
             })
     }
 
@@ -459,6 +462,28 @@ impl StrategyState {
         round.total = total;
         round.last = Some(seats[best].key.clone());
         Some(best)
+    }
+
+    /// Charges the latest pick to the member affinity actually kept.
+    pub fn move_round(&self, pool: &str, picked: &str, kept: &str) {
+        if picked == kept {
+            return;
+        }
+        let mut pools = self.lock();
+        let Some(round) = pools.rounds.get_mut(pool) else {
+            return;
+        };
+        if round.last.as_deref() != Some(picked) || !round.current.contains_key(kept) {
+            return;
+        }
+        let charge = i128::try_from(round.total).unwrap_or(i128::MAX);
+        if let Some(current) = round.current.get_mut(picked) {
+            *current += charge;
+        }
+        if let Some(current) = round.current.get_mut(kept) {
+            *current -= charge;
+        }
+        round.last = Some(kept.to_owned());
     }
 
     fn lock(&self) -> MutexGuard<'_, Pools> {
@@ -1314,9 +1339,10 @@ mod tests {
         use super::Needs;
         let state = StrategyState::with_builtins();
         let none = Needs::default();
-        for name in ["smart", "order", "rotate", "weight", "free", "missing"] {
+        for name in ["smart", "order", "rotate", "weight", "missing"] {
             assert_eq!(state.needs(name), none, "{name}");
         }
+        assert_eq!(state.needs("free"), Needs { free: true, ..none });
         let usage = Needs {
             usage: true,
             ..none

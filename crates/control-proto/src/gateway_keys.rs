@@ -33,6 +33,8 @@ pub enum GatewayKeyAction {
     Access,
     /// Set whether the key may issue short-lived keys.
     Issuer,
+    /// Issue a short-lived key.
+    Issue,
     /// Set, append, or remove a spending limit.
     Limit,
     /// Reset one or all spending-limit windows.
@@ -169,6 +171,15 @@ pub struct GatewayKeyRequest {
     /// Issuer flag.
     #[serde(default)]
     pub issues: bool,
+    /// Issued-key lifetime in seconds.
+    #[serde(default)]
+    pub ttl_seconds: Option<f64>,
+    /// Whole-lifetime token cap for an issued key.
+    #[serde(default)]
+    pub tokens: u64,
+    /// Whole-lifetime cost cap for an issued key.
+    #[serde(default)]
+    pub cost: f64,
     /// Limit to set, or `None` to remove one or all limits.
     #[serde(default)]
     pub limit: Option<GatewayKeyLimit>,
@@ -193,6 +204,9 @@ impl GatewayKeyRequest {
             quotas: false,
             read_only: false,
             issues: false,
+            ttl_seconds: None,
+            tokens: 0,
+            cost: 0.0,
             limit: None,
             index: None,
         }
@@ -221,6 +235,9 @@ impl fmt::Debug for GatewayKeyRequest {
             .field("quotas", &self.quotas)
             .field("read_only", &self.read_only)
             .field("issues", &self.issues)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("tokens", &self.tokens)
+            .field("cost", &self.cost)
             .field("limit", &self.limit)
             .field("index", &self.index)
             .finish()
@@ -228,7 +245,7 @@ impl fmt::Debug for GatewayKeyRequest {
 }
 
 /// Key list or mutation response. A secret is returned only by add, rotate,
-/// and copy.
+/// issue, and copy.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GatewayKeyResponse {
@@ -236,8 +253,11 @@ pub struct GatewayKeyResponse {
     pub version: u32,
     /// Keys in their stored order.
     pub keys: Vec<GatewayKey>,
-    /// The secret after add, rotate, or copy.
+    /// The secret after add, rotate, issue, or copy.
     pub secret: Option<String>,
+    /// Id of the key created by an issue action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_id: Option<String>,
 }
 
 impl Default for GatewayKeyResponse {
@@ -246,6 +266,7 @@ impl Default for GatewayKeyResponse {
             version: API_VERSION,
             keys: Vec::new(),
             secret: None,
+            issued_id: None,
         }
     }
 }
@@ -257,6 +278,7 @@ impl fmt::Debug for GatewayKeyResponse {
             .field("version", &self.version)
             .field("keys", &self.keys)
             .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("issued_id", &self.issued_id)
             .finish()
     }
 }

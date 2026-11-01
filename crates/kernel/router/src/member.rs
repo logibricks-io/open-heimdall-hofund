@@ -114,6 +114,13 @@ pub trait Member: Send + Sync {
         Ok(CountOutcome::Unsupported)
     }
 
+    /// Reads whether `model` is currently free on an account-backed member.
+    /// `None` keeps the flag already carried by the hop.
+    async fn costs_nothing(&self, model: &str) -> Option<bool> {
+        let _ = model;
+        None
+    }
+
     /// Lists models without counting as a real request or changing a rest.
     ///
     /// The default is `unsupported`.

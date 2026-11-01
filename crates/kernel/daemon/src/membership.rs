@@ -29,7 +29,7 @@ use hofund_provider::{
 };
 use hofund_router::{
     Attempt, AttemptHook, Cooldowns, FailoverPolicy, Hop, Member, MemberAttempt, Route, Router,
-    Snapshot,
+    Snapshot, Unit,
     strategy::{Measurements, StrategyState},
 };
 use tower::Service;
@@ -73,11 +73,13 @@ struct HopSpec {
     max_output_tokens: Option<u64>,
     context_window: Option<u64>,
     routing: String,
+    sink: bool,
     patience: Option<Duration>,
     weight: u64,
     free: bool,
     stays: hofund_router::affinity::Stays,
     cold_after: Duration,
+    units: Vec<Unit>,
 }
 
 struct LiveMember {
@@ -360,11 +362,13 @@ fn build_specs(
                 max_output_tokens: hop.max_output_tokens,
                 context_window: hop.context_window,
                 routing: hop.routing,
+                sink: hop.sink,
                 patience: hop.patience,
                 weight: hop.weight,
                 free: hop.free,
                 stays: hop.stays,
                 cold_after: hop.cold_after,
+                units: hop.units,
             });
         }
         stored.insert(model, specs);
@@ -388,12 +392,14 @@ pub(crate) struct PlannedHop {
     /// list, when it is known.
     pub context_window: Option<u64>,
     pub routing: String,
+    pub sink: bool,
     /// The route's patience, the same on every hop of one route.
     pub patience: Option<Duration>,
     pub weight: u64,
     pub free: bool,
     pub stays: hofund_router::affinity::Stays,
     pub cold_after: Duration,
+    pub units: Vec<Unit>,
 }
 
 impl Table {
@@ -443,9 +449,10 @@ impl Table {
                         weight: spec.weight,
                         free: spec.free,
                         nearly_spent: false,
-                        fallback: false,
+                        fallback: spec.units.iter().any(|unit| unit.fallback),
                         effort: String::new(),
                         cold_after: spec.cold_after,
+                        units: spec.units.clone(),
                     })
                     .collect();
                 let routing = specs.first().map_or("smart", |spec| spec.routing.as_str());
@@ -460,7 +467,8 @@ impl Table {
                     Route::new(list)
                         .with_routing(routing)
                         .with_stays(stays)
-                        .with_patience(patience),
+                        .with_patience(patience)
+                        .with_sink(specs.first().is_some_and(|spec| spec.sink)),
                 )
             })
             .collect();
@@ -583,6 +591,24 @@ impl Member for LiveMember {
         // As the reference: a Claude subscription tells what it has left as
         // it answers, so one not yet known is tried first to learn it.
         learns_allowance(self.subscription, &self.plugin_id)
+    }
+
+    async fn costs_nothing(&self, model: &str) -> Option<bool> {
+        if !self.subscription {
+            return None;
+        }
+        let list = self
+            .stack
+            .inner
+            .inner
+            .provider
+            .list_models(&ListQuery::new())
+            .await
+            .ok()?;
+        list.models()
+            .iter()
+            .find(|listed| listed.id().eq_ignore_ascii_case(model))
+            .map(hofund_plugin_api::ModelSpec::costs_nothing)
     }
 
     fn attempt(&self) -> MemberAttempt {
@@ -1298,11 +1324,13 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                sink: false,
                 patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
                 cold_after: hofund_router::affinity::CACHE_COLD,
+                units: Vec::new(),
             }],
         );
         let snapshot =
@@ -1397,11 +1425,13 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                sink: false,
                 patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
                 cold_after: hofund_router::affinity::CACHE_COLD,
+                units: Vec::new(),
             }],
         );
         let snapshot =
@@ -1487,11 +1517,13 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                sink: false,
                 patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
                 cold_after: hofund_router::affinity::CACHE_COLD,
+                units: Vec::new(),
             }],
         );
         let snapshot =
@@ -1576,11 +1608,13 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                sink: false,
                 patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
                 cold_after: hofund_router::affinity::CACHE_COLD,
+                units: Vec::new(),
             }],
         );
         let snapshot =
@@ -1637,11 +1671,13 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    sink: false,
                     patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                     stays: hofund_router::affinity::Stays::Auto,
                     cold_after: hofund_router::affinity::CACHE_COLD,
+                    units: Vec::new(),
                 },
                 PlannedHop {
                     provider: "my-provider".to_owned(),
@@ -1651,11 +1687,13 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    sink: false,
                     patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                     stays: hofund_router::affinity::Stays::Auto,
                     cold_after: hofund_router::affinity::CACHE_COLD,
+                    units: Vec::new(),
                 },
             ],
         );
@@ -1693,11 +1731,13 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    sink: false,
                     patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                     stays: hofund_router::affinity::Stays::Auto,
                     cold_after: hofund_router::affinity::CACHE_COLD,
+                    units: Vec::new(),
                 })
                 .collect(),
         )])
