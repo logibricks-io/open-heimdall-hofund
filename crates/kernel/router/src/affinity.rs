@@ -375,7 +375,7 @@ impl AffinityState {
             let stick = stick.as_ref().expect("stick exists when candidate matches");
             if candidate.resting {
                 Reason::Resting
-            } else if candidate.nearly_spent {
+            } else if index > 0 && candidate.nearly_spent {
                 Reason::Spent
             } else if mode == Stays::Session {
                 Reason::Session

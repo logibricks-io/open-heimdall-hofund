@@ -203,8 +203,8 @@ async fn c2f_nearly_spent_stuck_account_is_bypassed() {
         },
         vec![WindowInfo::new(QuotaSpan {
             name: "week".to_owned(),
-            used: 95.0,
-            remaining: 5.0,
+            used: 99.0,
+            remaining: 1.0,
             ..QuotaSpan::default()
         })],
         std::time::SystemTime::now(),
