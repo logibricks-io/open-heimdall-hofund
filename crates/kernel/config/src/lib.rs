@@ -235,6 +235,38 @@ pub struct Provider {
     pub options: BTreeMap<String, Value>,
     /// Host-owned model listing settings.
     pub model_list: ModelList,
+    /// Optional balance endpoint settings.
+    pub balance: ProviderBalance,
+}
+
+/// A provider's optional balance endpoint settings.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderBalance {
+    /// Endpoint URL. Empty selects a known endpoint from the provider host.
+    #[serde(default)]
+    pub url: String,
+    /// Field or expression to read from the response.
+    #[serde(default)]
+    pub path: String,
+    /// Account token used instead of the API key.
+    #[serde(default)]
+    pub token: String,
+    /// HTTP method: GET or POST. Empty means GET.
+    #[serde(default)]
+    pub method: String,
+}
+
+impl fmt::Debug for ProviderBalance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderBalance")
+            .field("url", &self.url)
+            .field("path", &self.path)
+            .field("token", &"<redacted>")
+            .field("method", &self.method)
+            .finish()
+    }
 }
 
 /// The largest weighted-routing share one API key may have.
@@ -693,6 +725,7 @@ impl fmt::Debug for Provider {
             .field("patience", &self.patience)
             .field("options", &self.options)
             .field("models", &self.model_list)
+            .field("balance", &self.balance)
             .finish()
     }
 }
@@ -936,6 +969,15 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         let options = options_of(&provider, &mut warnings)?;
         let key_protocol = validated_key_protocol(&provider.id, provider.key_protocol)?;
         let keys = validated_keys(&provider.id, provider.keys)?;
+        if !matches!(
+            provider.balance.method.trim().to_uppercase().as_str(),
+            "" | "GET" | "POST"
+        ) {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{}` balance method must be GET or POST",
+                provider.id
+            )));
+        }
         let fallback = provider
             .fallback
             .iter()
@@ -965,6 +1007,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             patience,
             options,
             model_list,
+            balance: provider.balance,
         });
     }
     let mut subscriptions = Vec::new();
@@ -1839,6 +1882,8 @@ struct RawProvider {
     options: BTreeMap<String, Value>,
     #[serde(default)]
     models: ModelList,
+    #[serde(default)]
+    balance: ProviderBalance,
     /// Accepted for one release, then copied into [`Self::options`].
     #[serde(default)]
     project: Option<String>,
@@ -1913,6 +1958,7 @@ impl fmt::Debug for RawProvider {
             .field("free", &self.free)
             .field("options", &self.options)
             .field("models", &self.models)
+            .field("balance", &self.balance)
             .field("project", &redacted_opt(&self.project))
             .field("location", &redacted_opt(&self.location))
             .field("credentials", &redacted_opt(&self.credentials))

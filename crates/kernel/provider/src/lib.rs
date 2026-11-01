@@ -8,6 +8,7 @@
 
 mod anthropic;
 mod attempt;
+pub mod balance;
 mod billing;
 mod error;
 mod generative;

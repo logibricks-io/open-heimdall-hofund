@@ -47,18 +47,6 @@ pub trait DaemonRegistry: Send + Sync {
         None
     }
 
-    /// Accounts an upstream plugin declares may take requests at once.
-    fn upstream_max_accounts(&self, id: &str) -> u64 {
-        self.factory(id)
-            .map_or(0, |factory| factory.spec().max_accounts())
-    }
-
-    /// Accounts a subscription plugin declares may take requests at once.
-    fn subscription_max_accounts(&self, id: &str) -> u64 {
-        self.subscription(id)
-            .map_or(0, |factory| factory.spec().max_accounts())
-    }
-
     /// The linked plugin that serves a kernel-built base on `host` for
     /// `protocol`. The default claims none.
     fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
@@ -80,6 +68,23 @@ pub trait DaemonRegistry: Send + Sync {
     fn agent_sign_in(&self, id: &str) -> Option<hofund_plugin_api::AgentSignIn> {
         self.subscription(id)
             .and_then(|factory| factory.spec().agent_sign_in())
+    }
+
+    /// The linked vendor balance reader. The default links none.
+    fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
+        None
+    }
+
+    /// Accounts an upstream plugin declares may take requests at once.
+    fn upstream_max_accounts(&self, id: &str) -> u64 {
+        self.factory(id)
+            .map_or(0, |factory| factory.spec().max_accounts())
+    }
+
+    /// Accounts a subscription plugin declares may take requests at once.
+    fn subscription_max_accounts(&self, id: &str) -> u64 {
+        self.subscription(id)
+            .map_or(0, |factory| factory.spec().max_accounts())
     }
 }
 
@@ -123,6 +128,18 @@ impl DaemonRegistry for RegistryAdapter {
         hofund_plugin_registry::subscription(id)
     }
 
+    fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
+        hofund_plugin_registry::host_plugin(protocol, host)
+    }
+
+    fn plan_quota(&self) -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
+        hofund_plugin_registry::plan_quota()
+    }
+
+    fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
+        hofund_plugin_registry::balance_quota()
+    }
+
     fn upstream_max_accounts(&self, id: &str) -> u64 {
         hofund_plugin_registry::declared_max_accounts("provider", id).unwrap_or_else(|| {
             hofund_plugin_registry::factory(id).map_or(0, |factory| factory.spec().max_accounts())
@@ -134,14 +151,6 @@ impl DaemonRegistry for RegistryAdapter {
             hofund_plugin_registry::subscription(id)
                 .map_or(0, |factory| factory.spec().max_accounts())
         })
-    }
-
-    fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
-        hofund_plugin_registry::host_plugin(protocol, host)
-    }
-
-    fn plan_quota(&self) -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
-        hofund_plugin_registry::plan_quota()
     }
 
     fn subscription_ids(&self) -> Vec<&'static str> {
@@ -230,5 +239,169 @@ mod tests {
                 root.path().join("nested/deeper/c.rs"),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod registry_defaults {
+    use std::sync::Arc;
+
+    use hofund_plugin_api::{
+        ConfigError, CredentialStyle, DynSubscriptionFactory, DynUpstreamFactory, ListKind,
+        PluginId, ProtocolId, RawTable, Schema, SignInFlowKind, SubscriptionSpec, UpstreamSpec,
+    };
+
+    use super::{CompiledPreset, DaemonRegistry};
+
+    static UPSTREAM_SPEC: UpstreamSpec = UpstreamSpec::from_static(
+        PluginId::from_static("test-upstream"),
+        &[ProtocolId::OPENAI_CHAT],
+        CredentialStyle::Bearer,
+        ListKind::Unsupported,
+    )
+    .with_max_accounts(9);
+
+    static SUBSCRIPTION_SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
+        PluginId::from_static("test-subscription"),
+        "Test subscription",
+        SignInFlowKind::Device,
+    )
+    .with_max_accounts(11);
+
+    struct EmptyConfig;
+    impl hofund_plugin_api::ValidConfig for EmptyConfig {}
+
+    struct UpstreamOnly(Arc<dyn DynUpstreamFactory>);
+    struct SubscriptionOnly(Arc<dyn DynSubscriptionFactory>);
+
+    struct UpstreamFactory;
+    struct SubscriptionFactory;
+
+    impl hofund_plugin_api::UpstreamFactory for UpstreamFactory {
+        type Config = EmptyConfig;
+
+        fn spec(&self) -> &'static UpstreamSpec {
+            &UPSTREAM_SPEC
+        }
+
+        fn config_schema(&self) -> Schema {
+            Schema::empty()
+        }
+
+        fn validate(&self, _raw: &RawTable) -> Result<Self::Config, ConfigError> {
+            Ok(EmptyConfig)
+        }
+
+        fn build(
+            &self,
+            _cfg: &Self::Config,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<Arc<dyn hofund_plugin_api::UpstreamProvider>, hofund_plugin_api::BuildError>
+        {
+            Err(hofund_plugin_api::BuildError::new("unused in test"))
+        }
+    }
+
+    impl hofund_plugin_api::SubscriptionFactory for SubscriptionFactory {
+        type Config = EmptyConfig;
+
+        fn spec(&self) -> &'static SubscriptionSpec {
+            &SUBSCRIPTION_SPEC
+        }
+
+        fn config_schema(&self) -> Schema {
+            Schema::empty()
+        }
+
+        fn validate(&self, _raw: &RawTable) -> Result<Self::Config, ConfigError> {
+            Ok(EmptyConfig)
+        }
+
+        fn build(
+            &self,
+            _cfg: &Self::Config,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<Arc<dyn hofund_plugin_api::Subscription>, hofund_plugin_api::BuildError>
+        {
+            Err(hofund_plugin_api::BuildError::new("unused in test"))
+        }
+    }
+
+    impl DaemonRegistry for UpstreamOnly {
+        fn factory(&self, _id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
+            Some(Arc::clone(&self.0))
+        }
+
+        fn is_kernel_factory(&self, _id: &str) -> bool {
+            false
+        }
+
+        fn builtin_factory_ids(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn builtin_protocols(&self) -> Vec<ProtocolId> {
+            Vec::new()
+        }
+
+        fn find_preset(
+            &self,
+            _id: &str,
+        ) -> Option<(&'static CompiledPreset, Option<&'static str>)> {
+            None
+        }
+
+        fn agents(&self) -> &'static [&'static hofund_plugin_api::AgentDescription] {
+            &[]
+        }
+
+        fn surfaces(&self) -> Vec<Arc<dyn hofund_plugin_api::InboundSurface>> {
+            Vec::new()
+        }
+    }
+
+    impl DaemonRegistry for SubscriptionOnly {
+        fn factory(&self, _id: &str) -> Option<Arc<dyn DynUpstreamFactory>> {
+            None
+        }
+
+        fn is_kernel_factory(&self, _id: &str) -> bool {
+            false
+        }
+
+        fn builtin_factory_ids(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn builtin_protocols(&self) -> Vec<ProtocolId> {
+            Vec::new()
+        }
+
+        fn find_preset(
+            &self,
+            _id: &str,
+        ) -> Option<(&'static CompiledPreset, Option<&'static str>)> {
+            None
+        }
+
+        fn agents(&self) -> &'static [&'static hofund_plugin_api::AgentDescription] {
+            &[]
+        }
+
+        fn surfaces(&self) -> Vec<Arc<dyn hofund_plugin_api::InboundSurface>> {
+            Vec::new()
+        }
+
+        fn subscription(&self, _id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
+            Some(Arc::clone(&self.0))
+        }
+    }
+
+    #[test]
+    fn p3z_default_max_accounts_reads_linked_factory_specs() {
+        let upstream = UpstreamOnly(Arc::new(UpstreamFactory));
+        assert_eq!(upstream.upstream_max_accounts("ignored"), 9);
+        let subscription = SubscriptionOnly(Arc::new(SubscriptionFactory));
+        assert_eq!(subscription.subscription_max_accounts("ignored"), 11);
     }
 }

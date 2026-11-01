@@ -21,6 +21,26 @@ pub const SERVED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const HISTORY_GAP: Duration = Duration::from_secs(5 * 60);
 const HISTORY_SAME: Duration = Duration::from_secs(30);
 const HISTORY_SLACK: Duration = Duration::from_secs(5 * 60);
+const BALANCE_MOVE_LIMIT: usize = 32;
+const BALANCE_SHARE_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// Metadata for a fresh key balance read, stored beside the quota record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BalanceRecordMeta {
+    /// Whether the upstream balance is account-wide rather than per key.
+    pub account_wide: bool,
+    /// Whether the card carries split balance parts.
+    pub balance_parts: bool,
+    /// Single wallet currency when unambiguous; empty otherwise.
+    pub balance_unit: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct BalanceMove {
+    from: String,
+    to: String,
+    at: QuotaTime,
+}
 
 /// Routing metadata and the public representation of one quota window.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -126,6 +146,12 @@ struct QuotaRecord {
     windows: Vec<WindowInfo>,
     #[serde(default)]
     persistent: bool,
+    #[serde(default)]
+    account_wide: bool,
+    #[serde(default)]
+    balance_parts: bool,
+    #[serde(default)]
+    balance_unit: String,
 }
 
 #[derive(Clone, Debug)]
@@ -139,6 +165,7 @@ struct State {
     records: Vec<QuotaRecord>,
     issues: BTreeMap<String, ReadIssue>,
     history: BTreeMap<String, BTreeMap<String, Vec<QuotaPoint>>>,
+    balance_moves: BTreeMap<String, Vec<BalanceMove>>,
 }
 
 /// Explicit quota cache and history state for one daemon.
@@ -186,6 +213,11 @@ impl QuotaStore {
         {
             state.history = history;
         }
+        if let Ok(bytes) = std::fs::read(root.join("balance-moves.json"))
+            && let Ok(moves) = serde_json::from_slice(&bytes)
+        {
+            state.balance_moves = moves;
+        }
         Self {
             root: Some(root),
             clock,
@@ -214,7 +246,28 @@ impl QuotaStore {
     }
 
     /// Records a fresh successful read and its history points.
-    pub fn record_success(&self, mut quota: Quota, mut windows: Vec<WindowInfo>, now: SystemTime) {
+    pub fn record_success(&self, quota: Quota, windows: Vec<WindowInfo>, now: SystemTime) {
+        self.record_success_meta(quota, windows, now, None);
+    }
+
+    /// Records a fresh key balance read with sharing metadata.
+    pub fn record_balance(
+        &self,
+        quota: Quota,
+        windows: Vec<WindowInfo>,
+        now: SystemTime,
+        meta: BalanceRecordMeta,
+    ) {
+        self.record_success_meta(quota, windows, now, Some(meta));
+    }
+
+    fn record_success_meta(
+        &self,
+        mut quota: Quota,
+        mut windows: Vec<WindowInfo>,
+        now: SystemTime,
+        balance: Option<BalanceRecordMeta>,
+    ) {
         let read_at = quota
             .read_at
             .as_ref()
@@ -232,13 +285,50 @@ impl QuotaStore {
         }
         quota.windows = windows.iter().map(|info| info.span.clone()).collect();
         let persistent = !quota.windows.is_empty() || !quota.balance.is_empty();
+        let mut state = self.state.lock().expect("quota store");
+        let key = quota_key(&quota);
+        let previous_balance = state
+            .records
+            .iter()
+            .find(|existing| quota_key(&existing.quota) == key)
+            .map(|existing| existing.quota.balance.clone());
+        let (account_wide, balance_parts, balance_unit) = balance.as_ref().map_or(
+            (
+                state
+                    .records
+                    .iter()
+                    .find(|existing| quota_key(&existing.quota) == key)
+                    .map(|existing| existing.account_wide)
+                    .unwrap_or_default(),
+                state
+                    .records
+                    .iter()
+                    .find(|existing| quota_key(&existing.quota) == key)
+                    .map(|existing| existing.balance_parts)
+                    .unwrap_or_default(),
+                state
+                    .records
+                    .iter()
+                    .find(|existing| quota_key(&existing.quota) == key)
+                    .map(|existing| existing.balance_unit.clone())
+                    .unwrap_or_default(),
+            ),
+            |meta| {
+                (
+                    meta.account_wide,
+                    meta.balance_parts,
+                    meta.balance_unit.clone(),
+                )
+            },
+        );
         let record = QuotaRecord {
             quota: quota.clone(),
             windows,
             persistent,
+            account_wide,
+            balance_parts,
+            balance_unit,
         };
-        let mut state = self.state.lock().expect("quota store");
-        let key = quota_key(&quota);
         state.issues.remove(&key);
         if let Some(index) = state
             .records
@@ -248,6 +338,9 @@ impl QuotaStore {
             state.records[index] = record;
         } else {
             state.records.push(record);
+        }
+        if let Some(previous) = previous_balance.as_deref() {
+            note_balance_move(&mut state, &quota, previous, &quota.balance, read_at);
         }
         note_history(&mut state, &quota, read_at, now);
         if let Some(root) = &self.root {
@@ -280,6 +373,47 @@ impl QuotaStore {
         state
             .issues
             .insert(quota_key(&quota), ReadIssue::Failed { quota, transient });
+    }
+
+    /// Marks keys of one provider that read the same account-wide balance.
+    pub fn share_provider_balances(&self, provider: &str) {
+        let mut state = self.state.lock().expect("quota store");
+        for record in &mut state.records {
+            if record.quota.provider == provider && record.quota.kind == QuotaKind::Balance {
+                record.quota.shared_balance.clear();
+            }
+        }
+        let mut indices = Vec::new();
+        for (index, record) in state.records.iter().enumerate() {
+            if balance_share_candidate(&state, provider, record) {
+                indices.push(index);
+            }
+        }
+        for left in 0..indices.len() {
+            if !state.records[indices[left]].quota.shared_balance.is_empty() {
+                continue;
+            }
+            for right in left + 1..indices.len() {
+                if !state.records[indices[right]]
+                    .quota
+                    .shared_balance
+                    .is_empty()
+                {
+                    continue;
+                }
+                let left_record = &state.records[indices[left]];
+                let right_record = &state.records[indices[right]];
+                if !balance_cards_share(&state, left_record, right_record) {
+                    continue;
+                }
+                let leader = left_record.quota.user.clone();
+                state.records[indices[left]].quota.shared_balance = leader.clone();
+                state.records[indices[right]].quota.shared_balance = leader;
+            }
+        }
+        if let Some(root) = &self.root {
+            save_state(root, &state);
+        }
     }
 
     /// Returns a report in configured provider order without fetching anything.
@@ -761,6 +895,74 @@ pub fn history_since(days: Option<&str>, now: SystemTime) -> SystemTime {
         .unwrap_or(UNIX_EPOCH)
 }
 
+fn balance_share_candidate(state: &State, provider: &str, record: &QuotaRecord) -> bool {
+    let quota = &record.quota;
+    quota.provider == provider
+        && quota.kind == QuotaKind::Balance
+        && record.account_wide
+        && !quota.user.is_empty()
+        && !quota.balance.is_empty()
+        && quota.error.is_empty()
+        && !record.balance_parts
+        && !record.balance_unit.is_empty()
+        && !balance_reading_kept(state, quota)
+}
+
+fn balance_reading_kept(state: &State, quota: &Quota) -> bool {
+    matches!(
+        state.issues.get(&quota_key(quota)),
+        Some(ReadIssue::Failed {
+            transient: true,
+            ..
+        })
+    )
+}
+
+fn balance_cards_share(state: &State, left: &QuotaRecord, right: &QuotaRecord) -> bool {
+    if left.quota.balance != right.quota.balance {
+        return false;
+    }
+    let Some(left_move) = latest_balance_move(state, &left.quota) else {
+        return false;
+    };
+    let Some(right_move) = latest_balance_move(state, &right.quota) else {
+        return false;
+    };
+    left_move.from == right_move.from
+        && left_move.to == right_move.to
+        && time_between(&left_move.at, &right_move.at) <= BALANCE_SHARE_WINDOW
+}
+
+fn latest_balance_move<'a>(state: &'a State, quota: &Quota) -> Option<&'a BalanceMove> {
+    let key = balance_move_key(quota);
+    state.balance_moves.get(&key)?.last()
+}
+
+fn balance_move_key(quota: &Quota) -> String {
+    format!("{}|{}", quota.provider, quota.user.to_lowercase())
+}
+
+fn note_balance_move(state: &mut State, quota: &Quota, from: &str, to: &str, read_at: SystemTime) {
+    if from.is_empty() || from == to || quota.provider.is_empty() || quota.user.is_empty() {
+        return;
+    }
+    let key = balance_move_key(quota);
+    let points = state.balance_moves.entry(key).or_default();
+    let next = BalanceMove {
+        from: from.to_owned(),
+        to: to.to_owned(),
+        at: quota_time(read_at),
+    };
+    if points.last() == Some(&next) {
+        return;
+    }
+    points.push(next);
+    if points.len() > BALANCE_MOVE_LIMIT {
+        let extra = points.len() - BALANCE_MOVE_LIMIT;
+        points.drain(..extra);
+    }
+}
+
 fn report_of(state: &State) -> Vec<Quota> {
     let mut out = Vec::new();
     for record in &state.records {
@@ -991,6 +1193,7 @@ fn save_state(root: &Path, state: &State) {
         .collect();
     atomic_json(&root.join("quotas.json"), &records);
     atomic_json(&root.join("quota-history.json"), &state.history);
+    atomic_json(&root.join("balance-moves.json"), &state.balance_moves);
 }
 
 fn atomic_json(path: &Path, value: &impl Serialize) {
@@ -1163,6 +1366,229 @@ mod tests {
             start: None,
             resets_at: reset.map(quota_time),
         }
+    }
+
+    fn balance_card(provider: &str, user: &str) -> Quota {
+        Quota {
+            provider: provider.to_owned(),
+            name: provider.to_owned(),
+            kind: QuotaKind::Balance,
+            user: user.to_owned(),
+            ..Quota::default()
+        }
+    }
+
+    fn wide_meta() -> BalanceRecordMeta {
+        BalanceRecordMeta {
+            account_wide: true,
+            balance_parts: false,
+            balance_unit: "USD".into(),
+        }
+    }
+
+    #[test]
+    fn p3o_shared_provider_balances_mark_matching_cards() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = QuotaStore::new(dir.path());
+        let meta = wide_meta();
+        let seed = at(1_900_000_000);
+        for user in ["a", "b"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$10.00".to_owned();
+            store.record_balance(card, Vec::new(), seed, meta.clone());
+        }
+        let moved = seed + Duration::from_secs(30);
+        for user in ["a", "b"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$9.00".to_owned();
+            store.record_balance(card, Vec::new(), moved, meta.clone());
+        }
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert_eq!(report[0].shared_balance, "a");
+        assert_eq!(report[1].shared_balance, "a");
+    }
+
+    #[test]
+    fn p3s_same_text_and_wide_without_moves_stays_unshared() {
+        let store = QuotaStore::in_memory();
+        let meta = wide_meta();
+        let read_at = at(1_900_000_000);
+        for user in ["a", "b"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$10.00".to_owned();
+            store.record_balance(card, Vec::new(), read_at, meta.clone());
+        }
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert!(report.iter().all(|card| card.shared_balance.is_empty()));
+    }
+
+    #[test]
+    fn p3t_same_move_within_five_minutes_shares_first_key() {
+        let store = QuotaStore::in_memory();
+        let meta = wide_meta();
+        let seed = at(1_900_000_000);
+        for user in ["a", "b", "c"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$10.00".to_owned();
+            store.record_balance(card, Vec::new(), seed, meta.clone());
+        }
+        let moved = seed + Duration::from_secs(60);
+        for user in ["a", "b", "c"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$9.00".to_owned();
+            store.record_balance(card, Vec::new(), moved, meta.clone());
+        }
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert_eq!(report[0].shared_balance, "a");
+        assert_eq!(report[1].shared_balance, "a");
+        assert_eq!(report[2].shared_balance, "a");
+    }
+
+    #[test]
+    fn p3w_different_move_sources_with_the_same_text_stay_unshared() {
+        let store = QuotaStore::in_memory();
+        let meta = wide_meta();
+        let seed = at(1_900_000_000);
+        let moved = seed + Duration::from_secs(45);
+        let mut first = balance_card("relay", "a");
+        first.balance = "$10.00".to_owned();
+        store.record_balance(first, Vec::new(), seed, meta.clone());
+        let mut first = balance_card("relay", "a");
+        first.balance = "$9.00".to_owned();
+        store.record_balance(first, Vec::new(), moved, meta.clone());
+        let mut second = balance_card("relay", "b");
+        second.balance = "$8.00".to_owned();
+        store.record_balance(
+            second,
+            Vec::new(),
+            seed + Duration::from_secs(5),
+            meta.clone(),
+        );
+        let mut second = balance_card("relay", "b");
+        second.balance = "$9.00".to_owned();
+        store.record_balance(second, Vec::new(), moved, meta);
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert!(report.iter().all(|card| card.shared_balance.is_empty()));
+    }
+
+    #[test]
+    fn p3x_balance_parts_never_share_even_with_matching_moves() {
+        let store = QuotaStore::in_memory();
+        let meta = BalanceRecordMeta {
+            account_wide: true,
+            balance_parts: true,
+            balance_unit: "USD".into(),
+        };
+        let seed = at(1_900_000_000);
+        for user in ["a", "b"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$10.00".to_owned();
+            store.record_balance(card, Vec::new(), seed, meta.clone());
+            let mut card = balance_card("relay", user);
+            card.balance = "$9.00".to_owned();
+            store.record_balance(
+                card,
+                Vec::new(),
+                seed + Duration::from_secs(30),
+                meta.clone(),
+            );
+        }
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert!(report.iter().all(|card| card.shared_balance.is_empty()));
+    }
+
+    #[test]
+    fn p3u_ten_minute_gap_and_non_wide_cards_stay_unshared() {
+        let store = QuotaStore::in_memory();
+        let wide = wide_meta();
+        let seed = at(1_900_000_000);
+        for user in ["a", "b"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$10.00".to_owned();
+            store.record_balance(card, Vec::new(), seed, wide.clone());
+        }
+        let late = seed + Duration::from_secs(10 * 60);
+        let mut first = balance_card("relay", "a");
+        first.balance = "$9.00".to_owned();
+        store.record_balance(first, Vec::new(), late, wide.clone());
+        let mut second = balance_card("relay", "b");
+        second.balance = "$9.00".to_owned();
+        store.record_balance(
+            second,
+            Vec::new(),
+            late + Duration::from_secs(10 * 60),
+            wide,
+        );
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert!(report.iter().all(|card| card.shared_balance.is_empty()));
+
+        let narrow = BalanceRecordMeta {
+            account_wide: false,
+            balance_parts: false,
+            balance_unit: "USD".into(),
+        };
+        let store = QuotaStore::in_memory();
+        let moved = at(2_000_000_000);
+        for user in ["a", "b"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$10.00".to_owned();
+            store.record_balance(
+                card,
+                Vec::new(),
+                moved - Duration::from_secs(60),
+                narrow.clone(),
+            );
+            let mut card = balance_card("relay", user);
+            card.balance = "$9.00".to_owned();
+            store.record_balance(card, Vec::new(), moved, narrow.clone());
+        }
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert!(report.iter().all(|card| card.shared_balance.is_empty()));
+    }
+
+    #[test]
+    fn p3v_diverged_amounts_clear_a_previous_shared_pair() {
+        let store = QuotaStore::in_memory();
+        let meta = wide_meta();
+        let seed = at(1_900_000_000);
+        for user in ["a", "b"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$10.00".to_owned();
+            store.record_balance(card, Vec::new(), seed, meta.clone());
+            let mut card = balance_card("relay", user);
+            card.balance = "$9.00".to_owned();
+            store.record_balance(
+                card,
+                Vec::new(),
+                seed + Duration::from_secs(30),
+                meta.clone(),
+            );
+        }
+        store.share_provider_balances("relay");
+        assert!(
+            store
+                .report(&[])
+                .iter()
+                .all(|card| card.shared_balance == "a")
+        );
+        let mut only_a = balance_card("relay", "a");
+        only_a.balance = "$8.00".to_owned();
+        store.record_balance(
+            only_a,
+            Vec::new(),
+            seed + Duration::from_secs(90),
+            meta.clone(),
+        );
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert!(report.iter().all(|card| card.shared_balance.is_empty()));
     }
 
     #[test]

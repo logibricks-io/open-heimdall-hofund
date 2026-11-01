@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Key provider balances (P0-5b2): host-known balance readers live in the
+  plan-quota provider plugin behind `BalanceQuota`, while custom balance URLs
+  and expression fields stay in the kernel provider reader. Fresh balance reads
+  feed the quota cache, API, CLI, and router wallet spans; several keys that
+  share one account-wide balance are marked with `sharedBalance`.
 - Plan allowance windows (P0-5b1): keyed and account-backed readers for Kimi
   Code, Zhipu and Z.ai, OpenCode Go, Command Code, MiniMax, Ollama Cloud,
   StepFun, Volcengine Ark, and Tencent Cloud, including monthly windows,
@@ -52,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reserve/count spend against both keys. Added masked listing, revocation,
   expiry/issuer-refusal 401s on every route, hourly-grace pruning, control and
   CLI issuance, issuer list status, and name-based key on/off.
+- OIDC token exchange for short-lived gateway keys (D-28): trust rules in
+  `oidc-rules.json` and `hofund gateway-key oidc add/list/remove` name an
+  issuer, audience (`hofund-<rule>` by default), claim patterns, backing
+  issuer key, and TTL cap. `POST /v1/hofund/keys/oidc` verifies RS256 tokens
+  (discovery, JWKS cache, exp/nbf/iat skew, single-use `jti`) and issues through
+  the same path as P0-4d keys.
 - Text-to-speech retrieval (P1-4): `POST /v1/audio/speech` and
   `POST /audio/speech` forward OpenAI-shaped JSON through the existing routed
   retrieval seam, changing only the member's model id. Audio, SSE, and vendor

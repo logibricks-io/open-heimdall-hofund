@@ -123,6 +123,68 @@ AuthResult
 AuthResult #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AuthResult::const fn accepted (self) -> bool
 AuthResult::const fn new (accepted : bool) -> Self
+BalanceCard
+BalanceCard #[non_exhaustive] derives(Clone, Debug, Default, PartialEq)
+BalanceCard::const fn account_wide (& self) -> bool
+BalanceCard::const fn until (& self) -> Option < SystemTime >
+BalanceCard::const fn with_account_wide (mut self , account_wide : bool) -> Self
+BalanceCard::fn error (& self) -> & str
+BalanceCard::fn new () -> Self
+BalanceCard::fn pack (text : impl Into < String > , parts : Vec < BalancePart > , split : Vec < BalancePart > , wallets : Vec < BalanceWallet > , windows : Vec < PlanWindow > , plan : impl Into < String > , plan_windows : Vec < PlanWindow > , until : Option < SystemTime > , renew : impl Into < String > , account_wide : bool ,) -> Self
+BalanceCard::fn parts (& self) -> & [BalancePart]
+BalanceCard::fn plan (& self) -> & str
+BalanceCard::fn plan_windows (& self) -> & [PlanWindow]
+BalanceCard::fn renew (& self) -> & str
+BalanceCard::fn split (& self) -> & [BalancePart]
+BalanceCard::fn text (& self) -> & str
+BalanceCard::fn wallets (& self) -> & [BalanceWallet]
+BalanceCard::fn windows (& self) -> & [PlanWindow]
+BalanceCard::fn with_error (mut self , error : impl Into < String >) -> Self
+BalanceCard::fn with_parts (mut self , parts : Vec < BalancePart >) -> Self
+BalanceCard::fn with_plan (mut self , plan : impl Into < String > , windows : Vec < PlanWindow > , until : Option < SystemTime > , renew : impl Into < String > ,) -> Self
+BalanceCard::fn with_split (mut self , split : Vec < BalancePart >) -> Self
+BalanceCard::fn with_text (mut self , text : impl Into < String >) -> Self
+BalanceCard::fn with_wallets (mut self , wallets : Vec < BalanceWallet >) -> Self
+BalanceCard::fn with_windows (mut self , windows : Vec < PlanWindow >) -> Self
+BalancePart
+BalancePart #[non_exhaustive] derives(Clone, Debug, Default, PartialEq)
+BalancePart::const fn percent (& self) -> Option < f64 >
+BalancePart::const fn with_percent (mut self , percent : f64) -> Self
+BalancePart::fn error (& self) -> & str
+BalancePart::fn label (& self) -> & str
+BalancePart::fn new (text : impl Into < String >) -> Self
+BalancePart::fn text (& self) -> & str
+BalancePart::fn with_error (mut self , error : impl Into < String >) -> Self
+BalancePart::fn with_label (mut self , label : impl Into < String >) -> Self
+BalanceQuery
+BalanceQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+BalanceQuery::const fn now (& self) -> SystemTime
+BalanceQuery::const fn with_now (mut self , now : SystemTime) -> Self
+BalanceQuery::fn api_key (& self) -> & str
+BalanceQuery::fn balance_method (& self) -> & str
+BalanceQuery::fn balance_path (& self) -> & str
+BalanceQuery::fn balance_token (& self) -> & str
+BalanceQuery::fn balance_url (& self) -> & str
+BalanceQuery::fn bases (& self) -> & [String]
+BalanceQuery::fn headers (& self) -> & [(String , String)]
+BalanceQuery::fn new (bases : Vec < String > , api_key : impl Into < String >) -> Self
+BalanceQuery::fn with_balance_settings (mut self , url : impl Into < String > , path : impl Into < String > , token : impl Into < String > , method : impl Into < String > ,) -> Self
+BalanceQuery::fn with_headers (mut self , headers : Vec < (String , String) >) -> Self
+BalanceQuota
+BalanceQuota::async fn read (& self , query : & BalanceQuery , host : & HostContext ,) -> Result < Option < BalanceCard > , PluginError >
+BalanceQuota::fn support (& self , query : & BalanceQuery) -> BalanceSupport
+BalanceSupport
+BalanceSupport #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+BalanceSupport::Certain
+BalanceSupport::Possible
+BalanceSupport::Unsupported
+BalanceWallet
+BalanceWallet #[non_exhaustive] derives(Clone, Debug, Default, PartialEq)
+BalanceWallet::const fn amount (& self) -> f64
+BalanceWallet::fn name (& self) -> & str
+BalanceWallet::fn new (amount : f64 , unit : impl Into < String >) -> Self
+BalanceWallet::fn unit (& self) -> & str
+BalanceWallet::fn with_name (mut self , name : impl Into < String >) -> Self
 BinaryName
 BinaryName #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 BinaryName::const fn as_str (self) -> & 'static str

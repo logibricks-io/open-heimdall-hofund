@@ -30,6 +30,7 @@ use hofund_usage::Ledger;
 
 mod adapt;
 mod agent_login;
+mod balances;
 mod config_ops;
 mod config_write;
 mod control;

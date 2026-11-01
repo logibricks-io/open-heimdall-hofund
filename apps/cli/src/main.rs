@@ -10,6 +10,7 @@ mod events;
 mod gateway_key;
 mod gateway_key_issue;
 mod gateway_key_limit;
+mod gateway_key_oidc;
 mod local;
 mod provider;
 mod provider_edit;

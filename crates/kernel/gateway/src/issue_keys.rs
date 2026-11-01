@@ -309,7 +309,7 @@ fn local_profile_refused(request: &Request) -> Option<String> {
     None
 }
 
-fn parse_api_ttl(value: &Value) -> Result<Duration, ()> {
+pub(super) fn parse_api_ttl(value: &Value) -> Result<Duration, ()> {
     match value {
         Value::String(text) => parse_ttl(text).map_err(|_| ()),
         Value::Number(number) => {
