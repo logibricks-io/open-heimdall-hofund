@@ -17,11 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent sign-in switching for Claude Code and Codex: `hofund accounts switch
+  <agent> next|<account>`, `hofund accounts import <file>`, a five-minute
+  NextLogin tick, subscription plugin file writes, and sign-out handover
+  (D-27). `keep_login` and `switch_only` live in `[subscriptions.options]`.
+
 - Model catalog (C-1a): `hofund-model-catalog` caches the models.dev `api.json`
   shape under `.hofund/catalog/`, revalidates with `ETag`, honors a configurable
   mirror URL, falls back to the last cache offline, refreshes in the background,
   applies `[[catalog.overrides]]` from config, enriches `GET /v1/models`, and
   adds `hofund models` plus `hofund models refresh`.
+
 - Key provider balances (P0-5b2): host-known balance readers live in the
   plan-quota provider plugin behind `BalanceQuota`, while custom balance URLs
   and expression fields stay in the kernel provider reader. Fresh balance reads

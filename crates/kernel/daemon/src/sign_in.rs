@@ -155,11 +155,11 @@ pub struct QuotaLine {
 }
 
 /// One built subscription with the host its commands use.
-struct Opened {
-    id: String,
+pub(crate) struct Opened {
+    pub(crate) id: String,
     name: String,
-    instance: Arc<dyn Subscription>,
-    host: HostContext,
+    pub(crate) instance: Arc<dyn Subscription>,
+    pub(crate) host: HostContext,
 }
 
 /// Builds every configured subscription with a loopback-capable host.
@@ -190,7 +190,7 @@ fn open(
     Ok(opened)
 }
 
-fn find<'a>(opened: &'a [Opened], id: &str) -> Result<&'a Opened, DaemonError> {
+pub(crate) fn find<'a>(opened: &'a [Opened], id: &str) -> Result<&'a Opened, DaemonError> {
     opened
         .iter()
         .find(|entry| entry.id == id)
@@ -204,7 +204,7 @@ fn runtime() -> Result<tokio::runtime::Runtime, DaemonError> {
         .map_err(show)
 }
 
-fn with_opened<T>(
+pub(crate) fn with_opened<T>(
     path: &Path,
     run: impl AsyncFnOnce(&[Opened]) -> Result<T, DaemonError>,
 ) -> Result<T, DaemonError> {
@@ -252,7 +252,9 @@ async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing>, DaemonEr
 }
 
 /// Account ids and labels, ordered by label and then id.
-async fn sorted_accounts(entry: &Opened) -> Result<Vec<(AccountId, String)>, DaemonError> {
+pub(crate) async fn sorted_accounts(
+    entry: &Opened,
+) -> Result<Vec<(AccountId, String)>, DaemonError> {
     let mut accounts: Vec<(AccountId, String)> = entry
         .host
         .accounts()
@@ -309,18 +311,38 @@ pub fn subscriptions_json(listings: &[SubscriptionListing]) -> String {
 /// Returns [`DaemonError`] when the subscription or account is unknown or
 /// the account file cannot be written.
 pub fn subscription_sign_out(path: &Path, id: &str, account: &str) -> Result<(), DaemonError> {
-    with_opened(path, async |opened| sign_out_in(opened, id, account).await)
+    let config = load_path(path).map_err(show)?;
+    with_opened(path, async |opened| {
+        sign_out_in(opened, &config, id, account).await
+    })
 }
 
-async fn sign_out_in(opened: &[Opened], id: &str, account: &str) -> Result<(), DaemonError> {
+async fn sign_out_in(
+    opened: &[Opened],
+    config: &hofund_config::Config,
+    id: &str,
+    account: &str,
+) -> Result<(), DaemonError> {
     let entry = find(opened, id)?;
     let known = sorted_accounts(entry).await?;
-    let Some((account, _)) = known.iter().find(|(known, _)| known.as_str() == account) else {
+    let Some((target, _)) = known.iter().find(|(known, _)| known.as_str() == account) else {
         return Err(DaemonError::new(format!(
             "subscription `{id}` has no account `{account}`"
         )));
     };
-    entry.host.accounts().remove(account).await.map_err(show)
+    if crate::RegistryAdapter.agent_sign_in(id).is_some() {
+        let state_root = entry.host.dirs().state_dir().map_err(show)?;
+        crate::agent_login::switch_before_forget(
+            opened,
+            &crate::RegistryAdapter,
+            config,
+            &state_root,
+            id,
+            account,
+        )
+        .await?;
+    }
+    entry.host.accounts().remove(target).await.map_err(show)
 }
 
 /// Refreshes the tokens of one account, or of every account of `id`.
@@ -657,6 +679,7 @@ fn say<W: Write>(out: &mut W, text: &str) -> Result<(), SignInError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -1221,12 +1244,43 @@ mod tests {
         rig.add_account("one", "Alpha").await;
         rig.add_account("two", "Beta").await;
         let opened = rig.opened();
-        sign_out_in(&opened, PLUGIN, "one").await.expect("sign out");
+        let config = test_config();
+        sign_out_in(&opened, &config, PLUGIN, "one")
+            .await
+            .expect("sign out");
         let listings = list_in(&opened).await.expect("list");
         let ids: Vec<&str> = listings[0].accounts.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, vec!["two"]);
-        assert!(sign_out_in(&opened, PLUGIN, "one").await.is_err());
-        assert!(sign_out_in(&opened, "missing", "two").await.is_err());
+        assert!(sign_out_in(&opened, &config, PLUGIN, "one").await.is_err());
+        assert!(
+            sign_out_in(&opened, &config, "missing", "two")
+                .await
+                .is_err()
+        );
+    }
+
+    fn test_config() -> hofund_config::Config {
+        use hofund_config::{Accounts, Failover, Stays, Subscription};
+        hofund_config::Config {
+            listen: "127.0.0.1:3425".parse().expect("addr"),
+            token_file: String::new(),
+            usage_file: String::new(),
+            failover: Failover::default(),
+            connect_timeout: Duration::from_secs(10),
+            read_timeout: Duration::from_secs(60),
+            providers: Vec::new(),
+            routes: Vec::new(),
+            subscriptions: vec![Subscription {
+                id: PLUGIN.to_owned(),
+                accounts: Accounts::All,
+                account_weights: BTreeMap::new(),
+                routing: "smart".to_owned(),
+                at_once: None,
+                stays: Stays::Auto,
+                options: BTreeMap::new(),
+            }],
+            warnings: Vec::new(),
+        }
     }
 
     #[tokio::test]

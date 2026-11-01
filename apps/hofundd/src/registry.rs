@@ -71,6 +71,10 @@ impl DaemonRegistry for LinkedRegistry {
     fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
         hofund_plugin_registry::balance_quota()
     }
+
+    fn subscription_ids(&self) -> Vec<&'static str> {
+        hofund_plugin_registry::subscription_ids()
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +179,10 @@ mod tests {
             linked_subscriptions += usize::from(ours);
         }
         assert!(linked_subscriptions > 0);
+        // d27_21: the shipped daemon lists the same subscriptions, so the sign-in tick sees them.
+        let ids = linked.subscription_ids();
+        assert!(!ids.is_empty());
+        assert_eq!(ids, hofund_plugin_registry::subscription_ids());
         let mut claimed = 0;
         for protocol in [
             ProtocolId::OPENAI_CHAT,
