@@ -65,6 +65,9 @@ pub use check::builtin_factory_ids;
 pub use fixture_agent_descriptions::fixture_agents;
 #[cfg(feature = "test-fixtures")]
 pub use fixture_preset_descriptions::{fixture_aliases, fixture_presets};
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub use fixture_subscription::{model_calls, reset_models, set_model_fail};
 pub use generated::{
     CompiledAlias, CompiledPreset, CompiledRegion, CompiledRoute, compiled_aliases,
     compiled_presets, compiled_routes,
@@ -72,6 +75,20 @@ pub use generated::{
 pub use select::{
     SelectError, Selection, model_plan_of, protocol_for, resolve_region, select, wire_for_protocol,
 };
+
+/// The linked vendor plan reader, when the plan-quota feature is enabled.
+#[cfg(feature = "plan-quota")]
+#[must_use]
+pub fn plan_quota() -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
+    Some(hofund_plugin_plan_quota::reader())
+}
+
+/// The linked vendor plan reader, when the plan-quota feature is enabled.
+#[cfg(not(feature = "plan-quota"))]
+#[must_use]
+pub fn plan_quota() -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
+    None
+}
 
 /// Every linked plugin contribution, keyed by plugin kind and id, in `plugins.toml` order.
 ///

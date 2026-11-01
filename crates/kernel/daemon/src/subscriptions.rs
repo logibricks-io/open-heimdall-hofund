@@ -504,6 +504,58 @@ impl QuotaPolls {
     }
 }
 
+/// How long after startup a signed-in account's list is first refreshed.
+pub(crate) const MODEL_LIST_FIRST: Duration = Duration::from_secs(2 * 60);
+/// How often a signed-in account's model list is refreshed thereafter.
+pub(crate) const MODEL_LIST_REFRESH: Duration = Duration::from_secs(60 * 60);
+
+/// Per-account model-list refresh schedule.
+#[derive(Default)]
+pub(crate) struct ModelPolls {
+    next: HashMap<MemberId, Instant>,
+}
+
+impl ModelPolls {
+    /// Refreshes every ready account whose list is due and returns the accounts asked.
+    pub(crate) async fn poll(
+        &mut self,
+        subscriptions: &Subscriptions,
+        now: Instant,
+    ) -> Vec<MemberId> {
+        let mut live = HashSet::new();
+        let mut asked = Vec::new();
+        for state in subscriptions.values() {
+            for member in state.members() {
+                live.insert(member.id.clone());
+                let due = *self
+                    .next
+                    .entry(member.id.clone())
+                    .or_insert(now + MODEL_LIST_FIRST);
+                if due > now {
+                    continue;
+                }
+                self.next
+                    .insert(member.id.clone(), now + MODEL_LIST_REFRESH);
+                asked.push(member.id.clone());
+                if let Err(error) = state
+                    .instance
+                    .list_models(&member.account, &state.host)
+                    .await
+                {
+                    tracing::warn!(
+                        subscription = %state.config.id,
+                        account = %member.account,
+                        %error,
+                        "model list refresh failed; keeping the last list"
+                    );
+                }
+            }
+        }
+        self.next.retain(|id, _| live.contains(id));
+        asked
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -895,6 +947,51 @@ mod tests {
         );
         let (kept, _) = runtime.quota_report(true).await;
         assert_eq!(kept.len(), 2, "the fresh readings are kept");
+    }
+
+    #[tokio::test]
+    async fn p14_signed_in_model_lists_refresh_after_two_minutes_then_hourly() {
+        let dir = tempfile::tempdir().expect("dir");
+        write_accounts(dir.path(), &[("one", "One"), ("two", "Two")]);
+        let states = states(dir.path(), &config(""));
+        for state in states.values() {
+            state.resolve(&cooldowns()).await;
+        }
+        hofund_plugin_registry::reset_models();
+        let mut polls = super::ModelPolls::default();
+        let start = tokio::time::Instant::now();
+        assert!(polls.poll(&states, start).await.is_empty());
+        assert_eq!(hofund_plugin_registry::model_calls(), 0);
+        let first = polls.poll(&states, start + super::MODEL_LIST_FIRST).await;
+        assert_eq!(first, [member("one"), member("two")]);
+        assert_eq!(hofund_plugin_registry::model_calls(), 2);
+        assert!(
+            polls
+                .poll(
+                    &states,
+                    start + super::MODEL_LIST_FIRST + Duration::from_secs(44 * 60)
+                )
+                .await
+                .is_empty()
+        );
+        hofund_plugin_registry::set_model_fail(true);
+        let next = polls
+            .poll(
+                &states,
+                start + super::MODEL_LIST_FIRST + super::MODEL_LIST_REFRESH,
+            )
+            .await;
+        assert_eq!(next, [member("one"), member("two")]);
+        assert_eq!(hofund_plugin_registry::model_calls(), 4);
+        hofund_plugin_registry::set_model_fail(false);
+        let account = AccountId::from_static("one");
+        let state = states.get(PLUGIN).expect("fixture");
+        let kept = state
+            .instance
+            .list_models(&account, state.host())
+            .await
+            .expect("last list remains available after the failed refresh");
+        assert_eq!(kept.models()[0].id(), "fixture-model");
     }
 
     #[tokio::test]
