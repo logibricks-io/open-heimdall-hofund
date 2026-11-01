@@ -32,7 +32,7 @@ impl Member for Fake {
     }
 
     fn protocol(&self) -> &str {
-        "openai-chat"
+        "plain"
     }
 
     async fn execute(

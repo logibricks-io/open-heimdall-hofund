@@ -526,8 +526,15 @@ mod tests {
         assert_eq!(info["limits"][0]["tokensLeft"], 0);
         assert_eq!(info["limits"][0]["spent"], true);
         // `/me` reports the very status `/v1/hofund/limit` does
-        let (status, _, body) =
-            request(&app, "GET", "/v1/hofund/limit", Some(&alice.secret), "", &[]).await;
+        let (status, _, body) = request(
+            &app,
+            "GET",
+            "/v1/hofund/limit",
+            Some(&alice.secret),
+            "",
+            &[],
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let limit: serde_json::Value = serde_json::from_slice(&body).expect("limit json");
         assert_eq!(limit["limits"], info["limits"]);
