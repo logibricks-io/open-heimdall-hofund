@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_util::Stream;
-use hofund_codec::StreamDecoder;
+use hofund_codec::{StreamDecoder, refusal_error};
 use hofund_ir::StreamEvent;
 use reqwest::Error as ReqwestError;
 
@@ -20,6 +20,7 @@ pub(crate) struct SseEvents {
     decoder: Box<dyn StreamDecoder>,
     pending: VecDeque<Result<StreamEvent, ProviderError>>,
     finished: bool,
+    committed: bool,
     /// Drop extension bags, and raw events this decoder does not model, when
     /// the client protocol and the upstream protocol differ.
     strip: bool,
@@ -36,6 +37,7 @@ impl SseEvents {
             decoder,
             pending: VecDeque::new(),
             finished: false,
+            committed: false,
             strip,
         }
     }
@@ -43,12 +45,17 @@ impl SseEvents {
     fn take_pending(&mut self) -> Option<Result<StreamEvent, ProviderError>> {
         loop {
             let mut item = self.pending.pop_front()?;
-            if let Ok(event) = &item
-                && let Some(error) = failure_of(event)
-            {
-                self.pending.clear();
-                self.finished = true;
-                return Some(Err(error));
+            if let Ok(event) = &item {
+                let refusal = refusal_error(event);
+                if self.committed && refusal {
+                    return Some(item);
+                }
+                if let Some(error) = failure_of(event) {
+                    self.pending.clear();
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                self.committed |= stream_commits(event);
             }
             if self.strip
                 && let Ok(event) = &mut item
@@ -102,6 +109,17 @@ impl Stream for SseEvents {
     }
 }
 
+fn stream_commits(event: &StreamEvent) -> bool {
+    match event {
+        StreamEvent::MessageStart(_)
+        | StreamEvent::ContentBlockStart(_)
+        | StreamEvent::ContentBlockStop(_)
+        | StreamEvent::Ping(_) => false,
+        StreamEvent::MessageDelta(delta) => delta.stop.is_some(),
+        _ => true,
+    }
+}
+
 /// A stream that reports an upstream failure before any content event is a
 /// status the router can fail over, when that status is configured.
 pub(crate) fn failure_of(event: &StreamEvent) -> Option<ProviderError> {
@@ -128,15 +146,20 @@ pub(crate) fn failure_of(event: &StreamEvent) -> Option<ProviderError> {
         .unwrap_or_else(|| "upstream stream failed".to_owned());
     let body = serde_json::to_vec(&unknown.payload).unwrap_or_default();
     let status = hofund_plugin_sdk::transport::status_for_error(&body);
-    if hofund_plugin_sdk::transport::is_credit_error(status, &body) {
-        Some(ProviderError::credit_status(status, message))
+    let error = if hofund_plugin_sdk::transport::is_credit_error(status, &body) {
+        ProviderError::credit_status(status, message)
     } else if hofund_plugin_sdk::transport::is_quota_error(status, &body) {
         let mut error = ProviderError::quota(message);
         error.status = Some(status);
-        Some(error)
+        error
     } else {
-        Some(ProviderError::status(status, message))
-    }
+        ProviderError::status(status, message)
+    };
+    Some(if refusal_error(event) {
+        error.without_cooldown()
+    } else {
+        error
+    })
 }
 
 fn pointer(value: &serde_json::Value, path: &str) -> Option<String> {
@@ -187,5 +210,48 @@ pub(crate) fn message_from(bytes: &[u8]) -> String {
         "upstream request failed".to_owned()
     } else {
         trimmed.chars().take(512).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use futures_util::{StreamExt, stream};
+    use hofund_codec::{AnthropicMessages, Codec};
+    use hofund_ir::StreamEvent;
+
+    use super::SseEvents;
+    use reqwest::Error as ReqwestError;
+
+    const THOUGHT: &str = concat!(
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"thought\"}}\n\n"
+    );
+    const REFUSAL: &str = concat!(
+        "event: error\n",
+        "data: {\"type\":\"error\",\"error\":{\"code\":\"content_filter\",\"message\":\"refused\"}}\n\n"
+    );
+
+    fn events(bytes: Vec<u8>) -> SseEvents {
+        let incoming = stream::iter(vec![Ok::<Bytes, ReqwestError>(Bytes::from(bytes))]);
+        SseEvents::new(incoming, AnthropicMessages.stream_decoder(), true)
+    }
+
+    #[tokio::test]
+    async fn b9_committed_refusal_error_keeps_its_event() {
+        let events = events([THOUGHT.as_bytes(), REFUSAL.as_bytes()].concat());
+        let events: Vec<_> = events.collect().await;
+        assert!(matches!(events[0], Ok(StreamEvent::ThinkingDelta(_))));
+        assert!(matches!(events[1], Ok(StreamEvent::Unknown(_))));
+        assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn b9_pre_commit_refusal_error_is_not_cooling() {
+        let events = events(REFUSAL.as_bytes().to_vec());
+        let events: Vec<_> = events.collect().await;
+        let error = events[0].as_ref().expect_err("refusal");
+        assert!(!error.cools());
+        assert_eq!(events.len(), 1);
     }
 }

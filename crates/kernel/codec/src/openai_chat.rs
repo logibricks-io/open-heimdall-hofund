@@ -1403,7 +1403,7 @@ fn decode_finish(token: &str) -> StopReason {
         "stop" => StopReason::EndTurn,
         "length" => StopReason::MaxTokens,
         "tool_calls" | "function_call" => StopReason::ToolUse,
-        "content_filter" => StopReason::ContentFilter,
+        "content_filter" | "sensitive" => StopReason::ContentFilter,
         "refusal" => StopReason::Refusal,
         other => StopReason::Other(other.to_owned()),
     }

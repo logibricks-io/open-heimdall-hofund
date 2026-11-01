@@ -1,4 +1,4 @@
-//! Failover happens only before a stream event is produced.
+//! Early failover and the continuation used for thinking-only refusal handover.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -244,6 +244,29 @@ async fn stream_event_commits_the_upstream() {
     let routed = dispatch(&router, "demo").await.expect("dispatch");
     assert_eq!(routed.upstream_id, "first");
     assert_eq!(second.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn b9_route_continuation_resumes_in_order() {
+    let second = Arc::new(AtomicUsize::new(0));
+    let third = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake("first", &Arc::new(AtomicUsize::new(0)), Kind::StreamOk),
+        fake("second", &second, Kind::StreamOk),
+        fake("third", &third, Kind::StreamOk),
+    ]);
+    let mut first = dispatch(&router, "demo").await.expect("first");
+    assert!(second.load(Ordering::SeqCst) == 0);
+    let continuation = first.take_continuation().expect("second remains");
+    assert!(first.take_continuation().is_none());
+    let mut second_routed = continuation.dispatch().await.expect("second");
+    assert_eq!(second_routed.upstream_id, "second");
+    let continuation = second_routed.take_continuation().expect("third remains");
+    let mut third_routed = continuation.dispatch().await.expect("third");
+    assert_eq!(third_routed.upstream_id, "third");
+    assert!(third_routed.take_continuation().is_none());
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+    assert_eq!(third.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
