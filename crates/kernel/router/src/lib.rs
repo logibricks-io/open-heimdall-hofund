@@ -12,13 +12,14 @@ mod attempt;
 mod cooldown;
 mod decision;
 mod member;
+mod patience;
 pub mod quota;
 mod snapshot;
 pub mod strategy;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use hofund_ir::{StreamEvent, estimate_input_tokens};
@@ -28,7 +29,8 @@ use tracing::Instrument;
 pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
-pub use member::Member;
+pub use member::{Member, ModelListAnswer};
+pub use patience::WaitHook;
 pub use snapshot::Snapshot;
 
 /// Which failures may try the next member.
@@ -78,6 +80,8 @@ pub struct Hop {
     pub max_output_tokens: Option<u64>,
     /// Input context window, when the route or catalog knows it.
     pub context_window: Option<u64>,
+    /// Direct-provider retry budget. Absent disables patience.
+    pub patience: Option<Duration>,
     /// Relative request share under weighted routing.
     pub weight: u64,
     /// Whether this model costs nothing on this member.
@@ -93,6 +97,7 @@ impl Hop {
             wire_model: None,
             max_output_tokens: None,
             context_window: None,
+            patience: Some(Duration::from_secs(60)),
             weight: 1,
             free: false,
         }
@@ -153,6 +158,8 @@ struct Resolved {
     pool: String,
     /// Strategy configured for this route pool.
     routing: String,
+    /// Retry budget for an explicit provider request, not a route pool.
+    patience: Option<Duration>,
 }
 
 impl Router {
@@ -283,6 +290,33 @@ impl Router {
         inbound_protocol: &str,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(request, inbound_protocol, hook, None)
+            .await
+    }
+
+    /// Dispatches with attempt callbacks and a notification before patience waits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch_with_attempt`].
+    pub async fn dispatch_with_wait(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        hook: Option<Arc<dyn AttemptHook>>,
+        wait: Option<Arc<dyn WaitHook>>,
+    ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(request, inbound_protocol, hook, wait)
+            .await
+    }
+
+    async fn dispatch_inner(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        hook: Option<Arc<dyn AttemptHook>>,
+        wait_hook: Option<Arc<dyn WaitHook>>,
+    ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         resolved.hops = self.order_hops(&resolved);
@@ -292,81 +326,112 @@ impl Router {
         let mut refused_providers = BTreeSet::new();
         let mut outgrown = Vec::<(String, String)>::new();
         let mut needs_room = None;
-        for (index, hop) in resolved.hops.iter().enumerate() {
-            let mut attempt = request.clone();
-            apply_wire(&mut attempt, hop, &resolved.bare);
-            let upstream_model = attempt.model.clone();
-            if refused_providers.contains(hop.member.route_id())
-                || outgrown.iter().any(|(route, model)| {
-                    route == hop.member.route_id() && *model == upstream_model
-                })
-                || needs_room.is_some_and(|tokens| {
-                    hop.context_window
-                        .is_some_and(|window| window > 0 && tokens >= window)
-                })
-            {
-                continue;
-            }
-            let info = Attempt {
-                member: hop.member.attempt(),
-                inbound_protocol: inbound_protocol.to_owned(),
-            };
-            if let Some(hook) = hook.as_ref()
-                && let Err(error) = hook.before(&info)
-            {
-                return Err(match error {
-                    AttemptError::PreviousResponseNotFound { id } => {
-                        RouterError::PreviousResponseNotFound { id }
-                    }
-                });
-            }
-            let result = call_member(hop, index, inbound_protocol, attempt, hook.clone()).await;
-            match result {
-                Ok(completion) => {
-                    if let Some(hook) = hook.as_ref() {
-                        hook.answered(&info);
-                    }
-                    let completion = if asked == upstream_model {
-                        completion
-                    } else {
-                        label_model(completion, asked)
-                    };
-                    return Ok(Routed {
-                        upstream_id: hop.member.route_id().to_owned(),
-                        upstream_model,
-                        completion,
+        let mut round = 0_u32;
+        let mut wait_from = None;
+        loop {
+            let mut busy = Vec::new();
+            let mut all_busy = true;
+            for (index, hop) in resolved.hops.iter().enumerate() {
+                let mut attempt = request.clone();
+                apply_wire(&mut attempt, hop, &resolved.bare);
+                let upstream_model = attempt.model.clone();
+                if refused_providers.contains(hop.member.route_id())
+                    || outgrown.iter().any(|(route, model)| {
+                        route == hop.member.route_id() && *model == upstream_model
+                    })
+                    || needs_room.is_some_and(|tokens| {
+                        hop.context_window
+                            .is_some_and(|window| window > 0 && tokens >= window)
+                    })
+                {
+                    continue;
+                }
+                let info = Attempt {
+                    member: hop.member.attempt(),
+                    inbound_protocol: inbound_protocol.to_owned(),
+                };
+                if let Some(hook) = hook.as_ref()
+                    && let Err(error) = hook.before(&info)
+                {
+                    return Err(match error {
+                        AttemptError::PreviousResponseNotFound { id } => {
+                            RouterError::PreviousResponseNotFound { id }
+                        }
                     });
                 }
-                Err(error) => {
-                    let upstream_id = hop.member.route_id().to_owned();
-                    let inferred = decision::too_long_unsaid(
-                        &error,
-                        input_tokens,
-                        hop.context_window,
-                        &upstream_model,
-                        &upstream_id,
-                    );
-                    let error = inferred.unwrap_or(error);
-                    if decision::outgrown(&error) {
-                        // As long on every account of this model; another
-                        // member not known to be too small may hold it.
-                        if error.status() != Some(413) {
-                            needs_room = Some(input_tokens);
+                let result = call_member(hop, index, inbound_protocol, attempt, hook.clone()).await;
+                match result {
+                    Ok(completion) => {
+                        if let Some(hook) = hook.as_ref() {
+                            hook.answered(&info);
                         }
-                        outgrown.push((upstream_id.clone(), upstream_model));
+                        let completion = if asked == upstream_model {
+                            completion
+                        } else {
+                            label_model(completion, asked)
+                        };
+                        return Ok(Routed {
+                            upstream_id: hop.member.route_id().to_owned(),
+                            upstream_model,
+                            completion,
+                        });
+                    }
+                    Err(error) => {
+                        let upstream_id = hop.member.route_id().to_owned();
+                        let inferred = decision::too_long_unsaid(
+                            &error,
+                            input_tokens,
+                            hop.context_window,
+                            &upstream_model,
+                            &upstream_id,
+                        );
+                        let error = inferred.unwrap_or(error);
+                        if decision::outgrown(&error) {
+                            // As long on every account of this model; another
+                            // member not known to be too small may hold it.
+                            if error.status() != Some(413) {
+                                needs_room = Some(input_tokens);
+                            }
+                            outgrown.push((upstream_id.clone(), upstream_model));
+                            last = Some((upstream_id, error));
+                            all_busy = false;
+                            continue;
+                        }
+                        if decision::skips_provider(&error) {
+                            // Every account of the provider refuses the same
+                            // content; another provider is asked once.
+                            refused_providers.insert(upstream_id.clone());
+                        } else if !decision::asks_next(&error) && !policy.allows(&error) {
+                            return Err(RouterError::Upstream { upstream_id, error });
+                        }
+                        let now = wait_hook
+                            .as_ref()
+                            .map_or_else(Instant::now, |hook| hook.now());
+                        if let Some(failure) = patience::busy(&error, now) {
+                            busy.push(failure);
+                        } else {
+                            all_busy = false;
+                        }
                         last = Some((upstream_id, error));
-                        continue;
                     }
-                    if decision::skips_provider(&error) {
-                        // Every account of the provider refuses the same
-                        // content; another provider is asked once.
-                        refused_providers.insert(upstream_id.clone());
-                    } else if !decision::asks_next(&error) && !policy.allows(&error) {
-                        return Err(RouterError::Upstream { upstream_id, error });
-                    }
-                    last = Some((upstream_id, error));
                 }
             }
+            let now = wait_hook
+                .as_ref()
+                .map_or_else(Instant::now, |hook| hook.now());
+            if all_busy
+                && let Some(budget) = resolved.patience
+                && let Some(hook) = wait_hook.as_ref()
+            {
+                let from = *wait_from.get_or_insert(now);
+                if let Some(wait) = patience::pause(&mut busy, round, from, budget, now) {
+                    hook.waiting();
+                    hook.wait(wait).await;
+                    round = round.saturating_add(1);
+                    continue;
+                }
+            }
+            break;
         }
         match last {
             Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
@@ -544,6 +609,7 @@ impl Router {
                 bare: asked.to_owned(),
                 pool: asked.to_owned(),
                 routing: route.routing.clone(),
+                patience: None,
             });
         }
         if let Some((provider_id, model)) = asked.split_once('/')
@@ -553,7 +619,10 @@ impl Router {
                 hop.member.route_id() == provider_id
                     && (route_model == model || hop.wire_model.as_deref() == Some(model))
             });
-            return self.one(asked, model, found);
+            let patience = found.first().and_then(|(_, hop)| hop.patience);
+            let mut resolved = self.one(asked, model, found)?;
+            resolved.patience = patience;
+            return Ok(resolved);
         }
         let found = self.matching(|_, hop| hop.wire_model.as_deref() == Some(asked));
         let bare = found
@@ -588,6 +657,7 @@ impl Router {
                 bare: bare.to_owned(),
                 pool: asked.to_owned(),
                 routing: "smart".to_owned(),
+                patience: None,
             }),
             _ => Err(RouterError::Ambiguous {
                 model: asked.to_owned(),

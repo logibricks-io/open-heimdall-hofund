@@ -38,14 +38,14 @@ use axum::routing::{get, post};
 use endpoints::{
     GENERATIVE_CATCHALL, inject_target, match_count, match_generate, percent_decode, query_key,
 };
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use hofund_codec::{Codec, StreamEncoder};
 use hofund_ir::{Request as ModelRequest, StreamEvent};
 use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
 };
 use hofund_plugin_host::HttpBackend;
-use hofund_router::{Completion, RouterError, Snapshot};
+use hofund_router::{Completion, Routed, RouterError, Snapshot, WaitHook};
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -121,6 +121,46 @@ impl fmt::Debug for TokenState {
     }
 }
 
+struct GatewayWait {
+    notice: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl GatewayWait {
+    fn channel() -> (Arc<Self>, oneshot::Receiver<()>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            Arc::new(Self {
+                notice: Mutex::new(Some(sender)),
+            }),
+            receiver,
+        )
+    }
+}
+
+impl WaitHook for GatewayWait {
+    fn waiting(&self) {
+        if let Some(sender) = self
+            .notice
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = sender.send(());
+        }
+    }
+
+    fn wait(
+        &self,
+        duration: Duration,
+    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(tokio::time::sleep(duration))
+    }
+
+    fn now(&self) -> Instant {
+        tokio::time::Instant::now().into_std()
+    }
+}
+
 /// Summary emitted when an authenticated model request begins.
 ///
 /// Carries ids and protocol only. Never headers, bodies, query strings, or
@@ -179,6 +219,8 @@ struct RequestTrack {
     started: Instant,
     active: bool,
     finished: bool,
+    drop_status: u16,
+    cancel_usage: Option<(Arc<Ledger>, UsageMeta)>,
 }
 
 impl RequestTrack {
@@ -197,6 +239,8 @@ impl RequestTrack {
             started: Instant::now(),
             active: true,
             finished: false,
+            drop_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            cancel_usage: None,
         }
     }
 
@@ -216,6 +260,11 @@ impl RequestTrack {
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             self.active = false;
         }
+    }
+
+    fn client_waiting(&mut self, usage: Arc<Ledger>, request: &ModelRequest) {
+        self.drop_status = 499;
+        self.cancel_usage = Some((usage, UsageMeta::new(request, "", self.started)));
     }
 
     fn end_with(
@@ -247,6 +296,8 @@ impl RequestTrack {
             started: self.started,
             active: self.active,
             finished: self.finished,
+            drop_status: self.drop_status,
+            cancel_usage: self.cancel_usage.take(),
         };
         self.active = false;
         self.finished = true;
@@ -259,7 +310,13 @@ impl Drop for RequestTrack {
         if !self.finished {
             // Panic, cancellation, or a path that forgot finish: still emit and
             // return the counter to zero.
-            self.end_with(None, StatusCode::INTERNAL_SERVER_ERROR.as_u16(), None, None);
+            let status = self.drop_status;
+            if status == 499
+                && let Some((usage, meta)) = self.cancel_usage.take()
+            {
+                write_usage(&usage, &meta, None, StatusCode::from_u16(499).expect("499"));
+            }
+            self.end_with(None, status, None, None);
         } else {
             self.release();
         }
@@ -1185,10 +1242,35 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     );
     let router = app.snapshot.load();
     let attempt = ask.as_ref().map(|ask| ask.attempt());
-    match router
-        .dispatch_with_attempt(&model_request, codec.id(), attempt)
-        .await
-    {
+    let (wait, notice) = GatewayWait::channel();
+    let mut dispatch: DispatchFuture = Box::pin({
+        let request = model_request.clone();
+        let protocol = codec.id().to_owned();
+        async move {
+            router
+                .dispatch_with_wait(&request, &protocol, attempt, Some(wait))
+                .await
+        }
+    });
+    let result = tokio::select! {
+        result = &mut dispatch => result,
+        _ = notice => {
+            track.client_waiting(Arc::clone(&app.usage), &model_request);
+            if model_request.stream {
+                return held_response(
+                    app,
+                    codec,
+                    model_request,
+                    started,
+                    track,
+                    capture,
+                    dispatch,
+                );
+            }
+            dispatch.await
+        }
+    };
+    match result {
         Ok(routed) => {
             success(
                 app,
@@ -1211,6 +1293,124 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             started,
             &mut track,
         ),
+    }
+}
+
+type DispatchFuture =
+    Pin<Box<dyn std::future::Future<Output = Result<Routed, RouterError>> + Send>>;
+type BytesStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
+
+struct HeldResponse {
+    dispatch: Option<DispatchFuture>,
+    app: Arc<Inner>,
+    codec: Arc<dyn Codec>,
+    request: ModelRequest,
+    started: Instant,
+    track: Option<RequestTrack>,
+    capture: Option<prev_response::Capture>,
+    incoming: Option<BytesStream>,
+    keepalive: Pin<Box<tokio::time::Sleep>>,
+}
+
+fn held_response(
+    app: Arc<Inner>,
+    codec: Arc<dyn Codec>,
+    request: ModelRequest,
+    started: Instant,
+    track: RequestTrack,
+    capture: Option<prev_response::Capture>,
+    dispatch: DispatchFuture,
+) -> Response {
+    let content_type = codec.stream_content_type();
+    let state = HeldResponse {
+        dispatch: Some(dispatch),
+        app,
+        codec,
+        request,
+        started,
+        track: Some(track),
+        capture,
+        incoming: None,
+        keepalive: Box::pin(tokio::time::sleep(Duration::ZERO)),
+    };
+    let body = futures_util::stream::unfold((state, false), |(mut state, done)| async move {
+        if done {
+            return None;
+        }
+        loop {
+            if let Some(incoming) = state.incoming.as_mut() {
+                if let Some(chunk) = incoming.next().await {
+                    return Some((chunk, (state, false)));
+                }
+                return None;
+            }
+            let dispatch = state.dispatch.as_mut().expect("held dispatch");
+            tokio::select! {
+                () = &mut state.keepalive => {
+                    state.keepalive.as_mut().reset(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                    );
+                    return Some((
+                        Ok(Bytes::from_static(b": keepalive\n\n")),
+                        (state, false),
+                    ));
+                }
+                result = dispatch => {
+                    state.dispatch = None;
+                    match result {
+                        Ok(routed) => {
+                            let response = success(
+                                Arc::clone(&state.app),
+                                Arc::clone(&state.codec),
+                                &state.request,
+                                &routed.upstream_id,
+                                &routed.upstream_model,
+                                routed.completion,
+                                state.started,
+                                state.track.as_mut().expect("held request track"),
+                                state.capture.take(),
+                            )
+                            .await;
+                            let stream = response
+                                .into_body()
+                                .into_data_stream()
+                                .map_err(std::io::Error::other);
+                            state.incoming = Some(Box::pin(stream));
+                        }
+                        Err(error) => {
+                            let (status, message) = stream_error(&error);
+                            let _ = failure(
+                                Arc::clone(&state.app),
+                                state.codec.as_ref(),
+                                &state.request,
+                                error,
+                                state.started,
+                                state.track.as_mut().expect("held request track"),
+                            );
+                            let bytes = state
+                                .codec
+                                .encode_stream_error(status.as_u16(), &message);
+                            return Some((Ok(Bytes::from(bytes)), (state, true)));
+                        }
+                    }
+                }
+            }
+        }
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from_stream(body))
+        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
+}
+
+fn stream_error(error: &RouterError) -> (StatusCode, String) {
+    match error {
+        RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string()),
+        RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
+            (StatusCode::BAD_REQUEST, error.to_string())
+        }
+        RouterError::Upstream { error, .. } => (status_of(error), error.message().to_owned()),
     }
 }
 
@@ -1969,6 +2169,8 @@ mod request_event_tests {
             started: std::time::Instant::now(),
             active: true,
             finished: false,
+            drop_status: 500,
+            cancel_usage: None,
         };
         // Mirror begin's increment (begin also calls started).
         counter.fetch_add(1, Ordering::SeqCst);
@@ -2007,6 +2209,8 @@ mod request_event_tests {
                 started: std::time::Instant::now(),
                 active: true,
                 finished: false,
+                drop_status: 500,
+                cancel_usage: None,
             };
             counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(counter.load(Ordering::SeqCst), 1);

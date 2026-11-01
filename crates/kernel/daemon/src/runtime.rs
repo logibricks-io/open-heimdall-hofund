@@ -465,6 +465,11 @@ impl Runtime {
         self.publish(candidate)
     }
 
+    pub(crate) fn spawn_probes(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let table = self.table.get().expect("initial snapshot").clone();
+        crate::probe::spawn(Arc::clone(&self.cooldowns), move || table.members())
+    }
+
     pub(crate) fn spawn_maintenance(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let cooldowns = Arc::clone(&self.cooldowns);
         let rests = Arc::clone(&self.rests);

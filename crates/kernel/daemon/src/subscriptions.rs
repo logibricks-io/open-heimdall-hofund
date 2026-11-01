@@ -261,6 +261,8 @@ impl SubscriptionState {
                 plugin_id: self.plugin.as_str().to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                patience: None,
+                kernel: false,
             },
             id,
             upstream,
