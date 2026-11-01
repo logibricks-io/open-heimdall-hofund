@@ -115,7 +115,7 @@ fn ask(gateway: &Gateway, path: &str) -> (u16, String, Option<String>, String) {
 
 #[test]
 fn the_route_is_codexs() {
-    let surface = CodexCatalog;
+    let surface = CodexCatalog::default();
     assert_eq!(surface.id().as_str(), "codex-catalog");
     let routes: Vec<(Method, &str)> = surface
         .routes()
@@ -136,7 +136,7 @@ fn the_route_is_codexs() {
 #[test]
 fn e2_surface_declares_only_the_backend_responses_socket() {
     assert_eq!(
-        CodexCatalog.responses_websocket_paths(),
+        CodexCatalog::default().responses_websocket_paths(),
         ["/backend-api/codex/responses"]
     );
 }
