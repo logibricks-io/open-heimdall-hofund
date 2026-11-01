@@ -85,6 +85,9 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::Usage => commands::usage(config)
                 .await
                 .map(|table| table.trim_end_matches('\n').to_owned()),
+            Command::Route => commands::route(config)
+                .await
+                .map(|table| table.trim_end_matches('\n').to_owned()),
             Command::AgentList => commands::agent_list(config).await,
             Command::AgentConnect { name, dry_run } => {
                 commands::agent_connect(config, &name, dry_run).await
@@ -162,6 +165,7 @@ enum Command {
     TokenRotate,
     GatewayKey(gateway_key::Command),
     Usage,
+    Route,
     AgentList,
     AgentConnect {
         name: String,
@@ -396,6 +400,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["token", "show"] => Command::TokenShow,
         ["token", "rotate"] => Command::TokenRotate,
         ["usage"] => Command::Usage,
+        ["route"] => Command::Route,
         ["agent", "list"] => Command::AgentList,
         ["agent", "connect", name] => Command::AgentConnect {
             name: (*name).to_owned(),

@@ -21,12 +21,14 @@ pub mod quota;
 mod scope;
 mod snapshot;
 pub mod strategy;
+pub mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::StreamExt;
+use hofund_control_proto::{RouteTry, SkipReason};
 use hofund_ir::{StreamEvent, estimate_input_tokens};
 use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
 use tracing::Instrument;
@@ -38,6 +40,11 @@ pub use member::{Member, ModelListAnswer};
 pub use patience::WaitHook;
 pub use scope::RouteScope;
 pub use snapshot::Snapshot;
+pub use view::{
+    RouteMeta, RouteTraceBook, RouteTraceHandle, TRACE_KEEP, TraceNow, UNROUTED_MOST,
+    UNROUTED_PHASE_MASKING, UNROUTED_SHOW, UNROUTED_UNKNOWN, UnroutedHold, UnroutedTimeout,
+    candidates_from_hops, fail_text, try_status, unrouted_timeout_status,
+};
 
 /// Which failures may try the next member.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -474,7 +481,7 @@ impl Router {
         inbound_protocol: &str,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, None, None, hook, None)
+        self.dispatch_inner(request, inbound_protocol, None, None, hook, None, None)
             .await
     }
 
@@ -490,8 +497,16 @@ impl Router {
         conversation: Option<&affinity::Conversation>,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, None, conversation, hook, None)
-            .await
+        self.dispatch_inner(
+            request,
+            inbound_protocol,
+            None,
+            conversation,
+            hook,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Dispatches with per-caller scope filtering and optional attempt callbacks.
@@ -507,7 +522,7 @@ impl Router {
         scope: Option<&RouteScope>,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, scope, None, hook, None)
+        self.dispatch_inner(request, inbound_protocol, scope, None, hook, None, None)
             .await
     }
 
@@ -523,7 +538,7 @@ impl Router {
         hook: Option<Arc<dyn AttemptHook>>,
         wait: Option<Arc<dyn WaitHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, None, None, hook, wait)
+        self.dispatch_inner(request, inbound_protocol, None, None, hook, wait, None)
             .await
     }
 
@@ -541,7 +556,7 @@ impl Router {
         hook: Option<Arc<dyn AttemptHook>>,
         wait: Option<Arc<dyn WaitHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, scope, None, hook, wait)
+        self.dispatch_inner(request, inbound_protocol, scope, None, hook, wait, None)
             .await
     }
 
@@ -560,10 +575,44 @@ impl Router {
         hook: Option<Arc<dyn AttemptHook>>,
         wait: Option<Arc<dyn WaitHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, scope, conversation, hook, wait)
-            .await
+        self.dispatch_inner(
+            request,
+            inbound_protocol,
+            scope,
+            conversation,
+            hook,
+            wait,
+            None,
+        )
+        .await
     }
 
+    /// Like [`Self::dispatch_scoped_conversation_with_wait`], and records the
+    /// routing decision in `trace`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_scoped_conversation_with_wait_traced(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        scope: Option<&RouteScope>,
+        conversation: Option<&affinity::Conversation>,
+        hook: Option<Arc<dyn AttemptHook>>,
+        wait: Option<Arc<dyn WaitHook>>,
+        trace: RouteTraceHandle,
+    ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(
+            request,
+            inbound_protocol,
+            scope,
+            conversation,
+            hook,
+            wait,
+            Some(trace),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_inner(
         &self,
         request: &Request,
@@ -572,6 +621,7 @@ impl Router {
         conversation: Option<&affinity::Conversation>,
         hook: Option<Arc<dyn AttemptHook>>,
         wait_hook: Option<Arc<dyn WaitHook>>,
+        mut trace: Option<RouteTraceHandle>,
     ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
@@ -580,6 +630,23 @@ impl Router {
         let ordered = self.order_for(&resolved, conversation);
         resolved.hops = ordered.hops;
         resolved.spent = self.spent(&resolved);
+        if let Some(trace) = trace.as_mut() {
+            trace.set_routing(&resolved.routing);
+            if resolved.pool_asked {
+                trace.set_group(&resolved.route);
+            }
+            if let Some(affinity) = &ordered.affinity {
+                trace.set_affinity_decision(affinity.reason);
+            }
+            let cooling = cooling_labels(self.cooldowns.as_ref(), &resolved);
+            trace.set_candidates(candidates_from_hops(
+                &resolved.hops,
+                &resolved.bare,
+                &resolved.spent,
+                &cooling,
+            ));
+            trace.sync_open();
+        }
         let hook = conversation.map_or(hook.clone(), |conversation| {
             Some(Arc::new(affinity::sealed::SealedHook::new(
                 self.sealed.clone(),
@@ -605,6 +672,7 @@ impl Router {
             affinity: ordered.affinity,
             affinity_state: self.affinity.clone(),
             cooldowns: self.cooldowns.clone(),
+            trace,
         }
         .run(0)
         .await;
@@ -1292,6 +1360,7 @@ struct DispatchState {
     affinity: Option<ReplyRoute>,
     affinity_state: affinity::AffinityState,
     cooldowns: Option<Arc<Cooldowns>>,
+    trace: Option<RouteTraceHandle>,
 }
 
 /// One member's answer within a dispatch round.
@@ -1316,21 +1385,63 @@ impl DispatchState {
         loop {
             let mut busy = Vec::new();
             let mut ending = Ending::Answered;
-            if let Some(answered) = self.round(&asking, &mut busy, &mut ending).await? {
-                let next = answered.index + 1;
-                let affinity_reason = self
-                    .affinity
-                    .as_ref()
-                    .map(|affinity| affinity.reason.to_owned());
-                let continuation = (next < self.resolved.hops.len())
-                    .then(|| RouteContinuation { state: self, next });
-                return Ok(Routed {
-                    upstream_id: answered.upstream_id,
-                    upstream_model: answered.upstream_model,
-                    completion: answered.completion,
-                    affinity_reason,
-                    continuation,
-                });
+            match self.round(&asking, &mut busy, &mut ending).await {
+                Ok(Some(answered)) => {
+                    let next = answered.index + 1;
+                    let has_continuation = next < self.resolved.hops.len();
+                    let affinity_reason = self
+                        .affinity
+                        .as_ref()
+                        .map(|affinity| affinity.reason.to_owned());
+                    if let Some(trace) = self.trace.as_mut()
+                        && self.asked != answered.upstream_model
+                    {
+                        let why = affinity_reason
+                            .as_deref()
+                            .filter(|reason| !reason.is_empty())
+                            .unwrap_or("stand-in");
+                        trace.set_moved(&answered.upstream_model, why);
+                    }
+                    if has_continuation {
+                        if let Some(trace) = self.trace.as_mut() {
+                            trace.sync_open();
+                        }
+                        let continuation = RouteContinuation { state: self, next };
+                        return Ok(Routed {
+                            upstream_id: answered.upstream_id,
+                            upstream_model: answered.upstream_model,
+                            completion: answered.completion,
+                            affinity_reason,
+                            continuation: Some(continuation),
+                        });
+                    }
+                    if let Some(trace) = self.trace.take() {
+                        let hop = &self.resolved.hops[answered.index];
+                        let member = hop.member.id().to_string();
+                        trace.finish(
+                            Some(&member),
+                            Some(hop.member.route_id()),
+                            Some(200),
+                            None,
+                            affinity_reason.as_deref(),
+                        );
+                    }
+                    return Ok(Routed {
+                        upstream_id: answered.upstream_id,
+                        upstream_model: answered.upstream_model,
+                        completion: answered.completion,
+                        affinity_reason,
+                        continuation: None,
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let message = error.to_string();
+                    if let Some(trace) = self.trace.take() {
+                        trace.finish(None, None, None, Some(&message), None);
+                    }
+                    return Err(error);
+                }
             }
             let now = self.now();
             // Every member asked has failed with nothing of a reply sent.
@@ -1355,6 +1466,19 @@ impl DispatchState {
                 }
             }
             break;
+        }
+        let error_message = self
+            .last
+            .as_ref()
+            .map(|(_, error)| error.message().to_owned());
+        if let Some(trace) = self.trace.take() {
+            trace.finish(
+                None,
+                None,
+                self.last.as_ref().and_then(|(_, error)| error.status()),
+                error_message.as_deref(),
+                None,
+            );
         }
         match self.last {
             Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
@@ -1395,6 +1519,27 @@ impl DispatchState {
                         .is_some_and(|window| window > 0 && tokens >= window)
                 })
             {
+                if self.refused_providers.contains(hop.member.route_id()) {
+                    self.note_skip(index as u32, SkipReason::ProviderRefused);
+                } else if self.needs_room.is_some_and(|tokens| {
+                    hop.context_window
+                        .is_some_and(|window| window > 0 && tokens >= window)
+                }) {
+                    self.note_skip(
+                        index as u32,
+                        SkipReason::Context {
+                            window: hop.context_window,
+                        },
+                    );
+                } else {
+                    self.note_skip(
+                        index as u32,
+                        SkipReason::Failure {
+                            status: None,
+                            message: "prompt too long for this member".to_owned(),
+                        },
+                    );
+                }
                 continue;
             }
             let info = Attempt {
@@ -1423,6 +1568,7 @@ impl DispatchState {
                     if let Some(hook) = self.hook.as_ref() {
                         hook.answered(&info);
                     }
+                    self.note_try(index, &hop, &upstream_model, true, Some(200), String::new());
                     let completion = if self.asked == upstream_model {
                         completion
                     } else {
@@ -1508,7 +1654,32 @@ impl DispatchState {
                         // content; another provider is asked once.
                         self.refused_providers.insert(upstream_id.clone());
                     } else if !decision::asks_next(&error) && !self.policy.allows(&error) {
+                        self.note_try(
+                            index,
+                            &hop,
+                            &upstream_model,
+                            true,
+                            try_status(&error),
+                            fail_text(&error),
+                        );
                         return Err(RouterError::Upstream { upstream_id, error });
+                    }
+                    self.note_try(
+                        index,
+                        &hop,
+                        &upstream_model,
+                        true,
+                        try_status(&error),
+                        fail_text(&error),
+                    );
+                    if self.policy.allows(&error) {
+                        self.note_skip(
+                            index as u32,
+                            SkipReason::Failure {
+                                status: try_status(&error),
+                                message: fail_text(&error),
+                            },
+                        );
                     }
                     if let Some(failure) = patience::busy(&error, index, self.now()) {
                         // Each member is asked once a round, so noted once.
@@ -1526,6 +1697,35 @@ impl DispatchState {
             }
         }
         Ok(None)
+    }
+
+    fn note_try(
+        &mut self,
+        _index: usize,
+        hop: &Hop,
+        upstream_model: &str,
+        done: bool,
+        status: Option<u16>,
+        fail: String,
+    ) {
+        let Some(trace) = self.trace.as_mut() else {
+            return;
+        };
+        trace.push_try(RouteTry::new(
+            hop.member.id().to_string(),
+            hop.member.route_id(),
+            upstream_model,
+            done,
+            status,
+            fail,
+        ));
+        trace.sync_open();
+    }
+
+    fn note_skip(&mut self, order: u32, reason: SkipReason) {
+        if let Some(trace) = self.trace.as_mut() {
+            trace.skip_candidate(order, reason);
+        }
     }
 }
 
@@ -1649,6 +1849,21 @@ pub enum RouterError {
         /// Its error.
         error: PluginError,
     },
+}
+
+fn cooling_labels(cooldowns: Option<&Arc<Cooldowns>>, resolved: &Resolved) -> Vec<Option<String>> {
+    resolved
+        .hops
+        .iter()
+        .map(|hop| {
+            let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+            cooldowns.and_then(|cooldowns| {
+                cooldowns
+                    .cooling_for_model(hop.member.id(), model)
+                    .map(|state| state.cause().as_str().to_owned())
+            })
+        })
+        .collect()
 }
 
 fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> Vec<Hop> {
