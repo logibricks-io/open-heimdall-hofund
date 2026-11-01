@@ -535,3 +535,36 @@ async fn d26_5_dispatch_reserve_takes_over_and_gives_back() {
     assert_eq!(second_hits.load(Ordering::SeqCst), 1);
     assert_eq!(reserve_hits.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn r1_28_affinity_decision_is_recorded_on_the_trace() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first = fake("first", &first_hits, vec![answer(), answer()]);
+    let second = fake("second", &second_hits, vec![answer()]);
+    let router = router(first, second, AffinityState::in_memory(), Stays::Auto);
+    let book = hofund_router::RouteTraceBook::new();
+    for _ in 0..2 {
+        let trace = book.begin(hofund_router::RouteMeta {
+            asked: "demo".to_owned(),
+            ..hofund_router::RouteMeta::default()
+        });
+        let _routed = router
+            .dispatch_scoped_conversation_with_wait_traced(
+                &hofund_router::Request::new("demo"),
+                "test",
+                None,
+                Some(&conversation()),
+                None,
+                None,
+                trace,
+            )
+            .await
+            .expect("dispatch");
+    }
+    let list = book.list(&Default::default());
+    assert!(
+        list.decisions.iter().any(|row| !row.affinity.is_empty()),
+        "a kept answerer must leave its affinity reason on the trace"
+    );
+}

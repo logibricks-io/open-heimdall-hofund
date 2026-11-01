@@ -12,6 +12,7 @@ mod gateway_key_issue;
 mod gateway_key_limit;
 mod gateway_key_oidc;
 mod local;
+mod models;
 mod provider;
 mod provider_edit;
 mod quota;
@@ -86,6 +87,9 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::Usage => commands::usage(config)
                 .await
                 .map(|table| table.trim_end_matches('\n').to_owned()),
+            Command::Route => commands::route(config)
+                .await
+                .map(|table| table.trim_end_matches('\n').to_owned()),
             Command::AgentList => commands::agent_list(config).await,
             Command::AgentConnect { name, dry_run } => {
                 commands::agent_connect(config, &name, dry_run).await
@@ -99,6 +103,8 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             }
             Command::GatewayKey(command) => gateway_key::run(config, &command).await,
             Command::ProviderList => provider::list(config).await,
+            Command::Models { model } => models::list(config, model.as_deref()).await,
+            Command::ModelsRefresh => models::refresh(config).await,
             Command::ProviderShow { id } => provider::show(config, &id).await,
             Command::ProviderTest { id, models } => provider::test(config, &id, &models).await,
             Command::ProviderRefresh { id } => provider::refresh(config, &id).await,
@@ -162,6 +168,7 @@ enum Command {
     TokenRotate,
     GatewayKey(gateway_key::Command),
     Usage,
+    Route,
     AgentList,
     AgentConnect {
         name: String,
@@ -185,6 +192,11 @@ enum Command {
     Quota(quota::QuotaCommand),
     /// `warmup` and `warmup <subscription>/<account>`.
     Warmup(warmup::WarmupCommand),
+    /// `models` and `models refresh`.
+    Models {
+        model: Option<String>,
+    },
+    ModelsRefresh,
     ProviderList,
     ProviderShow {
         id: String,
@@ -394,6 +406,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["token", "show"] => Command::TokenShow,
         ["token", "rotate"] => Command::TokenRotate,
         ["usage"] => Command::Usage,
+        ["route"] => Command::Route,
         ["agent", "list"] => Command::AgentList,
         ["agent", "connect", name] => Command::AgentConnect {
             name: (*name).to_owned(),
@@ -427,6 +440,11 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
+        },
+        ["models", "refresh"] => Command::ModelsRefresh,
+        ["models"] => Command::Models { model: None },
+        ["models", model] => Command::Models {
+            model: Some((*model).to_owned()),
         },
         ["accounts", rest @ ..] => match accounts::parse(rest) {
             Some(parsed) => Command::Accounts(parsed?),
@@ -760,6 +778,8 @@ commands:
   quota history [<provider|account>...] [--days <n>] [--json]
   warmup [--json]  last daily warm-up per account
   warmup <subscription>/<account>  run warm-up now
+  models [<model>]                show catalog spec and prices for route models
+  models refresh                  refetch the models.dev catalog cache
   provider list                   list providers
   provider show <id>              print a provider, its listed models and picks
   provider test <id> [<model>...] probe a provider's models

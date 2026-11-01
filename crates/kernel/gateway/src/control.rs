@@ -27,9 +27,10 @@ use hofund_control_proto::{
     GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES,
     ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse,
     ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteModelListResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    Topic, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
+    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
     decode_request,
 };
 use hyper_util::rt::TokioIo;
@@ -198,6 +199,45 @@ pub trait ControlState: Send + Sync {
     fn set_picks(&self, id: String, request: PicksSetRequest) -> ControlFuture<'_, PicksResponse>;
     /// Lists configured client-facing route models.
     fn route_models(&self) -> ControlFuture<'_, RouteModelListResponse>;
+    /// Lists recent routing decisions.
+    fn route_decisions(&self, query: RouteQuery) -> ControlFuture<'_, RouteListResponse> {
+        let _ = query;
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "routing decisions are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Returns the latest routing decision for one session.
+    fn route_session(
+        &self,
+        _session: String,
+        query: RouteQuery,
+    ) -> ControlFuture<'_, SessionRouteResponse> {
+        let _ = query;
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "routing decisions are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Lists requests waiting before routing starts.
+    fn route_unrouted(&self) -> ControlFuture<'_, UnroutedListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "routing decisions are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists known agents.
     fn agents(&self) -> ControlFuture<'_, AgentListResponse>;
     /// Reports agent connection states.
@@ -410,6 +450,18 @@ impl Control {
             .route(
                 "/v1/hofund/models",
                 get(route_models).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/route",
+                get(route_decisions).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/route/session",
+                get(route_session).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/route/unrouted",
+                get(route_unrouted).head(method_not_allowed),
             )
             .route("/v1/hofund/agents", get(agents).head(method_not_allowed))
             .route(
@@ -865,6 +917,30 @@ async fn set_picks(
 
 async fn route_models(State(state): State<HttpState>) -> Response {
     operation_response!(state.control.state.route_models().await)
+}
+
+async fn route_decisions(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = RouteQuery::parse(uri.query());
+    operation_response!(state.control.state.route_decisions(query).await)
+}
+
+async fn route_session(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = RouteQuery::parse(uri.query());
+    let Some(session) = query.session.clone().filter(|session| !session.is_empty()) else {
+        return failure_response(
+            ControlError::new(
+                ControlErrorKind::BadRequest,
+                "name the session with ?session=<id>",
+                "control",
+            )
+            .into(),
+        );
+    };
+    operation_response!(state.control.state.route_session(session, query).await)
+}
+
+async fn route_unrouted(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.route_unrouted().await)
 }
 
 async fn agents(State(state): State<HttpState>) -> Response {

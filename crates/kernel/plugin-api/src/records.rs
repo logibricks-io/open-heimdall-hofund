@@ -1457,6 +1457,66 @@ impl AgentSignIn {
     }
 }
 
+/// One agent sign-in an account-discovery pass found. Holds identity only;
+/// secrets stay in the agent's files until an explicit import.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DiscoveredAgentAccount {
+    id: AccountId,
+    label: String,
+    reference: String,
+}
+
+impl DiscoveredAgentAccount {
+    /// Builds a discovery row. `reference` is an opaque handle for
+    /// [`Subscription::import_agent_sign_in`](crate::Subscription::import_agent_sign_in).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `label` or `reference` is empty.
+    pub fn new(
+        id: AccountId,
+        label: impl Into<String>,
+        reference: impl Into<String>,
+    ) -> Result<Self, PluginError> {
+        let label = label.into();
+        let reference = reference.into();
+        if label.is_empty() {
+            return Err(PluginError::config(
+                "a discovered account has an empty label",
+            ));
+        }
+        if reference.is_empty() {
+            return Err(PluginError::config(
+                "a discovered account has an empty reference",
+            ));
+        }
+        Ok(Self {
+            id,
+            label,
+            reference,
+        })
+    }
+
+    /// Stable account id.
+    #[must_use]
+    pub fn id(&self) -> &AccountId {
+        &self.id
+    }
+
+    /// Human-readable label, such as an email.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Opaque import handle; never holds secret material.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+}
+
 /// Static metadata for a subscription plugin.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]

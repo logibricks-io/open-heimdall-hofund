@@ -20,6 +20,7 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, constant_time_eq, new_state};
 
 mod agent_sign_in;
+mod discover;
 mod limits;
 mod models;
 mod shape;
@@ -340,6 +341,22 @@ impl Subscription for Codex {
         host: &HostContext,
     ) -> Result<(), PluginError> {
         warmup::run(&self.endpoints, &self.prompts, account, host).await
+    }
+
+    async fn discover_agent_sign_in(
+        &self,
+        home: &Path,
+    ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, PluginError> {
+        discover::list(home)
+    }
+
+    async fn import_agent_sign_in(
+        &self,
+        home: &Path,
+        reference: &str,
+        host: &HostContext,
+    ) -> Result<AccountId, PluginError> {
+        discover::import(home, reference, host).await
     }
 }
 

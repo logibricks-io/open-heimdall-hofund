@@ -135,7 +135,8 @@ async fn state(
         )
         .with_router(snapshot)
         .with_quotas(quotas)
-        .with_events(events),
+        .with_events(events)
+        .with_route_trace(hofund_router::RouteTraceBook::new()),
     );
     Ok((state, token, token_path))
 }

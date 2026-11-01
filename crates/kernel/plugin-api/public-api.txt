@@ -279,6 +279,12 @@ DisconnectOutcome #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 DisconnectOutcome::const fn changed (& self) -> bool
 DisconnectOutcome::fn new (changed : bool , warnings : Vec < String >) -> Self
 DisconnectOutcome::fn warnings (& self) -> & [String]
+DiscoveredAgentAccount
+DiscoveredAgentAccount #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+DiscoveredAgentAccount::fn id (& self) -> & AccountId
+DiscoveredAgentAccount::fn label (& self) -> & str
+DiscoveredAgentAccount::fn new (id : AccountId , label : impl Into < String > , reference : impl Into < String > ,) -> Result < Self , PluginError >
+DiscoveredAgentAccount::fn reference (& self) -> & str
 DynAgentFactory
 DynAgentFactory::fn config_schema (& self) -> Schema
 DynAgentFactory::fn description (& self) -> & 'static AgentDescription
@@ -864,8 +870,10 @@ Subscription::async fn account_status (& self , account : & AccountId , host : &
 Subscription::async fn cancel_sign_in (& self , ctx : & SignInCtx , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn complete_sign_in (& self , ctx : & SignInCtx , proof : SignInProof , host : & HostContext ,) -> Result < AccountId , PluginError >
 Subscription::async fn daily_warmup (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
+Subscription::async fn discover_agent_sign_in (& self , home : & std :: path :: Path ,) -> Result < Vec < crate :: DiscoveredAgentAccount > , PluginError >
 Subscription::async fn health (& self) -> Result < () , PluginError >
 Subscription::async fn import_accounts (& self , text : & str , host : & HostContext ,) -> Result < Vec < AccountId > , PluginError >
+Subscription::async fn import_agent_sign_in (& self , home : & std :: path :: Path , reference : & str , host : & HostContext ,) -> Result < AccountId , PluginError >
 Subscription::async fn list_models (& self , account : & AccountId , host : & HostContext ,) -> Result < ModelList , PluginError >
 Subscription::async fn quota (& self , account : & AccountId , host : & HostContext ,) -> Result < Vec < QuotaWindow > , PluginError >
 Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >

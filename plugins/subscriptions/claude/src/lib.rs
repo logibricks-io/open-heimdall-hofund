@@ -25,6 +25,7 @@ mod account;
 mod agent_sign_in;
 mod cli;
 mod creds;
+mod discover;
 mod import;
 
 use creds::{Credentials, Profile};
@@ -454,6 +455,22 @@ impl Subscription for Claude {
         host: &HostContext,
     ) -> Result<(), PluginError> {
         account::warmup(host, || self.program(), account).await
+    }
+
+    async fn discover_agent_sign_in(
+        &self,
+        home: &Path,
+    ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, PluginError> {
+        discover::list(home)
+    }
+
+    async fn import_agent_sign_in(
+        &self,
+        home: &Path,
+        reference: &str,
+        host: &HostContext,
+    ) -> Result<AccountId, PluginError> {
+        discover::import(home, reference, host).await
     }
 }
 

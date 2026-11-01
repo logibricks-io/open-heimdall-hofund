@@ -26,11 +26,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hofund warmup`. Claude and Codex implement the hook in their subscription
   plugins; the kernel stays vendor-neutral.
 
+- Routing decision trace with bounded in-memory rings, `GET /v1/hofund/route`,
+  `GET /v1/hofund/route/session`, `GET /v1/hofund/route/unrouted`, and `hofund route`
+  (feature-parity rows 4.13 and 12.3). Continuation hops stay on one open trace until
+  the reply is served; unrouted holds honor 15s show, 30s unknown, and 2m most delays
+  with masking time excluded; group, affinity, and agent labels are recorded when known.
+
+- Account discovery from agents' own sign-ins (A-1): `hofund accounts discover`
+  and `hofund accounts discover --add` list or import accounts read from
+  configured agents' credential files (Claude Code and Codex today). Opt in
+  with boolean `discover` under `[subscriptions.options]` on a subscription,
+  or invoke the CLI; `HOFUND_NO_ACCOUNTS=1` disables every read. Discovery
+  never writes agent files or prints tokens.
+
 - Agent sign-in switching for Claude Code and Codex: `hofund accounts switch
   <agent> next|<account>`, `hofund accounts import <file>`, a five-minute
   NextLogin tick, subscription plugin file writes, and sign-out handover
   (D-27). `keep_login` and `switch_only` live in `[subscriptions.options]`.
 
+- Model catalog (C-1a): `hofund-model-catalog` caches the models.dev `api.json`
+  shape under `.hofund/catalog/`, revalidates with `ETag`, honors a configurable
+  mirror URL, falls back to the last cache offline, refreshes in the background,
+  applies `[[catalog.overrides]]` from config, enriches `GET /v1/models`, and
+  adds `hofund models` plus `hofund models refresh`. Reasoning-toggle provider ids
+  default from quirks when `[catalog]` omits `reasoning_toggle_providers`.
 - Usage ledger v2 part 1 (U-1a): cache-read, cache-write split into five-minute
   and one-hour columns, reasoning tokens, and a reasoning-hidden flag on each
   row; protocol usage extraction, control `GET /usage`, and `hofund usage`

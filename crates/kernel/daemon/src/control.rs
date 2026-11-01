@@ -12,11 +12,11 @@ use hofund_control_proto::{
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse,
     PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
-    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteModel,
-    RouteModelListResponse, RouteReserve, ShutdownRequest, ShutdownResponse, ShutdownState,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod, UsageQuery,
-    UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse,
+    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteListResponse,
+    RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, SessionRouteResponse,
+    ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
+    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -59,6 +59,7 @@ pub(crate) struct DaemonControl {
     in_flight: Arc<AtomicU64>,
     quotas: Option<Arc<DaemonQuotas>>,
     runtime: Option<Arc<crate::runtime::Runtime>>,
+    route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
 }
 
 impl DaemonControl {
@@ -113,11 +114,21 @@ impl DaemonControl {
             in_flight: Arc::new(AtomicU64::new(0)),
             quotas: None,
             runtime: None,
+            route_trace: None,
         }
     }
 
     pub(crate) fn with_runtime(mut self, runtime: Arc<crate::runtime::Runtime>) -> Self {
         self.runtime = Some(runtime);
+        self
+    }
+
+    /// Serves `/v1/hofund/route` from the shared routing trace book.
+    pub(crate) fn with_route_trace(
+        mut self,
+        route_trace: Arc<hofund_router::RouteTraceBook>,
+    ) -> Self {
+        self.route_trace = Some(route_trace);
         self
     }
 
@@ -623,6 +634,73 @@ impl ControlState for DaemonControl {
             })
             .collect();
         Box::pin(async move { Ok(response) })
+    }
+
+    fn route_decisions(&self, query: RouteQuery) -> ControlFuture<'_, RouteListResponse> {
+        let Some(book) = self.route_trace.as_ref() else {
+            return Box::pin(async {
+                Err(ControlError::new(
+                    ControlErrorKind::Internal,
+                    "routing trace is not available",
+                    "control",
+                )
+                .into())
+            });
+        };
+        let wait = query.wait_secs.map(std::time::Duration::from_secs);
+        let book = Arc::clone(book);
+        Box::pin(async move {
+            Ok(if let Some(wait) = wait {
+                book.list_wait(query, wait)
+            } else {
+                book.list(&query)
+            })
+        })
+    }
+
+    fn route_session(
+        &self,
+        session: String,
+        query: RouteQuery,
+    ) -> ControlFuture<'_, SessionRouteResponse> {
+        let Some(book) = self.route_trace.as_ref() else {
+            return Box::pin(async {
+                Err(ControlError::new(
+                    ControlErrorKind::Internal,
+                    "routing trace is not available",
+                    "control",
+                )
+                .into())
+            });
+        };
+        let wait = query
+            .wait_secs
+            .map(|secs| std::time::Duration::from_secs(secs.min(60)));
+        let after = query.after.unwrap_or(0);
+        let gateway_key = query.gateway_key.clone();
+        let book = Arc::clone(book);
+        Box::pin(async move {
+            Ok(if let Some(wait) = wait {
+                book.session_wait(&session, after, wait, gateway_key.as_deref())
+            } else {
+                book.session_latest(&session, gateway_key.as_deref())
+            })
+        })
+    }
+
+    fn route_unrouted(&self) -> ControlFuture<'_, UnroutedListResponse> {
+        let Some(book) = self.route_trace.as_ref() else {
+            return Box::pin(async {
+                Err(ControlError::new(
+                    ControlErrorKind::Internal,
+                    "routing trace is not available",
+                    "control",
+                )
+                .into())
+            });
+        };
+        let book = Arc::clone(book);
+        Box::pin(async move { Ok(book.unrouted()) })
     }
 
     fn agents(&self) -> ControlFuture<'_, AgentListResponse> {
