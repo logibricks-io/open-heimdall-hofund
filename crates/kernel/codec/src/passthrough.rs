@@ -111,7 +111,8 @@ impl EndWatch {
             if !self.data.is_empty() {
                 self.data.push(b'\n');
             }
-            self.data.extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
+            self.data
+                .extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
         }
     }
 
@@ -171,7 +172,10 @@ fn candidate_ends(object: &serde_json::Map<String, serde_json::Value>) -> bool {
         Some(serde_json::Value::Object(inner)) => inner,
         _ => object,
     };
-    let Some(candidates) = chunk.get("candidates").and_then(serde_json::Value::as_array) else {
+    let Some(candidates) = chunk
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+    else {
         return true;
     };
     candidates.is_empty()

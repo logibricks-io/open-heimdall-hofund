@@ -405,8 +405,14 @@ async fn d24_a_model_with_no_provider_rests_alone_and_its_seat_is_passed_over() 
     );
     book.record_failure_for_model(&member_id("first"), "wire-a", &error)
         .expect("model rest");
-    assert!(book.cooling(&member_id("first")).is_none(), "the member does not rest");
-    assert!(book.cooling_for_model(&member_id("first"), "wire-b").is_none());
+    assert!(
+        book.cooling(&member_id("first")).is_none(),
+        "the member does not rest"
+    );
+    assert!(
+        book.cooling_for_model(&member_id("first"), "wire-b")
+            .is_none()
+    );
     let mut first = Hop::new(fake("first", &seen, Behavior::Unary));
     first.wire_model = Some("wire-a".to_owned());
     let hops = vec![first, Hop::new(fake("second", &seen, Behavior::Unary))];

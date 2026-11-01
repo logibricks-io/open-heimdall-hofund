@@ -41,8 +41,7 @@ use endpoints::{
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use hofund_codec::{
-    EndWatch,
-    Codec, SESSION_HEADERS, SUBAGENT_HEADER, StreamEncoder, compacts_in_stream_client,
+    Codec, EndWatch, SESSION_HEADERS, SUBAGENT_HEADER, StreamEncoder, compacts_in_stream_client,
     conversation_key, turn_in,
 };
 use hofund_ir::{Request as ModelRequest, StreamEvent, too_long, words_of};
