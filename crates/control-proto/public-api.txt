@@ -420,6 +420,7 @@ Quota.provider
 Quota.read_at
 Quota.read_deferred
 Quota.renew
+Quota.shared_balance
 Quota.until
 Quota.user
 Quota.windows

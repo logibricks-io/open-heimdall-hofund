@@ -80,7 +80,21 @@ pub use select::{
 #[cfg(feature = "plan-quota")]
 #[must_use]
 pub fn plan_quota() -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
-    Some(hofund_plugin_plan_quota::reader())
+    Some(hofund_plugin_plan_quota::plan_reader())
+}
+
+/// The linked vendor balance reader, when the plan-quota feature is enabled.
+#[cfg(feature = "plan-quota")]
+#[must_use]
+pub fn balance_quota() -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
+    Some(hofund_plugin_plan_quota::balance_reader())
+}
+
+/// The linked vendor balance reader, when the plan-quota feature is enabled.
+#[cfg(not(feature = "plan-quota"))]
+#[must_use]
+pub fn balance_quota() -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
+    None
 }
 
 /// The linked vendor plan reader, when the plan-quota feature is enabled.

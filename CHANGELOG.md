@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Key provider balances (P0-5b2): host-known balance readers live in the
+  plan-quota provider plugin behind `BalanceQuota`, while custom balance URLs
+  and expression fields stay in the kernel provider reader. Fresh balance reads
+  feed the quota cache, API, CLI, and router wallet spans; several keys that
+  share one account-wide balance are marked with `sharedBalance`.
 - Plan allowance windows (P0-5b1): keyed and account-backed readers for Kimi
   Code, Zhipu and Z.ai, OpenCode Go, Command Code, MiniMax, Ollama Cloud,
   StepFun, Volcengine Ark, and Tencent Cloud, including monthly windows,
