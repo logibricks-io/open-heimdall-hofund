@@ -439,10 +439,9 @@ async fn start_inner(
     let model_catalog = ModelCatalog::open(&data_root, catalog_settings, catalog_fetcher)
         .map_err(|error| show(error.to_string()))?;
     if model_catalog.stale() {
-        let refresh = Arc::clone(&model_catalog);
+        let refresh = model_catalog.refresh_detached();
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || refresh.refresh()).await;
-            if let Ok(Err(error)) = result {
+            if let Ok(Err(error)) = refresh.await {
                 tracing::warn!(?error, "initial model catalog refresh failed");
             }
         });

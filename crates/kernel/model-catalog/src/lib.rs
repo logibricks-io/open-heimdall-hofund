@@ -126,12 +126,31 @@ impl ModelCatalog {
                 if !catalog.stale() {
                     continue;
                 }
-                let refresh = Arc::clone(&catalog);
-                let result = tokio::task::spawn_blocking(move || refresh.refresh()).await;
-                if let Ok(Err(error)) = result {
+                if let Ok(Err(error)) = catalog.refresh_detached().await {
                     tracing::warn!(?error, "model catalog refresh failed");
                 }
             }
         })
+    }
+
+    /// Runs [`Self::refresh`] on its own OS thread and reports the result.
+    ///
+    /// The fetch blocks on the network, so it is kept off the async runtime's
+    /// blocking pool: a runtime shuts down without waiting for a slow or hung
+    /// fetch, and the thread ends on its own once the fetch returns.
+    pub fn refresh_detached(
+        self: &Arc<Self>,
+    ) -> tokio::sync::oneshot::Receiver<io::Result<FetchResult>> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let catalog = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("hofund-catalog-sync".to_owned())
+            .spawn(move || {
+                let _ = send.send(catalog.refresh());
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(?error, "model catalog refresh thread did not start");
+        }
+        receive
     }
 }

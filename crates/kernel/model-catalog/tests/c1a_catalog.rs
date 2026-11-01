@@ -432,3 +432,46 @@ price = { input = 1.5, output = 6.0, cache_read = 0.1, cache_write = 2.0 }
     assert!((price.input - 1.5).abs() < 1e-9);
     assert!((price.output - 6.0).abs() < 1e-9);
 }
+
+struct HangingFetcher {
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl CatalogFetcher for HangingFetcher {
+    fn fetch(
+        &self,
+        _url: &str,
+        _if_none_match: Option<&str>,
+    ) -> Result<FetchResponse, std::io::Error> {
+        let _ = self.release.lock().unwrap().recv();
+        Ok(FetchResponse::Status(500))
+    }
+}
+
+#[test]
+fn c1a_21_runtime_shutdown_does_not_wait_for_a_hung_fetch() {
+    let (release, wait) = std::sync::mpsc::channel();
+    let fetcher = Arc::new(HangingFetcher {
+        release: Mutex::new(wait),
+    });
+    let (_dir, catalog) = temp_catalog(fetcher);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let pending = catalog.refresh_detached();
+        tokio::spawn(async move {
+            let _ = pending.await;
+        });
+    });
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(runtime);
+        let _ = done.send(());
+    });
+    let dropped = finished.recv_timeout(Duration::from_secs(10)).is_ok();
+    let _ = release.send(());
+    assert!(dropped, "runtime drop waited on the catalog fetch");
+}
