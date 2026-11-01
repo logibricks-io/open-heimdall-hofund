@@ -1,14 +1,17 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use hofund_config::Config;
-use hofund_control_proto::QuotaKind;
+use hofund_control_proto::{Quota, QuotaKind};
+use hofund_plugin_api::{PlanCard, PlanQuery, PlanSupport, PlanWindow, PluginError};
+use hofund_router::quota::QuotaStore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use super::{Job, record};
 use crate::runtime::Runtime;
 use crate::{RegistryAdapter, provider_keys};
 
@@ -220,4 +223,93 @@ async fn p13_many_plan_keys_read_eight_at_a_time() {
         "too many at once: {}",
         maximum.load(Ordering::SeqCst)
     );
+}
+
+fn plan_job(support: PlanSupport) -> Job {
+    let mut card = Quota {
+        provider: "plans".to_owned(),
+        name: "plans".to_owned(),
+        kind: QuotaKind::Plan,
+        ..Quota::default()
+    };
+    card.member = "plans".to_owned();
+    Job {
+        query: PlanQuery::new(Vec::new(), "key"),
+        card,
+        support,
+    }
+}
+
+#[test]
+fn p16_several_plans_are_display_only_and_keep_their_terms() {
+    let dir = tempfile::tempdir().expect("dir");
+    let quotas = QuotaStore::new(dir.path());
+    let until = UNIX_EPOCH + Duration::from_secs(4_102_444_800);
+    record(
+        &quotas,
+        plan_job(PlanSupport::Certain),
+        Ok(vec![
+            PlanCard::new("solo")
+                .with_windows(vec![PlanWindow::new("Day", 10.0)])
+                .with_term(until, "auto"),
+        ]),
+    );
+    let cards = quotas.report(&["plans".to_owned()]);
+    assert_eq!(cards.len(), 1);
+    assert!(!cards[0].display_only);
+    assert_eq!(
+        cards[0].until,
+        Some(hofund_router::quota::quota_time(until))
+    );
+    assert_eq!(cards[0].renew, "auto");
+
+    let dir = tempfile::tempdir().expect("dir");
+    let quotas = QuotaStore::new(dir.path());
+    record(
+        &quotas,
+        plan_job(PlanSupport::Certain),
+        Ok(vec![
+            PlanCard::new("team-a")
+                .with_user("team a")
+                .with_windows(vec![PlanWindow::new("Day", 10.0)])
+                .with_term(until, "off"),
+            PlanCard::new("team-b")
+                .with_user("team b")
+                .with_windows(vec![PlanWindow::new("Day", 20.0)]),
+        ]),
+    );
+    let cards = quotas.report(&["plans".to_owned()]);
+    assert_eq!(cards.len(), 2);
+    assert!(cards.iter().all(|card| card.display_only));
+    let first = cards
+        .iter()
+        .find(|card| card.plan == "team-a")
+        .expect("team-a");
+    assert_eq!(first.until, Some(hofund_router::quota::quota_time(until)));
+    let second = cards
+        .iter()
+        .find(|card| card.plan == "team-b")
+        .expect("team-b");
+    assert_eq!(second.until, None);
+}
+
+#[test]
+fn p17_a_possible_plan_shows_a_failed_read_only_after_a_proven_one() {
+    let dir = tempfile::tempdir().expect("dir");
+    let quotas = QuotaStore::new(dir.path());
+    record(
+        &quotas,
+        plan_job(PlanSupport::Possible),
+        Err(PluginError::status_error(401, "no plan")),
+    );
+    assert!(quotas.report(&["plans".to_owned()]).is_empty());
+
+    record(
+        &quotas,
+        plan_job(PlanSupport::Certain),
+        Err(PluginError::status_error(401, "no plan")),
+    );
+    let cards = quotas.report(&["plans".to_owned()]);
+    assert_eq!(cards.len(), 1);
+    assert!(!cards[0].error.is_empty());
 }
