@@ -71,17 +71,23 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with(None)
+}
+
+fn fixture_with(slow: Option<Arc<dyn Member>>) -> Fixture {
     let dir = tempfile::tempdir().expect("dir");
     let store = Arc::new(KeyStore::beside_token(dir.path().join("hofund.token")));
     store.list().expect("migration");
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let hits = Arc::new(AtomicUsize::new(0));
-    let member = Arc::new(Fake {
-        member_id: MemberId::from_preset(
-            PresetId::try_from("primary").expect("preset"),
-            MemberKey::from_static("row"),
-        ),
-        hits: Arc::clone(&hits),
+    let member: Arc<dyn Member> = slow.unwrap_or_else(|| {
+        Arc::new(Fake {
+            member_id: MemberId::from_preset(
+                PresetId::try_from("primary").expect("preset"),
+                MemberKey::from_static("row"),
+            ),
+            hits: Arc::clone(&hits),
+        })
     });
     let routes = BTreeMap::from([(
         "demo".to_owned(),
@@ -163,4 +169,79 @@ async fn r1_17_early_error_responses_drop_unrouted_holds() {
         fixture.book.unrouted().holds.is_empty(),
         "early failures must not leak holds into the unrouted view"
     );
+}
+
+struct Slow {
+    member_id: MemberId,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Member for Slow {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound: &str,
+    ) -> Result<Completion, PluginError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        let response = Response::new(Message::new(Role::Assistant)).with_usage(Some(Usage {
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            ..Usage::default()
+        }));
+        Ok(Completion::Unary(Box::new(response)))
+    }
+}
+
+#[tokio::test]
+async fn r1_31_hold_is_released_once_routing_begins() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let slow: Arc<dyn Member> = Arc::new(Slow {
+        member_id: MemberId::from_preset(
+            PresetId::try_from("primary").expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let fixture = fixture_with(Some(slow));
+    let app = fixture.app.clone();
+    let secret = fixture.secret.clone();
+    let call = tokio::spawn(async move {
+        post(
+            app,
+            &secret,
+            Body::from(r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .expect("member reached");
+    fixture
+        .clock
+        .store(UNROUTED_SHOW.as_millis() as u64 + 1, Ordering::SeqCst);
+    let holds = fixture.book.unrouted().holds;
+    release.notify_one();
+    let status = call.await.expect("join");
+    assert!(
+        holds.is_empty(),
+        "a request being served must not stay in the unrouted view"
+    );
+    assert_eq!(status, StatusCode::OK);
 }

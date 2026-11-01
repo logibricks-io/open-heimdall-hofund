@@ -37,3 +37,14 @@ fn r1_14_gateway_agent_label_uses_gateway_key_name() {
 fn trace_agent_label(headers: &[(&str, &str)], identity: &Identity) -> String {
     hofund_gateway::trace_agent_label_for_test(headers, identity)
 }
+
+#[test]
+fn r1_29_gateway_agent_label_is_cut_to_128_characters() {
+    let long = "a".repeat(200);
+    let headers = [(SUBAGENT_HEADER, long.as_str())];
+    let label = trace_agent_label(&headers, &Identity::default());
+    assert_eq!(label.chars().count(), 128);
+    let short = "b".repeat(128);
+    let headers = [(SUBAGENT_HEADER, short.as_str())];
+    assert_eq!(trace_agent_label(&headers, &Identity::default()), short);
+}

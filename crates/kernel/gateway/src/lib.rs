@@ -3468,3 +3468,20 @@ mod line_hold_tests {
         assert_eq!(event_gap(b"data: {}"), b"\n\n");
     }
 }
+
+#[cfg(test)]
+mod r1_watched_tests {
+    use super::unrouted_watched;
+
+    #[test]
+    fn r1_30_unrouted_view_watches_chat_and_generate_paths() {
+        assert!(unrouted_watched("/v1/chat/completions"));
+        assert!(unrouted_watched("/v1/messages"));
+        assert!(unrouted_watched("/v1beta/models/demo:generateContent"));
+        assert!(unrouted_watched(
+            "/v1beta/models/demo:streamGenerateContent"
+        ));
+        assert!(!unrouted_watched("/v1beta/models/demo:countTokens"));
+        assert!(!unrouted_watched("/v1/models"));
+    }
+}

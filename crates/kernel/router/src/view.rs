@@ -744,6 +744,9 @@ mod tests {
         RouteMeta, RouteTraceBook, TRACE_KEEP, TraceNow, UNROUTED_MOST, UNROUTED_SHOW,
         UNROUTED_UNKNOWN, UnroutedTimeout, unrouted_timeout_status,
     };
+    use std::collections::VecDeque;
+
+    use hofund_control_proto::RouteQuery;
 
     fn test_clock(start: u64) -> (TraceNow, Arc<AtomicU64>) {
         let millis = Arc::new(AtomicU64::new(start));
@@ -960,5 +963,103 @@ mod tests {
         let (wait, kind) = hold.timeout_after().expect("near most");
         assert_eq!(wait, Duration::from_millis(1));
         assert_eq!(kind, UnroutedTimeout::Most);
+    }
+
+    #[test]
+    fn r1_21_ended_masking_stays_excused_from_most() {
+        let (clock, now) = test_clock(0);
+        let book = RouteTraceBook::with_clock(clock);
+        let hold = book.hold_unrouted("s1", "demo", "plain", "body");
+        hold.begin_known_wait("body");
+        hold.begin_masking();
+        now.store(100_000, Ordering::SeqCst);
+        hold.end_masking();
+        now.store(
+            100_000 + UNROUTED_MOST.as_millis() as u64 - 1,
+            Ordering::SeqCst,
+        );
+        let (wait, kind) = hold.timeout_after().expect("timeout");
+        assert_eq!(kind, UnroutedTimeout::Most);
+        assert_eq!(wait, Duration::from_millis(1));
+    }
+
+    #[test]
+    fn r1_22_ended_known_wait_stays_excused_from_unknown() {
+        let (clock, now) = test_clock(0);
+        let book = RouteTraceBook::with_clock(clock);
+        let hold = book.hold_unrouted("s1", "demo", "plain", "body");
+        hold.begin_known_wait("body");
+        now.store(50_000, Ordering::SeqCst);
+        hold.end_known_wait();
+        now.store(
+            50_000 + UNROUTED_UNKNOWN.as_millis() as u64 - 1,
+            Ordering::SeqCst,
+        );
+        let (wait, kind) = hold.timeout_after().expect("timeout");
+        assert_eq!(kind, UnroutedTimeout::Unknown);
+        assert_eq!(wait, Duration::from_millis(1));
+    }
+
+    #[test]
+    fn r1_23_running_known_wait_suspends_the_unknown_timer() {
+        let (clock, now) = test_clock(0);
+        let book = RouteTraceBook::with_clock(clock);
+        let hold = book.hold_unrouted("s1", "demo", "plain", "waiting");
+        let late = UNROUTED_UNKNOWN.as_millis() as u64 + 1_000;
+        now.store(late, Ordering::SeqCst);
+        hold.begin_known_wait("body");
+        let (wait, kind) = hold.timeout_after().expect("timeout");
+        assert_eq!(kind, UnroutedTimeout::Most);
+        assert_eq!(
+            wait,
+            Duration::from_millis(UNROUTED_MOST.as_millis() as u64 - late)
+        );
+    }
+
+    #[test]
+    fn r1_24_fresh_hold_reports_the_nearer_unknown_timeout() {
+        let (clock, _now) = test_clock(0);
+        let book = RouteTraceBook::with_clock(clock);
+        let hold = book.hold_unrouted("s1", "demo", "plain", "waiting");
+        let (wait, kind) = hold.timeout_after().expect("timeout");
+        assert_eq!(kind, UnroutedTimeout::Unknown);
+        assert_eq!(wait, UNROUTED_UNKNOWN);
+    }
+
+    #[test]
+    fn r1_25_unrouted_holds_are_capped_at_trace_keep() {
+        let (clock, now) = test_clock(0);
+        let book = RouteTraceBook::with_clock(clock);
+        let holds: Vec<_> = (0..TRACE_KEEP + 5)
+            .map(|index| book.hold_unrouted(&format!("s{index}"), "demo", "plain", "waiting"))
+            .collect();
+        now.store(UNROUTED_SHOW.as_millis() as u64, Ordering::SeqCst);
+        assert_eq!(book.unrouted().holds.len(), TRACE_KEEP);
+        drop(holds);
+    }
+
+    #[test]
+    fn r1_26_ring_cap_and_list_limit_are_separate() {
+        let book = RouteTraceBook::new();
+        for index in 0..(TRACE_KEEP + 5) {
+            let handle = book.begin(RouteMeta {
+                session: format!("s{index}"),
+                asked: format!("m{index}"),
+                ..RouteMeta::default()
+            });
+            handle.finish(None, None, None, None, None);
+        }
+        let mut wide = RouteQuery::default();
+        wide.limit = TRACE_KEEP * 10;
+        assert_eq!(book.list(&wide).decisions.len(), TRACE_KEEP);
+        let mut narrow = RouteQuery::default();
+        narrow.limit = 2;
+        assert_eq!(book.list(&narrow).decisions.len(), 2);
+        let state = book.inner.lock().expect("route trace lock");
+        let indexed: usize = state.by_session.values().map(VecDeque::len).sum();
+        assert_eq!(
+            indexed, TRACE_KEEP,
+            "evicted decisions leave the session index"
+        );
     }
 }

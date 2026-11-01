@@ -874,3 +874,18 @@ async fn d24_unserved_wordings_try_the_next_member() {
         assert_next(400, message).await;
     }
 }
+
+#[tokio::test]
+async fn r1_27_pool_route_records_its_group_on_the_trace() {
+    let router = router(vec![fake(
+        "first",
+        &Arc::new(AtomicUsize::new(0)),
+        Kind::Unary,
+    )]);
+    let book = RouteTraceBook::new();
+    let _routed = dispatch_traced(&router, "demo", &book)
+        .await
+        .expect("dispatch");
+    let list = book.list(&Default::default());
+    assert_eq!(list.decisions[0].group, "demo");
+}
