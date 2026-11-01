@@ -27,6 +27,7 @@ mod sign_in;
 mod tokens;
 mod upstream;
 mod usage;
+mod warmup;
 
 /// The OAuth client Codex CLI signs in as.
 pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -52,7 +53,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     "ChatGPT (Codex)",
     SignInFlowKind::Pkce,
 )
-.with_agent_sign_in(AgentSignIn::new(&["codex"], "CODEX_HOME", ".codex"));
+.with_agent_sign_in(AgentSignIn::new(&["codex"], "CODEX_HOME", ".codex"))
+.with_daily_warmup(true);
 
 /// Registers the ChatGPT subscription.
 #[must_use]
@@ -120,8 +122,11 @@ impl SubscriptionFactory for CodexFactory {
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        if let Some(key) = raw.keys().next() {
-            return Err(ConfigError::new("unknown key").with_path(key));
+        hofund_plugin_sdk::daily_warmup::read_times(raw)?;
+        for key in raw.keys() {
+            if key != hofund_plugin_sdk::daily_warmup::TIMES_KEY {
+                return Err(ConfigError::new("unknown key").with_path(key));
+            }
         }
         Ok(CodexConfig)
     }
@@ -327,6 +332,14 @@ impl Subscription for Codex {
         host: &HostContext,
     ) -> Result<(), PluginError> {
         agent_sign_in::write(account, home, host).await
+    }
+
+    async fn daily_warmup(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        warmup::run(&self.endpoints, &self.prompts, account, host).await
     }
 }
 

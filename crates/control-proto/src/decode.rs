@@ -11,6 +11,7 @@ use crate::{
     ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
     QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest,
     ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -222,6 +223,7 @@ request!(AgentConnectRequest, validate);
 request!(AgentDisconnectRequest, validate);
 request!(AgentModelRequest, validate);
 request!(TokenRotateRequest);
+request!(WarmupRunRequest, validate);
 request!(ShutdownRequest);
 request!(GatewayKeyRequest);
 request!(GatewayKeyRestoreRequest);
@@ -280,6 +282,8 @@ response!(
     TokenRotateResponse,
     ShutdownResponse,
     GatewayKeyResponse,
+    WarmupListResponse,
+    WarmupRunResponse,
 );
 
 #[cfg(test)]

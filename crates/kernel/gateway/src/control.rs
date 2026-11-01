@@ -29,7 +29,8 @@ use hofund_control_proto::{
     ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery,
     QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteModelListResponse,
     ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    Topic, UsageQuery, UsageResponse, decode_request,
+    Topic, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -232,6 +233,28 @@ pub trait ControlState: Send + Sync {
     fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse>;
     /// Reports sampled quota history.
     fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse>;
+    /// Lists last daily warm-up results per subscription account.
+    fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "daily warm-up status is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Runs daily warm-up for one subscription account now.
+    fn run_warmup(&self, _request: WarmupRunRequest) -> ControlFuture<'_, WarmupRunResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "daily warm-up is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists named gateway keys.
     fn gateway_keys(&self) -> ControlFuture<'_, GatewayKeyResponse> {
         Box::pin(async { Err(unsupported_gateway_keys()) })
@@ -417,6 +440,8 @@ impl Control {
                 "/v1/hofund/quotas/history",
                 get(quota_history).head(method_not_allowed),
             )
+            .route("/v1/hofund/warmups", get(warmups).head(method_not_allowed))
+            .route("/v1/hofund/warmups/run", post(run_warmup))
             .route("/v1/hofund/token/rotate", post(rotate_token))
             .route("/v1/hofund/shutdown", post(shutdown))
             .route("/v1/hofund/config", get(config).head(method_not_allowed))
@@ -971,6 +996,18 @@ async fn quotas(State(state): State<HttpState>, uri: Uri) -> Response {
 async fn quota_history(State(state): State<HttpState>, uri: Uri) -> Response {
     let query = QuotaHistoryQuery::parse(uri.query());
     operation_response!(state.control.state.quota_history(query).await)
+}
+
+async fn warmups(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.warmups().await)
+}
+
+async fn run_warmup(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<WarmupRunRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.run_warmup(request).await)
 }
 
 async fn rotate_token(State(state): State<HttpState>, body: Bytes) -> Response {

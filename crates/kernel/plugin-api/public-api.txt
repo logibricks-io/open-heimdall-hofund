@@ -863,6 +863,7 @@ Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
 Subscription::async fn cancel_sign_in (& self , ctx : & SignInCtx , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn complete_sign_in (& self , ctx : & SignInCtx , proof : SignInProof , host : & HostContext ,) -> Result < AccountId , PluginError >
+Subscription::async fn daily_warmup (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn health (& self) -> Result < () , PluginError >
 Subscription::async fn import_accounts (& self , text : & str , host : & HostContext ,) -> Result < Vec < AccountId > , PluginError >
 Subscription::async fn list_models (& self , account : & AccountId , host : & HostContext ,) -> Result < ModelList , PluginError >
@@ -883,12 +884,14 @@ SubscriptionFactory::fn validate (& self , raw : & RawTable) -> Result < Self ::
 SubscriptionSpec
 SubscriptionSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SubscriptionSpec::const fn agent_sign_in (& self) -> Option < AgentSignIn >
+SubscriptionSpec::const fn daily_warmup (& self) -> bool
 SubscriptionSpec::const fn display_name (& self) -> & 'static str
 SubscriptionSpec::const fn flow (& self) -> SignInFlowKind
 SubscriptionSpec::const fn from_static (plugin : PluginId , display_name : & 'static str , flow : SignInFlowKind ,) -> Self
 SubscriptionSpec::const fn max_accounts (& self) -> u64
 SubscriptionSpec::const fn plugin (& self) -> & PluginId
 SubscriptionSpec::const fn with_agent_sign_in (mut self , agent_sign_in : AgentSignIn) -> Self
+SubscriptionSpec::const fn with_daily_warmup (mut self , daily_warmup : bool) -> Self
 SubscriptionSpec::const fn with_max_accounts (mut self , max_accounts : u64) -> Self
 SurfaceHost
 SurfaceHost #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
@@ -936,6 +939,24 @@ Visible
 Visible #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Visible::All
 Visible::Only
+WarmupAccountStatus
+WarmupAccountStatus #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+WarmupAccountStatus::fn account (& self) -> & AccountId
+WarmupAccountStatus::fn last (& self) -> Option < & WarmupRecord >
+WarmupAccountStatus::fn new (subscription : impl Into < String > , account : AccountId) -> Self
+WarmupAccountStatus::fn set_last (& mut self , record : WarmupRecord)
+WarmupAccountStatus::fn subscription (& self) -> & str
+WarmupOutcome
+WarmupOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+WarmupOutcome::Failed
+WarmupOutcome::Ok
+WarmupOutcome::Skipped
+WarmupRecord
+WarmupRecord #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+WarmupRecord::const fn at (& self) -> SystemTime
+WarmupRecord::const fn outcome (& self) -> WarmupOutcome
+WarmupRecord::fn detail (& self) -> & str
+WarmupRecord::fn new (at : SystemTime , outcome : WarmupOutcome , detail : impl Into < String >) -> Self
 WriteCtx
 WriteCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 WriteCtx::fn home (& self) -> & Path

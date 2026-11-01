@@ -1466,6 +1466,7 @@ pub struct SubscriptionSpec {
     flow: SignInFlowKind,
     max_accounts: u64,
     agent_sign_in: Option<AgentSignIn>,
+    daily_warmup: bool,
 }
 
 impl SubscriptionSpec {
@@ -1491,6 +1492,7 @@ impl SubscriptionSpec {
             flow,
             max_accounts: 0,
             agent_sign_in: None,
+            daily_warmup: false,
         }
     }
 
@@ -1510,6 +1512,13 @@ impl SubscriptionSpec {
         } else {
             max_accounts
         };
+        self
+    }
+
+    /// Declares that this subscription can run daily warm-up requests.
+    #[must_use]
+    pub const fn with_daily_warmup(mut self, daily_warmup: bool) -> Self {
+        self.daily_warmup = daily_warmup;
         self
     }
 
@@ -1542,6 +1551,12 @@ impl SubscriptionSpec {
     #[must_use]
     pub const fn agent_sign_in(&self) -> Option<AgentSignIn> {
         self.agent_sign_in
+    }
+
+    /// Whether daily warm-up is implemented for this subscription.
+    #[must_use]
+    pub const fn daily_warmup(&self) -> bool {
+        self.daily_warmup
     }
 }
 

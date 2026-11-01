@@ -71,6 +71,7 @@ pub(crate) struct Runtime {
     affinity: hofund_router::affinity::AffinityState,
     /// Wakes the subscription task after a publication.
     wake: tokio::sync::Notify,
+    warmup: Arc<crate::warmup::WarmupStore>,
 }
 
 impl Candidate {
@@ -112,6 +113,9 @@ impl Runtime {
                     .join("affinity.json"),
             ),
             wake: tokio::sync::Notify::new(),
+            warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
+                path, ".hofund",
+            ))),
         })
     }
 
@@ -516,7 +520,6 @@ impl Runtime {
     }
 
     /// The router-facing allowance view of the current quota store.
-    #[cfg(test)]
     pub(crate) fn quota_allowances(&self) -> Vec<hofund_router::quota::Allowance> {
         self.quotas.allowances(self.quotas.now())
     }
@@ -524,6 +527,14 @@ impl Runtime {
     /// The quota store's wall clock.
     pub(crate) fn quota_now(&self) -> std::time::SystemTime {
         self.quotas.now()
+    }
+
+    pub(crate) fn warmup(&self) -> &Arc<crate::warmup::WarmupStore> {
+        &self.warmup
+    }
+
+    pub(crate) fn subscription_states(&self) -> Subscriptions {
+        self.plan.lock().expect("plan").subscriptions.clone()
     }
 
     /// Returns sampled history from the shared store.
@@ -565,6 +576,10 @@ impl Runtime {
 
     pub(crate) fn affinity(&self) -> hofund_router::affinity::AffinityState {
         self.affinity.clone()
+    }
+
+    pub(crate) fn cooldowns(&self) -> &Arc<Cooldowns> {
+        &self.cooldowns
     }
 
     #[cfg(test)]

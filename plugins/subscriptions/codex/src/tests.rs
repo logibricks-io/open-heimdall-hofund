@@ -1586,3 +1586,28 @@ fn credits_window_nonblocking() {
     assert_eq!(crate::usage::window_name(0), "Allowance");
     assert_eq!(crate::usage::window_name(-86_400), "Allowance");
 }
+
+#[test]
+fn a3a_9_codex_warmup_posts_one_minimal_responses_call() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("warm", 10_000));
+    seed_prompts(&host, &[("gpt-5-mini", CODEX_PROMPT)]);
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(crate::warmup::run(
+        &Arc::new(endpoints()),
+        &Arc::new(models::Prompts::default()),
+        &id,
+        host.context(),
+    ))
+    .expect("warmup");
+    let responses = format!("{BASE}/responses");
+    assert!(
+        host.http()
+            .calls()
+            .iter()
+            .any(|call| call.uri() == responses),
+        "expected one responses POST"
+    );
+}

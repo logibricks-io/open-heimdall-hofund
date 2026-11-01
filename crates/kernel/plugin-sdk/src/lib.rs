@@ -45,6 +45,7 @@ pub async fn timeout<F: Future>(duration: std::time::Duration, future: F) -> Opt
 
 pub mod bedrock;
 pub mod classify;
+pub mod daily_warmup;
 pub mod digest;
 pub mod jwt;
 pub mod oauth;

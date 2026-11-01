@@ -253,4 +253,23 @@ pub trait Subscription: Send + Sync + 'static {
             "this subscription does not import accounts from a file",
         ))
     }
+
+    /// Sends the smallest vendor request that starts a rolling allowance window.
+    ///
+    /// The daemon calls this only when daily warm-up is configured and due.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the warm-up cannot run. Unsupported plugins
+    /// keep the default error.
+    async fn daily_warmup(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        let _ = (account, host);
+        Err(PluginError::unsupported(
+            "this subscription does not support daily warm-up",
+        ))
+    }
 }

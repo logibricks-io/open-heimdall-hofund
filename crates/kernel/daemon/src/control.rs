@@ -15,7 +15,8 @@ use hofund_control_proto::{
     QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteModel,
     RouteModelListResponse, RouteReserve, ShutdownRequest, ShutdownResponse, ShutdownState,
     StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod, UsageQuery,
-    UsageResponse, UsageRow, UsageTotals,
+    UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -24,7 +25,7 @@ use hofund_control_proto::{
 use hofund_gateway::control::{
     ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery,
 };
-use hofund_plugin_api::ModelSpec;
+use hofund_plugin_api::{ModelSpec, WarmupOutcome};
 
 use crate::quotas::DaemonQuotas;
 use hofund_router::Cooldowns;
@@ -57,6 +58,7 @@ pub(crate) struct DaemonControl {
     events: Arc<EventBus>,
     in_flight: Arc<AtomicU64>,
     quotas: Option<Arc<DaemonQuotas>>,
+    runtime: Option<Arc<crate::runtime::Runtime>>,
 }
 
 impl DaemonControl {
@@ -110,7 +112,13 @@ impl DaemonControl {
             events: Arc::new(EventBus::new()),
             in_flight: Arc::new(AtomicU64::new(0)),
             quotas: None,
+            runtime: None,
         }
+    }
+
+    pub(crate) fn with_runtime(mut self, runtime: Arc<crate::runtime::Runtime>) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 
     /// Reads live reserve placement from the shared router snapshot.
@@ -676,6 +684,50 @@ impl ControlState for DaemonControl {
         })
     }
 
+    fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
+        let runtime = self.runtime.clone();
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("warm-up status is not available".to_owned()).into());
+            };
+            let rows = runtime
+                .warmup()
+                .statuses()
+                .into_iter()
+                .map(warmup_row)
+                .collect();
+            let mut response = WarmupListResponse::default();
+            response.accounts = rows;
+            Ok(response)
+        })
+    }
+
+    fn run_warmup(&self, request: WarmupRunRequest) -> ControlFuture<'_, WarmupRunResponse> {
+        let runtime = self.runtime.clone();
+        let registry = Arc::clone(&self.registry);
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("warm-up is not available".to_owned()).into());
+            };
+            let record = crate::warmup::run_now(
+                &runtime,
+                runtime.warmup(),
+                registry.as_ref(),
+                &request.subscription,
+                &request.account,
+            )
+            .await
+            .map_err(|message| {
+                ControlFailure::from(ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    message,
+                    "warmup",
+                ))
+            })?;
+            Ok(warmup_run_response(record))
+        })
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         let ledger = Arc::clone(&self.usage);
         Box::pin(async move {
@@ -1039,6 +1091,44 @@ fn quotas_unavailable() -> ControlFailure {
 
 fn internal(message: String) -> ControlError {
     ControlError::new(ControlErrorKind::Internal, message, "usage")
+}
+
+fn warmup_row(status: hofund_plugin_api::WarmupAccountStatus) -> WarmupAccountRow {
+    let mut row = WarmupAccountRow::default();
+    row.subscription = status.subscription().to_owned();
+    row.account = status.account().to_string();
+    if let Some(last) = status.last() {
+        row.outcome = outcome_name(last.outcome()).to_owned();
+        row.detail = last.detail().to_owned();
+        row.at_ms = last
+            .at()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(0));
+    }
+    row
+}
+
+fn warmup_run_response(record: hofund_plugin_api::WarmupRecord) -> WarmupRunResponse {
+    let mut response = WarmupRunResponse::default();
+    response.outcome = outcome_name(record.outcome()).to_owned();
+    response.detail = record.detail().to_owned();
+    response.at_ms = record
+        .at()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0);
+    response
+}
+
+const fn outcome_name(outcome: WarmupOutcome) -> &'static str {
+    match outcome {
+        WarmupOutcome::Ok => "ok",
+        WarmupOutcome::Skipped => "skipped",
+        WarmupOutcome::Failed => "failed",
+        _ => "failed",
+    }
 }
 
 pub(crate) fn unix_milliseconds() -> u64 {
