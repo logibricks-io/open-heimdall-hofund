@@ -1049,11 +1049,15 @@ mod tests {
             });
             handle.finish(None, None, None, None, None);
         }
-        let mut wide = RouteQuery::default();
-        wide.limit = TRACE_KEEP * 10;
+        let wide = RouteQuery {
+            limit: TRACE_KEEP * 10,
+            ..RouteQuery::default()
+        };
         assert_eq!(book.list(&wide).decisions.len(), TRACE_KEEP);
-        let mut narrow = RouteQuery::default();
-        narrow.limit = 2;
+        let narrow = RouteQuery {
+            limit: 2,
+            ..RouteQuery::default()
+        };
         assert_eq!(book.list(&narrow).decisions.len(), 2);
         let state = book.inner.lock().expect("route trace lock");
         let indexed: usize = state.by_session.values().map(VecDeque::len).sum();
