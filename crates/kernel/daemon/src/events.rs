@@ -512,6 +512,7 @@ impl RequestEvents for RequestBridge {
         event.duration_ms = end.duration_ms;
         event.input_tokens = end.input_tokens;
         event.output_tokens = end.output_tokens;
+        event.reason = end.reason.clone().unwrap_or_default();
         self.bus.emit(EventPayload::RequestFinished(event));
     }
 }
@@ -967,6 +968,7 @@ mod tests {
             duration_ms: 12,
             input_tokens: Some(3),
             output_tokens: Some(5),
+            reason: None,
         });
         let frames = bus.requests.ring().after(0).expect("frames");
         assert_eq!(frames.len(), 2);
@@ -1001,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn request_bridge_maps_status_class_and_emits_finished() {
+    fn d26_6_request_story_reports_affinity_reason() {
         let bus = bus();
         let bridge = RequestBridge::new(Arc::clone(&bus));
         bridge.finished(&RequestEnd {
@@ -1012,6 +1014,7 @@ mod tests {
             duration_ms: 1,
             input_tokens: None,
             output_tokens: None,
+            reason: Some("reserve".to_owned()),
         });
         let frames = bus.requests.ring().after(0).expect("frames");
         let envelope = decode_response::<EventEnvelope>(
@@ -1023,6 +1026,7 @@ mod tests {
             EventPayload::RequestFinished(event) => {
                 assert_eq!(event.request_id, "r2");
                 assert_eq!(event.status_class, StatusClass::ClientError);
+                assert_eq!(event.reason, "reserve");
             }
             other => panic!("expected request_finished, got {other:?}"),
         }

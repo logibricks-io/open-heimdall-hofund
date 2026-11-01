@@ -384,6 +384,12 @@ fn render_routes(models: &[hofund_control_client::hofund_control_proto::RouteMod
             "\n{}\t{}\t{}",
             model.id, model.routing, model.stays
         ));
+        for reserve in &model.reserves {
+            out.push_str(&format!(
+                "\n{}/{}\t{}\tin reserve · {} at once",
+                model.id, reserve.member, model.routing, reserve.at_once
+            ));
+        }
     }
     out
 }
@@ -609,6 +615,22 @@ mod tests {
         assert_eq!(
             render_routes(&models),
             "model\trouting\tstays\nfirst\tweight\tstrict\nsecond\tsmart\tauto"
+        );
+    }
+
+    #[test]
+    fn d26_6_routes_show_reserve_member_and_at_once_limit() {
+        let mut model = RouteModel::default();
+        model.id = "demo".to_owned();
+        let ordinary = render_routes(std::slice::from_ref(&model));
+        assert_eq!(ordinary, "model\trouting\tstays\ndemo\tsmart\tauto");
+        let mut reserve = hofund_control_client::hofund_control_proto::RouteReserve::default();
+        reserve.member = "provider#third".to_owned();
+        reserve.at_once = 2;
+        model.reserves.push(reserve);
+        assert_eq!(
+            render_routes(&[model]),
+            "model\trouting\tstays\ndemo\tsmart\tauto\ndemo/provider#third\tsmart\tin reserve · 2 at once"
         );
     }
 

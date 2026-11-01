@@ -50,6 +50,16 @@ impl Default for ModelListResponse {
     }
 }
 
+/// One member held in reserve by accounts at once.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RouteReserve {
+    /// Stable member id.
+    pub member: String,
+    /// Provider or subscription at-once limit.
+    pub at_once: u64,
+}
+
 /// One client-facing route model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -62,6 +72,9 @@ pub struct RouteModel {
     /// Conversation affinity mode.
     #[serde(default = "default_stays")]
     pub stays: String,
+    /// Members currently held in reserve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reserves: Vec<RouteReserve>,
 }
 
 impl Default for RouteModel {
@@ -70,6 +83,7 @@ impl Default for RouteModel {
             id: String::new(),
             routing: default_routing(),
             stays: default_stays(),
+            reserves: Vec::new(),
         }
     }
 }

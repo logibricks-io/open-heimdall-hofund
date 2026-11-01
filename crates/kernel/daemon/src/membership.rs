@@ -69,6 +69,9 @@ pub(crate) struct Table {
 
 struct HopSpec {
     member: Arc<LiveMember>,
+    at_once_group: String,
+    at_once: u64,
+    rank: usize,
     wire_model: Option<String>,
     max_output_tokens: Option<u64>,
     context_window: Option<u64>,
@@ -358,6 +361,9 @@ fn build_specs(
                     Arc::clone(&table.offline),
                     Arc::downgrade(table),
                 )),
+                at_once_group: hop.at_once_group,
+                at_once: hop.at_once,
+                rank: hop.rank,
                 wire_model: hop.wire_model,
                 max_output_tokens: hop.max_output_tokens,
                 context_window: hop.context_window,
@@ -386,6 +392,12 @@ pub(crate) struct PlannedHop {
     /// Explicit member id for a multi-key provider or subscription account.
     /// A single-key provider leaves this unset to keep its existing id.
     pub member_id: Option<MemberId>,
+    /// Provider or subscription whose members share an at-once limit.
+    pub at_once_group: String,
+    /// Effective at-once limit; zero means every member is kept.
+    pub at_once: u64,
+    /// Position in the user's own member order.
+    pub rank: usize,
     pub wire_model: Option<String>,
     pub max_output_tokens: Option<u64>,
     /// Input context window of the hop's model, from the provider's model
@@ -462,9 +474,23 @@ impl Table {
                 let patience = specs
                     .first()
                     .map_or(Some(Duration::from_secs(60)), |spec| spec.patience);
+                let at_once = specs
+                    .iter()
+                    .map(|spec| {
+                        (
+                            spec.member.id.to_string(),
+                            hofund_router::at_once::AtOnceMember {
+                                group: spec.at_once_group.clone(),
+                                limit: usize::try_from(spec.at_once).unwrap_or(usize::MAX),
+                                rank: spec.rank,
+                            },
+                        )
+                    })
+                    .collect();
                 (
                     model.clone(),
                     Route::new(list)
+                        .with_at_once(at_once)
                         .with_routing(routing)
                         .with_stays(stays)
                         .with_patience(patience)
@@ -1320,6 +1346,9 @@ mod tests {
                 provider: "boom".to_owned(),
                 subscription: None,
                 member_id: None,
+                at_once_group: String::new(),
+                at_once: 0,
+                rank: 0,
                 wire_model: None,
                 max_output_tokens: None,
                 context_window: None,
@@ -1421,6 +1450,9 @@ mod tests {
                 provider: "later".to_owned(),
                 subscription: None,
                 member_id: None,
+                at_once_group: String::new(),
+                at_once: 0,
+                rank: 0,
                 wire_model: None,
                 max_output_tokens: None,
                 context_window: None,
@@ -1513,6 +1545,9 @@ mod tests {
                 provider: "quiet".to_owned(),
                 subscription: None,
                 member_id: None,
+                at_once_group: String::new(),
+                at_once: 0,
+                rank: 0,
                 wire_model: None,
                 max_output_tokens: None,
                 context_window: None,
@@ -1604,6 +1639,9 @@ mod tests {
                 provider: "pace".to_owned(),
                 subscription: None,
                 member_id: None,
+                at_once_group: String::new(),
+                at_once: 0,
+                rank: 0,
                 wire_model: None,
                 max_output_tokens: None,
                 context_window: None,
@@ -1667,6 +1705,9 @@ mod tests {
                     provider: "My_Provider".to_owned(),
                     subscription: None,
                     member_id: None,
+                    at_once_group: String::new(),
+                    at_once: 0,
+                    rank: 0,
                     wire_model: None,
                     max_output_tokens: None,
                     context_window: None,
@@ -1683,6 +1724,9 @@ mod tests {
                     provider: "my-provider".to_owned(),
                     subscription: None,
                     member_id: None,
+                    at_once_group: String::new(),
+                    at_once: 0,
+                    rank: 0,
                     wire_model: None,
                     max_output_tokens: None,
                     context_window: None,
@@ -1727,6 +1771,9 @@ mod tests {
                     provider: (*id).to_owned(),
                     subscription: None,
                     member_id: None,
+                    at_once_group: String::new(),
+                    at_once: 0,
+                    rank: 0,
                     wire_model: None,
                     max_output_tokens: None,
                     context_window: None,

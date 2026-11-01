@@ -209,6 +209,9 @@ pub struct Provider {
     pub key_weight: u64,
     /// Additional API keys, in candidate order after the first key.
     pub keys: Vec<ProviderKey>,
+    /// How many keys take requests; the rest wait in reserve. Absent uses the
+    /// plugin's declared default, and zero means no limit.
+    pub at_once: Option<u64>,
     /// Quirk profile id. Absent when the endpoint needs no profile.
     pub quirks: Option<String>,
     /// Extra request headers.
@@ -236,6 +239,8 @@ pub struct Provider {
 
 /// The largest weighted-routing share one API key may have.
 pub const MAX_KEY_WEIGHT: u64 = 1000;
+/// The largest accounts-at-once limit a provider or subscription may declare.
+pub const MAX_AT_ONCE: u64 = 1000;
 
 /// The codecs one API key may be restricted to.
 pub const KEY_PROTOCOLS: [&str; 5] = [
@@ -382,6 +387,44 @@ pub fn edit_provider_keys(
     Ok(document.to_string())
 }
 
+/// Sets one provider's or subscription's accounts-at-once override while
+/// preserving every unrelated TOML field. `None` restores the plugin default.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Invalid`] when the value is out of range or the id is
+/// absent, or [`ConfigError::Syntax`] when the document is not valid TOML.
+pub fn edit_at_once(text: &str, id: &str, at_once: Option<u64>) -> Result<String, ConfigError> {
+    use toml_edit::{DocumentMut, Item, value};
+
+    validated_at_once("provider or subscription", id, at_once)?;
+    let mut document = text
+        .parse::<DocumentMut>()
+        .map_err(|error| ConfigError::Syntax(error.to_string()))?;
+    let mut found = None;
+    for kind in ["providers", "subscriptions"] {
+        found = document
+            .get_mut(kind)
+            .and_then(Item::as_array_of_tables_mut)
+            .and_then(|entries| {
+                entries
+                    .iter_mut()
+                    .find(|table| table.get("id").and_then(Item::as_str) == Some(id))
+            });
+        if found.is_some() {
+            break;
+        }
+    }
+    let table = found
+        .ok_or_else(|| ConfigError::Invalid(format!("unknown provider or subscription `{id}`")))?;
+    if let Some(limit) = at_once {
+        table.insert("at_once", value(i64::try_from(limit).unwrap_or(i64::MAX)));
+    } else {
+        table.remove("at_once");
+    }
+    Ok(document.to_string())
+}
+
 impl fmt::Debug for ProviderKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -491,6 +534,9 @@ pub struct Subscription {
     pub account_weights: BTreeMap<String, u64>,
     /// Member-ordering strategy used inside this subscription.
     pub routing: String,
+    /// How many accounts take requests; the rest wait in reserve. Absent uses
+    /// the plugin's declared default, and zero means no limit.
+    pub at_once: Option<u64>,
     /// Conversation affinity for routes that do not override it.
     pub stays: Stays,
     /// Vendor host, client id, and any other plugin setting.
@@ -636,6 +682,7 @@ impl fmt::Debug for Provider {
             .field("key_plan", &self.key_plan)
             .field("key_weight", &self.key_weight)
             .field("keys", &self.keys)
+            .field("at_once", &self.at_once)
             .field("quirks", &self.quirks)
             .field("headers", &RedactedPairs(&self.headers))
             .field("max_output_tokens", &self.max_output_tokens)
@@ -891,6 +938,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             .iter()
             .map(|entry| parse_fallback(&provider.id, entry))
             .collect::<Result<Vec<_>, _>>()?;
+        let at_once = validated_at_once("provider", &provider.id, provider.at_once)?;
         let mut model_list = provider.models;
         model_list.auto_include = auto_include;
         providers.push(Provider {
@@ -904,6 +952,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             key_plan: provider.key_plan,
             key_weight,
             keys,
+            at_once,
             quirks: provider.quirks,
             headers: provider.headers,
             max_output_tokens: provider.max_output_tokens,
@@ -950,11 +999,13 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             }
         }
         validated_routing_name("subscription", &subscription.id, &subscription.routing)?;
+        let at_once = validated_at_once("subscription", &subscription.id, subscription.at_once)?;
         subscriptions.push(Subscription {
             id: subscription.id,
             accounts,
             account_weights,
             routing: subscription.routing,
+            at_once,
             stays: subscription.stays,
             options: prune_table(subscription.options),
         });
@@ -1522,6 +1573,19 @@ fn validate_key_weight(provider: &str, field: &str, weight: u64) -> Result<u64, 
     )))
 }
 
+fn validated_at_once(
+    kind: &str,
+    id: &str,
+    at_once: Option<u64>,
+) -> Result<Option<u64>, ConfigError> {
+    if at_once.is_some_and(|limit| limit > MAX_AT_ONCE) {
+        return Err(ConfigError::Invalid(format!(
+            "{kind} `{id}` at_once must be 0 to {MAX_AT_ONCE} (0 means no limit)"
+        )));
+    }
+    Ok(at_once)
+}
+
 fn validated_key_protocol(
     provider: &str,
     protocol: Option<String>,
@@ -1754,6 +1818,8 @@ struct RawProvider {
     #[serde(default)]
     keys: Vec<ProviderKey>,
     #[serde(default)]
+    at_once: Option<u64>,
+    #[serde(default)]
     quirks: Option<String>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
@@ -1798,6 +1864,8 @@ struct RawSubscription {
     account_weights: BTreeMap<String, u64>,
     #[serde(default = "default_smart")]
     routing: String,
+    #[serde(default)]
+    at_once: Option<u64>,
     #[serde(default)]
     stays: Stays,
     #[serde(default)]
@@ -3242,6 +3310,27 @@ weight = 2
         assert_eq!(provider.key_name, "Team");
         assert_eq!(provider.key_protocol.as_deref(), Some("openai-chat"));
         assert_eq!(provider.key_weight, 2);
+    }
+
+    #[test]
+    fn d26_1_config_at_once_validates_and_writes_provider_and_subscription() {
+        let original = "# keep\n[[providers]]\nid = \"p\"\npreset = \"openai\"\napi_key = \"k\"\n[[subscriptions]]\nid = \"sub\"\naccounts = \"*\"\n";
+        let edited = super::edit_at_once(original, "p", Some(2)).expect("provider edit");
+        let edited = super::edit_at_once(&edited, "sub", Some(0)).expect("subscription edit");
+        assert!(edited.starts_with("# keep\n"), "{edited}");
+        let config = load(&edited).expect("edited config");
+        assert_eq!(config.providers[0].at_once, Some(2));
+        assert_eq!(config.subscriptions[0].at_once, Some(0));
+        let cleared = super::edit_at_once(&edited, "p", None).expect("default");
+        assert_eq!(load(&cleared).expect("cleared").providers[0].at_once, None);
+        assert!(cleared.contains("at_once = 0"), "{cleared}");
+        for bad in ["at_once = 1001", "at_once = -1"] {
+            let text =
+                format!("[[providers]]\nid = \"p\"\npreset = \"openai\"\napi_key = \"k\"\n{bad}\n");
+            assert!(load(&text).is_err(), "{bad}");
+        }
+        assert!(super::edit_at_once(original, "p", Some(1001)).is_err());
+        assert!(super::edit_at_once(original, "missing", Some(1)).is_err());
     }
 
     #[test]

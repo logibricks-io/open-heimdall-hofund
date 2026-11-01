@@ -47,6 +47,18 @@ pub trait DaemonRegistry: Send + Sync {
         None
     }
 
+    /// Accounts an upstream plugin declares may take requests at once.
+    fn upstream_max_accounts(&self, id: &str) -> u64 {
+        self.factory(id)
+            .map_or(0, |factory| factory.spec().max_accounts())
+    }
+
+    /// Accounts a subscription plugin declares may take requests at once.
+    fn subscription_max_accounts(&self, id: &str) -> u64 {
+        self.subscription(id)
+            .map_or(0, |factory| factory.spec().max_accounts())
+    }
+
     /// The linked plugin that serves a kernel-built base on `host` for
     /// `protocol`. The default claims none.
     fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
@@ -98,6 +110,19 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn subscription(&self, id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
         hofund_plugin_registry::subscription(id)
+    }
+
+    fn upstream_max_accounts(&self, id: &str) -> u64 {
+        hofund_plugin_registry::declared_max_accounts("provider", id).unwrap_or_else(|| {
+            hofund_plugin_registry::factory(id).map_or(0, |factory| factory.spec().max_accounts())
+        })
+    }
+
+    fn subscription_max_accounts(&self, id: &str) -> u64 {
+        hofund_plugin_registry::declared_max_accounts("subscription", id).unwrap_or_else(|| {
+            hofund_plugin_registry::subscription(id)
+                .map_or(0, |factory| factory.spec().max_accounts())
+        })
     }
 
     fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
