@@ -77,6 +77,12 @@ pub struct UsageRow {
     pub duration_ms: u64,
     /// HTTP status label.
     pub status: String,
+    /// Authenticated gateway key id, absent in older peers.
+    #[serde(default)]
+    pub caller_key_id: String,
+    /// Authenticated gateway key name, absent in older peers.
+    #[serde(default)]
+    pub caller_key_name: String,
 }
 
 /// Aggregated usage totals.

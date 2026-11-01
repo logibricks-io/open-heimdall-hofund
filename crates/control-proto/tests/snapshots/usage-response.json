@@ -9,7 +9,9 @@
       "input_tokens": 10,
       "output_tokens": 5,
       "duration_ms": 25,
-      "status": "200"
+      "status": "200",
+      "caller_key_id": "",
+      "caller_key_name": ""
     }
   ],
   "totals": {

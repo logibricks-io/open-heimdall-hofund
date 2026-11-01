@@ -129,6 +129,7 @@ async fn state(
             registry,
             cooldowns,
             usage,
+            std::sync::Arc::new(hofund_secrets::KeyStore::beside_token(&token_path)),
             token_path.clone(),
             shutdown,
         )

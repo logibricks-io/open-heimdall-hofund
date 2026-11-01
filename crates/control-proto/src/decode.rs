@@ -5,11 +5,12 @@ use crate::{
     API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
     AgentListResponse, AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
-    ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, HealthResponse,
-    MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse,
-    PicksSetRequest, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest,
-    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageResponse,
+    ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, GatewayKeyRequest,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_REQUEST_BODY_BYTES,
+    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
+    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryResponse,
+    QuotaResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageResponse,
 };
 
 mod sealed {
@@ -222,6 +223,8 @@ request!(AgentDisconnectRequest, validate);
 request!(AgentModelRequest, validate);
 request!(TokenRotateRequest);
 request!(ShutdownRequest);
+request!(GatewayKeyRequest);
+request!(GatewayKeyRestoreRequest);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -274,6 +277,7 @@ response!(
     UsageResponse,
     TokenRotateResponse,
     ShutdownResponse,
+    GatewayKeyResponse,
 );
 
 #[cfg(test)]

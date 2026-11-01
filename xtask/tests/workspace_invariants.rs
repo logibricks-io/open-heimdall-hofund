@@ -95,6 +95,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-plugin-api",
             "hofund-plugin-host",
             "hofund-router",
+            "hofund-secrets",
             "hofund-usage",
         ],
         "hofund-ir" => &[],
@@ -172,13 +173,18 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-control-client" => &[],
         "hofund-control-proto" => &[],
         "hofund-desktop" => &[],
-        "hofund-daemon" => &["hofund-daemon", "hofund-plugin-registry"],
+        "hofund-daemon" => &[
+            "hofund-control-client",
+            "hofund-daemon",
+            "hofund-plugin-registry",
+        ],
         "hofund-daemon-bin" => &[],
         "hofund-gateway" => &[
             "hofund-codec",
             "hofund-ir",
             "hofund-plugin-api",
             "hofund-router",
+            "hofund-secrets",
             "hofund-usage",
         ],
         "hofund-ir" => &[],
@@ -1334,4 +1340,24 @@ fn e6_docs_cover_the_backend_socket_and_codex_wiring() {
     assert!(read("CHANGELOG.md").contains("P0-1e"));
     assert!(read("docs/coverage/agents.md").contains("supports_websockets"));
     assert!(read("docs/feature-parity.md").contains("e3_"));
+}
+
+#[test]
+fn k14_gateway_key_docs_and_parity_cover_the_phase_and_remainder() {
+    let root = workspace_root();
+    let read = |rel: &str| read_to_string(&root.join(rel));
+    let guide = read("docs/gateway-keys.md");
+    for command in [
+        "add", "list", "rotate", "rename", "on", "off", "remove", "move", "models", "accounts",
+        "quotas", "access", "issuer",
+    ] {
+        assert!(guide.contains(command), "missing command {command}");
+    }
+    assert!(guide.contains("P0-4b"));
+    assert!(guide.contains("P0-4c"));
+    assert!(guide.contains("P0-4d"));
+    assert!(read("CHANGELOG.md").contains("Named gateway keys (P0-4a)"));
+    let parity = read("docs/feature-parity.md");
+    assert!(parity.contains("| 10.4 | Named gateway keys with model and account limits"));
+    assert!(parity.contains("Spending limits are P0-4b"));
 }

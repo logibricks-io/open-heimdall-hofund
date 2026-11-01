@@ -8,8 +8,9 @@ use hofund_config::Config;
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
     AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
-    ControlErrorKind, FieldIssue, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
-    PicksSetRequest, ProviderListResponse, ProviderSummary, ProviderTestRequest,
+    ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse,
+    PicksResponse, PicksSetRequest, ProviderListResponse, ProviderSummary, ProviderTestRequest,
     ProviderTestResponse, ProviderTestResult, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery,
     QuotaResponse, RouteModel, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
     ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod,
@@ -26,6 +27,7 @@ use hofund_plugin_api::ModelSpec;
 
 use crate::quotas::DaemonQuotas;
 use hofund_router::Cooldowns;
+use hofund_secrets::{KeyLimit, KeyStore};
 use hofund_usage::{Ledger, Window};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
@@ -47,6 +49,7 @@ pub(crate) struct DaemonControl {
     registry: Arc<dyn DaemonRegistry>,
     cooldowns: Arc<Cooldowns>,
     usage: Arc<Ledger>,
+    keys: Arc<KeyStore>,
     agents: AgentOps,
     shutdown: watch::Sender<bool>,
     events: Arc<EventBus>,
@@ -64,6 +67,7 @@ impl DaemonControl {
         registry: Arc<dyn DaemonRegistry>,
         cooldowns: Arc<Cooldowns>,
         usage: Arc<Ledger>,
+        keys: Arc<KeyStore>,
         token_path: PathBuf,
         shutdown: watch::Sender<bool>,
     ) -> Self {
@@ -97,6 +101,7 @@ impl DaemonControl {
                 token_path,
             ),
             usage,
+            keys,
             ops,
             shutdown,
             events: Arc::new(EventBus::new()),
@@ -186,6 +191,119 @@ impl DaemonControl {
     /// The published configuration.
     fn config(&self) -> Arc<Config> {
         Arc::clone(&self.ops.live().config)
+    }
+
+    async fn mutate_gateway_key(
+        &self,
+        request: GatewayKeyRequest,
+    ) -> Result<GatewayKeyResponse, ControlFailure> {
+        let mut secret = None;
+        match request.action {
+            GatewayKeyAction::Add => {
+                let added = self
+                    .keys
+                    .add(&request.name, request.secret.as_deref())
+                    .map_err(key_failure)?;
+                secret = Some(added.secret);
+            }
+            GatewayKeyAction::Rotate => {
+                secret = Some(self.keys.rotate(&request.id).map_err(key_failure)?.secret);
+            }
+            GatewayKeyAction::Rename => self
+                .keys
+                .rename(&request.id, &request.name)
+                .map_err(key_failure)?,
+            GatewayKeyAction::On => self
+                .keys
+                .set_enabled(&request.id, true)
+                .map_err(key_failure)?,
+            GatewayKeyAction::Off => self
+                .keys
+                .set_enabled(&request.id, false)
+                .map_err(key_failure)?,
+            GatewayKeyAction::Remove => self.keys.remove(&request.id).map_err(key_failure)?,
+            GatewayKeyAction::Move => self
+                .keys
+                .move_key(&request.id, request.place.unwrap_or(0))
+                .map_err(key_failure)?,
+            GatewayKeyAction::Models => self
+                .keys
+                .set_models(&request.id, &request.models)
+                .map_err(key_failure)?,
+            GatewayKeyAction::Accounts => {
+                let known = self.known_accounts().await?;
+                self.keys
+                    .set_accounts(&request.id, &request.accounts, &known)
+                    .map_err(key_failure)?;
+            }
+            GatewayKeyAction::Quotas => self
+                .keys
+                .set_quotas(&request.id, request.quotas)
+                .map_err(key_failure)?,
+            GatewayKeyAction::Access => self
+                .keys
+                .set_read_only(&request.id, request.read_only)
+                .map_err(key_failure)?,
+            GatewayKeyAction::Issuer => self
+                .keys
+                .set_issuer(&request.id, request.issues)
+                .map_err(key_failure)?,
+            GatewayKeyAction::Copy => {
+                secret = Some(self.keys.copy(&request.id).map_err(key_failure)?);
+            }
+            _ => {
+                return Err(ControlError::new(
+                    ControlErrorKind::BadRequest,
+                    "unknown gateway-key action",
+                    "control",
+                )
+                .into());
+            }
+        }
+        key_response(self.keys.list(), secret, false)
+    }
+
+    async fn known_accounts(&self) -> Result<Vec<String>, ControlFailure> {
+        let config = self.config();
+        let mut known = Vec::new();
+        for provider in &config.providers {
+            let planned =
+                super::plan_using(provider, |id| self.registry.find_preset(id), &self.registry)
+                    .map_err(|error| internal(error.to_string()))?;
+            let endpoint = super::endpoint_for(provider, &planned)
+                .map_err(|error| internal(error.to_string()))?;
+            let fingerprint = super::provider_fingerprint(provider, &endpoint)
+                .map_err(|error| internal(error.to_string()))?;
+            known.push(format!("{}/{fingerprint}", provider.id));
+            known.push(format!(
+                "{}/{}",
+                provider.id,
+                membership::member_id(&provider.id)
+            ));
+        }
+        for subscription in &config.subscriptions {
+            let plugin = hofund_plugin_api::PluginId::try_from(subscription.id.as_str())
+                .map_err(|error| internal(error.to_string()))?;
+            let host = hofund_plugin_host::runtime_host_for(
+                hofund_plugin_api::PluginKind::Subscription,
+                plugin,
+                String::new(),
+                super::beside(&self.config_path, ".hofund"),
+                hofund_plugin_host::HttpLimits::new(config.connect_timeout, config.read_timeout),
+            )
+            .map_err(|error| internal(error.to_string()))?;
+            let accounts = host
+                .accounts()
+                .list()
+                .await
+                .map_err(|error| internal(error.to_string()))?;
+            for account in accounts {
+                let id = format!("{}/{}", subscription.id, account.id());
+                known.push(id.clone());
+                known.push(format!("{id}\t{}", account.label()));
+            }
+        }
+        Ok(known)
     }
 
     fn provider_exists(&self, id: &str) -> Result<(), ControlError> {
@@ -453,6 +571,32 @@ impl ControlState for DaemonControl {
         })
     }
 
+    fn gateway_keys(&self) -> ControlFuture<'_, GatewayKeyResponse> {
+        Box::pin(async move { key_response(self.keys.list(), None, false) })
+    }
+
+    fn change_gateway_key(
+        &self,
+        request: GatewayKeyRequest,
+    ) -> ControlFuture<'_, GatewayKeyResponse> {
+        Box::pin(self.mutate_gateway_key(request))
+    }
+
+    fn export_gateway_keys(&self) -> ControlFuture<'_, GatewayKeyResponse> {
+        Box::pin(async move { key_response(self.keys.export(), None, true) })
+    }
+
+    fn restore_gateway_keys(
+        &self,
+        request: GatewayKeyRestoreRequest,
+    ) -> ControlFuture<'_, GatewayKeyResponse> {
+        Box::pin(async move {
+            let keys = request.keys.into_iter().map(stored_key).collect::<Vec<_>>();
+            self.keys.restore(&keys).map_err(key_failure)?;
+            key_response(self.keys.list(), None, false)
+        })
+    }
+
     fn rotate_token(&self, _request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse> {
         Box::pin(async move { self.agents.rotate_token().await.map_err(Into::into) })
     }
@@ -496,6 +640,90 @@ impl ControlState for DaemonControl {
     fn events(&self, query: EventsQuery) -> Result<EventSubscription, ControlFailure> {
         Ok(self.events.subscribe(&query, self.snapshot_source()))
     }
+}
+
+fn key_response(
+    result: Result<Vec<hofund_secrets::Key>, hofund_secrets::SecretError>,
+    secret: Option<String>,
+    backup: bool,
+) -> Result<GatewayKeyResponse, ControlFailure> {
+    let keys = result.map_err(key_failure)?;
+    let mut response = GatewayKeyResponse::default();
+    response.keys = keys.into_iter().map(|key| wire_key(key, backup)).collect();
+    response.secret = secret;
+    Ok(response)
+}
+
+fn wire_key(key: hofund_secrets::Key, backup: bool) -> GatewayKey {
+    let mut out = GatewayKey::default();
+    out.id = key.id;
+    out.name = key.name;
+    out.off = key.off;
+    out.is_default = key.is_default;
+    out.masked = key.masked;
+    out.secret = if backup { key.secret } else { String::new() };
+    out.models = key.models;
+    out.accounts = key.accounts;
+    out.quotas = key.quotas;
+    out.read_only = key.read_only;
+    out.expires = key.expires;
+    out.issuer = key.issuer;
+    out.issues = key.issues;
+    out.limits = key.limits.into_iter().map(wire_limit).collect();
+    out.removed = backup && key.removed;
+    out
+}
+
+fn wire_limit(limit: KeyLimit) -> GatewayKeyLimit {
+    let mut out = GatewayKeyLimit::default();
+    out.period = limit.period;
+    out.days = limit.days;
+    out.hours = limit.hours;
+    out.tokens = limit.tokens;
+    out.cost = limit.cost;
+    out.cache_reads = limit.cache_reads;
+    out.since = limit.since;
+    out
+}
+
+fn stored_key(key: GatewayKey) -> hofund_secrets::Key {
+    hofund_secrets::Key {
+        id: key.id,
+        name: key.name,
+        off: key.off,
+        is_default: key.is_default,
+        secret: key.secret,
+        masked: String::new(),
+        models: key.models,
+        accounts: key.accounts,
+        quotas: key.quotas,
+        read_only: key.read_only,
+        expires: key.expires,
+        issuer: key.issuer,
+        issues: key.issues,
+        limits: key.limits.into_iter().map(stored_limit).collect(),
+        removed: key.removed,
+    }
+}
+
+fn stored_limit(limit: GatewayKeyLimit) -> KeyLimit {
+    KeyLimit {
+        period: limit.period,
+        days: limit.days,
+        hours: limit.hours,
+        tokens: limit.tokens,
+        cost: limit.cost,
+        cache_reads: limit.cache_reads,
+        since: limit.since,
+    }
+}
+
+fn key_failure(error: hofund_secrets::SecretError) -> ControlFailure {
+    let kind = match error {
+        hofund_secrets::SecretError::Key(_) => ControlErrorKind::Unprocessable,
+        _ => ControlErrorKind::Internal,
+    };
+    ControlError::new(kind, error.to_string(), "gateway_keys").into()
 }
 
 fn model_entries(models: &[ModelSpec]) -> Vec<ModelEntry> {
@@ -650,6 +878,8 @@ fn usage_row(row: hofund_usage::Row) -> UsageRow {
         .map(|tokens| u64::try_from(tokens).unwrap_or(0));
     out.duration_ms = u64::try_from(row.latency_ms).unwrap_or(0);
     out.status = row.status;
+    out.caller_key_id = row.caller_key_id;
+    out.caller_key_name = row.caller_key_name;
     out
 }
 

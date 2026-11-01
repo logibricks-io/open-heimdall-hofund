@@ -139,6 +139,7 @@ flowchart BT
   gateway --> codec
   gateway --> ir
   gateway --> usage
+  gateway --> secrets
   gateway --> pluginApi
   gateway --> pluginHost
   daemon --> gateway
@@ -240,14 +241,14 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-kit-agent` | `hofund-agent`, `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-quirks` |
 | `hofund-router` | `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api` |
-| `hofund-gateway` | `hofund-codec`, `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-usage` |
+| `hofund-gateway` | `hofund-codec`, `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-config` | — |
 | `hofund-control-client` | `hofund-control-proto` |
 | `hofund-control-proto` | — |
 | `hofund-secrets` | — |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
-| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent` |
+| `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests) |
 | `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry` |
 | `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-daemon`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
@@ -437,8 +438,8 @@ Connect, timeout, and interrupted-body errors follow `failover.connect_errors`.
   route table as an `ArcSwap` snapshot at startup. A panic in a member
   publishes a snapshot that omits that member. In-flight requests keep the
   `Arc` they loaded. Hot reload of configuration is pull request L. The
-  process does re-read the bearer token file on each request, so
-  `hofund token rotate` takes effect without a restart. `GET /health` is
+  process re-reads the bearer token file and named-key store on each request,
+  so token rotation and key changes take effect without a restart. `GET /health` is
   unauthenticated and returns no secrets.
 - There is no process-global route counter.
 - Language packs. A future i18n pack is the other place, besides

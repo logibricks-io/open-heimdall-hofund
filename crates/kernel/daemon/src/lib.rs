@@ -25,7 +25,7 @@ pub use hofund_gateway::Running;
 use hofund_provider::{Credential, Endpoint, Provider, Wire};
 use hofund_quirks::named;
 use hofund_router::{Cooldowns, FailoverPolicy, Snapshot};
-use hofund_secrets::TokenFile;
+use hofund_secrets::{KeyStore, TokenFile};
 use hofund_usage::Ledger;
 
 mod adapt;
@@ -155,7 +155,9 @@ pub fn check(path: &Path) -> Result<(), DaemonError> {
 ///
 /// Returns [`DaemonError`] when the config or the token file fails.
 pub fn token_show(path: &Path) -> Result<String, DaemonError> {
-    token_file(path)?.load_or_create().map_err(show)
+    let store = KeyStore::beside_token(token_file(path)?.path());
+    store.list().map_err(show)?;
+    store.token_file().load_or_create().map_err(show)
 }
 
 /// Replaces the bearer token and returns the new value.
@@ -164,7 +166,10 @@ pub fn token_show(path: &Path) -> Result<String, DaemonError> {
 ///
 /// Returns [`DaemonError`] when the config or the token file fails.
 pub fn token_rotate(path: &Path) -> Result<String, DaemonError> {
-    token_file(path)?.rotate().map_err(show)
+    KeyStore::beside_token(token_file(path)?.path())
+        .rotate_default()
+        .map(|rotated| rotated.secret)
+        .map_err(show)
 }
 
 /// The listen URL and bearer token an agent adapter should write.
@@ -188,9 +193,9 @@ pub struct LocalGateway {
 /// Returns [`DaemonError`] when the config or the token file fails.
 pub fn local_gateway(path: &Path) -> Result<LocalGateway, DaemonError> {
     let config = load_path(path).map_err(show)?;
-    let token = TokenFile::new(beside(path, &config.token_file))
-        .load_or_create()
-        .map_err(show)?;
+    let store = KeyStore::beside_token(beside(path, &config.token_file));
+    store.list().map_err(show)?;
+    let token = store.token_file().load_or_create().map_err(show)?;
     let (listen, _) =
         hofund_config::effective_listen(&config, hofund_config::addr_env().as_deref())
             .map_err(show)?;
@@ -418,6 +423,8 @@ async fn start_inner(
     };
     warn(&config);
     let token_path = beside(path, &config.token_file);
+    let key_store = Arc::new(KeyStore::beside_token(&token_path));
+    key_store.list().map_err(show)?;
     let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
     let usage = Arc::new(Ledger::open(&beside(path, &config.usage_file)).map_err(show)?);
     let runtime = runtime::Runtime::new(Arc::clone(&registry), path, max_idle_per_host);
@@ -445,6 +452,7 @@ async fn start_inner(
         inbound_codecs(),
         Arc::clone(&usage),
     )
+    .with_key_store(Arc::clone(&key_store))
     .with_surfaces(registry.surfaces())
     .with_surface_http(surface_http(&config, max_idle_per_host));
     let quotas = Arc::new(quotas::DaemonQuotas::new(
@@ -521,6 +529,7 @@ async fn start_inner(
                 Arc::clone(&registry),
                 cooldowns,
                 Arc::clone(&usage),
+                Arc::clone(&key_store),
                 token_path.clone(),
                 shutdown_request,
             )

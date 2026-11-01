@@ -23,12 +23,12 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
     AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
-    ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_ID_BYTES,
-    MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
-    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteModelListResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    Topic, UsageQuery, UsageResponse, decode_request,
+    ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest, GatewayKeyResponse,
+    GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES,
+    ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
+    ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UsageQuery, UsageResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -205,6 +205,28 @@ pub trait ControlState: Send + Sync {
     fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse>;
     /// Reports sampled quota history.
     fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse>;
+    /// Lists named gateway keys.
+    fn gateway_keys(&self) -> ControlFuture<'_, GatewayKeyResponse> {
+        Box::pin(async { Err(unsupported_gateway_keys()) })
+    }
+    /// Changes a named gateway key.
+    fn change_gateway_key(
+        &self,
+        _request: GatewayKeyRequest,
+    ) -> ControlFuture<'_, GatewayKeyResponse> {
+        Box::pin(async { Err(unsupported_gateway_keys()) })
+    }
+    /// Exports complete named-key records for backup.
+    fn export_gateway_keys(&self) -> ControlFuture<'_, GatewayKeyResponse> {
+        Box::pin(async { Err(unsupported_gateway_keys()) })
+    }
+    /// Restores named-key records.
+    fn restore_gateway_keys(
+        &self,
+        _request: GatewayKeyRestoreRequest,
+    ) -> ControlFuture<'_, GatewayKeyResponse> {
+        Box::pin(async { Err(unsupported_gateway_keys()) })
+    }
     /// Rotates the control and model bearer token.
     fn rotate_token(&self, request: TokenRotateRequest) -> ControlFuture<'_, TokenRotateResponse>;
     /// Starts graceful daemon shutdown.
@@ -226,6 +248,15 @@ pub trait ControlState: Send + Sync {
     ///
     /// Returns [`ControlFailure`] when the daemon cannot serve events.
     fn events(&self, query: EventsQuery) -> Result<EventSubscription, ControlFailure>;
+}
+
+fn unsupported_gateway_keys() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::Internal,
+        "gateway-key management is not implemented by this control state",
+        "control",
+    )
+    .into()
 }
 
 /// A control server with its own router and token-file state.
@@ -334,6 +365,20 @@ impl Control {
             .route("/v1/hofund/agents/{id}/disconnect", post(disconnect_agent))
             .route("/v1/hofund/agents/{id}/model", post(set_agent_model))
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
+            .route(
+                "/v1/hofund/gateway-keys",
+                get(gateway_keys)
+                    .post(change_gateway_key)
+                    .head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/gateway-keys/export",
+                get(export_gateway_keys).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/gateway-keys/restore",
+                post(restore_gateway_keys),
+            )
             .route("/v1/hofund/quotas", get(quotas).head(method_not_allowed))
             .route(
                 "/v1/hofund/quotas/history",
@@ -832,6 +877,30 @@ async fn usage(
         return failure_response(error.into());
     }
     operation_response!(state.control.state.usage(query).await)
+}
+
+async fn gateway_keys(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.gateway_keys().await)
+}
+
+async fn change_gateway_key(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<GatewayKeyRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.change_gateway_key(request).await)
+}
+
+async fn export_gateway_keys(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.export_gateway_keys().await)
+}
+
+async fn restore_gateway_keys(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<GatewayKeyRestoreRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.restore_gateway_keys(request).await)
 }
 
 async fn quotas(State(state): State<HttpState>, uri: Uri) -> Response {
