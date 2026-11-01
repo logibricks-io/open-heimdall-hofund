@@ -2071,12 +2071,12 @@ fn failure(
     coded(codec, status, &message)
 }
 
-/// Text that ends a stream that broke off after it began; the Codex
+/// Text that ends a stream that broke off after it began; an inbound
 /// catalog's compaction reads the same words.
 const ENDED_SHORT: &str = "the reply ended before it was complete";
 
 /// What a stream that failed after it began says: a reply whose body
-/// broke off says it ended before it was complete, so a client (a Codex
+/// broke off says it ended before it was complete, so a client (a catalog's
 /// compaction) can tell a cut from a vendor's own failure.
 fn broken_off(error: &PluginError) -> String {
     let message = error.message();
