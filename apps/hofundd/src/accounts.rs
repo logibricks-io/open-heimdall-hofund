@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn a1_10_accounts_discover_parses() {
+    fn a1_10_hofundd_accounts_discover_parses() {
         let parsed = parse(&[OsString::from("discover"), OsString::from("--add")]).expect("parse");
         assert_eq!(
             parsed,

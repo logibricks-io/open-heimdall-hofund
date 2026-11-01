@@ -3028,6 +3028,33 @@ mod tests {
     }
 
     #[test]
+    fn a1_23_discover_false_and_non_boolean_do_not_enable_agent_discovery() {
+        let off = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [subscriptions.options]
+            discover = false
+            "#,
+        )
+        .expect("false");
+        assert!(!off.discover_agent_accounts);
+
+        let yes = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [subscriptions.options]
+            discover = "yes"
+            "#,
+        )
+        .expect("string");
+        assert!(!yes.discover_agent_accounts);
+    }
+
+    #[test]
     fn kind_and_short_protocol_names_rewrite_and_warn() {
         let config = load(
             r#"

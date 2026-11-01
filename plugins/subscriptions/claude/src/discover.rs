@@ -88,6 +88,61 @@ mod tests {
     }
 
     #[test]
+    fn a1_16_claude_list_is_empty_without_credentials() {
+        let dir = scratch("empty");
+        let home = dir.path().join("claude-home");
+        fs::create_dir_all(&home).expect("home");
+        let rows = list(&home).expect("list");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn a1_17_claude_rejects_unknown_import_reference() {
+        let dir = scratch("bad-ref");
+        let home = dir.path().join("claude-home");
+        write_sign_in(&home);
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let error = block_on(import(&home, "other", host.context())).expect_err("ref");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown agent sign-in reference")
+        );
+    }
+
+    #[test]
+    fn a1_18_claude_import_leaves_stored_secret_unchanged() {
+        let dir = scratch("stored-secret");
+        let home = dir.path().join("claude-home");
+        write_sign_in(&home);
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        let marker = SecretObject::new()
+            .with_text("credentials", "marker-unchanged")
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "stored")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, marker)).expect("upsert");
+        block_on(import(&home, REFERENCE, host.context())).expect("import");
+        let after = block_on(host.context().accounts().secret(&id))
+            .expect("read")
+            .expect("stored");
+        let blob = SecretObject::parse(&after).expect("parse");
+        assert_eq!(blob.text("credentials"), Some("marker-unchanged"));
+    }
+
+    #[test]
     fn a1_3_lists_claude_sign_in_from_temp_home() {
         let dir = scratch("list");
         let home = dir.path().join("claude-home");

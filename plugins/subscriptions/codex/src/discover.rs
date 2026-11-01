@@ -161,6 +161,87 @@ mod tests {
     }
 
     #[test]
+    fn a1_19_codex_ignores_oversized_auth_json() {
+        let dir = scratch("large");
+        let home = dir.path().join("codex-home");
+        fs::create_dir_all(&home).expect("home");
+        let oversized = home.join("auth.json");
+        let mut data = vec![b' '];
+        data.resize((1024 * 1024 + 1) as usize, b'x');
+        fs::write(&oversized, data).expect("auth");
+        let rows = list(&home).expect("list");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn a1_20_codex_rejects_unknown_import_reference() {
+        let dir = scratch("bad-ref");
+        let home = dir.path().join("codex-home");
+        write_auth(&home);
+        let host = hofund_kit_subscription::TestHost::open_for(
+            hofund_plugin_api::PluginKind::Subscription,
+            hofund_plugin_api::PluginId::from_static("codex"),
+            dir.path(),
+        );
+        let error = hofund_kit_subscription::block_on(import(&home, "other", host.context()))
+            .expect_err("ref");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown agent sign-in reference")
+        );
+    }
+
+    #[test]
+    fn a1_21_codex_import_leaves_stored_secret_unchanged() {
+        let dir = scratch("stored-secret");
+        let home = dir.path().join("codex-home");
+        write_auth(&home);
+        let host = hofund_kit_subscription::TestHost::open_for(
+            hofund_plugin_api::PluginKind::Subscription,
+            hofund_plugin_api::PluginId::from_static("codex"),
+            dir.path(),
+        );
+        let rows = list(&home).expect("list");
+        let id = rows[0].id().clone();
+        let marker = SecretObject::new()
+            .with_text("account_id", "marker-unchanged")
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "stored")
+            .expect("account");
+        hofund_kit_subscription::block_on(host.context().accounts().upsert(account, marker))
+            .expect("upsert");
+        hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context()))
+            .expect("import");
+        let after = hofund_kit_subscription::block_on(host.context().accounts().secret(&id))
+            .expect("read")
+            .expect("stored");
+        let blob = SecretObject::parse(&after).expect("parse");
+        assert_eq!(blob.text("account_id"), Some("marker-unchanged"));
+    }
+
+    #[test]
+    fn a1_22_codex_import_errors_when_refresh_token_missing() {
+        let dir = scratch("no-refresh");
+        let home = dir.path().join("codex-home");
+        fs::create_dir_all(&home).expect("home");
+        let id = id_token("u@example.test", "sub-1", "acct-1", "plus");
+        let text = format!(r#"{{"tokens":{{"access_token":"access-example","id_token":"{id}"}}}}"#);
+        fs::write(home.join("auth.json"), text).expect("auth");
+        let host = hofund_kit_subscription::TestHost::open_for(
+            hofund_plugin_api::PluginKind::Subscription,
+            hofund_plugin_api::PluginId::from_static("codex"),
+            dir.path(),
+        );
+        let error = hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context()))
+            .expect_err("refresh");
+        assert!(error.to_string().contains("no refresh token"));
+    }
+
+    #[test]
     fn a1_4_lists_codex_sign_in_from_temp_home() {
         let dir = scratch("list");
         let home = dir.path().join("codex-home");
