@@ -335,6 +335,29 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `desktop` | Menu-bar shell at `apps/desktop`. Renders status and calls the daemon and the agent adapters. |
 | `xtask` | Local workspace tasks and the architecture tests. |
 
+## Routing strategies and measurements
+
+`hofund_router::strategy` owns the pure ordering functions and explicit
+per-route rotation, weighted-round, and speed-probe state. The daemon implements
+`Measurements` by reading the shared quota store, successful usage rows, and
+cached model catalogs. Token use has a one-hour half-life. Streamed replies
+record first-content latency beside whole-answer latency; speed uses a
+20-minute half-life and becomes unknown after an hour. Prices remain catalog
+data and are converted from millionths of a dollar to dollars per million
+tokens when a route is weighed. No process-global measurement or routing
+counter exists, and the router does not own the usage ledger. Each strategy
+declares the measurements it reads (`Needs`); allowances are always filled, and
+the ledger is read only for usage or speed, over the last day or hour through
+the `created_unix` index.
+
+Smart uses 90% and 98% allowance tiers, hourly renewal and lapse comparisons,
+and prepaid balances ranked only inside one provider and unit. Usage and pace
+break ties with decayed tokens; pace also uses 10% remaining-per-hour bands.
+Fast estimates a 200-token reply and probes unmeasured members every fifth
+eligible request. Cheap compares input-plus-output price, then cache-read
+price, with unpriced members last. Ready members retain strategy order before
+the single cooling probe.
+
 ## Member cooldowns
 
 `hofund_router::Cooldowns` is the cooldown book: explicit, thread-safe state
@@ -361,7 +384,19 @@ restores configured members at startup, keeps ended rungs for 35 days, ignores
 corrupt files without failing startup, and lets in-process state win. Rate,
 quota, generic, observation, flat-credit, and subscription rests remain
 in-memory. The daemon records call and stream outcomes, but counts never record
-success and cool only on 429 or transport-class failures. The router only orders
+success and cool only on 429 or transport-class failures.
+
+A failure that says no connection was made (a connect error, or a 502,
+transport, or I/O error naming a refused dial or failed lookup) does not rest
+the member when this computer has no network
+(`crates/kernel/daemon/src/offline.rs`). The network is only checked when no
+upstream answered in the last 15 seconds: the check needs a route out with a
+usable local address, then dials up to three other providers (not the failing
+one, and not hosts on this computer or its local network) for 2 seconds each.
+No connection means offline; with nothing else to dial, a route out counts as
+online. The answer is kept for 5 seconds and one request asks at a time.
+Offline, the next member is still asked, and the last member's failure goes to
+the client, but nobody rests. The router only orders
 members, putting ready members first and retaining the soonest cooling member
 as a probe.
 
@@ -375,7 +410,10 @@ the next member is asked. The order is fixed:
    skipped, and so are members whose known context window is at or below the
    estimated input tokens (a 413 only skips the same model). Members with an
    unknown window are asked. If none is left, the overflow goes back to the
-   client in its own protocol. An overflow never rests the member.
+   client in its own protocol. An overflow never rests the member. A member's
+   window is the context size its provider's model list gives the hop's model
+   (matched without regard to case); a model the list does not size has an
+   unknown window.
 2. The statuses in `failover.statuses` fail over. The default is 401, 402, 403,
    404, 408, 429, and 500 to 599.
 3. Some replies fail over by their body words even with a status not in
@@ -395,7 +433,6 @@ Connect, timeout, and interrupted-body errors follow `failover.connect_errors`.
 
 ## What is intentionally absent
 
-- Measurement-based smart, usage, pace, fast, and cheap routing strategies.
 - A running process does not reload configuration. The daemon publishes the
   route table as an `ArcSwap` snapshot at startup. A panic in a member
   publishes a snapshot that omits that member. In-flight requests keep the

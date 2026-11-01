@@ -536,6 +536,15 @@ impl ModelsHost {
             .map_err(PicksError::Save)?
     }
 
+    /// Puts `models` in a provider's cached list, as a fetch would.
+    #[cfg(test)]
+    pub(crate) fn seed_models(&self, provider_id: &str, models: &[ModelSpec]) {
+        let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        store.update(provider_id, |state| {
+            state.list = super::models_state::rows(models);
+        });
+    }
+
     /// Reads cached models without building a provider or contacting an upstream.
     #[must_use]
     pub fn cached(&self, provider_id: &str) -> Cached {

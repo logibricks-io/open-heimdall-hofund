@@ -37,6 +37,11 @@ pub trait Member: Send + Sync {
         ""
     }
 
+    /// Whether an unknown account can learn its allowance from reply metadata.
+    fn learns_allowance(&self) -> bool {
+        false
+    }
+
     /// Codec id this member speaks. Compared with the inbound protocol.
     fn protocol(&self) -> &str;
 

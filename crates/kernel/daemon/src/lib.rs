@@ -36,9 +36,11 @@ mod control_agents;
 mod control_local;
 pub(crate) mod control_map;
 mod events;
+mod measurements;
 mod membership;
 mod models;
 mod models_state;
+mod offline;
 mod one_shot;
 mod probe;
 mod quotas;
@@ -473,6 +475,7 @@ async fn start_inner(
         models_host.attach_events(Arc::clone(bus));
     }
     let models_host = Arc::new(models_host);
+    runtime.attach_measurements(Arc::clone(&usage), Arc::clone(&models_host));
     runtime.attach_models(Arc::clone(&models_host));
     if let Some(bus) = &control_bus {
         runtime.attach_events(Arc::clone(bus));
@@ -784,6 +787,7 @@ fn route_plan(
                         .get(provider.as_str())
                         .is_some_and(|provider| provider.free);
                     let free = free_hop(manual, listed.as_ref());
+                    let context_window = hop_window(listed.as_ref());
                     list.push(membership::PlannedHop {
                         provider: provider.clone(),
                         subscription: None,
@@ -792,6 +796,7 @@ fn route_plan(
                         max_output_tokens: upstream
                             .max_output_tokens
                             .or_else(|| caps.get(provider.as_str()).copied()),
+                        context_window,
                         routing: route.routing.clone(),
                         weight: upstream.weight.unwrap_or(1),
                         free,
@@ -804,6 +809,7 @@ fn route_plan(
                         member_id: None,
                         wire_model: upstream.model.clone(),
                         max_output_tokens: upstream.max_output_tokens,
+                        context_window: None,
                         routing: route.routing.clone(),
                         weight: upstream.weight.unwrap_or(1),
                         free: false,
@@ -829,6 +835,13 @@ fn listed_model(
     models
         .into_iter()
         .find(|listed| listed.id().eq_ignore_ascii_case(model))
+}
+
+/// The input window the model list gives a hop's model, when it gives one.
+fn hop_window(listed: Option<&hofund_plugin_api::ModelSpec>) -> Option<u64> {
+    listed
+        .map(hofund_plugin_api::ModelSpec::context)
+        .filter(|window| *window > 0)
 }
 
 fn free_hop(manual: bool, listed: Option<&hofund_plugin_api::ModelSpec>) -> bool {
@@ -912,6 +925,7 @@ fn providers(
                 preset_id: provider.preset.clone().unwrap_or_default(),
                 fingerprint,
                 patience: provider.patience.duration(),
+                base_url: endpoint.base_url.clone(),
             },
         );
         instances.insert(provider.id.clone(), instance);
@@ -1720,6 +1734,29 @@ mod tests {
         assert_eq!(hop.routing, "weight");
         assert_eq!(hop.weight, 3);
         assert!(hop.free);
+    }
+
+    #[test]
+    fn b10d_route_plan_gives_a_provider_hop_its_listed_window() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"Demo\"\nupstreams = [{ provider = \"one\" }, { provider = \"one\", model = \"bare\" }]\n",
+        )
+        .expect("config");
+        let host = super::ModelsHost::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        let sized = hofund_plugin_api::ModelSpec::new("demo", None)
+            .expect("model")
+            .with_context(64_000);
+        let bare = hofund_plugin_api::ModelSpec::new("bare", None).expect("model");
+        host.seed_models("one", &[sized, bare]);
+        let (routes, _) = super::route_plan(&config, Some(&host));
+        let hops = &routes["Demo"];
+        assert_eq!(hops[0].context_window, Some(64_000));
+        assert_eq!(hops[1].context_window, None);
+        let (routes, _) = super::route_plan(&config, None);
+        assert_eq!(routes["Demo"][0].context_window, None);
     }
 
     #[test]

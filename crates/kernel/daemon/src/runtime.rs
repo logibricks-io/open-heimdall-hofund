@@ -159,6 +159,20 @@ impl Runtime {
         Ok(snapshot.hold(owner))
     }
 
+    /// Connects live routing measurements to every published router snapshot.
+    pub(crate) fn attach_measurements(
+        &self,
+        usage: Arc<hofund_usage::Ledger>,
+        models: Arc<ModelsHost>,
+    ) {
+        let measurements =
+            crate::measurements::DaemonMeasurements::new(Arc::clone(&self.quotas), usage, models);
+        self.table
+            .get()
+            .expect("initial snapshot")
+            .set_measurements(Arc::new(measurements));
+    }
+
     /// Shares the list and probe host so reloads plan through it and
     /// replace its instances.
     pub(crate) fn attach_models(&self, host: Arc<ModelsHost>) {
