@@ -235,17 +235,31 @@ mod tests {
 
     struct AgentEnv {
         _guard: crate::agent_login::TestHomeGuard,
+        uuid: String,
+    }
+
+    /// A Claude account uuid unique to this test and process. Tests run in
+    /// parallel and the macOS keychain is shared, so a fixed identity makes
+    /// concurrent imports race on the same keychain item.
+    fn unique_claude_uuid() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{:08x}-2222-3333-4444-{n:012x}", std::process::id())
     }
 
     impl AgentEnv {
         fn claude(dir: &tempfile::TempDir) -> Self {
             let home = dir.path().join("agent-claude");
             fs::create_dir_all(&home).expect("home");
-            write_claude_sign_in(&home);
+            let uuid = unique_claude_uuid();
+            write_claude_sign_in(&home, &uuid);
             let mut map = BTreeMap::new();
             map.insert("CLAUDE_CONFIG_DIR".to_owned(), home);
             let guard = push_test_agent_homes(map);
-            Self { _guard: guard }
+            Self {
+                _guard: guard,
+                uuid,
+            }
         }
 
         fn codex(_dir: &tempfile::TempDir, codex_home: PathBuf) -> Self {
@@ -253,11 +267,14 @@ mod tests {
             let mut map = BTreeMap::new();
             map.insert("CODEX_HOME".to_owned(), codex_home);
             let guard = push_test_agent_homes(map);
-            Self { _guard: guard }
+            Self {
+                _guard: guard,
+                uuid: String::new(),
+            }
         }
     }
 
-    fn write_claude_sign_in(home: &Path) {
+    fn write_claude_sign_in(home: &Path, uuid: &str) {
         fs::write(
             home.join(".credentials.json"),
             r#"{"claudeAiOauth":{"accessToken":"access-example","refreshToken":"refresh-example"}}"#,
@@ -265,7 +282,9 @@ mod tests {
         .expect("creds");
         fs::write(
             home.join(".claude.json"),
-            r#"{"oauthAccount":{"emailAddress":"user@example.test","accountUuid":"11111111-2222-3333-4444-555555555555"}}"#,
+            format!(
+                r#"{{"oauthAccount":{{"emailAddress":"user@example.test","accountUuid":"{uuid}"}}}}"#
+            ),
         )
         .expect("profile");
     }
@@ -355,16 +374,16 @@ mod tests {
         path
     }
 
-    fn claude_account_id() -> hofund_plugin_api::AccountId {
-        account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"])
+    fn claude_account_id(uuid: &str) -> hofund_plugin_api::AccountId {
+        account_id_from(&["claude", uuid])
     }
 
     #[test]
     fn a1_12_daemon_list_marks_already_stored_identity() {
         let dir = tempfile::tempdir().expect("dir");
         let config = write_config(dir.path(), false);
-        let _env = AgentEnv::claude(&dir);
-        let id = claude_account_id();
+        let env = AgentEnv::claude(&dir);
+        let id = claude_account_id(&env.uuid);
         let first = accounts_discover_in_inner(&config, true, false).expect("import");
         assert_eq!(first.imported.len(), 1);
         assert_eq!(first.imported[0], id.to_string());
