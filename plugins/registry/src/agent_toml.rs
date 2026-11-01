@@ -28,6 +28,15 @@ pub struct AgentToml {
     pub active_provider: Option<ActiveProviderToml>,
     #[serde(default)]
     pub binary_not_go: bool,
+    /// Header whose value is the calling agent's id.
+    #[serde(default)]
+    pub request_agent_header: Option<String>,
+    /// User-Agent and `originator` product prefixes that name this agent.
+    #[serde(default)]
+    pub client_prefixes: Vec<String>,
+    /// Headers that name this agent even when the user agent names another.
+    #[serde(default)]
+    pub nested_turn_headers: Vec<String>,
 }
 
 /// The model kept under a provider the agent names in one key, with an older
@@ -648,6 +657,38 @@ fn validate(
             ));
         }
     }
+    validate_request_hints(agent, source)?;
+    Ok(())
+}
+
+fn validate_request_hints(agent: &AgentToml, source: &str) -> Result<(), String> {
+    if let Some(header) = &agent.request_agent_header {
+        valid_token(header, source, "request_agent_header")?;
+    }
+    valid_token_list(&agent.client_prefixes, source, "client_prefixes")?;
+    valid_token_list(&agent.nested_turn_headers, source, "nested_turn_headers")?;
+    Ok(())
+}
+
+fn valid_token(value: &str, source: &str, field: &str) -> Result<(), String> {
+    if value.is_empty() || value.chars().any(char::is_whitespace) || value.contains(',') {
+        return Err(error(source, field, "must be one non-empty token"));
+    }
+    Ok(())
+}
+
+fn valid_token_list(values: &[String], source: &str, field: &str) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        valid_token(value, source, field)?;
+        if !seen.insert(value.to_ascii_lowercase()) {
+            return Err(error(
+                source,
+                field,
+                format!("contains duplicate entry `{value}`"),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1204,6 +1245,20 @@ pub fn render(agent: &AgentToml) -> (String, String) {
     } else {
         "Gateway"
     };
+    let prefixes_name = format!("{static_name}_CLIENT_PREFIXES");
+    if !agent.client_prefixes.is_empty() {
+        output.push_str(&format!(
+            "static {prefixes_name}: &[&str] = &{:?};\n",
+            agent.client_prefixes
+        ));
+    }
+    let nested_name = format!("{static_name}_NESTED_TURN_HEADERS");
+    if !agent.nested_turn_headers.is_empty() {
+        output.push_str(&format!(
+            "static {nested_name}: &[&str] = &{:?};\n",
+            agent.nested_turn_headers
+        ));
+    }
     output.push_str(&format!(
         "static {static_name}: hofund_plugin_api::AgentDescription = hofund_plugin_api::AgentDescription::from_static(hofund_plugin_api::PluginId::from_static({:?}), {:?}, {:?}, {files_name}, {sets_name}, {:?}, {:?}, {visible}, hofund_plugin_api::AgentRoute::{route}, {requires_name})",
         agent.id,
@@ -1245,6 +1300,15 @@ pub fn render(agent: &AgentToml) -> (String, String) {
     }
     if agent.binary_not_go {
         output.push_str(".with_binary_not_go()");
+    }
+    if let Some(header) = &agent.request_agent_header {
+        output.push_str(&format!(".with_request_agent_header({header:?})"));
+    }
+    if !agent.client_prefixes.is_empty() {
+        output.push_str(&format!(".with_client_prefixes({prefixes_name})"));
+    }
+    if !agent.nested_turn_headers.is_empty() {
+        output.push_str(&format!(".with_nested_turn_headers({nested_name})"));
     }
     output.push_str(";\n");
     (static_name, output)
@@ -1490,6 +1554,46 @@ key = "effort"
         );
         let without_model = base().replace("[model]\nfile = \"config\"\nkey = \"model\"\n", "");
         reject(without_model + table, "active_provider");
+    }
+
+    #[test]
+    fn g2_16_request_hints_are_validated_and_rendered() {
+        let text = base().replace(
+            "route = \"gateway\"",
+            "route = \"gateway\"\nrequest_agent_header = \"x-fixture-agent-id\"\nclient_prefixes = [\"fixture\", \"fixture-extension\"]\nnested_turn_headers = [\"x-fixture-window-id\"]",
+        );
+        let agent = validate(&text).expect("hints");
+        let source = render(&agent).1;
+        assert!(source.contains(".with_request_agent_header(\"x-fixture-agent-id\")"));
+        assert!(source.contains(
+            "static AGENT_FIXTURE_AGENT_CLIENT_PREFIXES: &[&str] = &[\"fixture\", \"fixture-extension\"];"
+        ));
+        assert!(source.contains(".with_client_prefixes(AGENT_FIXTURE_AGENT_CLIENT_PREFIXES)"));
+        assert!(source.contains(
+            "static AGENT_FIXTURE_AGENT_NESTED_TURN_HEADERS: &[&str] = &[\"x-fixture-window-id\"];"
+        ));
+        assert!(
+            source.contains(".with_nested_turn_headers(AGENT_FIXTURE_AGENT_NESTED_TURN_HEADERS)")
+        );
+        let plain = render(&validate(&base()).expect("plain")).1;
+        assert!(!plain.contains("with_request_agent_header"));
+        assert!(!plain.contains("CLIENT_PREFIXES"));
+        assert!(!plain.contains("NESTED_TURN_HEADERS"));
+        let with = |extra: &str| {
+            base().replace(
+                "route = \"gateway\"",
+                &format!("route = \"gateway\"\n{extra}"),
+            )
+        };
+        reject(
+            with("client_prefixes = [\"fixture\", \"Fixture\"]"),
+            "client_prefixes",
+        );
+        reject(with("request_agent_header = \"\""), "request_agent_header");
+        reject(
+            with("nested_turn_headers = [\"has space\"]"),
+            "nested_turn_headers",
+        );
     }
 
     #[test]

@@ -449,8 +449,25 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         },
         ["models", "refresh"] => Command::ModelsRefresh,
         ["models"] => Command::Models { model: None },
-        ["models", model] => Command::Models {
-            model: Some((*model).to_owned()),
+        ["models", "hide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
+            agent: (*agent).to_owned(),
+            hide: owned(ids),
+            unhide: Vec::new(),
+        },
+        ["models", "unhide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
+            agent: (*agent).to_owned(),
+            hide: Vec::new(),
+            unhide: owned(ids),
+        },
+        ["models", token] => match canonical_agent(token) {
+            Some(agent) => Command::AgentModels {
+                agent: agent.to_owned(),
+                hide: Vec::new(),
+                unhide: Vec::new(),
+            },
+            None => Command::Models {
+                model: Some((*token).to_owned()),
+            },
         },
         ["accounts", rest @ ..] => match accounts::parse(rest) {
             Some(parsed) => Command::Accounts(parsed?),
@@ -608,21 +625,6 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             names: owned(names),
             only_picked: None,
         },
-        ["models", "hide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
-            agent: (*agent).to_owned(),
-            hide: owned(ids),
-            unhide: Vec::new(),
-        },
-        ["models", "unhide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
-            agent: (*agent).to_owned(),
-            hide: Vec::new(),
-            unhide: owned(ids),
-        },
-        ["models", agent] => Command::AgentModels {
-            agent: (*agent).to_owned(),
-            hide: Vec::new(),
-            unhide: Vec::new(),
-        },
         ["model", "show", id] => Command::ModelShow {
             id: (*id).to_owned(),
         },
@@ -689,6 +691,14 @@ fn agent_model(pairs: &[&str]) -> Result<Option<String>, String> {
         model = Some((value != "default").then(|| value.to_owned()));
     }
     Ok(model.flatten())
+}
+
+/// Canonical agent id when `name` matches a compiled agent, ignoring case.
+fn canonical_agent(name: &str) -> Option<&'static str> {
+    hofund_plugin_registry::agents().iter().find_map(|agent| {
+        let id = agent.id().as_str();
+        id.eq_ignore_ascii_case(name).then_some(id)
+    })
 }
 
 fn owned(values: &[&str]) -> Vec<String> {
@@ -811,6 +821,7 @@ commands:
   quota wait <provider|account> [--timeout <duration>] [--quiet]
   quota history [<provider|account>...] [--days <n>] [--json]
   models [<model>]                show catalog spec and prices for route models
+  models <agent>                  when <agent> is an agent id, list shown and hidden models
   models refresh                  refetch the models.dev catalog cache
   provider list                   list providers
   provider show <id>              print a provider, its listed models and picks
@@ -836,7 +847,6 @@ commands:
   visible <agent> <names...>|all  narrow an agent's model list, or show every model
   visible <agent> --only-picked   show only models picked for the agent
   visible <agent> --show-new      show models added later again
-  models <agent>                  list models shown to and hidden from an agent
   models hide|unhide <agent> <ids...>
                                   take route ids out of an agent's list, or put them back
 
@@ -1421,6 +1431,24 @@ mod tests {
 
     fn command(values: &[&str]) -> Result<Command, String> {
         parse(&words(values)).map(|(_, command)| command)
+    }
+
+    #[test]
+    fn g2_17_models_agent_id_lists_the_agent() {
+        assert_eq!(
+            command(&["models", "Claude-Code"]),
+            Ok(Command::AgentModels {
+                agent: "claude-code".to_owned(),
+                hide: Vec::new(),
+                unhide: Vec::new(),
+            })
+        );
+        assert_eq!(
+            command(&["models", "demo-model"]),
+            Ok(Command::Models {
+                model: Some("demo-model".to_owned()),
+            })
+        );
     }
 
     #[test]

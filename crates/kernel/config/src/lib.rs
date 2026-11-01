@@ -2057,6 +2057,7 @@ struct RawFile {
     subscriptions: Vec<RawSubscription>,
     #[serde(default)]
     agents: visible::RawAgentModels,
+    #[serde(default)]
     catalog: RawCatalog,
 }
 

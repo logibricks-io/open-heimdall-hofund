@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An omitted `[catalog]` table loads the default catalog settings.
 - Vendor-timed quota and credit rests now stay in place when a quota reading
   is merely less than full in the same window. They lift early only when a
   matching window's reset elapsed since the last good reading or moved to a
@@ -22,7 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[agents.picked_models]`, and `[agents.picked_only]` in config; gateway
   filtering of `/v1/models` and `/v1beta/models` by resolved agent; control
   routes and `hofund visible` / `hofund models` (including `all`, hide/unhide,
-  and picked-only) CLI commands.
+  and picked-only) CLI commands. The calling agent is resolved from optional
+  `request_agent_header`, `client_prefixes`, and `nested_turn_headers` on each
+  agent descriptor.
 - Account discovery from agents' own sign-ins (A-1): `hofund accounts discover`
   and `hofund accounts discover --add` list or import accounts read from
   configured agents' credential files (Claude Code and Codex today). Opt in

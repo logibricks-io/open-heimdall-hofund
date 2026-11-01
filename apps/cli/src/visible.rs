@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn g2_12_cli_models_render_lists_shown_and_hidden() {
         let mut response = AgentModelsResponse::default();
-        response.agent = "codex".to_owned();
+        response.agent = "fixture-agent".to_owned();
         response.shown = vec!["a".to_owned()];
         response.hidden = vec!["b".to_owned()];
         let text = render_models(&response);

@@ -2260,6 +2260,12 @@ pub struct AgentDescription {
     credential: Option<AgentCredential>,
     active_provider: Option<AgentActiveProvider>,
     binary_not_go: bool,
+    /// Header whose value is the calling agent's id.
+    request_agent_header: Option<&'static str>,
+    /// User-Agent and `originator` product prefixes that name this agent.
+    client_prefixes: &'static [&'static str],
+    /// Headers that name this agent even when the user agent names another.
+    nested_turn_headers: &'static [&'static str],
 }
 
 /// An agent that names the provider it uses in one key and keeps each
@@ -2501,7 +2507,41 @@ impl AgentDescription {
             credential: None,
             active_provider: None,
             binary_not_go: false,
+            request_agent_header: None,
+            client_prefixes: &[],
+            nested_turn_headers: &[],
         }
+    }
+
+    /// Header whose value is the calling agent's id.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_request_agent_header(mut self, header: &'static str) -> Self {
+        assert!(!header.is_empty(), "request agent header is empty");
+        assert!(
+            header_token(header),
+            "request agent header must be one token"
+        );
+        self.request_agent_header = Some(header);
+        self
+    }
+
+    /// Product prefixes matched against the User-Agent and `originator`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_client_prefixes(mut self, prefixes: &'static [&'static str]) -> Self {
+        assert_tokens(prefixes);
+        self.client_prefixes = prefixes;
+        self
+    }
+
+    /// Headers that select this agent even when another agent's product is named.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_nested_turn_headers(mut self, headers: &'static [&'static str]) -> Self {
+        assert_tokens(headers);
+        self.nested_turn_headers = headers;
+        self
     }
 
     /// Keeps the model in an active-provider layout, as `layout` says.
@@ -2679,6 +2719,48 @@ impl AgentDescription {
     #[must_use]
     pub const fn binary_not_go(&self) -> bool {
         self.binary_not_go
+    }
+
+    /// Header whose value names the calling agent, when this agent declares one.
+    #[must_use]
+    pub const fn request_agent_header(&self) -> Option<&'static str> {
+        self.request_agent_header
+    }
+
+    /// Product prefixes matched against the User-Agent and `originator`.
+    #[must_use]
+    pub const fn client_prefixes(&self) -> &'static [&'static str] {
+        self.client_prefixes
+    }
+
+    /// Headers that select this agent even when the user agent names another.
+    #[must_use]
+    pub const fn nested_turn_headers(&self) -> &'static [&'static str] {
+        self.nested_turn_headers
+    }
+}
+
+const fn header_token(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() || byte == b',' {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn assert_tokens(values: &[&str]) {
+    let mut index = 0;
+    while index < values.len() {
+        assert!(header_token(values[index]), "empty or spaced token");
+        index += 1;
     }
 }
 

@@ -2,16 +2,13 @@
 
 use hofund_plugin_api::AgentDescription;
 
-const SUBAGENT_HEADER: &str = "x-claude-code-agent-id";
-const STREAM_CLIENT_PREFIXES: [&str; 2] = ["codex", "acp-extension-codex"];
-const PLUGIN_HOST_PREFIX: &str = "claude code";
-const STREAM_WINDOW_HEADER: &str = "x-codex-window-id";
-const STREAM_TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";
-
 /// Resolves the agent id for a request from `headers` and compiled descriptions.
 ///
-/// `key_name` is the authenticated gateway key's display name. It matches an
-/// agent id when the headers do not. When no agent matches, returns `None`.
+/// A description may declare a request header whose value is an agent id, product
+/// prefixes for the User-Agent and `originator`, and headers that select that
+/// agent when present. `key_name` is the authenticated gateway key's display
+/// name. It matches an agent id when the headers do not. When no agent matches,
+/// returns `None`.
 #[must_use]
 pub fn request_agent_id<'a>(
     headers: impl IntoIterator<Item = (&'a str, &'a str)>,
@@ -22,22 +19,14 @@ pub fn request_agent_id<'a>(
         .into_iter()
         .map(|(name, value)| (name.to_ascii_lowercase(), value.to_owned()))
         .collect();
-    let header = |name: &str| -> Option<&str> {
-        map.iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.as_str())
-    };
-    if let Some(agent) = header(SUBAGENT_HEADER)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return match_agent(agent, descriptions);
+    if let Some(value) = request_header_value(&map, descriptions) {
+        return match_agent(value, descriptions);
     }
-    if codex_for_claude_code(&map) {
-        return match_agent("codex", descriptions);
+    if let Some(id) = match_nested_turn(&map, descriptions) {
+        return Some(id);
     }
-    let user_agent = header("user-agent").unwrap_or_default();
-    let originator = header("originator").unwrap_or_default();
+    let user_agent = header_value(&map, "user-agent").unwrap_or_default();
+    let originator = header_value(&map, "originator").unwrap_or_default();
     if let Some(id) = match_user_agent(user_agent, descriptions) {
         return Some(id);
     }
@@ -53,25 +42,75 @@ pub fn request_agent_id<'a>(
     None
 }
 
-fn codex_for_claude_code(headers: &[(String, String)]) -> bool {
-    let header = |name: &str| -> Option<&str> {
-        headers
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.as_str())
-    };
-    if header(STREAM_WINDOW_HEADER).is_none() && header(STREAM_TURN_METADATA_HEADER).is_none() {
-        return false;
-    }
-    ["user-agent", "originator"].into_iter().any(|name| {
-        header(name)
+/// Non-empty value of the first declared request-agent header that is present.
+fn request_header_value<'a>(
+    headers: &'a [(String, String)],
+    descriptions: &[&AgentDescription],
+) -> Option<&'a str> {
+    for description in descriptions {
+        let Some(name) = description.request_agent_header() else {
+            continue;
+        };
+        if let Some(value) = header_value(headers, name)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .is_some_and(|value| value.to_ascii_lowercase().starts_with(PLUGIN_HOST_PREFIX))
-    })
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn match_nested_turn(
+    headers: &[(String, String)],
+    descriptions: &[&AgentDescription],
+) -> Option<String> {
+    for description in descriptions {
+        let declared = description.nested_turn_headers();
+        if declared.is_empty() {
+            continue;
+        }
+        if declared
+            .iter()
+            .any(|name| header_value(headers, name).is_some())
+        {
+            return Some(normalize_agent_id(description.id().as_str()));
+        }
+    }
+    None
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    let name = name.to_ascii_lowercase();
+    headers
+        .iter()
+        .find(|(key, _)| key == &name)
+        .map(|(_, value)| value.as_str())
 }
 
 fn match_user_agent(value: &str, descriptions: &[&AgentDescription]) -> Option<String> {
+    let product = product_token(value)?;
+    for description in descriptions {
+        let id = description.id().as_str();
+        if id.eq_ignore_ascii_case(&product) || description.binary().eq_ignore_ascii_case(&product)
+        {
+            return Some(normalize_agent_id(id));
+        }
+        let binary = description.binary().to_ascii_lowercase();
+        if !binary.is_empty() && product.starts_with(&binary) {
+            return Some(normalize_agent_id(id));
+        }
+        if description.client_prefixes().iter().any(|prefix| {
+            let prefix = prefix.to_ascii_lowercase();
+            !prefix.is_empty() && product.starts_with(&prefix)
+        }) {
+            return Some(normalize_agent_id(id));
+        }
+    }
+    None
+}
+
+fn product_token(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -84,29 +123,7 @@ fn match_user_agent(value: &str, descriptions: &[&AgentDescription]) -> Option<S
         .next()
         .unwrap_or(trimmed)
         .to_ascii_lowercase();
-    if product == "cursor" {
-        return match_agent("cursor-local", descriptions).or_else(|| Some("cursor-local".into()));
-    }
-    for description in descriptions {
-        let id = description.id().as_str();
-        if id.eq_ignore_ascii_case(&product) {
-            return Some(normalize_agent_id(id));
-        }
-        if description.binary().eq_ignore_ascii_case(&product) {
-            return Some(normalize_agent_id(id));
-        }
-        if product.starts_with(description.binary()) {
-            return Some(normalize_agent_id(id));
-        }
-        if STREAM_CLIENT_PREFIXES
-            .iter()
-            .any(|prefix| product.starts_with(prefix))
-            && (id == "codex" || description.binary() == "codex")
-        {
-            return Some(normalize_agent_id(id));
-        }
-    }
-    None
+    (!product.is_empty()).then_some(product)
 }
 
 fn match_agent(candidate: &str, descriptions: &[&AgentDescription]) -> Option<String> {
@@ -135,68 +152,86 @@ mod tests {
 
     use super::request_agent_id;
 
-    static TEST_AGENT: AgentDescription = AgentDescription::from_static(
-        PluginId::from_static("codex"),
-        "Codex",
-        "codex",
-        &[],
-        &[],
-        None,
-        None,
-        hofund_plugin_api::Visible::All,
-        hofund_plugin_api::AgentRoute::Gateway,
-        &[],
-    );
+    const fn description(id: &'static str, binary: &'static str) -> AgentDescription {
+        AgentDescription::from_static(
+            PluginId::from_static(id),
+            "Fixture",
+            binary,
+            &[],
+            &[],
+            None,
+            None,
+            hofund_plugin_api::Visible::All,
+            hofund_plugin_api::AgentRoute::Gateway,
+            &[],
+        )
+    }
 
-    static CLAUDE: AgentDescription = AgentDescription::from_static(
-        PluginId::from_static("claude-code"),
-        "Claude Code",
-        "claude",
-        &[],
-        &[],
-        None,
-        None,
-        hofund_plugin_api::Visible::All,
-        hofund_plugin_api::AgentRoute::Gateway,
-        &[],
-    );
+    static HOST: AgentDescription =
+        description("fixture-host", "host").with_request_agent_header("x-fixture-agent-id");
+
+    static AGENT: AgentDescription = description("fixture-agent", "fixture")
+        .with_client_prefixes(&["fixture", "fixture-extension"])
+        .with_nested_turn_headers(&["x-fixture-window-id", "x-fixture-turn-metadata"]);
 
     #[test]
     fn g2_7_request_agent_reads_subagent_header() {
-        let headers = [("x-claude-code-agent-id", "claude-code")];
+        let headers = [("X-Fixture-Agent-Id", "fixture-host")];
         assert_eq!(
-            request_agent_id(headers, "hofund", &[&CLAUDE]),
-            Some("claude-code".to_owned())
+            request_agent_id(headers, "gateway", &[&HOST, &AGENT]),
+            Some("fixture-host".to_owned())
         );
+        let unknown = [
+            ("x-fixture-agent-id", "missing"),
+            ("user-agent", "fixture/1.0"),
+        ];
+        assert_eq!(request_agent_id(unknown, "gateway", &[&HOST, &AGENT]), None);
     }
 
     #[test]
     fn g2_8_request_agent_matches_user_agent_prefix() {
-        let headers = [("user-agent", "codex/1.0 (test)")];
+        let headers = [("user-agent", "fixture/1.0 (test)")];
         assert_eq!(
-            request_agent_id(headers, "hofund", &[&TEST_AGENT]),
-            Some("codex".to_owned())
+            request_agent_id(headers, "gateway", &[&AGENT]),
+            Some("fixture-agent".to_owned())
+        );
+        let extension = [("originator", "fixture-extension/2")];
+        assert_eq!(
+            request_agent_id(extension, "gateway", &[&HOST, &AGENT]),
+            Some("fixture-agent".to_owned())
         );
     }
 
     #[test]
-    fn g2_9_codex_turn_under_claude_code_names_codex() {
-        let headers = [
-            ("user-agent", "Claude Code/1.0"),
-            ("x-codex-window-id", "w"),
+    fn g2_9_nested_turn_names_its_agent() {
+        let window = [("user-agent", "host/1.0"), ("x-fixture-window-id", "w")];
+        assert_eq!(
+            request_agent_id(window, "gateway", &[&HOST, &AGENT]),
+            Some("fixture-agent".to_owned())
+        );
+        let turn = [
+            ("user-agent", "host/1.0"),
+            ("x-fixture-turn-metadata", "{}"),
         ];
         assert_eq!(
-            request_agent_id(headers, "hofund", &[&TEST_AGENT, &CLAUDE]),
-            Some("codex".to_owned())
+            request_agent_id(turn, "gateway", &[&HOST, &AGENT]),
+            Some("fixture-agent".to_owned())
+        );
+        let host_only = [("user-agent", "host/1.0")];
+        assert_eq!(
+            request_agent_id(host_only, "gateway", &[&HOST, &AGENT]),
+            Some("fixture-host".to_owned())
         );
     }
 
     #[test]
     fn g2_10_gateway_key_name_matches_description() {
         assert_eq!(
-            request_agent_id([], "Codex", &[&TEST_AGENT]),
-            Some("codex".to_owned())
+            request_agent_id([], "Fixture-Agent", &[&AGENT]),
+            Some("fixture-agent".to_owned())
         );
-        assert_eq!(request_agent_id([], "other", &[&TEST_AGENT]), None);
+        assert_eq!(request_agent_id([], "other", &[&AGENT]), None);
+        let unmatched = [("user-agent", "unmatched/1.0")];
+        assert_eq!(request_agent_id(unmatched, "other", &[&AGENT]), None);
     }
 }
