@@ -35,6 +35,15 @@ pub trait RawTap: Send {
     /// Flushes and closes a trailing partial frame, splicing complete JSON.
     fn finish(&mut self) -> Vec<u8>;
 
+    /// Ends a body whose read failed and returns the bytes still held.
+    ///
+    /// Unlike [`RawTap::finish`], the held tail is returned as it arrived,
+    /// without a frame end added. The caller decides whether an unfinished
+    /// last line can reach the client. The default calls [`RawTap::finish`].
+    fn abandon(&mut self) -> Vec<u8> {
+        self.finish()
+    }
+
     /// Input and output tokens seen so far.
     fn tokens(&self) -> (Option<i64>, Option<i64>);
 }
@@ -105,6 +114,16 @@ impl RawTap for DecoderTap {
             return Vec::new();
         }
         self.events.finish()
+    }
+
+    fn abandon(&mut self) -> Vec<u8> {
+        if let Ok(events) = self.decoder.finish() {
+            self.note(&events);
+        }
+        if !self.rewrite {
+            return Vec::new();
+        }
+        self.events.abandon()
     }
 
     fn tokens(&self) -> (Option<i64>, Option<i64>) {
@@ -255,6 +274,34 @@ impl<'p> EventBuf<'p> {
                 terminate_event(&mut raw);
                 out.extend(raw);
             }
+        }
+        out
+    }
+
+    /// Returns the held bytes without closing a frame. Bytes of an oversize
+    /// event already went out, so nothing of it is returned.
+    fn abandon(&mut self) -> Vec<u8> {
+        if self.overflowing {
+            self.overflowing = false;
+            self.cr_held = false;
+            self.tail.clear();
+            self.pending.clear();
+            self.reset_line();
+            return Vec::new();
+        }
+        self.classify_if_needed();
+        let mut out = Vec::new();
+        if self.kind == Kind::Sse {
+            out.extend(self.drain_events());
+        }
+        let rest = std::mem::take(&mut self.pending);
+        self.reset_line();
+        if rest.is_empty() {
+            return out;
+        }
+        match self.kind {
+            Kind::Sse => out.extend(self.rewrite_event(&rest)),
+            Kind::Json | Kind::Undecided => out.extend(rest),
         }
         out
     }
@@ -1425,6 +1472,52 @@ mod tests {
             }),
             vec!["partial"]
         );
+    }
+
+    #[test]
+    fn d21_abandon_returns_the_held_line_without_a_frame_end() {
+        let mut tap = OpenAiChat.raw_tap("demo", "upstream");
+        assert!(tap.push(br#"data: {"model":"upstream","n":"#).is_empty());
+        assert_eq!(tap.abandon(), br#"data: {"model":"upstream","n":"#);
+        assert!(tap.finish().is_empty());
+    }
+
+    #[test]
+    fn d21_abandon_splices_a_whole_unended_event() {
+        let mut tap = OpenAiChat.raw_tap("demo", "upstream");
+        assert!(tap.push(br#"data: {"model":"upstream"}"#).is_empty());
+        assert_eq!(tap.abandon(), br#"data: {"model":"demo"}"#);
+    }
+
+    #[test]
+    fn d21_abandon_without_a_rewrite_holds_nothing() {
+        let mut tap = OpenAiChat.raw_tap("demo", "demo");
+        assert_eq!(tap.push(b"data: {\"n\":"), b"data: {\"n\":");
+        assert!(tap.abandon().is_empty());
+    }
+
+    #[test]
+    fn d21_abandon_after_an_oversize_event_returns_nothing() {
+        let mut tap = DecoderTap::with_cap(
+            OpenAiChat.stream_decoder(),
+            OpenAiChat.model_paths(),
+            "demo",
+            "upstream",
+            8,
+        );
+        let sent = tap.push(br#"data: {"model":"upstream","n":"#);
+        assert!(!sent.is_empty());
+        assert!(tap.abandon().is_empty());
+        assert!(tap.finish().is_empty());
+    }
+
+    #[test]
+    fn d21_only_chat_ends_a_severed_stream_with_done() {
+        assert_eq!(OpenAiChat.severed_stream_end(), b"data: [DONE]\n\n");
+        assert!(AnthropicMessages.severed_stream_end().is_empty());
+        assert!(OpenAiResponses.severed_stream_end().is_empty());
+        assert!(GenerativeLanguage.severed_stream_end().is_empty());
+        assert!(Converse.severed_stream_end().is_empty());
     }
 
     #[test]

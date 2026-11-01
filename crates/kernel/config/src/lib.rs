@@ -66,6 +66,31 @@ impl Default for Failover {
     }
 }
 
+/// How long a direct request to one provider, or a request to a route, waits
+/// out busy failures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Patience {
+    /// Wait for the default 60 seconds.
+    #[default]
+    Default,
+    /// Return the failure without another attempt.
+    Off,
+    /// Wait for a validated custom budget.
+    Wait(Duration),
+}
+
+impl Patience {
+    /// The effective retry budget, or `None` when patience is off.
+    #[must_use]
+    pub fn duration(self) -> Option<Duration> {
+        match self {
+            Self::Default => Some(Duration::from_secs(60)),
+            Self::Off => None,
+            Self::Wait(duration) => Some(duration),
+        }
+    }
+}
+
 /// One value in an opaque options table.
 ///
 /// The shapes match the plugin table: string, integer, boolean, array, and
@@ -187,6 +212,8 @@ pub struct Provider {
     pub free: bool,
     /// Conversation affinity for routes that do not override it.
     pub stays: Stays,
+    /// Retry budget for a direct request to this provider.
+    pub patience: Patience,
     /// Plugin settings. The plugin validates the keys.
     ///
     /// See [`Value`] for which TOML shapes load and for the empty-string rule.
@@ -320,6 +347,10 @@ pub struct Route {
     pub stays_explicit: bool,
     /// Providers tried in order, each with an optional upstream model name.
     pub upstreams: Vec<Upstream>,
+    /// How long a request to this route waits for busy members to come
+    /// back. Members are judged by the route's patience, not their
+    /// provider's, which applies only to a direct request to that provider.
+    pub patience: Patience,
 }
 
 /// Which kind of upstream a route hop names.
@@ -401,6 +432,7 @@ impl fmt::Debug for Provider {
             .field("headers", &RedactedPairs(&self.headers))
             .field("max_output_tokens", &self.max_output_tokens)
             .field("free", &self.free)
+            .field("patience", &self.patience)
             .field("options", &self.options)
             .field("models", &self.model_list)
             .finish()
@@ -636,6 +668,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         }
         validate_refresh(&provider.id, &provider.models.refresh)?;
         let auto_include = clean_auto_include(&provider.id, &provider.models.auto_include)?;
+        let patience = patience_of("provider", &provider.id, provider.patience.as_ref())?;
         let options = options_of(&provider, &mut warnings)?;
         let mut model_list = provider.models;
         model_list.auto_include = auto_include;
@@ -650,6 +683,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             max_output_tokens: provider.max_output_tokens,
             free: provider.free,
             stays: provider.stays,
+            patience,
             options,
             model_list,
         });
@@ -717,6 +751,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         let routing = validated_routing(&route)?;
         let stays_explicit = route.stays.is_some();
         let stays = route.stays.unwrap_or_default();
+        let patience = patience_of("route", &route.model, route.patience.as_ref())?;
         let mut upstreams = Vec::new();
         for upstream in route.upstreams {
             let upstream = upstream_of(&route.model, upstream, &seen, &subscription_ids)?;
@@ -744,6 +779,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             stays,
             stays_explicit,
             upstreams,
+            patience,
         });
     }
     Ok(Config {
@@ -1199,6 +1235,40 @@ fn parse_duration(value: &str) -> Option<Duration> {
         .flatten()
 }
 
+fn patience_of(kind: &str, id: &str, value: Option<&Value>) -> Result<Patience, ConfigError> {
+    let invalid = || {
+        ConfigError::Invalid(format!(
+            "{kind} `{id}` patience must be `off`, `default`, or at most 240 seconds"
+        ))
+    };
+    let duration = match value {
+        None => return Ok(Patience::Default),
+        Some(Value::String(value)) => {
+            let value = value.trim().to_ascii_lowercase();
+            match value.as_str() {
+                "off" | "0" => return Ok(Patience::Off),
+                "default" => return Ok(Patience::Default),
+                _ => parse_duration(&value).ok_or_else(invalid)?,
+            }
+        }
+        Some(Value::Integer(seconds)) if (0..=240).contains(seconds) => {
+            if *seconds == 0 {
+                return Ok(Patience::Off);
+            }
+            Duration::from_secs(*seconds as u64)
+        }
+        _ => return Err(invalid()),
+    };
+    if duration > Duration::from_secs(240) {
+        return Err(invalid());
+    }
+    if duration.is_zero() {
+        Ok(Patience::Off)
+    } else {
+        Ok(Patience::Wait(duration))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFile {
@@ -1272,6 +1342,7 @@ struct RawProvider {
     free: bool,
     #[serde(default)]
     stays: Stays,
+    patience: Option<Value>,
     #[serde(default)]
     options: BTreeMap<String, Value>,
     #[serde(default)]
@@ -1382,6 +1453,7 @@ struct RawRoute {
     #[serde(default)]
     stays: Option<Stays>,
     upstreams: Vec<RawUpstream>,
+    patience: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1621,6 +1693,92 @@ mod tests {
             ))
             .unwrap_or_else(|error| panic!("mode {mode}: {error}"));
         }
+    }
+
+    #[test]
+    fn b6f_provider_patience_is_validated_at_load() {
+        let configured = |value: &str| {
+            load(&format!(
+                "[[providers]]\nid = \"primary\"\npreset = \"openai\"\npatience = {value}\n"
+            ))
+        };
+        assert_eq!(
+            configured("90").expect("seconds").providers[0].patience,
+            super::Patience::Wait(Duration::from_secs(90))
+        );
+        assert_eq!(
+            configured("\"2m\"").expect("duration").providers[0].patience,
+            super::Patience::Wait(Duration::from_secs(120))
+        );
+        assert_eq!(
+            configured("\"off\"").expect("off").providers[0].patience,
+            super::Patience::Off
+        );
+        assert_eq!(
+            configured("0").expect("zero is off").providers[0].patience,
+            super::Patience::Off
+        );
+        assert_eq!(
+            configured("240").expect("maximum").providers[0]
+                .patience
+                .duration(),
+            Some(Duration::from_secs(240))
+        );
+        assert_eq!(
+            configured("\"default\"").expect("default").providers[0]
+                .patience
+                .duration(),
+            Some(Duration::from_secs(60))
+        );
+        for invalid in ["241", "-1", "\"5m\"", "\"soon\"", "true"] {
+            configured(invalid).expect_err("invalid patience");
+        }
+    }
+
+    #[test]
+    fn b6h_patience_off_and_240_second_cap() {
+        let source = |value: &str| {
+            format!("[[providers]]\nid = \"primary\"\npreset = \"openai\"\npatience = {value}\n")
+        };
+        assert_eq!(
+            load(&source("\"off\"")).expect("off").providers[0].patience,
+            super::Patience::Off
+        );
+        assert_eq!(
+            load(&source("240")).expect("cap").providers[0]
+                .patience
+                .duration(),
+            Some(Duration::from_secs(240))
+        );
+        load(&source("300")).expect_err("patience over the cap is refused at load");
+    }
+
+    #[test]
+    fn b11_route_patience_is_validated_like_a_providers() {
+        let source = |value: &str| {
+            format!(
+                "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nupstreams = [{{ provider = \"one\" }}]\n{value}"
+            )
+        };
+        assert_eq!(
+            load(&source("")).expect("default").routes[0].patience,
+            super::Patience::Default
+        );
+        assert_eq!(
+            load(&source("patience = \"off\"\n")).expect("off").routes[0].patience,
+            super::Patience::Off
+        );
+        assert_eq!(
+            load(&source("patience = 240\n")).expect("cap").routes[0]
+                .patience
+                .duration(),
+            Some(Duration::from_secs(240))
+        );
+        let error = load(&source("patience = 300\n")).expect_err("over the cap");
+        assert!(
+            error.to_string().contains("route `demo` patience"),
+            "{error}"
+        );
     }
 
     #[test]

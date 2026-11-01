@@ -834,9 +834,16 @@ fn generative_effort(object: &Object) -> Option<Effort> {
     }
     let budget = config
         .get("thinkingBudget")
-        .and_then(Value::as_u64)
-        .or_else(|| config.get("thinking_budget").and_then(Value::as_u64));
-    (budget == Some(0)).then_some(Effort::None)
+        .and_then(Value::as_i64)
+        .or_else(|| config.get("thinking_budget").and_then(Value::as_i64))?;
+    Some(match budget {
+        ..0 => Effort::Medium,
+        0 => Effort::None,
+        1..=4096 => Effort::Low,
+        4097..=12000 => Effort::Medium,
+        12001..=24000 => Effort::High,
+        _ => Effort::Xhigh,
+    })
 }
 
 fn encode_generation(params: &GenerationParams) -> Result<Option<Value>, CodecError> {

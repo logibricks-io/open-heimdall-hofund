@@ -1524,3 +1524,198 @@ async fn v5_chat_token_field_is_retried_and_learned() {
         assert_eq!(body["max_completion_tokens"], 4096);
     }
 }
+
+const D10_REFUSAL: &str = r#"{"error":{"code":null,"message":"[ObjectParam] [input[2].internal_chat_message_metadata_passthrough.content_token_count] [unknown_parameter] Unknown parameter: 'input[2].internal_chat_message_metadata_passthrough.content_token_count'.","param":null,"type":"invalid_request_error"}}"#;
+
+fn d10_request() -> Request {
+    OpenAiResponses
+        .decode_request(
+            br#"{"model":"gpt-6","stream":false,"input":[
+            {"type":"message","role":"developer","content":[{"type":"input_text","text":"be brief"}],"internal_chat_message_metadata_passthrough":{"turn_id":"t1","content_token_count":[3]}},
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"again"}],"internal_chat_message_metadata_passthrough":{"turn_id":"t2","content_item_kinds":["text"],"content_token_count":[1]}}
+            ]}"#,
+        )
+        .expect("request")
+}
+
+fn d10_success() -> Value {
+    json!({
+        "id": "r1",
+        "object": "response",
+        "status": "completed",
+        "output": [],
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    })
+}
+
+fn d10_has_token_count(body: &[u8]) -> bool {
+    let value: Value = serde_json::from_slice(body).expect("body");
+    value["input"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item.pointer("/internal_chat_message_metadata_passthrough/content_token_count")
+                .is_some()
+        })
+    })
+}
+
+#[tokio::test]
+async fn d10f_routed_responses_refused_member_is_dropped_and_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(RefuseOnce {
+            refusal: D10_REFUSAL,
+            success: d10_success(),
+            calls: AtomicUsize::new(0),
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompat::new(
+        OpenAiProtocol::Responses,
+        Endpoint::new("relay", server.uri()),
+    )
+    .expect("provider");
+    provider
+        .execute(d10_request(), "openai-responses")
+        .await
+        .expect("retry");
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 2);
+    assert!(d10_has_token_count(&requests[0].body));
+    assert!(!d10_has_token_count(&requests[1].body));
+    let retry: Value = serde_json::from_slice(&requests[1].body).expect("retry");
+    assert_eq!(retry["input"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        retry.pointer("/input/0/internal_chat_message_metadata_passthrough/turn_id"),
+        Some(&json!("t1"))
+    );
+    assert_eq!(
+        retry.pointer("/input/2/internal_chat_message_metadata_passthrough/content_item_kinds/0"),
+        Some(&json!("text"))
+    );
+    assert_eq!(
+        retry.pointer("/input/2/content/0/text"),
+        Some(&json!("again"))
+    );
+}
+
+#[tokio::test]
+async fn d10g_routed_learned_member_is_left_out_next_time() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(RefuseOnce {
+            refusal: D10_REFUSAL,
+            success: d10_success(),
+            calls: AtomicUsize::new(0),
+        })
+        .expect(3)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompat::new(
+        OpenAiProtocol::Responses,
+        Endpoint::new("relay", server.uri()),
+    )
+    .expect("provider");
+    for _ in 0..2 {
+        provider
+            .execute(d10_request(), "openai-responses")
+            .await
+            .expect("completion");
+    }
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 3);
+    assert!(d10_has_token_count(&requests[0].body));
+    assert!(!d10_has_token_count(&requests[1].body));
+    assert!(!d10_has_token_count(&requests[2].body));
+}
+
+#[tokio::test]
+async fn d10h_routed_second_refusal_of_same_member_is_returned() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(D10_REFUSAL))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompat::new(
+        OpenAiProtocol::Responses,
+        Endpoint::new("relay", server.uri()),
+    )
+    .expect("provider");
+    let error = provider
+        .execute(d10_request(), "openai-responses")
+        .await
+        .err()
+        .expect("second refusal");
+    assert_eq!(error.status, Some(400));
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+}
+
+#[test]
+fn d10i_refusal_wordings_match_the_reference() {
+    for (body, expected) in [
+        (D10_REFUSAL, Some("content_token_count")),
+        (
+            "Codex: [ObjectParam] [input[55].internal_chat_message_metadata_passthrough.content_token_count] [unknown_parameter] Unknown parameter: 'input[55].internal_chat_message_metadata_passthrough.content_token_count'.",
+            Some("content_token_count"),
+        ),
+        (
+            r#"{"error":{"message":"Unknown parameter: 'input[0].internal_chat_message_metadata_passthrough.content_item_metadata'.","param":"input[0].internal_chat_message_metadata_passthrough.content_item_metadata","code":"unknown_parameter"}}"#,
+            Some("content_item_metadata"),
+        ),
+        (
+            r#"{"error":{"message":"Unknown parameter: 'input[4].internal_chat_message_metadata_passthrough'.","code":"unknown_parameter"}}"#,
+            Some(""),
+        ),
+        (
+            r#"{"error":{"message":"Unknown parameter: '\u0069nput[0].internal_chat_message_metadata_passthrough.content_item_metadata'.","code":"unknown_parameter"}}"#,
+            Some("content_item_metadata"),
+        ),
+    ] {
+        assert_eq!(
+            hofund_quirks::refused_passthrough(body.as_bytes()).as_deref(),
+            expected,
+            "{body}"
+        );
+    }
+    for body in [
+        r#"{"error":{"message":"Unknown parameter: 'input[0].foo'.","code":"unknown_parameter"}}"#,
+        r#"{"error":{"message":"Invalid type for 'input[0].internal_chat_message_metadata_passthrough.turn_id': expected a string.","code":"invalid_type"}}"#,
+        r#"{"error":{"message":"Unsupported parameter: 'store'."}}"#,
+    ] {
+        assert_eq!(
+            hofund_quirks::refused_passthrough(body.as_bytes()),
+            None,
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn d10j_cross_protocol_request_is_untouched() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(D10_REFUSAL))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompat::new(
+        OpenAiProtocol::Responses,
+        Endpoint::new("relay", server.uri()),
+    )
+    .expect("provider");
+    let error = provider
+        .execute(d10_request(), "anthropic-messages")
+        .await
+        .err()
+        .expect("cross-protocol refusal");
+    assert_eq!(error.status, Some(400));
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 1);
+    assert!(!d10_has_token_count(&requests[0].body));
+}

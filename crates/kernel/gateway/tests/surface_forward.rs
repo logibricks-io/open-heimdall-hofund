@@ -152,6 +152,7 @@ fn fixture(members: &[(&'static str, Option<&str>, Answer)]) -> Fixture {
             wire_model: wire.map(str::to_owned),
             max_output_tokens: None,
             context_window: None,
+            patience: Some(std::time::Duration::from_secs(60)),
             weight: 1,
             free: false,
             nearly_spent: false,

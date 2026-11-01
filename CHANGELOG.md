@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Route pools now wait out busy members (P0-3b11). Once every member has
+  failed in a way that passes, the pool asks them again: ready members
+  first, then those still waiting on a vendor's `Retry-After`, with pauses
+  doubling from 2 to 30 seconds (never shorter than the soonest ready time),
+  for at most twelve rounds within the route's `patience` (60 seconds by
+  default, at most 240, or `off`). A last member newly out of quota or credit
+  still lets earlier busy members be waited for; one already resting on
+  quota or credit ends the request. Streamed requests are held with SSE
+  comments, as for direct provider requests. Members use the route's
+  patience, not their provider's.
+- Responses failures caused by a 413 byte cap or a context overflow now emit
+  `response.failed` with code `context_length_exceeded`, allowing the client to
+  compact rather than reconnect (D-1). Codex receives this in its requested
+  stream even when routing fails before the first event; other clients keep
+  their pre-stream HTTP errors, and other protocols are unchanged.
+- Asked-model relabelling is now verified end to end for Chat, Messages,
+  Responses, and Generative Language, streamed and whole, for translated and
+  raw member replies; equal asked/wire names retain dated upstream ids (D-9).
+- Codex passthrough metadata refusals now use one shared parser and
+  byte-preserving editor on both routed Responses calls and Codex backend
+  relays. A 400 `unknown_parameter` retries once per rejected member, omitting
+  that member (or the whole passthrough) on every input item and remembering
+  the refusal per provider instance or upstream base. Repeated, unrelated,
+  and cross-protocol refusals do not trigger this retry (D-10).
+- Messages translation keeps client `cache_control` marks and TTLs, omits
+  marks on thinking blocks, strips complete thought-signature suffixes from
+  call and result ids, and checks required tool choices (D-12). Generative
+  Language `thinkingConfig` now records levels and budgets as request effort,
+  including snake_case fields and dynamic budgets (D-13).
+- Thinking-only refusal handover (P0-3b3 b9, #496): streamed Anthropic
+  Messages, Chat Completions, and Responses requests now try the next member
+  after a refusal or refusal error when only reasoning has been emitted, then
+  splice that member's answer into the same reply. Anthropic blocks are closed
+  and reindexed, Responses start frames are dropped while output and sequence
+  indexes continue, and Chat chunks pass through. Text or tool output commits
+  the stream, last-member and no-output behavior is unchanged, repeated
+  handovers accumulate indexes, and policy refusals do not cool the member.
+- Measurement routing (P0-2b): `smart`, `usage`, `pace`, `fast`, and `cheap`
+  now use live allowance, token, speed, and price measurements. Smart handles
+  allowance tiers, renewals, credit lapse and spending, and per-provider/unit
+  wallets; usage decays tokens by one hour; pace ranks remaining allowance per
+  hour; fast estimates short replies and probes unknown members; cheap compares
+  current catalog and cache-read prices. Streamed replies record first-content
+  latency in the migrated usage ledger, and daemon measurements survive router
+  snapshot replacement. Measurements are read only for strategies that use
+  them, over a bounded window backed by a new `created_unix` ledger index.
+
 - A connection failure while this computer has no network no longer rests
   route members: unless an upstream answered in the last 15 seconds, the daemon
   checks for a route out and dials other providers, and an offline verdict
@@ -17,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gives the model, so a vague 400 or 5xx on a request well past that window
   (1.2 times) is reported as too long, and after an overflow a member known to
   be too small is skipped (P0-3b3 b10, #490).
+
 - Quota windows (P0-5a): a kernel quota store keeps each subscription
   card with its windows, absolute reset times, `runsOutAt`, cached `asOf`
   fallbacks, deferred reads, and last-served times from the usage ledger,
@@ -48,6 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Chat token fields now follow the original request and OpenAI's
   `max_completion_tokens` convention (V-5). A refusal naming the other field
   triggers one retry and is remembered per provider for subsequent requests.
+- Single-provider patience and background recovery (P0-3b3): direct provider
+  requests retry busy failures and short rate limits with pauses doubling to 30
+  seconds, bounded by per-provider `patience` (60 seconds by default, at most
+  240 seconds, or `off`). Streaming clients receive SSE comments during waits,
+  disconnects record 499 without another attempt, and terminal failures pass
+  through. Kernel API keys resting after generic outages now answer background
+  model-list probes after 1, 2, 5, then 10 minutes; a response lifts the rest,
+  while a failure within 30 minutes suppresses probes until a real answer.
 - Per-model rests (P0-3b2): model-cooling and unserved-model refusals now rest
   only the affected member/model pair, with independent rate, generic, and
   persisted credit ladders. Routing probes are selected per pair, model success
@@ -58,8 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   weighted round robin, and free-first ordering, with per-route and per-account
   weights, manual/catalog/zero-price free detection, and strategy state kept
   across configuration snapshots. `smart`, `usage`, `pace`, `fast`, and `cheap`
-  are registered and validated but preserve listed order until P0-2b. Ready
-  members retain strategy order before the single cooling probe, and
+  are registered and validated at configuration load. Ready members retain
+  strategy order before the single cooling probe, and
   `hofund routes` prints each route's strategy.
 - Conversation stays (P0-2c1): providers, subscriptions, and routes accept
   `stays = "auto" | "session" | "turn" | "off" | "strict"`. Automatic affinity
@@ -777,6 +833,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A reasoning item handed to a Responses client is now one summary and no
+  content: a reply item is `{id, type, status, summary}` with an `rs_` id, and
+  a stream announces it with `summary: []` and then sends
+  `response.reasoning_summary_part.added`, `reasoning_summary_text.delta`,
+  `reasoning_summary_text.done` and `reasoning_summary_part.done` instead of
+  `response.reasoning_text.delta`. A sealed item that carries content parts,
+  another vendor's shape, is made into such an item (its text, else its
+  summaries, as the one summary, and no seal), keeping the id its events
+  carried; the upstream's own sealed item still goes back as it came. A
+  Responses reply relayed as it came is put through the same rule line by
+  line, every other byte and sequence number kept (D-20).
+- Dependencies: `tokio-tungstenite` 0.30, `base64` 0.23, and `toml` 1.1 in the
+  workspace crates, and the `actions/upload-artifact` v7 and
+  `actions/download-artifact` v8 release workflow actions.
+
 - Failover decisions (P0-3c) follow the reference order: the default
   `failover.statuses` is 401, 402, 403, 404, 408, 429, and 500 to 599; retired
   models, edge blocks, credit, quota, unserved models, refusals, request
@@ -1005,6 +1076,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before a short name is rewritten.
 
 ### Fixed
+
+- A shorter failure no longer shortens a longer rest: a 429's one-minute rate
+  rest arriving beside a 402's half-hour credit rest leaves the credit rest in
+  place, and a tie replaces it. A quota or credit rest that was only a guess
+  (the refusal named no time) still gives way to a same-cause refusal whose
+  reset or retry time the vendor names, though it is sooner. A credit
+  refusal whose rest is kept leaves the credit ladder's rung where it was
+  (D-19, ruling R-494b, superseding R-494).
+
+- A relayed stream whose upstream read fails mid-line no longer sends the
+  client a half event. Only ended lines go out as they arrive; the unfinished
+  last line goes out when the stream ends cleanly and is dropped when the read
+  fails, unless it is a whole `data:` line (`[DONE]` or valid JSON) short of
+  its line end. The error event starts on a frame of its own, and a severed
+  Chat Completions stream ends with `data: [DONE]` after it (D-21).
 
 - Goose model picks retain the config's current or legacy layout, remove stale
   flat keys from the current layout, and clear/disconnect by removing only

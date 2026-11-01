@@ -6,10 +6,13 @@ use std::time::Duration;
 
 use hofund_plugin_api::{Body, BodyStream, PluginError};
 use hofund_plugin_sdk::json::{self, Value, json};
-use hofund_plugin_sdk::{HttpRequest, HttpResponse, async_trait, text_response};
+use hofund_plugin_sdk::{
+    HttpRequest, HttpResponse, async_trait, refused_passthrough, text_response, without_passthrough,
+};
 
 use super::backend::{
     ACCOUNT_HEADER, ACCOUNT_MESSAGE, ACCOUNTS, BASES, Bases, COMPACT_MESSAGE, LIST_WAIT, PREFIX,
+    State,
 };
 use super::tests::block_on;
 use super::{Kernel, dispatch};
@@ -1224,4 +1227,156 @@ fn a_relayed_turn_that_names_an_account_is_refused() {
         ),
     );
     assert_eq!(status, 200, "only a turn is refused");
+}
+
+const PASSTHROUGH_REFUSAL: &str = r#"{"error":{"message":"[ObjectParam] [input[2].internal_chat_message_metadata_passthrough.content_token_count] [unknown_parameter] Unknown parameter: 'input[2].internal_chat_message_metadata_passthrough.content_token_count'.","type":"invalid_request_error"}}"#;
+
+fn passthrough_turn() -> String {
+    json!({
+        "model": "gpt-5",
+        "stream": false,
+        "input": [
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "be brief"}], "internal_chat_message_metadata_passthrough": {"turn_id": "t1", "content_token_count": [3]}},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "again"}], "internal_chat_message_metadata_passthrough": {"turn_id": "t2", "content_item_kinds": ["text"], "content_token_count": [1]}}
+        ]
+    })
+    .to_string()
+}
+
+fn passthrough_request(body: &str) -> HttpRequest {
+    request(
+        "POST",
+        "/backend-api/codex/responses",
+        &[("authorization", "Bearer sk-test")],
+        body,
+    )
+}
+
+fn ask_state(stub: &Stub, state: &State, request: HttpRequest) -> (u16, String, String) {
+    block_on(async {
+        let response = super::backend::serve_with_state(stub, TEST_BASES, request, state).await;
+        read(response).await
+    })
+}
+
+fn has_token_count(body: &[u8]) -> bool {
+    let value: Value = json::from_slice(body).expect("request JSON");
+    value["input"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item.pointer("/internal_chat_message_metadata_passthrough/content_token_count")
+                .is_some()
+        })
+    })
+}
+
+#[test]
+fn d10a_refused_member_is_dropped_retried_and_remembered() {
+    let stub = Stub::default()
+        .sending(answer(400, PASSTHROUGH_REFUSAL))
+        .sending(answer(200, "ok"))
+        .sending(answer(200, "ok again"));
+    let state = State::default();
+    let (status, _, body) = ask_state(&stub, &state, passthrough_request(&passthrough_turn()));
+    assert_eq!((status, body.as_str()), (200, "ok"));
+    let sent = stub.sent();
+    assert_eq!(sent.len(), 2);
+    assert!(has_token_count(&sent[0].body));
+    assert!(!has_token_count(&sent[1].body));
+    let retry: Value = json::from_slice(&sent[1].body).expect("retry JSON");
+    assert_eq!(retry["input"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        retry.pointer("/input/0/internal_chat_message_metadata_passthrough/turn_id"),
+        Some(&json!("t1"))
+    );
+    assert_eq!(
+        retry.pointer("/input/2/internal_chat_message_metadata_passthrough/content_item_kinds/0"),
+        Some(&json!("text"))
+    );
+    assert_eq!(
+        retry.pointer("/input/2/content/0/text"),
+        Some(&json!("again"))
+    );
+
+    let (status, _, body) = ask_state(&stub, &state, passthrough_request(&passthrough_turn()));
+    assert_eq!((status, body.as_str()), (200, "ok again"));
+    let sent = stub.sent();
+    assert_eq!(sent.len(), 1);
+    assert!(!has_token_count(&sent[0].body));
+}
+
+#[test]
+fn d10b_a_second_refusal_is_not_looped() {
+    let stub = Stub::default()
+        .sending(answer(400, PASSTHROUGH_REFUSAL))
+        .sending(answer(400, PASSTHROUGH_REFUSAL));
+    let (status, _, body) = ask_state(
+        &stub,
+        &State::default(),
+        passthrough_request(&passthrough_turn()),
+    );
+    assert_eq!(status, 400);
+    assert_eq!(body, PASSTHROUGH_REFUSAL);
+    assert_eq!(stub.sent().len(), 2);
+}
+
+#[test]
+fn d10c_refusal_wordings_are_specific_to_the_passthrough() {
+    assert_eq!(
+        refused_passthrough(PASSTHROUGH_REFUSAL.as_bytes()),
+        Some("content_token_count".to_owned())
+    );
+    assert_eq!(
+        refused_passthrough(
+            br#"{"error":{"message":"Unknown parameter: 'input[0].internal_chat_message_metadata_passthrough.content_item_metadata'.","code":"unknown_parameter"}}"#
+        ),
+        Some("content_item_metadata".to_owned())
+    );
+    assert_eq!(
+        refused_passthrough(
+            br#"{"error":{"message":"Unknown parameter: 'input[4].internal_chat_message_metadata_passthrough'.","code":"unknown_parameter"}}"#
+        ),
+        Some(String::new())
+    );
+    for body in [
+        r#"{"error":{"message":"Unknown parameter: 'input[0].foo'.","code":"unknown_parameter"}}"#,
+        r#"{"error":{"message":"Invalid type for 'input[0].internal_chat_message_metadata_passthrough.turn_id'.","code":"invalid_type"}}"#,
+        r#"{"error":{"message":"Unsupported parameter: 'store'."}}"#,
+    ] {
+        assert_eq!(refused_passthrough(body.as_bytes()), None, "{body}");
+    }
+}
+
+#[test]
+fn d10d_the_whole_passthrough_can_be_left_out() {
+    let body = passthrough_turn();
+    let (stripped, changed) = without_passthrough(body.as_bytes(), "");
+    assert!(changed);
+    let value: Value = json::from_slice(&stripped).expect("stripped JSON");
+    assert_eq!(value["input"].as_array().map(Vec::len), Some(3));
+    assert!(value["input"].as_array().is_some_and(|items| {
+        items.iter().all(|item| {
+            item.get("internal_chat_message_metadata_passthrough")
+                .is_none()
+        })
+    }));
+    assert_eq!(
+        value.pointer("/input/2/content/0/text"),
+        Some(&json!("again"))
+    );
+    assert!(!without_passthrough(&stripped, "").1);
+}
+
+#[test]
+fn d10e_an_unrelated_refusal_is_returned_without_a_retry() {
+    let refusal =
+        r#"{"error":{"message":"Unknown parameter: 'input[0].foo'.","code":"unknown_parameter"}}"#;
+    let stub = Stub::default().sending(answer(400, refusal));
+    let (status, _, body) = ask_state(
+        &stub,
+        &State::default(),
+        passthrough_request(&passthrough_turn()),
+    );
+    assert_eq!((status, body.as_str()), (400, refusal));
+    assert_eq!(stub.sent().len(), 1);
 }

@@ -568,6 +568,18 @@ async fn send<'a>(
         let retry_after = explicit_retry_after(response.headers());
         let reset_after = reset_after(response.headers());
         let bytes = response.bytes().await.unwrap_or_default();
+        if status.as_u16() == 400
+            && !cross_protocol
+            && codec.id() == "openai-responses"
+            && let Some(field) = hofund_quirks::refused_passthrough(&bytes)
+        {
+            let (stripped, changed) = hofund_quirks::without_passthrough(&body, &field);
+            if changed && upstream.state.learn_passthrough(&field) {
+                body = stripped;
+                response = send_json(upstream, url, body.clone()).await?;
+                continue;
+            }
+        }
         if status.as_u16() == 400 && !root_retried && hofund_quirks::root_union_refusal(&bytes) {
             let (folded, changed) = hofund_quirks::fold_encoded(codec.id(), &body);
             if changed {

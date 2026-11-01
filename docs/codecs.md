@@ -46,7 +46,11 @@ Messages `output_config.effort` publishes `low` through `max`
 (<https://platform.claude.com/docs/en/build-with-claude/effort>).
 Generative Language `thinkingConfig.thinkingLevel` publishes `minimal`
 through `high`
-(<https://ai.google.dev/gemini-api/docs/thinking>).
+(<https://ai.google.dev/gemini-api/docs/thinking>). On decode, a positive
+`thinkingBudget` maps to low through 4096, medium through 12000, high through
+24000, and xhigh above that. A negative dynamic budget maps to medium, zero to
+none, and `includeThoughts` alone does not request effort. The camelCase and
+snake_case field spellings are both read.
 `ultra` is read as `max` and written as `max`. Levels are not clamped to a
 model; this version has no catalog.
 
@@ -102,8 +106,15 @@ The provider drops every extension bag when the inbound protocol id differs
 from the outbound codec id, before it encodes the upstream body and again on
 the decoded response and stream events. Raw events the decoder does not model
 are dropped on that path too, after a leading upstream failure has been turned
-into an error. A same-protocol call keeps the bag. A caller that encodes with
-a different protocol without going through the provider should call
+into an error. A same-protocol call keeps the bag. On same-protocol Responses
+calls, a 400 naming an unknown member of
+`internal_chat_message_metadata_passthrough` is retried once without that
+member on every input item, or without the whole object when the refusal names
+it directly. The provider remembers refused members and omits them before
+later sends; removal preserves every other byte, repeated refusals are not
+retried, and cross-protocol requests do not use this rule. The refusal parser
+accepts the two upstream wordings and decodes JSON `\u` escapes before matching.
+A caller that encodes with a different protocol without going through the provider should call
 `Request::strip_extensions` (and the response and event equivalents) first.
 Otherwise foreign fields, including caller identifiers, are copied onto the
 other protocol's JSON.
@@ -302,7 +313,9 @@ already has the prefix is kept. Output item ids start with `msg_`, `rs_`,
 `fc_`, or `ctc_` and then a suffix of time and a process counter, so two
 items in one response, and two responses, do not share an id. A unary output
 item also has `status: completed` when the caller did not set one. A sealed
-reasoning item is written back as stored. A same-protocol response keeps an
+reasoning item is written back as stored, unless it carries content parts
+(another vendor's item), which is made over as described below. A
+same-protocol response keeps an
 item id the upstream already sent, on the unary body and on the stream. The
 stream copies that id onto the block (`item_id`) and the encoder prefers it
 over a fresh one.
@@ -376,7 +389,14 @@ Chat Completions. Anthropic encode drops it.
 Anthropic thinking is a `thinking` block (`text` + optional `signature`) or a
 `redacted_thinking` block (`data`). An empty signature is omitted and decodes
 as absent. When a thinking part is both redacted and readable, encode writes
-`redacted_thinking` and the readable text is not on the wire.
+`redacted_thinking` and the readable text is not on the wire. Same-protocol
+translation keeps client `cache_control` marks and TTLs on ordinary content,
+but does not write a mark on either thinking block type and adds no marks of
+its own. An invalid sequence that moves from a five-minute mark to a
+one-hour mark drops the client marks instead of rejecting the translation.
+A complete inline thought-signature suffix is removed from tool-call
+and tool-result ids on request decode; a truncated suffix is left alone.
+`tool_choice: any` is rejected when no tools are declared.
 
 Chat Completions stores readable thinking in one `reasoning_content` string.
 Several readable parts are concatenated, in order, with no separator. Signatures
@@ -596,6 +616,25 @@ stays an input item.
   `encrypted_content` onto `sealed_item` on the thinking block's open and
   close events. Assemble keeps that object on the thinking part, and the
   stream encoder writes it back. An empty seal is ignored.
+
+  A reasoning item the gateway hands a client (a reply, not a request) has
+  one `summary_text` summary and no content: `{id, type, status, summary}`
+  with an `rs_` id. A stream announces it as `{id, type, status:
+  "in_progress", summary: []}`, never with a seal, then sends
+  `response.reasoning_summary_part.added` before the first delta,
+  `response.reasoning_summary_text.delta` per delta, and
+  `reasoning_summary_text.done` and `reasoning_summary_part.done` before the
+  item's done event. A sealed item with a non-empty `content` array is
+  another vendor's: it is made into the same shape, its `reasoning_text`
+  (else its summaries, joined) as the one summary, its id kept (a fresh
+  `rs_` id when it has none, and on a stream the id its events carried), its
+  content and seal dropped. A client may send the item back to an upstream
+  that refuses a reasoning item with content and cannot open another
+  vendor's seal. A Responses reply relayed raw goes through the same rule:
+  each `data:` line whose event `item`, `response.output` or response-object
+  `output` holds such an item is rewritten, and every other line and byte,
+  sequence numbers included, stays (`reasoning_tidy.rs`). A request item
+  still carries its text as `reasoning_text` content.
 - Any other item type becomes a user message with one unknown part. Encode
   nests that part inside a message content array, so the wire form changes and
   the IR stays stable.

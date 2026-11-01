@@ -19,7 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::{FutureExt, Stream, StreamExt};
 use hofund_plugin_api::{
-    BodyStream, Completion, CountOutcome, MemberId, MemberKey, PluginError, PresetId,
+    BodyStream, Completion, CountOutcome, ListQuery, MemberId, MemberKey, PluginError, PresetId,
     QuotaObservation, RawAnswer, RawBody, Request,
 };
 use hofund_plugin_host::ObserveBackend;
@@ -29,7 +29,8 @@ use hofund_provider::{
 };
 use hofund_router::{
     Attempt, AttemptHook, Cooldowns, FailoverPolicy, Hop, Member, MemberAttempt, Route, Router,
-    Snapshot, strategy::StrategyState,
+    Snapshot,
+    strategy::{Measurements, StrategyState},
 };
 use tower::Service;
 
@@ -46,6 +47,8 @@ pub(crate) struct BuiltProvider {
     /// Preset id from configuration. Empty when the provider has no preset.
     pub preset_id: String,
     pub fingerprint: String,
+    pub patience: Option<Duration>,
+    pub kernel: bool,
     /// API root the provider is reached at. Empty when unknown.
     pub base_url: String,
 }
@@ -58,6 +61,7 @@ pub(crate) struct Table {
     offline: Arc<Offline>,
     strategies: Arc<StrategyState>,
     affinity: hofund_router::affinity::AffinityState,
+    measurements: Mutex<Option<Arc<dyn Measurements>>>,
     snapshot: Snapshot,
 }
 
@@ -67,6 +71,7 @@ struct HopSpec {
     max_output_tokens: Option<u64>,
     context_window: Option<u64>,
     routing: String,
+    patience: Option<Duration>,
     weight: u64,
     free: bool,
     stays: hofund_router::affinity::Stays,
@@ -81,6 +86,8 @@ struct LiveMember {
     protocol: &'static str,
     route: hofund_provider::AttemptRoute,
     subscription: bool,
+    patience: Option<Duration>,
+    kernel: bool,
     failed: Arc<AtomicU64>,
     stack: Cooldown<Guard<ProviderCall>>,
 }
@@ -276,6 +283,7 @@ fn build_table(
         offline: Arc::new(Offline::new(network)),
         strategies,
         affinity,
+        measurements: Mutex::new(None),
         snapshot,
     });
     let stored = build_specs(&table, built, routes)?;
@@ -338,6 +346,7 @@ fn build_specs(
                 max_output_tokens: hop.max_output_tokens,
                 context_window: hop.context_window,
                 routing: hop.routing,
+                patience: hop.patience,
                 weight: hop.weight,
                 free: hop.free,
                 stays: hop.stays,
@@ -364,6 +373,8 @@ pub(crate) struct PlannedHop {
     /// list, when it is known.
     pub context_window: Option<u64>,
     pub routing: String,
+    /// The route's patience, the same on every hop of one route.
+    pub patience: Option<Duration>,
     pub weight: u64,
     pub free: bool,
     pub stays: hofund_router::affinity::Stays,
@@ -371,6 +382,17 @@ pub(crate) struct PlannedHop {
 }
 
 impl Table {
+    pub(crate) fn members(&self) -> Vec<Arc<dyn Member>> {
+        let hops = self.hops.lock().expect("membership");
+        let mut members = BTreeMap::new();
+        for spec in hops.values().flatten() {
+            members
+                .entry(spec.member.id.to_string())
+                .or_insert_with(|| Arc::clone(&spec.member) as Arc<dyn Member>);
+        }
+        members.into_values().collect()
+    }
+
     pub(crate) fn replace(
         self: &Arc<Self>,
         built: &BTreeMap<String, BuiltProvider>,
@@ -382,6 +404,11 @@ impl Table {
         *self.policy.lock().expect("failover policy") = policy;
         self.publish();
         Ok(())
+    }
+
+    pub(crate) fn set_measurements(&self, measurements: Arc<dyn Measurements>) {
+        *self.measurements.lock().expect("measurements") = Some(measurements);
+        self.publish();
     }
 
     pub(crate) fn publish(&self) {
@@ -397,6 +424,7 @@ impl Table {
                         wire_model: spec.wire_model.clone(),
                         max_output_tokens: spec.max_output_tokens,
                         context_window: spec.context_window,
+                        patience: spec.member.patience,
                         weight: spec.weight,
                         free: spec.free,
                         nearly_spent: false,
@@ -407,21 +435,35 @@ impl Table {
                 let stays = specs
                     .first()
                     .map_or(hofund_router::affinity::Stays::Auto, |spec| spec.stays);
+                let patience = specs
+                    .first()
+                    .map_or(Some(Duration::from_secs(60)), |spec| spec.patience);
                 (
                     model.clone(),
-                    Route::new(list).with_routing(routing).with_stays(stays),
+                    Route::new(list)
+                        .with_routing(routing)
+                        .with_stays(stays)
+                        .with_patience(patience),
                 )
             })
             .collect();
         let policy = self.policy.lock().expect("failover policy").clone();
-        let router = Router::from_routes(routes, policy)
+        let mut router = Router::from_routes(routes, policy)
             .with_strategies(Arc::clone(&self.strategies))
             .with_cooldowns(Arc::clone(&self.cooldowns))
             .with_affinity(self.affinity.clone());
-        let router = match &self.quotas {
-            Some(quotas) => router.with_quotas(Arc::clone(quotas)),
-            None => router,
-        };
+        if let Some(quotas) = &self.quotas {
+            router = router.with_quotas(Arc::clone(quotas));
+        }
+        if let Some(measurements) = self
+            .measurements
+            .lock()
+            .expect("measurements")
+            .as_ref()
+            .cloned()
+        {
+            router = router.with_measurements(measurements);
+        }
         self.snapshot.store(router);
     }
 }
@@ -463,6 +505,8 @@ impl LiveMember {
             protocol: built.protocol,
             route: built.adapter.attempt_route(),
             subscription,
+            patience: built.patience,
+            kernel: built.kernel,
             failed,
             stack,
         }
@@ -493,6 +537,16 @@ impl Member for LiveMember {
 
     fn protocol(&self) -> &str {
         self.protocol
+    }
+
+    fn background_probe(&self) -> bool {
+        self.kernel
+    }
+
+    fn learns_allowance(&self) -> bool {
+        // As the reference: a Claude subscription tells what it has left as
+        // it answers, so one not yet known is tried first to learn it.
+        learns_allowance(self.subscription, &self.plugin_id)
     }
 
     fn attempt(&self) -> MemberAttempt {
@@ -545,6 +599,16 @@ impl Member for LiveMember {
             Ok(Out::Forward(_)) => Err(PluginError::internal("member returned an answer")),
             Err(error) => Err(error),
         }
+    }
+
+    async fn list_models(&self) -> Result<hofund_router::ModelListAnswer, PluginError> {
+        self.stack
+            .inner
+            .inner
+            .provider
+            .list_models(&ListQuery::new())
+            .await
+            .map(|_| hofund_router::ModelListAnswer)
     }
 
     async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, PluginError> {
@@ -1063,9 +1127,16 @@ fn kebab_of(value: &str) -> String {
     }
 }
 
+/// Whether an account not yet measured is tried first to learn its
+/// allowance: as the reference, only a Claude subscription reports what it
+/// has left as it answers.
+fn learns_allowance(subscription: bool, plugin_id: &str) -> bool {
+    subscription && plugin_id == "claude"
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BuiltProvider, PlannedHop, open, open_checking};
+    use super::{BuiltProvider, PlannedHop, learns_allowance, open, open_checking};
     use crate::offline::NetworkCheck;
     use std::collections::BTreeMap;
     use std::future::Future;
@@ -1084,6 +1155,14 @@ mod tests {
             CooldownPolicy::default(),
             Arc::new(|| tokio::time::Instant::now().into_std()),
         ))
+    }
+
+    #[test]
+    fn b1f_only_an_unmeasured_claude_subscription_learns_its_allowance() {
+        assert!(learns_allowance(true, "claude"));
+        assert!(!learns_allowance(true, "codex"));
+        assert!(!learns_allowance(true, "gemini"));
+        assert!(!learns_allowance(false, "claude"));
     }
 
     #[test]
@@ -1159,6 +1238,8 @@ mod tests {
                 plugin_id: "boom".to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                patience: Some(Duration::from_secs(60)),
+                kernel: true,
                 base_url: String::new(),
             },
         );
@@ -1173,6 +1254,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
@@ -1254,6 +1336,8 @@ mod tests {
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: "openai".to_owned(),
                 fingerprint: String::new(),
+                patience: Some(Duration::from_secs(60)),
+                kernel: true,
                 base_url: String::new(),
             },
         );
@@ -1268,6 +1352,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
@@ -1340,6 +1425,8 @@ mod tests {
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                patience: Some(Duration::from_secs(60)),
+                kernel: true,
                 base_url: String::new(),
             },
         );
@@ -1354,6 +1441,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
@@ -1425,6 +1513,8 @@ mod tests {
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                patience: Some(Duration::from_secs(60)),
+                kernel: true,
                 base_url: String::new(),
             },
         );
@@ -1439,6 +1529,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
@@ -1480,6 +1571,8 @@ mod tests {
                     plugin_id: "openai-compat".to_owned(),
                     preset_id: String::new(),
                     fingerprint: String::new(),
+                    patience: Some(Duration::from_secs(60)),
+                    kernel: true,
                     base_url: String::new(),
                 },
             );
@@ -1496,6 +1589,7 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                     stays: hofund_router::affinity::Stays::Auto,
@@ -1509,6 +1603,7 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                     stays: hofund_router::affinity::Stays::Auto,
@@ -1531,6 +1626,8 @@ mod tests {
             plugin_id: id.to_owned(),
             preset_id: String::new(),
             fingerprint: String::new(),
+            patience: Some(Duration::from_secs(60)),
+            kernel: true,
             base_url: String::new(),
         }
     }
@@ -1547,6 +1644,7 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                     stays: hofund_router::affinity::Stays::Auto,
@@ -1741,6 +1839,64 @@ mod tests {
         assert_eq!(routed.upstream_id, "first");
         assert_eq!(first_hits.load(Ordering::SeqCst), 2);
         assert_eq!(second_hits.load(Ordering::SeqCst), 3);
+    }
+
+    struct Paused;
+
+    impl hofund_router::WaitHook for Paused {
+        fn wait(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(tokio::time::sleep(duration))
+        }
+
+        fn now(&self) -> std::time::Instant {
+            tokio::time::Instant::now().into_std()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn b11_a_published_route_waits_by_its_own_patience() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "first".to_owned(),
+                scripted(
+                    "first",
+                    &first_hits,
+                    vec![Err(ProviderError::status(503, "busy")), Ok(raw_ok())],
+                ),
+            ),
+            (
+                "second".to_owned(),
+                scripted(
+                    "second",
+                    &second_hits,
+                    vec![Err(ProviderError::status(503, "busy"))],
+                ),
+            ),
+        ]);
+        // The route's 60 seconds cover the 2-second pause; a 1-second
+        // budget would end the request instead.
+        let (snapshot, _table) = super::open_with_table(
+            &built,
+            route(&["first", "second"]),
+            FailoverPolicy::default(),
+            cooldowns(),
+        )
+        .expect("snapshot");
+        let routed = snapshot
+            .load()
+            .dispatch_with_wait(
+                &Request::new("demo"),
+                "openai-chat",
+                None,
+                Some(Arc::new(Paused)),
+            )
+            .await
+            .expect("answered after the pause");
+        assert_eq!(routed.upstream_id, "first");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
     }
 
     fn windowed(hops: &[(&str, Option<u64>)]) -> BTreeMap<String, Vec<PlannedHop>> {

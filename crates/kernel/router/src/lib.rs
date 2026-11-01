@@ -1,8 +1,9 @@
 //! Ordered routing and failover across members.
 //!
 //! A model name maps to an ordered list of members. The next member is tried
-//! only when the current one fails before any content stream event or raw
-//! chunk has been produced. This crate does not name vendors or the plugin
+//! when the current one fails before any content stream event or raw chunk has
+//! been produced. A successful result also carries the untried route so the
+//! gateway can resume it after a thinking-only refusal. This crate does not name vendors or the plugin
 //! upstream and host types, and it does not read quirk data. It does not
 //! depend on `tower`.
 //! The daemon adapts each member into a service and wraps that service in the
@@ -14,6 +15,7 @@ mod attempt;
 mod cooldown;
 mod decision;
 mod member;
+mod patience;
 pub mod quota;
 mod snapshot;
 pub mod strategy;
@@ -30,7 +32,8 @@ use tracing::Instrument;
 pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
-pub use member::Member;
+pub use member::{Member, ModelListAnswer};
+pub use patience::WaitHook;
 pub use snapshot::Snapshot;
 
 /// Which failures may try the next member.
@@ -60,8 +63,9 @@ impl FailoverPolicy {
     ///
     /// Overflow is ruled out first. Listed statuses, transport failures, credit
     /// refusals, and the body-word classes then follow their independent rules.
-    /// Failover occurs only before a completion or first content stream event
-    /// is returned (`reference: internal/gateway/fallback.go:1487-1517`).
+    /// This policy judges failures before a completion or first content stream
+    /// event is returned (`reference: internal/gateway/fallback.go:1487-1517`).
+    /// A gateway resuming a route makes the separate thinking-only refusal decision.
     #[must_use]
     pub fn allows(&self, error: &PluginError) -> bool {
         decision::allows(error, self.connect_errors, &self.statuses)
@@ -80,6 +84,10 @@ pub struct Hop {
     pub max_output_tokens: Option<u64>,
     /// Input context window, when the route or catalog knows it.
     pub context_window: Option<u64>,
+    /// Retry budget for a direct request to this member's provider. Absent
+    /// disables patience. A request to a route pool uses [`Route::patience`]
+    /// for every member instead.
+    pub patience: Option<Duration>,
     /// Relative request share under weighted routing.
     pub weight: u64,
     /// Whether this model costs nothing on this member.
@@ -99,6 +107,7 @@ impl Hop {
             wire_model: None,
             max_output_tokens: None,
             context_window: None,
+            patience: Some(Duration::from_secs(60)),
             weight: 1,
             free: false,
             nearly_spent: false,
@@ -116,17 +125,29 @@ pub struct Route {
     pub routing: String,
     /// Conversation affinity for this pool.
     pub stays: affinity::Stays,
+    /// How long a request to this pool waits for members that failed in a
+    /// way that passes to come back. Absent disables the pool's patience.
+    pub patience: Option<Duration>,
 }
 
 impl Route {
-    /// A pool using smart routing and automatic affinity.
+    /// A pool using smart routing, automatic affinity, and the default
+    /// 60-second patience.
     #[must_use]
     pub fn new(hops: Vec<Hop>) -> Self {
         Self {
             hops,
             routing: "smart".to_owned(),
             stays: affinity::Stays::Auto,
+            patience: Some(Duration::from_secs(60)),
         }
+    }
+
+    /// Sets the pool's patience. `None` turns it off.
+    #[must_use]
+    pub fn with_patience(mut self, patience: Option<Duration>) -> Self {
+        self.patience = patience;
+        self
     }
 
     /// Sets the registered strategy name.
@@ -154,6 +175,7 @@ pub struct Router {
     strategies: Arc<strategy::StrategyState>,
     affinity: affinity::AffinityState,
     sealed: affinity::sealed::SealedState,
+    measurements: Option<Arc<dyn strategy::Measurements>>,
 }
 
 /// A counted input.
@@ -174,6 +196,14 @@ struct Resolved {
     pool: String,
     /// Strategy configured for this route pool.
     routing: String,
+    /// Retry budget: the pool's for a route, the provider's for a direct
+    /// request.
+    patience: Option<Duration>,
+    /// Whether the request named a route pool rather than one provider.
+    pool_asked: bool,
+    /// Per ordered hop: already resting out of its allowance (quota or
+    /// credit) when the request was planned.
+    spent: Vec<bool>,
     /// Conversation affinity configured for this route pool.
     stays: affinity::Stays,
 }
@@ -233,6 +263,7 @@ impl Router {
             strategies: Arc::new(strategy::StrategyState::with_builtins()),
             affinity: affinity::AffinityState::in_memory(),
             sealed: affinity::sealed::SealedState::default(),
+            measurements: None,
         }
     }
 
@@ -255,6 +286,13 @@ impl Router {
     #[must_use]
     pub fn with_strategies(mut self, strategies: Arc<strategy::StrategyState>) -> Self {
         self.strategies = strategies;
+        self
+    }
+
+    /// Supplies live allowance, usage, speed, and price measurements.
+    #[must_use]
+    pub fn with_measurements(mut self, measurements: Arc<dyn strategy::Measurements>) -> Self {
+        self.measurements = Some(measurements);
         self
     }
 
@@ -335,7 +373,7 @@ impl Router {
         inbound_protocol: &str,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, None, hook)
+        self.dispatch_inner(request, inbound_protocol, None, hook, None)
             .await
     }
 
@@ -351,7 +389,41 @@ impl Router {
         conversation: Option<&affinity::Conversation>,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, conversation, hook)
+        self.dispatch_inner(request, inbound_protocol, conversation, hook, None)
+            .await
+    }
+
+    /// Dispatches with attempt callbacks and a notification before patience waits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch_with_attempt`].
+    pub async fn dispatch_with_wait(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        hook: Option<Arc<dyn AttemptHook>>,
+        wait: Option<Arc<dyn WaitHook>>,
+    ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(request, inbound_protocol, None, hook, wait)
+            .await
+    }
+
+    /// Dispatches with conversation identity, attempt callbacks, and a
+    /// notification before patience waits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch_with_context`].
+    pub async fn dispatch_conversation_with_wait(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        conversation: Option<&affinity::Conversation>,
+        hook: Option<Arc<dyn AttemptHook>>,
+        wait: Option<Arc<dyn WaitHook>>,
+    ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(request, inbound_protocol, conversation, hook, wait)
             .await
     }
 
@@ -361,12 +433,13 @@ impl Router {
         inbound_protocol: &str,
         conversation: Option<&affinity::Conversation>,
         hook: Option<Arc<dyn AttemptHook>>,
+        wait_hook: Option<Arc<dyn WaitHook>>,
     ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         let ordered = self.order_for(&resolved, conversation);
-        let affinity = ordered.affinity;
         resolved.hops = ordered.hops;
+        resolved.spent = self.spent(&resolved);
         let hook = conversation.map_or(hook.clone(), |conversation| {
             Some(Arc::new(affinity::sealed::SealedHook::new(
                 self.sealed.clone(),
@@ -374,105 +447,25 @@ impl Router {
                 hook.clone(),
             )) as Arc<dyn AttemptHook>)
         });
-        let policy = self.policy.clone();
-        let input_tokens = estimate_input_tokens(request);
-        let mut last = None;
-        let mut refused_providers = BTreeSet::new();
-        let mut outgrown = Vec::<(String, String)>::new();
-        let mut needs_room = None;
-        for (index, hop) in resolved.hops.iter().enumerate() {
-            let mut attempt = request.clone();
-            apply_wire(&mut attempt, hop, &resolved.bare);
-            let upstream_model = attempt.model.clone();
-            if refused_providers.contains(hop.member.route_id())
-                || outgrown.iter().any(|(route, model)| {
-                    route == hop.member.route_id() && *model == upstream_model
-                })
-                || needs_room.is_some_and(|tokens| {
-                    hop.context_window
-                        .is_some_and(|window| window > 0 && tokens >= window)
-                })
-            {
-                continue;
-            }
-            let info = Attempt {
-                member: hop.member.attempt(),
-                inbound_protocol: inbound_protocol.to_owned(),
-            };
-            if let Some(hook) = hook.as_ref()
-                && let Err(error) = hook.before(&info)
-            {
-                return Err(match error {
-                    AttemptError::PreviousResponseNotFound { id } => {
-                        RouterError::PreviousResponseNotFound { id }
-                    }
-                });
-            }
-            let result = call_member(hop, index, inbound_protocol, attempt, hook.clone()).await;
-            match result {
-                Ok(completion) => {
-                    if let Some(hook) = hook.as_ref() {
-                        hook.answered(&info);
-                    }
-                    let completion = if asked == upstream_model {
-                        completion
-                    } else {
-                        label_model(completion, asked)
-                    };
-                    let completion = if let Some(affinity) = &affinity {
-                        affinity_reply::watch(
-                            completion,
-                            self.affinity.clone(),
-                            affinity.key.clone(),
-                            affinity.turn,
-                            affinity.strict,
-                            hop.member.id().to_string(),
-                            upstream_model.clone(),
-                        )
-                    } else {
-                        completion
-                    };
-                    return Ok(Routed {
-                        upstream_id: hop.member.route_id().to_owned(),
-                        upstream_model,
-                        completion,
-                    });
-                }
-                Err(error) => {
-                    let upstream_id = hop.member.route_id().to_owned();
-                    let inferred = decision::too_long_unsaid(
-                        &error,
-                        input_tokens,
-                        hop.context_window,
-                        &upstream_model,
-                        &upstream_id,
-                    );
-                    let error = inferred.unwrap_or(error);
-                    if decision::outgrown(&error) {
-                        // As long on every account of this model; another
-                        // member not known to be too small may hold it.
-                        if error.status() != Some(413) {
-                            needs_room = Some(input_tokens);
-                        }
-                        outgrown.push((upstream_id.clone(), upstream_model));
-                        last = Some((upstream_id, error));
-                        continue;
-                    }
-                    if decision::skips_provider(&error) {
-                        // Every account of the provider refuses the same
-                        // content; another provider is asked once.
-                        refused_providers.insert(upstream_id.clone());
-                    } else if !decision::asks_next(&error) && !policy.allows(&error) {
-                        return Err(RouterError::Upstream { upstream_id, error });
-                    }
-                    last = Some((upstream_id, error));
-                }
-            }
+        DispatchState {
+            asked,
+            request: request.clone(),
+            inbound_protocol: inbound_protocol.to_owned(),
+            hook,
+            resolved,
+            policy: self.policy.clone(),
+            input_tokens: estimate_input_tokens(request),
+            last: None,
+            refused_providers: BTreeSet::new(),
+            outgrown: Vec::new(),
+            needs_room: None,
+            missing_detail: self.models().join(", "),
+            wait_hook,
+            affinity: ordered.affinity,
+            affinity_state: self.affinity.clone(),
         }
-        match last {
-            Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
-            None => Err(self.missing(&request.model)),
-        }
+        .run(0)
+        .await
     }
 
     /// Counts input tokens for `request`.
@@ -601,6 +594,29 @@ impl Router {
         }
     }
 
+    /// Which ordered hops already rest out of their allowance, quota or
+    /// credit, before this request asks them (`reference:
+    /// internal/gateway/fallback.go:1230-1241`, `spentAfter`).
+    fn spent(&self, resolved: &Resolved) -> Vec<bool> {
+        resolved
+            .hops
+            .iter()
+            .map(|hop| {
+                let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                self.cooldowns.as_ref().is_some_and(|cooldowns| {
+                    cooldowns
+                        .cooling_for_model(hop.member.id(), model)
+                        .is_some_and(|cooling| {
+                            matches!(
+                                cooling.cause(),
+                                CooldownCause::Quota | CooldownCause::Credit
+                            )
+                        })
+                })
+            })
+            .collect()
+    }
+
     fn order_hops(&self, resolved: &Resolved) -> Vec<Hop> {
         self.order_for(resolved, None).hops
     }
@@ -613,11 +629,13 @@ impl Router {
         let ordered = if resolved.hops.len() < 2 {
             resolved.hops.clone()
         } else {
-            let seats = resolved
+            let mut seats = resolved
                 .hops
                 .iter()
                 .map(|hop| {
-                    let mut seat = strategy::Seat::new(hop.member.id().to_string());
+                    let mut seat = strategy::Seat::new(hop.member.route_id());
+                    seat.account = hop.member.id().account().is_some();
+                    seat.learns = hop.member.learns_allowance();
                     seat.weight = hop.weight;
                     seat.free = hop.free;
                     let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
@@ -629,6 +647,24 @@ impl Router {
                     seat
                 })
                 .collect::<Vec<_>>();
+            if let Some(measurements) = &self.measurements {
+                let models = resolved
+                    .hops
+                    .iter()
+                    .map(|hop| {
+                        hop.wire_model
+                            .clone()
+                            .unwrap_or_else(|| resolved.bare.clone())
+                    })
+                    .collect::<Vec<_>>();
+                measurements.weigh(
+                    &mut seats,
+                    &models,
+                    &resolved.pool,
+                    self.strategies.needs(&resolved.routing),
+                    std::time::SystemTime::now(),
+                );
+            }
             self.strategies
                 .order(&resolved.routing, &resolved.pool, &seats)
                 .into_iter()
@@ -712,6 +748,9 @@ impl Router {
                 pool: asked.to_owned(),
                 routing: route.routing.clone(),
                 stays: route.stays,
+                patience: route.patience,
+                pool_asked: true,
+                spent: Vec::new(),
             });
         }
         if let Some((provider_id, model)) = asked.split_once('/')
@@ -721,7 +760,10 @@ impl Router {
                 hop.member.route_id() == provider_id
                     && (route_model == model || hop.wire_model.as_deref() == Some(model))
             });
-            return self.one(asked, model, found);
+            let patience = found.first().and_then(|(_, hop, _)| hop.patience);
+            let mut resolved = self.one(asked, model, found)?;
+            resolved.patience = patience;
+            return Ok(resolved);
         }
         let found = self.matching(|_, hop| hop.wire_model.as_deref() == Some(asked));
         let bare = found
@@ -762,6 +804,9 @@ impl Router {
                     pool: asked.to_owned(),
                     routing: "smart".to_owned(),
                     stays,
+                    patience: None,
+                    pool_asked: false,
+                    spent: Vec::new(),
                 })
             }
             _ => Err(RouterError::Ambiguous {
@@ -785,6 +830,251 @@ impl Router {
     }
 }
 
+struct DispatchState {
+    asked: String,
+    request: Request,
+    inbound_protocol: String,
+    hook: Option<Arc<dyn AttemptHook>>,
+    resolved: Resolved,
+    policy: FailoverPolicy,
+    input_tokens: u64,
+    last: Option<(String, PluginError)>,
+    refused_providers: BTreeSet<String>,
+    outgrown: Vec<(String, String)>,
+    needs_room: Option<u64>,
+    missing_detail: String,
+    wait_hook: Option<Arc<dyn WaitHook>>,
+    /// Where an answer's stick is recorded, when the request has a conversation.
+    affinity: Option<ReplyRoute>,
+    affinity_state: affinity::AffinityState,
+}
+
+/// One member's answer within a dispatch round.
+struct Answered {
+    index: usize,
+    upstream_id: String,
+    upstream_model: String,
+    completion: Completion,
+}
+
+impl DispatchState {
+    fn now(&self) -> Instant {
+        self.wait_hook
+            .as_ref()
+            .map_or_else(Instant::now, |hook| hook.now())
+    }
+
+    async fn run(mut self, start: usize) -> Result<Routed, RouterError> {
+        let mut round = 0_u32;
+        let mut wait_from = None;
+        let mut asking: Vec<usize> = (start..self.resolved.hops.len()).collect();
+        loop {
+            let mut busy = Vec::new();
+            let mut ending = Ending::Answered;
+            if let Some(answered) = self.round(&asking, &mut busy, &mut ending).await? {
+                let next = answered.index + 1;
+                let continuation = (next < self.resolved.hops.len())
+                    .then(|| RouteContinuation { state: self, next });
+                return Ok(Routed {
+                    upstream_id: answered.upstream_id,
+                    upstream_model: answered.upstream_model,
+                    completion: answered.completion,
+                    continuation,
+                });
+            }
+            let now = self.now();
+            // Every member asked has failed with nothing of a reply sent.
+            // The last one's failure passes (busy), or, in a pool, it is
+            // newly out of its allowance after another member was busy:
+            // those busy are asked again in turn after a pause, while the
+            // patience lasts, counted from the first time all had failed
+            // (`reference: internal/gateway/gateway.go:3956-4006`).
+            let last_spent =
+                self.resolved.pool_asked && !busy.is_empty() && ending == Ending::Spent;
+            if (ending == Ending::Busy || last_spent)
+                && let Some(budget) = self.resolved.patience
+                && let Some(hook) = self.wait_hook.clone()
+            {
+                let from = *wait_from.get_or_insert(now);
+                if let Some((next, wait)) = patience::replan(&mut busy, round, from, budget, now) {
+                    hook.waiting();
+                    hook.wait(wait).await;
+                    round = round.saturating_add(1);
+                    asking = next;
+                    continue;
+                }
+            }
+            break;
+        }
+        match self.last {
+            Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
+            None => {
+                let detail = if self.missing_detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(". Routes: {}", self.missing_detail)
+                };
+                Err(RouterError::NoRoute {
+                    model: self.request.model,
+                    detail,
+                })
+            }
+        }
+    }
+
+    /// Asks each member in `asking` once, in that order. `Some` is an
+    /// answer; `None` means every member failed in a way that may try the
+    /// next one. `ending` tells how the last member asked failed.
+    async fn round(
+        &mut self,
+        asking: &[usize],
+        busy: &mut Vec<patience::Busy>,
+        ending: &mut Ending,
+    ) -> Result<Option<Answered>, RouterError> {
+        for &index in asking {
+            let hop = self.resolved.hops[index].clone();
+            let mut attempt = self.request.clone();
+            apply_wire(&mut attempt, &hop, &self.resolved.bare);
+            let upstream_model = attempt.model.clone();
+            if self.refused_providers.contains(hop.member.route_id())
+                || self.outgrown.iter().any(|(route, model)| {
+                    route == hop.member.route_id() && *model == upstream_model
+                })
+                || self.needs_room.is_some_and(|tokens| {
+                    hop.context_window
+                        .is_some_and(|window| window > 0 && tokens >= window)
+                })
+            {
+                continue;
+            }
+            let info = Attempt {
+                member: hop.member.attempt(),
+                inbound_protocol: self.inbound_protocol.clone(),
+            };
+            if let Some(hook) = self.hook.as_ref()
+                && let Err(error) = hook.before(&info)
+            {
+                return Err(match error {
+                    AttemptError::PreviousResponseNotFound { id } => {
+                        RouterError::PreviousResponseNotFound { id }
+                    }
+                });
+            }
+            let result = call_member(
+                &hop,
+                index,
+                &self.inbound_protocol,
+                attempt,
+                self.hook.clone(),
+            )
+            .await;
+            match result {
+                Ok(completion) => {
+                    if let Some(hook) = self.hook.as_ref() {
+                        hook.answered(&info);
+                    }
+                    let completion = if self.asked == upstream_model {
+                        completion
+                    } else {
+                        label_model(completion, self.asked.clone())
+                    };
+                    let completion = if let Some(affinity) = &self.affinity {
+                        affinity_reply::watch(
+                            completion,
+                            self.affinity_state.clone(),
+                            affinity.key.clone(),
+                            affinity.turn,
+                            affinity.strict,
+                            hop.member.id().to_string(),
+                            upstream_model.clone(),
+                        )
+                    } else {
+                        completion
+                    };
+                    return Ok(Some(Answered {
+                        index,
+                        upstream_id: hop.member.route_id().to_owned(),
+                        upstream_model,
+                        completion,
+                    }));
+                }
+                Err(error) => {
+                    let upstream_id = hop.member.route_id().to_owned();
+                    let inferred = decision::too_long_unsaid(
+                        &error,
+                        self.input_tokens,
+                        hop.context_window,
+                        &upstream_model,
+                        &upstream_id,
+                    );
+                    let error = inferred.unwrap_or(error);
+                    if decision::outgrown(&error) {
+                        // As long on every account of this model; another
+                        // member not known to be too small may hold it.
+                        if error.status() != Some(413) {
+                            self.needs_room = Some(self.input_tokens);
+                        }
+                        self.outgrown.push((upstream_id.clone(), upstream_model));
+                        self.last = Some((upstream_id, error));
+                        *ending = Ending::Other;
+                        continue;
+                    }
+                    if decision::skips_provider(&error) {
+                        // Every account of the provider refuses the same
+                        // content; another provider is asked once.
+                        self.refused_providers.insert(upstream_id.clone());
+                    } else if !decision::asks_next(&error) && !self.policy.allows(&error) {
+                        return Err(RouterError::Upstream { upstream_id, error });
+                    }
+                    if let Some(failure) = patience::busy(&error, index, self.now()) {
+                        // Each member is asked once a round, so noted once.
+                        busy.push(failure);
+                        *ending = Ending::Busy;
+                    } else if patience::spent(&error)
+                        && !self.resolved.spent.get(index).copied().unwrap_or(false)
+                    {
+                        *ending = Ending::Spent;
+                    } else {
+                        *ending = Ending::Other;
+                    }
+                    self.last = Some((upstream_id, error));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// How the last member asked in a round failed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// No member failed yet, or one answered.
+    Answered,
+    /// In a way that passes: busy, overloaded, rate limited for a moment.
+    Busy,
+    /// Newly out of its allowance (quota or credit), not resting so already.
+    Spent,
+    /// In a way that does not pass.
+    Other,
+}
+
+/// The untried remainder of a route after a streamed member refuses.
+pub struct RouteContinuation {
+    state: DispatchState,
+    next: usize,
+}
+
+impl RouteContinuation {
+    /// Asks the remaining members in their existing routing order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Router::dispatch`].
+    pub async fn dispatch(self) -> Result<Routed, RouterError> {
+        self.state.run(self.next).await
+    }
+}
+
 /// A successful dispatch.
 pub struct Routed {
     /// Id of the provider that produced the completion.
@@ -795,6 +1085,14 @@ pub struct Routed {
     /// The completion. A stream has produced its first content event, a raw
     /// body its first chunk, or either ended empty. An earlier failure is not returned here.
     pub completion: Completion,
+    continuation: Option<RouteContinuation>,
+}
+
+impl Routed {
+    /// Takes the untried remainder, leaving no continuation in this result.
+    pub fn take_continuation(&mut self) -> Option<RouteContinuation> {
+        self.continuation.take()
+    }
 }
 
 /// A forwarded call a member answered.

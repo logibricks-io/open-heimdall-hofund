@@ -99,6 +99,10 @@ impl Codec for OpenAiChat {
     fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
         crate::sse::data_frame(&self.encode_error(status, message))
     }
+
+    fn severed_stream_end(&self) -> &'static [u8] {
+        b"data: [DONE]\n\n"
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1403,7 +1407,7 @@ fn decode_finish(token: &str) -> StopReason {
         "stop" => StopReason::EndTurn,
         "length" => StopReason::MaxTokens,
         "tool_calls" | "function_call" => StopReason::ToolUse,
-        "content_filter" => StopReason::ContentFilter,
+        "content_filter" | "sensitive" => StopReason::ContentFilter,
         "refusal" => StopReason::Refusal,
         other => StopReason::Other(other.to_owned()),
     }

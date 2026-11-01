@@ -36,11 +36,13 @@ mod control_agents;
 mod control_local;
 pub(crate) mod control_map;
 mod events;
+mod measurements;
 mod membership;
 mod models;
 mod models_state;
 mod offline;
 mod one_shot;
+mod probe;
 mod quotas;
 mod registry;
 mod rests;
@@ -473,6 +475,7 @@ async fn start_inner(
         models_host.attach_events(Arc::clone(bus));
     }
     let models_host = Arc::new(models_host);
+    runtime.attach_measurements(Arc::clone(&usage), Arc::clone(&models_host));
     runtime.attach_models(Arc::clone(&models_host));
     if let Some(bus) = &control_bus {
         runtime.attach_events(Arc::clone(bus));
@@ -590,11 +593,13 @@ async fn start_inner(
     );
     let maintenance = runtime.spawn_maintenance();
     let subscriptions = runtime.spawn_subscriptions();
+    let probes = runtime.spawn_probes();
     let running = running.with_resource(AffinityFlush(runtime.affinity()));
     Ok(running
         .with_task(refresh)
         .with_task(maintenance)
-        .with_task(subscriptions))
+        .with_task(subscriptions)
+        .with_task(probes))
 }
 
 struct AffinityFlush(hofund_router::affinity::AffinityState);
@@ -818,6 +823,7 @@ fn route_plan(
                             .or_else(|| caps.get(provider.as_str()).copied()),
                         context_window,
                         routing: route.routing.clone(),
+                        patience: route.patience.duration(),
                         weight: upstream.weight.unwrap_or(1),
                         free,
                         stays,
@@ -837,6 +843,7 @@ fn route_plan(
                         max_output_tokens: upstream.max_output_tokens,
                         context_window: None,
                         routing: route.routing.clone(),
+                        patience: route.patience.duration(),
                         weight: upstream.weight.unwrap_or(1),
                         free: false,
                         stays,
@@ -1002,9 +1009,11 @@ fn providers(
                 adapter: Arc::clone(&instance.adapter),
                 protocol,
                 timeout,
+                kernel: registry.is_kernel_factory(&plugin_id),
                 plugin_id,
                 preset_id: provider.preset.clone().unwrap_or_default(),
                 fingerprint,
+                patience: provider.patience.duration(),
                 base_url: endpoint.base_url.clone(),
             },
         );
@@ -1814,6 +1823,24 @@ mod tests {
         assert_eq!(hop.routing, "weight");
         assert_eq!(hop.weight, 3);
         assert!(hop.free);
+    }
+
+    #[test]
+    fn b11_route_plan_carries_the_routes_patience_not_the_providers() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\npatience = \"off\"\n[[routes]]\nmodel = \"demo\"\npatience = 90\nupstreams = [{ provider = \"one\" }]\n[[routes]]\nmodel = \"plain\"\nupstreams = [{ provider = \"one\" }]\n",
+        )
+        .expect("config");
+        let (routes, _) = super::route_plan(&config, None);
+        assert_eq!(
+            routes["demo"][0].patience,
+            Some(std::time::Duration::from_secs(90))
+        );
+        assert_eq!(
+            routes["plain"][0].patience,
+            Some(std::time::Duration::from_secs(60)),
+            "a route's default is 60 seconds whatever its providers say"
+        );
     }
 
     #[test]

@@ -19,6 +19,8 @@ mod jsonutil;
 mod openai_chat;
 mod openai_responses;
 mod passthrough;
+mod reasoning_tidy;
+mod refusal;
 mod sse;
 
 pub use anthropic::AnthropicMessages;
@@ -27,8 +29,12 @@ pub use converse::Converse;
 pub use error::CodecError;
 pub use generative::{GenerativeLanguage, plain_code_assist_tools, plain_schema};
 pub use openai_chat::OpenAiChat;
-pub use openai_responses::{OpenAiResponses, UNMAPPED_TOOLS};
+pub use openai_responses::{
+    OpenAiResponses, PLUGIN_HOST_PREFIX, STREAM_CLIENT_PREFIXES, STREAM_TURN_METADATA_HEADER,
+    STREAM_WINDOW_HEADER, UNMAPPED_TOOLS, compacts_in_stream_client,
+};
 pub use passthrough::RawTap;
+pub use refusal::refusal_error;
 
 use hofund_ir::{Request, Response, StreamEvent};
 
@@ -203,6 +209,17 @@ pub trait Codec: Send + Sync {
         out.extend_from_slice(&json);
         out.extend_from_slice(b"\n\n");
         out
+    }
+
+    /// Bytes that end a relayed stream after [`Codec::encode_stream_error`]
+    /// when the upstream read failed mid-reply.
+    ///
+    /// The default is empty: the error frame is the last event. Chat
+    /// Completions returns `data: [DONE]`, the end a Chat client reads to
+    /// (`reference: internal/gateway/gateway.go:5978-5987`). A stream that
+    /// ended cleanly but short does not get these bytes.
+    fn severed_stream_end(&self) -> &'static [u8] {
+        b""
     }
 
     /// Encodes an error body in this protocol's JSON shape.
