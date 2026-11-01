@@ -700,6 +700,10 @@ fn trigger(model: &str) -> String {
 }
 
 fn compaction(stub: &Stub) -> (u16, String, String) {
+    compaction_body(stub, &trigger("smith/forge"))
+}
+
+fn compaction_body(stub: &Stub, body: &str) -> (u16, String, String) {
     ask(
         stub,
         request(
@@ -710,9 +714,24 @@ fn compaction(stub: &Stub) -> (u16, String, String) {
                 ("accept", "text/event-stream"),
                 ("authorization", "Bearer chatgpt"),
             ],
-            &trigger("smith/forge"),
+            body,
         ),
     )
+}
+
+fn conversation(compact: bool) -> String {
+    let mut input = json!([
+        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "be brief"}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the login bug"}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "now add a test"}]},
+    ]);
+    if compact {
+        input
+            .as_array_mut()
+            .expect("input")
+            .push(json!({"type": "compaction_trigger"}));
+    }
+    json!({"model": "smith/forge", "stream": true, "input": input}).to_string()
 }
 
 /// The events of a stream as `(event, data)`.
@@ -727,6 +746,106 @@ fn events(body: &str) -> Vec<(String, Value)> {
             )
         })
         .collect()
+}
+
+fn compacted_summary(body: &str) -> String {
+    events(body)[1].1["item"]["encrypted_content"]
+        .as_str()
+        .expect("sealed summary")
+        .strip_prefix(super::input::MARK)
+        .expect("hofund summary")
+        .to_owned()
+}
+
+#[test]
+fn d23_1_a_summary_stream_ended_short_compacts_locally() {
+    let cut = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_cut\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[{\"text\":\"PARTIAL\"}]}}\n\n",
+    );
+    let malformed = format!("{cut}data: {{\"type\":\"response.completed\"");
+    let failed = format!(
+        "data: {{\"type\":\"error\",\"message\":\"relay: {}\"}}\n\n",
+        super::backend::ENDED_SHORT
+    );
+    for reply in [cut.to_owned(), malformed, failed] {
+        let stub = Stub::default().calling(answer(200, reply));
+        let (status, _, body) = compaction_body(&stub, &conversation(true));
+        assert_eq!(status, 200, "{body}");
+        let summary = compacted_summary(&body);
+        for wanted in [
+            "without a model",
+            super::backend::ENDED_SHORT,
+            "fix the login bug",
+            "now add a test",
+        ] {
+            assert!(summary.contains(wanted), "{summary}");
+        }
+        assert!(!summary.contains("PARTIAL"), "{summary}");
+        assert_eq!(stub.called().len(), 1, "the summary was not retried");
+    }
+
+    let incomplete =
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n";
+    let stub = Stub::default().calling(answer(200, incomplete));
+    assert_eq!(compaction_body(&stub, &conversation(true)).0, 502);
+
+    let old = "x".repeat(super::backend::LOCAL_SUMMARY_MAX + 1);
+    let body = json!({"input": [
+        {"type": "message", "role": "user", "content": old},
+        {"type": "message", "role": "user", "content": "latest"},
+    ]});
+    let summary = super::backend::local_summary(body.to_string().as_bytes(), "cut");
+    assert!(!summary.contains(&old));
+    assert!(summary.contains("latest 1 of 2 messages"), "{summary}");
+}
+
+#[test]
+fn d23_2_an_ended_short_502_compacts_locally() {
+    for (status, said, local) in [
+        (502, format!("relay: {}", super::backend::ENDED_SHORT), true),
+        (
+            502,
+            format!("{}; relay is down", super::backend::ENDED_SHORT),
+            false,
+        ),
+        (500, super::backend::ENDED_SHORT.to_owned(), false),
+    ] {
+        let reply = json!({"error": {"message": said}}).to_string();
+        let stub = Stub::default().calling(answer(status, reply));
+        let (got, _, body) = compaction_body(&stub, &conversation(true));
+        if local {
+            assert_eq!(got, 200, "{body}");
+            let summary = compacted_summary(&body);
+            assert!(summary.contains(super::backend::ENDED_SHORT), "{summary}");
+            assert!(summary.contains("fix the login bug"), "{summary}");
+        } else {
+            assert_eq!(got, status, "{body}");
+        }
+        assert_eq!(stub.called().len(), 1);
+    }
+}
+
+#[test]
+fn d23_3_compaction_instructions_are_system_and_turns_keep_developer() {
+    let reply = json!({"status": "completed", "output": [
+        {"type": "message", "content": [{"type": "output_text", "text": "summary"}]},
+    ]});
+    let stub = Stub::default().calling(answer(200, reply.to_string()));
+    let (status, _, body) = compaction_body(&stub, &conversation(true));
+    assert_eq!(status, 200, "{body}");
+    let called = stub.called();
+    let asked: Value = json::from_slice(&called[0].body).expect("request JSON");
+    assert_eq!(asked["input"][0]["role"], "system");
+    assert_eq!(asked["input"][0]["content"][0]["text"], "be brief");
+    assert_eq!(asked["input"][1]["role"], "user");
+
+    let stub = Stub::default().calling(answer(200, "ok"));
+    let (status, _, body) = compaction_body(&stub, &conversation(false));
+    assert_eq!(status, 200, "{body}");
+    let called = stub.called();
+    let asked: Value = json::from_slice(&called[0].body).expect("request JSON");
+    assert_eq!(asked["input"][0]["role"], "developer");
 }
 
 #[test]

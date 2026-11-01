@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Codex compaction parity fixes (D-23): a summary stream that ends before its
+  terminal response, including the equivalent 502 error, now produces a
+  bounded local summary instead of returning partial text or failing the
+  compaction. Generated compaction asks normalize developer instructions to
+  system instructions for vendors without a developer role; ordinary turns
+  keep their original roles.
 - Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
   secret readable, as the reference does, so `gateway-key copy` shows a key
   again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,

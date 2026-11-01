@@ -1521,7 +1521,7 @@ fn stream_error(error: &RouterError) -> (StatusCode, String) {
         RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
             (StatusCode::FORBIDDEN, error.to_string())
         }
-        RouterError::Upstream { error, .. } => (status_of(error), error.message().to_owned()),
+        RouterError::Upstream { error, .. } => (status_of(error), broken_off(error)),
     }
 }
 
@@ -1811,7 +1811,7 @@ async fn success(
             let on_error = {
                 let codec = Arc::clone(&codec);
                 move |error: &PluginError| {
-                    codec.encode_stream_error(status_of(error).as_u16(), error.message())
+                    codec.encode_stream_error(status_of(error).as_u16(), &broken_off(error))
                 }
             };
             // Move the track into the stream so finish runs when the body ends.
@@ -1863,8 +1863,10 @@ async fn success(
                         let on_error = {
                             let codec = Arc::clone(&codec);
                             move |error: &PluginError| {
-                                codec
-                                    .encode_stream_error(status_of(error).as_u16(), error.message())
+                                codec.encode_stream_error(
+                                    status_of(error).as_u16(),
+                                    &broken_off(error),
+                                )
                             }
                         };
                         let record = RecordOnEnd {
@@ -1935,7 +1937,7 @@ async fn raw_body(
         let on_error = {
             let codec = Arc::clone(&codec);
             move |error: &PluginError| {
-                codec.encode_stream_error(status_of(error).as_u16(), error.message())
+                codec.encode_stream_error(status_of(error).as_u16(), &broken_off(error))
             }
         };
         let owned = track.take_for_stream();
@@ -2067,6 +2069,22 @@ fn failure(
             .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"));
     }
     coded(codec, status, &message)
+}
+
+/// Text that ends a stream that broke off after it began; the Codex
+/// catalog's compaction reads the same words.
+const ENDED_SHORT: &str = "the reply ended before it was complete";
+
+/// What a stream that failed after it began says: a reply whose body
+/// broke off says it ended before it was complete, so a client (a Codex
+/// compaction) can tell a cut from a vendor's own failure.
+fn broken_off(error: &PluginError) -> String {
+    let message = error.message();
+    if error.kind() == PluginErrorKind::Interrupted && !message.ends_with(ENDED_SHORT) {
+        format!("{message}: {ENDED_SHORT}")
+    } else {
+        message.to_owned()
+    }
 }
 
 fn status_of(error: &PluginError) -> StatusCode {
@@ -2644,6 +2662,23 @@ mod forwarded_token_tests {
 #[cfg(test)]
 mod line_hold_tests {
     use super::{LineHold, event_gap, whole_data_line};
+
+    #[test]
+    fn d23_4_a_stream_that_broke_off_says_it_ended_short() {
+        let cut = hofund_plugin_api::PluginError::interrupted("error decoding response body");
+        assert_eq!(
+            super::broken_off(&cut),
+            format!("error decoding response body: {}", super::ENDED_SHORT)
+        );
+        let again =
+            hofund_plugin_api::PluginError::interrupted(format!("relay: {}", super::ENDED_SHORT));
+        assert_eq!(
+            super::broken_off(&again),
+            format!("relay: {}", super::ENDED_SHORT)
+        );
+        let vendor = hofund_plugin_api::PluginError::status_error(502, "upstream said no");
+        assert_eq!(super::broken_off(&vendor), "upstream said no");
+    }
 
     #[test]
     fn d21_only_ended_lines_pass_the_hold() {

@@ -250,6 +250,9 @@ async fn summarise(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
     };
     if status >= 400 {
         let said = said(&body);
+        if status == 502 && said.ends_with(ENDED_SHORT) {
+            return local_compaction(request, &said);
+        }
         return error(
             status,
             &format!("compaction: hofund answered the summary request {status}: {said}"),
@@ -257,6 +260,7 @@ async fn summarise(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
     }
     let reply = match Reply::of(&body) {
         Ok(reply) => reply,
+        Err(why) if why.ends_with(ENDED_SHORT) => return local_compaction(request, &why),
         Err(why) => return error(502, &format!("compaction: {why}, so there is no summary")),
     };
     if reply.status == "incomplete" {
@@ -279,6 +283,84 @@ async fn summarise(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
         );
     }
     compaction_stream(&reply.id(), &summary, &reply.usage)
+}
+
+/// What the gateway says ends a stream that broke off after it began.
+pub(crate) const ENDED_SHORT: &str = "the reply ended before it was complete";
+pub(crate) const LOCAL_SUMMARY_MAX: usize = 80_000;
+
+fn local_compaction(request: &HttpRequest, why: &str) -> HttpResponse {
+    let summary = local_summary(request.body().bytes(), why);
+    compaction_stream(&Reply::default().id(), &summary, &Value::Null)
+}
+
+pub(crate) fn local_summary(body: &[u8], why: &str) -> String {
+    let value = json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let mut asked = Vec::new();
+    let mut last = String::new();
+    for item in value
+        .get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("message")
+            != "message"
+        {
+            continue;
+        }
+        let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+        let content = item.get("content").unwrap_or(&Value::Null);
+        let text = if let Some(text) = content.as_str() {
+            text.to_owned()
+        } else {
+            content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let text = text.trim();
+        if text.is_empty() || text == super::input::COMPACT_PROMPT {
+            continue;
+        }
+        match role {
+            "user" => asked.push(text.to_owned()),
+            "assistant" => last = text.to_owned(),
+            _ => {}
+        }
+    }
+    let mut first = asked.len();
+    let mut kept = 0;
+    while first > 0 && kept + asked[first - 1].len() <= LOCAL_SUMMARY_MAX {
+        first -= 1;
+        kept += asked[first].len();
+    }
+    let mut summary = format!(
+        "hofund compacted this conversation without a model ({why}), so this is no summary: it is what the user asked"
+    );
+    if first > 0 {
+        summary.push_str(&format!(
+            " (the latest {} of {} messages)",
+            asked.len() - first,
+            asked.len()
+        ));
+    }
+    summary.push_str(
+        " and the last reply. Look at the workspace for where the work stands before going on.\n\n## The user's messages\n",
+    );
+    for text in &asked[first..] {
+        summary.push_str(&format!("\n{text}\n"));
+    }
+    if !last.is_empty() {
+        summary.push_str(&format!("\n## The last reply\n\n{last}\n"));
+    }
+    summary
 }
 
 /// The compaction stream: created, the item added and done, completed.
@@ -424,6 +506,9 @@ impl Reply {
         }
         if !items.is_empty() {
             reply.output = items;
+        }
+        if reply.status.is_empty() {
+            return Err(ENDED_SHORT.to_owned());
         }
         Ok(reply)
     }
