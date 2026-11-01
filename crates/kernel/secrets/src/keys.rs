@@ -1159,6 +1159,15 @@ mod tests {
                     .masked
                     .ends_with(&generated.secret[generated.secret.len() - 6..])
         );
+        assert_eq!(
+            generated.key.masked,
+            format!(
+                "{KEY_PREFIX}…{}",
+                &generated.secret[generated.secret.len() - 6..]
+            )
+        );
+        let own = store.add("Own", Some("my-own-key-1234")).expect("own");
+        assert_eq!(own.key.masked, "…1234");
         store.set_enabled(&id, false).expect("off");
         assert_eq!(store.copy(&id).expect("copy while off"), generated.secret);
         let rotated = store.rotate(&id).expect("rotate");
