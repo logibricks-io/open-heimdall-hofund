@@ -42,8 +42,8 @@ pub use scope::RouteScope;
 pub use snapshot::Snapshot;
 pub use view::{
     RouteMeta, RouteTraceBook, RouteTraceHandle, TRACE_KEEP, TraceNow, UNROUTED_MOST,
-    UNROUTED_PHASE_MASKING, UNROUTED_SHOW, UNROUTED_UNKNOWN, UnroutedTimeout, candidates_from_hops,
-    fail_text, try_status, unrouted_timeout_status,
+    UNROUTED_PHASE_MASKING, UNROUTED_SHOW, UNROUTED_UNKNOWN, UnroutedHold, UnroutedTimeout,
+    candidates_from_hops, fail_text, try_status, unrouted_timeout_status,
 };
 
 /// Which failures may try the next member.

@@ -85,7 +85,7 @@ async fn r1_6_control_route_list_and_session_endpoints() {
     assert_eq!(decoded.session, "sess-a");
     assert!(decoded.decision.is_some());
 
-    book.hold_unrouted("sess-b", "demo", "plain", "waiting");
+    let _hold = book.hold_unrouted("sess-b", "demo", "plain", "waiting");
     let unrouted = client
         .get(format!("{base}/unrouted"))
         .bearer_auth(&token)

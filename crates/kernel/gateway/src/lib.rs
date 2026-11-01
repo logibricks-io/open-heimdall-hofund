@@ -1584,13 +1584,35 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     }
     let session = client_session(&identity_headers);
     let watched = unrouted_watched(&path);
-    if watched
-        && let Some(book) = &app.route_trace
-    {
-        book.hold_unrouted(&session, "", codec.id(), "body");
-        book.begin_known_wait(&session, "body");
+    let mut unrouted_hold = watched
+        .then(|| {
+            app.route_trace
+                .as_ref()
+                .map(|book| book.hold_unrouted(&session, "", codec.id(), "body"))
+        })
+        .flatten();
+    if let Some(hold) = &unrouted_hold {
+        hold.begin_known_wait("body");
     }
-    let bytes = match axum::body::to_bytes(request.into_body(), BODY_LIMIT).await {
+    let bytes = if let Some(hold) = &unrouted_hold {
+        let book = Arc::clone(app.route_trace.as_ref().expect("trace book"));
+        let hold_id = hold.id();
+        tokio::select! {
+            result = axum::body::to_bytes(request.into_body(), BODY_LIMIT) => result,
+            kind = wait_unrouted_hold_timeout(book, hold_id) => {
+                return unrouted_timeout_before_routing(
+                    app,
+                    codec.as_ref(),
+                    kind,
+                    started,
+                    &identity,
+                );
+            }
+        }
+    } else {
+        axum::body::to_bytes(request.into_body(), BODY_LIMIT).await
+    };
+    let bytes = match bytes {
         Ok(bytes) => bytes,
         Err(_) => {
             return coded(
@@ -1600,10 +1622,8 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             );
         }
     };
-    if watched
-        && let Some(book) = &app.route_trace
-    {
-        book.end_known_wait(&session);
+    if let Some(hold) = &unrouted_hold {
+        hold.end_known_wait();
     }
     let bytes = if let Some(route) = &matched {
         Bytes::from(inject_target(&bytes, &route.model, route.stream))
@@ -1669,10 +1689,8 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     .with_body(bytes.to_vec());
     let router = app.snapshot.load();
     let attempt = ask.as_ref().map(|ask| ask.attempt());
-    if watched
-        && let Some(book) = &app.route_trace
-    {
-        book.set_unrouted_asked(&session, &model_request.model);
+    if let Some(hold) = &unrouted_hold {
+        hold.set_asked(&model_request.model);
     }
     let agent = trace_agent_label(&identity_headers, &identity);
     let trace = app.route_trace.as_ref().map(|book| {
@@ -1685,6 +1703,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             ..hofund_router::RouteMeta::default()
         })
     });
+    drop(unrouted_hold.take());
     let (wait, notice) = GatewayWait::channel();
     let mut dispatch: DispatchFuture = Box::pin({
         let request = model_request.clone();
@@ -1717,33 +1736,8 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             }
         }
     });
-    let unrouted_abort = async {
-        loop {
-            let Some(book) = app.route_trace.as_ref() else {
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-                continue;
-            };
-            match book.unrouted_timeout_after(&session) {
-                None => tokio::time::sleep(std::time::Duration::from_secs(3600)).await,
-                Some((wait, kind)) if wait.is_zero() => return kind,
-                Some((wait, _)) => tokio::time::sleep(wait).await,
-            }
-        }
-    };
     let result = tokio::select! {
         result = &mut dispatch => result,
-        kind = unrouted_abort, if watched && app.route_trace.is_some() => {
-            return unrouted_timeout(
-                app,
-                codec.as_ref(),
-                &headers,
-                &model_request,
-                kind,
-                started,
-                &identity,
-                &mut track,
-            );
-        }
         _ = notice => {
             track.client_waiting(Arc::clone(&app.usage), &model_request, &identity);
             if model_request.stream {
@@ -2117,28 +2111,39 @@ fn truncate_agent(value: &str) -> String {
     value.chars().take(128).collect()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn unrouted_timeout(
+async fn wait_unrouted_hold_timeout(
+    book: Arc<hofund_router::RouteTraceBook>,
+    id: u64,
+) -> hofund_router::UnroutedTimeout {
+    loop {
+        match book.unrouted_timeout_after_id(id) {
+            None => std::future::pending::<()>().await,
+            Some((wait, kind)) if wait.is_zero() => return kind,
+            Some((wait, _)) => tokio::time::sleep(wait).await,
+        }
+    }
+}
+
+fn unrouted_timeout_before_routing(
     app: Arc<Inner>,
     codec: &dyn Codec,
-    _headers: &HeaderMap,
-    request: &ModelRequest,
-    _kind: hofund_router::UnroutedTimeout,
+    kind: hofund_router::UnroutedTimeout,
     started: Instant,
     identity: &Identity,
-    track: &mut RequestTrack,
 ) -> Response {
-    let status = StatusCode::from_u16(hofund_router::unrouted_timeout_status(_kind))
+    let status = StatusCode::from_u16(hofund_router::unrouted_timeout_status(kind))
         .unwrap_or(StatusCode::GATEWAY_TIMEOUT);
-    let message = "the gateway held this request too long before routing it";
     write_usage(
         &app.usage,
-        &UsageMeta::new(request, "", started, identity),
+        &UsageMeta::new(&ModelRequest::new(String::new()), "", started, identity),
         None,
         status,
     );
-    track.end_with(None, status.as_u16(), None, None);
-    coded(codec, status, message)
+    coded(
+        codec,
+        status,
+        "the gateway held this request too long before routing it",
+    )
 }
 
 fn client_session(headers: &[(&str, &str)]) -> String {
