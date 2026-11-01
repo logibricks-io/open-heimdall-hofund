@@ -1281,6 +1281,7 @@ mod tests {
             }],
             warnings: Vec::new(),
             catalog: CatalogSettings::default(),
+            discover_agent_accounts: false,
         }
     }
 
