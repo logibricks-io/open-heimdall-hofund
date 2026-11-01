@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use hofund_config::Config;
 use hofund_control_proto::QuotaKind;
-use hofund_plugin_registry as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
