@@ -884,12 +884,27 @@ fn encode_tool_choice(choice: &ToolChoice) -> Value {
 }
 
 fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
+    let input_tokens = take_u64(&mut object, "input_tokens")?;
+    let output_tokens = take_u64(&mut object, "output_tokens")?;
+    let cache_read_tokens = take_u64(&mut object, "cache_read_input_tokens")?;
+    let reported_write = take_u64(&mut object, "cache_creation_input_tokens")?;
+    let (five_minute, one_hour) = match take_object(&mut object, "cache_creation")? {
+        Some(mut creation) => (
+            take_u64(&mut creation, "ephemeral_5m_input_tokens")?,
+            take_u64(&mut creation, "ephemeral_1h_input_tokens")?,
+        ),
+        None => (None, None),
+    };
+    let (cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens) =
+        hofund_ir::normalize_cache_write(reported_write, five_minute, one_hour);
     Ok(Usage {
-        input_tokens: take_u64(&mut object, "input_tokens")?,
-        output_tokens: take_u64(&mut object, "output_tokens")?,
+        input_tokens,
+        output_tokens,
         total_tokens: None,
-        cache_read_tokens: take_u64(&mut object, "cache_read_input_tokens")?,
-        cache_write_tokens: take_u64(&mut object, "cache_creation_input_tokens")?,
+        cache_read_tokens,
+        cache_write_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
         reasoning_tokens: None,
         extensions: Extensions::from_map(object),
     })
@@ -899,16 +914,25 @@ fn encode_usage(usage: &Usage) -> Value {
     let mut object = Object::new();
     insert_u64(&mut object, "input_tokens", usage.input_tokens);
     insert_u64(&mut object, "output_tokens", usage.output_tokens);
-    insert_u64(
-        &mut object,
-        "cache_creation_input_tokens",
+    let (total, five, hour) = hofund_ir::normalize_cache_write(
         usage.cache_write_tokens,
+        usage.cache_write_5m_tokens,
+        usage.cache_write_1h_tokens,
     );
+    insert_u64(&mut object, "cache_creation_input_tokens", total);
     insert_u64(
         &mut object,
         "cache_read_input_tokens",
         usage.cache_read_tokens,
     );
+    if let (Some(five), Some(hour)) = (five, hour)
+        && (five > 0 || hour > 0)
+    {
+        let mut creation = Object::new();
+        creation.insert("ephemeral_5m_input_tokens".to_owned(), Value::from(five));
+        creation.insert("ephemeral_1h_input_tokens".to_owned(), Value::from(hour));
+        object.insert("cache_creation".to_owned(), Value::Object(creation));
+    }
     usage.extensions.merge_into(&mut object);
     Value::Object(object)
 }

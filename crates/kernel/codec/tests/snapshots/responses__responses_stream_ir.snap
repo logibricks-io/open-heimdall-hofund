@@ -59,7 +59,8 @@ expression: pretty_value!(&first)
     },
     "usage": {
       "input_tokens": 3,
-      "output_tokens": 2
+      "output_tokens": 2,
+      "cache_write_1h_tokens": 0
     }
   },
   {
