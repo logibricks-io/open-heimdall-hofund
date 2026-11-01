@@ -510,6 +510,21 @@ mod tests {
         assert_eq!(info["models"].as_array().map(Vec::len), Some(0));
         assert_eq!(info["usage"]["30d"]["calls"], 1);
 
+        // a limit used to the last token is spent, as in the reference
+        let mut stored = fixture.store.export().expect("export");
+        stored
+            .iter_mut()
+            .find(|key| key.id == alice_id)
+            .expect("Alice")
+            .limits[0]
+            .tokens = 35;
+        fixture.store.restore(&stored).expect("limits");
+        let (_, _, body) =
+            request(&app, "GET", "/v1/hofund/me", Some(&alice.secret), "", &[]).await;
+        let info: serde_json::Value = serde_json::from_slice(&body).expect("me json");
+        assert_eq!(info["limits"][0]["tokensLeft"], 0);
+        assert_eq!(info["limits"][0]["spent"], true);
+
         let (status, headers, body) = request(&app, "GET", "/me", None, "", &[]).await;
         assert_eq!(status, StatusCode::OK);
         let csp = headers["content-security-policy"].to_str().expect("CSP");
