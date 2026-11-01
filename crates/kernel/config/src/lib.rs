@@ -218,6 +218,8 @@ pub struct Provider {
     pub max_output_tokens: Option<u64>,
     /// Whether every model on this provider is free, overriding catalog prices.
     pub free: bool,
+    /// Models or routing groups tried after this provider fails.
+    pub fallback: Vec<Fallback>,
     /// Conversation affinity for routes that do not override it.
     pub stays: Stays,
     /// Retry budget for a direct request to this provider.
@@ -472,6 +474,8 @@ pub struct Subscription {
     pub accounts: Accounts,
     /// Account weights by lower-cased account id. Missing accounts weigh one.
     pub account_weights: BTreeMap<String, u64>,
+    /// Member-ordering strategy used inside this subscription.
+    pub routing: String,
     /// Conversation affinity for routes that do not override it.
     pub stays: Stays,
     /// Vendor host, client id, and any other plugin setting.
@@ -508,6 +512,8 @@ pub struct Route {
     /// back. Members are judged by the route's patience, not their
     /// provider's, which applies only to a direct request to that provider.
     pub patience: Patience,
+    /// Whether a rate-limited member with quota left moves behind the others.
+    pub sink: bool,
 }
 
 /// Which kind of upstream a route hop names.
@@ -517,6 +523,22 @@ pub enum UpstreamTarget {
     Provider(String),
     /// A configured subscription id. Membership expands this to account members.
     Subscription(String),
+    /// Another route named `group/<id>`.
+    Group(String),
+}
+
+/// One provider fallback entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// A model on a configured provider.
+    Model {
+        /// Configured provider id.
+        provider: String,
+        /// Model name sent to that provider.
+        model: String,
+    },
+    /// A whole routing group.
+    Group(String),
 }
 
 /// One hop on a route: a provider or a subscription, plus an optional model.
@@ -544,7 +566,7 @@ impl Upstream {
     pub fn provider(&self) -> Option<&str> {
         match &self.target {
             UpstreamTarget::Provider(id) => Some(id.as_str()),
-            UpstreamTarget::Subscription(_) => None,
+            UpstreamTarget::Subscription(_) | UpstreamTarget::Group(_) => None,
         }
     }
 
@@ -553,7 +575,16 @@ impl Upstream {
     pub fn subscription(&self) -> Option<&str> {
         match &self.target {
             UpstreamTarget::Subscription(id) => Some(id.as_str()),
-            UpstreamTarget::Provider(_) => None,
+            UpstreamTarget::Provider(_) | UpstreamTarget::Group(_) => None,
+        }
+    }
+
+    /// The group id when this hop names another routing group.
+    #[must_use]
+    pub fn group(&self) -> Option<&str> {
+        match &self.target {
+            UpstreamTarget::Group(id) => Some(id.as_str()),
+            UpstreamTarget::Provider(_) | UpstreamTarget::Subscription(_) => None,
         }
     }
 }
@@ -791,6 +822,11 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     }
     let mut warnings = Vec::new();
     let mut seen = BTreeSet::new();
+    let group_names = raw
+        .routes
+        .iter()
+        .filter_map(|route| route.model.strip_prefix("group/").map(str::to_owned))
+        .collect::<BTreeSet<_>>();
     let mut providers = Vec::new();
     for provider in raw.providers {
         if provider.id.is_empty() {
@@ -834,6 +870,11 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         let options = options_of(&provider, &mut warnings)?;
         let key_protocol = validated_key_protocol(&provider.id, provider.key_protocol)?;
         let keys = validated_keys(&provider.id, provider.keys)?;
+        let fallback = provider
+            .fallback
+            .iter()
+            .map(|entry| parse_fallback(&provider.id, entry))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut model_list = provider.models;
         model_list.auto_include = auto_include;
         providers.push(Provider {
@@ -850,6 +891,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             headers: provider.headers,
             max_output_tokens: provider.max_output_tokens,
             free: provider.free,
+            fallback,
             stays: provider.stays,
             patience,
             options,
@@ -890,10 +932,12 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
                 )));
             }
         }
+        validated_routing_name("subscription", &subscription.id, &subscription.routing)?;
         subscriptions.push(Subscription {
             id: subscription.id,
             accounts,
             account_weights,
+            routing: subscription.routing,
             stays: subscription.stays,
             options: prune_table(subscription.options),
         });
@@ -922,7 +966,13 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         let patience = patience_of("route", &route.model, route.patience.as_ref())?;
         let mut upstreams = Vec::new();
         for upstream in route.upstreams {
-            let upstream = upstream_of(&route.model, upstream, &seen, &subscription_ids)?;
+            let upstream = upstream_of(
+                &route.model,
+                upstream,
+                &seen,
+                &subscription_ids,
+                &group_names,
+            )?;
             upstreams.push(upstream);
         }
         // Q1: one id as both a provider and a subscription in one route is
@@ -948,8 +998,11 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             stays_explicit,
             upstreams,
             patience,
+            sink: route.sink,
         });
     }
+    validate_group_links(&routes)?;
+    validate_fallbacks(&providers, &seen, &group_names)?;
     Ok(Config {
         listen,
         token_file: raw.token_file,
@@ -1171,21 +1224,25 @@ fn normalized_account_weights(
     Ok(weights)
 }
 
-fn validated_routing(route: &RawRoute) -> Result<String, ConfigError> {
-    const NAMES: [&str; 9] = [
-        "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap",
-    ];
-    if !NAMES.contains(&route.routing.as_str()) {
+const ROUTING_NAMES: [&str; 9] = [
+    "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap",
+];
+
+fn validated_routing_name(kind: &str, id: &str, routing: &str) -> Result<(), ConfigError> {
+    if !ROUTING_NAMES.contains(&routing) {
         return Err(ConfigError::Invalid(format!(
-            "route `{}` has unknown routing `{}`; expected {}",
-            route.model,
-            route.routing,
-            NAMES.join(", ")
+            "{kind} `{id}` has unknown routing `{routing}`; expected {}",
+            ROUTING_NAMES.join(", ")
         )));
     }
+    Ok(())
+}
+
+fn validated_routing(route: &RawRoute) -> Result<String, ConfigError> {
+    validated_routing_name("route", &route.model, &route.routing)?;
     let group = route.upstreams.len() > 1
         || route.upstreams.iter().any(|upstream| {
-            matches!(upstream, RawUpstream::Mapped(mapped) if mapped.subscription.is_some())
+            matches!(upstream, RawUpstream::Mapped(mapped) if mapped.subscription.is_some() || mapped.group.is_some())
         });
     if route.routing == "cheap" && !group {
         return Err(ConfigError::Invalid(format!(
@@ -1201,6 +1258,7 @@ fn upstream_of(
     upstream: RawUpstream,
     providers: &BTreeSet<String>,
     subscriptions: &BTreeSet<String>,
+    groups: &BTreeSet<String>,
 ) -> Result<Upstream, ConfigError> {
     let (target, model, max_output_tokens, weight) = match upstream {
         RawUpstream::Id(provider) => (UpstreamTarget::Provider(provider), None, None, None),
@@ -1211,29 +1269,42 @@ fn upstream_of(
                 )));
             }
             let weight = mapped.weight.filter(|weight| *weight > 1);
-            match (mapped.provider, mapped.subscription) {
-                (Some(_), Some(_)) => {
+            match (mapped.provider, mapped.subscription, mapped.group) {
+                (Some(_), Some(_), _) => {
                     return Err(ConfigError::Invalid(format!(
                         "route `{route}` names both provider and subscription"
                     )));
                 }
-                (None, None) => {
+                (None, None, None) => {
                     return Err(ConfigError::Invalid(format!(
                         "route `{route}` upstream needs provider or subscription"
                     )));
                 }
-                (Some(provider), None) => (
+                (Some(provider), None, None) => (
                     UpstreamTarget::Provider(provider),
                     mapped.model,
                     mapped.max_output_tokens,
                     weight,
                 ),
-                (None, Some(subscription)) => (
+                (None, Some(subscription), None) => (
                     UpstreamTarget::Subscription(subscription),
                     mapped.model,
                     mapped.max_output_tokens,
                     weight,
                 ),
+                (None, None, Some(group)) => {
+                    if mapped.model.is_some() || mapped.max_output_tokens.is_some() {
+                        return Err(ConfigError::Invalid(format!(
+                            "route `{route}` group upstream `{group}` cannot override model or max_output_tokens"
+                        )));
+                    }
+                    (UpstreamTarget::Group(group), None, None, weight)
+                }
+                _ => {
+                    return Err(ConfigError::Invalid(format!(
+                        "route `{route}` upstream must name only one of provider, subscription, or group"
+                    )));
+                }
             }
         }
     };
@@ -1282,6 +1353,18 @@ fn upstream_of(
                 )));
             }
         }
+        UpstreamTarget::Group(group) => {
+            if group.is_empty() || group.contains('/') {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` has an invalid group id `{group}`"
+                )));
+            }
+            if !groups.contains(group) {
+                return Err(ConfigError::Invalid(format!(
+                    "route `{route}` names unknown group `{group}`"
+                )));
+            }
+        }
     }
     Ok(Upstream {
         target,
@@ -1289,6 +1372,107 @@ fn upstream_of(
         max_output_tokens,
         weight,
     })
+}
+
+fn parse_fallback(provider: &str, entry: &str) -> Result<Fallback, ConfigError> {
+    if let Some(group) = entry.strip_prefix("group/") {
+        if group.is_empty() || group.contains('/') {
+            return Err(ConfigError::Invalid(format!(
+                "provider `{provider}` has invalid fallback group `{entry}`"
+            )));
+        }
+        return Ok(Fallback::Group(group.to_owned()));
+    }
+    let Some((target, model)) = entry.split_once('/') else {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{provider}` fallback `{entry}` must be `provider/model` or `group/id`"
+        )));
+    };
+    if target.is_empty() || model.is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{provider}` has empty fallback target in `{entry}`"
+        )));
+    }
+    Ok(Fallback::Model {
+        provider: target.to_owned(),
+        model: model.to_owned(),
+    })
+}
+
+fn validate_fallbacks(
+    providers: &[Provider],
+    provider_ids: &BTreeSet<String>,
+    groups: &BTreeSet<String>,
+) -> Result<(), ConfigError> {
+    for provider in providers {
+        for fallback in &provider.fallback {
+            match fallback {
+                Fallback::Model {
+                    provider: target, ..
+                } if !provider_ids.contains(target) => {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider `{}` fallback names unknown provider `{target}`",
+                        provider.id
+                    )));
+                }
+                Fallback::Group(group) if !groups.contains(group) => {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider `{}` fallback names unknown group `{group}`",
+                        provider.id
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_group_links(routes: &[Route]) -> Result<(), ConfigError> {
+    fn walk(
+        model: &str,
+        depth: usize,
+        routes: &BTreeMap<&str, &Route>,
+        visiting: &mut BTreeSet<String>,
+        checked: &mut BTreeSet<String>,
+    ) -> Result<(), ConfigError> {
+        if depth > 8 {
+            return Err(ConfigError::Invalid(format!(
+                "route `{model}` nests routing groups more than 8 deep"
+            )));
+        }
+        if checked.contains(model) {
+            return Ok(());
+        }
+        if !visiting.insert(model.to_owned()) {
+            return Err(ConfigError::Invalid(format!(
+                "route `{model}` forms a routing group cycle"
+            )));
+        }
+        let route = routes.get(model).expect("validated group target");
+        for group in route.upstreams.iter().filter_map(Upstream::group) {
+            walk(
+                &format!("group/{group}"),
+                depth + 1,
+                routes,
+                visiting,
+                checked,
+            )?;
+        }
+        visiting.remove(model);
+        checked.insert(model.to_owned());
+        Ok(())
+    }
+
+    let routes = routes
+        .iter()
+        .map(|route| (route.model.as_str(), route))
+        .collect::<BTreeMap<_, _>>();
+    let mut checked = BTreeSet::new();
+    for model in routes.keys() {
+        walk(model, 0, &routes, &mut BTreeSet::new(), &mut checked)?;
+    }
+    Ok(())
 }
 
 fn default_listen() -> String {
@@ -1559,6 +1743,8 @@ struct RawProvider {
     #[serde(default)]
     free: bool,
     #[serde(default)]
+    fallback: Vec<String>,
+    #[serde(default)]
     stays: Stays,
     patience: Option<Value>,
     #[serde(default)]
@@ -1591,6 +1777,8 @@ struct RawSubscription {
     accounts: String,
     #[serde(default)]
     account_weights: BTreeMap<String, u64>,
+    #[serde(default = "default_smart")]
+    routing: String,
     #[serde(default)]
     stays: Stays,
     #[serde(default)]
@@ -1676,6 +1864,8 @@ struct RawRoute {
     stays: Option<Stays>,
     upstreams: Vec<RawUpstream>,
     patience: Option<Value>,
+    #[serde(default)]
+    sink: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1692,6 +1882,8 @@ struct RawMappedUpstream {
     provider: Option<String>,
     #[serde(default)]
     subscription: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -2087,6 +2279,114 @@ mod tests {
         )
         .expect_err("zero member weight");
         assert!(error.to_string().contains("weight 0"), "{error}");
+    }
+
+    #[test]
+    fn d1_provider_fallback_accepts_a_whole_routing_group() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "plan"
+            preset = "openai"
+            fallback = ["group/backup", "other/x"]
+            [[providers]]
+            id = "other"
+            preset = "openai"
+            [[routes]]
+            model = "group/backup"
+            upstreams = ["other"]
+            [[routes]]
+            model = "demo"
+            upstreams = ["plan"]
+            "#,
+        )
+        .expect("fallback group");
+        assert_eq!(
+            config.providers[0].fallback,
+            [
+                super::Fallback::Group("backup".to_owned()),
+                super::Fallback::Model {
+                    provider: "other".to_owned(),
+                    model: "x".to_owned(),
+                },
+            ]
+        );
+        let error = load(
+            "[[providers]]\nid = \"plan\"\npreset = \"openai\"\nfallback = [\"group/missing\"]\n[[routes]]\nmodel = \"demo\"\nupstreams = [\"plan\"]\n",
+        )
+        .expect_err("unknown fallback group");
+        assert!(error.to_string().contains("unknown group `missing`"));
+    }
+
+    #[test]
+    fn d2_group_members_keep_their_manual_order() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "a"
+            preset = "openai"
+            [[providers]]
+            id = "b"
+            preset = "openai"
+            [[routes]]
+            model = "group/ordered"
+            routing = "order"
+            upstreams = [{ provider = "b", model = "second" }, { provider = "a", model = "first" }]
+            "#,
+        )
+        .expect("ordered group");
+        let upstreams = &config.routes[0].upstreams;
+        assert_eq!(upstreams[0].provider(), Some("b"));
+        assert_eq!(upstreams[0].model.as_deref(), Some("second"));
+        assert_eq!(upstreams[1].provider(), Some("a"));
+        assert_eq!(upstreams[1].model.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn d3_route_sink_is_opt_in() {
+        let config = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nsink = true\nupstreams = [\"one\"]\n[[routes]]\nmodel = \"plain\"\nupstreams = [\"one\"]\n",
+        )
+        .expect("sink setting");
+        assert!(config.routes[0].sink);
+        assert!(!config.routes[1].sink);
+    }
+
+    #[test]
+    fn d5_subscription_routing_and_nested_groups_validate() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "one"
+            preset = "openai"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            routing = "weight"
+            [[routes]]
+            model = "group/inner"
+            upstreams = [{ subscription = "codex" }]
+            [[routes]]
+            model = "group/outer"
+            routing = "weight"
+            upstreams = [{ group = "inner", weight = 2 }, "one"]
+            [[routes]]
+            model = "demo"
+            upstreams = [{ group = "outer" }]
+            "#,
+        )
+        .expect("nested groups");
+        assert_eq!(config.subscriptions[0].routing, "weight");
+        assert_eq!(config.routes[1].upstreams[0].group(), Some("inner"));
+        let cycle = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"group/a\"\nupstreams = [{ group = \"b\" }]\n[[routes]]\nmodel = \"group/b\"\nupstreams = [{ group = \"a\" }]\n[[routes]]\nmodel = \"demo\"\nupstreams = [\"one\"]\n",
+        )
+        .expect_err("group cycle");
+        assert!(cycle.to_string().contains("cycle"), "{cycle}");
+        let unknown =
+            load("[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\nrouting = \"unknown\"\n")
+                .expect_err("unknown subscription routing");
+        assert!(unknown.to_string().contains("unknown routing"));
     }
 
     #[test]

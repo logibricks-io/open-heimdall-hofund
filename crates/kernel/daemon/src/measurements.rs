@@ -90,12 +90,17 @@ impl Measurements for DaemonMeasurements {
                 seat.ttft = speed.ttft;
                 seat.tps = speed.tps;
             }
+            let listed = if (needs.free || needs.price) && !seat.account {
+                crate::listed_model(self.models.cached(&seat.key).models, &wire_models[index])
+            } else {
+                None
+            };
+            if needs.free
+                && let Some(listed) = listed.as_ref()
+            {
+                seat.free = listed.costs_nothing();
+            }
             if needs.price {
-                let listed = if seat.account {
-                    None
-                } else {
-                    crate::listed_model(self.models.cached(&seat.key).models, &wire_models[index])
-                };
                 (seat.priced, seat.cost, seat.cache_cost) =
                     price_of(seat.free, listed.as_ref().map(ModelSpec::prices));
             }
@@ -409,5 +414,39 @@ mod tests {
         assert!(!seats[2].known);
         assert!(seats[2].learns);
         assert!(!seats[3].learns);
+    }
+
+    #[test]
+    fn d6_provider_free_flags_follow_each_model_cache_read() {
+        let dir = tempfile::tempdir().expect("dir");
+        let quotas = Arc::new(QuotaStore::new(dir.path()));
+        let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger"));
+        let models = Arc::new(ModelsHost::new(Duration::ZERO, Duration::ZERO));
+        let measurements = DaemonMeasurements::new(quotas, usage, Arc::clone(&models));
+        let paid = ModelSpec::new("demo", None)
+            .expect("model")
+            .with_prices(1, 2, 0);
+        models.seed_models("one", std::slice::from_ref(&paid));
+        models.seed_models("other", std::slice::from_ref(&paid));
+        let needs = Needs {
+            free: true,
+            ..Needs::default()
+        };
+        let mut seats = vec![Seat::new("one"), Seat::new("other")];
+        let wire = vec!["demo".to_owned(), "demo".to_owned()];
+        measurements.weigh(&mut seats, &wire, "demo", needs, at(1_900_000_000));
+        assert!(!seats[0].free && !seats[1].free);
+
+        models.seed_models("other", &[paid.clone().with_free(true)]);
+        measurements.weigh(&mut seats, &wire, "demo", needs, at(1_900_000_001));
+        assert!(!seats[0].free && seats[1].free);
+
+        models.seed_models("other", std::slice::from_ref(&paid));
+        measurements.weigh(&mut seats, &wire, "demo", needs, at(1_900_000_002));
+        assert!(!seats[0].free && !seats[1].free);
+
+        models.seed_models("other", &[paid.with_prices(0, 0, 0)]);
+        measurements.weigh(&mut seats, &wire, "demo", needs, at(1_900_000_003));
+        assert!(!seats[0].free && seats[1].free);
     }
 }

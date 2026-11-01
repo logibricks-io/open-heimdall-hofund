@@ -340,11 +340,13 @@ pub(crate) fn expand(
                     max_output_tokens: hop.max_output_tokens,
                     context_window: hop.context_window,
                     routing: hop.routing.clone(),
+                    sink: hop.sink,
                     patience: hop.patience,
                     weight: state.config.account_weight(member.account.as_str()),
                     free: hop.free,
                     stays: hop.stays,
                     cold_after: hop.cold_after,
+                    units: hop.units.clone(),
                 });
                 built.entry(key).or_insert(member.built);
             }

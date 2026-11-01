@@ -951,6 +951,7 @@ fn raw_app_as(
             fallback: false,
             effort: String::new(),
             cold_after: hofund_router::affinity::CACHE_COLD,
+            units: Vec::new(),
         }],
     );
     let mut codecs = HashMap::new();
@@ -1426,6 +1427,7 @@ fn named_app(stream: bool, wire: &str, answer: &'static str) -> (axum::Router, t
             patience: Some(std::time::Duration::from_secs(60)),
             free: false,
             cold_after: hofund_router::affinity::CACHE_COLD,
+            units: Vec::new(),
             nearly_spent: false,
             fallback: false,
             effort: String::new(),
@@ -1631,6 +1633,7 @@ fn protocol_app(members: Vec<Arc<dyn Member>>) -> (axum::Router, tempfile::TempD
             fallback: false,
             effort: String::new(),
             cold_after: hofund_router::affinity::CACHE_COLD,
+            units: Vec::new(),
         })
         .collect();
     let routes = BTreeMap::from([("demo".to_owned(), hops)]);
