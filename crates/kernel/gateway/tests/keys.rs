@@ -191,6 +191,8 @@ fn fixture() -> Fixture {
         patience: None,
         weight: 1,
         free: false,
+        cold_after: hofund_router::affinity::CACHE_COLD,
+        nearly_spent: false,
     };
     let routes = BTreeMap::from([
         ("demo".to_owned(), vec![hop("primary", "account-a")]),

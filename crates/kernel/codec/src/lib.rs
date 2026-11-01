@@ -9,6 +9,7 @@
 //! vendor capability gaps belong in `quirks`.
 
 mod anthropic;
+mod conversation;
 mod converse;
 mod custom_input;
 mod error;
@@ -23,6 +24,7 @@ mod refusal;
 mod sse;
 
 pub use anthropic::AnthropicMessages;
+pub use conversation::{SESSION_HEADERS, SUBAGENT_HEADER, Turn, conversation_key, turn_in};
 pub use converse::Converse;
 pub use error::CodecError;
 pub use generative::{GenerativeLanguage, plain_code_assist_tools, plain_schema};

@@ -59,6 +59,9 @@ pub struct RouteModel {
     /// Registered member-ordering strategy.
     #[serde(default = "default_routing")]
     pub routing: String,
+    /// Conversation affinity mode.
+    #[serde(default = "default_stays")]
+    pub stays: String,
 }
 
 impl Default for RouteModel {
@@ -66,12 +69,17 @@ impl Default for RouteModel {
         Self {
             id: String::new(),
             routing: default_routing(),
+            stays: default_stays(),
         }
     }
 }
 
 fn default_routing() -> String {
     "smart".to_owned()
+}
+
+fn default_stays() -> String {
+    "auto".to_owned()
 }
 
 /// Route model list response.

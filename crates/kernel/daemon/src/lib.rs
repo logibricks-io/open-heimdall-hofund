@@ -603,11 +603,20 @@ async fn start_inner(
     let maintenance = runtime.spawn_maintenance();
     let subscriptions = runtime.spawn_subscriptions();
     let probes = runtime.spawn_probes();
+    let running = running.with_resource(AffinityFlush(runtime.affinity()));
     Ok(running
         .with_task(refresh)
         .with_task(maintenance)
         .with_task(subscriptions)
         .with_task(probes))
+}
+
+struct AffinityFlush(hofund_router::affinity::AffinityState);
+
+impl Drop for AffinityFlush {
+    fn drop(&mut self) {
+        self.0.flush();
+    }
 }
 
 /// Serves until a termination signal or a control shutdown, then drains.
@@ -725,9 +734,13 @@ fn router(
     path: &Path,
     max_idle_per_host: Option<usize>,
     mut models_host: Option<&mut ModelsHost>,
-    cooldowns: Arc<Cooldowns>,
     registry: &Arc<dyn DaemonRegistry>,
     subscriptions: &subscriptions::Subscriptions,
+    shared: (
+        Arc<Cooldowns>,
+        hofund_router::affinity::AffinityState,
+        Arc<hofund_router::quota::QuotaStore>,
+    ),
 ) -> Result<RouterParts, DaemonError> {
     let Built { built, instances } = providers(
         config,
@@ -736,7 +749,7 @@ fn router(
         Mode::Serve,
         models_host.as_deref(),
         None,
-        Some(Arc::clone(&cooldowns)),
+        Some(Arc::clone(&shared.0)),
         registry,
     )?;
     if let Some(host) = models_host.as_deref_mut() {
@@ -754,8 +767,14 @@ fn router(
         .collect();
     let (routes, policy) = route_plan(config, models_host.as_deref());
     let (members, expanded) = subscriptions::expand(&built, &routes, subscriptions)?;
-    let (snapshot, table) =
-        membership::open_with_table(&members, expanded, policy.clone(), cooldowns)?;
+    let (snapshot, table) = membership::open_with_table_and_affinity(
+        &members,
+        expanded,
+        policy.clone(),
+        shared.0,
+        shared.1,
+        Some(shared.2),
+    )?;
     Ok(RouterParts {
         snapshot,
         table,
@@ -783,8 +802,14 @@ fn route_plan(
         .iter()
         .filter_map(|(id, provider)| provider.max_output_tokens.map(|cap| (*id, cap)))
         .collect();
+    let subscriptions: BTreeMap<&str, &hofund_config::Subscription> = config
+        .subscriptions
+        .iter()
+        .map(|subscription| (subscription.id.as_str(), subscription))
+        .collect();
     let mut routes = BTreeMap::new();
     for route in &config.routes {
+        let stays = effective_stays(route, &configured, &subscriptions);
         let mut list = Vec::new();
         for upstream in &route.upstreams {
             match &upstream.target {
@@ -810,6 +835,12 @@ fn route_plan(
                         patience: route.patience.duration(),
                         weight: upstream.weight.unwrap_or(1),
                         free,
+                        stays,
+                        cold_after: configured
+                            .get(provider.as_str())
+                            .map_or(hofund_router::affinity::CACHE_COLD, |provider| {
+                                provider_cold_after(provider)
+                            }),
                     });
                 }
                 UpstreamTarget::Subscription(subscription) => {
@@ -824,6 +855,12 @@ fn route_plan(
                         patience: route.patience.duration(),
                         weight: upstream.weight.unwrap_or(1),
                         free: false,
+                        stays,
+                        cold_after: if subscription == "codex" {
+                            hofund_router::affinity::CACHE_HOUR
+                        } else {
+                            hofund_router::affinity::CACHE_COLD
+                        },
                     });
                 }
             }
@@ -835,6 +872,56 @@ fn route_plan(
         statuses: config.failover.statuses.clone(),
     };
     (routes, policy)
+}
+
+pub(crate) fn route_stays(
+    config: &Config,
+    route: &hofund_config::Route,
+) -> hofund_router::affinity::Stays {
+    let providers = config
+        .providers
+        .iter()
+        .map(|provider| (provider.id.as_str(), provider))
+        .collect();
+    let subscriptions = config
+        .subscriptions
+        .iter()
+        .map(|subscription| (subscription.id.as_str(), subscription))
+        .collect();
+    effective_stays(route, &providers, &subscriptions)
+}
+
+fn effective_stays(
+    route: &hofund_config::Route,
+    providers: &BTreeMap<&str, &hofund_config::Provider>,
+    subscriptions: &BTreeMap<&str, &hofund_config::Subscription>,
+) -> hofund_router::affinity::Stays {
+    let configured = if route.stays_explicit {
+        route.stays
+    } else if route.upstreams.len() == 1 {
+        match &route.upstreams[0].target {
+            UpstreamTarget::Provider(id) => providers
+                .get(id.as_str())
+                .map_or(hofund_config::Stays::Auto, |provider| provider.stays),
+            UpstreamTarget::Subscription(id) => subscriptions
+                .get(id.as_str())
+                .map_or(hofund_config::Stays::Auto, |subscription| {
+                    subscription.stays
+                }),
+        }
+    } else {
+        hofund_config::Stays::Auto
+    };
+    hofund_router::affinity::Stays::parse(configured.as_str()).expect("validated stays mode")
+}
+
+fn provider_cold_after(provider: &hofund_config::Provider) -> std::time::Duration {
+    let own_host = models::url_host(&provider.base_url).as_deref() == Some("api.deepseek.com");
+    if own_host || provider.preset.as_deref() == Some("deepseek") {
+        hofund_router::affinity::CACHE_HOUR
+    } else {
+        hofund_router::affinity::CACHE_COLD
+    }
 }
 
 /// The catalog entry for `model`, matched without regard to case as the
