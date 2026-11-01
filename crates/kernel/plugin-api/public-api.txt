@@ -474,6 +474,62 @@ Plan #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 Plan::fn changes (& self) -> & [FileChange]
 Plan::fn is_empty (& self) -> bool
 Plan::fn new (changes : Vec < FileChange >) -> Self
+PlanCard
+PlanCard #[non_exhaustive] derives(Clone, Debug, PartialEq)
+PlanCard::const fn until (& self) -> Option < SystemTime >
+PlanCard::fn error (& self) -> & str
+PlanCard::fn new (plan : impl Into < String >) -> Self
+PlanCard::fn plan (& self) -> & str
+PlanCard::fn renew (& self) -> & str
+PlanCard::fn user (& self) -> & str
+PlanCard::fn windows (& self) -> & [PlanWindow]
+PlanCard::fn with_error (mut self , error : impl Into < String >) -> Self
+PlanCard::fn with_term (mut self , until : SystemTime , renew : impl Into < String >) -> Self
+PlanCard::fn with_user (mut self , user : impl Into < String >) -> Self
+PlanCard::fn with_windows (mut self , windows : Vec < PlanWindow >) -> Self
+PlanQuery
+PlanQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+PlanQuery::const fn now (& self) -> SystemTime
+PlanQuery::const fn with_now (mut self , now : SystemTime) -> Self
+PlanQuery::fn access_key_id (& self) -> & str
+PlanQuery::fn api_key (& self) -> & str
+PlanQuery::fn bases (& self) -> & [String]
+PlanQuery::fn new (bases : Vec < String > , api_key : impl Into < String >) -> Self
+PlanQuery::fn organization (& self) -> & str
+PlanQuery::fn plan_url (& self) -> & str
+PlanQuery::fn project (& self) -> & str
+PlanQuery::fn secret_access_key (& self) -> & str
+PlanQuery::fn session_token (& self) -> & str
+PlanQuery::fn with_access_key (mut self , id : impl Into < String > , secret : impl Into < String >) -> Self
+PlanQuery::fn with_plan_url (mut self , url : impl Into < String >) -> Self
+PlanQuery::fn with_session_token (mut self , token : impl Into < String >) -> Self
+PlanQuery::fn with_team (mut self , organization : impl Into < String > , project : impl Into < String > ,) -> Self
+PlanQuota
+PlanQuota::async fn read (& self , query : & PlanQuery , host : & HostContext ,) -> Result < Vec < PlanCard > , PluginError >
+PlanQuota::fn support (& self , query : & PlanQuery) -> PlanSupport
+PlanSupport
+PlanSupport #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+PlanSupport::Certain
+PlanSupport::Possible
+PlanSupport::Unsupported
+PlanWindow
+PlanWindow #[non_exhaustive] derives(Clone, Debug, PartialEq)
+PlanWindow::const fn amount (& self) -> f64
+PlanWindow::const fn blocking (& self) -> bool
+PlanWindow::const fn limit (& self) -> f64
+PlanWindow::const fn resets_at (& self) -> Option < SystemTime >
+PlanWindow::const fn span (& self) -> Option < Duration >
+PlanWindow::const fn used (& self) -> f64
+PlanWindow::const fn with_blocking (mut self , blocking : bool) -> Self
+PlanWindow::const fn with_optional_reset (mut self , at : Option < SystemTime >) -> Self
+PlanWindow::const fn with_resets_at (mut self , at : SystemTime) -> Self
+PlanWindow::const fn with_span (mut self , span : Duration) -> Self
+PlanWindow::fn display (& self) -> & str
+PlanWindow::fn name (& self) -> & str
+PlanWindow::fn new (name : impl Into < String > , used : f64) -> Self
+PlanWindow::fn unit (& self) -> & str
+PlanWindow::fn with_count (mut self , amount : f64 , limit : f64 , unit : impl Into < String >) -> Self
+PlanWindow::fn with_display (mut self , display : impl Into < String >) -> Self
 PluginError
 PluginError #[non_exhaustive] derives(Debug, Error)
 PluginError::const fn cools (& self) -> bool

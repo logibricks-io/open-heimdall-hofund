@@ -339,6 +339,7 @@ ProviderKey.id
 ProviderKey.masked
 ProviderKey.name
 ProviderKey.on
+ProviderKey.plan
 ProviderKey.protocol
 ProviderKey.rest
 ProviderKey.weight
@@ -346,6 +347,7 @@ ProviderKeyAction #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, S
 ProviderKeyAction::Add
 ProviderKeyAction::Off
 ProviderKeyAction::On
+ProviderKeyAction::Plan
 ProviderKeyAction::Protocol
 ProviderKeyAction::Remove
 ProviderKeyAction::RemoveMany
@@ -358,6 +360,7 @@ ProviderKeyRequest.action
 ProviderKeyRequest.key_id
 ProviderKeyRequest.keys
 ProviderKeyRequest.name
+ProviderKeyRequest.plan
 ProviderKeyRequest.protocol
 ProviderKeyRequest.version
 ProviderKeyRequest.weight
@@ -405,10 +408,12 @@ Quota derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde
 Quota.alias
 Quota.as_of
 Quota.balance
+Quota.display_only
 Quota.error
 Quota.kind
 Quota.last
 Quota.last_served_at
+Quota.member
 Quota.name
 Quota.plan
 Quota.provider

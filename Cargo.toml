@@ -25,6 +25,7 @@ members = [
     "plugins/providers/bedrock-mantle",
     "plugins/providers/fixture",
     "plugins/providers/google-vertex",
+    "plugins/providers/plan-quota",
     "plugins/providers/relay",
     "plugins/providers/remote-gateway",
     "plugins/registry",
@@ -79,6 +80,7 @@ hofund-plugin-codex-catalog = { version = "0.1.0", path = "plugins/inbound/codex
 hofund-plugin-retrieval = { version = "0.1.0", path = "plugins/inbound/retrieval" }
 hofund-plugin-muse = { version = "0.1.0", path = "plugins/inbound/muse" }
 hofund-plugin-ollama = { version = "0.1.0", path = "plugins/inbound/ollama" }
+hofund-plugin-plan-quota = { version = "0.1.0", path = "plugins/providers/plan-quota" }
 hofund-plugin-registry = { version = "0.1.0", path = "plugins/registry" }
 hofund-plugin-relay = { version = "0.1.0", path = "plugins/providers/relay" }
 hofund-plugin-remote-gateway = { version = "0.1.0", path = "plugins/providers/remote-gateway" }

@@ -263,6 +263,17 @@ impl QuotaStore {
             .insert(quota_key(&quota), ReadIssue::Deferred(quota));
     }
 
+    /// Whether `quota` has a successful reading with windows or a balance.
+    #[must_use]
+    pub fn has_reading(&self, quota: &Quota) -> bool {
+        let key = quota_key(quota);
+        let state = self.state.lock().expect("quota store");
+        state
+            .records
+            .iter()
+            .any(|record| quota_key(&record.quota) == key && record.persistent)
+    }
+
     /// Records a failed read. A transient failure uses the last good reading.
     pub fn record_failure(&self, quota: Quota, transient: bool) {
         let mut state = self.state.lock().expect("quota store");
@@ -355,7 +366,7 @@ impl QuotaStore {
         let state = self.state.lock().expect("quota store");
         report_of(&state)
             .into_iter()
-            .filter(|quota| quota.error.is_empty())
+            .filter(|quota| quota.error.is_empty() && !quota.display_only)
             .filter_map(|quota| {
                 let key = quota_key(&quota);
                 let record = state
@@ -717,6 +728,9 @@ pub fn apply_last_served(quotas: &mut [Quota], served: &[ServedRequest], now: Sy
 /// Stable identity shared by a quota card and served request rows.
 #[must_use]
 pub fn served_key(quota: &Quota) -> String {
+    if !quota.member.is_empty() {
+        return quota.member.clone();
+    }
     if quota.kind.is_account() && !quota.user.is_empty() {
         format!("account:{}:{}", quota.provider, quota.user.to_lowercase())
     } else {

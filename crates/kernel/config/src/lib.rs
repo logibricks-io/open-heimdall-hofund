@@ -203,6 +203,8 @@ pub struct Provider {
     pub key_name: String,
     /// Only codec the first key works with. Absent allows the provider's codec.
     pub key_protocol: Option<String>,
+    /// Preset region or plan of the first key. Absent uses the provider's plan.
+    pub key_plan: Option<String>,
     /// Weighted-routing share of the first key.
     pub key_weight: u64,
     /// Additional API keys, in candidate order after the first key.
@@ -265,6 +267,9 @@ pub struct ProviderKey {
     /// Only codec this key works with. Absent allows the provider's codec.
     #[serde(default)]
     pub protocol: Option<String>,
+    /// Preset region or plan. Absent uses the provider's plan.
+    #[serde(default)]
+    pub plan: Option<String>,
     /// Weighted-routing share. One is the default.
     #[serde(default = "default_key_weight")]
     pub weight: u64,
@@ -280,6 +285,7 @@ impl Provider {
             name: self.key_name.clone(),
             on: true,
             protocol: self.key_protocol.clone(),
+            plan: self.key_plan.clone(),
             weight: self.key_weight,
         };
         let mut seen = BTreeSet::new();
@@ -336,6 +342,11 @@ pub fn edit_provider_keys(
     } else {
         table.remove("key_protocol");
     }
+    if let Some(plan) = &first.plan {
+        table.insert("key_plan", value(plan));
+    } else {
+        table.remove("key_plan");
+    }
     if first.weight == 1 {
         table.remove("key_weight");
     } else {
@@ -359,6 +370,9 @@ pub fn edit_provider_keys(
             }
             if let Some(protocol) = &entry.protocol {
                 table.insert("protocol", value(protocol));
+            }
+            if let Some(plan) = &entry.plan {
+                table.insert("plan", value(plan));
             }
             if entry.weight != 1 {
                 table.insert(
@@ -419,6 +433,7 @@ impl fmt::Debug for ProviderKey {
             .field("name", &self.name)
             .field("on", &self.on)
             .field("protocol", &self.protocol)
+            .field("plan", &self.plan)
             .field("weight", &self.weight)
             .finish()
     }
@@ -664,6 +679,7 @@ impl fmt::Debug for Provider {
             .field("api_key", &"<redacted>")
             .field("key_name", &self.key_name)
             .field("key_protocol", &self.key_protocol)
+            .field("key_plan", &self.key_plan)
             .field("key_weight", &self.key_weight)
             .field("keys", &self.keys)
             .field("at_once", &self.at_once)
@@ -933,6 +949,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             api_key: provider.api_key,
             key_name: provider.key_name,
             key_protocol,
+            key_plan: provider.key_plan,
             key_weight,
             keys,
             at_once,
@@ -1794,6 +1811,8 @@ struct RawProvider {
     key_name: String,
     #[serde(default)]
     key_protocol: Option<String>,
+    #[serde(default)]
+    key_plan: Option<String>,
     #[serde(default = "default_key_weight")]
     key_weight: u64,
     #[serde(default)]
@@ -1882,6 +1901,7 @@ impl fmt::Debug for RawProvider {
             .field("api_key", &"<redacted>")
             .field("key_name", &self.key_name)
             .field("key_protocol", &self.key_protocol)
+            .field("key_plan", &self.key_plan)
             .field("key_weight", &self.key_weight)
             .field("keys", &self.keys)
             .field("quirks", &self.quirks)
@@ -3207,11 +3227,13 @@ mod tests {
             api_key = "env:FIRST_KEY"
             key_name = "Personal"
             key_protocol = "openai-chat"
+            key_plan = "api"
             key_weight = 2
             [[providers.keys]]
             key = "env:SECOND_KEY"
             name = "Team"
             protocol = "openai-responses"
+            plan = "coding"
             weight = 3
             [[providers.keys]]
             key = "env:SECOND_KEY"
@@ -3228,8 +3250,10 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].name, "Personal");
         assert_eq!(keys[0].protocol.as_deref(), Some("openai-chat"));
+        assert_eq!(keys[0].plan.as_deref(), Some("api"));
         assert_eq!(keys[0].weight, 2);
         assert_eq!(keys[1].name, "Team");
+        assert_eq!(keys[1].plan.as_deref(), Some("coding"));
         assert!(keys[1].on);
         assert_eq!(keys[1].weight, 3);
         let debug = format!("{config:?} {provider:?} {keys:?}");
@@ -3239,7 +3263,7 @@ mod tests {
         for (field, message) in [
             ("weight = 1001", "0 to 1000"),
             ("protocol = \"carrier-pigeon\"", "unknown key protocol"),
-            ("plan = \"paid\"", "unknown field"),
+            ("unknown = \"paid\"", "unknown field"),
         ] {
             let error = load(&format!(
                 "[[providers]]\nid = \"primary\"\npreset = \"openai\"\n[[providers.keys]]\nkey = \"k\"\n{field}\n"

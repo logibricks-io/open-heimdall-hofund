@@ -69,6 +69,7 @@ flowchart BT
   pluginSdk["plugin-sdk<br/>helpers"]
   pluginHost["plugin-host<br/>HostContext"]
   pluginRegistry["plugin-registry<br/>composition"]
+  pluginPlanQuota["plugin-plan-quota<br/>plan readers"]
   pluginRelay["plugin-relay<br/>provider"]
   pluginEcho["plugin-echo<br/>inbound"]
   pluginOllama["plugin-ollama<br/>inbound"]
@@ -100,6 +101,7 @@ flowchart BT
   pluginHost --> pluginApi
   pluginRegistry --> pluginApi
   pluginRegistry --> pluginSdk
+  pluginRegistry --> pluginPlanQuota
   pluginRegistry --> pluginRelay
   pluginRegistry --> pluginEcho
   pluginRegistry --> pluginOllama
@@ -112,6 +114,8 @@ flowchart BT
   pluginRegistry --> pluginGemini
   pluginRegistry --> provider
   pluginRegistry --> quirks
+  pluginPlanQuota --> pluginApi
+  pluginPlanQuota --> pluginSdk
   pluginRelay --> pluginApi
   pluginRelay --> pluginSdk
   pluginEcho --> pluginApi
@@ -207,7 +211,7 @@ handle.
 The subscription kit depends only on `plugin-host`. The agent kit also depends
 on `agent` for the shared engine and `plugin-api` for descriptions. The upstream
 kit depends on `plugin-api` for the factory contract. The kits are not on the
-diagram. `plugin-relay` and `plugin-registry` dev-depend on `kit-upstream` for
+diagram. `plugin-plan-quota`, `plugin-relay`, and `plugin-registry` dev-depend on `kit-upstream` for
 conformance tests, and the subscription plugins dev-depend on
 `kit-subscription`; the registry also dev-depends on `kit-agent` and on `agent`
 for the frozen Codex, Claude Code, Gemini CLI, and OpenCode equivalence oracles.
@@ -228,9 +232,10 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-codex-catalog` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-muse` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-ollama` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-plan-quota` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-retrieval` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-gemini`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-gemini`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
@@ -308,6 +313,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. SigV4, OAuth token parsing, form bodies, and JSON page cursors live here. Re-exports `tracing` and `async_trait`. |
 | `plugin-host` | The `HostContext` constructor, the pooled HTTP client, and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
 | `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` serves the built-in Chat, Responses, Messages, and Generative adapters. |
+| `plugin-plan-quota` | Vendor plan-window readers for key providers (allowances only when asked). The kit dependency is tests only. |
 | `plugin-relay` | Sample upstream plugin. The kit dependency is tests only. |
 | `plugin-echo` | Sample inbound plugin. Declares `GET /hofund/echo`. |
 | `plugin-ollama` | The Ollama API (`/api/version`, `/api/tags`, `/api/show`, `/api/chat`, `/api/generate`) for clients that take an Ollama server. Lists the gateway's models and runs chats on its Chat Completions route in process. |

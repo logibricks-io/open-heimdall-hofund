@@ -29,6 +29,8 @@ pub enum ProviderKeyAction {
     Weight,
     /// Restrict a key to one codec, or clear the restriction with an empty protocol.
     Protocol,
+    /// Select a preset region or plan for one key, or clear it to inherit the provider's.
+    Plan,
 }
 
 /// One provider key's active rest.
@@ -59,6 +61,9 @@ pub struct ProviderKey {
     pub on: bool,
     /// Only codec the key works with, or empty for any.
     pub protocol: String,
+    /// Preset region or plan, or empty to inherit the provider's plan.
+    #[serde(default)]
+    pub plan: String,
     /// Weighted-routing share.
     pub weight: u64,
     /// Active member-wide rest, when present.
@@ -127,6 +132,9 @@ pub struct ProviderKeyRequest {
     /// Codec for the protocol action, or for keys being added; empty means any.
     #[serde(default)]
     pub protocol: String,
+    /// Preset region or plan for the plan action; empty inherits the provider's plan.
+    #[serde(default)]
+    pub plan: String,
 }
 
 impl ProviderKeyRequest {
@@ -141,6 +149,7 @@ impl ProviderKeyRequest {
             name: String::new(),
             weight: 0,
             protocol: String::new(),
+            plan: String::new(),
         }
     }
 
@@ -163,6 +172,7 @@ impl fmt::Debug for ProviderKeyRequest {
             .field("name", &self.name)
             .field("weight", &self.weight)
             .field("protocol", &self.protocol)
+            .field("plan", &self.plan)
             .finish()
     }
 }

@@ -40,6 +40,7 @@ pub mod kernel;
 
 #[cfg(not(feature = "kernel"))]
 mod kernel;
+mod plan;
 mod records;
 mod redaction;
 pub mod responses_ws;
@@ -72,6 +73,7 @@ pub use id::{
     SurfaceId, TierId,
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
+pub use plan::{PlanCard, PlanQuery, PlanQuota, PlanSupport, PlanWindow};
 pub use records::{
     Account, AccountStatus, AgentActiveProvider, AgentCredential, AgentDescription, AgentFile,
     AgentRoute, AgentSet, AuthChoice, BinaryName, DeviceFlow, FileKind, ListQuery, MatchNeedle,

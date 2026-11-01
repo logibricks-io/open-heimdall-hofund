@@ -93,6 +93,12 @@ pub struct Quota {
     /// User-chosen account alias.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub alias: String,
+    /// Router member identity for a plan key. Not part of the wire model.
+    #[serde(skip)]
+    pub member: String,
+    /// Whether this card must not feed routing because its plan is ambiguous.
+    #[serde(skip)]
+    pub display_only: bool,
 }
 
 /// One window of an allowance.

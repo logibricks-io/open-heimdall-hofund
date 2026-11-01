@@ -33,6 +33,8 @@ const probe::PROBE_WAIT
 const probe::STREAM_CAP
 const wire::FORWARD_CAP
 cursor_pages
+digest::fn hmac_sha256 (key : & [u8] , data : & [u8]) -> [u8 ; 32]
+digest::fn sha256 (bytes : & [u8]) -> [u8 ; 32]
 form_body
 gemini_models
 gemini_models_with_dropped
@@ -48,6 +50,7 @@ jwt::RsaSigner::fn from_pem (text : & str) -> Result < Self , KeyError >
 jwt::RsaSigner::fn sign (& self , header : & Value , claims : & Value) -> Result < String , KeyError >
 mod bedrock
 mod classify
+mod digest
 mod jwt
 mod oauth
 mod page

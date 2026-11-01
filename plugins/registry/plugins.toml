@@ -83,6 +83,13 @@ package = "hofund-plugin-ollama"
 feature = "ollama"
 
 [[plugin]]
+id = "plan-quota"
+kind = "provider"
+path = "plugins/providers/plan-quota"
+package = "hofund-plugin-plan-quota"
+feature = "plan-quota"
+
+[[plugin]]
 id = "relay"
 kind = "provider"
 path = "plugins/providers/relay"

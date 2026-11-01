@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Plan allowance windows (P0-5b1): keyed and account-backed readers for Kimi
+  Code, Zhipu and Z.ai, OpenCode Go, Command Code, MiniMax, Ollama Cloud,
+  StepFun, Volcengine Ark, and Tencent Cloud, including monthly windows,
+  counts, reset times, plan terms, and renewal modes. Fresh quota reports feed
+  the cache, history, API, CLI, and per-key routing allowances; failed reads
+  keep previously proven plans, mixed per-key plans select their own sources,
+  and each provider reads at most eight keys at once. Signed-in accounts now
+  refresh model lists after two minutes and hourly thereafter, keeping the
+  last good list on failure. The plugin SDK gains `digest::sha256` and
+  `digest::hmac_sha256` for request signing, and `kit-upstream` re-exports
+  `wiremock` with an IO-enabled `block_on` so plugin tests need no tokio.
 - Accounts at once (D-26): optional `at_once` on providers and subscriptions,
   with plugin `max_accounts` defaults, keeps the first N keys or accounts in
   configured order taking requests and holds the rest in reserve. Ready members
