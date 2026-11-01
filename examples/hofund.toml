@@ -116,3 +116,9 @@ api_key = "replace-me-too"
 model = "demo"
 routing = "weight"
 upstreams = [{ provider = "primary", weight = 3 }, "backup"]
+# patience is optional. Once every member has failed in a way that passes
+# (busy or a short rate limit), the route asks them again, ready ones first,
+# with pauses doubling to 30 seconds, for 60 seconds by default. The route's
+# patience applies to its members; their providers' own patience is only for
+# direct requests. Set seconds up to 240, or "off" to fail at once.
+# patience = 60

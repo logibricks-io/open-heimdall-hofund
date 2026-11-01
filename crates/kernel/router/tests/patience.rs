@@ -159,15 +159,26 @@ async fn b6a_single_provider_retries_busy_failures_with_backoff() {
     assert_eq!(started.elapsed(), Duration::from_secs(5));
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 
+    // A route pool waits by its own patience (b11), not the provider's:
+    // the provider's is off here and the pool still waits its default.
     let (router, hits) = make_router(
         vec![Err(PluginError::status_error(503, "busy")), Ok(answer())],
-        Some(Duration::from_secs(60)),
+        None,
     );
-    let error = dispatch(&router, "demo")
+    let started = tokio::time::Instant::now();
+    dispatch(&router, "demo")
+        .await
+        .expect("the pool's patience waits");
+    assert_eq!(started.elapsed(), Duration::from_secs(2));
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    let (router, hits) = make_router(
+        vec![Err(PluginError::status_error(503, "busy")), Ok(answer())],
+        None,
+    );
+    dispatch(&router, "primary/demo")
         .await
         .err()
-        .expect("a route pool is not single-provider patience");
-    assert!(matches!(error, hofund_router::RouterError::Upstream { .. }));
+        .expect("the provider's patience is off for a direct request");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 

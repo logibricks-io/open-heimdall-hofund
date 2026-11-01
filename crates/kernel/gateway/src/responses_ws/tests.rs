@@ -12,7 +12,9 @@ use futures_util::{SinkExt, StreamExt, stream};
 use hofund_codec::{Codec, OpenAiResponses};
 use hofund_ir::{ContentPart, Request as ModelRequest, Role};
 use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PresetId, ProtocolId};
-use hofund_router::{Completion, FailoverPolicy, Member, Router as ModelRouter, Snapshot};
+use hofund_router::{
+    Completion, FailoverPolicy, Hop, Member, Route, Router as ModelRouter, Snapshot,
+};
 use hofund_usage::Ledger;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -261,6 +263,19 @@ impl RequestEvents for EventSpy {
     }
 }
 
+/// A router whose pools do not wait out busy members: these tests read how
+/// refusals reach the socket.
+fn impatient(routes: BTreeMap<String, Vec<Arc<dyn Member>>>) -> ModelRouter {
+    let routes = routes
+        .into_iter()
+        .map(|(model, members)| {
+            let hops = members.into_iter().map(Hop::new).collect();
+            (model, Route::new(hops).with_patience(None))
+        })
+        .collect();
+    ModelRouter::from_routes(routes, FailoverPolicy::default())
+}
+
 fn gateway(
     members: Vec<Arc<dyn Member>>,
     token_file: Option<PathBuf>,
@@ -269,7 +284,7 @@ fn gateway(
 ) -> Gateway {
     let mut routes = BTreeMap::new();
     routes.insert("demo".to_owned(), members);
-    let snapshot = Snapshot::new(ModelRouter::new(routes, FailoverPolicy::default()));
+    let snapshot = Snapshot::new(impatient(routes));
     let mut codecs = std::collections::HashMap::new();
     codecs.insert(
         "/v1/responses".to_owned(),
@@ -1294,7 +1309,7 @@ fn backend_gateway(
 ) -> Router {
     let mut routes = BTreeMap::new();
     routes.insert("demo".to_owned(), members);
-    let snapshot = Snapshot::new(ModelRouter::new(routes, FailoverPolicy::default()));
+    let snapshot = Snapshot::new(impatient(routes));
     let mut codecs = std::collections::HashMap::new();
     codecs.insert(
         "/v1/responses".to_owned(),

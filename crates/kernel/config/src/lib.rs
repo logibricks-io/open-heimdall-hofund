@@ -66,7 +66,8 @@ impl Default for Failover {
     }
 }
 
-/// How long a direct request to one provider waits out a busy failure.
+/// How long a direct request to one provider, or a request to a route, waits
+/// out busy failures.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Patience {
     /// Wait for the default 60 seconds.
@@ -301,6 +302,10 @@ pub struct Route {
     pub routing: String,
     /// Providers tried in order, each with an optional upstream model name.
     pub upstreams: Vec<Upstream>,
+    /// How long a request to this route waits for busy members to come
+    /// back. Members are judged by the route's patience, not their
+    /// provider's, which applies only to a direct request to that provider.
+    pub patience: Patience,
 }
 
 /// Which kind of upstream a route hop names.
@@ -618,7 +623,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         }
         validate_refresh(&provider.id, &provider.models.refresh)?;
         let auto_include = clean_auto_include(&provider.id, &provider.models.auto_include)?;
-        let patience = patience_of(&provider.id, provider.patience.as_ref())?;
+        let patience = patience_of("provider", &provider.id, provider.patience.as_ref())?;
         let options = options_of(&provider, &mut warnings)?;
         let mut model_list = provider.models;
         model_list.auto_include = auto_include;
@@ -697,6 +702,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             )));
         }
         let routing = validated_routing(&route)?;
+        let patience = patience_of("route", &route.model, route.patience.as_ref())?;
         let mut upstreams = Vec::new();
         for upstream in route.upstreams {
             let upstream = upstream_of(&route.model, upstream, &seen, &subscription_ids)?;
@@ -722,6 +728,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             model: route.model,
             routing,
             upstreams,
+            patience,
         });
     }
     Ok(Config {
@@ -1177,10 +1184,10 @@ fn parse_duration(value: &str) -> Option<Duration> {
         .flatten()
 }
 
-fn patience_of(provider: &str, value: Option<&Value>) -> Result<Patience, ConfigError> {
+fn patience_of(kind: &str, id: &str, value: Option<&Value>) -> Result<Patience, ConfigError> {
     let invalid = || {
         ConfigError::Invalid(format!(
-            "provider `{provider}` patience must be `off`, `default`, or at most 240 seconds"
+            "{kind} `{id}` patience must be `off`, `default`, or at most 240 seconds"
         ))
     };
     let duration = match value {
@@ -1390,6 +1397,7 @@ struct RawRoute {
     #[serde(default = "default_smart")]
     routing: String,
     upstreams: Vec<RawUpstream>,
+    patience: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1632,6 +1640,34 @@ mod tests {
             Some(Duration::from_secs(240))
         );
         load(&source("300")).expect_err("patience over the cap is refused at load");
+    }
+
+    #[test]
+    fn b11_route_patience_is_validated_like_a_providers() {
+        let source = |value: &str| {
+            format!(
+                "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nupstreams = [{{ provider = \"one\" }}]\n{value}"
+            )
+        };
+        assert_eq!(
+            load(&source("")).expect("default").routes[0].patience,
+            super::Patience::Default
+        );
+        assert_eq!(
+            load(&source("patience = \"off\"\n")).expect("off").routes[0].patience,
+            super::Patience::Off
+        );
+        assert_eq!(
+            load(&source("patience = 240\n")).expect("cap").routes[0]
+                .patience
+                .duration(),
+            Some(Duration::from_secs(240))
+        );
+        let error = load(&source("patience = 300\n")).expect_err("over the cap");
+        assert!(
+            error.to_string().contains("route `demo` patience"),
+            "{error}"
+        );
     }
 
     #[test]

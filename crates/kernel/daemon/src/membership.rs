@@ -69,6 +69,7 @@ struct HopSpec {
     max_output_tokens: Option<u64>,
     context_window: Option<u64>,
     routing: String,
+    patience: Option<Duration>,
     weight: u64,
     free: bool,
 }
@@ -290,6 +291,7 @@ fn build_specs(
                 max_output_tokens: hop.max_output_tokens,
                 context_window: hop.context_window,
                 routing: hop.routing,
+                patience: hop.patience,
                 weight: hop.weight,
                 free: hop.free,
             });
@@ -314,6 +316,8 @@ pub(crate) struct PlannedHop {
     /// list, when it is known.
     pub context_window: Option<u64>,
     pub routing: String,
+    /// The route's patience, the same on every hop of one route.
+    pub patience: Option<Duration>,
     pub weight: u64,
     pub free: bool,
 }
@@ -367,7 +371,15 @@ impl Table {
                     })
                     .collect();
                 let routing = specs.first().map_or("smart", |spec| spec.routing.as_str());
-                (model.clone(), Route::new(list).with_routing(routing))
+                let patience = specs
+                    .first()
+                    .map_or(Some(Duration::from_secs(60)), |spec| spec.patience);
+                (
+                    model.clone(),
+                    Route::new(list)
+                        .with_routing(routing)
+                        .with_patience(patience),
+                )
             })
             .collect();
         let policy = self.policy.lock().expect("failover policy").clone();
@@ -1173,6 +1185,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
             }],
@@ -1268,6 +1281,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
             }],
@@ -1354,6 +1368,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
             }],
@@ -1439,6 +1454,7 @@ mod tests {
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
+                patience: Some(Duration::from_secs(60)),
                 weight: 1,
                 free: false,
             }],
@@ -1496,6 +1512,7 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                 },
@@ -1507,6 +1524,7 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                 },
@@ -1545,6 +1563,7 @@ mod tests {
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
+                    patience: Some(Duration::from_secs(60)),
                     weight: 1,
                     free: false,
                 })

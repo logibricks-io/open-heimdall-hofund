@@ -339,6 +339,7 @@ pub(crate) fn expand(
                     max_output_tokens: hop.max_output_tokens,
                     context_window: hop.context_window,
                     routing: hop.routing.clone(),
+                    patience: hop.patience,
                     weight: state.config.account_weight(member.account.as_str()),
                     free: hop.free,
                 });

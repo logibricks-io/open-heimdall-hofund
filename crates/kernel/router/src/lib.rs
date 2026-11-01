@@ -82,7 +82,9 @@ pub struct Hop {
     pub max_output_tokens: Option<u64>,
     /// Input context window, when the route or catalog knows it.
     pub context_window: Option<u64>,
-    /// Direct-provider retry budget. Absent disables patience.
+    /// Retry budget for a direct request to this member's provider. Absent
+    /// disables patience. A request to a route pool uses [`Route::patience`]
+    /// for every member instead.
     pub patience: Option<Duration>,
     /// Relative request share under weighted routing.
     pub weight: u64,
@@ -113,16 +115,27 @@ pub struct Route {
     pub hops: Vec<Hop>,
     /// Registered routing strategy name.
     pub routing: String,
+    /// How long a request to this pool waits for members that failed in a
+    /// way that passes to come back. Absent disables the pool's patience.
+    pub patience: Option<Duration>,
 }
 
 impl Route {
-    /// A pool using smart routing.
+    /// A pool using smart routing and the default 60-second patience.
     #[must_use]
     pub fn new(hops: Vec<Hop>) -> Self {
         Self {
             hops,
             routing: "smart".to_owned(),
+            patience: Some(Duration::from_secs(60)),
         }
+    }
+
+    /// Sets the pool's patience. `None` turns it off.
+    #[must_use]
+    pub fn with_patience(mut self, patience: Option<Duration>) -> Self {
+        self.patience = patience;
+        self
     }
 
     /// Sets the registered strategy name.
@@ -161,8 +174,14 @@ struct Resolved {
     pool: String,
     /// Strategy configured for this route pool.
     routing: String,
-    /// Retry budget for an explicit provider request, not a route pool.
+    /// Retry budget: the pool's for a route, the provider's for a direct
+    /// request.
     patience: Option<Duration>,
+    /// Whether the request named a route pool rather than one provider.
+    pool_asked: bool,
+    /// Per ordered hop: already resting out of its allowance (quota or
+    /// credit) when the request was planned.
+    spent: Vec<bool>,
 }
 
 impl Router {
@@ -331,6 +350,7 @@ impl Router {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         resolved.hops = self.order_hops(&resolved);
+        resolved.spent = self.spent(&resolved);
         DispatchState {
             asked,
             request: request.clone(),
@@ -476,6 +496,29 @@ impl Router {
         }
     }
 
+    /// Which ordered hops already rest out of their allowance, quota or
+    /// credit, before this request asks them (`reference:
+    /// internal/gateway/fallback.go:1230-1241`, `spentAfter`).
+    fn spent(&self, resolved: &Resolved) -> Vec<bool> {
+        resolved
+            .hops
+            .iter()
+            .map(|hop| {
+                let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                self.cooldowns.as_ref().is_some_and(|cooldowns| {
+                    cooldowns
+                        .cooling_for_model(hop.member.id(), model)
+                        .is_some_and(|cooling| {
+                            matches!(
+                                cooling.cause(),
+                                CooldownCause::Quota | CooldownCause::Credit
+                            )
+                        })
+                })
+            })
+            .collect()
+    }
+
     fn order_hops(&self, resolved: &Resolved) -> Vec<Hop> {
         let ordered = if resolved.hops.len() < 2 {
             resolved.hops.clone()
@@ -540,7 +583,9 @@ impl Router {
                 bare: asked.to_owned(),
                 pool: asked.to_owned(),
                 routing: route.routing.clone(),
-                patience: None,
+                patience: route.patience,
+                pool_asked: true,
+                spent: Vec::new(),
             });
         }
         if let Some((provider_id, model)) = asked.split_once('/')
@@ -589,6 +634,8 @@ impl Router {
                 pool: asked.to_owned(),
                 routing: "smart".to_owned(),
                 patience: None,
+                pool_asked: false,
+                spent: Vec::new(),
             }),
             _ => Err(RouterError::Ambiguous {
                 model: asked.to_owned(),
@@ -645,10 +692,11 @@ impl DispatchState {
     async fn run(mut self, start: usize) -> Result<Routed, RouterError> {
         let mut round = 0_u32;
         let mut wait_from = None;
+        let mut asking: Vec<usize> = (start..self.resolved.hops.len()).collect();
         loop {
             let mut busy = Vec::new();
-            let mut all_busy = true;
-            if let Some(answered) = self.round(start, &mut busy, &mut all_busy).await? {
+            let mut ending = Ending::Answered;
+            if let Some(answered) = self.round(&asking, &mut busy, &mut ending).await? {
                 let next = answered.index + 1;
                 let continuation = (next < self.resolved.hops.len())
                     .then(|| RouteContinuation { state: self, next });
@@ -660,15 +708,24 @@ impl DispatchState {
                 });
             }
             let now = self.now();
-            if all_busy
+            // Every member asked has failed with nothing of a reply sent.
+            // The last one's failure passes (busy), or, in a pool, it is
+            // newly out of its allowance after another member was busy:
+            // those busy are asked again in turn after a pause, while the
+            // patience lasts, counted from the first time all had failed
+            // (`reference: internal/gateway/gateway.go:3956-4006`).
+            let last_spent =
+                self.resolved.pool_asked && !busy.is_empty() && ending == Ending::Spent;
+            if (ending == Ending::Busy || last_spent)
                 && let Some(budget) = self.resolved.patience
                 && let Some(hook) = self.wait_hook.clone()
             {
                 let from = *wait_from.get_or_insert(now);
-                if let Some(wait) = patience::pause(&mut busy, round, from, budget, now) {
+                if let Some((next, wait)) = patience::replan(&mut busy, round, from, budget, now) {
                     hook.waiting();
                     hook.wait(wait).await;
                     round = round.saturating_add(1);
+                    asking = next;
                     continue;
                 }
             }
@@ -690,15 +747,16 @@ impl DispatchState {
         }
     }
 
-    /// Asks each member from `start` once. `Some` is an answer; `None` means
-    /// every member failed in a way that may try the next one.
+    /// Asks each member in `asking` once, in that order. `Some` is an
+    /// answer; `None` means every member failed in a way that may try the
+    /// next one. `ending` tells how the last member asked failed.
     async fn round(
         &mut self,
-        start: usize,
+        asking: &[usize],
         busy: &mut Vec<patience::Busy>,
-        all_busy: &mut bool,
+        ending: &mut Ending,
     ) -> Result<Option<Answered>, RouterError> {
-        for index in start..self.resolved.hops.len() {
+        for &index in asking {
             let hop = self.resolved.hops[index].clone();
             let mut attempt = self.request.clone();
             apply_wire(&mut attempt, &hop, &self.resolved.bare);
@@ -770,7 +828,7 @@ impl DispatchState {
                         }
                         self.outgrown.push((upstream_id.clone(), upstream_model));
                         self.last = Some((upstream_id, error));
-                        *all_busy = false;
+                        *ending = Ending::Other;
                         continue;
                     }
                     if decision::skips_provider(&error) {
@@ -780,10 +838,17 @@ impl DispatchState {
                     } else if !decision::asks_next(&error) && !self.policy.allows(&error) {
                         return Err(RouterError::Upstream { upstream_id, error });
                     }
-                    if let Some(failure) = patience::busy(&error, self.now()) {
-                        busy.push(failure);
+                    if let Some(failure) = patience::busy(&error, index, self.now()) {
+                        if !busy.iter().any(|noted| noted.index == index) {
+                            busy.push(failure);
+                        }
+                        *ending = Ending::Busy;
+                    } else if patience::spent(&error)
+                        && !self.resolved.spent.get(index).copied().unwrap_or(false)
+                    {
+                        *ending = Ending::Spent;
                     } else {
-                        *all_busy = false;
+                        *ending = Ending::Other;
                     }
                     self.last = Some((upstream_id, error));
                 }
@@ -791,6 +856,19 @@ impl DispatchState {
         }
         Ok(None)
     }
+}
+
+/// How the last member asked in a round failed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// No member failed yet, or one answered.
+    Answered,
+    /// In a way that passes: busy, overloaded, rate limited for a moment.
+    Busy,
+    /// Newly out of its allowance (quota or credit), not resting so already.
+    Spent,
+    /// In a way that does not pass.
+    Other,
 }
 
 /// The untried remainder of a route after a streamed member refuses.

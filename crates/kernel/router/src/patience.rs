@@ -1,4 +1,5 @@
-//! Direct-provider retry budgets and busy-failure planning.
+//! Retry budgets for busy failures, of one provider or a route pool, and
+//! the planning of the rounds that ask the busy members again.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -12,7 +13,7 @@ const SHORT_RATE_LIMIT: Duration = Duration::from_secs(240);
 const VENDOR_TIME_CLAMP: Duration = Duration::from_secs(1);
 const REPLAN_ROUNDS: u32 = 12;
 
-/// Supplies runtime-specific sleeping for a direct-provider patience pause.
+/// Supplies runtime-specific sleeping for a patience pause.
 pub trait WaitHook: Send + Sync {
     /// The router is about to wait before another attempt.
     fn waiting(&self) {}
@@ -26,11 +27,23 @@ pub trait WaitHook: Send + Sync {
     }
 }
 
+/// A member that failed in a way that passes, and when it may be asked
+/// again: now, or when its vendor's `Retry-After` says.
 pub(crate) struct Busy {
+    /// Its place in the ordered hops.
+    pub(crate) index: usize,
     pub(crate) ready: Instant,
 }
 
-pub(crate) fn busy(error: &PluginError, now: Instant) -> Option<Busy> {
+/// Whether a failure says the member is out of its allowance: quota or
+/// credit. Such a member is not asked again within the request.
+pub(crate) fn spent(error: &PluginError) -> bool {
+    error.is_credit()
+        || error.kind() == PluginErrorKind::Quota
+        || error.kind() == PluginErrorKind::Status && error.status() == Some(402)
+}
+
+pub(crate) fn busy(error: &PluginError, index: usize, now: Instant) -> Option<Busy> {
     if error.kind() != PluginErrorKind::Status
         || error.is_credit()
         || !crate::decision::rests(error)
@@ -49,7 +62,33 @@ pub(crate) fn busy(error: &PluginError, now: Instant) -> Option<Busy> {
         return None;
     }
     let ready = error.retry_after().map_or(now, |after| now + after);
-    Some(Busy { ready })
+    Some(Busy { index, ready })
+}
+
+/// The members to ask again and the pause before (`reference:
+/// internal/gateway/patience.go:113-175`, `replan`): the pause doubles from
+/// two seconds each round up to thirty, and is never shorter than the
+/// soonest vendor time. Those ready by then go first, in the order they
+/// failed, those still asking for time after them. `None` once the rounds
+/// are spent or the pause would end past the budget, counted from
+/// `wait_from`.
+pub(crate) fn replan(
+    failures: &mut [Busy],
+    round: u32,
+    wait_from: Instant,
+    budget: Duration,
+    now: Instant,
+) -> Option<(Vec<usize>, Duration)> {
+    let wait = pause(failures, round, wait_from, budget, now)?;
+    let at = now.checked_add(wait)?;
+    let (next, later): (Vec<&Busy>, Vec<&Busy>) =
+        failures.iter().partition(|failure| failure.ready <= at);
+    let order = next
+        .into_iter()
+        .chain(later)
+        .map(|failure| failure.index)
+        .collect();
+    Some((order, wait))
 }
 
 pub(crate) fn pause(
@@ -97,7 +136,7 @@ mod tests {
 
     use hofund_plugin_api::PluginError;
 
-    use super::{Busy, busy, pause};
+    use super::{Busy, busy, pause, replan, spent};
 
     #[test]
     fn b6d_rate_limit_hint_over_240_seconds_is_not_busy() {
@@ -105,13 +144,13 @@ mod tests {
         let short =
             PluginError::status_error(429, "slow").with_retry_after(Duration::from_secs(240));
         assert!(
-            busy(&short, now).is_some(),
+            busy(&short, 0, now).is_some(),
             "a 240-second hint is still short"
         );
         let long =
             PluginError::status_error(429, "slow").with_retry_after(Duration::from_millis(240_500));
         assert!(
-            busy(&long, now).is_none(),
+            busy(&long, 0, now).is_none(),
             "a hint past 240 seconds is terminal even inside the one-second clamp"
         );
     }
@@ -121,6 +160,7 @@ mod tests {
         let start = std::time::Instant::now();
         let budget = Duration::from_secs(60);
         let mut exact = [Busy {
+            index: 0,
             ready: start + budget,
         }];
         assert_eq!(
@@ -130,6 +170,7 @@ mod tests {
         );
 
         let mut clamped = [Busy {
+            index: 0,
             ready: start + budget + Duration::from_millis(900),
         }];
         assert_eq!(
@@ -140,6 +181,7 @@ mod tests {
         assert_eq!(clamped[0].ready, start + budget);
 
         let mut late = [Busy {
+            index: 0,
             ready: start + budget + Duration::from_millis(1001),
         }];
         assert_eq!(pause(&mut late, 0, start, budget, start), None);
@@ -150,7 +192,10 @@ mod tests {
         let start = std::time::Instant::now();
         // A budget no pause can spend isolates the round backstop.
         let budget = Duration::from_secs(24 * 60 * 60);
-        let mut ready = [Busy { ready: start }];
+        let mut ready = [Busy {
+            index: 0,
+            ready: start,
+        }];
         assert_eq!(
             pause(&mut ready, 11, start, budget, start),
             Some(Duration::from_secs(30)),
@@ -169,5 +214,43 @@ mod tests {
         );
         assert_eq!(pause(&mut [], 0, start, budget, start), None);
         assert_eq!(pause(&mut ready, 0, start, Duration::ZERO, start), None);
+    }
+
+    #[test]
+    fn b11_replan_asks_ready_members_before_those_still_asking_for_time() {
+        let now = std::time::Instant::now();
+        let mut failures = [
+            Busy {
+                index: 0,
+                ready: now + Duration::from_secs(20),
+            },
+            Busy {
+                index: 2,
+                ready: now,
+            },
+            Busy {
+                index: 3,
+                ready: now + Duration::from_secs(1),
+            },
+        ];
+        let (order, wait) =
+            replan(&mut failures, 0, now, Duration::from_secs(60), now).expect("a pause");
+        assert_eq!(wait, Duration::from_secs(2), "first pause is two seconds");
+        assert_eq!(order, vec![2, 3, 0], "ready first, in failure order");
+        assert!(
+            replan(&mut failures, 12, now, Duration::from_secs(60), now).is_none(),
+            "twelve rounds at most"
+        );
+    }
+
+    #[test]
+    fn b11_quota_and_credit_failures_are_spent_not_busy() {
+        let now = std::time::Instant::now();
+        let quota = PluginError::quota("out of quota");
+        assert!(spent(&quota) && busy(&quota, 0, now).is_none());
+        let credit = PluginError::status_error(402, "pay up");
+        assert!(spent(&credit) && busy(&credit, 0, now).is_none());
+        let overloaded = PluginError::status_error(529, "overloaded");
+        assert!(!spent(&overloaded) && busy(&overloaded, 1, now).is_some_and(|b| b.index == 1));
     }
 }
