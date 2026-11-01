@@ -783,7 +783,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             )));
         }
         validate_refresh(&provider.id, &provider.models.refresh)?;
-        validate_key_weight(&provider.id, "key_weight", provider.key_weight)?;
+        let key_weight = validate_key_weight(&provider.id, "key_weight", provider.key_weight)?;
         let auto_include = clean_auto_include(&provider.id, &provider.models.auto_include)?;
         let patience = patience_of("provider", &provider.id, provider.patience.as_ref())?;
         let options = options_of(&provider, &mut warnings)?;
@@ -799,7 +799,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             api_key: provider.api_key,
             key_name: provider.key_name,
             key_protocol,
-            key_weight: provider.key_weight,
+            key_weight,
             keys,
             quirks: provider.quirks,
             headers: provider.headers,
@@ -1260,12 +1260,13 @@ fn default_key_weight() -> u64 {
     1
 }
 
-fn validate_key_weight(provider: &str, field: &str, weight: u64) -> Result<(), ConfigError> {
-    if (1..=MAX_KEY_WEIGHT).contains(&weight) {
-        return Ok(());
+/// Zero, like an absent weight, counts as the default share of one.
+fn validate_key_weight(provider: &str, field: &str, weight: u64) -> Result<u64, ConfigError> {
+    if weight <= MAX_KEY_WEIGHT {
+        return Ok(weight.max(1));
     }
     Err(ConfigError::Invalid(format!(
-        "provider `{provider}` {field} must be 1 to {MAX_KEY_WEIGHT}"
+        "provider `{provider}` {field} must be 0 to {MAX_KEY_WEIGHT} (0 counts as 1)"
     )))
 }
 
@@ -1290,7 +1291,7 @@ fn validated_key_protocol(
 fn validated_keys(provider: &str, keys: Vec<ProviderKey>) -> Result<Vec<ProviderKey>, ConfigError> {
     let mut validated = Vec::with_capacity(keys.len());
     for mut key in keys {
-        validate_key_weight(provider, "key weight", key.weight)?;
+        key.weight = validate_key_weight(provider, "key weight", key.weight)?;
         key.protocol = validated_key_protocol(provider, key.protocol)?;
         validated.push(key);
     }
@@ -2757,8 +2758,7 @@ mod tests {
         assert!(!debug.contains("SECOND_KEY"), "{debug}");
 
         for (field, message) in [
-            ("weight = 0", "1 to 1000"),
-            ("weight = 1001", "1 to 1000"),
+            ("weight = 1001", "0 to 1000"),
             ("protocol = \"carrier-pigeon\"", "unknown key protocol"),
             ("plan = \"paid\"", "unknown field"),
         ] {
@@ -2769,9 +2769,19 @@ mod tests {
             assert!(error.to_string().contains(message), "{field}: {error}");
         }
         load(
-            "[[providers]]\nid = \"primary\"\npreset = \"openai\"\napi_key = \"k\"\nkey_weight = 0\n",
+            "[[providers]]\nid = \"primary\"\npreset = \"openai\"\napi_key = \"k\"\nkey_weight = 1001\n",
         )
         .expect_err("first-key weight");
+        // Zero, like an absent weight, counts as one, as in the reference.
+        let zero = load(
+            "[[providers]]\nid = \"primary\"\npreset = \"openai\"\napi_key = \"k\"\nkey_weight = 0\n[[providers.keys]]\nkey = \"k2\"\nweight = 0\n",
+        )
+        .expect("zero weights");
+        load("[[providers]]\nid = \"primary\"\npreset = \"openai\"\napi_key = \"k\"\nkey_weight = 1000\n")
+            .expect("largest weight");
+        let zero_keys = zero.providers[0].key_entries();
+        assert_eq!(zero_keys[0].weight, 1);
+        assert_eq!(zero_keys[1].weight, 1);
     }
 
     #[test]

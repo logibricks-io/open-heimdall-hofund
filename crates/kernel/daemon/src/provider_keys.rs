@@ -37,8 +37,10 @@ pub(crate) fn masked(secret: &str) -> String {
     if secret.is_empty() {
         return String::new();
     }
-    if secret.len() >= 12 {
-        format!("…{}", &secret[secret.len() - 4..])
+    let characters = secret.chars().count();
+    if characters >= 12 {
+        let suffix: String = secret.chars().skip(characters - 4).collect();
+        format!("…{suffix}")
     } else {
         "…".to_owned()
     }
@@ -46,12 +48,15 @@ pub(crate) fn masked(secret: &str) -> String {
 
 pub(crate) fn split(text: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
-    text.split(|character: char| character.is_whitespace() || matches!(character, ',' | ';'))
-        .map(|key| key.trim_matches(['"', '\'', '`']))
-        .filter(|key| !key.is_empty())
-        .filter(|key| seen.insert((*key).to_owned()))
-        .map(str::to_owned)
-        .collect()
+    // Full-width comma and semicolon split too, as in the reference.
+    text.split(|character: char| {
+        character.is_whitespace() || matches!(character, ',' | ';' | '\u{ff0c}' | '\u{ff1b}')
+    })
+    .map(|key| key.trim_matches(['"', '\'', '`']))
+    .filter(|key| !key.is_empty())
+    .filter(|key| seen.insert((*key).to_owned()))
+    .map(str::to_owned)
+    .collect()
 }
 
 pub(crate) fn resolve(provider: &Provider) -> Result<Vec<ResolvedKey>, DaemonError> {
@@ -177,7 +182,12 @@ pub(crate) fn mutate(
             .ok_or_else(|| format!("provider `{provider_id}` has no such key"))
     };
     let lone_before = (!several)
-        .then(|| entries.iter().find(|key| key.entry.on).map(|key| key.id.clone()))
+        .then(|| {
+            entries
+                .iter()
+                .find(|key| key.entry.on)
+                .map(|key| key.id.clone())
+        })
         .flatten();
     let mut moves = Vec::new();
     let mut added = 0_u64;
@@ -375,7 +385,10 @@ pub(crate) fn mutate(
         let lone = if several_after {
             lone_before.filter(|id| entries.iter().any(|key| key.id == *id && key.entry.on))
         } else {
-            entries.iter().find(|key| key.entry.on).map(|key| key.id.clone())
+            entries
+                .iter()
+                .find(|key| key.entry.on)
+                .map(|key| key.id.clone())
         };
         if let Some(id) = lone {
             moves.push((
@@ -434,6 +447,11 @@ mod tests {
         assert_eq!(masked("first-provider-key"), "…-key");
         assert_eq!(masked("short"), "…");
         assert_eq!(masked(""), "");
+        // A multi-byte suffix is cut on a character, never inside one.
+        assert_eq!(
+            masked("abcdefgh-\u{e9}\u{e9}\u{e9}\u{e9}"),
+            "…\u{e9}\u{e9}\u{e9}\u{e9}"
+        );
     }
 
     #[test]
@@ -443,6 +461,10 @@ mod tests {
             ["one", "two", "three", "four", "five"]
         );
         assert!(split(" \n,; ").is_empty());
+        assert_eq!(
+            split("six\u{ff0c}seven\u{ff1b}eight\u{3000}nine"),
+            ["six", "seven", "eight", "nine"]
+        );
     }
 
     #[test]
