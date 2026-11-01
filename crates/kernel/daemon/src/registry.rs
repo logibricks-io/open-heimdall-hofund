@@ -65,6 +65,11 @@ pub trait DaemonRegistry: Send + Sync {
         let _ = (protocol, host);
         None
     }
+
+    /// The linked vendor plan reader. The default links none.
+    fn plan_quota(&self) -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
+        None
+    }
 }
 
 /// Compatibility adapter backed by the compile-time plugin registry.
@@ -122,6 +127,10 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
         hofund_plugin_registry::host_plugin(protocol, host)
+    }
+
+    fn plan_quota(&self) -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
+        hofund_plugin_registry::plan_quota()
     }
 }
 

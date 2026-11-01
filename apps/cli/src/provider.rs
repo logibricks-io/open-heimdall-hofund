@@ -82,6 +82,7 @@ pub(crate) async fn key_edit(
                 .map_err(|_| format!("a key's weight is a whole number, not `{value}`"))?;
         }
         ProviderKeyAction::Protocol => value.clone_into(&mut request.protocol),
+        ProviderKeyAction::Plan => value.clone_into(&mut request.plan),
         _ => {}
     }
     let response = client
@@ -108,7 +109,7 @@ fn render_keys(response: &ProviderKeysResponse) -> String {
             response.before, response.after
         ));
     }
-    out.push_str("id\tname\tmasked\ton\tprotocol\tweight\trest");
+    out.push_str("id\tname\tmasked\ton\tprotocol\tplan\tweight\trest");
     for key in &response.keys {
         let rest = key.rest.as_ref().map_or_else(String::new, |rest| {
             format!(
@@ -117,12 +118,13 @@ fn render_keys(response: &ProviderKeysResponse) -> String {
             )
         });
         out.push_str(&format!(
-            "\n{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             key.id,
             key.name,
             key.masked,
             yes_no(key.on),
             key.protocol,
+            key.plan,
             key.weight,
             rest
         ));
@@ -646,6 +648,7 @@ mod tests {
         key.masked = "…-key".to_owned();
         key.on = true;
         key.protocol = "openai-chat".to_owned();
+        key.plan = "coding".to_owned();
         key.weight = 3;
         let mut rest = hofund_control_client::hofund_control_proto::ProviderKeyRest::default();
         rest.why = "rate_limit".to_owned();
@@ -660,7 +663,7 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("key-id\tTeam\t…-key\tyes\topenai-chat\t3"),
+            rendered.contains("key-id\tTeam\t…-key\tyes\topenai-chat\tcoding\t3"),
             "{rendered}"
         );
         assert!(rendered.contains("rate_limit until 1234"), "{rendered}");

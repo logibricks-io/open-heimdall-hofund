@@ -2046,6 +2046,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-plan-quota"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-upstream",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-registry"
 version = "0.1.0"
 dependencies = [
@@ -2062,6 +2072,7 @@ dependencies = [
  "hofund-plugin-google-vertex",
  "hofund-plugin-muse",
  "hofund-plugin-ollama",
+ "hofund-plugin-plan-quota",
  "hofund-plugin-registry",
  "hofund-plugin-relay",
  "hofund-plugin-remote-gateway",
