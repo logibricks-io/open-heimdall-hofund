@@ -15,9 +15,11 @@ use hofund_control_proto::{
     GatewayKeyRestoreRequest, HealthResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
     PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery,
-    QuotaResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UsagePeriod, UsageQuery,
-    UsageResponse, decode_error_envelope, decode_response,
+    QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery,
+    SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, Topic, UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -363,6 +365,35 @@ impl Client {
         self.get("/v1/hofund/models").await
     }
 
+    /// Lists recent routing decisions.
+    pub async fn route_decisions(
+        &self,
+        query: RouteQuery,
+    ) -> Result<RouteListResponse, ClientError> {
+        let encoded = query.encode();
+        if encoded.is_empty() {
+            self.get("/v1/hofund/route").await
+        } else {
+            self.get(&format!("/v1/hofund/route?{encoded}")).await
+        }
+    }
+
+    /// Returns the latest routing decision for one session.
+    pub async fn route_session(
+        &self,
+        session: &str,
+        mut query: RouteQuery,
+    ) -> Result<SessionRouteResponse, ClientError> {
+        query.session = Some(session.to_owned());
+        self.get(&format!("/v1/hofund/route/session?{}", query.encode()))
+            .await
+    }
+
+    /// Lists requests waiting before routing begins.
+    pub async fn route_unrouted(&self) -> Result<UnroutedListResponse, ClientError> {
+        self.get("/v1/hofund/route/unrouted").await
+    }
+
     /// Lists known agents.
     pub async fn agents(&self) -> Result<AgentListResponse, ClientError> {
         self.get("/v1/hofund/agents").await
@@ -500,6 +531,24 @@ impl Client {
             self.get(&format!("/v1/hofund/quotas/history?{query}"))
                 .await
         }
+    }
+
+    /// Lists last daily warm-up results known to the daemon.
+    pub async fn warmups(&self) -> Result<WarmupListResponse, ClientError> {
+        self.get("/v1/hofund/warmups").await
+    }
+
+    /// Runs daily warm-up for one subscription account now.
+    pub async fn run_warmup(
+        &self,
+        request: WarmupRunRequest,
+    ) -> Result<WarmupRunResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/warmups/run",
+            Some(json_body(&request)?),
+        )
+        .await
     }
 
     /// Reports usage for a period.

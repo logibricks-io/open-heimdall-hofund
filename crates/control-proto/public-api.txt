@@ -321,6 +321,10 @@ ModelListenerStatus.configured
 ModelListenerStatus.effective
 ModelListenerStatus.effective_source
 ModelListenerStatus.running
+ModelMove #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ModelMove.to
+ModelMove.why
+ModelMove::fn new (to : impl Into < String > , why : impl Into < String >) -> Self
 ModelsRefreshedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 ModelsRefreshedEvent.error
 ModelsRefreshedEvent.list_kind
@@ -547,6 +551,18 @@ ResyncRequiredEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seria
 ResyncRequiredEvent.cursors
 ResyncRequiredEvent.reason
 ResyncRequiredEvent.topic
+RouteCandidate #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+RouteCandidate.member
+RouteCandidate.model
+RouteCandidate.order
+RouteCandidate.provider
+RouteCandidate.skip
+RouteCandidate.skipped
+RouteCandidate::fn new (member : impl Into < String > , provider : impl Into < String > , model : impl Into < String > , order : u32 , skipped : bool , skip : Option < SkipReason > ,) -> Self
+RouteListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+RouteListResponse.decisions
+RouteListResponse.seq
+RouteListResponse.version
 RouteModel #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 RouteModel.id
 RouteModel.reserves
@@ -555,9 +571,52 @@ RouteModel.stays
 RouteModelListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 RouteModelListResponse.models
 RouteModelListResponse.version
+RouteQuery derives(Clone, Debug, PartialEq, Eq)
+RouteQuery.after
+RouteQuery.gateway_key
+RouteQuery.limit
+RouteQuery.session
+RouteQuery.wait_secs
+RouteQuery::fn encode (& self) -> String
+RouteQuery::fn parse (raw : Option < & str >) -> Self
 RouteReserve #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 RouteReserve.at_once
 RouteReserve.member
+RouteTry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+RouteTry.done
+RouteTry.fail
+RouteTry.member
+RouteTry.model
+RouteTry.provider
+RouteTry.status
+RouteTry::fn new (member : impl Into < String > , provider : impl Into < String > , model : impl Into < String > , done : bool , status : Option < u16 > , fail : impl Into < String > ,) -> Self
+RoutingDecision #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+RoutingDecision.affinity
+RoutingDecision.agent
+RoutingDecision.asked
+RoutingDecision.candidates
+RoutingDecision.done
+RoutingDecision.error
+RoutingDecision.gateway_key
+RoutingDecision.group
+RoutingDecision.id
+RoutingDecision.moved
+RoutingDecision.request_id
+RoutingDecision.routing
+RoutingDecision.seq
+RoutingDecision.served_member
+RoutingDecision.served_provider
+RoutingDecision.session
+RoutingDecision.status
+RoutingDecision.time_ms
+RoutingDecision.tries
+RoutingDecision.unrouted
+SessionRouteResponse #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionRouteResponse.decision
+SessionRouteResponse.seq
+SessionRouteResponse.session
+SessionRouteResponse.version
+SessionRouteResponse::fn empty (session : impl Into < String >) -> Self
 ShutdownRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ShutdownRequest.version
 ShutdownRequest::fn new () -> Self
@@ -573,6 +632,16 @@ ShutdownState::Unknown #[serde(other)]
 SignInProgressEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SignInProgressEvent.provider
 SignInProgressEvent.state
+SkipReason #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (tag = "kind" , rename_all = "snake_case")]
+SkipReason::Context
+SkipReason::Cooldown
+SkipReason::Disabled
+SkipReason::Failure
+SkipReason::ProviderRefused
+SkipReason::Quota
+SkipReason::Rest
+SkipReason::Strategy
+SkipReason::Unknown #[serde(other)]
 SnapshotEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SnapshotEvent.cursors
 SnapshotEvent.disk_revision
@@ -622,6 +691,16 @@ Topic::Control
 Topic::Requests
 Topic::Unknown #[serde(other)]
 Topic::const fn as_str (self) -> & 'static str
+UnroutedListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+UnroutedListResponse.holds
+UnroutedListResponse.version
+UnroutedRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+UnroutedRequest.asked
+UnroutedRequest.id
+UnroutedRequest.inbound_protocol
+UnroutedRequest.phase
+UnroutedRequest.session
+UnroutedRequest.since_ms
 UsagePeriod #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
 UsagePeriod::All
 UsagePeriod::Day
@@ -662,6 +741,25 @@ UsageTotals.input_tokens
 UsageTotals.output_tokens
 UsageTotals.reasoning_tokens
 UsageTotals.requests
+WarmupAccountRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+WarmupAccountRow.account
+WarmupAccountRow.at_ms
+WarmupAccountRow.detail
+WarmupAccountRow.outcome
+WarmupAccountRow.subscription
+WarmupListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+WarmupListResponse.accounts
+WarmupListResponse.version
+WarmupRunRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+WarmupRunRequest.account
+WarmupRunRequest.subscription
+WarmupRunRequest.version
+WarmupRunRequest::fn new (subscription : impl Into < String > , account : impl Into < String >) -> Self
+WarmupRunResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+WarmupRunResponse.at_ms
+WarmupRunResponse.detail
+WarmupRunResponse.outcome
+WarmupRunResponse.version
 const API_VERSION
 const MAX_BOOT_ID_LEN
 const MAX_CONFIG_TEXT_BYTES

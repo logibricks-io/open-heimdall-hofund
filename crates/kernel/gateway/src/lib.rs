@@ -48,8 +48,8 @@ use endpoints::{
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use hofund_codec::{
-    Codec, EndWatch, SESSION_HEADERS, SUBAGENT_HEADER, StreamEncoder, compacts_in_stream_client,
-    conversation_key, turn_in,
+    Codec, EndWatch, SESSION_HEADERS, STREAM_CLIENT_PREFIXES, SUBAGENT_HEADER, StreamEncoder,
+    compacts_in_stream_client, conversation_key, turn_in,
 };
 use hofund_config::VisibleCatalog;
 use hofund_ir::{Request as ModelRequest, StreamEvent, too_long, words_of};
@@ -106,6 +106,8 @@ struct Inner {
     visible_catalog: Option<Arc<RwLock<VisibleCatalog>>>,
     /// Optional resolver for the agent behind a model-list request.
     request_agent: Option<RequestAgentHook>,
+    /// Routing decision history for the management API.
+    route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
     /// models.dev catalog for `/v1/models` enrichment and routing metadata.
     model_catalog: Option<Arc<hofund_model_catalog::ModelCatalog>>,
 }
@@ -491,6 +493,7 @@ impl Gateway {
                 quota_scope: tell_everything(),
                 visible_catalog: None,
                 request_agent: None,
+                route_trace: None,
                 model_catalog: None,
             }),
         }
@@ -610,6 +613,20 @@ impl Gateway {
         let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
         inner.quota_scope = scope;
         self
+    }
+
+    /// Records routing decisions for `GET /v1/hofund/route`. Call before [`Self::bind`].
+    #[must_use]
+    pub fn with_route_trace(mut self, book: Arc<hofund_router::RouteTraceBook>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
+        inner.route_trace = Some(book);
+        self
+    }
+
+    /// Shared routing trace book when attached.
+    #[must_use]
+    pub fn route_trace(&self) -> Option<Arc<hofund_router::RouteTraceBook>> {
+        self.inner.route_trace.clone()
     }
 
     /// Attaches the models.dev catalog used to enrich `/v1/models` listings.
@@ -815,6 +832,17 @@ impl Running {
     pub fn with_resource<T: std::any::Any + Send>(mut self, resource: T) -> Self {
         self.resources.push(Box::new(resource));
         self
+    }
+
+    /// Returns the routing trace book stored with [`Self::with_resource`].
+    #[must_use]
+    pub fn route_trace_book(&self) -> Option<Arc<hofund_router::RouteTraceBook>> {
+        for resource in &self.resources {
+            if let Some(book) = resource.downcast_ref::<Arc<hofund_router::RouteTraceBook>>() {
+                return Some(Arc::clone(book));
+            }
+        }
+        None
     }
 
     /// Links a control listener to this server's lifetime.
@@ -1660,7 +1688,43 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         Err(response) => return *response,
     };
     let started = Instant::now();
-    let bytes = match axum::body::to_bytes(request.into_body(), BODY_LIMIT).await {
+    let mut identity_headers = Vec::new();
+    for name in SESSION_HEADERS.iter().copied().chain([SUBAGENT_HEADER]) {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            identity_headers.push((name, value));
+        }
+    }
+    let session = client_session(&identity_headers);
+    let watched = unrouted_watched(&path);
+    let mut unrouted_hold = watched
+        .then(|| {
+            app.route_trace
+                .as_ref()
+                .map(|book| book.hold_unrouted(&session, "", codec.id(), "body"))
+        })
+        .flatten();
+    if let Some(hold) = &unrouted_hold {
+        hold.begin_known_wait("body");
+    }
+    let bytes = if let Some(hold) = &unrouted_hold {
+        let book = Arc::clone(app.route_trace.as_ref().expect("trace book"));
+        let hold_id = hold.id();
+        tokio::select! {
+            result = axum::body::to_bytes(request.into_body(), BODY_LIMIT) => result,
+            kind = wait_unrouted_hold_timeout(book, hold_id) => {
+                return unrouted_timeout_before_routing(
+                    app,
+                    codec.as_ref(),
+                    kind,
+                    started,
+                    &identity,
+                );
+            }
+        }
+    } else {
+        axum::body::to_bytes(request.into_body(), BODY_LIMIT).await
+    };
+    let bytes = match bytes {
         Ok(bytes) => bytes,
         Err(_) => {
             return coded(
@@ -1670,6 +1734,9 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             );
         }
     };
+    if let Some(hold) = &unrouted_hold {
+        hold.end_known_wait();
+    }
     let bytes = if let Some(route) = &matched {
         Bytes::from(inject_target(&bytes, &route.model, route.stream))
     } else {
@@ -1714,24 +1781,17 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     };
     // Authenticated request with a decoded body: start the request topic and
     // the in-flight counter before dispatch.
+    let request_id = next_request_id();
     let mut track = RequestTrack::begin(
         &app,
         RequestStart {
-            request_id: next_request_id(),
+            request_id: request_id.clone(),
             route: model_request.model.clone(),
             inbound_protocol: codec.id().to_owned(),
             started_at_ms: unix_ms_now(),
         },
     )
     .with_reservation(reservation);
-    let router = app.snapshot.load();
-    let attempt = ask.as_ref().map(|ask| ask.attempt());
-    let mut identity_headers = Vec::new();
-    for name in SESSION_HEADERS.iter().copied().chain([SUBAGENT_HEADER]) {
-        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
-            identity_headers.push((name, value));
-        }
-    }
     let turn = turn_in(&model_request);
     let conversation = hofund_router::affinity::Conversation::new(
         conversation_key(&model_request.model, &identity_headers, &bytes),
@@ -1739,22 +1799,53 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         turn.within,
     )
     .with_body(bytes.to_vec());
+    let router = app.snapshot.load();
+    let attempt = ask.as_ref().map(|ask| ask.attempt());
+    if let Some(hold) = &unrouted_hold {
+        hold.set_asked(&model_request.model);
+    }
+    let agent = trace_agent_label(&identity_headers, &identity);
+    let trace = app.route_trace.as_ref().map(|book| {
+        book.begin(hofund_router::RouteMeta {
+            session: session.clone(),
+            agent,
+            gateway_key: identity.key_id.clone(),
+            request_id: request_id.clone(),
+            asked: model_request.model.clone(),
+            ..hofund_router::RouteMeta::default()
+        })
+    });
+    drop(unrouted_hold.take());
     let (wait, notice) = GatewayWait::channel();
     let mut dispatch: DispatchFuture = Box::pin({
         let request = model_request.clone();
         let protocol = codec.id().to_owned();
         let scope = route_scope(&identity);
         async move {
-            router
-                .dispatch_scoped_conversation_with_wait(
-                    &request,
-                    &protocol,
-                    Some(&scope),
-                    Some(&conversation),
-                    attempt,
-                    Some(wait),
-                )
-                .await
+            if let Some(trace) = trace {
+                router
+                    .dispatch_scoped_conversation_with_wait_traced(
+                        &request,
+                        &protocol,
+                        Some(&scope),
+                        Some(&conversation),
+                        attempt,
+                        Some(wait),
+                        trace,
+                    )
+                    .await
+            } else {
+                router
+                    .dispatch_scoped_conversation_with_wait(
+                        &request,
+                        &protocol,
+                        Some(&scope),
+                        Some(&conversation),
+                        attempt,
+                        Some(wait),
+                    )
+                    .await
+            }
         }
     });
     let result = tokio::select! {
@@ -2066,6 +2157,125 @@ fn authenticate_request(
         None => list_error(message),
     };
     Err(Box::new(json_response(StatusCode::UNAUTHORIZED, body)))
+}
+
+/// Whether a model path should appear in the pre-route unrouted view.
+fn unrouted_watched(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/chat/completions"
+            | "/chat/completions"
+            | "/v1/responses"
+            | "/responses"
+            | "/v1/messages"
+            | "/messages"
+    ) || (path.starts_with("/v1beta/models/")
+        && (path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent")))
+}
+
+/// Agent label stored on the routing trace when the gateway can infer it.
+fn trace_agent_label(headers: &[(&str, &str)], identity: &Identity) -> String {
+    if let Some((_, value)) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(SUBAGENT_HEADER))
+    {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return truncate_agent(trimmed);
+        }
+    }
+    if let Some(label) = stream_client_agent_label(headers) {
+        return label;
+    }
+    if !identity.key_name.is_empty() {
+        return identity.key_name.clone();
+    }
+    String::new()
+}
+
+fn stream_client_agent_label(headers: &[(&str, &str)]) -> Option<String> {
+    for header in ["user-agent", "originator"] {
+        let Some(value) = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(header))
+            .map(|(_, value)| value.to_lowercase())
+        else {
+            continue;
+        };
+        for prefix in STREAM_CLIENT_PREFIXES {
+            if value.starts_with(prefix) {
+                return Some(prefix.to_owned());
+            }
+        }
+    }
+    None
+}
+
+#[doc(hidden)]
+pub fn trace_agent_label_for_test(headers: &[(&str, &str)], identity: &Identity) -> String {
+    trace_agent_label(headers, identity)
+}
+
+fn truncate_agent(value: &str) -> String {
+    if value.chars().count() <= 128 {
+        return value.to_owned();
+    }
+    value.chars().take(128).collect()
+}
+
+async fn wait_unrouted_hold_timeout(
+    book: Arc<hofund_router::RouteTraceBook>,
+    id: u64,
+) -> hofund_router::UnroutedTimeout {
+    loop {
+        match book.unrouted_timeout_after_id(id) {
+            None => std::future::pending::<()>().await,
+            Some((wait, kind)) if wait.is_zero() => return kind,
+            Some((wait, _)) => tokio::time::sleep(wait).await,
+        }
+    }
+}
+
+fn unrouted_timeout_before_routing(
+    app: Arc<Inner>,
+    codec: &dyn Codec,
+    kind: hofund_router::UnroutedTimeout,
+    started: Instant,
+    identity: &Identity,
+) -> Response {
+    let status = StatusCode::from_u16(hofund_router::unrouted_timeout_status(kind))
+        .unwrap_or(StatusCode::GATEWAY_TIMEOUT);
+    write_usage(
+        &app.usage,
+        &UsageMeta::new(&ModelRequest::new(String::new()), "", started, identity),
+        None,
+        status,
+    );
+    coded(
+        codec,
+        status,
+        "the gateway held this request too long before routing it",
+    )
+}
+
+fn client_session(headers: &[(&str, &str)]) -> String {
+    SESSION_HEADERS
+        .iter()
+        .find_map(|name| {
+            headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| (*value).trim())
+                .filter(|value| !value.is_empty())
+        })
+        .map(|value| {
+            if value.chars().count() > 128 {
+                value.chars().take(128).collect()
+            } else {
+                value.to_owned()
+            }
+        })
+        .unwrap_or_default()
 }
 
 fn route_scope(identity: &Identity) -> RouteScope {
@@ -3444,5 +3654,22 @@ fixture-agent = ["relay"]
         let (plain, _dir) = base_gateway(catalog);
         let all = plain.filtered_models_for_test(&headers, &identity, route_ids);
         assert_eq!(all, ["relay/a", "other/b"]);
+    }
+}
+
+#[cfg(test)]
+mod r1_watched_tests {
+    use super::unrouted_watched;
+
+    #[test]
+    fn r1_30_unrouted_view_watches_chat_and_generate_paths() {
+        assert!(unrouted_watched("/v1/chat/completions"));
+        assert!(unrouted_watched("/v1/messages"));
+        assert!(unrouted_watched("/v1beta/models/demo:generateContent"));
+        assert!(unrouted_watched(
+            "/v1beta/models/demo:streamGenerateContent"
+        ));
+        assert!(!unrouted_watched("/v1beta/models/demo:countTokens"));
+        assert!(!unrouted_watched("/v1/models"));
     }
 }

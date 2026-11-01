@@ -62,6 +62,14 @@ Doc URLs were checked on 2026-10-25 (HTTP 200 unless noted). "not found" means n
 - `keep_login` (default false). The agent returns to the first account as soon as that account has room, including under in-order routing. The automatic switch (every five minutes) uses the same rule.
 - `switch_only` (default false). Only the agent sign-in moves. Gateway routing stays on the account it already chose, and the sign-in does not follow a spent account back to the first one unless `keep_login` or in-order routing asks it to.
 
+- `daily-warmup-at-times` (optional). A string `"06:00,21:30"` or array of
+  `HH:MM` values in the subscription's local timezone. When set on a
+  subscription that supports daily warm-up, the daemon sends one minimal
+  upstream request at each listed time (within one hour after wake) so a
+  rolling allowance window can start early. Omitted or empty disables scheduling
+  for that subscription; manual `hofund warmup <subscription>/<account>` still
+  runs when the account is signed in.
+
 Boolean `discover` (default false) under `[subscriptions.options]` on any subscription row opts the daemon into reading configured agents' own sign-in files and importing accounts that are not already stored. The same reads run on demand with `hofund accounts discover` (list) and `hofund accounts discover --add` (import). `HOFUND_NO_ACCOUNTS=1` disables every discovery read even when `discover = true`. Discovery never writes agent credential files and never prints tokens.
 
 Account discovery is implemented for subscriptions that declare an agent home and keep a readable sign-in on disk:

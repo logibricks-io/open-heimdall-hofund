@@ -13,10 +13,11 @@ use hofund_control_proto::{
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse,
     PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
-    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteModel,
-    RouteModelListResponse, RouteReserve, ShutdownRequest, ShutdownResponse, ShutdownState,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod, UsageQuery,
-    UsageResponse, UsageRow, UsageTotals,
+    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteListResponse,
+    RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, SessionRouteResponse,
+    ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
+    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -25,7 +26,7 @@ use hofund_control_proto::{
 use hofund_gateway::control::{
     ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery,
 };
-use hofund_plugin_api::ModelSpec;
+use hofund_plugin_api::{ModelSpec, WarmupOutcome};
 
 use crate::quotas::DaemonQuotas;
 use hofund_router::Cooldowns;
@@ -58,6 +59,8 @@ pub(crate) struct DaemonControl {
     events: Arc<EventBus>,
     in_flight: Arc<AtomicU64>,
     quotas: Option<Arc<DaemonQuotas>>,
+    runtime: Option<Arc<crate::runtime::Runtime>>,
+    route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
 }
 
 impl DaemonControl {
@@ -105,7 +108,23 @@ impl DaemonControl {
             events: Arc::new(EventBus::new()),
             in_flight: Arc::new(AtomicU64::new(0)),
             quotas: None,
+            runtime: None,
+            route_trace: None,
         }
+    }
+
+    pub(crate) fn with_runtime(mut self, runtime: Arc<crate::runtime::Runtime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Serves `/v1/hofund/route` from the shared routing trace book.
+    pub(crate) fn with_route_trace(
+        mut self,
+        route_trace: Arc<hofund_router::RouteTraceBook>,
+    ) -> Self {
+        self.route_trace = Some(route_trace);
+        self
     }
 
     /// Reads live reserve placement from the shared router snapshot.
@@ -612,6 +631,73 @@ impl ControlState for DaemonControl {
         Box::pin(async move { Ok(response) })
     }
 
+    fn route_decisions(&self, query: RouteQuery) -> ControlFuture<'_, RouteListResponse> {
+        let Some(book) = self.route_trace.as_ref() else {
+            return Box::pin(async {
+                Err(ControlError::new(
+                    ControlErrorKind::Internal,
+                    "routing trace is not available",
+                    "control",
+                )
+                .into())
+            });
+        };
+        let wait = query.wait_secs.map(std::time::Duration::from_secs);
+        let book = Arc::clone(book);
+        Box::pin(async move {
+            Ok(if let Some(wait) = wait {
+                book.list_wait(query, wait)
+            } else {
+                book.list(&query)
+            })
+        })
+    }
+
+    fn route_session(
+        &self,
+        session: String,
+        query: RouteQuery,
+    ) -> ControlFuture<'_, SessionRouteResponse> {
+        let Some(book) = self.route_trace.as_ref() else {
+            return Box::pin(async {
+                Err(ControlError::new(
+                    ControlErrorKind::Internal,
+                    "routing trace is not available",
+                    "control",
+                )
+                .into())
+            });
+        };
+        let wait = query
+            .wait_secs
+            .map(|secs| std::time::Duration::from_secs(secs.min(60)));
+        let after = query.after.unwrap_or(0);
+        let gateway_key = query.gateway_key.clone();
+        let book = Arc::clone(book);
+        Box::pin(async move {
+            Ok(if let Some(wait) = wait {
+                book.session_wait(&session, after, wait, gateway_key.as_deref())
+            } else {
+                book.session_latest(&session, gateway_key.as_deref())
+            })
+        })
+    }
+
+    fn route_unrouted(&self) -> ControlFuture<'_, UnroutedListResponse> {
+        let Some(book) = self.route_trace.as_ref() else {
+            return Box::pin(async {
+                Err(ControlError::new(
+                    ControlErrorKind::Internal,
+                    "routing trace is not available",
+                    "control",
+                )
+                .into())
+            });
+        };
+        let book = Arc::clone(book);
+        Box::pin(async move { Ok(book.unrouted()) })
+    }
+
     fn agents(&self) -> ControlFuture<'_, AgentListResponse> {
         Box::pin(async move { self.agents.list().await.map_err(Into::into) })
     }
@@ -704,6 +790,49 @@ impl ControlState for DaemonControl {
         Box::pin(async move {
             let quotas = self.quotas.as_ref().ok_or_else(quotas_unavailable)?;
             Ok::<_, ControlFailure>(quotas.history_response(&query))
+        })
+    }
+
+    fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
+        let runtime = self.runtime.clone();
+        let registry = Arc::clone(&self.registry);
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("warm-up status is not available".to_owned()).into());
+            };
+            let rows = crate::warmup::list_statuses(&runtime, registry.as_ref(), runtime.warmup())
+                .into_iter()
+                .map(warmup_row)
+                .collect();
+            let mut response = WarmupListResponse::default();
+            response.accounts = rows;
+            Ok(response)
+        })
+    }
+
+    fn run_warmup(&self, request: WarmupRunRequest) -> ControlFuture<'_, WarmupRunResponse> {
+        let runtime = self.runtime.clone();
+        let registry = Arc::clone(&self.registry);
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("warm-up is not available".to_owned()).into());
+            };
+            let record = crate::warmup::run_now(
+                &runtime,
+                runtime.warmup(),
+                registry.as_ref(),
+                &request.subscription,
+                &request.account,
+            )
+            .await
+            .map_err(|message| {
+                ControlFailure::from(ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    message,
+                    "warmup",
+                ))
+            })?;
+            Ok(warmup_run_response(record))
         })
     }
 
@@ -1070,6 +1199,44 @@ fn quotas_unavailable() -> ControlFailure {
 
 fn internal(message: String) -> ControlError {
     ControlError::new(ControlErrorKind::Internal, message, "usage")
+}
+
+fn warmup_row(status: hofund_plugin_api::WarmupAccountStatus) -> WarmupAccountRow {
+    let mut row = WarmupAccountRow::default();
+    row.subscription = status.subscription().to_owned();
+    row.account = status.account().to_string();
+    if let Some(last) = status.last() {
+        row.outcome = outcome_name(last.outcome()).to_owned();
+        row.detail = last.detail().to_owned();
+        row.at_ms = last
+            .at()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(0));
+    }
+    row
+}
+
+fn warmup_run_response(record: hofund_plugin_api::WarmupRecord) -> WarmupRunResponse {
+    let mut response = WarmupRunResponse::default();
+    response.outcome = outcome_name(record.outcome()).to_owned();
+    response.detail = record.detail().to_owned();
+    response.at_ms = record
+        .at()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0);
+    response
+}
+
+const fn outcome_name(outcome: WarmupOutcome) -> &'static str {
+    match outcome {
+        WarmupOutcome::Ok => "ok",
+        WarmupOutcome::Skipped => "skipped",
+        WarmupOutcome::Failed => "failed",
+        _ => "failed",
+    }
 }
 
 pub(crate) fn unix_milliseconds() -> u64 {

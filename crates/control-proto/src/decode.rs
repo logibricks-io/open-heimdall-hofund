@@ -11,8 +11,9 @@ use crate::{
     MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderTestRequest, ProviderTestResponse, QuotaHistoryResponse, QuotaResponse, ReloadRequest,
-    RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UsageResponse,
+    RouteListResponse, RouteModelListResponse, SessionRouteResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -227,6 +228,7 @@ request!(AgentVisibleSetRequest);
 request!(AgentHiddenSetRequest);
 request!(AgentPickedOnlyRequest);
 request!(TokenRotateRequest);
+request!(WarmupRunRequest, validate);
 request!(ShutdownRequest);
 request!(GatewayKeyRequest);
 request!(GatewayKeyRestoreRequest);
@@ -275,6 +277,9 @@ response!(
     ModelListResponse,
     PicksResponse,
     RouteModelListResponse,
+    RouteListResponse,
+    SessionRouteResponse,
+    UnroutedListResponse,
     AgentListResponse,
     AgentStatusResponse,
     AgentPlanResponse,
@@ -286,6 +291,8 @@ response!(
     TokenRotateResponse,
     ShutdownResponse,
     GatewayKeyResponse,
+    WarmupListResponse,
+    WarmupRunResponse,
 );
 
 #[cfg(test)]

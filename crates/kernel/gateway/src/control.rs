@@ -28,9 +28,11 @@ use hofund_control_proto::{
     GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES,
     ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse,
     ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteModelListResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    Topic, UsageQuery, UsageResponse, decode_request,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
+    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -198,6 +200,45 @@ pub trait ControlState: Send + Sync {
     fn set_picks(&self, id: String, request: PicksSetRequest) -> ControlFuture<'_, PicksResponse>;
     /// Lists configured client-facing route models.
     fn route_models(&self) -> ControlFuture<'_, RouteModelListResponse>;
+    /// Lists recent routing decisions.
+    fn route_decisions(&self, query: RouteQuery) -> ControlFuture<'_, RouteListResponse> {
+        let _ = query;
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "routing decisions are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Returns the latest routing decision for one session.
+    fn route_session(
+        &self,
+        _session: String,
+        query: RouteQuery,
+    ) -> ControlFuture<'_, SessionRouteResponse> {
+        let _ = query;
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "routing decisions are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Lists requests waiting before routing starts.
+    fn route_unrouted(&self) -> ControlFuture<'_, UnroutedListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "routing decisions are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists known agents.
     fn agents(&self) -> ControlFuture<'_, AgentListResponse>;
     /// Reports agent connection states.
@@ -293,6 +334,28 @@ pub trait ControlState: Send + Sync {
     fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse>;
     /// Reports sampled quota history.
     fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse>;
+    /// Lists last daily warm-up results per subscription account.
+    fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "daily warm-up status is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Runs daily warm-up for one subscription account now.
+    fn run_warmup(&self, _request: WarmupRunRequest) -> ControlFuture<'_, WarmupRunResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "daily warm-up is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists named gateway keys.
     fn gateway_keys(&self) -> ControlFuture<'_, GatewayKeyResponse> {
         Box::pin(async { Err(unsupported_gateway_keys()) })
@@ -449,6 +512,18 @@ impl Control {
                 "/v1/hofund/models",
                 get(route_models).head(method_not_allowed),
             )
+            .route(
+                "/v1/hofund/route",
+                get(route_decisions).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/route/session",
+                get(route_session).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/route/unrouted",
+                get(route_unrouted).head(method_not_allowed),
+            )
             .route("/v1/hofund/agents", get(agents).head(method_not_allowed))
             .route(
                 "/v1/hofund/agents/status",
@@ -488,6 +563,8 @@ impl Control {
                 "/v1/hofund/quotas/history",
                 get(quota_history).head(method_not_allowed),
             )
+            .route("/v1/hofund/warmups", get(warmups).head(method_not_allowed))
+            .route("/v1/hofund/warmups/run", post(run_warmup))
             .route("/v1/hofund/token/rotate", post(rotate_token))
             .route("/v1/hofund/shutdown", post(shutdown))
             .route("/v1/hofund/config", get(config).head(method_not_allowed))
@@ -913,6 +990,30 @@ async fn route_models(State(state): State<HttpState>) -> Response {
     operation_response!(state.control.state.route_models().await)
 }
 
+async fn route_decisions(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = RouteQuery::parse(uri.query());
+    operation_response!(state.control.state.route_decisions(query).await)
+}
+
+async fn route_session(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = RouteQuery::parse(uri.query());
+    let Some(session) = query.session.clone().filter(|session| !session.is_empty()) else {
+        return failure_response(
+            ControlError::new(
+                ControlErrorKind::BadRequest,
+                "name the session with ?session=<id>",
+                "control",
+            )
+            .into(),
+        );
+    };
+    operation_response!(state.control.state.route_session(session, query).await)
+}
+
+async fn route_unrouted(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.route_unrouted().await)
+}
+
 async fn agents(State(state): State<HttpState>) -> Response {
     operation_response!(state.control.state.agents().await)
 }
@@ -1107,6 +1208,18 @@ async fn quotas(State(state): State<HttpState>, uri: Uri) -> Response {
 async fn quota_history(State(state): State<HttpState>, uri: Uri) -> Response {
     let query = QuotaHistoryQuery::parse(uri.query());
     operation_response!(state.control.state.quota_history(query).await)
+}
+
+async fn warmups(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.warmups().await)
+}
+
+async fn run_warmup(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<WarmupRunRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.run_warmup(request).await)
 }
 
 async fn rotate_token(State(state): State<HttpState>, body: Bytes) -> Response {
