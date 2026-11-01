@@ -468,6 +468,14 @@ impl Runtime {
                                 &self.quotas,
                             )
                             .await;
+                            crate::balances::poll(
+                                &config,
+                                &self.path,
+                                self.max_idle_per_host,
+                                &self.registry,
+                                &self.quotas,
+                            )
+                            .await;
                         }
                     }
                 )

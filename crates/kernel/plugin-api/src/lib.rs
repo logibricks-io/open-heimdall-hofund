@@ -40,6 +40,7 @@ pub mod kernel;
 
 #[cfg(not(feature = "kernel"))]
 mod kernel;
+mod balance;
 mod plan;
 mod records;
 mod redaction;
@@ -73,6 +74,9 @@ pub use id::{
     SurfaceId, TierId,
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
+pub use balance::{
+    BalanceCard, BalancePart, BalanceQuota, BalanceQuery, BalanceSupport, BalanceWallet,
+};
 pub use plan::{PlanCard, PlanQuery, PlanQuota, PlanSupport, PlanWindow};
 pub use records::{
     Account, AccountStatus, AgentActiveProvider, AgentCredential, AgentDescription, AgentFile,

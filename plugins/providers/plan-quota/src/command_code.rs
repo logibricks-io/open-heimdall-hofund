@@ -13,10 +13,10 @@ const DAY: u64 = 24 * HOUR;
 
 #[derive(Clone)]
 pub(crate) struct CachedPlan {
-    id: String,
-    until: Option<SystemTime>,
-    renew: String,
-    at: SystemTime,
+    pub(crate) id: String,
+    pub(crate) until: Option<SystemTime>,
+    pub(crate) renew: String,
+    pub(crate) at: SystemTime,
 }
 
 pub(crate) async fn read(

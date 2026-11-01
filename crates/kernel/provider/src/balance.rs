@@ -1,6 +1,5 @@
 //! Key balance and key-plan readers for compatible upstream endpoints.
 
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
@@ -13,7 +12,6 @@ use crate::http::{Credential, Endpoint};
 mod expr;
 
 const BODY_LIMIT: usize = 1 << 20;
-const COMMAND_PLAN_KEEP: Duration = Duration::from_secs(600);
 
 /// Settings for a provider-owned balance endpoint.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -131,16 +129,8 @@ pub struct BalanceReader {
     endpoint: Endpoint,
     options: BalanceOptions,
     client: reqwest::Client,
-    command_plan: Mutex<Option<CommandPlan>>,
     #[cfg(test)]
     source_root: Option<String>,
-}
-
-#[derive(Clone)]
-struct CommandPlan {
-    id: String,
-    until: Option<SystemTime>,
-    read_at: SystemTime,
 }
 
 #[derive(Clone)]
@@ -153,16 +143,6 @@ struct Source {
 
 #[derive(Clone)]
 enum SourceKind {
-    DeepSeek,
-    Moonshot(&'static str),
-    OpenRouter,
-    SiliconFlow(&'static str, &'static str),
-    StepFun(&'static str),
-    CommandCode,
-    Ollama,
-    AiHubMix,
-    AiHubMixAccount,
-    OpenCodeZen,
     Custom,
 }
 
@@ -182,7 +162,6 @@ impl BalanceReader {
             endpoint,
             options,
             client,
-            command_plan: Mutex::new(None),
             #[cfg(test)]
             source_root: None,
         })
@@ -210,17 +189,12 @@ impl BalanceReader {
     /// `Ok(None)` means this endpoint has no balance facility or no card for
     /// this key.
     pub async fn read(&self) -> Result<Option<BalanceReport>, ProviderError> {
-        if self.endpoint.api_key.is_empty() {
+        if self.endpoint.api_key.is_empty() || self.options.url.trim().is_empty() {
             return Ok(None);
         }
         let Some(source) = self.source() else {
             return Ok(None);
         };
-        if matches!(source.kind, SourceKind::OpenCodeZen) {
-            return Err(ProviderError::unsupported(
-                "OpenCode tells no API key its balance: Zen's pay-as-you-go credits are shown only in the OpenCode console (https://opencode.ai/console, Overview, Credits)",
-            ));
-        }
         if !source.token.is_empty() && self.custom() {
             match url_path(&self.options.url).as_str() {
                 "/api/usage/token" => {
@@ -258,19 +232,9 @@ impl BalanceReader {
             });
         }
         if status >= 300 {
-            if let SourceKind::SiliconFlow(_, console) = source.kind
-                && retired_siliconflow(status, &body)
-            {
-                return Err(ProviderError::status(
-                    status,
-                    format!(
-                        "SiliconFlow retired its balance query (/v1/user/info) and has no API for it in its place yet; the balance and vouchers are on {console}"
-                    ),
-                ));
-            }
             return Err(status_error(status, &body));
         }
-        self.parse(source, &body).await.map(Some)
+        self.parse(source, &body).map(Some)
     }
 
     fn custom(&self) -> bool {
@@ -279,79 +243,14 @@ impl BalanceReader {
 
     fn source(&self) -> Option<Source> {
         let options = self.effective_options();
-        if !options.url.trim().is_empty() {
-            return Some(Source {
-                kind: SourceKind::Custom,
-                url: options.url,
-                token: options.token,
-                account_wide: false,
-            });
+        if options.url.trim().is_empty() {
+            return None;
         }
-        let host = reqwest::Url::parse(&self.endpoint.base_url)
-            .ok()
-            .and_then(|url| url.host_str().map(str::to_owned))?;
-        let (kind, url) = match host.as_str() {
-            "api.deepseek.com" => (
-                SourceKind::DeepSeek,
-                "https://api.deepseek.com/user/balance",
-            ),
-            "api.moonshot.cn" => (
-                SourceKind::Moonshot("¥"),
-                "https://api.moonshot.cn/v1/users/me/balance",
-            ),
-            "api.moonshot.ai" => (
-                SourceKind::Moonshot("$"),
-                "https://api.moonshot.ai/v1/users/me/balance",
-            ),
-            "openrouter.ai" => (
-                SourceKind::OpenRouter,
-                "https://openrouter.ai/api/v1/credits",
-            ),
-            "api.siliconflow.cn" => (
-                SourceKind::SiliconFlow("¥", "https://cloud.siliconflow.cn"),
-                "https://api.siliconflow.cn/v1/user/info",
-            ),
-            "api.siliconflow.com" => (
-                SourceKind::SiliconFlow("$", "https://cloud.siliconflow.com"),
-                "https://api.siliconflow.com/v1/user/info",
-            ),
-            "api.stepfun.com" => (
-                SourceKind::StepFun("¥"),
-                "https://api.stepfun.com/v1/accounts",
-            ),
-            "api.stepfun.ai" => (
-                SourceKind::StepFun("$"),
-                "https://api.stepfun.ai/v1/accounts",
-            ),
-            "api.commandcode.ai" => (
-                SourceKind::CommandCode,
-                "https://api.commandcode.ai/alpha/billing/credits",
-            ),
-            "ollama.com" => (SourceKind::Ollama, "https://ollama.com/api/balance"),
-            "aihubmix.com" if !options.token.is_empty() => (
-                SourceKind::AiHubMixAccount,
-                "https://aihubmix.com/api/user/self",
-            ),
-            "aihubmix.com" => (
-                SourceKind::AiHubMix,
-                "https://aihubmix.com/dashboard/billing/remain",
-            ),
-            "opencode.ai" if open_code_zen(&self.endpoint.base_url) => {
-                return Some(Source {
-                    kind: SourceKind::OpenCodeZen,
-                    url: String::new(),
-                    token: String::new(),
-                    account_wide: false,
-                });
-            }
-            _ => return None,
-        };
-        let account_wide = !matches!(kind, SourceKind::AiHubMix | SourceKind::OpenCodeZen);
         Some(self.relocate(Source {
-            kind,
-            url: url.to_owned(),
+            kind: SourceKind::Custom,
+            url: options.url,
             token: options.token,
-            account_wide,
+            account_wide: false,
         }))
     }
 
@@ -461,81 +360,12 @@ impl BalanceReader {
         Ok((status, body))
     }
 
-    async fn parse(&self, source: Source, body: &[u8]) -> Result<BalanceReport, ProviderError> {
-        match source.kind {
-            SourceKind::DeepSeek => parse_deepseek(body),
-            SourceKind::Moonshot(sign) => {
-                let amount = required_number(&at(body, &["data", "available_balance"])?)?;
-                Ok(single_balance(
-                    money(sign, amount),
-                    amount,
-                    currency_unit(sign),
-                    true,
-                ))
-            }
-            SourceKind::OpenRouter => {
-                let credits = required_number(&at(body, &["data", "total_credits"])?)?;
-                let used = optional_number(&at(body, &["data", "total_usage"])?).unwrap_or(0.0);
-                let amount = credits - used;
-                Ok(single_balance(money("$", amount), amount, "USD", true))
-            }
-            SourceKind::SiliconFlow(sign, _) => {
-                let amount = required_number(&at(body, &["data", "totalBalance"])?)?;
-                Ok(single_balance(
-                    money(sign, amount),
-                    amount,
-                    currency_unit(sign),
-                    true,
-                ))
-            }
-            SourceKind::StepFun(sign) => {
-                let amount = required_number(&at(body, &["balance"])?)?;
-                Ok(single_balance(
-                    money(sign, amount),
-                    amount,
-                    currency_unit(sign),
-                    true,
-                ))
-            }
-            SourceKind::AiHubMix => {
-                let amount = required_number(&at(body, &["total_usage"])?)?;
-                if amount < 0.0 {
-                    return Err(ProviderError::decode(
-                        "this key has no limit, and AiHubMix tells a key only what is left on it: give hofund the account's access token in this provider's balance settings, or give the key a limit in AiHubMix's console",
-                    ));
-                }
-                Ok(single_balance(money("$", amount), amount, "USD", false))
-            }
-            SourceKind::AiHubMixAccount => {
-                let reply = json(body)?;
-                if reply.get("success").and_then(Value::as_bool) != Some(true) {
-                    return Err(ProviderError::decode(
-                        reply
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .filter(|message| !message.is_empty())
-                            .unwrap_or("AiHubMix didn't take the access token"),
-                    ));
-                }
-                let amount = required_number(
-                    reply
-                        .pointer("/data/quota")
-                        .ok_or_else(|| ProviderError::decode("no balance in the reply"))?,
-                )? / 500_000.0;
-                Ok(single_balance(money("$", amount), amount, "USD", true))
-            }
-            SourceKind::CommandCode => self.parse_command(body).await,
-            SourceKind::Ollama => parse_ollama(body),
-            SourceKind::Custom => self.parse_custom(body, source.account_wide),
-            SourceKind::OpenCodeZen => unreachable!("handled before the request"),
-        }
+    fn parse(&self, source: Source, body: &[u8]) -> Result<BalanceReport, ProviderError> {
+        let _ = source.kind;
+        self.parse_custom(body)
     }
 
-    fn parse_custom(
-        &self,
-        body: &[u8],
-        _account_wide: bool,
-    ) -> Result<BalanceReport, ProviderError> {
+    fn parse_custom(&self, body: &[u8]) -> Result<BalanceReport, ProviderError> {
         let options = self.effective_options();
         let windows = if url_path(&options.url) == "/v1/usage" {
             panel_windows(body)
@@ -579,316 +409,6 @@ impl BalanceReader {
             Err(error) => Err(error),
         }
     }
-
-    async fn parse_command(&self, body: &[u8]) -> Result<BalanceReport, ProviderError> {
-        let reply = json(body)?;
-        let credits = reply
-            .get("credits")
-            .ok_or_else(|| ProviderError::decode("no balance in the reply"))?;
-        let monthly = credits.get("monthlyCredits").and_then(optional_number);
-        let purchased = credits.get("purchasedCredits").and_then(optional_number);
-        let free = credits.get("freeCredits").and_then(optional_number);
-        if monthly.is_none() && purchased.is_none() && free.is_none() {
-            return Err(ProviderError::decode("no balance in the reply"));
-        }
-        let monthly = monthly.unwrap_or(0.0).max(0.0);
-        let left = monthly + purchased.unwrap_or(0.0).max(0.0) + free.unwrap_or(0.0).max(0.0);
-        let mut windows = command_windows(&reply);
-        let has_windows = !windows.is_empty();
-        let mut plan_id = credits
-            .get("planId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let mut until = None;
-        if plan_id.is_empty() && has_windows {
-            let cached = self.command_plan.lock().expect("command plan").clone();
-            let fresh = cached
-                .as_ref()
-                .filter(|cached| {
-                    cached
-                        .read_at
-                        .elapsed()
-                        .is_ok_and(|age| age < COMMAND_PLAN_KEEP)
-                })
-                .cloned();
-            if let Some(cached) = fresh {
-                plan_id = cached.id;
-                until = cached.until;
-            } else {
-                let (id, end) = self.command_subscription().await;
-                plan_id = cached.as_ref().map_or(id.clone(), |old| {
-                    if id.is_empty() {
-                        old.id.clone()
-                    } else {
-                        id.clone()
-                    }
-                });
-                until = if end.is_some() {
-                    end
-                } else {
-                    cached.as_ref().and_then(|old| old.until)
-                };
-                if !id.is_empty() {
-                    *self.command_plan.lock().expect("command plan") = Some(CommandPlan {
-                        id,
-                        until,
-                        read_at: SystemTime::now(),
-                    });
-                }
-            }
-        }
-        let (plan_name, plan_monthly) = command_plan(&plan_id);
-        if plan_monthly > 0.0 {
-            let pool = plan_monthly.max(monthly) + left - monthly;
-            if pool > 0.0 {
-                let spent = (pool - left).max(0.0);
-                windows.push(BalanceWindow {
-                    name: "Credits".to_owned(),
-                    used: (100.0 * spent / pool).min(100.0),
-                    amount: spent,
-                    limit: pool,
-                    unit: "USD".to_owned(),
-                    display: format!("{} / {}", money("$", spent), money("$", pool)),
-                    resets_at: until.filter(|until| *until > SystemTime::now()),
-                    span: None,
-                    blocking: true,
-                });
-            }
-        }
-        Ok(BalanceReport {
-            balance: Some(Balance {
-                text: money("$", left),
-                parts: Vec::new(),
-                split: Vec::new(),
-                wallets: vec![Wallet {
-                    name: "USD".to_owned(),
-                    amount: left,
-                    unit: "USD".to_owned(),
-                }],
-            }),
-            plan: has_windows.then(|| BalancePlan {
-                name: plan_name,
-                windows,
-                until,
-                renew: String::new(),
-            }),
-            windows: Vec::new(),
-            account_wide: true,
-        })
-    }
-
-    async fn command_subscription(&self) -> (String, Option<SystemTime>) {
-        let source = self.relocate(Source {
-            kind: SourceKind::CommandCode,
-            url: "https://api.commandcode.ai/alpha/billing/subscriptions".to_owned(),
-            token: String::new(),
-            account_wide: true,
-        });
-        let Ok((status, body)) = self.send(&source, reqwest::Method::GET, &source.url).await else {
-            return (String::new(), None);
-        };
-        if status >= 300 {
-            return (String::new(), None);
-        }
-        let Ok(reply) = json(&body) else {
-            return (String::new(), None);
-        };
-        if reply.get("success").and_then(Value::as_bool) == Some(false) {
-            return (String::new(), None);
-        }
-        let Some(data) = reply.get("data") else {
-            return (String::new(), None);
-        };
-        let status = data
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if matches!(status, "canceled" | "incomplete_expired") {
-            return (String::new(), None);
-        }
-        (
-            data.get("planId")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            data.get("currentPeriodEnd").and_then(timestamp),
-        )
-    }
-}
-
-fn single_balance(text: String, amount: f64, unit: &str, account_wide: bool) -> BalanceReport {
-    BalanceReport {
-        balance: Some(Balance {
-            text,
-            parts: Vec::new(),
-            split: Vec::new(),
-            wallets: vec![Wallet {
-                name: unit.to_owned(),
-                amount,
-                unit: unit.to_owned(),
-            }],
-        }),
-        plan: None,
-        windows: Vec::new(),
-        account_wide,
-    }
-}
-
-fn parse_deepseek(body: &[u8]) -> Result<BalanceReport, ProviderError> {
-    let reply = json(body)?;
-    let infos = reply
-        .get("balance_infos")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ProviderError::decode("no balance in the reply"))?;
-    let mut amounts = Vec::new();
-    for info in infos {
-        let Some(total) = info.get("total_balance").and_then(optional_number) else {
-            continue;
-        };
-        let code = info
-            .get("currency")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_uppercase();
-        let granted = info.get("granted_balance").and_then(optional_number);
-        let topped = info.get("topped_up_balance").and_then(optional_number);
-        amounts.push((code, total, granted.zip(topped)));
-    }
-    if amounts.is_empty() {
-        return Err(ProviderError::decode("no balance in the reply"));
-    }
-    amounts.sort_by(|left, right| {
-        (right.1 > 0.0)
-            .cmp(&(left.1 > 0.0))
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    let mut text = Vec::new();
-    let mut split = Vec::new();
-    let mut wallets = Vec::new();
-    for (code, total, parts) in amounts {
-        let sign = currency_sign(&code);
-        text.push(money(sign, total));
-        if let Some((granted, topped)) = parts
-            && granted != 0.0
-        {
-            split.push(BalancePart {
-                label: "Granted".to_owned(),
-                text: money(sign, granted),
-                ..BalancePart::default()
-            });
-            split.push(BalancePart {
-                label: "Topped up".to_owned(),
-                text: money(sign, topped),
-                ..BalancePart::default()
-            });
-        }
-        wallets.push(Wallet {
-            name: code.clone(),
-            amount: total,
-            unit: code,
-        });
-    }
-    Ok(BalanceReport {
-        balance: Some(Balance {
-            text: text.join(" · "),
-            parts: Vec::new(),
-            split,
-            wallets,
-        }),
-        account_wide: true,
-        ..BalanceReport::default()
-    })
-}
-
-fn parse_ollama(body: &[u8]) -> Result<BalanceReport, ProviderError> {
-    let reply = json(body)?;
-    let included = reply.get("included");
-    let purchased = reply.get("purchased");
-    if included.is_none() && purchased.is_none() {
-        return Err(ProviderError::decode(
-            "Ollama's reply has no included or purchased balance",
-        ));
-    }
-    let bought = purchased
-        .and_then(|value| value.get("balance_usd"))
-        .and_then(optional_number);
-    let balance = bought.map(|amount| Balance {
-        text: money("$", amount),
-        parts: Vec::new(),
-        split: Vec::new(),
-        wallets: vec![Wallet {
-            name: "USD".to_owned(),
-            amount,
-            unit: "USD".to_owned(),
-        }],
-    });
-    let credits_left = bought.is_some_and(|amount| amount > 0.0);
-    let mut windows = Vec::new();
-    if let Some(included) = included {
-        for (key, name, span) in [
-            ("session", "Session limit", None),
-            ("weekly", "Weekly", Some(Duration::from_secs(7 * 24 * 3600))),
-        ] {
-            let Some(limit) = included.get(key) else {
-                continue;
-            };
-            let Some(left) = limit.get("remaining_percent").and_then(optional_number) else {
-                continue;
-            };
-            windows.push(BalanceWindow {
-                name: name.to_owned(),
-                used: (100.0 - left).clamp(0.0, 100.0),
-                resets_at: limit.get("resets_at").and_then(timestamp),
-                span,
-                blocking: !credits_left,
-                ..BalanceWindow::default()
-            });
-        }
-        let allowance = included.get("allowance_usd").and_then(optional_number);
-        let left = included.get("balance_usd").and_then(optional_number);
-        if let (Some(allowance), Some(left)) = (allowance, left)
-            && allowance > 0.0
-        {
-            let used = (allowance - left).clamp(0.0, allowance);
-            let period = included.get("period");
-            let from = period
-                .and_then(|period| period.get("from"))
-                .and_then(timestamp);
-            let until = period
-                .and_then(|period| period.get("until"))
-                .and_then(timestamp);
-            let span = from
-                .zip(until)
-                .and_then(|(from, until)| until.duration_since(from).ok());
-            let monthly = span.is_some_and(|span| {
-                let days = span.as_secs_f64() / 86_400.0;
-                (27.0..=32.0).contains(&days)
-            });
-            windows.push(BalanceWindow {
-                name: if monthly { "Month" } else { "Allowance" }.to_owned(),
-                used: (100.0 * used / allowance).min(100.0),
-                amount: used,
-                limit: allowance,
-                unit: "USD".to_owned(),
-                display: String::new(),
-                resets_at: until,
-                span,
-                blocking: !credits_left,
-            });
-        }
-    }
-    Ok(BalanceReport {
-        balance,
-        plan: (!windows.is_empty()).then(|| BalancePlan {
-            name: String::new(),
-            windows,
-            until: None,
-            renew: String::new(),
-        }),
-        windows: Vec::new(),
-        account_wide: true,
-    })
 }
 
 fn panel_windows(body: &[u8]) -> Vec<BalanceWindow> {
@@ -935,62 +455,6 @@ fn panel_windows(body: &[u8]) -> Vec<BalanceWindow> {
         }
     }
     out
-}
-
-fn command_windows(reply: &Value) -> Vec<BalanceWindow> {
-    let Some(windows) = reply.get("windowLimits") else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (key, name, seconds) in [
-        ("fiveHour", "5 hours", 5 * 3600),
-        ("weekly", "Weekly", 7 * 24 * 3600),
-    ] {
-        let Some(window) = windows.get(key) else {
-            continue;
-        };
-        let (Some(used), Some(cap)) = (
-            window.get("used").and_then(optional_number),
-            window.get("cap").and_then(optional_number),
-        ) else {
-            continue;
-        };
-        if cap <= 0.0 {
-            continue;
-        }
-        let used = used.max(0.0);
-        out.push(BalanceWindow {
-            name: name.to_owned(),
-            used: (100.0 * used / cap).min(100.0),
-            amount: used,
-            limit: cap,
-            unit: "USD".to_owned(),
-            display: String::new(),
-            resets_at: window.get("resetAt").and_then(timestamp),
-            span: Some(Duration::from_secs(seconds)),
-            blocking: true,
-        });
-    }
-    out
-}
-
-fn command_plan(id: &str) -> (String, f64) {
-    let id = id.to_lowercase().replace('_', "-");
-    for (prefix, name, monthly) in [
-        ("individual-provider", "Provider", 15.0),
-        ("individual-pro-v1", "Pro", 80.0),
-        ("individual-goat", "GOAT", 70.0),
-        ("individual-ultra", "Ultra", 300.0),
-        ("individual-max", "Max", 150.0),
-        ("individual-pro", "Pro", 30.0),
-        ("individual-go", "Go", 10.0),
-        ("teams-pro", "Teams Pro", 40.0),
-    ] {
-        if id.starts_with(prefix) {
-            return (name.to_owned(), monthly);
-        }
-    }
-    (String::new(), 0.0)
 }
 
 fn balance_path(options: &BalanceOptions) -> String {
@@ -1108,22 +572,10 @@ fn redact_error(error: &str, key: &str) -> String {
         .replace(&percent_encode(key), &mask)
 }
 
-fn open_code_zen(base: &str) -> bool {
-    !base.contains("/go") && (base.contains("/zen") || base.contains("/inference"))
-}
-
 fn url_path(raw: &str) -> String {
     reqwest::Url::parse(raw.trim())
         .map(|url| url.path().trim_end_matches('/').to_owned())
         .unwrap_or_default()
-}
-
-fn retired_siliconflow(status: u16, body: &[u8]) -> bool {
-    status == 410
-        || json(body)
-            .ok()
-            .and_then(|reply| reply.get("code").and_then(Value::as_i64))
-            == Some(20092)
 }
 
 fn balance_refusal(body: &[u8]) -> Option<String> {
@@ -1171,29 +623,6 @@ fn json(body: &[u8]) -> Result<Value, ProviderError> {
     serde_json::from_slice(body).map_err(|error| ProviderError::decode(error.to_string()))
 }
 
-fn at(body: &[u8], path: &[&str]) -> Result<Value, ProviderError> {
-    let mut value = json(body)?;
-    for segment in path {
-        value = value
-            .get(*segment)
-            .cloned()
-            .ok_or_else(|| ProviderError::decode("no balance in the reply"))?;
-    }
-    Ok(value)
-}
-
-fn optional_number(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().parse().ok(),
-        _ => None,
-    }
-}
-
-fn required_number(value: &Value) -> Result<f64, ProviderError> {
-    optional_number(value).ok_or_else(|| ProviderError::decode("no balance in the reply"))
-}
-
 fn timestamp(value: &Value) -> Option<SystemTime> {
     match value {
         Value::String(text) => {
@@ -1220,15 +649,6 @@ fn epoch_time(value: f64) -> Option<SystemTime> {
 
 fn money(sign: &str, value: f64) -> String {
     format!("{sign}{value:.2}")
-}
-
-fn currency_sign(code: &str) -> &str {
-    match code.to_uppercase().as_str() {
-        "CNY" | "RMB" => "¥",
-        "USD" => "$",
-        "" => "",
-        _ => "",
-    }
 }
 
 fn currency_unit(sign: &str) -> &str {

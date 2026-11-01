@@ -58,6 +58,11 @@ pub trait DaemonRegistry: Send + Sync {
     fn plan_quota(&self) -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
         None
     }
+
+    /// The linked vendor balance reader. The default links none.
+    fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
+        None
+    }
 }
 
 /// Compatibility adapter backed by the compile-time plugin registry.
@@ -106,6 +111,10 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn plan_quota(&self) -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
         hofund_plugin_registry::plan_quota()
+    }
+
+    fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
+        hofund_plugin_registry::balance_quota()
     }
 }
 

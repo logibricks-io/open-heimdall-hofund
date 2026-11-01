@@ -282,6 +282,38 @@ impl QuotaStore {
             .insert(quota_key(&quota), ReadIssue::Failed { quota, transient });
     }
 
+    /// Marks keys of one provider that read the same account-wide balance.
+    pub fn share_provider_balances(&self, provider: &str) {
+        let mut state = self.state.lock().expect("quota store");
+        let mut indices = Vec::new();
+        for (index, record) in state.records.iter().enumerate() {
+            let quota = &record.quota;
+            if quota.provider != provider
+                || quota.kind != QuotaKind::Balance
+                || quota.user.is_empty()
+                || quota.balance.is_empty()
+                || !quota.error.is_empty()
+            {
+                continue;
+            }
+            indices.push(index);
+        }
+        for left in 0..indices.len() {
+            for right in left + 1..indices.len() {
+                let a = &state.records[indices[left]].quota;
+                let b = &state.records[indices[right]].quota;
+                if a.balance == b.balance {
+                    let leader = a.user.clone();
+                    state.records[indices[left]].quota.shared_balance = leader.clone();
+                    state.records[indices[right]].quota.shared_balance = leader;
+                }
+            }
+        }
+        if let Some(root) = &self.root {
+            save_state(root, &state);
+        }
+    }
+
     /// Returns a report in configured provider order without fetching anything.
     #[must_use]
     pub fn report(&self, provider_order: &[String]) -> Vec<Quota> {

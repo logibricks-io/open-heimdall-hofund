@@ -42,6 +42,7 @@ mod models;
 mod models_state;
 mod offline;
 mod one_shot;
+mod balances;
 mod plans;
 mod probe;
 mod provider_keys;

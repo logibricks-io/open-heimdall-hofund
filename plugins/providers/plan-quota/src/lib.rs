@@ -4,6 +4,7 @@
 
 mod command_code;
 mod control_plans;
+mod key_balances;
 mod key_plans;
 mod stepfun;
 
@@ -11,7 +12,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use hofund_plugin_api::{HostContext, PlanCard, PlanQuery, PlanQuota, PlanSupport, PluginError};
+use hofund_plugin_api::{
+    BalanceCard, BalanceQuery, BalanceQuota, BalanceSupport, HostContext, PlanCard, PlanQuery,
+    PlanQuota, PlanSupport, PluginError,
+};
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::time::parse_rfc3339;
 use hofund_plugin_sdk::{Call, Contribution};
@@ -24,8 +28,20 @@ pub fn contribute() -> Contribution {
 
 /// Builds the stateful plan reader shared by the registry.
 #[must_use]
-pub fn reader() -> Arc<dyn PlanQuota> {
+pub fn reader() -> Arc<Reader> {
     Arc::new(Reader::default())
+}
+
+/// Builds the stateful plan reader shared by the registry.
+#[must_use]
+pub fn plan_reader() -> Arc<dyn PlanQuota> {
+    reader()
+}
+
+/// Builds the stateful balance reader shared by the registry.
+#[must_use]
+pub fn balance_reader() -> Arc<dyn BalanceQuota> {
+    reader()
 }
 
 #[derive(Default)]
@@ -99,6 +115,21 @@ impl PlanQuota for Reader {
             return Ok(Vec::new());
         };
         read_source(self, query, host, source).await
+    }
+}
+
+#[hofund_plugin_sdk::async_trait]
+impl BalanceQuota for Reader {
+    fn support(&self, query: &BalanceQuery) -> BalanceSupport {
+        key_balances::support(query)
+    }
+
+    async fn read(
+        &self,
+        query: &BalanceQuery,
+        host: &HostContext,
+    ) -> Result<Option<BalanceCard>, PluginError> {
+        key_balances::read(self, query, host).await
     }
 }
 
