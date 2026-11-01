@@ -85,6 +85,18 @@ const WARM_ARGS: [&str; 11] = [
     "--no-session-persistence",
 ];
 
+struct WarmupCleanup<'a> {
+    file: &'a Path,
+    work: &'a Path,
+}
+
+impl Drop for WarmupCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.file);
+        let _ = std::fs::remove_dir_all(self.work);
+    }
+}
+
 /// Sends one "hi" through Claude Code for `account`.
 pub(crate) async fn warmup(
     host: &HostContext,
@@ -101,12 +113,13 @@ pub(crate) async fn warmup(
             "the stored Claude Code sign-in has no credentials",
         ));
     };
+    let stored = stored.to_owned();
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
     let program = program()?;
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
-    creds::write_private(&file, stored)?;
+    creds::write_private(&file, &stored)?;
     let settings = dir.join(creds::PROFILE_FILE);
     if !settings.exists() {
         creds::write_private(&settings, &profile.settings_text())?;
@@ -114,22 +127,46 @@ pub(crate) async fn warmup(
     let work = dir.join("warmup-run");
     let _ = std::fs::remove_dir_all(&work);
     creds::private_dir(&work)?;
+    let _cleanup = WarmupCleanup {
+        file: &file,
+        work: &work,
+    };
+
+    let mut last = String::new();
+    let run_result = run_warmup_process(host, &program, &dir, &work, &mut last).await;
+
+    let read_back = creds::read_credentials(&dir);
+    if let Some(rotated) = read_back.filter(|rotated| rotated.text != stored) {
+        let updated = blob.with_text(creds::CREDENTIALS, &rotated.text);
+        lease.commit(None, updated.to_secret()).await?;
+    }
+
+    run_result?;
+    finish_warmup_output(&last)
+}
+
+async fn run_warmup_process(
+    host: &HostContext,
+    program: &Path,
+    dir: &Path,
+    work: &Path,
+    last: &mut String,
+) -> Result<(), PluginError> {
     let request = SpawnRequest::new(
-        &program,
+        program,
         WARM_ARGS.iter().map(OsString::from).collect(),
         vec![(
             OsString::from(crate::cli::CONFIG_DIR_VAR),
             dir.as_os_str().to_owned(),
         )],
-        &work,
+        work,
     )?;
     let child = host.spawn_process().spawn_piped(&request).await?;
     child.write_stdin(b"hi\n".to_vec().into()).await?;
     let mut stdout = child.stdout()?;
-    let mut last = String::new();
     let finished = hofund_plugin_sdk::timeout(
         Duration::from_secs(60),
-        crate::cli::drain(&mut stdout, &mut last),
+        crate::cli::drain(&mut stdout, last),
     )
     .await;
     drop(child);
@@ -138,7 +175,16 @@ pub(crate) async fn warmup(
             "Claude Code did not finish the warm-up in time",
         ));
     }
-    if let Some(result) = warmup_result(&last)
+    Ok(())
+}
+
+fn finish_warmup_output(last: &str) -> Result<(), PluginError> {
+    if last.trim().is_empty() {
+        return Err(PluginError::transport(
+            "Claude Code warm-up produced no output",
+        ));
+    }
+    if let Some(result) = warmup_result(last)
         && result.get("is_error").and_then(|v| v.as_bool()) == Some(true)
     {
         let message = result
@@ -147,15 +193,12 @@ pub(crate) async fn warmup(
             .unwrap_or("Claude Code refused the warm-up");
         return Err(PluginError::transport(message));
     }
-    if warmup_result(&last).is_none() && !last.is_empty() {
+    if warmup_result(last).is_none() {
         return Err(PluginError::transport(format!(
             "Claude Code warm-up ended without a result; {}",
-            crate::cli::said(&last)
+            crate::cli::said(last)
         )));
     }
-    drop(lease);
-    let _ = std::fs::remove_dir_all(&work);
-    let _ = std::fs::remove_file(&file);
     Ok(())
 }
 
@@ -184,12 +227,18 @@ async fn run(
 
 #[cfg(test)]
 mod warmup_tests {
-    use super::warmup_result;
+    use super::{finish_warmup_output, warmup_result};
 
     #[test]
     fn a3a_10_claude_warmup_reads_result_line() {
         let text = "not json\n{\"type\":\"result\",\"is_error\":false,\"result\":\"Hi\"}\n";
         let result = warmup_result(text).expect("result");
         assert_eq!(result["is_error"], false);
+    }
+
+    #[test]
+    fn a3a_20_claude_warmup_empty_output_fails() {
+        assert!(finish_warmup_output("").is_err());
+        assert!(finish_warmup_output("   \n").is_err());
     }
 }

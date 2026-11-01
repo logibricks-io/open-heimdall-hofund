@@ -1592,7 +1592,8 @@ fn a3a_9_codex_warmup_posts_one_minimal_responses_call() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host, &access_token("warm", 10_000));
-    seed_prompts(&host, &[("gpt-5-mini", CODEX_PROMPT)]);
+    seed_prompts(&host, &[("gpt-5", CODEX_PROMPT)]);
+    host.http().enqueue(MODELS.to_vec());
     host.http()
         .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
     block_on(crate::warmup::run(

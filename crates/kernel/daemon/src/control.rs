@@ -686,13 +686,12 @@ impl ControlState for DaemonControl {
 
     fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
         let runtime = self.runtime.clone();
+        let registry = Arc::clone(&self.registry);
         Box::pin(async move {
             let Some(runtime) = runtime else {
                 return Err(internal("warm-up status is not available".to_owned()).into());
             };
-            let rows = runtime
-                .warmup()
-                .statuses()
+            let rows = crate::warmup::list_statuses(&runtime, registry.as_ref(), runtime.warmup())
                 .into_iter()
                 .map(warmup_row)
                 .collect();

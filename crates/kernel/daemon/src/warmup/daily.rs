@@ -49,22 +49,6 @@ pub fn day_start(ats: &[String], now: SystemTime, zone: FixedOffset) -> Option<S
     latest
 }
 
-/// The first configured start strictly after `now` in `zone`.
-pub fn next_day_start(ats: &[String], now: SystemTime, zone: FixedOffset) -> Option<SystemTime> {
-    let mut first: Option<SystemTime> = None;
-    for at in ats {
-        let start = day_start(std::slice::from_ref(at), now, zone)?;
-        let start_local = zoned(start, zone);
-        let next_date = start_local.date_naive().succ_opt()?;
-        let (hour, minute) = clock(at)?;
-        let next = naive_to_system(local_datetime(next_date, hour, minute)?, zone)?;
-        if first.is_none_or(|t| next < t) {
-            first = Some(next);
-        }
-    }
-    first
-}
-
 /// Names a day's start for persistence: `2006-01-02 15:04` in `zone`.
 pub fn start_key(t: SystemTime, zone: FixedOffset) -> String {
     zoned(t, zone).format("%Y-%m-%d %H:%M").to_string()
@@ -101,31 +85,6 @@ pub fn daily_due(
         return None;
     }
     Some(key)
-}
-
-/// Whether a reset warm-up should wait for the next day start instead of running now.
-#[allow(dead_code)] // reserved for week/all reset warm-up (A-3b and reference reset loop)
-pub fn held_for_day(ats: &[String], span: Duration, now: SystemTime, zone: FixedOffset) -> bool {
-    let Some(next) = next_day_start(ats, now, zone) else {
-        return false;
-    };
-    next.duration_since(now)
-        .ok()
-        .is_some_and(|left| left < span)
-}
-
-/// Whether a configured start passed since `last_tick`.
-#[allow(dead_code)] // reference sleep-after-day-start guard; daily tick uses `daily_due` only
-pub fn day_start_passed(
-    ats: &[String],
-    last_tick: SystemTime,
-    now: SystemTime,
-    zone: FixedOffset,
-) -> bool {
-    let Some(start) = day_start(ats, now, zone) else {
-        return false;
-    };
-    start > last_tick
 }
 
 /// Whether a short allowance window has not started yet.
@@ -173,7 +132,7 @@ fn naive_to_system(value: NaiveDateTime, zone: FixedOffset) -> Option<SystemTime
 
 #[cfg(test)]
 mod tests {
-    use super::{DAILY_SLACK, daily_due, day_start_passed, had_start, held_for_day, start_key};
+    use super::{DAILY_SLACK, daily_due, had_start, start_key};
     use chrono::{FixedOffset, TimeZone};
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -232,24 +191,5 @@ mod tests {
         let zone = east8();
         let key = start_key(east8_at(28, 6, 0), zone);
         assert!(had_start("2026-09-28", &key));
-    }
-
-    #[test]
-    fn a3a_13_held_for_day_waits_before_long_span_reset() {
-        let zone = east8();
-        assert!(held_for_day(
-            &ats("06:00"),
-            Duration::from_secs(5 * 3600),
-            east8_at(28, 2, 0),
-            zone
-        ));
-    }
-
-    #[test]
-    fn a3a_14_day_start_passed_after_sleep() {
-        let zone = east8();
-        let last = east8_at(27, 23, 0);
-        let now = east8_at(28, 7, 30);
-        assert!(day_start_passed(&ats("06:00"), last, now, zone));
     }
 }

@@ -30,6 +30,9 @@ pub(crate) const START_DELAY: Duration = Duration::from_secs(2 * 60);
 /// Per-account warm-up deadline for one vendor request.
 const RUN_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
+/// After a failed daily attempt, wait this long before trying the same member again.
+pub(crate) const FAILED_RETRY: Duration = Duration::from_secs(5 * 60);
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Persisted {
     #[serde(default)]
@@ -41,6 +44,7 @@ pub(crate) struct WarmupStore {
     path: PathBuf,
     persisted: Mutex<Persisted>,
     status: Mutex<BTreeMap<String, WarmupAccountStatus>>,
+    failed_retry: Mutex<BTreeMap<String, SystemTime>>,
     running: tokio::sync::Mutex<()>,
 }
 
@@ -52,6 +56,7 @@ impl WarmupStore {
             path,
             persisted: Mutex::new(persisted),
             status: Mutex::new(BTreeMap::new()),
+            failed_retry: Mutex::new(BTreeMap::new()),
             running: tokio::sync::Mutex::new(()),
         }
     }
@@ -92,22 +97,40 @@ impl WarmupStore {
             .collect()
     }
 
-    #[allow(dead_code)] // single-account lookup for tests; control lists via `statuses`
-    pub(crate) fn status_for(
-        &self,
-        subscription: &str,
-        account: &str,
-    ) -> Option<WarmupAccountStatus> {
-        self.status
+    pub(crate) fn failed_cooling(&self, member: &str, now: SystemTime) -> bool {
+        self.failed_retry
             .lock()
-            .expect("warmup status")
-            .get(&member_key(subscription, account))
-            .cloned()
+            .expect("warmup retry")
+            .get(member)
+            .is_some_and(|until| now < *until)
+    }
+
+    pub(crate) fn record_failed_retry(&self, member: &str, now: SystemTime) {
+        self.failed_retry
+            .lock()
+            .expect("warmup retry")
+            .insert(member.to_owned(), now + FAILED_RETRY);
+    }
+
+    pub(crate) fn clear_failed_retry(&self, member: &str) {
+        self.failed_retry
+            .lock()
+            .expect("warmup retry")
+            .remove(member);
     }
 }
 
 fn member_key(subscription: &str, account: &str) -> String {
     format!("{subscription}/{account}")
+}
+
+fn ensure_configured_row(
+    rows: &mut BTreeMap<String, WarmupAccountStatus>,
+    subscription: &str,
+    account: &AccountId,
+) {
+    rows.entry(member_key(subscription, account.as_str()))
+        .or_insert_with(|| WarmupAccountStatus::new(subscription.to_owned(), account.clone()));
 }
 
 fn read_persisted(path: &Path) -> Persisted {
@@ -250,6 +273,9 @@ pub(crate) async fn tick(
             );
             continue;
         }
+        if store.failed_cooling(&member_id, now) {
+            continue;
+        }
         let last = store.last_daily_key(&member_id);
         let Some(key) = daily_due(&candidate.times, &last, false, now, zone) else {
             continue;
@@ -267,6 +293,7 @@ pub(crate) async fn tick(
         let result = run_warmup(&candidate.state, &candidate.member.account).await;
         match result {
             Ok(()) => {
+                store.clear_failed_retry(&member_id);
                 store.set_daily_key(&member_id, &key);
                 let mut row = WarmupAccountStatus::new(
                     candidate.subscription,
@@ -276,6 +303,7 @@ pub(crate) async fn tick(
                 store.record(row);
             }
             Err(message) => {
+                store.record_failed_retry(&member_id, now);
                 let mut row = WarmupAccountStatus::new(
                     candidate.subscription,
                     candidate.member.account.clone(),
@@ -317,6 +345,44 @@ fn note_skipped(
     let mut row = WarmupAccountStatus::new(subscription, account.clone());
     row.set_last(WarmupRecord::new(at, WarmupOutcome::Skipped, detail));
     store.record(row);
+}
+
+/// Status rows for the control API: every configured warm-up account, merged
+/// with last-attempt records when present.
+pub(crate) fn list_statuses(
+    runtime: &Arc<Runtime>,
+    registry: &dyn DaemonRegistry,
+    store: &WarmupStore,
+) -> Vec<WarmupAccountStatus> {
+    let mut rows: BTreeMap<String, WarmupAccountStatus> = store
+        .statuses()
+        .into_iter()
+        .map(|row| (member_key(row.subscription(), row.account().as_str()), row))
+        .collect();
+    for (subscription_id, state) in runtime.subscription_states().iter() {
+        let Some(factory) = registry.subscription(subscription_id.as_str()) else {
+            continue;
+        };
+        if !factory.spec().daily_warmup() {
+            continue;
+        }
+        let Ok(times) = times_from_options(&state.config.options) else {
+            continue;
+        };
+        if times.is_empty() {
+            continue;
+        }
+        for member in state.members() {
+            ensure_configured_row(&mut rows, subscription_id.as_str(), &member.account);
+        }
+    }
+    let mut out: Vec<_> = rows.into_values().collect();
+    out.sort_by(|left, right| {
+        left.subscription()
+            .cmp(right.subscription())
+            .then_with(|| left.account().as_str().cmp(right.account().as_str()))
+    });
+    out
 }
 
 /// Runs warm-up for one account immediately, ignoring the schedule.
@@ -388,11 +454,11 @@ pub(crate) fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use super::{WarmupStore, note_skipped, times_from_options};
+    use super::{FAILED_RETRY, WarmupStore, note_skipped, times_from_options};
     use hofund_config::Value;
     use hofund_plugin_api::{AccountId, WarmupOutcome};
     use std::collections::BTreeMap;
-    use std::time::UNIX_EPOCH;
+    use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
     fn a3a_6_skipped_resting_records_detail() {
@@ -400,7 +466,11 @@ mod tests {
         let store = WarmupStore::new(dir.path());
         let account = AccountId::from_static("a-0000000000000001");
         note_skipped(&store, "acct", &account, UNIX_EPOCH, "account is resting");
-        let row = store.status_for("acct", account.as_str()).expect("row");
+        let row = store
+            .statuses()
+            .into_iter()
+            .find(|row| row.account() == &account)
+            .expect("row");
         let last = row.last().expect("last");
         assert_eq!(last.outcome(), WarmupOutcome::Skipped);
         assert_eq!(last.detail(), "account is resting");
@@ -418,7 +488,11 @@ mod tests {
             UNIX_EPOCH,
             "account is not signed in",
         );
-        let row = store.status_for("claude", account.as_str()).expect("row");
+        let row = store
+            .statuses()
+            .into_iter()
+            .find(|row| row.account() == &account)
+            .expect("row");
         let last = row.last().expect("last");
         assert_eq!(last.outcome(), WarmupOutcome::Skipped);
         assert_eq!(last.detail(), "account is not signed in");
@@ -445,5 +519,34 @@ mod tests {
         store.set_daily_key("acct/a@x.io", "2026-09-28 06:00");
         let store2 = WarmupStore::new(dir.path());
         assert_eq!(store2.last_daily_key("acct/a@x.io"), "2026-09-28 06:00");
+    }
+
+    #[test]
+    fn a3a_21_failed_retry_skips_account_until_backoff_expires() {
+        let dir = tempfile::tempdir().expect("temp");
+        let store = WarmupStore::new(dir.path());
+        let now = UNIX_EPOCH;
+        store.record_failed_retry("acct/a-0000000000000001", now);
+        assert!(store.failed_cooling("acct/a-0000000000000001", now));
+        assert!(!store.failed_cooling(
+            "acct/a-0000000000000001",
+            now + FAILED_RETRY + Duration::from_secs(1)
+        ));
+        assert!(!store.failed_cooling("acct/a-0000000000000002", now));
+        let order = ["acct/a-0000000000000001", "acct/a-0000000000000002"];
+        let next = order
+            .iter()
+            .find(|id| !store.failed_cooling(id, now))
+            .expect("peer runs");
+        assert_eq!(*next, "acct/a-0000000000000002");
+    }
+
+    #[test]
+    fn a3a_23_list_statuses_includes_configured_account_without_last_run() {
+        let mut rows = BTreeMap::new();
+        let account = AccountId::from_static("a-0000000000000033");
+        super::ensure_configured_row(&mut rows, "acct", &account);
+        let row = rows.get("acct/a-0000000000000033").expect("configured row");
+        assert!(row.last().is_none());
     }
 }

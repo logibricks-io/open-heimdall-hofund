@@ -120,9 +120,9 @@ async fn trigger(config: &Path, target: &str) -> Result<String, String> {
 }
 
 fn split_target(target: &str) -> Result<(String, String), String> {
-    let (subscription, account) = target.split_once('/').ok_or_else(|| {
-        "use subscription/account, for example acct/user@example.test".to_owned()
-    })?;
+    let (subscription, account) = target
+        .split_once('/')
+        .ok_or_else(|| "use subscription/account, for example acct/user@example.test".to_owned())?;
     if subscription.is_empty() || account.is_empty() {
         return Err("subscription and account must be non-empty".to_owned());
     }

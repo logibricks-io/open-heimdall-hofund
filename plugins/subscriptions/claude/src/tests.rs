@@ -684,3 +684,65 @@ fn d27_7_write_agent_sign_in_creates_claude_files() {
     assert!(agent_home.join(creds::CREDENTIALS_FILE).is_file());
     assert!(agent_home.join(creds::PROFILE_FILE).is_file());
 }
+
+fn warmup_script(rotate: Option<&'static str>, lines: Vec<String>) -> PipedScript {
+    PipedScript::new().on_stdin(move |spawn, stdin| {
+        assert_eq!(stdin, b"hi\n");
+        let dir = config_dir(spawn);
+        let file = dir.join(creds::CREDENTIALS_FILE);
+        if let Some(rotated) = rotate {
+            std::fs::write(&file, rotated).expect("rotate");
+        }
+        lines
+    })
+}
+
+#[test]
+fn a3a_19_warmup_commits_rotation_and_removes_credentials_file() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let _sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    host.process().script_piped(warmup_script(
+        Some(ROTATED),
+        vec![r#"{"type":"result","is_error":false,"result":"Hi"}"#.to_owned()],
+    ));
+    block_on(_sub.daily_warmup(&id, host.context())).expect("warmup");
+    assert_eq!(stored(&host, &id).text(creds::CREDENTIALS), Some(ROTATED));
+    let account_dir = state(&host).join("accounts").join(id.as_str());
+    assert!(!account_dir.join(creds::CREDENTIALS_FILE).exists());
+    assert!(!account_dir.join("warmup-run").exists());
+}
+
+#[test]
+fn a3a_19_warmup_commits_rotation_when_the_run_fails() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    host.process().script_piped(warmup_script(
+        Some(ROTATED),
+        vec![r#"{"type":"result","is_error":true,"result":"nope"}"#.to_owned()],
+    ));
+    let error = block_on(sub.daily_warmup(&id, host.context())).expect_err("refused");
+    assert_eq!(error.kind(), PluginErrorKind::Transport);
+    assert_eq!(stored(&host, &id).text(creds::CREDENTIALS), Some(ROTATED));
+    let account_dir = state(&host).join("accounts").join(id.as_str());
+    assert!(!account_dir.join(creds::CREDENTIALS_FILE).exists());
+}
+
+#[test]
+fn a3a_20_warmup_empty_stdout_fails_and_removes_credentials_file() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    host.process().script_piped(warmup_script(None, Vec::new()));
+    let error = block_on(sub.daily_warmup(&id, host.context())).expect_err("empty");
+    assert_eq!(error.kind(), PluginErrorKind::Transport);
+    let account_dir = state(&host).join("accounts").join(id.as_str());
+    assert!(!account_dir.join(creds::CREDENTIALS_FILE).exists());
+}
