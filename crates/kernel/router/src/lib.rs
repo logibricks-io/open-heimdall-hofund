@@ -96,6 +96,10 @@ pub struct Hop {
     pub free: bool,
     /// Whether the member's known allowance is nearly spent.
     pub nearly_spent: bool,
+    /// Whether this row is a provider fallback rather than its own member.
+    pub fallback: bool,
+    /// Fixed reasoning effort for affinity identity, empty when not fixed.
+    pub effort: String,
     /// How long this member's unread prompt cache stays warm.
     pub cold_after: Duration,
 }
@@ -113,6 +117,8 @@ impl Hop {
             weight: 1,
             free: false,
             nearly_spent: false,
+            fallback: false,
+            effort: String::new(),
             cold_after: affinity::CACHE_COLD,
         }
     }
@@ -221,6 +227,7 @@ struct ReplyRoute {
     key: String,
     turn: u64,
     strict: bool,
+    planned: Vec<affinity::Candidate>,
 }
 
 impl Router {
@@ -503,7 +510,8 @@ impl Router {
                 hook.clone(),
             )) as Arc<dyn AttemptHook>)
         });
-        DispatchState {
+        let opening = conversation.map(|conversation| conversation.key.clone());
+        let result = DispatchState {
             asked,
             request: request.clone(),
             inbound_protocol: inbound_protocol.to_owned(),
@@ -519,9 +527,16 @@ impl Router {
             wait_hook,
             affinity: ordered.affinity,
             affinity_state: self.affinity.clone(),
+            cooldowns: self.cooldowns.clone(),
         }
         .run(0)
-        .await
+        .await;
+        if result.is_err()
+            && let Some(key) = opening
+        {
+            self.affinity.opened(&key);
+        }
+        result
     }
 
     /// Counts input tokens for `request`.
@@ -756,6 +771,22 @@ impl Router {
                 .map(|index| resolved.hops[index].clone())
                 .collect()
         };
+        let ordered = if let Some(cooldowns) = &self.cooldowns {
+            order_hops(ordered, cooldowns, &resolved.bare)
+        } else {
+            ordered
+        };
+        let group_member = |hop: &Hop| {
+            let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+            format!("{}/{model}:{}", hop.member.route_id(), hop.effort)
+        };
+        let mut places = BTreeMap::new();
+        if resolved.pool_asked {
+            for hop in &resolved.hops {
+                let next = places.len() + 1;
+                places.entry(group_member(hop)).or_insert(next);
+            }
+        }
         let decision = conversation.map(|conversation| {
             let now = SystemTime::now();
             let allowances = self
@@ -768,57 +799,57 @@ impl Router {
                 .map(|hop| {
                     let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
                     let member = hop.member.id().to_string();
-                    let nearly_spent = hop.nearly_spent
-                        || allowances
-                            .iter()
-                            .find(|allowance| allowance.member == member)
-                            .and_then(|allowance| allowance.fullest(model, now))
-                            .is_some_and(|window| {
-                                window.used >= affinity::spent_share_of(&resolved.routing)
-                            });
+                    let used = allowances
+                        .iter()
+                        .find(|allowance| allowance.member == member)
+                        .and_then(|allowance| allowance.fullest(model, now))
+                        .map(|window| window.used);
+                    let group_member = group_member(hop);
                     affinity::Candidate {
                         member,
                         model: model.to_owned(),
+                        effort: hop.effort.clone(),
                         resting: self.cooldowns.as_ref().is_some_and(|cooldowns| {
                             cooldowns
                                 .cooling_for_model(hop.member.id(), model)
                                 .is_some()
                         }),
-                        nearly_spent,
+                        nearly_spent: hop.nearly_spent
+                            || used.is_some_and(|used| {
+                                used >= affinity::spent_share_of(&resolved.routing)
+                            }),
+                        low_allowance: used.is_some_and(|used| used >= 90.0),
+                        fallback: hop.fallback,
+                        aside: false,
+                        place: places.get(&group_member).copied().unwrap_or(0),
+                        group_member,
                         cold_after: hop.cold_after,
                     }
                 })
                 .collect::<Vec<_>>();
-            self.affinity
-                .order(conversation, resolved.stays, &resolved.routing, &candidates)
+            let decision =
+                self.affinity
+                    .order(conversation, resolved.stays, &resolved.routing, &candidates);
+            (decision, candidates)
         });
-        let (ordered, strict) = if let Some(decision) = &decision {
-            (
-                decision
-                    .order
-                    .iter()
-                    .map(|index| ordered[*index].clone())
-                    .collect::<Vec<_>>(),
-                decision.strict,
-            )
-        } else {
-            (ordered, false)
-        };
-        let hops = if strict {
-            ordered
-        } else if let Some(cooldowns) = &self.cooldowns {
-            order_hops(ordered, cooldowns, &resolved.bare)
+        let ordered = if let Some((decision, _)) = &decision {
+            decision
+                .order
+                .iter()
+                .map(|index| ordered[*index].clone())
+                .collect::<Vec<_>>()
         } else {
             ordered
         };
         Ordered {
-            hops,
+            hops: ordered,
             affinity: conversation
                 .zip(decision)
-                .map(|(conversation, decision)| ReplyRoute {
+                .map(|(conversation, (decision, planned))| ReplyRoute {
                     key: conversation.key.clone(),
                     turn: conversation.turn,
                     strict: decision.strict,
+                    planned,
                 }),
         }
     }
@@ -969,6 +1000,7 @@ struct DispatchState {
     /// Where an answer's stick is recorded, when the request has a conversation.
     affinity: Option<ReplyRoute>,
     affinity_state: affinity::AffinityState,
+    cooldowns: Option<Arc<Cooldowns>>,
 }
 
 /// One member's answer within a dispatch round.
@@ -1101,14 +1133,48 @@ impl DispatchState {
                         label_model(completion, self.asked.clone())
                     };
                     let completion = if let Some(affinity) = &self.affinity {
+                        let member = hop.member.id().to_string();
+                        let answerer = affinity.planned.iter().find(|candidate| {
+                            candidate.member == member
+                                && candidate.model == upstream_model
+                                && candidate.effort == hop.effort
+                        });
+                        let stood_in = answerer.is_some_and(|answerer| {
+                            affinity::AffinityState::stands_in_for(
+                                answerer,
+                                &affinity.planned,
+                                |candidate| {
+                                    self.cooldowns.as_ref().is_some_and(|cooldowns| {
+                                        self.resolved.hops.iter().any(|hop| {
+                                            hop.member.id().to_string() == candidate.member
+                                                && hop
+                                                    .wire_model
+                                                    .as_deref()
+                                                    .unwrap_or(&self.resolved.bare)
+                                                    == candidate.model
+                                                && cooldowns
+                                                    .cooling_for_model(
+                                                        hop.member.id(),
+                                                        &candidate.model,
+                                                    )
+                                                    .is_some()
+                                        })
+                                    })
+                                },
+                            )
+                        });
                         affinity_reply::watch(
                             completion,
-                            self.affinity_state.clone(),
-                            affinity.key.clone(),
-                            affinity.turn,
-                            affinity.strict,
-                            hop.member.id().to_string(),
-                            upstream_model.clone(),
+                            affinity_reply::Reply {
+                                state: self.affinity_state.clone(),
+                                key: affinity.key.clone(),
+                                turn: affinity.turn,
+                                strict: affinity.strict,
+                                member,
+                                model: upstream_model.clone(),
+                                effort: hop.effort.clone(),
+                                stood_in,
+                            },
                         )
                     } else {
                         completion

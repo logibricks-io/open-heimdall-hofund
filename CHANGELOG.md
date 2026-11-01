@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Conversation affinity now returns fallback, ordered-group, and stand-in
+  answerers to earlier ready members at the next user turn without crossing
+  tool-loop or strict-stay boundaries (P0-2c2, D-14, D-25). Rotate and
+  whole-session routing spread new conversations by 30-minute least-held
+  counts, including in-flight first requests; subagents follow their leads,
+  emergency fallbacks stay out of rotation while the provider is ready, and
+  effort plus stand-in identity persist compatibly in `affinity.json`.
 - Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
   secret readable, as the reference does, so `gateway-key copy` shows a key
   again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,

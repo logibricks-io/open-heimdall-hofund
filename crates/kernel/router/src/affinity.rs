@@ -1,5 +1,6 @@
 //! Conversation affinity, cache warmth, and durable answerer state.
 
+mod rules;
 pub(crate) mod sealed;
 
 use std::collections::BTreeMap;
@@ -110,6 +111,14 @@ pub struct CacheUsage {
     pub write_hour: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Answerer<'a> {
+    pub(crate) member: &'a str,
+    pub(crate) model: &'a str,
+    pub(crate) effort: &'a str,
+    pub(crate) stood_in: bool,
+}
+
 /// A candidate as affinity sees it after strategy ordering.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
@@ -117,10 +126,22 @@ pub struct Candidate {
     pub member: String,
     /// Model this candidate serves.
     pub model: String,
+    /// Fixed reasoning effort of the group member, empty when it follows the request.
+    pub effort: String,
     /// Whether the member/model pair is cooling down.
     pub resting: bool,
     /// Whether its known allowance is nearly spent.
     pub nearly_spent: bool,
+    /// Whether its known allowance is at least 90 percent used.
+    pub low_allowance: bool,
+    /// Whether this row is a provider fallback.
+    pub fallback: bool,
+    /// Whether this row is set aside for another protocol.
+    pub aside: bool,
+    /// Group member identity, shared by its keys and accounts.
+    pub group_member: String,
+    /// One-based position of the group member, zero outside a group.
+    pub place: usize,
     /// How long its unread prompt cache remains warm.
     pub cold_after: Duration,
 }
@@ -132,8 +153,14 @@ impl Candidate {
         Self {
             member: member.into(),
             model: model.into(),
+            effort: String::new(),
             resting: false,
             nearly_spent: false,
+            low_allowance: false,
+            fallback: false,
+            aside: false,
+            group_member: String::new(),
+            place: 0,
             cold_after: CACHE_COLD,
         }
     }
@@ -167,6 +194,12 @@ pub enum Reason {
     Gone,
     /// Strict affinity kept the answerer.
     Strict,
+    /// A provider fallback returned the conversation to the ready provider.
+    Main,
+    /// An ordered group returned the conversation to an earlier ready member.
+    Order,
+    /// A stand-in returned the conversation to an earlier ready group member.
+    Back,
     /// Session affinity kept the answerer.
     Session,
     /// The request continues the current turn.
@@ -194,6 +227,9 @@ impl Reason {
             Self::Off => "off",
             Self::Gone => "gone",
             Self::Strict => "strict",
+            Self::Main => "main",
+            Self::Order => "order",
+            Self::Back => "back",
             Self::Session => "session",
             Self::Turn => "turn",
             Self::Cache => "cache",
@@ -226,6 +262,8 @@ pub struct Stick {
     pub member: String,
     /// Model that answered.
     pub model: String,
+    /// Fixed reasoning effort that answered.
+    pub effort: String,
     /// User-turn number that answered.
     pub turn: u64,
     /// When the answer completed.
@@ -238,11 +276,14 @@ pub struct Stick {
     pub hour_tokens: u64,
     /// When the one-hour cache was last written or fully read.
     pub hour_at: Option<SystemTime>,
+    /// Whether this answerer stood in for an earlier group member.
+    pub stood_in: bool,
 }
 
 #[derive(Default)]
 struct State {
     sticks: BTreeMap<String, Stick>,
+    opening: BTreeMap<String, Stick>,
     dirty: bool,
     scheduled: bool,
 }
@@ -351,7 +392,14 @@ impl AffinityState {
             candidates
                 .iter()
                 .position(|candidate| {
-                    candidate.member == stick.member && candidate.model == stick.model
+                    candidate.member == stick.member
+                        && candidate.model == stick.model
+                        && candidate.effort == stick.effort
+                })
+                .or_else(|| {
+                    candidates.iter().position(|candidate| {
+                        candidate.member == stick.member && candidate.model == stick.model
+                    })
                 })
                 .or_else(|| {
                     candidates
@@ -375,13 +423,29 @@ impl AffinityState {
             let stick = stick.as_ref().expect("stick exists when candidate matches");
             if candidate.resting {
                 Reason::Resting
+            } else if !conversation.within && rules::back_to_main(candidates, index) {
+                Reason::Main
+            } else if !conversation.within
+                && mode == Stays::Auto
+                && routing == "order"
+                && rules::back_to_first(candidates, index)
+            {
+                Reason::Order
+            } else if !conversation.within
+                && mode == Stays::Auto
+                && routing != "order"
+                && routing != "rotate"
+                && stick.stood_in
+                && rules::back_from_stand_in(candidates, index)
+            {
+                Reason::Back
             } else if index > 0 && candidate.nearly_spent {
                 Reason::Spent
             } else if mode == Stays::Session {
                 Reason::Session
             } else if conversation.within {
                 Reason::Turn
-            } else if mode == Stays::Turn {
+            } else if mode == Stays::Turn || routing == "rotate" {
                 Reason::NewTurn
             } else if stick.cache_read.saturating_add(stick.cache_write) < CACHE_WORTH {
                 Reason::NoCache
@@ -405,7 +469,21 @@ impl AffinityState {
             let member = &candidates[index].member;
             order.retain(|candidate| candidates[*candidate].member == *member);
         }
-        let order = later_rules(order, stick.as_ref(), routing);
+        let spread = rules::spreads_sessions(mode, routing);
+        let order = match reason {
+            Reason::NewTurn if routing == "rotate" => match at {
+                Some(at) => rules::after(order, at, candidates),
+                None => order,
+            },
+            Reason::First if routing == "rotate" => {
+                self.least_held(conversation, candidates, order, false, now)
+            }
+            Reason::First if spread && conversation.key.contains("|agent:") => {
+                self.with_lead(conversation, candidates, order, now)
+            }
+            Reason::First if spread => self.least_held(conversation, candidates, order, true, now),
+            _ => order,
+        };
         Decision {
             order,
             kept,
@@ -416,6 +494,33 @@ impl AffinityState {
 
     /// Remembers the answerer and its cache usage.
     pub fn answered(&self, key: &str, member: &str, model: &str, turn: u64, usage: CacheUsage) {
+        self.answered_as(
+            key,
+            Answerer {
+                member,
+                model,
+                effort: "",
+                stood_in: false,
+            },
+            turn,
+            usage,
+        );
+    }
+
+    /// Remembers the answerer, its effort, and whether it stood in for an earlier member.
+    pub(crate) fn answered_as(
+        &self,
+        key: &str,
+        answerer: Answerer<'_>,
+        turn: u64,
+        usage: CacheUsage,
+    ) {
+        let Answerer {
+            member,
+            model,
+            effort,
+            stood_in,
+        } = answerer;
         let now = (self.clock)();
         let cache_write = if usage.read == 0 && usage.write == 0 {
             usage.input.unwrap_or(0)
@@ -423,12 +528,15 @@ impl AffinityState {
             usage.write
         };
         let mut state = self.lock();
-        let previous = state.sticks.get(key).filter(|stick| {
-            stick.member == member && stick.model == model && stick.hour_at.is_some()
-        });
+        let previous = state
+            .sticks
+            .get(key)
+            .filter(|stick| stick.member == member && stick.model == model)
+            .cloned();
+        let stood_in = stood_in || previous.as_ref().is_some_and(|stick| stick.stood_in);
         let (hour_tokens, hour_at) = if usage.write_hour > 0 {
             (usage.read.saturating_add(usage.write_hour), Some(now))
-        } else if let Some(previous) = previous.filter(|previous| {
+        } else if let Some(previous) = previous.as_ref().filter(|previous| {
             previous.hour_tokens > 0
                 && previous
                     .hour_at
@@ -444,19 +552,115 @@ impl AffinityState {
             Stick {
                 member: member.to_owned(),
                 model: model.to_owned(),
+                effort: effort.to_owned(),
                 turn,
                 at: now,
                 cache_read: usage.read,
                 cache_write,
                 hour_tokens,
                 hour_at,
+                stood_in,
             },
         );
+        state.opening.remove(key);
         if state.sticks.len() > 4096 {
             state.sticks.retain(|_, stick| fresh(stick.at, now));
         }
         drop(state);
         self.note();
+    }
+
+    pub(crate) fn opened(&self, key: &str) {
+        self.lock().opening.remove(key);
+    }
+
+    pub(crate) fn stands_in_for(
+        answerer: &Candidate,
+        planned: &[Candidate],
+        resting: impl FnMut(&Candidate) -> bool,
+    ) -> bool {
+        rules::stands_in_for(answerer, planned, resting)
+    }
+
+    fn least_held(
+        &self,
+        conversation: &Conversation,
+        candidates: &[Candidate],
+        order: Vec<usize>,
+        ready: bool,
+        now: SystemTime,
+    ) -> Vec<usize> {
+        if candidates.len() < 2 {
+            return order;
+        }
+        let scope = conversation
+            .key
+            .split_once('|')
+            .map_or(conversation.key.as_str(), |(scope, _)| scope);
+        let prefix = format!("{scope}|");
+        let mut held = rules::Holdings::new();
+        let mut state = self.lock();
+        for (key, stick) in state.sticks.iter().chain(state.opening.iter()) {
+            if key.starts_with(&prefix)
+                && age(stick.at, now) <= HELD_FOR
+                && !(ready && key.contains("|agent:"))
+            {
+                *held
+                    .entry((
+                        stick.member.clone(),
+                        stick.model.clone(),
+                        stick.effort.clone(),
+                    ))
+                    .or_default() += 1;
+            }
+        }
+        let order = rules::least_held(order, candidates, &held, ready);
+        let selected = &candidates[order[0]];
+        state.opening.insert(
+            conversation.key.clone(),
+            Stick {
+                member: selected.member.clone(),
+                model: selected.model.clone(),
+                effort: selected.effort.clone(),
+                turn: 0,
+                at: now,
+                cache_read: 0,
+                cache_write: 0,
+                hour_tokens: 0,
+                hour_at: None,
+                stood_in: false,
+            },
+        );
+        order
+    }
+
+    fn with_lead(
+        &self,
+        conversation: &Conversation,
+        candidates: &[Candidate],
+        mut order: Vec<usize>,
+        now: SystemTime,
+    ) -> Vec<usize> {
+        let Some((lead, _)) = conversation.key.split_once("|agent:") else {
+            return order;
+        };
+        let stick = self.lock().sticks.get(lead).cloned();
+        let Some(stick) = stick.filter(|stick| age(stick.at, now) <= HELD_FOR) else {
+            return order;
+        };
+        for index in 1..candidates.len() {
+            let candidate = &candidates[index];
+            if candidate.member == stick.member
+                && candidate.model == stick.model
+                && candidate.effort == stick.effort
+                && rules::ready_for_new(candidates, index)
+            {
+                let selected = order.remove(index);
+                order.insert(0, selected);
+                break;
+            }
+        }
+        order
     }
 
     /// Forgets a broken answer except under strict affinity.
@@ -557,10 +761,7 @@ impl AffinityState {
     }
 }
 
-fn later_rules(order: Vec<usize>, stick: Option<&Stick>, routing: &str) -> Vec<usize> {
-    let _ = (stick, routing);
-    order
-}
+const HELD_FOR: Duration = Duration::from_secs(30 * 60);
 
 fn warm(stick: &Stick, cold_after: Duration, now: SystemTime) -> bool {
     age(stick.at, now) <= cold_after
@@ -581,6 +782,8 @@ struct SavedStick {
     member: String,
     model: String,
     #[serde(default)]
+    effort: String,
+    #[serde(default)]
     turn: u64,
     at_ms: u64,
     #[serde(default)]
@@ -591,6 +794,12 @@ struct SavedStick {
     cache_hour: u64,
     #[serde(default)]
     cache_hour_at_ms: Option<u64>,
+    #[serde(
+        default,
+        rename = "stoodIn",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    stood_in: bool,
 }
 
 impl SavedStick {
@@ -598,12 +807,14 @@ impl SavedStick {
         Self {
             member: stick.member.clone(),
             model: stick.model.clone(),
+            effort: stick.effort.clone(),
             turn: stick.turn,
             at_ms: millis(stick.at),
             cache_read: stick.cache_read,
             cache_write: stick.cache_write,
             cache_hour: stick.hour_tokens,
             cache_hour_at_ms: stick.hour_at.map(millis),
+            stood_in: stick.stood_in,
         }
     }
 
@@ -611,12 +822,14 @@ impl SavedStick {
         Some(Stick {
             member: self.member,
             model: self.model,
+            effort: self.effort,
             turn: self.turn,
             at: from_millis(self.at_ms)?,
             cache_read: self.cache_read,
             cache_write: self.cache_write,
             hour_tokens: self.cache_hour,
             hour_at: self.cache_hour_at_ms.and_then(from_millis),
+            stood_in: self.stood_in,
         })
     }
 }
@@ -665,8 +878,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        AffinityState, CACHE_COLD, CACHE_HOUR, CacheUsage, Candidate, Conversation, Reason,
-        STICK_KEEP, STICKS_KEPT, Stays,
+        AffinityState, Answerer, CACHE_COLD, CACHE_HOUR, CacheUsage, Candidate, Conversation,
+        Reason, STICK_KEEP, STICKS_KEPT, Stays,
     };
 
     fn conversation() -> Conversation {
@@ -955,5 +1168,447 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("debounced affinity write did not arrive");
+    }
+
+    fn grouped() -> Vec<Candidate> {
+        candidates()
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut candidate)| {
+                candidate.group_member = format!("member-{index}");
+                candidate.place = index + 1;
+                candidate
+            })
+            .collect()
+    }
+
+    fn three() -> Vec<Candidate> {
+        let mut candidates = grouped();
+        candidates.push(Candidate::new("third", "model"));
+        candidates[2].group_member = "member-2".to_owned();
+        candidates[2].place = 3;
+        candidates
+    }
+
+    #[test]
+    fn c4a_fallback_gives_back_only_at_a_new_turn_and_not_under_strict() {
+        let state = AffinityState::in_memory();
+        state.answered("demo|session", "second", "model", 1, usage(0, 3000));
+        let mut candidates = candidates();
+        candidates[1].fallback = true;
+
+        let decision = state.order(&conversation(), Stays::Auto, "smart", &candidates);
+        assert_eq!(decision.reason, Reason::Main);
+        assert_eq!(decision.reason.as_str(), "main");
+        assert_eq!(decision.order, [0, 1]);
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Session, "smart", &candidates)
+                .reason,
+            Reason::Main
+        );
+        let within = Conversation::new("demo|session", 1, true);
+        assert_eq!(
+            state
+                .order(&within, Stays::Auto, "smart", &candidates)
+                .reason,
+            Reason::Turn
+        );
+        let strict = state.order(&conversation(), Stays::Strict, "smart", &candidates);
+        assert_eq!(strict.reason, Reason::Strict);
+        assert_eq!(strict.order, [1]);
+
+        candidates[0].resting = true;
+        let waiting = state.order(&conversation(), Stays::Auto, "smart", &candidates);
+        assert_eq!(waiting.reason, Reason::Cache);
+        assert_eq!(waiting.order, [1, 0]);
+    }
+
+    #[test]
+    fn c4b_effort_matching_prefers_the_exact_tier_before_wider_member_matches() {
+        let state = AffinityState::in_memory();
+        state.answered_as(
+            "demo|session",
+            Answerer {
+                member: "shared",
+                model: "model",
+                effort: "high",
+                stood_in: false,
+            },
+            1,
+            usage(0, 3000),
+        );
+        let mut low = Candidate::new("shared", "model");
+        low.effort = "low".to_owned();
+        let mut high = Candidate::new("shared", "model");
+        high.effort = "high".to_owned();
+        let other = Candidate::new("shared", "other");
+        let decision = state.order(
+            &conversation(),
+            Stays::Auto,
+            "smart",
+            &[low.clone(), high, other.clone()],
+        );
+        assert_eq!(decision.order, [1, 0, 2]);
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Auto, "smart", &[low, other.clone()])
+                .order,
+            [0, 1]
+        );
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Auto, "smart", &[other])
+                .reason,
+            Reason::Cache
+        );
+    }
+
+    #[test]
+    fn c5a_ordered_group_returns_only_across_members_turns_and_auto_mode() {
+        let state = AffinityState::in_memory();
+        state.answered("demo|session", "second", "model", 1, usage(0, 3000));
+        let candidates = grouped();
+        let decision = state.order(&conversation(), Stays::Auto, "order", &candidates);
+        assert_eq!(decision.reason, Reason::Order);
+        assert_eq!(decision.reason.as_str(), "order");
+        assert_eq!(decision.order, [0, 1]);
+        let within = Conversation::new("demo|session", 1, true);
+        assert_eq!(
+            state
+                .order(&within, Stays::Auto, "order", &candidates)
+                .reason,
+            Reason::Turn
+        );
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Session, "order", &candidates)
+                .reason,
+            Reason::Session
+        );
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Auto, "smart", &candidates)
+                .reason,
+            Reason::Cache
+        );
+
+        let mut same_member = candidates;
+        same_member[1].group_member = same_member[0].group_member.clone();
+        same_member[1].place = same_member[0].place;
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Auto, "order", &same_member)
+                .reason,
+            Reason::Cache
+        );
+    }
+
+    #[test]
+    fn c6a_session_spread_counts_answered_and_opening_leads_for_thirty_minutes() {
+        let root = tempfile::tempdir().expect("root");
+        let current = Arc::new(std::sync::Mutex::new(SystemTime::now()));
+        let clock = {
+            let current = Arc::clone(&current);
+            Arc::new(move || *current.lock().expect("clock"))
+        };
+        let state =
+            AffinityState::with_clock(root.path().join("affinity.json"), clock, Duration::ZERO);
+        let candidates = three();
+        state.answered("demo|old", "first", "model", 1, usage(0, 3000));
+        for (key, first) in [("new-1", 1), ("new-2", 2), ("new-3", 0)] {
+            let conversation = Conversation::new(format!("demo|{key}"), 1, false);
+            let decision = state.order(&conversation, Stays::Session, "smart", &candidates);
+            assert_eq!(decision.reason, Reason::First);
+            assert_eq!(decision.order[0], first, "{key}");
+        }
+        *current.lock().expect("clock") += Duration::from_secs(31 * 60);
+        let expired = Conversation::new("demo|expired", 1, false);
+        assert_eq!(
+            state
+                .order(&expired, Stays::Session, "smart", &candidates)
+                .order[0],
+            0
+        );
+    }
+
+    #[test]
+    fn c6b_session_spread_respects_readiness_and_strategy_gating() {
+        let state = AffinityState::in_memory();
+        state.answered("demo|a", "first", "model", 1, usage(0, 3000));
+        state.answered("demo|b", "second", "model", 1, usage(0, 3000));
+        let mut candidates = three();
+        for fallback in [false, true] {
+            candidates[2].low_allowance = !fallback;
+            candidates[2].fallback = fallback;
+            let new = Conversation::new(format!("demo|new-{fallback}"), 1, false);
+            assert_eq!(
+                state
+                    .order(&new, Stays::Session, "smart", &candidates)
+                    .order[0],
+                0
+            );
+            state.opened(&new.key);
+        }
+        for (mode, routing, expected) in [
+            (Stays::Session, "smart", true),
+            (Stays::Strict, "usage", true),
+            (Stays::Session, "pace", true),
+            (Stays::Auto, "smart", false),
+            (Stays::Turn, "smart", false),
+            (Stays::Off, "smart", false),
+            (Stays::Session, "order", false),
+            (Stays::Session, "weight", false),
+            (Stays::Session, "rotate", false),
+        ] {
+            assert_eq!(super::rules::spreads_sessions(mode, routing), expected);
+        }
+    }
+
+    #[test]
+    fn c6c_a_subagent_follows_its_ready_lead_with_the_same_effort() {
+        let state = AffinityState::in_memory();
+        state.answered_as(
+            "demo|session",
+            Answerer {
+                member: "second",
+                model: "model",
+                effort: "high",
+                stood_in: false,
+            },
+            1,
+            usage(0, 3000),
+        );
+        let mut candidates = grouped();
+        candidates[0].effort = "low".to_owned();
+        candidates[1].effort = "high".to_owned();
+        let subagent = Conversation::new("demo|session|agent:one", 1, false);
+        assert_eq!(
+            state
+                .order(&subagent, Stays::Session, "smart", &candidates)
+                .order,
+            [1, 0]
+        );
+        candidates[1].low_allowance = true;
+        assert_eq!(
+            state
+                .order(&subagent, Stays::Session, "smart", &candidates)
+                .order,
+            [0, 1]
+        );
+    }
+
+    #[test]
+    fn c6d_rotate_goes_after_the_answerer_and_opened_releases_a_hold() {
+        let state = AffinityState::in_memory();
+        state.answered("demo|session", "second", "model", 1, usage(0, 3000));
+        let mut candidates = three();
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Turn, "rotate", &candidates)
+                .order,
+            [2, 0, 1]
+        );
+        candidates[2].resting = true;
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Turn, "rotate", &candidates)
+                .order[0],
+            0
+        );
+
+        state.answered("opening|old", "first", "model", 1, usage(0, 3000));
+        let opening = Conversation::new("opening|new", 1, false);
+        assert_eq!(
+            state
+                .order(&opening, Stays::Auto, "rotate", &candidates[..2])
+                .order[0],
+            1
+        );
+        state.opened(&opening.key);
+        assert_eq!(
+            state
+                .order(&opening, Stays::Auto, "rotate", &candidates[..2])
+                .order[0],
+            1
+        );
+    }
+
+    #[test]
+    fn c6e_nothing_held_keeps_the_routing_order_and_still_counts_the_opening() {
+        let state = AffinityState::in_memory();
+        let mut candidates = three();
+        candidates[0].resting = true;
+        let first = Conversation::new("demo|a", 1, false);
+        assert_eq!(
+            state
+                .order(&first, Stays::Session, "smart", &candidates)
+                .order,
+            [0, 1, 2]
+        );
+        let second = Conversation::new("demo|b", 1, false);
+        assert_eq!(
+            state
+                .order(&second, Stays::Session, "smart", &candidates)
+                .order[0],
+            1
+        );
+    }
+
+    #[test]
+    fn d14_rotate_skips_fallback_rows_for_new_and_returning_conversations() {
+        let state = AffinityState::in_memory();
+        let mut candidates = three();
+        candidates[2].fallback = true;
+        state.answered("demo|a", "first", "model", 1, usage(0, 3000));
+        state.answered("demo|b", "second", "model", 1, usage(0, 3000));
+        let new = Conversation::new("demo|new", 1, false);
+        assert_eq!(
+            state.order(&new, Stays::Auto, "rotate", &candidates).order[0],
+            0
+        );
+        state.answered("demo|session", "second", "model", 1, usage(0, 3000));
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Turn, "rotate", &candidates)
+                .order[0],
+            0
+        );
+    }
+
+    #[test]
+    fn d25a_stand_in_return_requires_an_unavailable_earlier_member_and_auto() {
+        let state = AffinityState::in_memory();
+        state.answered_as(
+            "demo|session",
+            Answerer {
+                member: "second",
+                model: "model",
+                effort: "high",
+                stood_in: true,
+            },
+            1,
+            usage(0, 3000),
+        );
+        state.answered_as(
+            "demo|session",
+            Answerer {
+                member: "second",
+                model: "model",
+                effort: "high",
+                stood_in: false,
+            },
+            2,
+            usage(0, 3000),
+        );
+        assert!(state.stick("demo|session").expect("stick").stood_in);
+        let candidates = grouped();
+        let decision = state.order(&conversation(), Stays::Auto, "smart", &candidates);
+        assert_eq!(decision.reason, Reason::Back);
+        assert_eq!(decision.reason.as_str(), "back");
+        let within = Conversation::new("demo|session", 1, true);
+        assert_eq!(
+            state
+                .order(&within, Stays::Auto, "smart", &candidates)
+                .reason,
+            Reason::Turn
+        );
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Session, "smart", &candidates)
+                .reason,
+            Reason::Session
+        );
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Strict, "smart", &candidates)
+                .reason,
+            Reason::Strict
+        );
+        assert_eq!(
+            state
+                .order(&conversation(), Stays::Auto, "rotate", &candidates)
+                .reason,
+            Reason::NewTurn
+        );
+
+        state.answered("demo|merits", "second", "model", 1, usage(0, 3000));
+        let merits = Conversation::new("demo|merits", 2, false);
+        assert_eq!(
+            state
+                .order(&merits, Stays::Auto, "smart", &candidates)
+                .reason,
+            Reason::Cache
+        );
+        let mut planned = grouped();
+        planned[0].resting = true;
+        assert!(AffinityState::stands_in_for(&planned[1], &planned, |_| {
+            false
+        }));
+        planned[0].resting = false;
+        assert!(!AffinityState::stands_in_for(&planned[1], &planned, |_| {
+            false
+        }));
+        planned[0].nearly_spent = true;
+        assert!(AffinityState::stands_in_for(&planned[1], &planned, |_| {
+            false
+        }));
+    }
+
+    #[test]
+    fn d25b_stood_in_and_effort_survive_restart_and_legacy_files_default_false() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("affinity.json");
+        let now = SystemTime::now();
+        let state = AffinityState::with_clock(&path, Arc::new(SystemTime::now), Duration::ZERO);
+        state.answered_as(
+            "demo|session",
+            Answerer {
+                member: "second",
+                model: "model",
+                effort: "high",
+                stood_in: true,
+            },
+            1,
+            usage(0, 3000),
+        );
+        state.flush();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("saved")).expect("json");
+        assert_eq!(saved["demo|session"]["stoodIn"], true);
+        assert_eq!(saved["demo|session"]["effort"], "high");
+        let restarted = AffinityState::with_clock(&path, Arc::new(SystemTime::now), Duration::ZERO);
+        let stick = restarted.stick("demo|session").expect("stand-in");
+        assert!(stick.stood_in);
+        assert_eq!(stick.effort, "high");
+        assert_eq!(
+            restarted
+                .order(&conversation(), Stays::Auto, "smart", &grouped())
+                .reason,
+            Reason::Back
+        );
+
+        let at_ms = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time")
+            .as_millis();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "legacy|session": {
+                    "member": "second",
+                    "model": "model",
+                    "turn": 1,
+                    "at_ms": at_ms,
+                    "cache_write": 3000
+                }
+            }))
+            .expect("legacy json"),
+        )
+        .expect("legacy file");
+        let legacy = AffinityState::with_clock(&path, Arc::new(SystemTime::now), Duration::ZERO);
+        let stick = legacy.stick("legacy|session").expect("legacy");
+        assert!(!stick.stood_in);
+        assert_eq!(stick.effort, "");
     }
 }

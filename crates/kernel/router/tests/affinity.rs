@@ -98,7 +98,7 @@ fn router(
     stays: Stays,
 ) -> Router {
     let hops = vec![Hop::new(first), Hop::new(second)];
-    let route = Route::new(hops).with_routing("rotate").with_stays(stays);
+    let route = Route::new(hops).with_routing("smart").with_stays(stays);
     Router::from_routes(
         BTreeMap::from([("demo".to_owned(), route)]),
         FailoverPolicy::default(),
@@ -319,4 +319,60 @@ async fn c3d_strict_dispatch_asks_the_answerer_first_even_while_its_model_rests(
         .expect("strict answerer answers");
     assert_eq!(models.lock().expect("models").as_slice(), ["model-a"]);
     assert_eq!(first_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn d25c_dispatch_records_a_stand_in_and_returns_after_recovery() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first = fake("first", &first_hits, vec![answer()]);
+    let second = fake("second", &second_hits, vec![answer()]);
+    let cooldowns = Arc::new(hofund_router::Cooldowns::new(
+        hofund_router::CooldownPolicy::default(),
+    ));
+    cooldowns
+        .record_failure_for_model(
+            first.id(),
+            "demo",
+            &PluginError::status_error(429, "out")
+                .with_retry_after(std::time::Duration::from_secs(120)),
+        )
+        .expect("rest");
+    let state = AffinityState::in_memory();
+    let route = Route::new(vec![Hop::new(Arc::clone(&first)), Hop::new(second)])
+        .with_routing("smart")
+        .with_stays(Stays::Auto);
+    let router = Router::from_routes(
+        BTreeMap::from([("demo".to_owned(), route)]),
+        FailoverPolicy::default(),
+    )
+    .with_affinity(state.clone())
+    .with_cooldowns(cooldowns.clone());
+
+    let routed = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&conversation()),
+            None,
+        )
+        .await
+        .expect("stand-in answers");
+    assert_eq!(routed.upstream_id, "second");
+    assert!(state.stick("demo|session").expect("stick").stood_in);
+
+    cooldowns.record_success(first.id());
+    let next = Conversation::new("demo|session", 2, false);
+    let routed = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&next),
+            None,
+        )
+        .await
+        .expect("recovered member answers");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
 }

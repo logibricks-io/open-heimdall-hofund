@@ -430,6 +430,8 @@ impl Table {
                         weight: spec.weight,
                         free: spec.free,
                         nearly_spent: false,
+                        fallback: false,
+                        effort: String::new(),
                         cold_after: spec.cold_after,
                     })
                     .collect();
