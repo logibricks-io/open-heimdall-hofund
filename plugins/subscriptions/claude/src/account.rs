@@ -119,18 +119,19 @@ pub(crate) async fn warmup(
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
+    let work = dir.join("warmup-run");
+    // Armed before the first write so every early return removes both.
+    let _cleanup = WarmupCleanup {
+        file: &file,
+        work: &work,
+    };
     creds::write_private(&file, &stored)?;
     let settings = dir.join(creds::PROFILE_FILE);
     if !settings.exists() {
         creds::write_private(&settings, &profile.settings_text())?;
     }
-    let work = dir.join("warmup-run");
     let _ = std::fs::remove_dir_all(&work);
     creds::private_dir(&work)?;
-    let _cleanup = WarmupCleanup {
-        file: &file,
-        work: &work,
-    };
 
     let mut last = String::new();
     let run_result = run_warmup_process(host, &program, &dir, &work, &mut last).await;
