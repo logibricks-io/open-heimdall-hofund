@@ -97,7 +97,6 @@ pub fn account_by_name(
     if reference.is_empty() {
         return Err("name an account to switch to".to_owned());
     }
-    let _lower = reference.to_lowercase();
     let mut by_alias = Vec::new();
     for (key, alias) in aliases {
         if alias.eq_ignore_ascii_case(reference) {
@@ -135,11 +134,6 @@ pub fn next_in_order(
     policy: &LoginPolicy,
     include_off: bool,
 ) -> Result<(String, bool), String> {
-    let _active = rows
-        .iter()
-        .find(|row| row.active)
-        .map(|row| row.key.as_str())
-        .unwrap_or("");
     let start = rows
         .iter()
         .position(|row| row.active)
@@ -290,11 +284,15 @@ mod tests {
     use super::*;
 
     fn row(key: &str, on: bool, active: bool) -> LoginRow {
+        row_switch(key, on, active, true)
+    }
+
+    fn row_switch(key: &str, on: bool, active: bool, switchable: bool) -> LoginRow {
         LoginRow {
             key: key.to_owned(),
             on,
             active,
-            switchable: true,
+            switchable,
         }
     }
 
@@ -415,5 +413,130 @@ mod tests {
         let jump = next_login(&rows, &quotas, &policy, Some("first")).expect("back");
         assert_eq!(jump.1, "first");
         assert!(jump.2);
+    }
+
+    #[test]
+    fn d27_13_next_in_order_skips_non_switchable() {
+        let rows = vec![
+            row("a", true, true),
+            row_switch("b", true, false, false),
+            row("c", true, false),
+        ];
+        let quotas = vec![
+            ("a".to_owned(), quota(99.0)),
+            ("b".to_owned(), quota(10.0)),
+            ("c".to_owned(), quota(50.0)),
+        ];
+        let policy = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: false,
+            switch_only: false,
+            sign_in_spends: true,
+        };
+        let (to, _) = next_in_order(&rows, &quotas, &policy, true).expect("next");
+        assert_eq!(to, "c");
+    }
+
+    #[test]
+    fn d27_14_alias_ambiguity_when_two_accounts_share_a_name() {
+        let rows = vec![
+            row("alpha@example.test", true, false),
+            row("beta@example.test", true, false),
+        ];
+        let aliases = vec![
+            ("alpha@example.test".to_owned(), "work".to_owned()),
+            ("beta@example.test".to_owned(), "work".to_owned()),
+        ];
+        let error = account_by_name(&rows, &aliases, "work").expect_err("ambiguous");
+        assert!(error.contains("more than one account is named"));
+    }
+
+    #[test]
+    fn d27_15_keep_login_returns_to_first_despite_sign_in_spends() {
+        let policy = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: true,
+            switch_only: false,
+            sign_in_spends: true,
+        };
+        assert!(policy.returns_to_first());
+        let rows = vec![row("first", true, false), row("second", true, true)];
+        let quotas = vec![
+            ("first".to_owned(), quota(10.0)),
+            ("second".to_owned(), quota(10.0)),
+        ];
+        let jump = next_login(&rows, &quotas, &policy, None).expect("keep_login jump");
+        assert_eq!(jump.1, "first");
+        assert!(jump.2);
+    }
+
+    #[test]
+    fn d27_16_next_login_will_not_return_before_back_share() {
+        let rows = vec![
+            row_switch("first", true, false, false),
+            row("second", true, true),
+        ];
+        let quotas = vec![
+            ("first".to_owned(), quota(95.0)),
+            ("second".to_owned(), quota(99.0)),
+        ];
+        let policy = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: false,
+            switch_only: false,
+            sign_in_spends: false,
+        };
+        assert!(next_login(&rows, &quotas, &policy, Some("first")).is_none());
+    }
+
+    #[test]
+    fn d27_17_next_login_needs_spare_room_above_active_margin() {
+        let rows = vec![row("active", true, true), row("spare", true, false)];
+        let quotas = vec![
+            ("active".to_owned(), quota(99.0)),
+            ("spare".to_owned(), quota(98.99)),
+        ];
+        let policy = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: false,
+            switch_only: false,
+            sign_in_spends: true,
+        };
+        assert!(next_login(&rows, &quotas, &policy, None).is_none());
+    }
+
+    #[test]
+    fn d27_18_next_login_stays_when_active_below_spent_share() {
+        let rows = vec![row("active", true, true), row("spare", true, false)];
+        let quotas = vec![
+            ("active".to_owned(), quota(50.0)),
+            ("spare".to_owned(), quota(10.0)),
+        ];
+        let policy = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: false,
+            switch_only: false,
+            sign_in_spends: true,
+        };
+        assert!(next_login(&rows, &quotas, &policy, None).is_none());
+    }
+
+    #[test]
+    fn d27_20_keep_login_jumps_to_first_only_when_active_is_not_first() {
+        let policy = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: true,
+            switch_only: false,
+            sign_in_spends: false,
+        };
+        let quotas = vec![
+            ("first".to_owned(), quota(10.0)),
+            ("second".to_owned(), quota(10.0)),
+        ];
+        let on_second = vec![row("first", true, false), row("second", true, true)];
+        let jump = next_login(&on_second, &quotas, &policy, None).expect("off first");
+        assert_eq!(jump.1, "first");
+        let on_first = vec![row("first", true, true), row("second", true, false)];
+        assert!(next_login(&on_first, &quotas, &policy, None).is_none());
     }
 }

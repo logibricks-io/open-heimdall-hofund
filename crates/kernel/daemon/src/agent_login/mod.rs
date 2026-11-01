@@ -632,4 +632,9 @@ mod tests {
         assert_eq!(moved.as_deref(), Some("spare"));
         assert_eq!(wrote.0.lock().expect("wrote").as_slice(), ["spare"]);
     }
+
+    #[test]
+    fn d27_19_login_switch_every_is_five_minutes() {
+        assert_eq!(LOGIN_SWITCH_EVERY.as_secs(), 300);
+    }
 }

@@ -29,7 +29,8 @@ hofundd — the hofund daemon
 Usage: hofundd [--config <path>]
        hofundd one-shot [--config <path>]
        hofundd subscription [--config <path>] <command> [<args>...]
-       hofundd accounts [--config <path>] switch <claude|codex> <next|account>
+       hofundd accounts [--config <path>] switch <agent> <next|account>
+       hofundd accounts [--config <path>] import <file>
 
 Serves the configuration until a termination signal, with local control
 enabled. Without --config, HOFUND_CONFIG or the per-user default is used.
