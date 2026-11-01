@@ -70,6 +70,12 @@ pub trait DaemonRegistry: Send + Sync {
             .and_then(|factory| factory.spec().agent_sign_in())
     }
 
+    /// Whether subscription `id` implements daily warm-up.
+    fn subscription_daily_warmup(&self, id: &str) -> bool {
+        self.subscription(id)
+            .is_some_and(|factory| factory.spec().daily_warmup())
+    }
+
     /// The linked vendor balance reader. The default links none.
     fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
         None
@@ -155,6 +161,11 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn subscription_ids(&self) -> Vec<&'static str> {
         hofund_plugin_registry::subscription_ids()
+    }
+
+    fn subscription_daily_warmup(&self, id: &str) -> bool {
+        hofund_plugin_registry::subscription(id)
+            .is_some_and(|factory| factory.spec().daily_warmup())
     }
 }
 

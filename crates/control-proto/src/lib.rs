@@ -22,6 +22,7 @@ mod status;
 mod token;
 mod usage;
 mod version;
+mod warmups;
 
 pub use agents::*;
 pub use common::*;
@@ -42,3 +43,4 @@ pub use status::*;
 pub use token::*;
 pub use usage::*;
 pub use version::*;
+pub use warmups::*;

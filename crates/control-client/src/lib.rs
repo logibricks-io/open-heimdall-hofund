@@ -17,7 +17,8 @@ use hofund_control_proto::{
     QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery,
     SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
     TokenRotateResponse, Topic, UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse,
-    decode_error_envelope, decode_response,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -481,6 +482,24 @@ impl Client {
             self.get(&format!("/v1/hofund/quotas/history?{query}"))
                 .await
         }
+    }
+
+    /// Lists last daily warm-up results known to the daemon.
+    pub async fn warmups(&self) -> Result<WarmupListResponse, ClientError> {
+        self.get("/v1/hofund/warmups").await
+    }
+
+    /// Runs daily warm-up for one subscription account now.
+    pub async fn run_warmup(
+        &self,
+        request: WarmupRunRequest,
+    ) -> Result<WarmupRunResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/warmups/run",
+            Some(json_body(&request)?),
+        )
+        .await
     }
 
     /// Reports usage for a period.

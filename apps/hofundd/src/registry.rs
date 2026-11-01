@@ -60,6 +60,11 @@ impl DaemonRegistry for LinkedRegistry {
         })
     }
 
+    fn subscription_daily_warmup(&self, id: &str) -> bool {
+        hofund_plugin_registry::subscription(id)
+            .is_some_and(|factory| factory.spec().daily_warmup())
+    }
+
     fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
         hofund_plugin_registry::host_plugin(protocol, host)
     }

@@ -56,6 +56,7 @@ mod runtime;
 mod sign_in;
 mod subscriptions;
 mod terminate;
+mod warmup;
 mod watch;
 
 pub use account_discovery::{
@@ -565,6 +566,7 @@ async fn start_inner(
             .with_router(snapshot)
             .with_agent_hooks(options.agent_session, Some(token_generation))
             .with_quotas(Arc::clone(&quotas))
+            .with_runtime(Arc::clone(&runtime))
             .with_events(Arc::clone(&events))
             .with_in_flight(Arc::clone(&in_flight))
             .with_route_trace(route_trace),
@@ -633,12 +635,18 @@ async fn start_inner(
     );
     let maintenance = runtime.spawn_maintenance();
     let subscriptions = runtime.spawn_subscriptions();
+    let warmups = crate::warmup::spawn(
+        Arc::clone(&runtime),
+        Arc::clone(runtime.warmup()),
+        Arc::clone(&registry),
+    );
     let probes = runtime.spawn_probes();
     let running = running.with_resource(AffinityFlush(runtime.affinity()));
     Ok(running
         .with_task(refresh)
         .with_task(maintenance)
         .with_task(subscriptions)
+        .with_task(warmups)
         .with_task(probes))
 }
 

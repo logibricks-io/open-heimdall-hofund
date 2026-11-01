@@ -57,7 +57,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
         ".claude",
     )
     .with_sign_in_spends(true),
-);
+)
+.with_daily_warmup(true);
 
 /// Registers the Claude Code subscription.
 #[must_use]
@@ -93,8 +94,9 @@ impl SubscriptionFactory for ClaudeFactory {
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
+        hofund_plugin_sdk::daily_warmup::read_times(raw)?;
         for key in raw.keys() {
-            if key != "command" {
+            if key != "command" && key != hofund_plugin_sdk::daily_warmup::TIMES_KEY {
                 return Err(ConfigError::new("unknown key").with_path(key));
             }
         }
@@ -445,6 +447,14 @@ impl Subscription for Claude {
         host: &HostContext,
     ) -> Result<Vec<AccountId>, PluginError> {
         import::store(host, text).await
+    }
+
+    async fn daily_warmup(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        account::warmup(host, || self.program(), account).await
     }
 
     async fn discover_agent_sign_in(

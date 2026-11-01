@@ -18,6 +18,7 @@ mod provider_edit;
 mod quota;
 mod serve;
 mod subscription;
+mod warmup;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -50,6 +51,7 @@ fn main() -> ExitCode {
         Command::Subscription(command) => hand_over(subscription::run(&config, &command)),
         Command::Accounts(command) => hand_over(accounts::run(&config, &command)),
         Command::Quota(command) => quota::run(&config, command),
+        Command::Warmup(command) => warmup::run(&config, command),
         other => finish(run_control(&config, other)),
     }
 }
@@ -139,6 +141,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             | Command::TokenShow
             | Command::Subscription(_)
             | Command::Quota(_)
+            | Command::Warmup(_)
             | Command::Accounts(_) => Err("not a control command".to_owned()),
         }
     })
@@ -187,6 +190,8 @@ enum Command {
     Accounts(AccountsCommand),
     /// `quota`, `quota history`, and `quota wait`.
     Quota(quota::QuotaCommand),
+    /// `warmup` and `warmup <subscription>/<account>`.
+    Warmup(warmup::WarmupCommand),
     /// `models` and `models refresh`.
     Models {
         model: Option<String>,
@@ -289,6 +294,7 @@ enum HelpTopic {
     SubscriptionRefresh,
     SubscriptionQuota,
     Quota,
+    Warmup,
     Provider,
     Routes,
     Model,
@@ -426,6 +432,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["quota", rest @ ..] => match quota::parse(rest) {
             quota::QuotaCommand::Help => Command::Help(HelpTopic::Quota),
             parsed => Command::Quota(parsed),
+        },
+        ["warmup", rest @ ..] => match warmup::parse(rest) {
+            warmup::WarmupCommand::Help => Command::Help(HelpTopic::Warmup),
+            parsed => Command::Warmup(parsed),
         },
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
@@ -678,6 +688,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["subscription", "quota", ..] => HelpTopic::SubscriptionQuota,
         ["subscription", ..] => HelpTopic::Subscription,
         ["quota", ..] => HelpTopic::Quota,
+        ["warmup", ..] => HelpTopic::Warmup,
         ["provider", ..] => HelpTopic::Provider,
         ["routes", ..] => HelpTopic::Routes,
         ["model", ..] => HelpTopic::Model,
@@ -721,6 +732,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::SubscriptionRefresh => subscription::REFRESH_HELP,
         HelpTopic::SubscriptionQuota => subscription::QUOTA_HELP,
         HelpTopic::Quota => quota::QUOTA_HELP,
+        HelpTopic::Warmup => warmup::WARMUP_HELP,
         HelpTopic::Provider => PROVIDER_HELP,
         HelpTopic::Routes => ROUTES_HELP,
         HelpTopic::Model => MODEL_HELP,
@@ -764,6 +776,8 @@ commands:
   quota [<provider>...] [--json]  print what is left of each subscription
   quota wait <provider|account> [--timeout <duration>] [--quiet]
   quota history [<provider|account>...] [--days <n>] [--json]
+  warmup [--json]  last daily warm-up per account
+  warmup <subscription>/<account>  run warm-up now
   models [<model>]                show catalog spec and prices for route models
   models refresh                  refetch the models.dev catalog cache
   provider list                   list providers

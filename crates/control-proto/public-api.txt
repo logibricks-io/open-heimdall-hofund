@@ -724,6 +724,25 @@ UsageTotals.input_tokens
 UsageTotals.output_tokens
 UsageTotals.reasoning_tokens
 UsageTotals.requests
+WarmupAccountRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+WarmupAccountRow.account
+WarmupAccountRow.at_ms
+WarmupAccountRow.detail
+WarmupAccountRow.outcome
+WarmupAccountRow.subscription
+WarmupListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+WarmupListResponse.accounts
+WarmupListResponse.version
+WarmupRunRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+WarmupRunRequest.account
+WarmupRunRequest.subscription
+WarmupRunRequest.version
+WarmupRunRequest::fn new (subscription : impl Into < String > , account : impl Into < String >) -> Self
+WarmupRunResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+WarmupRunResponse.at_ms
+WarmupRunResponse.detail
+WarmupRunResponse.outcome
+WarmupRunResponse.version
 const API_VERSION
 const MAX_BOOT_ID_LEN
 const MAX_CONFIG_TEXT_BYTES

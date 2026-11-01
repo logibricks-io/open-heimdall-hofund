@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Daily subscription warm-up (A-3a): opt-in `daily-warmup-at-times` under
+  `[subscriptions.options]` sends one minimal vendor request at each configured
+  local time so rolling allowance windows can start early. The daemon skips
+  resting, unsigned-in, or already-running short windows, persists one attempt
+  per start, runs accounts one at a time, and exposes status on
+  `GET /v1/hofund/warmups`, manual `POST /v1/hofund/warmups/run`, and
+  `hofund warmup`. Claude and Codex implement the hook in their subscription
+  plugins; the kernel stays vendor-neutral.
+
 - Routing decision trace with bounded in-memory rings, `GET /v1/hofund/route`,
   `GET /v1/hofund/route/session`, `GET /v1/hofund/route/unrouted`, and `hofund route`
   (feature-parity rows 4.13 and 12.3). Continuation hops stay on one open trace until
