@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the reply is served; unrouted holds honor 15s show, 30s unknown, and 2m most delays
   with masking time excluded; group, affinity, and agent labels are recorded when known.
 
+- Account discovery from agents' own sign-ins (A-1): `hofund accounts discover`
+  and `hofund accounts discover --add` list or import accounts read from
+  configured agents' credential files (Claude Code and Codex today). Opt in
+  with boolean `discover` under `[subscriptions.options]` on a subscription,
+  or invoke the CLI; `HOFUND_NO_ACCOUNTS=1` disables every read. Discovery
+  never writes agent files or prints tokens.
+
 - Agent sign-in switching for Claude Code and Codex: `hofund accounts switch
   <agent> next|<account>`, `hofund accounts import <file>`, a five-minute
   NextLogin tick, subscription plugin file writes, and sign-out handover

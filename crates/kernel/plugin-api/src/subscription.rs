@@ -253,4 +253,36 @@ pub trait Subscription: Send + Sync + 'static {
             "this subscription does not import accounts from a file",
         ))
     }
+
+    /// Reads the agent sign-in under `home` and returns account identity without
+    /// storing secrets. The default does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the home cannot be read.
+    async fn discover_agent_sign_in(
+        &self,
+        home: &std::path::Path,
+    ) -> Result<Vec<crate::DiscoveredAgentAccount>, PluginError> {
+        let _ = home;
+        Ok(Vec::new())
+    }
+
+    /// Stores one row from [`Self::discover_agent_sign_in`]. Reads `home` again;
+    /// it never writes back to the agent's files.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the reference is unknown or the store write fails.
+    async fn import_agent_sign_in(
+        &self,
+        home: &std::path::Path,
+        reference: &str,
+        host: &HostContext,
+    ) -> Result<AccountId, PluginError> {
+        let _ = (home, reference, host);
+        Err(PluginError::unsupported(
+            "this subscription does not import an agent sign-in",
+        ))
+    }
 }
