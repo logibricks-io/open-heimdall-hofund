@@ -11,7 +11,7 @@ use crate::commands::{client, failure};
 
 pub(crate) const HELP: &str = "\
 usage: hofund gateway-key [list] [--json]
-       hofund gateway-key add <name> [--key <value> | --key -]
+       hofund gateway-key add <name> [--key <value> | --key -] [--read-only]
        hofund gateway-key rotate <id>
        hofund gateway-key copy <id>
        hofund gateway-key rename <id> <name>
@@ -22,6 +22,8 @@ usage: hofund gateway-key [list] [--json]
        hofund gateway-key quotas <id> [on | off]
        hofund gateway-key access <id> [read-only | full]
        hofund gateway-key issuer <id> [on | off]
+       hofund gateway-key limit <id> [--tokens N --cost USD --per WINDOW --days N --hours N --cache-reads --index N]
+       hofund gateway-key reset-limit <id> [N]
 
 Add and rotate print the new secret; copy prints a key's secret again. The
 list shows only a masked form. Secrets are kept readable in caller-keys.json,
@@ -37,6 +39,7 @@ pub(crate) enum Command {
     Add {
         name: String,
         secret: Option<String>,
+        read_only: bool,
     },
     Rotate {
         id: String,
@@ -81,16 +84,21 @@ pub(crate) enum Command {
         id: String,
         issues: Option<bool>,
     },
+    Limits(crate::gateway_key_limit::Command),
 }
 
 pub(crate) fn parse(
     words: &[&str],
     secret: Option<String>,
     json: bool,
+    read_only: bool,
 ) -> Result<Option<Command>, String> {
     let ["gateway-key", rest @ ..] = words else {
         return Ok(None);
     };
+    if let Some(command) = crate::gateway_key_limit::parse(words, &secret, json)? {
+        return Ok(Some(Command::Limits(command)));
+    }
     let (action, args) = rest.split_first().unwrap_or((&"list", &[][..]));
     let action = *action;
     let one = |_action: &str| -> Result<String, String> {
@@ -104,6 +112,7 @@ pub(crate) fn parse(
         ("add", [name]) if !json => Command::Add {
             name: (*name).to_owned(),
             secret,
+            read_only,
         },
         ("rotate", _) => Command::Rotate { id: one("rotate")? },
         ("copy", _) => Command::Copy { id: one("copy")? },
@@ -179,6 +188,9 @@ fn on_off(value: &str) -> Result<bool, String> {
 
 pub(crate) async fn run(config: &Path, command: &Command) -> Result<String, String> {
     let client = client(config).await?;
+    if let Command::Limits(command) = command {
+        return crate::gateway_key_limit::run(&client, command).await;
+    }
     if let Command::List { json } = command {
         let response = client.gateway_keys().await.map_err(failure)?;
         return if *json {
@@ -298,10 +310,15 @@ enum Verb {
 
 fn mutation(command: &Command) -> Result<(GatewayKeyRequest, String, Verb), String> {
     let (action, id, verb) = match command {
-        Command::Add { name, secret } => {
+        Command::Add {
+            name,
+            secret,
+            read_only,
+        } => {
             let mut request = GatewayKeyRequest::new(GatewayKeyAction::Add);
             request.name = name.clone();
             request.secret = secret.clone();
+            request.read_only = *read_only;
             return Ok((request, String::new(), Verb::Add));
         }
         Command::Rotate { id } => (GatewayKeyAction::Rotate, id, Verb::Rotate),
@@ -344,7 +361,9 @@ fn mutation(command: &Command) -> Result<(GatewayKeyRequest, String, Verb), Stri
             request.issues = issues.unwrap_or(false);
             return Ok((request.for_id(id), id.clone(), Verb::Issuer));
         }
-        Command::List { .. } => return Err("not a gateway-key mutation".to_owned()),
+        Command::List { .. } | Command::Limits(_) => {
+            return Err("not a gateway-key mutation".to_owned());
+        }
     };
     Ok((GatewayKeyRequest::new(action).for_id(id), id.clone(), verb))
 }
@@ -435,7 +454,7 @@ fn list_table(keys: &[GatewayKey]) -> String {
             key.accounts.join(",")
         };
         let access = if key.read_only { "read-only" } else { "full" };
-        let limit = if key.limits.is_empty() { "-" } else { "stored" };
+        let limit = crate::gateway_key_limit::column(key);
         let until = key
             .expires
             .map_or_else(|| "-".to_owned(), |value| value.to_string());
@@ -469,18 +488,20 @@ mod tests {
     #[test]
     fn k11_cli_parses_actions_and_list_columns() {
         assert_eq!(
-            parse(&words(&["gateway-key", "list"]), None, true),
+            parse(&words(&["gateway-key", "list"]), None, true, false),
             Ok(Some(Command::List { json: true }))
         );
         assert_eq!(
             parse(
                 &words(&["gateway-key", "add", "Work"]),
                 Some("own-secret".to_owned()),
+                false,
                 false
             ),
             Ok(Some(Command::Add {
                 name: "Work".to_owned(),
-                secret: Some("own-secret".to_owned())
+                secret: Some("own-secret".to_owned()),
+                read_only: false,
             }))
         );
         for (args, expected) in [
@@ -554,7 +575,7 @@ mod tests {
                 },
             ),
         ] {
-            assert_eq!(parse(&args, None, false), Ok(Some(expected)));
+            assert_eq!(parse(&args, None, false, false), Ok(Some(expected)));
         }
         let mut key = GatewayKey::default();
         key.id = "k".to_owned();
@@ -568,9 +589,53 @@ mod tests {
             )
         );
         assert!(table.contains("\thofund_key_…abcdef\t"));
-        assert!(parse(&words(&["gateway-key", "copy"]), None, false).is_err());
+        assert!(parse(&words(&["gateway-key", "copy"]), None, false, false).is_err());
         assert!(table.contains("primary/*"));
         assert!(table.contains("full"));
         assert!(!table.contains("read-only"));
+    }
+
+    #[test]
+    fn r6_add_read_only_access_command_and_access_column() {
+        let command = parse(
+            &words(&["gateway-key", "add", "Display"]),
+            Some("display-secret".to_owned()),
+            false,
+            true,
+        )
+        .expect("parse")
+        .expect("gateway-key");
+        let (request, _, _) = mutation(&command).expect("mutation");
+        assert!(request.read_only);
+        assert_eq!(request.name, "Display");
+        assert_eq!(request.secret.as_deref(), Some("display-secret"));
+        assert!(HELP.contains("[--read-only]"));
+
+        let mut key = GatewayKey::default();
+        key.read_only = true;
+        let table = list_table(&[key]);
+        assert!(table.contains("ACCESS"));
+        assert!(table.contains("read-only"));
+        for value in ["read-only", "full"] {
+            let command = parse(
+                &words(&["gateway-key", "access", "key-id", value]),
+                None,
+                false,
+                false,
+            )
+            .expect("parse")
+            .expect("gateway-key");
+            let (request, _, _) = mutation(&command).expect("mutation");
+            assert_eq!(request.read_only, value == "read-only");
+        }
+        assert!(
+            parse(
+                &words(&["gateway-key", "access", "key-id", "invalid"]),
+                None,
+                false,
+                false,
+            )
+            .is_err()
+        );
     }
 }

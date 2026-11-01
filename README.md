@@ -96,7 +96,9 @@ creates a starter file on Start or Open config.
 
 [`examples/hofund.toml`](examples/hofund.toml) is a complete file: two
 `[[providers]]` tables and a `[[routes]]` table whose `upstreams` list is the
-failover order. `api_key` may be a literal or `env:NAME`. Check it in place:
+failover order. `api_key` may be a literal or `env:NAME`. Several keys per
+provider, their routing, and their management commands are covered in
+[docs/provider-keys.md](docs/provider-keys.md). Check the config in place:
 
 ```sh
 hofund config check --config examples/hofund.toml
@@ -180,6 +182,23 @@ wins.
 - `strict` never moves while the answerer remains configured. Resting and
   spent members are asked anyway, their errors reach the caller, and a broken
   reply after a 200 keeps the stick. Removing the member releases it.
+
+A fallback is only an emergency path: at the next user turn, the conversation
+returns to the provider's own member once that member is ready, except under
+`strict`. An `order` route under `auto` similarly returns to its first ready
+member. Under other non-rotate strategies, a later member that answered only
+because an earlier member was resting or nearly spent gives the conversation
+back when the earlier member leads again. These returns never happen within a
+tool-result turn, and a member chosen on its own merits keeps its cache.
+
+Under `rotate`, a new turn goes to the next eligible member after the last
+answerer. New conversations go to the member holding the fewest conversations
+from the last 30 minutes, including conversations whose first request is still
+running. `session` and `strict` spread new conversations the same way under
+`smart`, `usage`, and `pace`; a subagent starts on its lead's member when that
+member is ready. Resting, set-aside, and emergency fallback rows are not spread
+onto while a provider's own member is ready, and whole-session spreading skips
+members at least 90% used behind the ready leader.
 
 Conversation identity uses the standard agent session headers, or a hash of
 the first user item, with a separate suffix for Claude Code subagents. Sticks

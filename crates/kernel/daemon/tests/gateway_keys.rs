@@ -1,7 +1,9 @@
 //! Named-key control API against a running daemon.
 
 use hofund_control_client::Client;
-use hofund_control_proto::{GatewayKeyAction, GatewayKeyRequest, GatewayKeyRestoreRequest};
+use hofund_control_proto::{
+    GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyRestoreRequest,
+};
 use hofund_daemon::{ControlRuntime, StartOptions, start_with_options};
 
 fn request(
@@ -44,6 +46,19 @@ async fn k12_control_api_supports_every_action_and_backup() {
         .expect("add");
     assert_eq!(added.secret.as_deref(), Some("control-secret-123"));
     let id = added.keys.last().expect("added key").id.clone();
+    let viewer = client
+        .change_gateway_key(request(GatewayKeyAction::Add, |request| {
+            request.name = "Viewer".to_owned();
+            request.read_only = true;
+        }))
+        .await
+        .expect("add read-only");
+    let viewer_key = viewer
+        .keys
+        .iter()
+        .find(|key| key.name == "Viewer")
+        .expect("viewer key");
+    assert!(viewer_key.read_only, "add keeps the read-only flag");
     let change = |action| GatewayKeyRequest::new(action).for_id(&id);
     let changed = |action, configure: &dyn Fn(&mut GatewayKeyRequest)| {
         let mut request = change(action);
@@ -92,6 +107,56 @@ async fn k12_control_api_supports_every_action_and_backup() {
         }))
         .await
         .expect("issuer");
+    client
+        .change_gateway_key(changed(GatewayKeyAction::Limit, &|request| {
+            let mut limit = GatewayKeyLimit::default();
+            limit.period = "day".to_owned();
+            limit.tokens = 100;
+            request.limit = Some(limit);
+        }))
+        .await
+        .expect("daily limit");
+    client
+        .change_gateway_key(changed(GatewayKeyAction::Limit, &|request| {
+            let mut limit = GatewayKeyLimit::default();
+            limit.period = "hours".to_owned();
+            limit.hours = 5;
+            limit.cost = 2.5;
+            request.limit = Some(limit);
+            request.index = Some(1);
+        }))
+        .await
+        .expect("hourly limit");
+    let limited = client
+        .change_gateway_key(changed(GatewayKeyAction::ResetLimit, &|request| {
+            request.index = Some(1);
+        }))
+        .await
+        .expect("reset limit");
+    let key = limited
+        .keys
+        .iter()
+        .find(|key| key.id == id)
+        .expect("limited");
+    assert_eq!(key.limits.len(), 2);
+    assert_eq!(key.limits[1].hours, 5);
+    assert!(key.limits[1].since > 0);
+    let removed = client
+        .change_gateway_key(changed(GatewayKeyAction::Limit, &|request| {
+            request.index = Some(0);
+        }))
+        .await
+        .expect("remove first limit");
+    assert_eq!(
+        removed
+            .keys
+            .iter()
+            .find(|key| key.id == id)
+            .expect("key")
+            .limits
+            .len(),
+        1
+    );
     client
         .change_gateway_key(change(GatewayKeyAction::Off))
         .await

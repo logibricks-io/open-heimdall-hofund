@@ -1854,6 +1854,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "chrono",
  "futures-util",
  "hofund-codec",
  "hofund-control-proto",
@@ -1866,6 +1867,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "metrics",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -2227,6 +2229,7 @@ dependencies = [
 name = "hofund-secrets"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "getrandom 0.2.17",
  "serde",
  "serde_json",

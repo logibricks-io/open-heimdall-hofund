@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Vendor-timed quota and credit rests now stay in place when a quota reading
+  is merely less than full in the same window. They lift early only when a
+  matching window's reset elapsed since the last good reading or moved to a
+  later cycle; failed and empty readings lift nothing. Ordinary renewed-window
+  readings still lift rests whose deadlines were not vendor-named (D-29).
+
 ### Added
 
 - Text-to-speech retrieval (P1-4): `POST /v1/audio/speech` and
@@ -16,6 +24,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `speech.audio.done` usage is read from the final 16 KiB, vendor errors and
   pre-byte failover retain the other retrieval routes' behavior, and recent
   calls use operation `speech`.
+- Conversation affinity now returns fallback, ordered-group, and stand-in
+  answerers to earlier ready members at the next user turn without crossing
+  tool-loop or strict-stay boundaries (P0-2c2, D-14, D-25). Rotate and
+  whole-session routing spread new conversations by 30-minute least-held
+  counts, including in-flight first requests; subagents follow their leads,
+  emergency fallbacks stay out of rotation while the provider is ready, and
+  effort plus stand-in identity persist compatibly in `affinity.json`.
+- Gateway-key spending limits (P0-4b): up to five token and/or estimated-cost
+  caps per key over local calendar windows or absolute N-day/N-hour cycles.
+  Cache-aware token sums rebuild from SQLite after restart, in-flight body-size
+  reservations hold concurrent requests to every cap, and spent keys receive a
+  pre-upstream 429 with reset/retry headers. `GET /v1/hofund/limit` reports each
+  limit and the binding one. `gateway-key limit` and `reset-limit` manage and
+  reset caps through the control API. Cost caps currently follow the unpriced
+  path: calls add zero cost and are reported as unpriced until model prices land.
+- Provider upstream API keys (K-1): ordered per-key candidates with protocol
+  restrictions, weights, independent rests and credit-ladder persistence, and
+  member-id-based strategies. Added secret-free key listing, bulk add (with an
+  optional protocol), single and bulk remove, on/off, make-first, rename,
+  per-key weight and protocol, and replacement through the config writer,
+  control API, and CLI. Replacement preserves key settings and moves rests.
+  Per-key concurrency, remote allowances, per-key plans, and reserve-key
+  accounts-at-once remain follow-ups. See `docs/provider-keys.md`.
+- Codex compaction parity fixes (D-23): a summary stream that ends before its
+  terminal response, including the equivalent 502 error, now produces a
+  bounded local summary instead of returning partial text or failing the
+  compaction. Generated compaction asks normalize developer instructions to
+  system instructions for vendors without a developer role; ordinary turns
+  keep their original roles.
+- Read-only gateway keys and `/me` (P0-4c): read-only keys can read `/health`, quotas,
+  history, and their own key page, while every other HTTP route and Responses
+  WebSocket upgrade is refused with 403 `gateway_key_read_only` before an
+  upstream call. Route coverage is exhaustively tested. `gateway-key add
+  --read-only`, `gateway-key access`, and the `ACCESS` column manage the mode;
+  the default sharing key stays full. The static `/me` page provides
+  placeholder-by-default agent setup, and `/v1/hofund/me` reports only the
+  calling key's limits, usage, top models, and allowed models without secrets.
 - Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
   secret readable, as the reference does, so `gateway-key copy` shows a key
   again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,

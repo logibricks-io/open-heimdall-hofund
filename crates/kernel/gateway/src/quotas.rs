@@ -120,10 +120,14 @@ pub fn tell_everything() -> QuotaScopeHook {
     Arc::new(|_| QuotaAccess::All)
 }
 
-pub(crate) fn routes(router: axum::Router<Arc<Inner>>) -> axum::Router<Arc<Inner>> {
+pub(crate) fn routes(router: super::readonly::RouteSet) -> super::readonly::RouteSet {
     router
-        .route("/v1/hofund/quotas", axum::routing::get(quotas))
-        .route("/v1/hofund/quotas/history", axum::routing::get(history))
+        .route(&["GET"], "/v1/hofund/quotas", axum::routing::get(quotas))
+        .route(
+            &["GET"],
+            "/v1/hofund/quotas/history",
+            axum::routing::get(history),
+        )
 }
 
 fn presented(headers: &HeaderMap, uri: &Uri) -> String {

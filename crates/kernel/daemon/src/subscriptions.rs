@@ -264,6 +264,7 @@ impl SubscriptionState {
                 patience: None,
                 kernel: false,
                 base_url: String::new(),
+                key: None,
             },
             id,
             upstream,
@@ -376,24 +377,7 @@ pub(crate) fn apply_windows(
     windows: &[QuotaWindow],
 ) -> bool {
     let now = SystemTime::now();
-    let full = windows
-        .iter()
-        .filter(|window| {
-            window.blocking()
-                && window.scope_model().is_none()
-                && window.limit().is_some_and(|limit| window.used() >= limit)
-        })
-        .collect::<Vec<_>>();
-    let full_reset = full
-        .iter()
-        .filter_map(|window| {
-            window
-                .resets_at()
-                .and_then(|reset| reset.duration_since(now).ok())
-        })
-        .max();
-    let full_unknown = full.iter().any(|window| window.resets_at().is_none());
-    cooldowns.observe_credit_window(member, full_reset, full_unknown);
+    cooldowns.observe_credit_window(member, windows);
     let mut cooled = false;
     for window in windows {
         if !window.blocking() || window.scope_model().is_some() {
@@ -704,7 +688,7 @@ mod tests {
             .expect("subscription")
             .resolve(&cooldowns())
             .await;
-        let (routes, _) = crate::route_plan(&config, None);
+        let (routes, _) = crate::route_plan(&config, None, None);
         let (_, expanded) =
             super::expand(&BTreeMap::new(), &routes, &subscriptions).expect("expanded routes");
 
@@ -813,6 +797,42 @@ mod tests {
             )
             .await;
         (cooldowns, polls, cooled, states)
+    }
+
+    #[tokio::test]
+    async fn d29_4_failed_quota_poll_never_lifts_vendor_timed_rest() {
+        let dir = tempfile::tempdir().expect("dir");
+        write_accounts(dir.path(), &[("one", "One")]);
+        let states = states(dir.path(), &config("quota = \"unsupported\""));
+        let cooldowns = cooldowns();
+        for state in states.values() {
+            assert!(state.resolve(&cooldowns).await);
+        }
+        let id = member("one");
+        cooldowns.configure_credit_window(&id);
+        super::apply_windows(
+            &cooldowns,
+            &id,
+            &PluginId::from_static(PLUGIN),
+            &[full_window("window", Some(Duration::from_secs(3600)))],
+        );
+        cooldowns.record_failure(
+            &id,
+            &hofund_plugin_api::PluginError::credit_status(402, "out")
+                .with_reset_after(Duration::from_secs(6 * 3600)),
+        );
+        assert!(cooldowns.cooling(&id).is_some());
+        let cooled = QuotaPolls::default()
+            .poll(
+                &states,
+                &cooldowns,
+                &hofund_router::quota::QuotaStore::in_memory(),
+                tokio::time::Instant::now(),
+                false,
+            )
+            .await;
+        assert!(cooled.is_empty());
+        assert!(cooldowns.cooling(&id).is_some());
     }
 
     #[tokio::test]

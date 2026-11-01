@@ -25,10 +25,11 @@ use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
     ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest, GatewayKeyResponse,
     GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
-    ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UsageQuery, UsageResponse, decode_request,
+    ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse,
+    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteModelListResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    Topic, UsageQuery, UsageResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -154,6 +155,32 @@ pub trait ControlState: Send + Sync {
     fn draining(&self) -> bool;
     /// Lists configured providers.
     fn providers(&self) -> ControlFuture<'_, ProviderListResponse>;
+    /// Lists a provider's upstream API keys without their secrets.
+    fn provider_keys(&self, _id: String) -> ControlFuture<'_, ProviderKeysResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "provider keys are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Changes a provider's upstream API keys.
+    fn change_provider_key(
+        &self,
+        _id: String,
+        _request: ProviderKeyRequest,
+    ) -> ControlFuture<'_, ProviderKeysResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "provider keys are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Reads a provider's cached models.
     fn provider_models(&self, id: String) -> ControlFuture<'_, ModelListResponse>;
     /// Refreshes a provider's models.
@@ -337,6 +364,12 @@ impl Control {
             .route(
                 "/v1/hofund/providers",
                 get(providers).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/providers/{id}/keys",
+                get(provider_keys)
+                    .post(change_provider_key)
+                    .head(method_not_allowed),
             )
             .route(
                 "/v1/hofund/providers/{id}/models",
@@ -703,6 +736,33 @@ async fn status(State(state): State<HttpState>) -> Response {
 
 async fn providers(State(state): State<HttpState>) -> Response {
     operation_response!(state.control.state.providers().await)
+}
+
+async fn provider_keys(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.provider_keys(id).await)
+}
+
+async fn change_provider_key(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<ProviderKeyRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.change_provider_key(id, request).await)
 }
 
 async fn provider_models(
