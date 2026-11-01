@@ -922,6 +922,14 @@ fn raw_app(
     parts: Vec<Vec<u8>>,
     then_error: bool,
 ) -> (axum::Router, Arc<Ledger>, tempfile::TempDir) {
+    raw_app_as(parts, then_error, "upstream")
+}
+
+fn raw_app_as(
+    parts: Vec<Vec<u8>>,
+    then_error: bool,
+    wire: &str,
+) -> (axum::Router, Arc<Ledger>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir");
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
@@ -933,7 +941,7 @@ fn raw_app(
                 parts,
                 then_error,
             }) as Arc<dyn Member>,
-            wire_model: Some("upstream".to_owned()),
+            wire_model: Some(wire.to_owned()),
             max_output_tokens: None,
             context_window: None,
             patience: Some(std::time::Duration::from_secs(60)),
@@ -1118,23 +1126,133 @@ async fn d9h_raw_plugin_member_names_the_asked_model_and_counts_usage() {
     }
 }
 
+const STREAM_CUT: &str = "data: {\"a\":1}\n\ndata: {\"b\":";
+
+const CHAT_STREAM: &str =
+    r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+
+fn chat_error_frame(body: &str) -> &str {
+    let start = body.find("data: {\"error\":").expect("error frame");
+    &body[start..]
+}
+
 #[tokio::test]
-async fn a_partial_raw_frame_is_closed_before_the_protocol_error() {
-    let (app, _usage, dir) = raw_app(vec![br#"data: {"n":1"#.to_vec()], true);
-    let (status, content_type, body) = post_raw(
+async fn d21_a_severed_chat_stream_drops_the_half_event_and_ends_done() {
+    let (app, usage, dir) = raw_app(vec![br#"data: {"n":1"#.to_vec()], true);
+    let (status, content_type, body) = post_raw(app, "/v1/chat/completions", CHAT_STREAM).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(content_type, "text/event-stream");
+    assert!(body.starts_with("data: {\"error\":"), "{body}");
+    assert!(!body.contains("\"n\":1"), "{body}");
+    assert!(body.contains("mid-stream"), "{body}");
+    assert!(body.ends_with("}\n\ndata: [DONE]\n\n"), "{body}");
+    assert_eq!(usage.rows().expect("rows")[0].status, "502");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d21_a_severed_whole_chat_reply_gets_no_done() {
+    let unary = r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#;
+    let (app, usage, dir) = raw_app(vec![br#"{"id":"x","#.to_vec()], true);
+    let (_, content_type, body) = post_raw(app, "/v1/chat/completions", unary).await;
+    assert_ne!(content_type, "text/event-stream", "{body}");
+    assert!(!body.contains("[DONE]"), "{body}");
+    assert_eq!(usage.rows().expect("rows")[0].status, "502");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d21_severed_mid_line_keeps_the_events_before_it() {
+    for wire in ["upstream", "demo"] {
+        let parts = vec![
+            b"data: {\"a\":1}\n\ndata: {\"b\"".to_vec(),
+            b":2,\"c\":".to_vec(),
+        ];
+        let (app, _usage, dir) = raw_app_as(parts, true, wire);
+        let (status, _, body) = post_raw(app, "/v1/chat/completions", CHAT_STREAM).await;
+        assert_eq!(status, StatusCode::OK, "{wire}: {body}");
+        assert!(
+            body.starts_with("data: {\"a\":1}\n\ndata: {\"error\":"),
+            "{wire}: {body}"
+        );
+        assert!(!body.contains("\"b\""), "{wire}: {body}");
+        assert!(body.ends_with("data: [DONE]\n\n"), "{wire}: {body}");
+        assert_eq!(body.matches("[DONE]").count(), 1, "{wire}: {body}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn d21_severed_at_line_end_closes_the_event_before_the_error() {
+    for wire in ["upstream", "demo"] {
+        let (app, _usage, dir) = raw_app_as(vec![b"data: {\"a\":1}\n".to_vec()], true, wire);
+        let (_, _, body) = post_raw(app, "/v1/chat/completions", CHAT_STREAM).await;
+        assert!(
+            body.starts_with("data: {\"a\":1}\n\ndata: {\"error\":"),
+            "{wire}: {body}"
+        );
+        assert!(
+            chat_error_frame(&body).ends_with("}\n\ndata: [DONE]\n\n"),
+            "{body}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn d21_a_whole_data_line_short_of_its_end_still_goes_out() {
+    for wire in ["upstream", "demo"] {
+        let (app, _usage, dir) = raw_app_as(vec![b"data: {\"a\":1}".to_vec()], true, wire);
+        let (_, _, body) = post_raw(app, "/v1/chat/completions", CHAT_STREAM).await;
+        assert!(
+            body.starts_with("data: {\"a\":1}\n\ndata: {\"error\":"),
+            "{wire}: {body}"
+        );
+        assert!(body.ends_with("data: [DONE]\n\n"), "{wire}: {body}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn d21_a_severed_messages_stream_ends_on_its_error_event() {
+    let parts = vec![
+        concat!(
+            "event: ping\ndata: {\"type\":\"ping\"}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_bl"
+        )
+        .as_bytes()
+        .to_vec(),
+    ];
+    let (app, _usage, dir) = raw_app(parts, true);
+    let (status, _, body) = post_raw(
         app,
-        "/v1/chat/completions",
-        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        "/v1/messages",
+        r#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}"#,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(content_type, "text/event-stream");
     assert!(
-        body.starts_with("data: {\"n\":1\n\ndata: {\"error\":"),
+        body.starts_with(concat!(
+            "event: ping\ndata: {\"type\":\"ping\"}\n\n",
+            "event: content_block_delta\n\nevent: error\ndata: "
+        )),
         "{body}"
     );
-    assert!(!body.contains("event:"), "{body}");
-    assert!(body.contains("mid-stream"), "{body}");
+    assert!(!body.contains("content_bl\""), "{body}");
+    assert!(!body.contains("content_bl\n"), "{body}");
+    assert!(!body.contains("[DONE]"), "{body}");
+    assert!(body.ends_with("}\n\n"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d21_a_clean_end_sends_the_unended_line_as_it_came() {
+    let stream = STREAM_CUT;
+    let (app, usage, dir) = raw_app_as(split_at(STREAM_CUT.as_bytes(), "1}"), false, "demo");
+    let (status, _, body) = post_raw(app, "/v1/chat/completions", CHAT_STREAM).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, stream);
+    assert_eq!(usage.rows().expect("rows")[0].status, "200");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1221,7 +1339,7 @@ async fn a_crlf_frame_does_not_gain_an_extra_blank_event() {
 }
 
 #[tokio::test]
-async fn held_rewriter_bytes_are_flushed_before_the_error_frame() {
+async fn d21_a_held_rewriter_half_line_is_dropped_before_the_error_frame() {
     let (app, _, dir) = raw_app(vec![br#"data: {"model":"upstream"#.to_vec()], true);
     let (status, _, body) = post_raw(
         app,
@@ -1230,10 +1348,9 @@ async fn held_rewriter_bytes_are_flushed_before_the_error_frame() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(
-        body.starts_with("data: {\"model\":\"upstream\n\ndata: {\"error\":"),
-        "{body}"
-    );
+    assert!(body.starts_with("data: {\"error\":"), "{body}");
+    assert!(!body.contains("upstream"), "{body}");
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
