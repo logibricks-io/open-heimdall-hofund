@@ -258,6 +258,7 @@ mod tests {
         "GET /v1/models",
         "GET /v1/hofund/keys",
         "POST /v1/hofund/keys",
+        "POST /v1/hofund/keys/oidc",
         "DELETE /v1/hofund/keys/{id}",
         "POST /v1/chat/completions",
         "POST /v1/messages",
