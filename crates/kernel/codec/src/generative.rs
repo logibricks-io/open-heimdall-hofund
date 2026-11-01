@@ -116,6 +116,15 @@ impl Codec for GenerativeLanguage {
     fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
         crate::sse::data_frame(&self.encode_error(status, message))
     }
+
+    fn encode_stream_failure(&self, message: &str) -> Vec<u8> {
+        let body = serde_json::json!({"error": {"code": 502, "message": message, "status": "UNAVAILABLE"}});
+        crate::sse::data_frame(body.to_string().as_bytes())
+    }
+
+    fn stream_end(&self) -> crate::StreamEnd {
+        crate::StreamEnd::Candidate
+    }
 }
 
 fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
