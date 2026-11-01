@@ -28,6 +28,7 @@ use hofund_router::{Cooldowns, FailoverPolicy, Snapshot, Unit};
 use hofund_secrets::{KeyStore, TokenFile};
 use hofund_usage::Ledger;
 
+mod account_discovery;
 mod adapt;
 mod agent_login;
 mod balances;
@@ -56,6 +57,9 @@ mod subscriptions;
 mod terminate;
 mod watch;
 
+pub use account_discovery::{
+    DiscoverReport, accounts_discover_in, format_report, import_if_configured,
+};
 pub use agent_login::{accounts_import_in, accounts_switch_in};
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
@@ -436,6 +440,7 @@ async fn start_inner(
     let mut models_host = ModelsHost::new(config.connect_timeout, config.read_timeout)
         .with_state_root(beside(path, ".hofund"))
         .with_registry(Arc::clone(&registry));
+    account_discovery::import_if_configured(path, &config)?;
     let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
     // Subscription members join before the port opens.
     runtime.refresh_subscriptions().await;

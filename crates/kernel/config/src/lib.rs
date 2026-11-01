@@ -41,6 +41,9 @@ pub struct Config {
     pub routes: Vec<Route>,
     /// Account subscriptions, in file order.
     pub subscriptions: Vec<Subscription>,
+    /// When true, the daemon may read agents' own sign-in files and import
+    /// accounts. Set with boolean `discover` under `[subscriptions.options]`.
+    pub discover_agent_accounts: bool,
     /// Deprecated keys that still loaded. The next release rejects them.
     pub warnings: Vec<String>,
 }
@@ -698,6 +701,7 @@ impl fmt::Debug for Config {
             .field("providers", &self.providers)
             .field("routes", &self.routes)
             .field("subscriptions", &self.subscriptions)
+            .field("discover_agent_accounts", &self.discover_agent_accounts)
             .field("warnings", &self.warnings)
             .finish()
     }
@@ -1012,6 +1016,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     }
     let mut subscriptions = Vec::new();
     let mut subscription_ids = BTreeSet::new();
+    let mut discover_agent_accounts = false;
     for subscription in raw.subscriptions {
         if !kebab(&subscription.id) {
             return Err(ConfigError::Invalid(format!(
@@ -1036,7 +1041,14 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             }
         };
         let account_weights = normalized_account_weights(&subscription)?;
-        for key in subscription.options.keys() {
+        let mut options = subscription.options;
+        if options
+            .remove("discover")
+            .is_some_and(|value| matches!(value, Value::Boolean(true)))
+        {
+            discover_agent_accounts = true;
+        }
+        for key in options.keys() {
             if key.is_empty() {
                 return Err(ConfigError::Invalid(format!(
                     "subscription `{}` has an empty option key",
@@ -1053,7 +1065,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             routing: subscription.routing,
             at_once,
             stays: subscription.stays,
-            options: prune_table(subscription.options),
+            options: prune_table(options),
         });
     }
     let mut models = BTreeSet::new();
@@ -1130,6 +1142,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         providers,
         routes,
         subscriptions,
+        discover_agent_accounts,
         warnings,
     })
 }
@@ -2993,6 +3006,52 @@ mod tests {
         )
         .expect_err("account");
         assert!(error.to_string().contains("account id"));
+    }
+
+    #[test]
+    fn a1_9_discover_option_enables_agent_account_discovery() {
+        let config = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [subscriptions.options]
+            discover = true
+            "#,
+        )
+        .expect("discover");
+        assert!(config.discover_agent_accounts);
+        assert!(
+            !config.subscriptions[0].options.contains_key("discover"),
+            "discover is a kernel flag, not a plugin option"
+        );
+    }
+
+    #[test]
+    fn a1_23_discover_false_and_non_boolean_do_not_enable_agent_discovery() {
+        let off = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [subscriptions.options]
+            discover = false
+            "#,
+        )
+        .expect("false");
+        assert!(!off.discover_agent_accounts);
+
+        let yes = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [subscriptions.options]
+            discover = "yes"
+            "#,
+        )
+        .expect("string");
+        assert!(!yes.discover_agent_accounts);
     }
 
     #[test]

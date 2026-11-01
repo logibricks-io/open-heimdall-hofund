@@ -574,6 +574,7 @@ impl Runtime {
 
     #[cfg(test)]
     pub(crate) fn publish_candidate(&self, config: &Config) -> Result<Vec<String>, DaemonError> {
+        crate::account_discovery::import_if_configured(&self.path, config)?;
         let candidate = self.prepare(config)?;
         self.publish(candidate, &[])
     }

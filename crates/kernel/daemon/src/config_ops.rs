@@ -290,6 +290,13 @@ impl ConfigOps {
 
     fn check(&self, text: &str) -> Result<(Config, crate::runtime::Candidate), Vec<FieldIssue>> {
         let config = hofund_config::load(text).map_err(|error| vec![config_issue(&error, text)])?;
+        if let Err(error) = crate::account_discovery::import_if_configured(&self.path, &config) {
+            return Err(vec![FieldIssue::new(
+                "subscriptions",
+                "discover_failed",
+                scrub(&error.to_string(), text),
+            )]);
+        }
         let candidate = self.runtime.prepare(&config).map_err(|error| {
             vec![FieldIssue::new(
                 "providers",
