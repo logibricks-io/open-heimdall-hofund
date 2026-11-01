@@ -95,7 +95,26 @@ fn token_wall(message: &str) -> bool {
 mod tests {
     use std::time::Duration;
 
-    use super::{Busy, pause};
+    use hofund_plugin_api::PluginError;
+
+    use super::{Busy, busy, pause};
+
+    #[test]
+    fn b6d_rate_limit_hint_over_240_seconds_is_not_busy() {
+        let now = std::time::Instant::now();
+        let short =
+            PluginError::status_error(429, "slow").with_retry_after(Duration::from_secs(240));
+        assert!(
+            busy(&short, now).is_some(),
+            "a 240-second hint is still short"
+        );
+        let long =
+            PluginError::status_error(429, "slow").with_retry_after(Duration::from_millis(240_500));
+        assert!(
+            busy(&long, now).is_none(),
+            "a hint past 240 seconds is terminal even inside the one-second clamp"
+        );
+    }
 
     #[test]
     fn b6e_patience_budget_is_inclusive_with_one_second_clamp() {
