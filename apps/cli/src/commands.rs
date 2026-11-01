@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use hofund_control_client::hofund_control_proto::{
     AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentModelRequest, AgentPlanRequest,
-    AgentState, ConfigApplyRequest, ConfigValidateRequest, FieldIssue, ReloadRequest,
+    AgentState, ConfigApplyRequest, ConfigValidateRequest, FieldIssue, ReloadRequest, RouteQuery,
     ShutdownRequest, TokenRotateRequest, UsagePeriod, UsageQuery, UsageResponse,
 };
 use hofund_control_client::{Client, ClientError, probe_model_health, resolve_config_id};
@@ -218,6 +218,45 @@ pub(crate) async fn usage(config: &Path) -> Result<String, String> {
         .await
         .map_err(failure)?;
     Ok(usage_table(&response))
+}
+
+/// `hofund route`: the latest routing decisions from the daemon trace.
+pub(crate) async fn route(config: &Path) -> Result<String, String> {
+    let client = client(config).await?;
+    let response = client
+        .route_decisions(RouteQuery::default())
+        .await
+        .map_err(failure)?;
+    let mut out = String::new();
+    for row in response.decisions {
+        out.push_str(&format!(
+            "#{} seq={} asked={} served={}/{} status={:?}\n",
+            row.id, row.seq, row.asked, row.served_provider, row.served_member, row.status,
+        ));
+        if let Some(moved) = &row.moved {
+            out.push_str(&format!("  moved to {} ({})\n", moved.to, moved.why));
+        }
+        for candidate in &row.candidates {
+            if candidate.skipped {
+                out.push_str(&format!(
+                    "  skip {}@{} order={}\n",
+                    candidate.provider, candidate.member, candidate.order
+                ));
+            }
+        }
+        for try_row in &row.tries {
+            if !try_row.fail.is_empty() {
+                out.push_str(&format!(
+                    "  try {}@{} status={:?} {}\n",
+                    try_row.provider, try_row.member, try_row.status, try_row.fail
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push_str("no routing decisions recorded yet\n");
+    }
+    Ok(out)
 }
 
 /// Renders `response` in the fixed-column layout `hofund usage` has always

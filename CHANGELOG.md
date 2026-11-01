@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Routing decision trace with bounded in-memory rings, `GET /v1/hofund/route`,
+  `GET /v1/hofund/route/session`, `GET /v1/hofund/route/unrouted`, and `hofund route`
+  (feature-parity rows 4.13 and 12.3).
+
 - Agent sign-in switching for Claude Code and Codex: `hofund accounts switch
   <agent> next|<account>`, `hofund accounts import <file>`, a five-minute
   NextLogin tick, subscription plugin file writes, and sign-out handover

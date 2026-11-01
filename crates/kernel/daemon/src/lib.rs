@@ -450,6 +450,7 @@ async fn start_inner(
         .as_ref()
         .map(|_| Arc::new(events::EventBus::new()));
     let in_flight = Arc::new(AtomicU64::new(0));
+    let route_trace = hofund_router::RouteTraceBook::new();
     let mut gateway = Gateway::with_token_file(
         snapshot.clone(),
         token.clone(),
@@ -457,6 +458,7 @@ async fn start_inner(
         inbound_codecs(),
         Arc::clone(&usage),
     )
+    .with_route_trace(Arc::clone(&route_trace))
     .with_key_store(Arc::clone(&key_store))
     .with_surfaces(registry.surfaces())
     .with_surface_http(surface_http(&config, max_idle_per_host));
@@ -481,6 +483,7 @@ async fn start_inner(
         .bind(listen)
         .await
         .map_err(|error| DaemonError::new(error.to_string()))?;
+    running = running.with_resource(Arc::clone(&route_trace));
     if let Some(hook) = options.relisten_hook {
         running = running.with_bind_hook(hook);
     }
@@ -542,7 +545,8 @@ async fn start_inner(
             .with_agent_hooks(options.agent_session, Some(token_generation))
             .with_quotas(Arc::clone(&quotas))
             .with_events(Arc::clone(&events))
-            .with_in_flight(Arc::clone(&in_flight)),
+            .with_in_flight(Arc::clone(&in_flight))
+            .with_route_trace(route_trace),
         );
         let control = hofund_gateway::control::Control::with_token_file(state, token, token_path);
         let mut tcp_listen = options.control_listen;

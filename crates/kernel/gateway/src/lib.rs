@@ -98,6 +98,8 @@ struct Inner {
     quota_source: Option<Arc<dyn QuotaSource>>,
     /// What each caller of the quota routes may be told.
     quota_scope: QuotaScopeHook,
+    /// Routing decision history for the management API.
+    route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
 }
 
 struct TokenState {
@@ -479,6 +481,7 @@ impl Gateway {
                 sockets: Arc::new(responses_ws::SocketRegistry::default()),
                 quota_source: None,
                 quota_scope: tell_everything(),
+                route_trace: None,
             }),
         }
     }
@@ -549,6 +552,20 @@ impl Gateway {
         let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
         inner.quota_scope = scope;
         self
+    }
+
+    /// Records routing decisions for `GET /v1/hofund/route`. Call before [`Self::bind`].
+    #[must_use]
+    pub fn with_route_trace(mut self, book: Arc<hofund_router::RouteTraceBook>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
+        inner.route_trace = Some(book);
+        self
+    }
+
+    /// Shared routing trace book when attached.
+    #[must_use]
+    pub fn route_trace(&self) -> Option<Arc<hofund_router::RouteTraceBook>> {
+        self.inner.route_trace.clone()
     }
 
     /// The axum router. `/health` is open. Every other route requires a token.
@@ -746,6 +763,17 @@ impl Running {
     pub fn with_resource<T: std::any::Any + Send>(mut self, resource: T) -> Self {
         self.resources.push(Box::new(resource));
         self
+    }
+
+    /// Returns the routing trace book stored with [`Self::with_resource`].
+    #[must_use]
+    pub fn route_trace_book(&self) -> Option<Arc<hofund_router::RouteTraceBook>> {
+        for resource in &self.resources {
+            if let Some(book) = resource.downcast_ref::<Arc<hofund_router::RouteTraceBook>>() {
+                return Some(Arc::clone(book));
+            }
+        }
+        None
     }
 
     /// Links a control listener to this server's lifetime.
@@ -1581,10 +1609,11 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     };
     // Authenticated request with a decoded body: start the request topic and
     // the in-flight counter before dispatch.
+    let request_id = next_request_id();
     let mut track = RequestTrack::begin(
         &app,
         RequestStart {
-            request_id: next_request_id(),
+            request_id: request_id.clone(),
             route: model_request.model.clone(),
             inbound_protocol: codec.id().to_owned(),
             started_at_ms: unix_ms_now(),
@@ -1606,22 +1635,46 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         turn.within,
     )
     .with_body(bytes.to_vec());
+    let session = client_session(&identity_headers);
+    let trace = app.route_trace.as_ref().map(|book| {
+        book.begin(hofund_router::RouteMeta {
+            session: session.clone(),
+            gateway_key: identity.key_id.clone(),
+            request_id,
+            asked: model_request.model.clone(),
+            ..hofund_router::RouteMeta::default()
+        })
+    });
     let (wait, notice) = GatewayWait::channel();
     let mut dispatch: DispatchFuture = Box::pin({
         let request = model_request.clone();
         let protocol = codec.id().to_owned();
         let scope = route_scope(&identity);
         async move {
-            router
-                .dispatch_scoped_conversation_with_wait(
-                    &request,
-                    &protocol,
-                    Some(&scope),
-                    Some(&conversation),
-                    attempt,
-                    Some(wait),
-                )
-                .await
+            if let Some(trace) = trace {
+                router
+                    .dispatch_scoped_conversation_with_wait_traced(
+                        &request,
+                        &protocol,
+                        Some(&scope),
+                        Some(&conversation),
+                        attempt,
+                        Some(wait),
+                        trace,
+                    )
+                    .await
+            } else {
+                router
+                    .dispatch_scoped_conversation_with_wait(
+                        &request,
+                        &protocol,
+                        Some(&scope),
+                        Some(&conversation),
+                        attempt,
+                        Some(wait),
+                    )
+                    .await
+            }
         }
     });
     let result = tokio::select! {
@@ -1933,6 +1986,26 @@ fn authenticate_request(
         None => list_error(message),
     };
     Err(Box::new(json_response(StatusCode::UNAUTHORIZED, body)))
+}
+
+fn client_session(headers: &[(&str, &str)]) -> String {
+    SESSION_HEADERS
+        .iter()
+        .find_map(|name| {
+            headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| (*value).trim())
+                .filter(|value| !value.is_empty())
+        })
+        .map(|value| {
+            if value.chars().count() > 128 {
+                value.chars().take(128).collect()
+            } else {
+                value.to_owned()
+            }
+        })
+        .unwrap_or_default()
 }
 
 fn route_scope(identity: &Identity) -> RouteScope {
