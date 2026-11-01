@@ -1083,6 +1083,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A relayed Messages, Responses, or Generative Language stream that ends
+  cleanly before its last event (`message_stop`, a `response.*` terminal, a
+  finish reason, or an error) is no longer passed off as a whole reply. The
+  unfinished last line is dropped, the protocol's failure event follows
+  ("<member>: the reply ended before it was complete"; `response.failed` with
+  `server_error` for Responses, `UNAVAILABLE` for Generative Language), and
+  the usage row records 502. A Responses socket turn cut this way ends on that
+  `response.failed` and the socket stays open. A severed stream now ends on the
+  same failure event, so a Chat Completions error says `api_error` (D-22).
+- A 400 or 422 that says a model has no provider behind a router, or that a
+  deployment is not found or does not exist, now fails over to the next member
+  and rests only that model on its key, like other unserved-model refusals
+  (D-24).
+
 - A shorter failure no longer shortens a longer rest: a 429's one-minute rate
   rest arriving beside a 402's half-hour credit rest leaves the credit rest in
   place, and a tie replaces it. A quota or credit rest that was only a guess

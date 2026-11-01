@@ -1700,3 +1700,140 @@ async fn c13_transport_error_before_any_byte_is_a_502() {
     assert!(body.contains("reset after the request body"), "{body}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+const MESSAGES_STREAM: &str =
+    r#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+
+const RESPONSES_STREAM: &str = r#"{"model":"demo","input":"hi","stream":true}"#;
+
+const GENERATIVE_ASK: &str = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+
+const GENERATIVE_URI: &str = "/v1beta/models/demo:streamGenerateContent";
+
+#[tokio::test]
+async fn d22_a_messages_stream_that_ends_short_fails_with_502() {
+    let parts = vec![
+        concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n",
+        )
+        .as_bytes()
+        .to_vec(),
+    ];
+    let (app, usage, dir) = raw_app_as(parts, false, "demo");
+    let (status, _, body) = post_raw(app, "/v1/messages", MESSAGES_STREAM).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n",
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",",
+            "\"message\":\"primary: the reply ended before it was complete\"}}\n\n",
+        )
+    );
+    assert_eq!(usage.rows().expect("rows")[0].status, "502");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d22_a_whole_messages_stream_is_left_as_it_came() {
+    let stream = concat!(
+        "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (app, usage, dir) = raw_app_as(split_at(stream.as_bytes(), "message_stop"), false, "demo");
+    let (_, _, body) = post_raw(app, "/v1/messages", MESSAGES_STREAM).await;
+    assert_eq!(body, stream);
+    assert_eq!(usage.rows().expect("rows")[0].status, "200");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d22_a_responses_stream_that_ends_short_drops_the_half_line_and_fails() {
+    let parts = vec![
+        concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"resp",
+        )
+        .as_bytes()
+        .to_vec(),
+    ];
+    let (app, usage, dir) = raw_app_as(parts, false, "demo");
+    let (_, _, body) = post_raw(app, "/v1/responses", RESPONSES_STREAM).await;
+    assert_eq!(
+        body,
+        concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n\n",
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":",
+            "{\"object\":\"response\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",",
+            "\"message\":\"primary: the reply ended before it was complete\"}}}\n\n",
+        )
+    );
+    assert_eq!(usage.rows().expect("rows")[0].status, "502");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d22_each_terminal_ends_a_responses_stream_whole() {
+    for last in [
+        "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+        "data: {\"type\":\"response.incomplete\"}\n\n",
+        "data: {\"type\":\"response.failed\"}",
+        "data: {\"error\":{\"message\":\"no\"}}\n\n",
+    ] {
+        let stream = format!("data: {{\"type\":\"response.created\"}}\n\n{last}");
+        let (app, usage, dir) = raw_app_as(vec![stream.clone().into_bytes()], false, "demo");
+        let (_, _, body) = post_raw(app, "/v1/responses", RESPONSES_STREAM).await;
+        assert_eq!(body, stream, "{last}");
+        assert_eq!(usage.rows().expect("rows")[0].status, "200", "{last}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn d22_a_generative_stream_ends_on_a_finish_reason_or_no_candidate() {
+    for last in [
+        "data: {\"candidates\":[{\"content\":{},\"finishReason\":\"STOP\"}]}\n\n",
+        "data: {\"response\":{\"candidates\":[{\"finishReason\":\"MAX_TOKENS\"}]}}\n\n",
+        "data: {\"usageMetadata\":{\"promptTokenCount\":1}}\n\n",
+    ] {
+        let stream = format!("data: {{\"candidates\":[{{\"content\":{{}}}}]}}\n\n{last}");
+        let (app, usage, dir) = raw_app_as(vec![stream.clone().into_bytes()], false, "demo");
+        let (_, _, body) = post_raw(app, GENERATIVE_URI, GENERATIVE_ASK).await;
+        assert_eq!(body, stream, "{last}");
+        assert_eq!(usage.rows().expect("rows")[0].status, "200", "{last}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    let stream = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"pa\"}]}}]}\n\n";
+    let (app, usage, dir) = raw_app_as(vec![stream.as_bytes().to_vec()], false, "demo");
+    let (_, _, body) = post_raw(app, GENERATIVE_URI, GENERATIVE_ASK).await;
+    assert_eq!(
+        body,
+        format!(
+            "{stream}data: {{\"error\":{{\"code\":502,\"message\":\"primary: the reply ended before it was complete\",\"status\":\"UNAVAILABLE\"}}}}\n\n"
+        )
+    );
+    assert_eq!(usage.rows().expect("rows")[0].status, "502");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d22_a_chat_stream_is_not_held_to_a_last_event() {
+    let (app, usage, dir) = raw_app_as(vec![b"data: {\"a\":1}\n\n".to_vec()], false, "demo");
+    let (_, _, body) = post_raw(app, "/v1/chat/completions", CHAT_STREAM).await;
+    assert_eq!(body, "data: {\"a\":1}\n\n");
+    assert_eq!(usage.rows().expect("rows")[0].status, "200");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d22_a_severed_chat_stream_says_api_error() {
+    let (app, _usage, dir) = raw_app(vec![b"data: {\"a\":1}\n\n".to_vec()], true);
+    let (_, _, body) = post_raw(app, "/v1/chat/completions", CHAT_STREAM).await;
+    let frame = chat_error_frame(&body);
+    assert!(frame.contains("\"type\":\"api_error\""), "{body}");
+    assert!(!frame.contains("server_error"), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+}

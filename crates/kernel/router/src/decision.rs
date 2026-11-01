@@ -43,11 +43,12 @@ static CREDIT_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 
-/// The model is not one this key serves. The last clause is model, then
-/// absent, unsupported, unauthorized, or not enabled.
+/// The model is not one this key serves. A model no provider behind a router
+/// serves, and a deployment that does not exist, say so too. The last clause
+/// is model, then absent, unsupported, unauthorized, or not enabled.
 static UNSERVED_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     re(
-        "(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|\u{6a21}\u{578b}.{0,12}(\u{4e0d}\u{5b58}\u{5728}|\u{4e0d}\u{652f}\u{6301}|\u{65e0}\u{6743}|\u{672a}\u{5f00}\u{901a})",
+        "(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|has no provider supported|deployment[ _]?not[ _]?found|deployment.{0,60}does ?n[o']t exist|\u{6a21}\u{578b}.{0,12}(\u{4e0d}\u{5b58}\u{5728}|\u{4e0d}\u{652f}\u{6301}|\u{65e0}\u{6743}|\u{672a}\u{5f00}\u{901a})",
     )
 });
 
@@ -410,6 +411,32 @@ mod tests {
         }
         let overflow = PluginError::status_error(400, "prompt is too long: 300 tokens");
         assert!(!allows(&overflow, false, &[400].into_iter().collect()));
+    }
+
+    #[test]
+    fn d24_unserved_wordings_rest_the_model_and_are_no_shape() {
+        for message in [
+            r#"{"error":{"message":"Model id : lab/demo-flash , has no provider supported"}}"#,
+            r#"Router: {"error":{"message":"Model id : lab/demo-flash , has no provider supported","type":"invalid_request_error"}}"#,
+            r#"{"error":{"code":"DeploymentNotFound","message":"The API deployment for this resource does not exist."}}"#,
+            r#"{"error":{"code":"deployment_not_found","message":"gone"}}"#,
+            r#"{"error":{"message":"The API deployment for this resource does not exist."}}"#,
+            r#"{"error":{"message":"Deployment not found for ModelName: demo-4o"}}"#,
+            r#"{"error":{"message":"The model demo-x does not exist","code":"model_not_found"}}"#,
+        ] {
+            let error = PluginError::status_error(400, message);
+            assert!(allows(&error, false, &none()), "{message}");
+            assert!(!asks_next(&error), "{message}");
+            assert!(model_unserved(&error), "{message}");
+        }
+        for message in [
+            r#"{"error":{"message":"Invalid parameter: messages.3.content"}}"#,
+            r#"{"error":{"message":"messages: field required"}}"#,
+        ] {
+            let error = PluginError::status_error(400, message);
+            assert!(!allows(&error, false, &none()), "{message}");
+            assert!(!model_unserved(&error), "{message}");
+        }
     }
 
     #[test]
