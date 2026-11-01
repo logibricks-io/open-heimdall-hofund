@@ -1302,6 +1302,7 @@ fn named_app(stream: bool, wire: &str, answer: &'static str) -> (axum::Router, t
             max_output_tokens: None,
             context_window: None,
             weight: 1,
+            patience: Some(std::time::Duration::from_secs(60)),
             free: false,
         }],
     )]);

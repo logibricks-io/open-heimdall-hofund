@@ -1407,9 +1407,13 @@ fn held_response(
                         }
                         Err(error) => {
                             let (status, message) = stream_error(&error);
+                            // Only the usage row and the track are kept: the
+                            // reply already went out as a stream, so the error
+                            // goes as a stream error frame whatever the client.
                             let _ = failure(
                                 Arc::clone(&state.app),
                                 state.codec.as_ref(),
+                                &HeaderMap::new(),
                                 &state.request,
                                 error,
                                 state.started,
