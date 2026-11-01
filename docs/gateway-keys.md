@@ -34,6 +34,7 @@ it leaves a tombstone, with no secret, so migration does not resurrect it.
 ```sh
 hofund gateway-key add "Remote laptop"       # prints the new secret
 hofund gateway-key add Family --key -       # reads an existing secret from stdin
+hofund gateway-key add Display --read-only  # may read stats, never call models
 hofund gateway-key list
 hofund gateway-key list --json
 hofund gateway-key rotate <id>
@@ -56,13 +57,49 @@ The list columns are `ID NAME STATE GATEWAY KEY LIMIT MODELS ACCOUNTS ACCESS`,
 as in the reference, plus `UNTIL` until expiry joins `STATE` in P0-4d.
 `GATEWAY KEY` is the masked form.
 `models`, `accounts`, `quotas`, `access`, and `issuer` also work without a value
-to show the current setting. Use `access <id> read-only` to store the read-only
-flag; its route enforcement is a later phase.
+to show the current setting. `access <id> read-only|full` changes that access,
+and `add <name> --read-only` sets it at creation. The default sharing key must
+retain full access.
 
 Authentication accepts `Authorization: Bearer <key>`, `x-api-key`,
 `x-goog-api-key`, or `?key=<key>`. One enabled match is enough. Missing, unknown,
 disabled, and removed keys receive 401. Existing loopback behavior is unchanged:
 hofund still requires a key on loopback.
+
+## Read-only keys and the key page
+
+A read-only key may use only `GET` or `HEAD` on `/health`, `/me`, `/v1/hofund/me`,
+`/v1/hofund/quotas`, and `/v1/hofund/quotas/history`. Every other route is
+refused before its handler or any upstream call with HTTP 403 and error code
+`gateway_key_read_only` in a `permission_error` envelope. Model lists and calls,
+token counts, writes, inbound surfaces, and both Responses WebSocket upgrades
+are refused. Route construction records every method and path; the
+`r2_every_registered_route_is_allowed_or_refused_and_exercised` test fails when
+a route is unclassified, and exercises both lists. Restoring full access takes
+effect on the next request.
+
+The reference also allows root information, quota cards, usage summary and
+request rows, limit, concurrency, and its own MCP inventory. Hofund has no
+corresponding routes yet, so this change does not invent them. The allow list
+will expand only with those real routes.
+
+`GET /me` serves the same static English page to everyone, without a key. Its
+CSP allows connections only to the same origin, forbids forms and framing, and
+loads no external resource. The page keeps a typed key only in tab
+`sessionStorage`, sends it as a bearer header, and offers placeholder-by-default
+setup for Claude Code, Codex, OpenAI-compatible clients, and a curl test.
+
+`GET /v1/hofund/me` requires an enabled named key and answers with
+`Cache-Control: no-store`. A `key` query pair is refused with 400 so a credential
+does not enter an address. The response contains only the caller's `name`,
+`readOnly`, `limits`, `usage`, `topModels`, `models`, and the gateway `version`.
+Usage covers today, seven days, and thirty days; the eight most-used models are
+ranked from only that key's rows. Limits include their current RFC 3339 window
+and token use. Allowed models are the scoped model-list ids, or none for a
+read-only key. No secret, account, other key, or provider credential is exposed.
+The current ledger has no cache or price columns, so those response counters are
+zero. A legacy token without a named-key store, an unknown key, and a disabled
+key receive 401.
 
 ## Model and account scopes
 
@@ -104,7 +141,7 @@ requests and responses redact secrets from `Debug` output.
 
 ## Later phases
 
-Limit records, read-only flags, expiry, issuer ids, and issuer permission flags
-are stored now so older files remain forward-compatible. Spending-limit
-enforcement and its CLI are P0-4b. Read-only route enforcement and `/me` are
-P0-4c. Expiry checks and issuing short-lived keys are P0-4d.
+Limit records, expiry, issuer ids, and issuer permission flags are stored so
+older files remain forward-compatible. Spending-limit enforcement and its CLI
+are P0-4b. Read-only route enforcement and `/me` are P0-4c. Expiry checks and
+issuing short-lived keys are P0-4d.
