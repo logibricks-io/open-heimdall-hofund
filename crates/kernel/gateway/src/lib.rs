@@ -1381,6 +1381,8 @@ struct HeldResponse {
     keepalive: Pin<Box<tokio::time::Sleep>>,
 }
 
+// The caller identity rides along for key usage attribution.
+#[allow(clippy::too_many_arguments)]
 fn held_response(
     app: Arc<Inner>,
     codec: Arc<dyn Codec>,
@@ -1976,6 +1978,8 @@ async fn raw_body(
         .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "response"))
 }
 
+// The caller identity rides along for key usage attribution.
+#[allow(clippy::too_many_arguments)]
 fn failure(
     app: Arc<Inner>,
     codec: &dyn Codec,
