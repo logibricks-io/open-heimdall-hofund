@@ -7,6 +7,7 @@ members = [
     "crates/kernel/agent",
     "crates/kernel/codec",
     "crates/kernel/config",
+    "crates/kernel/model-catalog",
     "crates/control-client",
     "crates/control-proto",
     "crates/kernel/daemon",
@@ -61,6 +62,7 @@ rust-version = "1.99.1"
 hofund-agent = { version = "0.1.0", path = "crates/kernel/agent" }
 hofund-codec = { version = "0.1.0", path = "crates/kernel/codec" }
 hofund-config = { version = "0.1.0", path = "crates/kernel/config" }
+hofund-model-catalog = { version = "0.1.0", path = "crates/kernel/model-catalog" }
 hofund-control-client = { version = "0.1.0", path = "crates/control-client" }
 hofund-control-proto = { version = "0.1.0", path = "crates/control-proto" }
 hofund-daemon = { version = "0.1.0", path = "crates/kernel/daemon" }

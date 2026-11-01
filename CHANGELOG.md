@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   NextLogin tick, subscription plugin file writes, and sign-out handover
   (D-27). `keep_login` and `switch_only` live in `[subscriptions.options]`.
 
+- Model catalog (C-1a): `hofund-model-catalog` caches the models.dev `api.json`
+  shape under `.hofund/catalog/`, revalidates with `ETag`, honors a configurable
+  mirror URL, falls back to the last cache offline, refreshes in the background,
+  applies `[[catalog.overrides]]` from config, enriches `GET /v1/models`, and
+  adds `hofund models` plus `hofund models refresh`. Reasoning-toggle provider ids
+  default from quirks when `[catalog]` omits `reasoning_toggle_providers`.
 - Usage ledger v2 part 1 (U-1a): cache-read, cache-write split into five-minute
   and one-hour columns, reasoning tokens, and a reasoning-hidden flag on each
   row; protocol usage extraction, control `GET /usage`, and `hofund usage`
