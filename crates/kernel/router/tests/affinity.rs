@@ -223,3 +223,100 @@ async fn c2f_nearly_spent_stuck_account_is_bypassed() {
     assert_eq!(first_hits.load(Ordering::SeqCst), 1);
     assert_eq!(second_hits.load(Ordering::SeqCst), 0);
 }
+
+struct Recording {
+    id: MemberId,
+    models: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Member for Recording {
+    fn id(&self) -> &MemberId {
+        &self.id
+    }
+
+    fn route_id(&self) -> &str {
+        "second"
+    }
+
+    fn protocol(&self) -> &str {
+        "test"
+    }
+
+    async fn execute(
+        &self,
+        request: hofund_router::Request,
+        _inbound: &str,
+    ) -> Result<Completion, PluginError> {
+        self.models.lock().expect("models").push(request.model);
+        answer()
+    }
+}
+
+#[tokio::test]
+async fn c3d_strict_dispatch_asks_the_answerer_first_even_while_its_model_rests() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let first = fake("first", &first_hits, vec![answer()]);
+    let models = Arc::new(Mutex::new(Vec::new()));
+    let second_id = MemberId::from_preset(
+        PresetId::try_from("second").expect("preset"),
+        MemberKey::from_static("row"),
+    );
+    let second: Arc<dyn Member> = Arc::new(Recording {
+        id: second_id.clone(),
+        models: Arc::clone(&models),
+    });
+    let cooldowns = Arc::new(hofund_router::Cooldowns::new(
+        hofund_router::CooldownPolicy::default(),
+    ));
+    cooldowns
+        .record_failure_for_model(
+            &second_id,
+            "model-a",
+            &PluginError::status_error(
+                429,
+                "All credentials for the requested model are cooling down",
+            )
+            .with_retry_after(std::time::Duration::from_secs(120)),
+        )
+        .expect("model rest");
+    assert!(cooldowns.cooling_for_model(&second_id, "model-a").is_some());
+    assert!(cooldowns.cooling_for_model(&second_id, "model-b").is_none());
+    let state = AffinityState::in_memory();
+    state.answered(
+        "demo|session",
+        "preset:second:row",
+        "model-a",
+        1,
+        CacheUsage {
+            input: Some(3000),
+            read: 0,
+            write: 3000,
+            write_hour: 0,
+        },
+    );
+    let mut resting = Hop::new(Arc::clone(&second));
+    resting.wire_model = Some("model-a".to_owned());
+    let mut ready = Hop::new(second);
+    ready.wire_model = Some("model-b".to_owned());
+    let route = Route::new(vec![Hop::new(first), ready, resting])
+        .with_routing("order")
+        .with_stays(Stays::Strict);
+    let router = Router::from_routes(
+        BTreeMap::from([("demo".to_owned(), route)]),
+        FailoverPolicy::default(),
+    )
+    .with_affinity(state)
+    .with_cooldowns(cooldowns);
+    router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&conversation()),
+            None,
+        )
+        .await
+        .expect("strict answerer answers");
+    assert_eq!(models.lock().expect("models").as_slice(), ["model-a"]);
+    assert_eq!(first_hits.load(Ordering::SeqCst), 0);
+}
