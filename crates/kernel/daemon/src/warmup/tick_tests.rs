@@ -63,7 +63,7 @@ impl DaemonRegistry for WarmRegistry {
         &self,
         id: &str,
     ) -> Option<(
-        &'static hofund_plugin_registry::CompiledPreset,
+        &'static crate::registry::CompiledPreset,
         Option<&'static str>,
     )> {
         self.inner.find_preset(id)

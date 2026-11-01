@@ -521,7 +521,7 @@ mod tests {
         let account = AccountId::from_static("a-0000000000000002");
         note_skipped(
             &store,
-            "claude",
+            "fixture-sub",
             &account,
             UNIX_EPOCH,
             "account is not signed in",
