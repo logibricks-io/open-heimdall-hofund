@@ -106,6 +106,28 @@ fn d12f_a_truncated_signature_suffix_stays_on_the_id() {
 }
 
 #[test]
+fn d12h_kept_signature_marks_follow_the_reference_reading() {
+    for (id, expected) in [
+        ("toolu_1__tsk4__abcd", "toolu_1__tsk4__abcd"),
+        ("toolu_1__tsk__x__ts4__c2ln", "toolu_1__tsk__x"),
+        ("toolu_1__tsr4__c2ln", "toolu_1"),
+        ("\u{e9}__ts4__c2ln", "\u{e9}"),
+        ("__ts4__c2ln", "__ts4__c2ln"),
+    ] {
+        let body = format!(
+            r#"{{"model":"m1","max_tokens":64,"messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"Bash","input":{{}}}}]}}]}}"#
+        );
+        let request = AnthropicMessages
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        assert!(
+            matches!(&request.messages[0].content[0], hofund_ir::ContentPart::ToolCall(call) if call.id == expected),
+            "{id}"
+        );
+    }
+}
+
+#[test]
 fn d12g_an_invalid_mark_sequence_falls_back_without_rejecting() {
     let wire = translated(
         r#"{"model":"m1","max_tokens":64,"system":[{"type":"text","text":"fixed","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":[

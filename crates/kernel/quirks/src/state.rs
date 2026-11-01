@@ -261,3 +261,30 @@ fn host(base_url: &str) -> String {
         .unwrap_or_default()
         .to_ascii_lowercase()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RequestState;
+
+    #[test]
+    fn d10p_learned_members_are_stripped_only_from_responses_bodies() {
+        let state = RequestState::default();
+        let body = br#"{"input":[{"internal_chat_message_metadata_passthrough":{"turn_id":"t1","content_token_count":[1]}}]}"#;
+        assert_eq!(
+            state.strip_passthrough("openai-responses", body),
+            (body.to_vec(), false)
+        );
+        assert!(state.learn_passthrough("content_token_count"));
+        assert!(!state.learn_passthrough("content_token_count"));
+        assert_eq!(
+            state.strip_passthrough("openai-chat", body),
+            (body.to_vec(), false)
+        );
+        let (stripped, changed) = state.strip_passthrough("openai-responses", body);
+        assert!(changed);
+        assert_eq!(
+            stripped,
+            br#"{"input":[{"internal_chat_message_metadata_passthrough":{"turn_id":"t1"}}]}"#
+        );
+    }
+}

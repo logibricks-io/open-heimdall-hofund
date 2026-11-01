@@ -157,7 +157,69 @@ pub(crate) fn without_passthrough_if(body: &[u8], drop: impl Fn(&str) -> bool) -
 
 #[cfg(test)]
 mod tests {
-    use super::without_passthrough;
+    use super::{refused_passthrough, without_passthrough};
+
+    const KEY: &str = "internal_chat_message_metadata_passthrough";
+
+    fn refused(text: &str) -> Option<String> {
+        refused_passthrough(text.replace("KEY", KEY).as_bytes())
+    }
+
+    #[test]
+    fn d10k_bracketed_path_with_spaces_before_the_code_is_a_refusal() {
+        assert_eq!(
+            refused("[input[3].KEY.turn_id] \t\n[unknown_parameter]").as_deref(),
+            Some("turn_id")
+        );
+        assert_eq!(
+            refused("input[3].KEY.turn_id[unknown_parameter]").as_deref(),
+            Some("turn_id")
+        );
+    }
+
+    #[test]
+    fn d10l_quoted_path_needs_its_closing_quote() {
+        assert_eq!(
+            refused("unknown parameter: 'input[1].KEY.create_time.more'"),
+            None
+        );
+        assert_eq!(
+            refused("UNKNOWN PARAMETER 'input[1].KEY.create_time'").as_deref(),
+            Some("create_time")
+        );
+    }
+
+    #[test]
+    fn d10m_the_leftmost_refusal_wins() {
+        assert_eq!(
+            refused("unknown parameter: 'input[0].KEY.first' and input[1].KEY.second [unknown_parameter]")
+                .as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            refused("input[1].KEY.second [unknown_parameter] then unknown parameter: 'input[0].KEY.first'")
+                .as_deref(),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn d10n_an_index_and_a_member_name_are_required() {
+        assert_eq!(refused("input[].KEY.turn_id [unknown_parameter]"), None);
+        assert_eq!(refused("input[0].KEY. [unknown_parameter]"), None);
+        assert_eq!(refused("unknown parameter: 'input[0].KEY.'"), None);
+    }
+
+    #[test]
+    fn d10o_an_empty_field_drops_the_whole_passthrough() {
+        let body = br#"{"input":[{"type":"message", "internal_chat_message_metadata_passthrough":{"turn_id":"t1"}, "content":[]}, {"type":"message"}]}"#;
+        let (stripped, changed) = without_passthrough(body, "");
+        assert!(changed);
+        assert_eq!(
+            stripped,
+            br#"{"input":[{"type":"message", "content":[]}, {"type":"message"}]}"#
+        );
+    }
 
     #[test]
     fn removal_preserves_every_other_byte() {

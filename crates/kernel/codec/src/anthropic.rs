@@ -251,22 +251,35 @@ fn unsign_calls(request: &mut Request) {
 }
 
 fn unsigned_id(id: &str) -> Option<&str> {
-    let mut offset = 1;
+    // A mark never starts the id: the search begins after its first character.
+    let mut offset = id.chars().next().map_or(0, char::len_utf8);
     while let Some(found) = id[offset..].find("__ts") {
         let at = offset + found;
         let mut rest = &id[at + "__ts".len()..];
-        if rest.starts_with('k') {
-            return None;
+        offset = at + 1;
+        let raw = rest.starts_with('r');
+        if raw {
+            rest = &rest[1..];
         }
-        if let Some(raw) = rest.strip_prefix('r') {
-            rest = raw;
+        let kept = !raw && rest.starts_with('k');
+        if kept {
+            rest = &rest[1..];
         }
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
         let Some(signature) = rest[digits..].strip_prefix("__") else {
-            offset = at + 1;
             continue;
         };
+        if kept && digits == 0 {
+            // A kept signature's mark always carries its length.
+            continue;
+        }
+        // The first mark decides: a signature cut short is none.
         if digits > 0 && rest[..digits] != signature.len().to_string() {
+            return None;
+        }
+        if kept {
+            // A kept signature points into a store this gateway does not
+            // hold, so it reads as no signature and the id stays whole.
             return None;
         }
         if signature.is_empty()
