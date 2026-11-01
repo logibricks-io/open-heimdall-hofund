@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Vendor-timed quota and credit rests now stay in place when a quota reading
+  is merely less than full in the same window. They lift early only when a
+  matching window's reset elapsed since the last good reading or moved to a
+  later cycle; failed and empty readings lift nothing. Ordinary renewed-window
+  readings still lift rests whose deadlines were not vendor-named (D-29).
+
 ### Added
 
 - Gateway-key spending limits (P0-4b): up to five token and/or estimated-cost
