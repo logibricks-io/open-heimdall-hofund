@@ -129,8 +129,6 @@ pub struct BalanceReader {
     endpoint: Endpoint,
     options: BalanceOptions,
     client: reqwest::Client,
-    #[cfg(test)]
-    source_root: Option<String>,
 }
 
 #[derive(Clone)]
@@ -138,7 +136,6 @@ struct Source {
     kind: SourceKind,
     url: String,
     token: String,
-    account_wide: bool,
 }
 
 #[derive(Clone)]
@@ -162,27 +159,7 @@ impl BalanceReader {
             endpoint,
             options,
             client,
-            #[cfg(test)]
-            source_root: None,
         })
-    }
-
-    #[cfg(test)]
-    fn with_source_root(mut self, root: String) -> Self {
-        self.source_root = Some(root);
-        self
-    }
-
-    fn relocate(&self, source: Source) -> Source {
-        #[cfg(test)]
-        if let Some(root) = &self.source_root
-            && let Ok(url) = reqwest::Url::parse(&source.url)
-        {
-            let mut source = source;
-            source.url = format!("{}{}", root.trim_end_matches('/'), url.path());
-            return source;
-        }
-        source
     }
 
     /// Reads the key's balance and any plan carried by the same endpoint.
@@ -246,12 +223,11 @@ impl BalanceReader {
         if options.url.trim().is_empty() {
             return None;
         }
-        Some(self.relocate(Source {
+        Some(Source {
             kind: SourceKind::Custom,
             url: options.url,
             token: options.token,
-            account_wide: false,
-        }))
+        })
     }
 
     fn effective_options(&self) -> BalanceOptions {

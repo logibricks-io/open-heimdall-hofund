@@ -3,8 +3,8 @@
 use std::time::{Duration, SystemTime};
 
 use hofund_plugin_api::{
-    BalanceCard, BalancePart, BalanceQuery, BalanceSupport, BalanceWallet, HostContext,
-    PlanWindow, PluginError,
+    BalanceCard, BalancePart, BalanceQuery, BalanceSupport, BalanceWallet, HostContext, PlanWindow,
+    PluginError,
 };
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::Value;
@@ -20,13 +20,29 @@ const COMMAND_PLAN_KEEP: Duration = Duration::from_secs(600);
 #[derive(Clone)]
 enum Source {
     DeepSeek(String),
-    Moonshot { url: String, sign: &'static str },
+    Moonshot {
+        url: String,
+        sign: &'static str,
+    },
     OpenRouter(String),
-    SiliconFlow { url: String, sign: &'static str, console: &'static str },
-    StepFun { url: String, sign: &'static str },
-    CommandCode { credits: String, subscriptions: String },
+    SiliconFlow {
+        url: String,
+        sign: &'static str,
+        console: &'static str,
+    },
+    StepFun {
+        url: String,
+        sign: &'static str,
+    },
+    CommandCode {
+        credits: String,
+        subscriptions: String,
+    },
     Ollama(String),
-    AiHubMix { url: String, key: bool },
+    AiHubMix {
+        url: String,
+        key: bool,
+    },
     OpenCodeZen,
 }
 
@@ -160,9 +176,7 @@ fn source(query: &BalanceQuery) -> Option<Source> {
                 });
             }
             "ollama.com" => {
-                return Some(Source::Ollama(
-                    "https://ollama.com/api/balance".to_owned(),
-                ));
+                return Some(Source::Ollama("https://ollama.com/api/balance".to_owned()));
             }
             "aihubmix.com" if !query.balance_token().trim().is_empty() => {
                 return Some(Source::AiHubMix {
@@ -243,34 +257,15 @@ async fn parse(
 ) -> Result<BalanceCard, PluginError> {
     match source {
         Source::DeepSeek(_) => parse_deepseek(body),
-        Source::Moonshot { sign, .. } => {
-            let amount = required_number(&at(body, &["data", "available_balance"])?)?;
-            Ok(single_balance(money(sign, amount), amount, currency_unit(sign), true))
-        }
+        Source::Moonshot { sign, .. } => parse_moonshot(body, sign),
         Source::OpenRouter(_) => {
             let credits = required_number(&at(body, &["data", "total_credits"])?)?;
             let used = optional_number(&at(body, &["data", "total_usage"])?).unwrap_or(0.0);
             let amount = credits - used;
             Ok(single_balance(money("$", amount), amount, "USD", true))
         }
-        Source::SiliconFlow { sign, .. } => {
-            let amount = required_number(&at(body, &["data", "totalBalance"])?)?;
-            Ok(single_balance(
-                money(sign, amount),
-                amount,
-                currency_unit(sign),
-                true,
-            ))
-        }
-        Source::StepFun { sign, .. } => {
-            let amount = required_number(&at(body, &["balance"])?)?;
-            Ok(single_balance(
-                money(sign, amount),
-                amount,
-                currency_unit(sign),
-                true,
-            ))
-        }
+        Source::SiliconFlow { sign, .. } => parse_siliconflow(body, sign),
+        Source::StepFun { sign, .. } => parse_stepfun(body, sign),
         Source::AiHubMix { key: true, .. } => parse_aihubmix_key(body),
         Source::AiHubMix { key: false, .. } => parse_aihubmix_account(body),
         Source::CommandCode {
@@ -295,6 +290,36 @@ fn single_balance(text: String, amount: f64, unit: &str, account_wide: bool) -> 
         String::new(),
         account_wide,
     )
+}
+
+fn parse_moonshot(body: &[u8], sign: &str) -> Result<BalanceCard, PluginError> {
+    let amount = required_number(&at(body, &["data", "available_balance"])?)?;
+    Ok(single_balance(
+        money(sign, amount),
+        amount,
+        currency_unit(sign),
+        true,
+    ))
+}
+
+fn parse_siliconflow(body: &[u8], sign: &str) -> Result<BalanceCard, PluginError> {
+    let amount = required_number(&at(body, &["data", "totalBalance"])?)?;
+    Ok(single_balance(
+        money(sign, amount),
+        amount,
+        currency_unit(sign),
+        true,
+    ))
+}
+
+fn parse_stepfun(body: &[u8], sign: &str) -> Result<BalanceCard, PluginError> {
+    let amount = required_number(&at(body, &["balance"])?)?;
+    Ok(single_balance(
+        money(sign, amount),
+        amount,
+        currency_unit(sign),
+        true,
+    ))
 }
 
 fn parse_deepseek(body: &[u8]) -> Result<BalanceCard, PluginError> {
@@ -334,12 +359,8 @@ fn parse_deepseek(body: &[u8]) -> Result<BalanceCard, PluginError> {
         if let Some((granted, topped)) = parts
             && granted != 0.0
         {
-            split.push(
-                BalancePart::new(money(sign, granted)).with_label("Granted"),
-            );
-            split.push(
-                BalancePart::new(money(sign, topped)).with_label("Topped up"),
-            );
+            split.push(BalancePart::new(money(sign, granted)).with_label("Granted"));
+            split.push(BalancePart::new(money(sign, topped)).with_label("Topped up"));
         }
         wallets.push(BalanceWallet::new(total, code));
     }
@@ -470,14 +491,22 @@ async fn parse_command(
             );
         }
     }
-    let plan_windows = if has_windows { windows.clone() } else { windows };
+    let plan_windows = if has_windows {
+        windows.clone()
+    } else {
+        windows
+    };
     Ok(BalanceCard::pack(
         money("$", left),
         Vec::new(),
         Vec::new(),
         vec![BalanceWallet::new(left, "USD")],
         Vec::new(),
-        if has_windows { plan_name } else { String::new() },
+        if has_windows {
+            plan_name
+        } else {
+            String::new()
+        },
         plan_windows,
         until,
         String::new(),
@@ -517,7 +546,7 @@ async fn read_subscription(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
-        data.get("currentPeriodEnd").and_then(|value| at_time(value)),
+        data.get("currentPeriodEnd").and_then(at_time),
         String::new(),
     )
 }
@@ -809,6 +838,53 @@ mod balance_tests {
         assert_eq!(card.wallets()[0].unit(), "USD");
         assert_eq!(card.split().len(), 4);
         assert!(card.account_wide());
+    }
+
+    #[test]
+    fn p3b_moonshot_reads_available_balance_in_order() {
+        let card = parse_moonshot(br#"{"data":{"available_balance":12.5}}"#, "¥").expect("balance");
+        assert_eq!(card.text(), "¥12.50");
+        assert_eq!(card.wallets()[0].unit(), "CNY");
+    }
+
+    #[test]
+    fn p3d_siliconflow_retired_query_names_the_console() {
+        assert!(retired_siliconflow(410, br#"{"message":"gone"}"#));
+        assert!(!retired_siliconflow(401, br#"{"message":"gone"}"#));
+        let card = parse_siliconflow(br#"{"data":{"totalBalance":3.5}}"#, "¥").expect("balance");
+        assert_eq!(card.text(), "¥3.50");
+    }
+
+    #[test]
+    fn p3e_stepfun_reads_account_balance() {
+        let card = parse_stepfun(br#"{"balance":8.25}"#, "¥").expect("balance");
+        assert_eq!(card.text(), "¥8.25");
+    }
+
+    #[test]
+    fn p3f_command_code_credits_sum_monthly_and_purchased() {
+        let body = br#"{"credits":{"monthlyCredits":5,"purchasedCredits":2.5,"freeCredits":0.5,"planId":"individual-pro-v1"},"windowLimits":{"fiveHour":{"used":1,"cap":10}}}"#;
+        let reply = json_body(body).expect("json");
+        let credits = reply.get("credits").expect("credits");
+        let monthly = credits.get("monthlyCredits").and_then(optional_number);
+        let purchased = credits.get("purchasedCredits").and_then(optional_number);
+        let free = credits.get("freeCredits").and_then(optional_number);
+        let left = monthly.unwrap_or(0.0).max(0.0)
+            + purchased.unwrap_or(0.0).max(0.0)
+            + free.unwrap_or(0.0).max(0.0);
+        assert_eq!(left, 8.0);
+        assert_eq!(command_windows(&reply).len(), 1);
+    }
+
+    #[test]
+    fn p3h_aihubmix_key_and_account_parse_differently() {
+        let key = parse_aihubmix_key(br#"{"total_usage":4.25}"#).expect("key");
+        assert_eq!(key.text(), "$4.25");
+        assert!(!key.account_wide());
+        let account = parse_aihubmix_account(br#"{"success":true,"data":{"quota":2500000}}"#)
+            .expect("account");
+        assert_eq!(account.text(), "$5.00");
+        assert!(account.account_wide());
     }
 
     #[test]

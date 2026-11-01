@@ -38,9 +38,9 @@ mod inbound;
 #[doc(hidden)]
 pub mod kernel;
 
+mod balance;
 #[cfg(not(feature = "kernel"))]
 mod kernel;
-mod balance;
 mod plan;
 mod records;
 mod redaction;
@@ -56,6 +56,9 @@ pub use agent::{
     AgentFactory, AgentIntegration, ConnectionStatus, Credential, CredentialError, CredentialStore,
     DisconnectOutcome, DynAgentFactory, FileChange, GatewayTarget, ImportCtx, ImportedProvider,
     Plan, WriteCtx,
+};
+pub use balance::{
+    BalanceCard, BalancePart, BalanceQuery, BalanceQuota, BalanceSupport, BalanceWallet,
 };
 pub use body::{Body, BodyStream};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
@@ -74,9 +77,6 @@ pub use id::{
     SurfaceId, TierId,
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
-pub use balance::{
-    BalanceCard, BalancePart, BalanceQuota, BalanceQuery, BalanceSupport, BalanceWallet,
-};
 pub use plan::{PlanCard, PlanQuery, PlanQuota, PlanSupport, PlanWindow};
 pub use records::{
     Account, AccountStatus, AgentActiveProvider, AgentCredential, AgentDescription, AgentFile,

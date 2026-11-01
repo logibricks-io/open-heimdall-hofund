@@ -28,7 +28,7 @@ pub fn contribute() -> Contribution {
 
 /// Builds the stateful plan reader shared by the registry.
 #[must_use]
-pub fn reader() -> Arc<Reader> {
+pub(crate) fn reader() -> Arc<Reader> {
     Arc::new(Reader::default())
 }
 

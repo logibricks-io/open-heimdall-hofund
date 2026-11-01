@@ -24,15 +24,6 @@ async fn mock(server: &MockServer, verb: &str, route: &str, status: u16, body: &
         .await;
 }
 
-
-
-
-
-
-
-
-
-
 #[tokio::test]
 async fn p3i_custom_expression_aggregates_lists_and_keeps_partial_amounts() {
     let server = MockServer::start().await;
@@ -51,7 +42,10 @@ async fn p3i_custom_expression_aggregates_lists_and_keeps_partial_amounts() {
     )
     .await;
     let balance = report.balance.expect("balance");
-    assert_eq!(balance.text, "share 50% · total $8.00 · broken — · count 3.00");
+    assert_eq!(
+        balance.text,
+        "share 50% · total $8.00 · broken — · count 3.00"
+    );
     assert_eq!(balance.parts.len(), 4);
     assert!(!balance.parts[2].error.is_empty());
     assert_eq!(balance.parts[0].percent, Some(50.0));
@@ -202,7 +196,6 @@ async fn p3l_panel_usage_returns_windows_and_account_wide_metadata() {
     assert_eq!(report.windows[0].used, 25.0);
     assert_eq!(report.windows[0].unit, "USD");
 }
-
 
 #[test]
 fn p3n_error_helpers_do_not_expose_key_or_accept_other_methods() {

@@ -1198,6 +1198,23 @@ mod tests {
     }
 
     #[test]
+    fn p3o_shared_provider_balances_mark_matching_cards() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = QuotaStore::new(dir.path());
+        let read_at = at(1_900_000_000);
+        for user in ["a", "b"] {
+            let mut card = quota("relay", user);
+            card.kind = QuotaKind::Balance;
+            card.balance = "$10.00".to_owned();
+            store.record_success(card, Vec::new(), read_at);
+        }
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert_eq!(report[0].shared_balance, "a");
+        assert_eq!(report[1].shared_balance, "a");
+    }
+
+    #[test]
     fn q1c_report_clamps_remaining_and_keeps_run_out_distinct() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = QuotaStore::new(dir.path());

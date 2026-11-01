@@ -397,6 +397,7 @@ impl BalanceCard {
 
     /// Builds a card from plugin reader parts.
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn pack(
         text: impl Into<String>,

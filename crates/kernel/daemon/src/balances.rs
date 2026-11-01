@@ -7,8 +7,8 @@ use futures_util::StreamExt;
 use hofund_config::{Config, Provider};
 use hofund_control_proto::{Quota, QuotaKind, QuotaSpan};
 use hofund_plugin_api::{
-    BalanceCard, BalanceQuery, BalanceSupport, BalanceWallet, HostContext, PluginError,
-    PluginErrorKind, PluginId, PlanWindow,
+    BalanceCard, BalanceQuery, BalanceSupport, BalanceWallet, HostContext, PlanWindow, PluginError,
+    PluginErrorKind, PluginId,
 };
 use hofund_plugin_host::HttpLimits;
 use hofund_provider::balance::{BalanceOptions, BalanceReader};
@@ -64,8 +64,8 @@ pub(crate) async fn poll(
                 }
             }
         }
-        let mut readings = futures_util::stream::iter(jobs.into_iter().enumerate().map(
-            |(index, job)| {
+        let mut readings =
+            futures_util::stream::iter(jobs.into_iter().enumerate().map(|(index, job)| {
                 let plugin = plugin.clone();
                 let root = root.clone();
                 async move {
@@ -99,11 +99,10 @@ pub(crate) async fn poll(
                     };
                     (index, job, result)
                 }
-            },
-        ))
-        .buffer_unordered(READS_AT_ONCE)
-        .collect::<Vec<_>>()
-        .await;
+            }))
+            .buffer_unordered(READS_AT_ONCE)
+            .collect::<Vec<_>>()
+            .await;
         readings.sort_by_key(|(index, _, _)| *index);
         for (_, job, result) in readings {
             record(quotas, job, result);
@@ -264,7 +263,9 @@ fn bases(
 
 fn report_to_card(report: hofund_provider::balance::BalanceReport) -> BalanceCard {
     let balance = report.balance.as_ref();
-    let text = balance.map(|balance| balance.text.clone()).unwrap_or_default();
+    let text = balance
+        .map(|balance| balance.text.clone())
+        .unwrap_or_default();
     let wallets = balance
         .map(|balance| {
             balance
@@ -340,7 +341,13 @@ fn record(quotas: &QuotaStore, job: Job, result: Result<Option<BalanceCard>, Plu
     match result {
         Ok(Some(card)) => {
             if !card.error().is_empty() {
-                record_failure(quotas, &job, job.card.clone(), card.error().to_owned(), true);
+                record_failure(
+                    quotas,
+                    &job,
+                    job.card.clone(),
+                    card.error().to_owned(),
+                    true,
+                );
                 return;
             }
             let mut quota = job.card.clone();
@@ -368,18 +375,18 @@ fn record(quotas: &QuotaStore, job: Job, result: Result<Option<BalanceCard>, Plu
         Err(error) => {
             let mut card = job.card.clone();
             card.error = error.to_string();
-            record_failure(quotas, &job, card, error.to_string(), transient_error(&error));
+            record_failure(
+                quotas,
+                &job,
+                card,
+                error.to_string(),
+                transient_error(&error),
+            );
         }
     }
 }
 
-fn record_failure(
-    quotas: &QuotaStore,
-    job: &Job,
-    mut card: Quota,
-    error: String,
-    transient: bool,
-) {
+fn record_failure(quotas: &QuotaStore, job: &Job, mut card: Quota, error: String, transient: bool) {
     if job.support == BalanceSupport::Possible && !quotas.has_reading(&card) {
         return;
     }
@@ -423,6 +430,9 @@ fn wallet_info(wallet: &BalanceWallet) -> WindowInfo {
         reset_after: None,
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 fn transient_error(error: &PluginError) -> bool {
     matches!(
