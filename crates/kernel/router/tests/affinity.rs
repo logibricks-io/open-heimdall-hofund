@@ -376,3 +376,90 @@ async fn d25c_dispatch_records_a_stand_in_and_returns_after_recovery() {
     assert_eq!(first_hits.load(Ordering::SeqCst), 1);
     assert_eq!(second_hits.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn c6g_a_failed_opening_no_longer_counts_as_held() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first = fake(
+        "first",
+        &first_hits,
+        vec![Err(PluginError::status_error(500, "down")), answer()],
+    );
+    let second = fake(
+        "second",
+        &second_hits,
+        vec![Err(PluginError::status_error(500, "down")), answer()],
+    );
+    let router = router(first, second, AffinityState::in_memory(), Stays::Session);
+    let opening = Conversation::new("demo|a", 1, false);
+    assert!(
+        router
+            .dispatch_with_context(
+                &hofund_router::Request::new("demo"),
+                "test",
+                Some(&opening),
+                None
+            )
+            .await
+            .is_err()
+    );
+    let next = Conversation::new("demo|b", 1, false);
+    let routed = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&next),
+            None,
+        )
+        .await
+        .expect("answers");
+    assert_eq!(routed.upstream_id, "first");
+}
+
+#[tokio::test]
+async fn c6h_a_broken_stream_no_longer_counts_as_held() {
+    use futures_util::StreamExt;
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let broken = Ok(Completion::Stream(Box::pin(futures_util::stream::iter(
+        vec![
+            Ok(hofund_ir::StreamEvent::TextDelta(hofund_ir::TextDelta {
+                index: 0,
+                text: "hi".to_owned(),
+                extensions: hofund_ir::Extensions::new(),
+            })),
+            Err(PluginError::status_error(500, "cut")),
+        ],
+    ))));
+    let first = fake("first", &first_hits, vec![broken, answer()]);
+    let second = fake("second", &second_hits, vec![answer()]);
+    let router = router(first, second, AffinityState::in_memory(), Stays::Session);
+    let opening = Conversation::new("demo|a", 1, false);
+    let routed = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&opening),
+            None,
+        )
+        .await
+        .expect("stream starts");
+    let Completion::Stream(mut stream) = routed.completion else {
+        panic!("stream");
+    };
+    while stream.next().await.is_some() {}
+    drop(stream);
+    let next = Conversation::new("demo|b", 1, false);
+    let routed = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&next),
+            None,
+        )
+        .await
+        .expect("answers");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+}

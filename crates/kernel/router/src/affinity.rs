@@ -1456,6 +1456,46 @@ mod tests {
     }
 
     #[test]
+    fn c4c_a_route_of_fallback_rows_only_keeps_its_own_affinity() {
+        let mut candidates = candidates();
+        candidates[0].fallback = true;
+        candidates[1].fallback = true;
+        assert!(!super::rules::back_to_main(&candidates, 1));
+        let state = AffinityState::in_memory();
+        state.answered("demo|session", "second", "model", 1, usage(0, 3000));
+        let decision = state.order(&conversation(), Stays::Auto, "smart", &candidates);
+        assert_ne!(decision.reason, Reason::Main);
+        assert_eq!(decision.order[0], 1);
+        state.answered("demo|turn", "first", "model", 1, usage(0, 3000));
+        let turn = Conversation::new("demo|turn", 2, false);
+        assert_eq!(
+            state.order(&turn, Stays::Turn, "rotate", &candidates).order[0],
+            1
+        );
+    }
+
+    #[test]
+    fn d25d_stand_in_return_needs_a_member_listed_ahead() {
+        let mut candidates = three();
+        assert!(super::rules::back_from_stand_in(&candidates, 2));
+        candidates[0].place = 3;
+        assert!(!super::rules::back_from_stand_in(&candidates, 2));
+        candidates[0].place = 4;
+        assert!(!super::rules::back_from_stand_in(&candidates, 2));
+    }
+
+    #[test]
+    fn c6f_session_spread_does_not_count_subagents_of_other_sessions() {
+        let state = AffinityState::in_memory();
+        state.answered("demo|lead|agent:one", "first", "model", 1, usage(0, 3000));
+        let new = Conversation::new("demo|new", 1, false);
+        assert_eq!(
+            state.order(&new, Stays::Session, "smart", &three()).order[0],
+            0
+        );
+    }
+
+    #[test]
     fn d14_rotate_skips_fallback_rows_for_new_and_returning_conversations() {
         let state = AffinityState::in_memory();
         let mut candidates = three();
