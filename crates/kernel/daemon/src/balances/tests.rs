@@ -60,17 +60,27 @@ async fn p3q_two_keys_with_the_same_balance_share_once() {
     let url = format!("{}/shared", server.uri());
     let text = format!(
         "[[providers]]\nid = \"relay\"\npreset = \"relay\"\nbase_url = \"http://127.0.0.1:9\"\napi_key = \"alpha\"\nkey_name = \"one\"\n\
-         [providers.balance]\nurl = \"{url}\"\npath = \"$amount\"\n\
+         [providers.balance]\nurl = \"{url}\"\npath = \"$amount\"\ntoken = \"panel\"\n\
          [[providers.keys]]\nkey = \"beta\"\nname = \"two\"\n\
          [[routes]]\nmodel = \"demo\"\nupstreams = [\"relay\"]\n"
     );
     let runtime = runtime(&dir, &config(&text));
+    let (first, _) = runtime.quota_report(false).await;
+    assert_eq!(first.len(), 2);
+    assert!(first.iter().all(|card| card.balance == "$10.00"));
+    assert!(first.iter().all(|card| card.shared_balance.is_empty()));
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/shared"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"amount":9}"#))
+        .mount(&server)
+        .await;
     let (cards, _) = runtime.quota_report(false).await;
     assert_eq!(cards.len(), 2);
-    assert!(cards.iter().all(|card| card.balance == "$10.00"));
-    let first = provider_keys::key_id("alpha");
-    assert_eq!(cards[0].shared_balance, first);
-    assert_eq!(cards[1].shared_balance, first);
+    assert!(cards.iter().all(|card| card.balance == "$9.00"));
+    let leader = provider_keys::key_id("alpha");
+    assert_eq!(cards[0].shared_balance, leader);
+    assert_eq!(cards[1].shared_balance, leader);
 }
 
 #[tokio::test]

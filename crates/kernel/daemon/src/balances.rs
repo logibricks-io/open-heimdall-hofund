@@ -13,7 +13,7 @@ use hofund_plugin_api::{
 use hofund_plugin_host::HttpLimits;
 use hofund_provider::balance::{BalanceOptions, BalanceReader};
 use hofund_provider::{Credential, Endpoint};
-use hofund_router::quota::{QuotaStore, WindowInfo};
+use hofund_router::quota::{BalanceRecordMeta, QuotaStore, WindowInfo};
 
 use crate::provider_keys::{self, ResolvedKey};
 use crate::{DaemonError, DaemonRegistry, beside, show};
@@ -369,7 +369,12 @@ fn record(quotas: &QuotaStore, job: Job, result: Result<Option<BalanceCard>, Plu
             if quota.balance.is_empty() && windows.is_empty() {
                 return;
             }
-            quotas.record_success(quota, windows, quotas.now());
+            let meta = BalanceRecordMeta {
+                account_wide: card.account_wide(),
+                balance_parts: !card.parts().is_empty() || !card.split().is_empty(),
+                balance_unit: balance_unit(&card),
+            };
+            quotas.record_balance(quota, windows, quotas.now(), meta);
         }
         Ok(None) => {}
         Err(error) => {
@@ -412,6 +417,20 @@ fn window_info(window: &PlanWindow) -> WindowInfo {
         scope_model: None,
         window_span: window.span(),
         reset_after: None,
+    }
+}
+
+fn balance_unit(card: &BalanceCard) -> String {
+    let units = card
+        .wallets()
+        .iter()
+        .map(BalanceWallet::unit)
+        .filter(|unit| !unit.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    if units.len() == 1 {
+        units.into_iter().next().unwrap_or("").to_owned()
+    } else {
+        String::new()
     }
 }
 
