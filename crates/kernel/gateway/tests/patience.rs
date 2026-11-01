@@ -209,14 +209,18 @@ fn fixture(answers: Vec<Result<Completion, PluginError>>) -> Fixture {
 }
 
 fn request() -> axum::http::Request<axum::body::Body> {
+    request_for("primary/demo")
+}
+
+fn request_for(model: &str) -> axum::http::Request<axum::body::Body> {
     axum::http::Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
         .header("authorization", "Bearer secret")
         .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            r#"{"model":"primary/demo","stream":true,"messages":[]}"#,
-        ))
+        .body(axum::body::Body::from(format!(
+            r#"{{"model":"{model}","stream":true,"messages":[]}}"#
+        )))
         .expect("request")
 }
 
@@ -272,4 +276,28 @@ async fn b6c_disconnect_during_patience_records_499_and_stops_retries() {
     let rows = fixture.usage.rows().expect("usage rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "499");
+}
+
+#[tokio::test(start_paused = true)]
+async fn b11_a_route_request_is_held_with_keepalives_while_its_pool_waits() {
+    let fixture = fixture(vec![
+        Err(PluginError::status_error(503, "busy")),
+        Ok(text_answer()),
+    ]);
+    let response = fixture
+        .app
+        .oneshot(request_for("demo"))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let first = body.next().await.expect("keepalive").expect("chunk");
+    assert_eq!(first, Bytes::from_static(b": keepalive\n\n"));
+    let mut rest = Vec::new();
+    while let Some(chunk) = body.next().await {
+        rest.extend_from_slice(&chunk.expect("chunk"));
+    }
+    let text = String::from_utf8(rest).expect("utf8");
+    assert!(text.contains("answered"), "{text}");
+    assert_eq!(fixture.hits.load(Ordering::SeqCst), 2);
 }

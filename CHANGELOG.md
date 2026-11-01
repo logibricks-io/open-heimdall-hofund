@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Route pools now wait out busy members (P0-3b11). Once every member has
+  failed in a way that passes, the pool asks them again: ready members
+  first, then those still waiting on a vendor's `Retry-After`, with pauses
+  doubling from 2 to 30 seconds (never shorter than the soonest ready time),
+  for at most twelve rounds within the route's `patience` (60 seconds by
+  default, at most 240, or `off`). A last member newly out of quota or credit
+  still lets earlier busy members be waited for; one already resting on
+  quota or credit ends the request. Streamed requests are held with SSE
+  comments, as for direct provider requests. Members use the route's
+  patience, not their provider's.
 - Responses failures caused by a 413 byte cap or a context overflow now emit
   `response.failed` with code `context_length_exceeded`, allowing the client to
   compact rather than reconnect (D-1). Codex receives this in its requested
