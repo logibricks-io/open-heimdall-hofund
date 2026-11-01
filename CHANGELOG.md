@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   NextLogin tick, subscription plugin file writes, and sign-out handover
   (D-27). `keep_login` and `switch_only` live in `[subscriptions.options]`.
 
+- Usage ledger v2 part 1 (U-1a): cache-read, cache-write split into five-minute
+  and one-hour columns, reasoning tokens, and a reasoning-hidden flag on each
+  row; protocol usage extraction, control `GET /usage`, and `hofund usage`
+  totals report them. Cost and attribution follow in later usage tasks.
+
 - Key provider balances (P0-5b2): host-known balance readers live in the
   plan-quota provider plugin behind `BalanceQuota`, while custom balance URLs
   and expression fields stay in the kernel provider reader. Fresh balance reads

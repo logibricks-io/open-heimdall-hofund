@@ -23,9 +23,15 @@ pub struct Usage {
     /// Prompt tokens served from a cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u64>,
-    /// Prompt tokens written into a cache.
+    /// Prompt tokens written into a cache (total when the protocol reports one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+    /// Prompt cache writes billed at the five-minute TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m_tokens: Option<u64>,
+    /// Prompt cache writes billed at the one-hour TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u64>,
     /// Output tokens spent on reasoning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
@@ -42,6 +48,8 @@ impl Usage {
         merge_counter(&mut self.total_tokens, patch.total_tokens);
         merge_counter(&mut self.cache_read_tokens, patch.cache_read_tokens);
         merge_counter(&mut self.cache_write_tokens, patch.cache_write_tokens);
+        merge_counter(&mut self.cache_write_5m_tokens, patch.cache_write_5m_tokens);
+        merge_counter(&mut self.cache_write_1h_tokens, patch.cache_write_1h_tokens);
         merge_counter(&mut self.reasoning_tokens, patch.reasoning_tokens);
         self.extensions.absorb(&patch.extensions);
     }
@@ -74,6 +82,34 @@ fn merge_counter(slot: &mut Option<u64>, patch: Option<u64>) {
     if let Some(value) = patch {
         *slot = Some(value);
     }
+}
+
+/// Fills cache-write totals and TTL splits the way the reference ledger does.
+///
+/// When the protocol sends `cache_creation` counts, five-minute and one-hour
+/// tokens are taken from there. When only a total is given, it counts as
+/// five-minute write and one-hour is zero.
+#[must_use]
+pub fn normalize_cache_write(
+    reported_total: Option<u64>,
+    five_minute: Option<u64>,
+    one_hour: Option<u64>,
+) -> (Option<u64>, Option<u64>, Option<u64>) {
+    if five_minute.is_some() || one_hour.is_some() {
+        let five = five_minute.unwrap_or(0);
+        let hour = one_hour.unwrap_or(0);
+        let total = reported_total
+            .map(|total| total.max(five.saturating_add(hour)))
+            .or_else(|| Some(five.saturating_add(hour)))
+            .filter(|total| *total > 0 || five > 0 || hour > 0);
+        let five = (five > 0)
+            .then_some(five)
+            .or_else(|| total.map(|total| total.saturating_sub(hour)));
+        let hour = (hour > 0).then_some(hour);
+        return (total, five, hour);
+    }
+    let total = reported_total.filter(|total| *total > 0);
+    (total, total, Some(0))
 }
 
 #[cfg(test)]

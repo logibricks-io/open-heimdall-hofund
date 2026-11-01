@@ -900,6 +900,8 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
         total_tokens: take_u64(&mut object, "totalTokenCount")?,
         cache_read_tokens: take_u64(&mut object, "cachedContentTokenCount")?,
         cache_write_tokens: None,
+        cache_write_5m_tokens: None,
+        cache_write_1h_tokens: None,
         reasoning_tokens: take_u64(&mut object, "thoughtsTokenCount")?,
         extensions: Extensions::from_map(object),
     })

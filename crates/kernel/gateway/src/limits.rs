@@ -454,31 +454,53 @@ pub(super) async fn limit_route(State(app): State<Arc<Inner>>, request: Request)
     )
 }
 
-pub(super) fn observe_usage(meta: &mut super::UsageMeta, usage: &Usage, protocol: &str) {
+pub(super) fn observe_usage(
+    meta: &mut super::UsageMeta,
+    usage: &Usage,
+    protocol: &str,
+    saw_reasoning: bool,
+) {
+    if saw_reasoning {
+        meta.saw_reasoning = true;
+    }
     let input = super::as_i64(usage.input_tokens);
     let output = super::as_i64(usage.output_tokens);
-    let cache_read = super::as_i64(usage.cache_read_tokens);
-    let cache_write = super::as_i64(usage.cache_write_tokens);
     if input.is_some() {
         meta.input = input;
     }
     if output.is_some() {
         meta.output = output;
     }
-    if cache_read.is_some() {
-        meta.details.cache_read_tokens = cache_read;
+    if let Some(value) = super::as_i64(usage.cache_read_tokens) {
+        meta.details.cache_read_tokens = Some(value);
     }
-    if cache_write.is_some() {
-        meta.details.cache_write_tokens = cache_write;
+    let (total, five, hour) = hofund_ir::normalize_cache_write(
+        usage.cache_write_tokens,
+        usage.cache_write_5m_tokens,
+        usage.cache_write_1h_tokens,
+    );
+    if let Some(value) = super::as_i64(total) {
+        meta.details.cache_write_tokens = Some(value);
+    }
+    if let Some(value) = super::as_i64(five) {
+        meta.details.cache_write_5m_tokens = Some(value);
+    }
+    if let Some(value) = super::as_i64(hour) {
+        meta.details.cache_write_1h_tokens = Some(value);
+    }
+    if let Some(value) = super::as_i64(usage.reasoning_tokens) {
+        meta.details.reasoning_tokens = Some(value);
     }
     if let Some(input) = input {
         let cached = if input_includes_cache(protocol) {
-            cache_read.unwrap_or(0)
+            meta.details.cache_read_tokens.unwrap_or(0)
         } else {
             0
         };
         meta.details.uncached_input_tokens = Some(input.saturating_sub(cached));
     }
+    meta.details.reasoning_hidden =
+        super::reasoning_hidden(protocol, meta.saw_reasoning, meta.details.reasoning_tokens);
 }
 
 pub(super) fn input_includes_cache(protocol: &str) -> bool {
@@ -704,6 +726,7 @@ mod tests {
                     caller_key_id: "key".to_owned(),
                     caller_key_name: "Busy".to_owned(),
                     caller_issuer_id: String::new(),
+                    ..Default::default()
                 },
                 None,
                 UsageDetails {
@@ -742,6 +765,7 @@ mod tests {
                 caller_key_id: "key".to_owned(),
                 caller_key_name: "Busy".to_owned(),
                 caller_issuer_id: String::new(),
+                ..Default::default()
             })
             .expect("record");
         let status = budget.status(&identity, now).expect("status").remove(0);
@@ -854,6 +878,7 @@ mod tests {
                 caller_key_id: "key".to_owned(),
                 caller_key_name: "Busy".to_owned(),
                 caller_issuer_id: String::new(),
+                ..Default::default()
             })
             .expect("record");
         let held = budget
@@ -911,6 +936,7 @@ mod tests {
                 caller_key_id: child.key_id.clone(),
                 caller_key_name: child.key_name.clone(),
                 caller_issuer_id: parent.key_id.clone(),
+                ..Default::default()
             })
             .expect("issued usage");
         let status = budget.status(&parent, now).expect("persisted").remove(0);

@@ -1646,12 +1646,16 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
         }
         None => None,
     };
+    let (cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens) =
+        hofund_ir::normalize_cache_write(cache_write_tokens, None, None);
     Ok(Usage {
         input_tokens,
         output_tokens,
         total_tokens,
         cache_read_tokens,
         cache_write_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
         reasoning_tokens,
         extensions: Extensions::from_map(object),
     })
