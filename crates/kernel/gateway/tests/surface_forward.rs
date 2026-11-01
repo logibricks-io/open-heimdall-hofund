@@ -57,9 +57,12 @@ impl hofund_router::Member for Fake {
 }
 
 static ID: SurfaceId = SurfaceId::from_static("forwarder");
-static ROUTES: [RouteSpec; 1] = [RouteSpec::from_static(Method::Post, "/embed")];
+static ROUTES: [RouteSpec; 2] = [
+    RouteSpec::from_static(Method::Post, "/embed"),
+    RouteSpec::from_static(Method::Post, "/speech"),
+];
 
-/// Forwards the body's text as the model name to `/embeddings`, and answers
+/// Forwards the body's text as the model name to a retrieval path, and answers
 /// with the provider's status and body, or the error's status and message.
 struct Forwarder;
 
@@ -79,20 +82,27 @@ impl InboundSurface for Forwarder {
         request: axum::http::Request<hofund_plugin_api::Body>,
         host: &SurfaceHost,
     ) -> Result<axum::http::Response<BodyStream>, PluginError> {
+        let path = if request.uri().path() == "/speech" {
+            "/audio/speech"
+        } else {
+            "/embeddings"
+        };
         let model = String::from_utf8_lossy(request.body().bytes()).into_owned();
-        let call = Forward::new(model, "/embeddings", |wire| {
+        let call = Forward::new(model, path, |wire| {
             Ok(RawBody::new("application/json", format!("m={wire}")))
         })?;
         let (status, body) = match host.gateway().forward(call).await {
-            Ok(answer) => (answer.status(), answer.body().to_vec()),
+            Ok(answer) => (answer.status(), answer.into_body_stream()),
             Err(error) => (
                 error.status().unwrap_or(599),
-                format!("{:?}:{}", error.kind(), error.message()).into_bytes(),
+                BodyStream::from_bytes(
+                    format!("{:?}:{}", error.kind(), error.message()).into_bytes(),
+                ),
             ),
         };
         Ok(axum::http::Response::builder()
             .status(status)
-            .body(BodyStream::from_bytes(body))
+            .body(body)
             .expect("response"))
     }
 }
@@ -194,9 +204,17 @@ fn fixture(members: &[(&'static str, Option<&str>, Answer)]) -> Fixture {
 }
 
 async fn embed(fixture: &Fixture, model: &'static str) -> (StatusCode, String) {
+    send(fixture, "/embed", model).await
+}
+
+async fn speech(fixture: &Fixture) -> (StatusCode, String) {
+    send(fixture, "/speech", "vectors").await
+}
+
+async fn send(fixture: &Fixture, path: &str, model: &'static str) -> (StatusCode, String) {
     let request = Request::builder()
         .method("POST")
-        .uri("/embed")
+        .uri(path)
         .header("authorization", "Bearer secret")
         .body(Body::from(model))
         .expect("request");
@@ -338,4 +356,160 @@ async fn a_name_two_providers_serve_is_a_bad_request() {
         ("", "400")
     );
     assert!(fixture.seen.lock().expect("seen").is_empty());
+}
+
+fn streamed_speech(chunks: Vec<Vec<u8>>) -> Result<RawAnswer, PluginError> {
+    let body = BodyStream::unfold(chunks.into_iter(), |mut chunks| async move {
+        chunks.next().map(|chunk| (Ok(chunk), chunks))
+    });
+    Ok(RawAnswer::streaming(
+        200,
+        Some("text/event-stream".to_owned()),
+        body,
+    ))
+}
+
+fn counted_speech() -> Result<RawAnswer, PluginError> {
+    streamed_speech(vec![
+        br#"data: {"type":"speech.audio.delta","audio":"SUQz"}"#.to_vec(),
+        b"\n\ndata: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":12,\"output_tokens\":340}}\n\n".to_vec(),
+    ])
+}
+
+fn stale_speech_usage() -> Result<RawAnswer, PluginError> {
+    streamed_speech(vec![
+        b"data: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":99,\"output_tokens\":99}}\n\n".to_vec(),
+        format!(": {}\n", "x".repeat(16 * 1024)).into_bytes(),
+    ])
+}
+
+fn speech_audio() -> Result<RawAnswer, PluginError> {
+    Ok(RawAnswer::streaming(
+        200,
+        Some("audio/mpeg".to_owned()),
+        BodyStream::from_bytes(b"audio".to_vec()),
+    ))
+}
+
+#[tokio::test]
+async fn p1_4_08_sse_usage_tail() {
+    let fixture = fixture(&[("member", None, counted_speech)]);
+    let (status, body) = speech(&fixture).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("speech.audio.done"), "{body}");
+    let rows = fixture.usage.rows().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].input_tokens, rows[0].output_tokens),
+        (Some(12), Some(340))
+    );
+    assert_eq!(
+        fixture.events.started.lock().expect("started").as_slice(),
+        [("vectors".to_owned(), "speech".to_owned())]
+    );
+    assert_eq!(
+        fixture.events.finished.lock().expect("finished").as_slice(),
+        [(Some("member".to_owned()), 200, Some(12), Some(340))]
+    );
+
+    let stale = crate::fixture(&[("member", None, stale_speech_usage)]);
+    let (status, _) = speech(&stale).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = stale.usage.rows().expect("rows");
+    assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (None, None));
+}
+
+fn vendor_json_speech_usage() -> Result<RawAnswer, PluginError> {
+    streamed_speech(vec![
+        b"{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n".to_vec(),
+        br#"{"audio":"SUQz"}"#.to_vec(),
+        b"\n{\"usage\":{\"input_tokens\":5,\"output_tokens\":7}}\n".to_vec(),
+        b"{\"done\":true}\n".to_vec(),
+    ])
+}
+
+#[tokio::test]
+async fn p1_4_13_usage_from_last_line_with_usage_whatever_its_type() {
+    let fixture = fixture(&[("member", None, vendor_json_speech_usage)]);
+    let (status, _) = speech(&fixture).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = fixture.usage.rows().expect("rows");
+    assert_eq!(
+        (rows[0].input_tokens, rows[0].output_tokens),
+        (Some(5), Some(7))
+    );
+}
+
+fn cut_short_speech() -> Result<RawAnswer, PluginError> {
+    let chunks: Vec<Result<Vec<u8>, PluginError>> = vec![
+        Ok(b"data: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}\n\n".to_vec()),
+        Err(PluginError::status_error(502, "upstream cut")),
+    ];
+    let body = BodyStream::unfold(chunks.into_iter(), |mut chunks| async move {
+        chunks.next().map(|chunk| (chunk, chunks))
+    });
+    Ok(RawAnswer::streaming(
+        200,
+        Some("text/event-stream".to_owned()),
+        body,
+    ))
+}
+
+#[tokio::test]
+async fn p1_4_14_cut_short_stream_counts_no_tokens() {
+    let fixture = fixture(&[("member", None, cut_short_speech)]);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/speech")
+        .header("authorization", "Bearer secret")
+        .body(Body::from("vectors"))
+        .expect("request");
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .is_err()
+    );
+    let rows = fixture.usage.rows().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (None, None));
+}
+
+#[tokio::test]
+async fn p1_4_09_errors_failover() {
+    let fixture = fixture(&[
+        ("first", Some("wire-a"), || {
+            Err(PluginError::quota_status(429, "busy"))
+        }),
+        ("second", Some("wire-b"), speech_audio),
+    ]);
+    let (status, body) = speech(&fixture).await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "audio"));
+    assert_eq!(
+        fixture.seen.lock().expect("seen").as_slice(),
+        [
+            "first/audio/speech:m=wire-a",
+            "second/audio/speech:m=wire-b"
+        ]
+    );
+    let rows = fixture.usage.rows().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].upstream.as_str(), rows[0].status.as_str()),
+        ("second", "200")
+    );
+
+    let refused = crate::fixture(&[("only", None, || {
+        Err(PluginError::status_error(400, "voice refused"))
+    })]);
+    let (status, body) = speech(&refused).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("voice refused"), "{body}");
+    assert_eq!(refused.usage.rows().expect("rows")[0].status, "400");
 }

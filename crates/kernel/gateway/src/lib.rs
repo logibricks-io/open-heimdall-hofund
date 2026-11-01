@@ -944,7 +944,11 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             RequestStart {
                 request_id: next_request_id(),
                 route: call.model().to_owned(),
-                inbound_protocol: call.path().to_owned(),
+                inbound_protocol: if call.path() == "/audio/speech" {
+                    "speech".to_owned()
+                } else {
+                    call.path().to_owned()
+                },
                 started_at_ms: unix_ms_now(),
             },
         );
@@ -1011,8 +1015,18 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 let answer = forwarded.answer;
                 let status =
                     StatusCode::from_u16(answer.status()).unwrap_or(StatusCode::BAD_GATEWAY);
-                let (input, output) = forwarded_tokens(answer.body());
                 let mut meta = usage(&forwarded.upstream_id);
+                if answer.is_streaming() {
+                    return Ok(streamed_forward(
+                        answer,
+                        Arc::clone(&app.usage),
+                        meta,
+                        &mut track,
+                        forwarded.upstream_id,
+                        status,
+                    ));
+                }
+                let (input, output) = forwarded_tokens(answer.body());
                 meta.details = forwarded_details(answer.body(), input);
                 write_usage(&app.usage, &meta, Some((input, output)), status);
                 track.end_with(
@@ -1058,6 +1072,109 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             }
         }
     }
+}
+
+const SPEECH_TAIL: usize = 16 * 1024;
+
+struct ForwardStream {
+    body: BodyStream,
+    end: Option<ForwardStreamEnd>,
+}
+
+struct ForwardStreamEnd {
+    usage: Arc<Ledger>,
+    meta: UsageMeta,
+    track: RequestTrack,
+    member: String,
+    status: StatusCode,
+    tail: Vec<u8>,
+}
+
+impl ForwardStream {
+    fn finish(&mut self) {
+        let Some(mut end) = self.end.take() else {
+            return;
+        };
+        let (input, output) = speech_tokens(&end.tail);
+        write_usage(&end.usage, &end.meta, Some((input, output)), end.status);
+        end.track.end_with(
+            Some(end.member),
+            end.status.as_u16(),
+            input.and_then(|value| u64::try_from(value).ok()),
+            output.and_then(|value| u64::try_from(value).ok()),
+        );
+    }
+}
+
+impl Drop for ForwardStream {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn streamed_forward(
+    answer: hofund_plugin_api::RawAnswer,
+    usage: Arc<Ledger>,
+    meta: UsageMeta,
+    track: &mut RequestTrack,
+    member: String,
+    status: StatusCode,
+) -> hofund_plugin_api::RawAnswer {
+    let content_type = answer.content_type().map(str::to_owned);
+    let state = ForwardStream {
+        body: answer.into_body_stream(),
+        end: Some(ForwardStreamEnd {
+            usage,
+            meta,
+            track: track.take_for_stream(),
+            member,
+            status,
+            tail: Vec::new(),
+        }),
+    };
+    let body = BodyStream::unfold(state, |mut state| async move {
+        match state.body.next_chunk().await {
+            Some(Ok(chunk)) => {
+                if let Some(end) = &mut state.end {
+                    end.tail.extend_from_slice(&chunk);
+                    if end.tail.len() > SPEECH_TAIL {
+                        let excess = end.tail.len() - SPEECH_TAIL;
+                        end.tail.drain(..excess);
+                    }
+                }
+                Some((Ok(chunk.to_vec()), state))
+            }
+            Some(Err(error)) => {
+                // cut short: the reference counts no tokens for it
+                if let Some(end) = &mut state.end {
+                    end.tail.clear();
+                }
+                state.finish();
+                Some((Err(error), state))
+            }
+            None => {
+                state.finish();
+                None
+            }
+        }
+    });
+    hofund_plugin_api::RawAnswer::streaming(status.as_u16(), content_type, body)
+}
+
+fn speech_tokens(tail: &[u8]) -> (Option<i64>, Option<i64>) {
+    for line in tail.split(|byte| *byte == b'\n').rev() {
+        let line = line.trim_ascii();
+        let line = line.strip_prefix(b"data:").unwrap_or(line).trim_ascii();
+        // the last JSON or SSE data line that carries a usage object, as the
+        // reference reads it: a speech.audio.done event or a vendor's JSON
+        if !line.windows(7).any(|window| window == b"\"usage\"") {
+            continue;
+        }
+        if serde_json::from_slice::<serde_json::Value>(line).is_ok() {
+            return forwarded_tokens(line);
+        }
+    }
+    (None, None)
 }
 
 /// Input and output tokens in a forwarded JSON answer, read the way the

@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-retrieval"
-description = "Inbound plugin. Serves embeddings, reranking, and speech to text by forwarding them to a provider of the model."
+description = "Inbound plugin. Serves embeddings, reranking, speech to text, and text to speech by forwarding them to a provider of the model."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
