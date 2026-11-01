@@ -7,8 +7,10 @@
 
 pub mod control;
 mod endpoints;
+mod me;
 mod prev_response;
 mod quotas;
+mod readonly;
 mod refusal_handover;
 mod relisten;
 mod responses_ws;
@@ -41,7 +43,7 @@ use endpoints::{
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use hofund_codec::{
-    Codec, SESSION_HEADERS, SUBAGENT_HEADER, StreamEncoder, compacts_in_stream_client,
+    Codec, EndWatch, SESSION_HEADERS, SUBAGENT_HEADER, StreamEncoder, compacts_in_stream_client,
     conversation_key, turn_in,
 };
 use hofund_ir::{Request as ModelRequest, StreamEvent, too_long, words_of};
@@ -804,27 +806,37 @@ impl Drop for Running {
 
 /// The complete outer request path, also used to replay a socket turn.
 fn request_router(app: &Arc<Inner>) -> axum::Router {
-    let mut routes = codec_routes(app);
-    if app.quota_source.is_some() {
-        routes = quotas::routes(routes);
-    }
-    if !app.surfaces.is_empty() {
-        routes = routes.fallback(dispatch_surface);
-    }
-    routes
+    request_routes(app)
+        .router
         .with_state(Arc::clone(app))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(app),
             responses_ws::path_guard,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(app),
+            readonly::guard,
+        ))
+}
+
+fn request_routes(app: &Arc<Inner>) -> readonly::RouteSet {
+    let mut routes = me::routes(codec_routes(app));
+    if app.quota_source.is_some() {
+        routes = quotas::routes(routes);
+    }
+    if !app.surfaces.is_empty() {
+        routes.patterns.push("*".to_owned());
+        routes.router = routes.router.fallback(dispatch_surface);
+    }
+    routes
 }
 
 /// `/health`, the model lists and every codec route. Surfaces are not here,
 /// so the in-process gateway a surface calls cannot reach another surface.
-fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
-    let mut routes = axum::Router::new()
-        .route("/health", get(health))
-        .route("/v1/models", get(models));
+fn codec_routes(inner: &Inner) -> readonly::RouteSet {
+    let mut routes = readonly::RouteSet::new()
+        .route(&["GET"], "/health", get(health))
+        .route(&["GET"], "/v1/models", get(models));
     let generative =
         inner.codecs.contains_key(GENERATIVE_UNARY) || inner.codecs.contains_key(GENERATIVE_STREAM);
     let responses = inner
@@ -837,22 +849,32 @@ fn codec_routes(inner: &Inner) -> axum::Router<Arc<Inner>> {
         if path.contains('{') || responses && responses_ws::is_responses_path(&path) {
             continue;
         }
-        routes = routes.route(&path, post(complete));
+        routes = routes.route(&["POST"], &path, post(complete));
     }
     if responses {
         routes = routes
-            .route("/v1/responses", post(complete).get(responses_ws::get))
-            .route("/responses", post(complete).get(responses_ws::get));
+            .route(
+                &["GET", "POST"],
+                "/v1/responses",
+                post(complete).get(responses_ws::get),
+            )
+            .route(
+                &["GET", "POST"],
+                "/responses",
+                post(complete).get(responses_ws::get),
+            );
     }
     if messages {
-        routes = routes.route("/v1/messages/count_tokens", post(complete));
+        routes = routes.route(&["POST"], "/v1/messages/count_tokens", post(complete));
     }
     if generative {
         routes = routes
-            .route(GENERATIVE_CATCHALL, post(complete))
-            .route(GENERATIVE_LIST, get(generative_models));
+            .route(&["POST"], GENERATIVE_CATCHALL, post(complete))
+            .route(&["GET"], GENERATIVE_LIST, get(generative_models));
     }
-    routes.fallback(not_found)
+    routes.patterns.push("*".to_owned());
+    routes.router = routes.router.fallback(not_found);
+    routes
 }
 
 /// The gateway's codec routes, run in process for an inbound surface.
@@ -881,7 +903,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
         parts.headers.insert(header::AUTHORIZATION, bearer);
         parts.extensions.insert(self.identity.clone());
         let request = Request::from_parts(parts, Body::from(body.bytes().clone()));
-        let router = codec_routes(&app).with_state(Arc::clone(&app));
+        let router = codec_routes(&app).router.with_state(Arc::clone(&app));
         let response = tower::ServiceExt::oneshot(router, request)
             .await
             .unwrap_or_else(|never| match never {});
@@ -1936,11 +1958,10 @@ async fn raw_body(
         let tap = codec.raw_tap(&request.model, upstream_model);
         let on_error = {
             let codec = Arc::clone(&codec);
-            move |error: &PluginError| {
-                codec.encode_stream_error(status_of(error).as_u16(), &broken_off(error))
-            }
+            move |message: &str| codec.encode_stream_failure(message)
         };
         let owned = track.take_for_stream();
+        let event_stream = content_type == "text/event-stream";
         let relay = RawRelay {
             body,
             meta,
@@ -1948,7 +1969,10 @@ async fn raw_body(
             tap,
             on_error,
             severed_end: codec.severed_stream_end(),
-            lines: (content_type == "text/event-stream").then(LineHold::default),
+            lines: event_stream.then(LineHold::default),
+            ends: event_stream
+                .then(|| EndWatch::new(codec.stream_end()))
+                .flatten(),
             sent_tail: Vec::new(),
             phase: 0,
             track: Some(owned),
@@ -2259,6 +2283,9 @@ struct RawRelay<E> {
     /// Holds an unfinished last line of an event stream. `None` for other
     /// stream framings.
     lines: Option<LineHold>,
+    /// Watches an event stream for its last event. `None` when the framing
+    /// or the protocol has none to check.
+    ends: Option<EndWatch>,
     /// The last few bytes the client got, to place an appended event.
     sent_tail: Vec<u8>,
     /// 0 relays, 1 records a clean end, 2 is done.
@@ -2269,7 +2296,7 @@ struct RawRelay<E> {
 
 impl<E> RawRelay<E>
 where
-    E: Fn(&PluginError) -> Vec<u8>,
+    E: Fn(&str) -> Vec<u8>,
 {
     fn finish(&mut self, status: StatusCode) {
         write_usage(
@@ -2294,6 +2321,28 @@ where
         self.meta.output = output.or(self.meta.output);
     }
 
+    /// The last bytes of an event stream that ended cleanly before its last
+    /// event: what it sent without a half line, then the protocol's failure
+    /// event, and a 502 row (`reference: internal/gateway/gateway.go:5955-5990`,
+    /// `internal/gateway/codex_backend.go:1490-1500`).
+    fn ended_short(&mut self, mut out: Vec<u8>) -> Bytes {
+        self.phase = 2;
+        self.finish(StatusCode::BAD_GATEWAY);
+        drop_half_line(&mut out);
+        let before = match (out.is_empty(), self.sent_tail.is_empty()) {
+            (true, true) => &b""[..],
+            (true, false) => event_gap(&self.sent_tail),
+            (false, _) => event_gap(&out),
+        };
+        out.extend_from_slice(before);
+        let message = match self.member.as_deref() {
+            Some(member) => format!("{member}: {ENDED_SHORT}"),
+            None => ENDED_SHORT.to_owned(),
+        };
+        out.extend((self.on_error)(&message));
+        Bytes::from(out)
+    }
+
     /// The next bytes for the client, or `None` when the stream is over.
     /// An empty chunk is a step that forwarded nothing.
     async fn next(&mut self) -> Option<Bytes> {
@@ -2312,6 +2361,12 @@ where
                 self.note_tokens();
                 if let Some(lines) = self.lines.as_mut() {
                     tail = lines.release(&tail);
+                }
+                if let Some(ends) = self.ends.as_mut() {
+                    ends.lines(&tail);
+                    if !ends.reached() {
+                        return Some(self.ended_short(tail));
+                    }
                 }
                 if tail.is_empty() {
                     self.phase = 2;
@@ -2337,7 +2392,7 @@ where
                     (false, _) => event_gap(&out),
                 };
                 out.extend_from_slice(before);
-                out.extend((self.on_error)(&error));
+                out.extend((self.on_error)(&broken_off(&error)));
                 if self.lines.is_some() {
                     out.extend_from_slice(self.severed_end);
                 }
@@ -2349,6 +2404,9 @@ where
                 self.note_tokens();
                 if let Some(lines) = self.lines.as_mut() {
                     forwarded = lines.push(&forwarded);
+                }
+                if let Some(ends) = self.ends.as_mut() {
+                    ends.lines(&forwarded);
                 }
                 if !forwarded.is_empty() {
                     let keep = forwarded.len().saturating_sub(4);
@@ -2396,14 +2454,20 @@ impl LineHold {
     /// half line no client can parse.
     fn drop_half(&mut self, tail: &[u8]) -> Vec<u8> {
         let mut out = self.release(tail);
-        let start = out
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
-        if !whole_data_line(&out[start..]) {
-            out.truncate(start);
-        }
+        drop_half_line(&mut out);
         out
+    }
+}
+
+/// Drops an unfinished last line no client can parse, unless it is a whole
+/// `data:` line short of its line end.
+fn drop_half_line(out: &mut Vec<u8>) {
+    let start = out
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    if !whole_data_line(&out[start..]) {
+        out.truncate(start);
     }
 }
 

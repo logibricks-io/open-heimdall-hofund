@@ -202,7 +202,7 @@ impl DaemonControl {
             GatewayKeyAction::Add => {
                 let added = self
                     .keys
-                    .add(&request.name, request.secret.as_deref())
+                    .add_with_access(&request.name, request.secret.as_deref(), request.read_only)
                     .map_err(key_failure)?;
                 secret = Some(added.secret);
             }

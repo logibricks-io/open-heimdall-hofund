@@ -33,7 +33,7 @@ pub use openai_responses::{
     OpenAiResponses, PLUGIN_HOST_PREFIX, STREAM_CLIENT_PREFIXES, STREAM_TURN_METADATA_HEADER,
     STREAM_WINDOW_HEADER, UNMAPPED_TOOLS, compacts_in_stream_client,
 };
-pub use passthrough::RawTap;
+pub use passthrough::{EndWatch, RawTap, StreamEnd};
 pub use refusal::refusal_error;
 
 use hofund_ir::{Request, Response, StreamEvent};
@@ -209,6 +209,24 @@ pub trait Codec: Send + Sync {
         out.extend_from_slice(&json);
         out.extend_from_slice(b"\n\n");
         out
+    }
+
+    /// Encodes the failure that ends a relayed stream cut mid-reply: a read
+    /// that failed, or a stream that ended before its last event.
+    ///
+    /// The frame is each protocol's own mid-reply failure
+    /// (`reference: internal/gateway/gateway.go:6008-6034`). The default is
+    /// [`Codec::encode_stream_error`] with status 502, which is already that
+    /// shape for Messages. Chat, Responses, and Generative Language override it.
+    fn encode_stream_failure(&self, message: &str) -> Vec<u8> {
+        self.encode_stream_error(502, message)
+    }
+
+    /// How a relayed event stream in this protocol says it reached its last
+    /// event, so a stream that ends short of it can be told apart from a
+    /// whole one. The default is [`StreamEnd::Unchecked`].
+    fn stream_end(&self) -> StreamEnd {
+        StreamEnd::Unchecked
     }
 
     /// Bytes that end a relayed stream after [`Codec::encode_stream_error`]

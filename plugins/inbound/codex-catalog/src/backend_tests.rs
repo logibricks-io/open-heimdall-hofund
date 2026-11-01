@@ -798,6 +798,22 @@ fn d23_1_a_summary_stream_ended_short_compacts_locally() {
     let summary = super::backend::local_summary(body.to_string().as_bytes(), "cut");
     assert!(!summary.contains(&old));
     assert!(summary.contains("latest 1 of 2 messages"), "{summary}");
+
+    let exact = "y".repeat(super::backend::LOCAL_SUMMARY_MAX);
+    let body = json!({"input": [
+        {"type": "message", "role": "user", "content": exact},
+        {"type": "message", "role": "user", "content": super::input::COMPACT_PROMPT},
+    ]});
+    let summary = super::backend::local_summary(body.to_string().as_bytes(), "cut");
+    assert!(
+        summary.contains(&exact),
+        "a message of exactly the cap is kept"
+    );
+    assert!(!summary.contains("messages)"), "{}", &summary[..200]);
+    assert!(
+        !summary.contains(super::input::COMPACT_PROMPT.trim()),
+        "the compaction prompt is not a user ask"
+    );
 }
 
 #[test]

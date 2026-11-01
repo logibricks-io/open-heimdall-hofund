@@ -44,6 +44,19 @@ async fn k12_control_api_supports_every_action_and_backup() {
         .expect("add");
     assert_eq!(added.secret.as_deref(), Some("control-secret-123"));
     let id = added.keys.last().expect("added key").id.clone();
+    let viewer = client
+        .change_gateway_key(request(GatewayKeyAction::Add, |request| {
+            request.name = "Viewer".to_owned();
+            request.read_only = true;
+        }))
+        .await
+        .expect("add read-only");
+    let viewer_key = viewer
+        .keys
+        .iter()
+        .find(|key| key.name == "Viewer")
+        .expect("viewer key");
+    assert!(viewer_key.read_only, "add keeps the read-only flag");
     let change = |action| GatewayKeyRequest::new(action).for_id(&id);
     let changed = |action, configure: &dyn Fn(&mut GatewayKeyRequest)| {
         let mut request = change(action);

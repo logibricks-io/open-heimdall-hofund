@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>hofund gateway key</title>
+<style>
+:root { color-scheme: light dark; --bg:#f5f5f7; --card:#fff; --text:#1d1d1f; --sub:#6e6e73; --line:#d2d2d7; --accent:#0071e3; --bad:#d70015; }
+@media (prefers-color-scheme:dark) { :root { --bg:#000; --card:#1c1c1e; --text:#f5f5f7; --sub:#98989d; --line:#38383a; --accent:#0a84ff; --bad:#ff453a; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+main { max-width:680px; margin:auto; padding:40px 16px 64px; }
+h1 { font-size:26px; margin:0 0 8px; overflow-wrap:anywhere; }
+h2 { font-size:13px; color:var(--sub); margin:28px 4px 8px; }
+p { margin:0 0 10px; }
+.card { background:var(--card); border-radius:12px; padding:16px; box-shadow:0 0 0 .5px var(--line); margin-top:10px; }
+.sub,.note { color:var(--sub); } .note { font-size:12px; margin-top:8px; }
+.row { display:flex; gap:8px; align-items:center; } .grow { flex:1; min-width:0; }
+input { width:100%; font:inherit; color:var(--text); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:9px 11px; }
+button { font:inherit; cursor:pointer; border:0; border-radius:8px; padding:8px 14px; background:var(--card); color:var(--text); box-shadow:0 0 0 .5px var(--line); }
+button.primary { background:var(--accent); color:white; } button:disabled { opacity:.5; }
+.error { color:var(--bad); margin-top:10px; } [hidden] { display:none !important; }
+.stats { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+.stat .v { font-size:20px; font-weight:600; } .stat .k,.stat .s { color:var(--sub); font-size:12px; }
+ul { list-style:none; padding:0; margin:0; } li { padding:6px 0; overflow-wrap:anywhere; }
+pre { background:var(--bg); border-radius:8px; padding:12px; overflow:auto; font:12px/1.5 ui-monospace,monospace; }
+.tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+.tabs button[aria-selected=true] { outline:2px solid var(--accent); }
+.models { max-height:260px; overflow:auto; } .models button { display:block; width:100%; text-align:left; margin:4px 0; }
+@media(max-width:480px) { main { padding-top:24px; } .stats { gap:6px; } .stat .v { font-size:17px; } }
+</style>
+</head>
+<body>
+<main>
+<section id="signin">
+  <h1>Your gateway key</h1>
+  <p class="sub">Enter your key to see its own usage, allowed models, and agent setup.</p>
+  <form id="form" autocomplete="off">
+    <label for="key">Gateway key</label>
+    <div class="row"><input id="key" type="password" spellcheck="false" autocapitalize="off" autocomplete="off"><button class="primary" id="go" type="submit">Continue</button></div>
+    <p class="error" id="error" role="alert" hidden></p>
+    <p class="note">The key stays in this tab and is sent only to this gateway.</p>
+  </form>
+</section>
+<section id="info" hidden>
+  <div class="row"><div class="grow"><p class="sub">Gateway key</p><h1 id="name"></h1></div><button id="refresh" type="button">Refresh</button><button id="forget" type="button">Forget key</button></div>
+  <p class="error" id="refreshError" role="alert" hidden></p>
+  <h2>Limits</h2><div class="card" id="limits"></div>
+  <h2>Usage</h2><div class="card stats" id="usage"></div>
+  <div class="card"><p class="sub">Most used, last 30 days</p><ul id="top"></ul></div>
+  <div id="setupBlock">
+    <h2>Set up</h2>
+    <div class="card">
+      <div class="tabs" id="tabs" role="tablist"></div>
+      <div id="snippet"></div>
+      <label class="note"><input type="checkbox" id="withKey"> Put my key in the setup</label>
+    </div>
+    <h2>Models this key can use</h2><div class="card models" id="models"></div>
+  </div>
+  <div class="card" id="readOnly" hidden><p>This key reads its usage only; it cannot call models.</p></div>
+</section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const node = document.createElement(tag); if (cls) node.className = cls; if (text != null) node.textContent = text; return node; };
+const BASE = location.origin + location.pathname.replace(/\/me\/?$/, "");
+const PLACEHOLDER = "YOUR_GATEWAY_KEY";
+const STORE = "hofund-gateway-key";
+const store = {
+  get() { try { return sessionStorage.getItem(STORE) || ""; } catch { return ""; } },
+  set(value) { try { value ? sessionStorage.setItem(STORE, value) : sessionStorage.removeItem(STORE); } catch {} },
+};
+let key = "", data = null, model = "", tab = "claude";
+const total = (u) => (u.input || 0) + (u.output || 0) + (u.cache_read || 0) + (u.cache_write || 0);
+const q = (value) => JSON.stringify(value);
+const sh = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
+async function load(secret) {
+  const response = await fetch(BASE + "/v1/hofund/me", { headers: { Authorization: "Bearer " + secret }, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" });
+  return { ok: response.ok, status: response.status, body: response.ok ? await response.json() : null };
+}
+function showError(node, status) {
+  node.textContent = status === 401 ? "This is not an enabled gateway key here." : "The gateway did not answer. Check the address and try again.";
+  node.hidden = false;
+}
+$("form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const secret = $("key").value.trim(); if (!secret) return $("key").focus();
+  $("go").disabled = true; $("error").hidden = true;
+  try {
+    const result = await load(secret);
+    if (!result.ok) return showError($("error"), result.status);
+    key = secret; store.set(secret); $("key").value = ""; show(result.body);
+  } catch { showError($("error"), 0); } finally { $("go").disabled = false; }
+});
+$("forget").onclick = () => { key = ""; data = null; store.set(""); $("info").hidden = true; $("signin").hidden = false; $("key").focus(); };
+$("refresh").onclick = async () => {
+  $("refreshError").hidden = true;
+  try { const result = await load(key); if (result.ok) show(result.body); else if (result.status === 401) $("forget").onclick(); else showError($("refreshError"), result.status); }
+  catch { showError($("refreshError"), 0); }
+};
+$("withKey").onchange = drawSetup;
+function show(next) {
+  data = next; $("signin").hidden = true; $("info").hidden = false; $("name").textContent = data.name || "";
+  drawLimits(); drawUsage();
+  const ids = (data.models || []).map((entry) => entry.id);
+  if (!ids.includes(model)) model = ids[0] || "";
+  $("setupBlock").hidden = !!data.readOnly; $("readOnly").hidden = !data.readOnly;
+  drawTabs(); drawSetup(); drawModels();
+}
+function drawLimits() {
+  const box = $("limits"); box.replaceChildren();
+  const limits = data.limits || [];
+  if (!limits.length) return box.append(el("p", "sub", "No limit on this key."));
+  for (const limit of limits) {
+    const name = limit.period === "days" ? `Every ${limit.days} days` : limit.period === "hours" ? `Every ${limit.hours} hours` : `Per ${limit.period}`;
+    box.append(el("p", "", name));
+    if (limit.tokenLimit) box.append(el("p", "sub", `${limit.tokens} of ${limit.tokenLimit} tokens; ${limit.tokensLeft} left`));
+    if (limit.costLimit) box.append(el("p", "sub", `$${limit.cost} of $${limit.costLimit}; $${limit.costLeft} left`));
+    if (limit.spent) box.append(el("p", "error", "Used up until it resets"));
+  }
+}
+function drawUsage() {
+  const box = $("usage"); box.replaceChildren();
+  for (const [period, label] of [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]]) {
+    const u = (data.usage || {})[period] || {};
+    const card = el("div", "stat"); card.append(el("div", "k", label), el("div", "v", String(total(u))), el("div", "s", `tokens · ${u.calls || 0} requests`)); box.append(card);
+  }
+  const top = $("top"); top.replaceChildren();
+  for (const entry of data.topModels || []) top.append(el("li", "", `${entry.id} · ${total(entry)} tokens`));
+  if (!top.children.length) top.append(el("li", "sub", "Nothing yet."));
+}
+const TABS = [["claude", "Claude Code"], ["codex", "Codex"], ["openai", "OpenAI-compatible"], ["curl", "Test"]];
+function drawTabs() {
+  const box = $("tabs"); box.replaceChildren();
+  for (const [id, label] of TABS) { const button = el("button", "", label); button.type = "button"; button.setAttribute("role", "tab"); button.setAttribute("aria-selected", String(id === tab)); button.onclick = () => { tab = id; drawTabs(); drawSetup(); }; box.append(button); }
+}
+function drawSetup() {
+  if (!data) return;
+  const box = $("snippet"); box.replaceChildren();
+  const secret = $("withKey").checked ? key : PLACEHOLDER;
+  const selected = model || "MODEL_ID";
+  let text;
+  if (tab === "claude") text = JSON.stringify({ env: { ANTHROPIC_BASE_URL: BASE, ANTHROPIC_AUTH_TOKEN: secret, ANTHROPIC_MODEL: selected, ANTHROPIC_DEFAULT_OPUS_MODEL: selected, ANTHROPIC_DEFAULT_SONNET_MODEL: selected, ANTHROPIC_DEFAULT_HAIKU_MODEL: selected } }, null, 2);
+  else if (tab === "codex") text = [`model = ${q(selected)}`, 'model_provider = "hofund"', "", "[model_providers.hofund]", 'name = "hofund"', `base_url = ${q(BASE + "/v1")}`, 'wire_api = "responses"', "supports_websockets = true", `experimental_bearer_token = ${q(secret)}`].join("\n");
+  else if (tab === "openai") text = [`Base URL: ${BASE}/v1`, `API key: ${secret}`, `Model: ${selected}`].join("\n");
+  else text = `curl ${BASE}/v1/chat/completions \\\n  -H ${sh("Authorization: Bearer " + secret)} \\\n  -H 'Content-Type: application/json' \\\n  -d ${sh(JSON.stringify({ model: selected, messages: [{ role: "user", content: "Say hi" }] }))}`;
+  box.append(el("pre", "", text));
+}
+function drawModels() {
+  const box = $("models"); box.replaceChildren();
+  const models = data.models || [];
+  if (!models.length) return box.append(el("p", "sub", "This key cannot use any model."));
+  for (const entry of models) { const button = el("button", "", entry.id); button.type = "button"; button.setAttribute("aria-pressed", String(entry.id === model)); button.onclick = () => { model = entry.id; drawModels(); drawSetup(); }; box.append(button); }
+}
+(async () => {
+  const saved = store.get(); if (!saved) return $("key").focus();
+  try { const result = await load(saved); if (result.ok) { key = saved; return show(result.body); } if (result.status === 401) store.set(""); } catch {}
+  $("key").focus();
+})();
+</script>
+</body>
+</html>
