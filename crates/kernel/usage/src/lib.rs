@@ -1,8 +1,8 @@
 //! One SQLite row per gateway request.
 //!
 //! The row stores the model, the upstream id, token totals, latency, and
-//! status. Cache counters stay on the canonical usage object and are not
-//! written here.
+//! status. Additive columns also keep uncached input and cache counters for
+//! gateway-key budgets while ordinary rows retain protocol input totals.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -12,7 +12,9 @@ use rusqlite::{Connection, params};
 use thiserror::Error;
 
 mod key;
-pub use key::{CallerModel, CallerTotals, KeyLimitWindow, key_limit_window};
+mod limits;
+pub use key::{CallerModel, CallerTotals};
+pub use limits::{KeyUsage, UsageDetails};
 
 /// A reporting window over the ledger.
 ///
@@ -164,6 +166,9 @@ impl Ledger {
             ("caller_key_id", "TEXT NOT NULL DEFAULT ''"),
             ("caller_key_name", "TEXT NOT NULL DEFAULT ''"),
             ("ttft_ms", "INTEGER"),
+            ("uncached_input_tokens", "INTEGER"),
+            ("cache_read_tokens", "INTEGER"),
+            ("cache_write_tokens", "INTEGER"),
         ] {
             ensure_column(&connection, column, declaration)?;
         }

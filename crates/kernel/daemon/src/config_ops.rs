@@ -236,10 +236,19 @@ impl ConfigOps {
         expected: &str,
         text: String,
     ) -> Result<ConfigResponse, ControlFailure> {
+        self.apply_with_key_moves(expected, text, Vec::new()).await
+    }
+
+    pub(crate) async fn apply_with_key_moves(
+        self: &Arc<Self>,
+        expected: &str,
+        text: String,
+        key_moves: Vec<(hofund_plugin_api::MemberId, hofund_plugin_api::MemberId)>,
+    ) -> Result<ConfigResponse, ControlFailure> {
         let _gate = self.gate.lock().await;
         let ops = Arc::clone(self);
         let expected = expected.to_owned();
-        let staged = run_blocking(move || ops.apply_locked(&expected, text)).await?;
+        let staged = run_blocking(move || ops.apply_locked(&expected, text, key_moves)).await?;
         Ok(self.finish(staged).await)
     }
 
@@ -291,7 +300,12 @@ impl ConfigOps {
         Ok((config, candidate))
     }
 
-    fn apply_locked(&self, expected: &str, text: String) -> Result<Staged, ControlFailure> {
+    fn apply_locked(
+        &self,
+        expected: &str,
+        text: String,
+        key_moves: Vec<(hofund_plugin_api::MemberId, hofund_plugin_api::MemberId)>,
+    ) -> Result<Staged, ControlFailure> {
         let _lock = self.lock()?;
         let (disk_revision, _) = self.read_disk()?;
         if disk_revision != expected {
@@ -313,7 +327,7 @@ impl ConfigOps {
             );
             write_failure(failure)
         })?;
-        self.publish(candidate, written.clone(), text)
+        self.publish(candidate, written.clone(), text, key_moves)
     }
 
     /// Emits `config_rejected` for a candidate that was not published.
@@ -345,7 +359,7 @@ impl ConfigOps {
                 return Err(invalid(issues));
             }
         };
-        self.publish(candidate, disk_revision.clone(), text)
+        self.publish(candidate, disk_revision.clone(), text, Vec::new())
             .map(Reloaded::Staged)
     }
 
@@ -356,11 +370,12 @@ impl ConfigOps {
         candidate: crate::runtime::Candidate,
         runtime_revision: String,
         text: String,
+        key_moves: Vec<(hofund_plugin_api::MemberId, hofund_plugin_api::MemberId)>,
     ) -> Result<Staged, ControlFailure> {
         let config = Arc::clone(candidate.config());
         let changed = self
             .runtime
-            .publish(candidate)
+            .publish(candidate, &key_moves)
             .map_err(|error| internal(format!("publication failed: {error}")))?;
         Ok(Staged {
             config,
@@ -775,6 +790,33 @@ mod tests {
             other => panic!("expected config_reloaded then snapshot_published, got {other:?}"),
         }
         assert!(!format!("{:?}", fixture.bus.control_frames()).contains(SECRET));
+    }
+
+    #[tokio::test]
+    async fn k6_replacement_move_survives_config_publication() {
+        let original = "listen = \"127.0.0.1:0\"\n[[providers]]\nid = \"first\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"first-key\"\n[[providers.keys]]\nkey = \"old-key\"\n[[routes]]\nmodel = \"m\"\nupstreams = [\"first\"]\n";
+        let fixture = fixture(original);
+        let old =
+            crate::membership::key_member_id("first", &crate::provider_keys::key_id("old-key"));
+        let new =
+            crate::membership::key_member_id("first", &crate::provider_keys::key_id("new-key"));
+        fixture
+            .runtime
+            .cooldown_book()
+            .record_failure(&old, &PluginError::credit_status(402, "out of credit"));
+        let candidate = original.replace("old-key", "new-key");
+        fixture
+            .ops
+            .apply_with_key_moves(
+                &revision(original.as_bytes()),
+                candidate,
+                vec![(old.clone(), new.clone())],
+            )
+            .await
+            .unwrap_or_else(|failure| panic!("apply: {:?}", failure.error));
+        let book = fixture.runtime.cooldown_book();
+        assert!(book.cooling(&old).is_none());
+        assert!(book.cooling(&new).is_some());
     }
 
     #[tokio::test]

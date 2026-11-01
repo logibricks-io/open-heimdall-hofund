@@ -7,6 +7,7 @@
 
 pub mod control;
 mod endpoints;
+mod limits;
 mod me;
 mod prev_response;
 mod quotas;
@@ -38,6 +39,7 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 
 use axum::response::Response;
 use axum::routing::{get, post};
+use chrono::Local;
 use endpoints::{
     GENERATIVE_CATCHALL, inject_target, match_count, match_generate, percent_decode, query_key,
 };
@@ -78,6 +80,7 @@ struct Inner {
     keys: Option<Arc<KeyStore>>,
     codecs: HashMap<String, Arc<dyn Codec>>,
     usage: Arc<Ledger>,
+    budget: limits::Budget,
     prev: prev_response::PrevStore,
     surfaces: Vec<Arc<dyn InboundSurface>>,
     /// Optional request-topic emitter. Absent when control is off.
@@ -229,6 +232,7 @@ struct RequestTrack {
     finished: bool,
     drop_status: u16,
     cancel_usage: Option<(Arc<Ledger>, UsageMeta)>,
+    reservation: Option<limits::Reservation>,
 }
 
 impl RequestTrack {
@@ -249,7 +253,13 @@ impl RequestTrack {
             finished: false,
             drop_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             cancel_usage: None,
+            reservation: None,
         }
+    }
+
+    fn with_reservation(mut self, reservation: Option<limits::Reservation>) -> Self {
+        self.reservation = reservation;
+        self
     }
 
     fn finish(&mut self, end: RequestEnd) {
@@ -306,6 +316,7 @@ impl RequestTrack {
             finished: self.finished,
             drop_status: self.drop_status,
             cancel_usage: self.cancel_usage.take(),
+            reservation: self.reservation.take(),
         };
         self.active = false;
         self.finished = true;
@@ -446,6 +457,7 @@ impl Gateway {
                 tokens: TokenState::new(token, token_file),
                 keys: None,
                 codecs,
+                budget: limits::Budget::new(Arc::clone(&usage)),
                 usage,
                 prev: prev_response::PrevStore::new(),
                 surfaces: Vec::new(),
@@ -836,7 +848,8 @@ fn request_routes(app: &Arc<Inner>) -> readonly::RouteSet {
 fn codec_routes(inner: &Inner) -> readonly::RouteSet {
     let mut routes = readonly::RouteSet::new()
         .route(&["GET"], "/health", get(health))
-        .route(&["GET"], "/v1/models", get(models));
+        .route(&["GET"], "/v1/models", get(models))
+        .route(&["GET"], "/v1/hofund/limit", get(limits::limit_route));
     let generative =
         inner.codecs.contains_key(GENERATIVE_UNARY) || inner.codecs.contains_key(GENERATIVE_STREAM);
     let responses = inner
@@ -885,6 +898,7 @@ fn codec_routes(inner: &Inner) -> readonly::RouteSet {
 struct InProcess {
     app: std::sync::Weak<Inner>,
     identity: Identity,
+    body_bytes: usize,
 }
 
 #[async_trait::async_trait]
@@ -934,6 +948,50 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 started_at_ms: unix_ms_now(),
             },
         );
+        track.reservation = match app
+            .budget
+            .reserve(&self.identity, self.body_bytes, Local::now())
+        {
+            Ok(reservation) => reservation,
+            Err(limits::ReserveFailure::Refused(refusal)) => {
+                let status = StatusCode::TOO_MANY_REQUESTS;
+                write_usage(
+                    &app.usage,
+                    &UsageMeta::new(
+                        &ModelRequest::new(call.model()),
+                        "",
+                        started,
+                        &self.identity,
+                    ),
+                    None,
+                    status,
+                );
+                track.end_with(None, status.as_u16(), None, None);
+                return Err(PluginError::status_error(
+                    status.as_u16(),
+                    refusal.message(),
+                ));
+            }
+            Err(limits::ReserveFailure::Unavailable) => {
+                let status = StatusCode::SERVICE_UNAVAILABLE;
+                write_usage(
+                    &app.usage,
+                    &UsageMeta::new(
+                        &ModelRequest::new(call.model()),
+                        "",
+                        started,
+                        &self.identity,
+                    ),
+                    None,
+                    status,
+                );
+                track.end_with(None, status.as_u16(), None, None);
+                return Err(PluginError::status_error(
+                    status.as_u16(),
+                    "gateway key limits are temporarily unavailable",
+                ));
+            }
+        };
         let router = app.snapshot.load();
         let usage = |upstream: &str| UsageMeta {
             model: call.model().to_owned(),
@@ -943,6 +1001,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             input: None,
             output: None,
             ttft_ms: None,
+            details: hofund_usage::UsageDetails::default(),
         };
         match router
             .forward_scoped(&call, Some(&route_scope(&self.identity)))
@@ -953,12 +1012,9 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 let status =
                     StatusCode::from_u16(answer.status()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let (input, output) = forwarded_tokens(answer.body());
-                write_usage(
-                    &app.usage,
-                    &usage(&forwarded.upstream_id),
-                    Some((input, output)),
-                    status,
-                );
+                let mut meta = usage(&forwarded.upstream_id);
+                meta.details = forwarded_details(answer.body(), input);
+                write_usage(&app.usage, &meta, Some((input, output)), status);
                 track.end_with(
                     Some(forwarded.upstream_id),
                     status.as_u16(),
@@ -1025,6 +1081,41 @@ fn forwarded_tokens(body: &[u8]) -> (Option<i64>, Option<i64>) {
     (input, count("/usage/output_tokens"))
 }
 
+fn forwarded_details(body: &[u8], input: Option<i64>) -> hofund_usage::UsageDetails {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return hofund_usage::UsageDetails {
+            uncached_input_tokens: input,
+            ..hofund_usage::UsageDetails::default()
+        };
+    };
+    let count = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_i64)
+            .filter(|tokens| *tokens >= 0)
+    };
+    let cache_read = count("/usage/prompt_tokens_details/cached_tokens")
+        .or_else(|| count("/usage/input_tokens_details/cached_tokens"))
+        .or_else(|| count("/usage/cache_read_input_tokens"))
+        .or_else(|| count("/usage/cachedContentTokenCount"));
+    let cache_write = count("/usage/cache_creation_input_tokens")
+        .or_else(|| count("/usage/input_tokens_details/cache_write_tokens"));
+    let includes_cache = value.pointer("/usage/prompt_tokens").is_some()
+        || value.pointer("/usage/input_tokens_details").is_some()
+        || value.pointer("/usage/cachedContentTokenCount").is_some();
+    hofund_usage::UsageDetails {
+        uncached_input_tokens: input.map(|input| {
+            if includes_cache {
+                input.saturating_sub(cache_read.unwrap_or(0))
+            } else {
+                input
+            }
+        }),
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
+    }
+}
+
 async fn not_found(request: Request) -> Response {
     if responses_ws::wants_socket(request.method(), request.headers()) {
         return responses_ws::upgrade_required();
@@ -1066,11 +1157,13 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
         Ok(bytes) => bytes,
         Err(_) => return text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
     };
+    let body_bytes = bytes.len();
     let inbound =
         axum::http::Request::from_parts(parts, hofund_plugin_api::Body::from_bytes(bytes));
     let gateway = Arc::new(InProcess {
         app: Arc::downgrade(&app),
         identity,
+        body_bytes,
     });
     let members = app.snapshot.load().member_ids();
     let protocols = protocols_of(&app.codecs);
@@ -1218,6 +1311,42 @@ async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> R
     )
 }
 
+fn reserve_for_codec(
+    app: &Inner,
+    codec: &dyn Codec,
+    identity: &Identity,
+    request: &ModelRequest,
+    body_bytes: usize,
+    started: Instant,
+) -> Result<Option<limits::Reservation>, Box<Response>> {
+    let now = Local::now();
+    match app.budget.reserve(identity, body_bytes, now) {
+        Ok(reservation) => Ok(reservation),
+        Err(limits::ReserveFailure::Refused(refusal)) => {
+            write_usage(
+                &app.usage,
+                &UsageMeta::new(request, "", started, identity),
+                None,
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+            Err(Box::new(limits::refusal_response(codec, &refusal, now)))
+        }
+        Err(limits::ReserveFailure::Unavailable) => {
+            write_usage(
+                &app.usage,
+                &UsageMeta::new(request, "", started, identity),
+                None,
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+            Err(Box::new(coded(
+                codec,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "gateway key limits are temporarily unavailable",
+            )))
+        }
+    }
+}
+
 async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let path = request.uri().path().to_owned();
     let uri = request.uri().clone();
@@ -1298,6 +1427,17 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             return coded(codec.as_ref(), StatusCode::BAD_REQUEST, &error.to_string());
         }
     };
+    let reservation = match reserve_for_codec(
+        &app,
+        codec.as_ref(),
+        &identity,
+        &model_request,
+        bytes.len(),
+        started,
+    ) {
+        Ok(reservation) => reservation,
+        Err(response) => return *response,
+    };
     // Authenticated request with a decoded body: start the request topic and
     // the in-flight counter before dispatch.
     let mut track = RequestTrack::begin(
@@ -1308,7 +1448,8 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             inbound_protocol: codec.id().to_owned(),
             started_at_ms: unix_ms_now(),
         },
-    );
+    )
+    .with_reservation(reservation);
     let router = app.snapshot.load();
     let attempt = ask.as_ref().map(|ask| ask.attempt());
     let mut identity_headers = Vec::new();
@@ -1788,19 +1929,16 @@ async fn success(
     track: &mut RequestTrack,
     capture: Option<prev_response::Capture>,
 ) -> Response {
-    let meta = UsageMeta::new(request, upstream, started, identity);
+    let mut meta = UsageMeta::new(request, upstream, started, identity);
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
     match completion {
         Completion::Unary(response) => {
-            let input = response
-                .usage
-                .as_ref()
-                .and_then(|usage| as_i64(usage.input_tokens));
-            let output = response
-                .usage
-                .as_ref()
-                .and_then(|usage| as_i64(usage.output_tokens));
+            if let Some(usage) = response.usage.as_ref() {
+                limits::observe_usage(&mut meta, usage, codec.id());
+            }
+            let input = meta.input;
+            let output = meta.output;
             write_usage(&app.usage, &meta, Some((input, output)), StatusCode::OK);
             let status = StatusCode::OK;
             let encoded = codec.encode_response_for(request, &response);
@@ -1842,6 +1980,7 @@ async fn success(
                 meta,
                 input: None,
                 output: None,
+                protocol: codec.id().to_owned(),
                 track: Some(track.take_for_stream()),
                 member,
             };
@@ -1896,6 +2035,7 @@ async fn success(
                             meta,
                             input: None,
                             output: None,
+                            protocol: codec.id().to_owned(),
                             track: Some(track.take_for_stream()),
                             member,
                         };
@@ -1967,6 +2107,7 @@ async fn raw_body(
             meta,
             usage,
             tap,
+            input_includes_cache: limits::input_includes_cache(codec.id()),
             on_error,
             severed_end: codec.severed_stream_end(),
             lines: event_stream.then(LineHold::default),
@@ -2005,10 +2146,20 @@ async fn raw_body(
         track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
         return coded(codec.as_ref(), StatusCode::BAD_GATEWAY, error.message());
     }
+    if let Ok(response) = codec.decode_response(&bytes)
+        && let Some(usage) = response.usage.as_ref()
+    {
+        limits::observe_usage(&mut meta, usage, codec.id());
+    }
     let (input, output) = codec.response_tokens(&bytes);
-    meta.input = input;
-    meta.output = output;
-    write_usage(&app.usage, &meta, Some((input, output)), StatusCode::OK);
+    meta.input = input.or(meta.input);
+    meta.output = output.or(meta.output);
+    write_usage(
+        &app.usage,
+        &meta,
+        Some((meta.input, meta.output)),
+        StatusCode::OK,
+    );
     track.end_with(
         member,
         StatusCode::OK.as_u16(),
@@ -2127,6 +2278,7 @@ struct UsageMeta {
     input: Option<i64>,
     output: Option<i64>,
     ttft_ms: Option<i64>,
+    details: hofund_usage::UsageDetails,
 }
 
 impl UsageMeta {
@@ -2139,6 +2291,7 @@ impl UsageMeta {
             input: None,
             output: None,
             ttft_ms: None,
+            details: hofund_usage::UsageDetails::default(),
         }
     }
 
@@ -2155,6 +2308,7 @@ struct RecordOnEnd {
     meta: UsageMeta,
     input: Option<i64>,
     output: Option<i64>,
+    protocol: String,
     track: Option<RequestTrack>,
     member: Option<String>,
 }
@@ -2242,7 +2396,7 @@ fn sse_body(
                         ));
                     }
                     Some(Ok(event)) => {
-                        note_usage(&event, &mut record.input, &mut record.output);
+                        note_usage(&event, &mut record);
                         if matches!(
                             event,
                             StreamEvent::TextDelta(_)
@@ -2278,6 +2432,7 @@ struct RawRelay<E> {
     meta: UsageMeta,
     usage: Arc<Ledger>,
     tap: Box<dyn hofund_codec::RawTap>,
+    input_includes_cache: bool,
     on_error: E,
     severed_end: &'static [u8],
     /// Holds an unfinished last line of an event stream. `None` for other
@@ -2317,8 +2472,19 @@ where
 
     fn note_tokens(&mut self) {
         let (input, output) = self.tap.tokens();
+        let (cache_read, cache_write) = self.tap.cache_tokens();
         self.meta.input = input.or(self.meta.input);
         self.meta.output = output.or(self.meta.output);
+        self.meta.details.cache_read_tokens = cache_read.or(self.meta.details.cache_read_tokens);
+        self.meta.details.cache_write_tokens = cache_write.or(self.meta.details.cache_write_tokens);
+        if let Some(input) = self.meta.input {
+            let cached = if self.input_includes_cache {
+                self.meta.details.cache_read_tokens.unwrap_or(0)
+            } else {
+                0
+            };
+            self.meta.details.uncached_input_tokens = Some(input.saturating_sub(cached));
+        }
     }
 
     /// The last bytes of an event stream that ended cleanly before its last
@@ -2498,7 +2664,7 @@ fn frame_closed(bytes: &[u8]) -> bool {
     bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n") || bytes.ends_with(b"\r\r")
 }
 
-fn note_usage(event: &StreamEvent, input: &mut Option<i64>, output: &mut Option<i64>) {
+fn note_usage(event: &StreamEvent, record: &mut RecordOnEnd) {
     let usage = match event {
         StreamEvent::MessageStart(start) => start.usage.as_ref(),
         StreamEvent::MessageDelta(delta) => delta.usage.as_ref(),
@@ -2507,12 +2673,9 @@ fn note_usage(event: &StreamEvent, input: &mut Option<i64>, output: &mut Option<
     let Some(usage) = usage else {
         return;
     };
-    if let Some(value) = as_i64(usage.input_tokens) {
-        *input = Some(value);
-    }
-    if let Some(value) = as_i64(usage.output_tokens) {
-        *output = Some(value);
-    }
+    limits::observe_usage(&mut record.meta, usage, &record.protocol);
+    record.input = record.meta.input;
+    record.output = record.meta.output;
 }
 
 fn finish_record(row: &mut RecordOnEnd, status: StatusCode) {
@@ -2557,7 +2720,11 @@ fn write_usage(
         caller_key_id: meta.identity.key_id.clone(),
         caller_key_name: meta.identity.key_name.clone(),
     };
-    let _ = usage.record_with_ttft(&row, meta.ttft_ms);
+    let mut details = meta.details;
+    if details.uncached_input_tokens.is_none() {
+        details.uncached_input_tokens = input_tokens;
+    }
+    let _ = usage.record_with_details(&row, meta.ttft_ms, details);
 }
 
 fn as_i64(value: Option<u64>) -> Option<i64> {
@@ -2641,6 +2808,7 @@ mod request_event_tests {
             finished: false,
             drop_status: 500,
             cancel_usage: None,
+            reservation: None,
         };
         // Mirror begin's increment (begin also calls started).
         counter.fetch_add(1, Ordering::SeqCst);
@@ -2681,6 +2849,7 @@ mod request_event_tests {
                 finished: false,
                 drop_status: 500,
                 cancel_usage: None,
+                reservation: None,
             };
             counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -2695,7 +2864,7 @@ mod request_event_tests {
 
 #[cfg(test)]
 mod forwarded_token_tests {
-    use super::forwarded_tokens;
+    use super::{forwarded_details, forwarded_tokens};
 
     #[test]
     fn tokens_are_read_from_the_first_field_that_has_a_positive_count() {
@@ -2720,6 +2889,23 @@ mod forwarded_token_tests {
         assert_eq!(read(r#"{"usage":{"prompt_tokens":-1}}"#), (None, None));
         assert_eq!(read("not json"), (None, None));
         assert_eq!(read("{}"), (None, None));
+    }
+
+    #[test]
+    fn l3_forwarded_cache_details_follow_the_protocol_shape() {
+        let chat = forwarded_details(
+            br#"{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}}"#,
+            Some(10),
+        );
+        assert_eq!(chat.uncached_input_tokens, Some(6));
+        assert_eq!(chat.cache_read_tokens, Some(4));
+        let messages = forwarded_details(
+            br#"{"usage":{"input_tokens":10,"cache_read_input_tokens":4,"cache_creation_input_tokens":2}}"#,
+            Some(10),
+        );
+        assert_eq!(messages.uncached_input_tokens, Some(10));
+        assert_eq!(messages.cache_read_tokens, Some(4));
+        assert_eq!(messages.cache_write_tokens, Some(2));
     }
 }
 

@@ -51,6 +51,8 @@ pub(crate) struct BuiltProvider {
     pub kernel: bool,
     /// API root the provider is reached at. Empty when unknown.
     pub base_url: String,
+    /// Per-key identity when the provider has several enabled keys.
+    pub key: Option<crate::provider_keys::KeyMember>,
 }
 
 pub(crate) struct Table {
@@ -327,13 +329,23 @@ fn build_specs(
                     hop.provider
                 )));
             }
-            let built = built.get(&hop.provider).ok_or_else(|| {
-                DaemonError::new(format!(
-                    "route `{model}` names unknown provider `{}`",
-                    hop.provider
-                ))
-            })?;
-            let subscription = hop.member_id.is_some();
+            let built = built
+                .get(&hop.provider)
+                .or_else(|| {
+                    built.values().find(|candidate| {
+                        candidate
+                            .key
+                            .as_ref()
+                            .is_some_and(|key| Some(&key.member) == hop.member_id.as_ref())
+                    })
+                })
+                .ok_or_else(|| {
+                    DaemonError::new(format!(
+                        "route `{model}` names unknown provider `{}`",
+                        hop.provider
+                    ))
+                })?;
+            let subscription = hop.member_id.is_some() && built.key.is_none();
             specs.push(HopSpec {
                 member: Arc::new(LiveMember::new(
                     built,
@@ -362,12 +374,13 @@ fn build_specs(
 
 #[derive(Clone)]
 pub(crate) struct PlannedHop {
-    /// Provider config id when this hop is a provider. Empty for subscription hops
-    /// before expansion. After expansion, the built-map key for the member.
+    /// Provider config id for provider and per-key hops. Empty for subscription
+    /// hops before expansion, then the built-map key for the account member.
     pub provider: String,
     /// Subscription config id when this hop should expand to account members.
     pub subscription: Option<String>,
-    /// Explicit member id for subscription accounts. Provider hops leave this unset.
+    /// Explicit member id for a multi-key provider or subscription account.
+    /// A single-key provider leaves this unset to keep its existing id.
     pub member_id: Option<MemberId>,
     pub wire_model: Option<String>,
     pub max_output_tokens: Option<u64>,
@@ -1125,6 +1138,13 @@ pub(crate) fn member_id(provider_id: &str) -> MemberId {
     MemberId::from_preset(preset, MemberKey::from_static("default"))
 }
 
+pub(crate) fn key_member_id(provider_id: &str, key_id: &str) -> MemberId {
+    let base = member_id(provider_id);
+    let preset = base.preset().expect("provider member preset").clone();
+    let key = MemberKey::try_from(key_id).expect("a key fingerprint is a valid member key");
+    MemberId::from_preset(preset, key)
+}
+
 fn kebab_of(value: &str) -> String {
     let mut out = String::new();
     let mut hyphen = true;
@@ -1264,6 +1284,7 @@ mod tests {
                 patience: Some(Duration::from_secs(60)),
                 kernel: true,
                 base_url: String::new(),
+                key: None,
             },
         );
         let mut routes = BTreeMap::new();
@@ -1362,6 +1383,7 @@ mod tests {
                 patience: Some(Duration::from_secs(60)),
                 kernel: true,
                 base_url: String::new(),
+                key: None,
             },
         );
         let mut routes = BTreeMap::new();
@@ -1451,6 +1473,7 @@ mod tests {
                 patience: Some(Duration::from_secs(60)),
                 kernel: true,
                 base_url: String::new(),
+                key: None,
             },
         );
         let mut routes = BTreeMap::new();
@@ -1539,6 +1562,7 @@ mod tests {
                 patience: Some(Duration::from_secs(60)),
                 kernel: true,
                 base_url: String::new(),
+                key: None,
             },
         );
         let mut routes = BTreeMap::new();
@@ -1597,6 +1621,7 @@ mod tests {
                     patience: Some(Duration::from_secs(60)),
                     kernel: true,
                     base_url: String::new(),
+                    key: None,
                 },
             );
         }
@@ -1652,6 +1677,7 @@ mod tests {
             patience: Some(Duration::from_secs(60)),
             kernel: true,
             base_url: String::new(),
+            key: None,
         }
     }
 
@@ -1948,6 +1974,22 @@ mod tests {
                 answers: std::sync::Mutex::new(answers.into_iter().collect()),
             }),
         )
+    }
+
+    fn keyed(
+        mut built: BuiltProvider,
+        provider: &str,
+        key: &str,
+        rank: usize,
+        weight: u64,
+    ) -> BuiltProvider {
+        built.key = Some(crate::provider_keys::KeyMember {
+            provider: provider.to_owned(),
+            member: super::key_member_id(provider, key),
+            weight,
+            rank,
+        });
+        built
     }
 
     /// A request the estimate puts at `tokens` input tokens.
@@ -2553,6 +2595,123 @@ mod tests {
                 .await
                 .expect("dispatch");
             assert_eq!(routed.upstream_id, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn k4_per_key_rest_tries_sibling_before_next_provider() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let backup_hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "one#a".to_owned(),
+                keyed(
+                    scripted(
+                        "one",
+                        &first_hits,
+                        vec![Err(ProviderError::status(429, "slow"))],
+                    ),
+                    "one",
+                    "a",
+                    0,
+                    1,
+                ),
+            ),
+            (
+                "one#b".to_owned(),
+                keyed(
+                    scripted("one", &second_hits, vec![Ok(raw_ok()), Ok(raw_ok())]),
+                    "one",
+                    "b",
+                    1,
+                    1,
+                ),
+            ),
+            (
+                "two".to_owned(),
+                scripted("two", &backup_hits, vec![Ok(raw_ok())]),
+            ),
+        ]);
+        let book = cooldowns();
+        let mut routes = route(&["one", "one", "two"]);
+        let hops = routes.get_mut("demo").expect("route");
+        hops[0].member_id = Some(super::key_member_id("one", "a"));
+        hops[1].member_id = Some(super::key_member_id("one", "b"));
+        let snapshot =
+            open(&built, routes, FailoverPolicy::default(), Arc::clone(&book)).expect("snapshot");
+
+        snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("sibling key answers");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
+        assert!(book.cooling(&super::key_member_id("one", "a")).is_some());
+        assert!(book.cooling(&super::key_member_id("one", "b")).is_none());
+
+        snapshot
+            .load()
+            .dispatch(&Request::new("demo"), "openai-chat")
+            .await
+            .expect("rested key goes last");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn k5_weighted_strategy_rotates_provider_keys() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let built = BTreeMap::from([
+            (
+                "one#a".to_owned(),
+                keyed(
+                    scripted(
+                        "one",
+                        &first_hits,
+                        vec![Ok(raw_ok()), Ok(raw_ok()), Ok(raw_ok())],
+                    ),
+                    "one",
+                    "a",
+                    0,
+                    3,
+                ),
+            ),
+            (
+                "one#b".to_owned(),
+                keyed(
+                    scripted("one", &second_hits, vec![Ok(raw_ok())]),
+                    "one",
+                    "b",
+                    1,
+                    1,
+                ),
+            ),
+        ]);
+        let mut routes = route(&["one", "one"]);
+        let hops = routes.get_mut("demo").expect("route");
+        hops[0].member_id = Some(super::key_member_id("one", "a"));
+        hops[0].routing = "weight".to_owned();
+        hops[0].weight = 3;
+        hops[1].member_id = Some(super::key_member_id("one", "b"));
+        hops[1].routing = "weight".to_owned();
+        let (snapshot, table) =
+            super::open_with_table(&built, routes, FailoverPolicy::default(), cooldowns())
+                .expect("snapshot");
+
+        for (first, second) in [(1, 0), (2, 0), (2, 1), (3, 1)] {
+            table.publish();
+            snapshot
+                .load()
+                .dispatch(&Request::new("demo"), "openai-chat")
+                .await
+                .expect("dispatch");
+            assert_eq!(first_hits.load(Ordering::SeqCst), first);
+            assert_eq!(second_hits.load(Ordering::SeqCst), second);
         }
     }
 

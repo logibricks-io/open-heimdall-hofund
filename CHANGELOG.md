@@ -16,6 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts, including in-flight first requests; subagents follow their leads,
   emergency fallbacks stay out of rotation while the provider is ready, and
   effort plus stand-in identity persist compatibly in `affinity.json`.
+- Gateway-key spending limits (P0-4b): up to five token and/or estimated-cost
+  caps per key over local calendar windows or absolute N-day/N-hour cycles.
+  Cache-aware token sums rebuild from SQLite after restart, in-flight body-size
+  reservations hold concurrent requests to every cap, and spent keys receive a
+  pre-upstream 429 with reset/retry headers. `GET /v1/hofund/limit` reports each
+  limit and the binding one. `gateway-key limit` and `reset-limit` manage and
+  reset caps through the control API. Cost caps currently follow the unpriced
+  path: calls add zero cost and are reported as unpriced until model prices land.
+- Provider upstream API keys (K-1): ordered per-key candidates with protocol
+  restrictions, weights, independent rests and credit-ladder persistence, and
+  member-id-based strategies. Added secret-free key listing, bulk add (with an
+  optional protocol), single and bulk remove, on/off, make-first, rename,
+  per-key weight and protocol, and replacement through the config writer,
+  control API, and CLI. Replacement preserves key settings and moves rests.
+  Per-key concurrency, remote allowances, per-key plans, and reserve-key
+  accounts-at-once remain follow-ups. See `docs/provider-keys.md`.
 - Codex compaction parity fixes (D-23): a summary stream that ends before its
   terminal response, including the equivalent 502 error, now produces a
   bounded local summary instead of returning partial text or failing the

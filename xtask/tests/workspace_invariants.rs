@@ -1353,11 +1353,11 @@ fn k14_gateway_key_docs_and_parity_cover_the_phase_and_remainder() {
     ] {
         assert!(guide.contains(command), "missing command {command}");
     }
-    assert!(guide.contains("P0-4b"));
-    assert!(guide.contains("P0-4c"));
+    assert!(guide.contains("## Spending limits"));
+    assert!(guide.contains("GET /v1/hofund/limit"));
     assert!(guide.contains("P0-4d"));
     assert!(read("CHANGELOG.md").contains("Named gateway keys (P0-4a)"));
     let parity = read("docs/feature-parity.md");
     assert!(parity.contains("| 10.4 | Named gateway keys with model and account limits"));
-    assert!(parity.contains("Spending limits are P0-4b"));
+    assert!(parity.contains("spending limits are implemented"));
 }

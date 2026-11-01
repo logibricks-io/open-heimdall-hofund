@@ -240,4 +240,24 @@ mod tests {
         assert_eq!(cooling.failures(), 1);
         assert!(restored.cooling_for_model(&id, "model-b").is_none());
     }
+
+    #[test]
+    fn k4_key_ladder_persists_under_the_key_member_id() {
+        let (mut store, book, _, clock, root) = fixture();
+        let key = crate::membership::key_member_id("provider", "0123456789");
+        let other = crate::membership::key_member_id("provider", "abcdef0123");
+        book.record_failure(&key, &PluginError::credit_status(402, "out of credit"));
+        store.save(&book);
+        let text = std::fs::read_to_string(root.path().join("rests.json")).expect("rests");
+        assert!(text.contains(&key.to_string()), "{text}");
+
+        let restored_clock = Arc::clone(&clock);
+        let restored = Cooldowns::with_clock(
+            CooldownPolicy::default(),
+            Arc::new(move || *restored_clock.lock().expect("clock")),
+        );
+        store.load(&restored, &HashSet::from([key.clone(), other.clone()]));
+        assert!(restored.cooling(&key).is_some());
+        assert!(restored.cooling(&other).is_none());
+    }
 }
