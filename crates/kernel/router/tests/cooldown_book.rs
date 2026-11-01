@@ -1802,6 +1802,24 @@ fn d29_1_less_than_full_reading_with_same_reset_keeps_vendor_timed_rest() {
 }
 
 #[test]
+fn d29_6_same_reset_read_a_moment_later_keeps_vendor_timed_rest() {
+    let (book, id, clock) = windowed();
+    let reset = SystemTime::now() + Duration::from_secs(3 * HOUR);
+    let reading = |used| QuotaWindow::new("window", used, Some(10), Some(reset)).expect("window");
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.record_failure(
+        &id,
+        &credit_error().with_reset_after(Duration::from_secs(6 * HOUR)),
+    )
+    .expect("vendor-timed rest");
+    // the monotonic clock runs ahead of the wall clock between readings
+    *clock.lock().expect("clock") += Duration::from_millis(900);
+    book.observe_credit_window(&id, &[reading(8)]);
+    assert!(book.cooling(&id).is_some());
+    assert!(book.drain_recoveries().is_empty());
+}
+
+#[test]
 fn d29_2_reset_moved_to_later_cycle_lifts_vendor_timed_rest() {
     let (book, id, _) = windowed();
     book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);

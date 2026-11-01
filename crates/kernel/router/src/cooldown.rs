@@ -1252,10 +1252,17 @@ impl CreditWindow {
         }
     }
 
+    /// Whether a window full at the last good reading stands started again:
+    /// its reset has gone by, or the same window now resets in a later
+    /// cycle. Resets come as wall times turned into instants, so readings
+    /// within a second of each other count as the same reset.
     fn started_again(&self, read: &HashMap<String, Option<Instant>>, now: Instant) -> bool {
         self.full.iter().any(|(name, reset)| {
             read.get(name).is_some_and(|current| {
-                *reset <= now || (*current).is_some_and(|current| current > *reset)
+                *reset <= now
+                    || (*current).is_some_and(|current| {
+                        current.saturating_duration_since(*reset) > Duration::from_secs(1)
+                    })
             })
         })
     }
