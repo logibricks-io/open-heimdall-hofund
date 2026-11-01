@@ -1289,6 +1289,84 @@ async fn a11_provider_does_not_resend_after_other_statuses() {
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
 }
 
+struct SealedRequest;
+
+impl Match for SealedRequest {
+    fn matches(&self, request: &MockRequest) -> bool {
+        serde_json::from_slice::<Value>(&request.body)
+            .ok()
+            .and_then(|body| body["input"].as_array().cloned())
+            .is_some_and(|input| {
+                input.iter().any(|item| {
+                    item["type"] == "reasoning" && item["encrypted_content"] == "foreign"
+                })
+            })
+    }
+}
+
+struct UnsealedRequest;
+
+impl Match for UnsealedRequest {
+    fn matches(&self, request: &MockRequest) -> bool {
+        !SealedRequest.matches(request)
+    }
+}
+
+struct DropSeals;
+
+impl AttemptHook for DropSeals {
+    fn prepare(&self, _route: &AttemptRoute, body: &[u8]) -> Option<Vec<u8>> {
+        let mut body: Value = serde_json::from_slice(body).ok()?;
+        body["input"] = json!([{"type":"reasoning","encrypted_content":"foreign"}]);
+        serde_json::to_vec(&body).ok()
+    }
+
+    fn retry(&self, _route: &AttemptRoute, _status: u16, body: &[u8]) -> Option<Vec<u8>> {
+        if !String::from_utf8_lossy(body).contains("invalid encrypted summary") {
+            return None;
+        }
+        let prepared = self.prepare(_route, br#"{"input":[]}"#)?;
+        let mut body: Value = serde_json::from_slice(&prepared).ok()?;
+        body["input"] = json!([]);
+        serde_json::to_vec(&body).ok()
+    }
+}
+
+#[tokio::test]
+async fn cs_provider_retries_once_with_the_replacement_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(SealedRequest)
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_string(r#"{"error":{"message":"invalid encrypted summary"}}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(UnsealedRequest)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "resp_clean",
+            "status": "completed",
+            "output": [{"type":"message","role":"assistant","content":[{"type":"output_text","text":"clean"}]}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let endpoint = Endpoint::new("primary", format!("{}/v1", server.uri()));
+    let provider = OpenAiCompat::new(OpenAiProtocol::Responses, endpoint).expect("provider");
+    let completion = provider
+        .execute_with_attempt(user_request(false), "openai-responses", Some(&DropSeals))
+        .await
+        .expect("replacement retry");
+    assert_eq!(text_of(completion).await, "clean");
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+}
+
 #[tokio::test]
 async fn a6_nonstreamed_200_error_fails_as_its_mapped_status() {
     let server = MockServer::start().await;

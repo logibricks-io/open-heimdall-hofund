@@ -11,7 +11,7 @@ use crate::commands::{client, failure};
 
 pub(crate) const HELP: &str = "\
 usage: hofund gateway-key [list] [--json]
-       hofund gateway-key add <name> [--key <value> | --key -]
+       hofund gateway-key add <name> [--key <value> | --key -] [--read-only]
        hofund gateway-key rotate <id>
        hofund gateway-key copy <id>
        hofund gateway-key rename <id> <name>
@@ -39,6 +39,7 @@ pub(crate) enum Command {
     Add {
         name: String,
         secret: Option<String>,
+        read_only: bool,
     },
     Rotate {
         id: String,
@@ -90,6 +91,7 @@ pub(crate) fn parse(
     words: &[&str],
     secret: Option<String>,
     json: bool,
+    read_only: bool,
 ) -> Result<Option<Command>, String> {
     let ["gateway-key", rest @ ..] = words else {
         return Ok(None);
@@ -110,6 +112,7 @@ pub(crate) fn parse(
         ("add", [name]) if !json => Command::Add {
             name: (*name).to_owned(),
             secret,
+            read_only,
         },
         ("rotate", _) => Command::Rotate { id: one("rotate")? },
         ("copy", _) => Command::Copy { id: one("copy")? },
@@ -307,10 +310,15 @@ enum Verb {
 
 fn mutation(command: &Command) -> Result<(GatewayKeyRequest, String, Verb), String> {
     let (action, id, verb) = match command {
-        Command::Add { name, secret } => {
+        Command::Add {
+            name,
+            secret,
+            read_only,
+        } => {
             let mut request = GatewayKeyRequest::new(GatewayKeyAction::Add);
             request.name = name.clone();
             request.secret = secret.clone();
+            request.read_only = *read_only;
             return Ok((request, String::new(), Verb::Add));
         }
         Command::Rotate { id } => (GatewayKeyAction::Rotate, id, Verb::Rotate),
@@ -480,18 +488,20 @@ mod tests {
     #[test]
     fn k11_cli_parses_actions_and_list_columns() {
         assert_eq!(
-            parse(&words(&["gateway-key", "list"]), None, true),
+            parse(&words(&["gateway-key", "list"]), None, true, false),
             Ok(Some(Command::List { json: true }))
         );
         assert_eq!(
             parse(
                 &words(&["gateway-key", "add", "Work"]),
                 Some("own-secret".to_owned()),
+                false,
                 false
             ),
             Ok(Some(Command::Add {
                 name: "Work".to_owned(),
-                secret: Some("own-secret".to_owned())
+                secret: Some("own-secret".to_owned()),
+                read_only: false,
             }))
         );
         for (args, expected) in [
@@ -565,7 +575,7 @@ mod tests {
                 },
             ),
         ] {
-            assert_eq!(parse(&args, None, false), Ok(Some(expected)));
+            assert_eq!(parse(&args, None, false, false), Ok(Some(expected)));
         }
         let mut key = GatewayKey::default();
         key.id = "k".to_owned();
@@ -579,9 +589,53 @@ mod tests {
             )
         );
         assert!(table.contains("\thofund_key_…abcdef\t"));
-        assert!(parse(&words(&["gateway-key", "copy"]), None, false).is_err());
+        assert!(parse(&words(&["gateway-key", "copy"]), None, false, false).is_err());
         assert!(table.contains("primary/*"));
         assert!(table.contains("full"));
         assert!(!table.contains("read-only"));
+    }
+
+    #[test]
+    fn r6_add_read_only_access_command_and_access_column() {
+        let command = parse(
+            &words(&["gateway-key", "add", "Display"]),
+            Some("display-secret".to_owned()),
+            false,
+            true,
+        )
+        .expect("parse")
+        .expect("gateway-key");
+        let (request, _, _) = mutation(&command).expect("mutation");
+        assert!(request.read_only);
+        assert_eq!(request.name, "Display");
+        assert_eq!(request.secret.as_deref(), Some("display-secret"));
+        assert!(HELP.contains("[--read-only]"));
+
+        let mut key = GatewayKey::default();
+        key.read_only = true;
+        let table = list_table(&[key]);
+        assert!(table.contains("ACCESS"));
+        assert!(table.contains("read-only"));
+        for value in ["read-only", "full"] {
+            let command = parse(
+                &words(&["gateway-key", "access", "key-id", value]),
+                None,
+                false,
+                false,
+            )
+            .expect("parse")
+            .expect("gateway-key");
+            let (request, _, _) = mutation(&command).expect("mutation");
+            assert_eq!(request.read_only, value == "read-only");
+        }
+        assert!(
+            parse(
+                &words(&["gateway-key", "access", "key-id", "invalid"]),
+                None,
+                false,
+                false,
+            )
+            .is_err()
+        );
     }
 }

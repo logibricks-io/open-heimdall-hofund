@@ -273,7 +273,7 @@ pub(crate) async fn model_show(config: &Path, id: &str) -> Result<String, String
     }
 }
 
-/// `hofund routes`: configured route models and their strategy names.
+/// `hofund routes`: configured route models, strategies, and affinity modes.
 pub(crate) async fn routes(config: &Path) -> Result<String, String> {
     let client = client(config).await?;
     let response = client.route_models().await.map_err(failure)?;
@@ -281,9 +281,12 @@ pub(crate) async fn routes(config: &Path) -> Result<String, String> {
 }
 
 fn render_routes(models: &[hofund_control_client::hofund_control_proto::RouteModel]) -> String {
-    let mut out = String::from("model\trouting");
+    let mut out = String::from("model\trouting\tstays");
     for model in models {
-        out.push_str(&format!("\n{}\t{}", model.id, model.routing));
+        out.push_str(&format!(
+            "\n{}\t{}\t{}",
+            model.id, model.routing, model.stays
+        ));
     }
     out
 }
@@ -498,16 +501,17 @@ mod tests {
     }
 
     #[test]
-    fn a9_routes_print_the_routing_name() {
+    fn c1d_routes_print_the_routing_and_stays_modes() {
         let mut first = RouteModel::default();
         first.id = "first".to_owned();
         first.routing = "weight".to_owned();
+        first.stays = "strict".to_owned();
         let mut second = RouteModel::default();
         second.id = "second".to_owned();
         let models = vec![first, second];
         assert_eq!(
             render_routes(&models),
-            "model\trouting\nfirst\tweight\nsecond\tsmart"
+            "model\trouting\tstays\nfirst\tweight\tstrict\nsecond\tsmart\tauto"
         );
     }
 

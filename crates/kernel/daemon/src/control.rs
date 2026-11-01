@@ -202,7 +202,7 @@ impl DaemonControl {
             GatewayKeyAction::Add => {
                 let added = self
                     .keys
-                    .add(&request.name, request.secret.as_deref())
+                    .add_with_access(&request.name, request.secret.as_deref(), request.read_only)
                     .map_err(key_failure)?;
                 secret = Some(added.secret);
             }
@@ -502,6 +502,9 @@ impl ControlState for DaemonControl {
                 let mut model = RouteModel::default();
                 model.id = route.model.clone();
                 model.routing = route.routing.clone();
+                model.stays = super::route_stays(&self.config(), route)
+                    .as_str()
+                    .to_owned();
                 model
             })
             .collect();

@@ -68,6 +68,12 @@ pub trait AttemptHook: Send + Sync {
         false
     }
 
+    /// Returns a replacement body for one same-member retry after a refusal.
+    fn retry(&self, attempt: &Attempt, status: u16, body: &[u8]) -> Option<Vec<u8>> {
+        let _ = (attempt, status, body);
+        None
+    }
+
     /// Notes the attempt that produced the returned completion.
     fn answered(&self, attempt: &Attempt) {
         let _ = attempt;

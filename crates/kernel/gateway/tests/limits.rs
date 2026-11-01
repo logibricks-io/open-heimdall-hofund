@@ -84,6 +84,8 @@ fn fixture() -> Fixture {
             patience: None,
             weight: 1,
             free: false,
+            cold_after: hofund_router::affinity::CACHE_COLD,
+            nearly_spent: false,
         }],
     )]);
     let token = store.token_file().read().expect("token");

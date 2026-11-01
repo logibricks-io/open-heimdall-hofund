@@ -285,8 +285,18 @@ impl KeyStore {
             .any(|key| key.id == id && !key.off && !key.removed && !key.secret.is_empty()))
     }
 
-    /// Adds a key with a generated secret or a caller-supplied one.
+    /// Adds a full-access key with a generated secret or a caller-supplied one.
     pub fn add(&self, name: &str, own: Option<&str>) -> Result<KeyWithSecret, SecretError> {
+        self.add_with_access(name, own, false)
+    }
+
+    /// Adds a key with a generated secret or a caller-supplied one and the requested access.
+    pub fn add_with_access(
+        &self,
+        name: &str,
+        own: Option<&str>,
+        read_only: bool,
+    ) -> Result<KeyWithSecret, SecretError> {
         let _guard = self.lock()?;
         let mut keys = self.load_migrated()?;
         let name = clean_name(name)?;
@@ -298,6 +308,7 @@ impl KeyStore {
             id: random_hex(12)?,
             name,
             secret: secret.clone(),
+            read_only,
             ..Key::default()
         };
         keys.push(key.clone());
@@ -888,6 +899,9 @@ fn mask(secret: &str) -> String {
 fn key_error(message: impl Into<String>) -> SecretError {
     SecretError::Key(message.into())
 }
+
+#[cfg(test)]
+mod readonly_tests;
 
 #[cfg(test)]
 mod tests {

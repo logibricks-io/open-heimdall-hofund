@@ -111,7 +111,10 @@ api_key = "replace-me-too"
 # Weights are integers of at least 1; omitted and 1 are the default. Provider
 # free = true marks every model free; cached catalog free flags and all-zero
 # prices are used otherwise. Account weights go in [subscriptions.account_weights]
-# with lower-cased account ids as keys. hofund routes prints the strategy names.
+# with lower-cased account ids as keys. hofund routes prints the strategy and
+# stays names. stays is auto, session, turn, off, or strict. A single-target
+# route without stays inherits the provider or subscription setting.
+# stays = "auto"
 [[routes]]
 model = "demo"
 routing = "weight"

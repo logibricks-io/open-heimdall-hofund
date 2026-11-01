@@ -11,7 +11,9 @@ use chrono::{DateTime, Days, Local, NaiveTime, TimeZone};
 use rusqlite::{Connection, params};
 use thiserror::Error;
 
+mod key;
 mod limits;
+pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
 
 /// A reporting window over the ledger.

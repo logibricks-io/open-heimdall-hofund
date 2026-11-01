@@ -153,6 +153,8 @@ fn router_with_windows(members: Vec<(Arc<dyn Member>, Option<u64>)>) -> Router {
             patience: Some(std::time::Duration::from_secs(60)),
             weight: 1,
             free: false,
+            nearly_spent: false,
+            cold_after: hofund_router::affinity::CACHE_COLD,
         })
         .collect();
     Router::from_hops(
@@ -793,4 +795,22 @@ async fn transport_error_before_first_byte_fails_over() {
     let routed = dispatch(&router, "demo").await.expect("transport failover");
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(second.load(Ordering::SeqCst), 1);
+}
+
+/// A router's answer for a model none of its providers serves.
+const NO_PROVIDER: &str =
+    r#"{"error":{"message":"Model id : lab/demo-flash , has no provider supported"}}"#;
+
+#[tokio::test]
+async fn d24_unserved_wordings_try_the_next_member() {
+    for message in [
+        NO_PROVIDER,
+        r#"Router: {"error":{"message":"Model id : lab/demo-flash , has no provider supported"}}"#,
+        r#"{"error":{"message":"Model id : lab/demo-flash , has no provider supported","type":"invalid_request_error"}}"#,
+        r#"{"error":{"code":"DeploymentNotFound","message":"The API deployment for this resource does not exist. If you created the deployment recently, please wait a few minutes and try again."}}"#,
+        r#"{"error":{"message":"Deployment not found for ModelName: demo-4o"}}"#,
+        r#"{"error":{"message":"The model demo-x does not exist","code":"model_not_found"}}"#,
+    ] {
+        assert_next(400, message).await;
+    }
 }
