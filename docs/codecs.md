@@ -313,7 +313,9 @@ already has the prefix is kept. Output item ids start with `msg_`, `rs_`,
 `fc_`, or `ctc_` and then a suffix of time and a process counter, so two
 items in one response, and two responses, do not share an id. A unary output
 item also has `status: completed` when the caller did not set one. A sealed
-reasoning item is written back as stored. A same-protocol response keeps an
+reasoning item is written back as stored, unless it carries content parts
+(another vendor's item), which is made over as described below. A
+same-protocol response keeps an
 item id the upstream already sent, on the unary body and on the stream. The
 stream copies that id onto the block (`item_id`) and the encoder prefers it
 over a fresh one.
@@ -614,6 +616,25 @@ stays an input item.
   `encrypted_content` onto `sealed_item` on the thinking block's open and
   close events. Assemble keeps that object on the thinking part, and the
   stream encoder writes it back. An empty seal is ignored.
+
+  A reasoning item the gateway hands a client (a reply, not a request) has
+  one `summary_text` summary and no content: `{id, type, status, summary}`
+  with an `rs_` id. A stream announces it as `{id, type, status:
+  "in_progress", summary: []}`, never with a seal, then sends
+  `response.reasoning_summary_part.added` before the first delta,
+  `response.reasoning_summary_text.delta` per delta, and
+  `reasoning_summary_text.done` and `reasoning_summary_part.done` before the
+  item's done event. A sealed item with a non-empty `content` array is
+  another vendor's: it is made into the same shape, its `reasoning_text`
+  (else its summaries, joined) as the one summary, its id kept (a fresh
+  `rs_` id when it has none, and on a stream the id its events carried), its
+  content and seal dropped. A client may send the item back to an upstream
+  that refuses a reasoning item with content and cannot open another
+  vendor's seal. A Responses reply relayed raw goes through the same rule:
+  each `data:` line whose event `item`, `response.output` or response-object
+  `output` holds such an item is rewritten, and every other line and byte,
+  sequence numbers included, stays (`reasoning_tidy.rs`). A request item
+  still carries its text as `reasoning_text` content.
 - Any other item type becomes a user message with one unknown part. Encode
   nests that part inside a message content array, so the wire form changes and
   the IR stays stable.

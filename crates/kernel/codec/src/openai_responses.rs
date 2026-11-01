@@ -124,6 +124,30 @@ impl Codec for OpenAiResponses {
         &[&["model"], &["response", "model"]]
     }
 
+    /// The model-name tap, then reasoning items another vendor wrote with
+    /// their text in them made into one summary with no content and no seal.
+    fn raw_tap(&self, client_model: &str, upstream_model: &str) -> Box<dyn crate::RawTap> {
+        Box::new(crate::reasoning_tidy::ReasoningTap::new(Box::new(
+            crate::passthrough::DecoderTap::new(
+                self.stream_decoder(),
+                self.model_paths(),
+                client_model,
+                upstream_model,
+            ),
+        )))
+    }
+
+    /// The model-name splice, then reasoning items another vendor wrote with
+    /// their text in them made into one summary with no content and no seal.
+    fn rewrite_model(&self, bytes: &[u8], client_model: &str, upstream_model: &str) -> Vec<u8> {
+        crate::reasoning_tidy::tidy_whole(crate::passthrough::rewrite_all(
+            bytes,
+            self.model_paths(),
+            client_model,
+            upstream_model,
+        ))
+    }
+
     fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
         let mut out = Vec::new();
         let overflow = too_long(status, &words_of(message));
@@ -1220,8 +1244,23 @@ fn unknown_item(part: &UnknownPart) -> Value {
     Value::Object(item)
 }
 
+/// The reasoning item for one thinking part.
+///
+/// A request item carries the text as a `reasoning_text` content part. A
+/// reply item carries it as one summary and no content: a client stores the
+/// item and may send it back to an upstream that refuses a reasoning item
+/// with content. A sealed item from the upstream goes back as it came, unless
+/// it carries content parts, which marks another vendor's item; that one is
+/// made over (see [`made_reasoning`]).
+///
+/// reference: internal/gateway/responses.go:2452-2476
 fn thinking_item(part: &ThinkingPart, emit: &Emit<'_>) -> Option<Value> {
     if let Some(Value::Object(sealed)) = part.extensions.get(SEALED_ITEM) {
+        if emit.response
+            && let Some(made) = made_reasoning(sealed)
+        {
+            return Some(Value::Object(made));
+        }
         return Some(Value::Object(sealed.clone()));
     }
     if part.text.is_empty() {
@@ -1229,18 +1268,62 @@ fn thinking_item(part: &ThinkingPart, emit: &Emit<'_>) -> Option<Value> {
     }
     let mut item = Object::new();
     item.insert("type".to_owned(), Value::String("reasoning".to_owned()));
-    item.insert(
-        "content".to_owned(),
-        Value::Array(vec![serde_json::json!({
-            "type": "reasoning_text",
-            "text": part.text,
-        })]),
-    );
     if emit.response {
         put_identity(&mut item, &part.extensions, "rs");
+        item.insert("summary".to_owned(), summary_of(&part.text));
+        merge_except(&part.extensions, &mut item, SEALED_ITEM);
+        item.remove("content");
+        item.remove("encrypted_content");
+    } else {
+        item.insert(
+            "content".to_owned(),
+            Value::Array(vec![serde_json::json!({
+                "type": "reasoning_text",
+                "text": part.text,
+            })]),
+        );
+        merge_except(&part.extensions, &mut item, SEALED_ITEM);
     }
-    merge_except(&part.extensions, &mut item, SEALED_ITEM);
     Some(Value::Object(item))
+}
+
+/// One `summary_text` part holding `text`.
+fn summary_of(text: &str) -> Value {
+    serde_json::json!([{"type": "summary_text", "text": text}])
+}
+
+/// The item the gateway hands a client for a reasoning item another vendor
+/// wrote with its text in content parts, or `None` for an item with no
+/// content parts, which goes as it came.
+///
+/// The made item keeps the item's id (a fresh `rs_` id when it has none) and
+/// carries the text, else the summaries, as one summary. It has no content
+/// and no seal: the upstream that sealed it is not the one the client may
+/// send it back to.
+///
+/// reference: internal/gateway/reasoning_content.go:9-72
+pub(crate) fn made_reasoning(item: &Object) -> Option<Object> {
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return None;
+    }
+    if item
+        .get("content")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return None;
+    }
+    let id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map_or_else(|| fresh_id("rs"), str::to_owned);
+    let mut made = Object::new();
+    made.insert("id".to_owned(), Value::String(id));
+    made.insert("type".to_owned(), Value::String("reasoning".to_owned()));
+    made.insert("status".to_owned(), Value::String("completed".to_owned()));
+    made.insert("summary".to_owned(), summary_of(&reasoning_text(item)));
+    Some(made)
 }
 
 fn function_call_item(call: &ToolCallPart, emit: &Emit<'_>) -> Value {
@@ -1690,6 +1773,8 @@ struct ItemState {
     output_index: u32,
     restored: Option<RestoredTool>,
     custom_input: CustomStream,
+    /// A reasoning item's summary part was announced.
+    summary_open: bool,
 }
 
 #[derive(Default)]
@@ -1754,17 +1839,37 @@ impl StreamEncoder {
                 );
             }
             StreamEvent::ThinkingDelta(delta) => {
+                // reference: internal/gateway/responses.go:2275-2288
                 self.ensure(delta.index, ItemKind::Reasoning, &Extensions::new());
-                if let Some(item) = self.open.get_mut(&delta.index) {
-                    item.text.push_str(&delta.text);
+                let Some(item) = self.open.get_mut(&delta.index) else {
+                    return Ok(());
+                };
+                if delta.text.is_empty() {
+                    return Ok(());
                 }
-                let output_index = self.output_index(delta.index);
+                item.text.push_str(&delta.text);
+                let announce = !std::mem::replace(&mut item.summary_open, true);
+                let item_id = item.id.clone();
+                let output_index = item.output_index;
+                if announce {
+                    self.write(
+                        "response.reasoning_summary_part.added",
+                        serde_json::json!({
+                            "type": "response.reasoning_summary_part.added",
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "summary_index": 0,
+                            "part": {"type": "summary_text", "text": ""},
+                        }),
+                    );
+                }
                 self.write(
-                    "response.reasoning_text.delta",
+                    "response.reasoning_summary_text.delta",
                     serde_json::json!({
-                        "type": "response.reasoning_text.delta",
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": item_id,
                         "output_index": output_index,
-                        "content_index": 0,
+                        "summary_index": 0,
                         "delta": delta.text,
                     }),
                 );
@@ -1886,8 +1991,13 @@ impl StreamEncoder {
             (_, BlockStart::ToolCall { .. }) => "fc",
             (_, BlockStart::Unknown { .. }) => return,
         };
+        let sealed_id = match extensions.get(SEALED_ITEM) {
+            Some(Value::Object(sealed)) => sealed.get("id"),
+            _ => None,
+        };
         let id = extensions
             .get("item_id")
+            .or(sealed_id)
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
@@ -1901,7 +2011,7 @@ impl StreamEncoder {
             state.name = tool.name;
         }
         let kind = state.kind;
-        let item = state.added_item(extensions);
+        let item = state.added_item();
         self.open.insert(index, state);
         self.write(
             "response.output_item.added",
@@ -1964,26 +2074,7 @@ impl StreamEncoder {
                 })
             }
             ItemKind::Function => self.finish_call(&state, output_index),
-            ItemKind::Reasoning => match extensions.get(SEALED_ITEM) {
-                Some(Value::Object(sealed)) => {
-                    let mut sealed = sealed.clone();
-                    sealed
-                        .entry("id".to_owned())
-                        .or_insert_with(|| Value::String(state.id.clone()));
-                    Value::Object(sealed)
-                }
-                _ => {
-                    let text = state.text;
-                    let summary = text.clone();
-                    serde_json::json!({
-                        "id": state.id,
-                        "type": "reasoning",
-                        "status": "completed",
-                        "content": [{"type": "reasoning_text", "text": text}],
-                        "summary": [{"type": "summary_text", "text": summary}],
-                    })
-                }
-            },
+            ItemKind::Reasoning => self.close_reasoning(state, extensions),
         };
         self.done.insert(output_index, item.clone());
         self.write(
@@ -1994,6 +2085,62 @@ impl StreamEncoder {
                 "item": item,
             }),
         );
+    }
+
+    /// Ends a reasoning item: the summary part's done events when one was
+    /// announced, then the item, which has one summary and no content. An
+    /// upstream's sealed item goes as it came unless it carries content
+    /// parts, another vendor's shape, which is made over.
+    ///
+    /// reference: internal/gateway/responses.go:2200-2216, 2321-2329
+    fn close_reasoning(&mut self, state: ItemState, extensions: &Extensions) -> Value {
+        let output_index = state.output_index;
+        let part = serde_json::json!({"type": "summary_text", "text": state.text});
+        if state.summary_open {
+            self.write(
+                "response.reasoning_summary_text.done",
+                serde_json::json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": state.id,
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "text": state.text,
+                }),
+            );
+            self.write(
+                "response.reasoning_summary_part.done",
+                serde_json::json!({
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": state.id,
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "part": part.clone(),
+                }),
+            );
+        }
+        if let Some(Value::Object(sealed)) = extensions.get(SEALED_ITEM) {
+            if let Some(mut made) = made_reasoning(sealed) {
+                // the id the item's events already carried
+                made.insert("id".to_owned(), Value::String(state.id));
+                return Value::Object(made);
+            }
+            let mut sealed = sealed.clone();
+            sealed
+                .entry("id".to_owned())
+                .or_insert_with(|| Value::String(state.id));
+            return Value::Object(sealed);
+        }
+        let summary = if state.summary_open {
+            vec![part]
+        } else {
+            Vec::new()
+        };
+        serde_json::json!({
+            "id": state.id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": summary,
+        })
     }
 
     fn finish_call(&mut self, state: &ItemState, output_index: u32) -> Value {
@@ -2134,6 +2281,7 @@ impl ItemState {
                 output_index,
                 restored,
                 custom_input: CustomStream::default(),
+                summary_open: false,
             },
             BlockStart::Thinking { .. } => Self {
                 kind: ItemKind::Reasoning,
@@ -2144,6 +2292,7 @@ impl ItemState {
                 output_index,
                 restored,
                 custom_input: CustomStream::default(),
+                summary_open: false,
             },
             BlockStart::ToolCall { id: call_id, name } => Self {
                 kind: ItemKind::Function,
@@ -2154,13 +2303,14 @@ impl ItemState {
                 output_index,
                 restored,
                 custom_input: CustomStream::default(),
+                summary_open: false,
             },
             BlockStart::Unknown { .. } => return None,
         };
         Some(state)
     }
 
-    fn added_item(&self, extensions: &Extensions) -> Value {
+    fn added_item(&self) -> Value {
         match self.kind {
             ItemKind::Message => serde_json::json!({
                 "id": self.id,
@@ -2169,20 +2319,17 @@ impl ItemState {
                 "status": "in_progress",
                 "content": [],
             }),
-            ItemKind::Reasoning => match extensions.get(SEALED_ITEM) {
-                Some(Value::Object(sealed)) => {
-                    let mut sealed = sealed.clone();
-                    sealed
-                        .entry("id".to_owned())
-                        .or_insert_with(|| Value::String(self.id.clone()));
-                    Value::Object(sealed)
-                }
-                _ => serde_json::json!({
+            // An upstream's seal is not announced: the item's done event
+            // carries it, made over when it is another vendor's.
+            // reference: internal/gateway/responses.go:2249-2263
+            ItemKind::Reasoning => {
+                serde_json::json!({
                     "id": self.id,
                     "type": "reasoning",
+                    "status": "in_progress",
                     "summary": [],
-                }),
-            },
+                })
+            }
             ItemKind::Function => {
                 let custom = self
                     .restored
