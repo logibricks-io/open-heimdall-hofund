@@ -20,13 +20,14 @@ pub struct TestIssuer {
     extra: Mutex<BTreeMap<String, Arc<RsaKeyPair>>>,
     fetches: AtomicU32,
     down: AtomicBool,
+    jwks_uri: Mutex<Option<String>>,
 }
 
 impl TestIssuer {
     pub fn new() -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let pair = Arc::new(generate_key());
+        let pair = Arc::new(generate_key(include_str!("test-key.pem")));
         let components = PublicKeyComponents::<Vec<u8>>::from(pair.public());
         let spki = pair.public().as_ref().to_vec();
         Self {
@@ -38,7 +39,12 @@ impl TestIssuer {
             extra: Mutex::new(BTreeMap::new()),
             fetches: AtomicU32::new(0),
             down: AtomicBool::new(false),
+            jwks_uri: Mutex::new(None),
         }
+    }
+
+    pub fn set_jwks_uri(&self, uri: impl Into<String>) {
+        *self.jwks_uri.lock().expect("jwks uri") = Some(uri.into());
     }
 
     pub fn fetch_count(&self) -> u32 {
@@ -105,17 +111,22 @@ impl TestIssuer {
     }
 
     pub fn sign(&self, kid: &str, claims: BTreeMap<String, Value>) -> String {
-        let pair = if kid == "k1" {
-            Arc::clone(&self.pair)
-        } else {
-            self.extra
-                .lock()
-                .expect("extra")
-                .get(kid)
-                .cloned()
-                .unwrap_or_else(|| Arc::clone(&self.pair))
-        };
-        let header = serde_json::json!({"alg":"RS256","typ":"JWT","kid":kid});
+        self.sign_with_alg(kid, "RS256", claims)
+    }
+
+    pub fn sign_with_alg(&self, kid: &str, alg: &str, claims: BTreeMap<String, Value>) -> String {
+        let pair = self.signing_pair(kid);
+        self.sign_with_pair(&pair, kid, alg, claims)
+    }
+
+    pub fn sign_with_pair(
+        &self,
+        pair: &Arc<RsaKeyPair>,
+        kid: &str,
+        alg: &str,
+        claims: BTreeMap<String, Value>,
+    ) -> String {
+        let header = serde_json::json!({"alg": alg, "typ":"JWT","kid":kid});
         let header = URL_SAFE_NO_PAD.encode(header.to_string());
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims).expect("claims"));
         let signed = format!("{header}.{payload}");
@@ -128,6 +139,35 @@ impl TestIssuer {
         )
         .expect("sign");
         format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature))
+    }
+
+    pub fn foreign_pair() -> Arc<RsaKeyPair> {
+        Arc::new(generate_key(include_str!("test-key-alt.pem")))
+    }
+
+    pub fn token_with_tampered_payload(token: &str) -> String {
+        let parts: Vec<&str> = token.split('.').collect();
+        let mut claims: BTreeMap<String, Value> =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).expect("payload"))
+                .expect("claims json");
+        if let Some(Value::String(text)) = claims.get_mut("repository") {
+            text.push('x');
+        }
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims).expect("claims"));
+        format!("{}.{}.{}", parts[0], payload, parts[2])
+    }
+
+    fn signing_pair(&self, kid: &str) -> Arc<RsaKeyPair> {
+        if kid == "k1" {
+            Arc::clone(&self.pair)
+        } else {
+            self.extra
+                .lock()
+                .expect("extra")
+                .get(kid)
+                .cloned()
+                .unwrap_or_else(|| Arc::clone(&self.pair))
+        }
     }
 
     pub fn spki(&self) -> &[u8] {
@@ -154,11 +194,15 @@ impl TestIssuer {
         }
         let discovery = format!("{}/.well-known/openid-configuration", self.url);
         if url == discovery {
-            return Ok(format!(
-                r#"{{"issuer":"{}","jwks_uri":"{}/jwks"}}"#,
-                self.url, self.url
-            )
-            .into_bytes());
+            let jwks_uri = self
+                .jwks_uri
+                .lock()
+                .expect("jwks uri")
+                .clone()
+                .unwrap_or_else(|| format!("{}/jwks", self.url));
+            return Ok(
+                format!(r#"{{"issuer":"{}","jwks_uri":"{jwks_uri}"}}"#, self.url).into_bytes(),
+            );
         }
         if url == format!("{}/jwks", self.url) {
             self.fetches.fetch_add(1, Ordering::SeqCst);
@@ -184,10 +228,9 @@ impl TestIssuer {
     }
 }
 
-fn generate_key() -> RsaKeyPair {
-    const PEM: &str = include_str!("test-key.pem");
+fn generate_key(pem: &str) -> RsaKeyPair {
     let mut body = String::new();
-    for line in PEM.lines() {
+    for line in pem.lines() {
         let line = line.trim();
         if line.starts_with("-----") {
             continue;

@@ -184,7 +184,7 @@ mod tests {
         peer: &str,
         token: Option<&str>,
         body: &str,
-    ) -> (StatusCode, Vec<u8>) {
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
         let mut builder = axum::http::Request::builder()
             .method("POST")
             .uri(OIDC_KEYS_PATH)
@@ -199,11 +199,12 @@ mod tests {
             .insert(PeerAddr(std::net::SocketAddr::new(ip, 5000)));
         let response = app.clone().oneshot(request).await.expect("response");
         let status = response.status();
+        let headers = response.headers().clone();
         let body = axum::body::to_bytes(response.into_body(), BODY_LIMIT)
             .await
             .expect("body")
             .to_vec();
-        (status, body)
+        (status, headers, body)
     }
 
     #[tokio::test]
@@ -237,7 +238,7 @@ mod tests {
         let token = |aud: &str, over: BTreeMap<String, Value>| {
             fixture.issuer.sign("k1", fixture.issuer.claims(aud, &over))
         };
-        let (status, body) = post_oidc(
+        let (status, _, body) = post_oidc(
             &app,
             "192.168.1.9",
             Some(&token("hofund-x", BTreeMap::new())),
@@ -247,7 +248,7 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("no rule"));
-        let (status, body) = post_oidc(
+        let (status, _, body) = post_oidc(
             &app,
             "192.168.1.9",
             Some(&token(&rule.audience, BTreeMap::new())),
@@ -258,7 +259,7 @@ mod tests {
         let issued: hofund_secrets::IssuedKey = serde_json::from_slice(&body).expect("issued");
         assert_eq!(issued.issuer, parent.key.id);
         assert_eq!(issued.name, "acme/app@main (run 42)");
-        let (status, _) = post_oidc(
+        let (status, _, _) = post_oidc(
             &app,
             "192.168.1.9",
             Some(&token(
@@ -272,9 +273,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, _) = post_oidc(&app, "192.168.1.9", None, "").await;
+        let (status, _, _) = post_oidc(&app, "192.168.1.9", None, "").await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, _) = post_oidc(
+        let (status, _, _) = post_oidc(
             &app,
             "192.168.1.9",
             Some(&token(&rule.audience, BTreeMap::new())),
@@ -282,5 +283,84 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn d28_13_exchange_caps_requested_ttl_to_rule_lifetime() {
+        use chrono::{DateTime, Utc};
+        use std::time::UNIX_EPOCH;
+
+        let fixture = fixture().await;
+        let parent = fixture.store.add("CI", None).expect("parent");
+        fixture
+            .store
+            .set_issuer(&parent.key.id, true)
+            .expect("issuer");
+        let rule = fixture
+            .rules
+            .add(
+                RuleDraft {
+                    key: parent.key.id.clone(),
+                    issuer: fixture.issuer.url.clone(),
+                    ttl: 1800,
+                    claims: BTreeMap::from([("repository".to_owned(), "acme/app".to_owned())]),
+                    ..RuleDraft::default()
+                },
+                &fixture.store,
+            )
+            .expect("rule");
+        assert_eq!(rule.lifetime().as_secs(), 1800);
+        let app = fixture.gateway.into_router();
+        let token = fixture.issuer.sign(
+            "k1",
+            fixture.issuer.claims(&rule.audience, &BTreeMap::new()),
+        );
+        let before = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_secs() as i64;
+        let (status, _, body) =
+            post_oidc(&app, "192.168.1.9", Some(&token), r#"{"ttl":"48h"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let issued: hofund_secrets::IssuedKey = serde_json::from_slice(&body).expect("issued");
+        let expires: DateTime<Utc> = issued.expires.parse().expect("expires");
+        let ttl = expires.timestamp() - before;
+        assert!(
+            (1700..=1900).contains(&ttl),
+            "issued ttl {ttl}s should stay near the rule cap 1800s, not 48h"
+        );
+    }
+
+    #[tokio::test]
+    async fn d28_14_exchange_created_response_cache_control_no_store() {
+        let fixture = fixture().await;
+        let parent = fixture.store.add("CI", None).expect("parent");
+        fixture
+            .store
+            .set_issuer(&parent.key.id, true)
+            .expect("issuer");
+        let rule = fixture
+            .rules
+            .add(
+                RuleDraft {
+                    key: parent.key.id.clone(),
+                    issuer: fixture.issuer.url.clone(),
+                    claims: BTreeMap::from([("repository".to_owned(), "acme/app".to_owned())]),
+                    ..RuleDraft::default()
+                },
+                &fixture.store,
+            )
+            .expect("rule");
+        let app = fixture.gateway.into_router();
+        let token = fixture.issuer.sign(
+            "k1",
+            fixture.issuer.claims(&rule.audience, &BTreeMap::new()),
+        );
+        let (status, headers, _) = post_oidc(&app, "192.168.1.9", Some(&token), "").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            headers.get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static("no-store"))
+        );
     }
 }

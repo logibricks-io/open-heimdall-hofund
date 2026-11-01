@@ -4,7 +4,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use hofund_secrets::KeyStore;
 use hofund_secrets::oidc::{RuleDraft, RuleStore};
-use serde_json::{Number, Value};
+use serde_json::{Number, Value, json};
 
 use super::test_issuer::TestIssuer;
 use super::{
@@ -365,4 +365,208 @@ fn d28_oidc_key_name_from_workflow_claims() {
         ("run_id".to_owned(), Value::String("42".to_owned())),
     ]);
     assert_eq!(oidc_key_name(&claims), "acme/app@main (run 42)");
+}
+
+#[tokio::test]
+async fn d28_01_match_refuses_non_rs256_algorithms() {
+    let fixture = fixture().await;
+    let issuer = &fixture.issuer;
+    let key = issuer_key(&fixture.keys);
+    let rule = fixture
+        .rules
+        .add(
+            RuleDraft {
+                key,
+                issuer: fixture.issuer.url.clone(),
+                claims: BTreeMap::from([("repository".to_owned(), "acme/app".to_owned())]),
+                ..RuleDraft::default()
+            },
+            &fixture.keys,
+        )
+        .expect("add");
+    let claims = issuer.claims(&rule.audience, &BTreeMap::new());
+    for alg in ["HS256", "none", "RS384"] {
+        let token = issuer.sign_with_alg("k1", alg, claims.clone());
+        let err = match_token(&token, &fixture.rules).await.expect_err(alg);
+        assert!(
+            err.contains("only RS256"),
+            "{alg} should name RS256 refusal, got {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn d28_02_match_refuses_invalid_signature() {
+    let fixture = fixture().await;
+    let issuer = &fixture.issuer;
+    let key = issuer_key(&fixture.keys);
+    let rule = fixture
+        .rules
+        .add(
+            RuleDraft {
+                key,
+                issuer: fixture.issuer.url.clone(),
+                claims: BTreeMap::from([("repository".to_owned(), "acme/app".to_owned())]),
+                ..RuleDraft::default()
+            },
+            &fixture.keys,
+        )
+        .expect("add");
+    let claims = issuer.claims(&rule.audience, &BTreeMap::new());
+    let good = issuer.sign("k1", claims.clone());
+    match_token(&good, &fixture.rules)
+        .await
+        .expect("valid signature");
+    let tampered = TestIssuer::token_with_tampered_payload(&good);
+    let err = match_token(&tampered, &fixture.rules)
+        .await
+        .expect_err("tampered payload");
+    assert!(err.contains("signature is not"), "{err}");
+    let foreign = TestIssuer::foreign_pair();
+    let wrong_key = issuer.sign_with_pair(&foreign, "k1", "RS256", claims);
+    let err = match_token(&wrong_key, &fixture.rules)
+        .await
+        .expect_err("foreign signer");
+    assert!(err.contains("signature is not"), "{err}");
+}
+
+#[tokio::test]
+async fn d28_08_match_refuses_http_jwks_uri_without_jwks_fetch() {
+    let fixture = fixture().await;
+    let host = fixture
+        .issuer
+        .url
+        .strip_prefix("https://")
+        .expect("issuer url");
+    fixture.issuer.set_jwks_uri(format!("http://{host}/jwks"));
+    let key = issuer_key(&fixture.keys);
+    let rule = fixture
+        .rules
+        .add(
+            RuleDraft {
+                key,
+                issuer: fixture.issuer.url.clone(),
+                claims: BTreeMap::from([("repository".to_owned(), "acme/app".to_owned())]),
+                ..RuleDraft::default()
+            },
+            &fixture.keys,
+        )
+        .expect("add");
+    let token = fixture.issuer.sign(
+        "k1",
+        fixture.issuer.claims(&rule.audience, &BTreeMap::new()),
+    );
+    let err = match_token(&token, &fixture.rules)
+        .await
+        .expect_err("http jwks");
+    assert!(err.contains("jwks_uri isn't https"), "{err}");
+    assert_eq!(fixture.issuer.fetch_count(), 0);
+}
+
+#[test]
+fn d28_09_parse_jwks_skips_rsa_modulus_shorter_than_2048_bits() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.block_on(lock_oidc_tests());
+    let mut modulus = vec![0_u8; 128];
+    modulus[0] = 0x80;
+    let jwks = json!({
+        "keys": [{
+            "kty": "RSA",
+            "kid": "weak",
+            "use": "sig",
+            "n": URL_SAFE_NO_PAD.encode(modulus),
+            "e": URL_SAFE_NO_PAD.encode([1_u8, 0, 1]),
+        }]
+    });
+    let err = parse_jwks(jwks.to_string().as_bytes()).expect_err("1024-bit key");
+    assert!(err.contains("lists no RSA signing key"), "{err}");
+}
+
+#[tokio::test]
+async fn d28_10_jwks_refetch_after_keys_fresh_elapsed() {
+    let fixture = fixture().await;
+    let issuer = &fixture.issuer;
+    let key = issuer_key(&fixture.keys);
+    let rule = fixture
+        .rules
+        .add(
+            RuleDraft {
+                key,
+                issuer: fixture.issuer.url.clone(),
+                claims: BTreeMap::from([("repository".to_owned(), "acme/app".to_owned())]),
+                ..RuleDraft::default()
+            },
+            &fixture.keys,
+        )
+        .expect("add");
+    let token = || issuer.sign("k1", issuer.claims(&rule.audience, &BTreeMap::new()));
+    match_token(&token(), &fixture.rules)
+        .await
+        .expect("initial fetch");
+    assert_eq!(issuer.fetch_count(), 1);
+    let advanced = std::time::SystemTime::now() + Duration::from_secs(3601);
+    set_now_for_tests(Some(advanced));
+    let exp = advanced
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+        + 300;
+    let fresh = issuer.sign(
+        "k1",
+        issuer.claims(
+            &rule.audience,
+            &BTreeMap::from([("exp".to_owned(), Value::Number(Number::from(exp)))]),
+        ),
+    );
+    match_token(&fresh, &fixture.rules)
+        .await
+        .expect("refetch after cache age");
+    assert_eq!(issuer.fetch_count(), 2);
+    set_now_for_tests(None);
+}
+
+#[tokio::test]
+async fn d28_11_jwks_refetch_gap_limits_unknown_kid_fetches() {
+    let fixture = fixture().await;
+    let issuer = &fixture.issuer;
+    let key = issuer_key(&fixture.keys);
+    let rule = fixture
+        .rules
+        .add(
+            RuleDraft {
+                key,
+                issuer: fixture.issuer.url.clone(),
+                claims: BTreeMap::from([("repository".to_owned(), "acme/app".to_owned())]),
+                ..RuleDraft::default()
+            },
+            &fixture.keys,
+        )
+        .expect("add");
+    let base = std::time::SystemTime::now();
+    set_now_for_tests(Some(base));
+    let claims = || issuer.claims(&rule.audience, &BTreeMap::new());
+    assert!(
+        match_token(&issuer.sign("ghost-a", claims()), &fixture.rules)
+            .await
+            .is_err()
+    );
+    assert_eq!(issuer.fetch_count(), 1);
+    assert!(
+        match_token(&issuer.sign("ghost-b", claims()), &fixture.rules)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        issuer.fetch_count(),
+        1,
+        "second unknown kid within the refetch gap must not fetch again"
+    );
+    set_now_for_tests(Some(base + Duration::from_secs(11)));
+    assert!(
+        match_token(&issuer.sign("ghost-c", claims()), &fixture.rules)
+            .await
+            .is_err()
+    );
+    assert_eq!(issuer.fetch_count(), 2);
+    set_now_for_tests(None);
 }
