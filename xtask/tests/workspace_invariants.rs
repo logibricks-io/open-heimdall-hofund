@@ -91,6 +91,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         ],
         "hofund-gateway" => &[
             "hofund-codec",
+            "hofund-config",
             "hofund-control-proto",
             "hofund-ir",
             "hofund-plugin-api",
@@ -184,6 +185,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-daemon-bin" => &[],
         "hofund-gateway" => &[
             "hofund-codec",
+            "hofund-config",
             "hofund-ir",
             "hofund-plugin-api",
             "hofund-router",

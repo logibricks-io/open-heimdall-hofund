@@ -17,6 +17,7 @@ mod provider_edit;
 mod quota;
 mod serve;
 mod subscription;
+mod visible;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -126,6 +127,16 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             }
             Command::Routes => provider::routes(config).await,
             Command::ModelList => provider::model_list(config).await,
+            Command::Visible {
+                agent,
+                names,
+                only_picked,
+            } => visible::visible(config, &agent, &names, only_picked).await,
+            Command::AgentModels {
+                agent,
+                hide,
+                unhide,
+            } => visible::models(config, &agent, &hide, &unhide).await,
             Command::ModelShow { id } => provider::model_show(config, &id).await,
             Command::Version
             | Command::Help(_)
@@ -245,6 +256,16 @@ enum Command {
     ModelList,
     ModelShow {
         id: String,
+    },
+    Visible {
+        agent: String,
+        names: Vec<String>,
+        only_picked: Option<bool>,
+    },
+    AgentModels {
+        agent: String,
+        hide: Vec<String>,
+        unhide: Vec<String>,
     },
 }
 
@@ -559,6 +580,36 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["provider", ..] => return Err(help_text(HelpTopic::Provider)),
         ["routes"] => Command::Routes,
         ["model", "list"] => Command::ModelList,
+        ["visible", agent, "--only-picked"] => Command::Visible {
+            agent: (*agent).to_owned(),
+            names: Vec::new(),
+            only_picked: Some(true),
+        },
+        ["visible", agent, "--show-new"] => Command::Visible {
+            agent: (*agent).to_owned(),
+            names: Vec::new(),
+            only_picked: Some(false),
+        },
+        ["visible", agent, names @ ..] => Command::Visible {
+            agent: (*agent).to_owned(),
+            names: owned(names),
+            only_picked: None,
+        },
+        ["models", "hide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
+            agent: (*agent).to_owned(),
+            hide: owned(ids),
+            unhide: Vec::new(),
+        },
+        ["models", "unhide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
+            agent: (*agent).to_owned(),
+            hide: Vec::new(),
+            unhide: owned(ids),
+        },
+        ["models", agent] => Command::AgentModels {
+            agent: (*agent).to_owned(),
+            hide: Vec::new(),
+            unhide: Vec::new(),
+        },
         ["model", "show", id] => Command::ModelShow {
             id: (*id).to_owned(),
         },
@@ -767,6 +818,12 @@ commands:
   routes                          list route models, routing strategies, and stays modes
   model list                      list the models routes serve
   model show <id>                 print one routed model
+  visible <agent> <names...>|all  narrow an agent's model list, or show every model
+  visible <agent> --only-picked   show only models picked for the agent
+  visible <agent> --show-new      show models added later again
+  models <agent>                  list models shown to and hidden from an agent
+  models hide|unhide <agent> <ids...>
+                                  take route ids out of an agent's list, or put them back
 
 Commands that read or change runtime state talk to a running daemon. With
 no daemon they run hofundd once for the command, from hofund's directory or

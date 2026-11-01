@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use hofund_config::{Config, ConfigError};
+use hofund_config::{Config, ConfigError, VisibleCatalog};
 use hofund_control_proto::{
     ConfigRejectedEvent, ConfigReloadedEvent, ConfigResponse, ConfigValidationResponse,
     ControlError, ControlErrorKind, EventPayload, FieldIssue, ListenSource,
@@ -22,6 +22,7 @@ use hofund_control_proto::{
 };
 use hofund_gateway::control::ControlFailure;
 use hofund_gateway::{Relisten, RelistenError};
+use hofund_router::Snapshot;
 use tokio::sync::watch;
 
 use crate::config_write::{SidecarLock, WriteFailure, atomic_write, primary_lock_path};
@@ -149,6 +150,13 @@ pub(crate) enum ReloadOrigin {
     Watcher,
 }
 
+/// Listener and model-list state shared with config edits.
+pub(crate) struct ConfigOpsRouting {
+    pub(crate) listener: ModelListener,
+    pub(crate) visible_catalog: Arc<RwLock<VisibleCatalog>>,
+    pub(crate) snapshot: Snapshot,
+}
+
 pub(crate) struct ConfigOps {
     gate: tokio::sync::Mutex<()>,
     path: PathBuf,
@@ -159,7 +167,7 @@ pub(crate) struct ConfigOps {
     /// compared against it, so reverting an edit clears `pending_restart`.
     started: Arc<Config>,
     live: RwLock<Arc<LiveConfig>>,
-    listener: ModelListener,
+    routing: ConfigOpsRouting,
 }
 
 impl ConfigOps {
@@ -170,14 +178,14 @@ impl ConfigOps {
         bus: Arc<EventBus>,
         config: Arc<Config>,
         runtime_revision: String,
-        listener: ModelListener,
+        routing: ConfigOpsRouting,
     ) -> Self {
         let live = LiveConfig {
             config: Arc::clone(&config),
             runtime_revision,
             generation: 1,
             pending_restart: Vec::new(),
-            not_applied: listener.env_issue(&config).into_iter().collect(),
+            not_applied: routing.listener.env_issue(&config).into_iter().collect(),
         };
         Self {
             gate: tokio::sync::Mutex::new(()),
@@ -187,13 +195,89 @@ impl ConfigOps {
             bus,
             started: config,
             live: RwLock::new(Arc::new(live)),
-            listener,
+            routing,
         }
+    }
+
+    /// Route model ids an agent is shown, after visibility filters.
+    pub(crate) fn agent_route_models(
+        &self,
+        agent: Option<&str>,
+        active_model: Option<&str>,
+    ) -> Vec<String> {
+        self.agent_models(agent, active_model).0
+    }
+
+    /// Shown and hidden route ids for one agent.
+    ///
+    /// `active_model` stays in the shown list even when a deny list names it.
+    pub(crate) fn agent_models(
+        &self,
+        agent: Option<&str>,
+        active_model: Option<&str>,
+    ) -> (Vec<String>, Vec<String>) {
+        crate::agent_visible::models_for_agent(
+            &self.routing.visible_catalog,
+            &self.routing.snapshot,
+            agent,
+            active_model,
+        )
+    }
+
+    async fn apply_edited_config(
+        self: &Arc<Self>,
+        edit: impl FnOnce(&str) -> Result<String, ConfigError>,
+    ) -> Result<ConfigResponse, ControlFailure> {
+        let current = self.get().await?;
+        let text = edit(&current.text).map_err(|error| {
+            ControlFailure::from(ControlError::new(
+                ControlErrorKind::InvalidConfig,
+                error.to_string(),
+                "config",
+            ))
+        })?;
+        self.apply(&current.disk_revision, text).await
+    }
+
+    pub(crate) async fn set_agent_visible(
+        self: &Arc<Self>,
+        agent: &str,
+        names: Vec<String>,
+    ) -> Result<ConfigResponse, ControlFailure> {
+        let agent = agent.to_owned();
+        self.apply_edited_config(move |text| {
+            hofund_config::edit_agent_visible(text, &agent, &names)
+        })
+        .await
+    }
+
+    pub(crate) async fn set_agent_hidden_models(
+        self: &Arc<Self>,
+        agent: &str,
+        ids: Vec<String>,
+    ) -> Result<ConfigResponse, ControlFailure> {
+        let agent = agent.to_owned();
+        self.apply_edited_config(move |text| {
+            hofund_config::edit_agent_hidden_models(text, &agent, &ids)
+        })
+        .await
+    }
+
+    pub(crate) async fn set_agent_picked_only(
+        self: &Arc<Self>,
+        agent: &str,
+        only: bool,
+    ) -> Result<ConfigResponse, ControlFailure> {
+        let agent = agent.to_owned();
+        self.apply_edited_config(move |text| {
+            hofund_config::edit_agent_picked_only(text, &agent, only)
+        })
+        .await
     }
 
     /// The listener addresses for the published configuration.
     pub(crate) fn listener(&self) -> ListenerView {
-        self.listener.view(&self.live().config)
+        self.routing.listener.view(&self.live().config)
     }
 
     /// The published configuration.
@@ -388,7 +472,7 @@ impl ConfigOps {
 
     /// Moves the listener, then records and announces the publication.
     async fn finish(&self, staged: Staged) -> ConfigResponse {
-        let listen = self.listener.follow(&staged.config).await;
+        let listen = self.routing.listener.follow(&staged.config).await;
         let mut live = self.live.write().expect("live config");
         let next = Arc::new(LiveConfig {
             pending_restart: restart_diff(&self.started, &staged.config),
@@ -399,6 +483,11 @@ impl ConfigOps {
         });
         *live = Arc::clone(&next);
         drop(live);
+        crate::agent_visible::rebuild_catalog(
+            &self.routing.visible_catalog,
+            Arc::clone(&next.config),
+            &self.routing.snapshot,
+        );
         let mut event = ConfigReloadedEvent::default();
         event.disk_revision.clone_from(&next.runtime_revision);
         event.runtime_revision.clone_from(&next.runtime_revision);
@@ -416,6 +505,7 @@ impl ConfigOps {
             let mut event = ListenerRelistenFailedEvent::default();
             event.issue = issue;
             event.running = self
+                .routing
                 .listener
                 .view(&next.config)
                 .running
@@ -546,14 +636,17 @@ fn internal(message: String) -> ControlFailure {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
+    use hofund_config::VisibleCatalog;
     use hofund_control_proto::{ControlErrorKind, EventEnvelope, EventPayload};
     use hofund_gateway::control::ControlFailure;
     use hofund_plugin_api::PluginError;
     use hofund_router::Snapshot;
 
-    use super::{ConfigOps, ENV_OVERRIDE, ModelListener, ReloadOrigin, restart_diff};
+    use super::{
+        ConfigOps, ConfigOpsRouting, ENV_OVERRIDE, ModelListener, ReloadOrigin, restart_diff,
+    };
     use crate::RegistryAdapter;
     use crate::control::revision;
     use crate::events::EventBus;
@@ -592,17 +685,27 @@ mod tests {
         let path = dir.path().join("hofund.toml");
         std::fs::write(&path, text).expect("seed");
         let config = hofund_config::load(text).expect("config");
+        let config = Arc::new(config);
         let runtime = Runtime::new(Arc::new(RegistryAdapter), &path, None);
-        let snapshot = runtime.initial_snapshot(&config, None).expect("snapshot");
+        let snapshot = runtime
+            .initial_snapshot(config.as_ref(), None)
+            .expect("snapshot");
         let bus = Arc::new(EventBus::new());
         let ops = Arc::new(ConfigOps::new(
             &path,
             Some(runtime_dir.path().join("config-test.lock")),
             Arc::clone(&runtime),
             Arc::clone(&bus),
-            Arc::new(config),
+            Arc::clone(&config),
             revision(text.as_bytes()),
-            ModelListener::new(None, None, tokio::sync::watch::channel(None).0),
+            ConfigOpsRouting {
+                listener: ModelListener::new(None, None, tokio::sync::watch::channel(None).0),
+                visible_catalog: Arc::new(RwLock::new(VisibleCatalog::build(
+                    Arc::clone(&config),
+                    &snapshot.load().models(),
+                ))),
+                snapshot: snapshot.clone(),
+            },
         ));
         Fixture {
             ops,

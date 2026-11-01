@@ -1280,6 +1280,7 @@ mod tests {
                 options: BTreeMap::new(),
             }],
             warnings: Vec::new(),
+            agents: Default::default(),
         }
     }
 

@@ -312,3 +312,83 @@ impl Default for AgentChangeResponse {
         }
     }
 }
+
+/// Per-agent model visibility response.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AgentModelsResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Agent id.
+    pub agent: String,
+    /// Route ids the agent is shown.
+    pub shown: Vec<String>,
+    /// Route ids kept from the agent.
+    pub hidden: Vec<String>,
+}
+
+/// Replace the visibility names for one agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct AgentVisibleSetRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Visibility names; empty clears the allow-list.
+    pub names: Vec<String>,
+}
+
+impl AgentVisibleSetRequest {
+    /// Constructs a version-current request.
+    #[must_use]
+    pub fn new(names: Vec<String>) -> Self {
+        Self {
+            version: API_VERSION,
+            names,
+        }
+    }
+}
+
+/// Replace hidden route ids for one agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct AgentHiddenSetRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Route ids to hide; empty shows every listed model.
+    pub ids: Vec<String>,
+}
+
+impl AgentHiddenSetRequest {
+    /// Constructs a version-current request.
+    #[must_use]
+    pub fn new(ids: Vec<String>) -> Self {
+        Self {
+            version: API_VERSION,
+            ids,
+        }
+    }
+}
+
+/// Toggle picked-only mode for one agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct AgentPickedOnlyRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// When true, only picked models are shown.
+    pub only: bool,
+}
+
+impl AgentPickedOnlyRequest {
+    /// Constructs a version-current request.
+    #[must_use]
+    pub fn new(only: bool) -> Self {
+        Self {
+            version: API_VERSION,
+            only,
+        }
+    }
+}

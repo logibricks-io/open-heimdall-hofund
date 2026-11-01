@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-agent visible model lists (G-2, feature-parity row 5.7): optional
+  `family` on providers and routes; `[agents.visible]`, `[agents.hidden_models]`,
+  `[agents.picked_models]`, and `[agents.picked_only]` in config; gateway
+  filtering of `/v1/models` and `/v1beta/models` by resolved agent; control
+  routes and `hofund visible` / `hofund models` (including `all`, hide/unhide,
+  and picked-only) CLI commands.
+
 - Agent sign-in switching for Claude Code and Codex: `hofund accounts switch
   <agent> next|<account>`, `hofund accounts import <file>`, a five-minute
   NextLogin tick, subscription plugin file writes, and sign-out handover
