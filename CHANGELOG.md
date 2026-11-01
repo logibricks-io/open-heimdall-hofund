@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Conversation affinity now returns fallback, ordered-group, and stand-in
+  answerers to earlier ready members at the next user turn without crossing
+  tool-loop or strict-stay boundaries (P0-2c2, D-14, D-25). Rotate and
+  whole-session routing spread new conversations by 30-minute least-held
+  counts, including in-flight first requests; subagents follow their leads,
+  emergency fallbacks stay out of rotation while the provider is ready, and
+  effort plus stand-in identity persist compatibly in `affinity.json`.
 - Gateway-key spending limits (P0-4b): up to five token and/or estimated-cost
   caps per key over local calendar windows or absolute N-day/N-hour cycles.
   Cache-aware token sums rebuild from SQLite after restart, in-flight body-size

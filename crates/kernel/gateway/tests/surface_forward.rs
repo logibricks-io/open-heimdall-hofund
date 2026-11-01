@@ -156,6 +156,8 @@ fn fixture(members: &[(&'static str, Option<&str>, Answer)]) -> Fixture {
             weight: 1,
             free: false,
             nearly_spent: false,
+            fallback: false,
+            effort: String::new(),
             cold_after: hofund_router::affinity::CACHE_COLD,
         })
         .collect();

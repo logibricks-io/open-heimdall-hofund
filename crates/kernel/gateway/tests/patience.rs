@@ -188,6 +188,8 @@ fn fixture(answers: Vec<Result<Completion, PluginError>>) -> Fixture {
         free: false,
         cold_after: hofund_router::affinity::CACHE_COLD,
         nearly_spent: false,
+        fallback: false,
+        effort: String::new(),
     };
     let snapshot = Snapshot::new(Router::from_hops(
         BTreeMap::from([("demo".to_owned(), vec![hop])]),

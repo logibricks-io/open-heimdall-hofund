@@ -5,21 +5,32 @@ use hofund_ir::{StreamEvent, Usage};
 use hofund_plugin_api::{BodyStream, Completion};
 use serde_json::Value;
 
-use crate::affinity::{AffinityState, CacheUsage};
+use crate::affinity::{AffinityState, Answerer, CacheUsage};
 
-struct Reply {
-    state: AffinityState,
-    key: String,
-    turn: u64,
-    strict: bool,
-    member: String,
-    model: String,
+pub(crate) struct Reply {
+    pub(crate) state: AffinityState,
+    pub(crate) key: String,
+    pub(crate) turn: u64,
+    pub(crate) strict: bool,
+    pub(crate) member: String,
+    pub(crate) model: String,
+    pub(crate) effort: String,
+    pub(crate) stood_in: bool,
 }
 
 impl Reply {
     fn answered(self, usage: CacheUsage) {
-        self.state
-            .answered(&self.key, &self.member, &self.model, self.turn, usage);
+        self.state.answered_as(
+            &self.key,
+            Answerer {
+                member: &self.member,
+                model: &self.model,
+                effort: &self.effort,
+                stood_in: self.stood_in,
+            },
+            self.turn,
+            usage,
+        );
     }
 
     fn broken(self) {
@@ -27,23 +38,13 @@ impl Reply {
     }
 }
 
-pub(crate) fn watch(
-    completion: Completion,
-    state: AffinityState,
-    key: String,
-    turn: u64,
-    strict: bool,
-    member: String,
-    model: String,
-) -> Completion {
-    let reply = Reply {
-        state,
-        key,
-        turn,
-        strict,
-        member,
-        model,
-    };
+impl Drop for Reply {
+    fn drop(&mut self) {
+        self.state.opened(&self.key);
+    }
+}
+
+pub(crate) fn watch(completion: Completion, reply: Reply) -> Completion {
     match completion {
         Completion::Unary(response) => {
             let usage = response

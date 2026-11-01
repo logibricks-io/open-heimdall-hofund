@@ -948,6 +948,8 @@ fn raw_app_as(
             weight: 1,
             free: false,
             nearly_spent: false,
+            fallback: false,
+            effort: String::new(),
             cold_after: hofund_router::affinity::CACHE_COLD,
         }],
     );
@@ -1425,6 +1427,8 @@ fn named_app(stream: bool, wire: &str, answer: &'static str) -> (axum::Router, t
             free: false,
             cold_after: hofund_router::affinity::CACHE_COLD,
             nearly_spent: false,
+            fallback: false,
+            effort: String::new(),
         }],
     )]);
     let codecs = HashMap::from([
@@ -1624,6 +1628,8 @@ fn protocol_app(members: Vec<Arc<dyn Member>>) -> (axum::Router, tempfile::TempD
             weight: 1,
             free: false,
             nearly_spent: false,
+            fallback: false,
+            effort: String::new(),
             cold_after: hofund_router::affinity::CACHE_COLD,
         })
         .collect();
