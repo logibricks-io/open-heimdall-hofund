@@ -18,6 +18,8 @@ listen = "127.0.0.1:3425"
 # refresh = "24h"
 # poll = "1h"
 #
+# reasoning_toggle_providers = ["deepseek"]
+#
 # [[catalog.overrides]]
 # model = "demo"
 # context = 128000

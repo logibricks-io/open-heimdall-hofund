@@ -51,7 +51,11 @@ impl Syncer {
     ///
     /// Returns an error when a new body cannot be parsed or written.
     pub fn sync(&self, url: &str) -> io::Result<FetchResult> {
-        let prior = self.cache.read()?;
+        let prior = match self.cache.read() {
+            Ok(envelope) => envelope,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => None,
+            Err(error) => return Err(error),
+        };
         let etag = prior.as_ref().and_then(|envelope| envelope.etag.as_deref());
         match self.fetcher.fetch(url, etag) {
             Ok(FetchResponse::NotModified) | Ok(FetchResponse::Status(304)) => {

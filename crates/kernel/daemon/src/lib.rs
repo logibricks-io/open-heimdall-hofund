@@ -435,7 +435,8 @@ async fn start_inner(
     let usage = Arc::new(Ledger::open(&beside(path, &config.usage_file)).map_err(show)?);
     let data_root = catalog_data_root(path, control_session.as_ref());
     let catalog_fetcher = Arc::new(ReqwestFetcher::new().map_err(|error| show(error.to_string()))?);
-    let model_catalog = ModelCatalog::open(&data_root, config.catalog.clone(), catalog_fetcher)
+    let catalog_settings = effective_catalog_settings(config.catalog.clone());
+    let model_catalog = ModelCatalog::open(&data_root, catalog_settings, catalog_fetcher)
         .map_err(|error| show(error.to_string()))?;
     if model_catalog.stale() {
         let refresh = Arc::clone(&model_catalog);
@@ -2063,6 +2064,21 @@ fn catalog_data_root(
         .unwrap_or_else(|| beside(config_path, ".hofund"))
 }
 
+pub(crate) fn effective_catalog_settings(
+    settings: hofund_config::CatalogSettings,
+) -> hofund_config::CatalogSettings {
+    if !settings.reasoning_toggle_providers.is_empty() {
+        return settings;
+    }
+    hofund_config::CatalogSettings {
+        reasoning_toggle_providers: hofund_quirks::catalog_reasoning_toggle_providers()
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect(),
+        ..settings
+    }
+}
+
 fn show<E: std::fmt::Display>(error: E) -> DaemonError {
     DaemonError::new(error.to_string())
 }
@@ -2075,6 +2091,27 @@ mod tests {
 
     fn registry() -> std::sync::Arc<dyn super::DaemonRegistry> {
         std::sync::Arc::new(super::RegistryAdapter)
+    }
+
+    #[test]
+    fn c1a_daemon_catalog_reasoning_toggles_default_from_quirks() {
+        use hofund_config::CatalogSettings;
+
+        let effective = super::effective_catalog_settings(CatalogSettings::default());
+        let expected: Vec<String> = hofund_quirks::catalog_reasoning_toggle_providers()
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect();
+        assert_eq!(effective.reasoning_toggle_providers, expected);
+
+        let configured = CatalogSettings {
+            reasoning_toggle_providers: vec!["custom".to_owned()],
+            ..CatalogSettings::default()
+        };
+        assert_eq!(
+            super::effective_catalog_settings(configured.clone()),
+            configured
+        );
     }
 
     #[test]

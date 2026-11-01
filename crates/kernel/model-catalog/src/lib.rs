@@ -41,7 +41,7 @@ impl ModelCatalog {
         fetcher: Arc<dyn CatalogFetcher>,
     ) -> io::Result<Arc<Self>> {
         let cache = CacheFile::beside_data_root(data_root);
-        let index = cache::load_index(&cache, &settings.overrides)?;
+        let index = cache::load_index(&cache, &settings)?;
         Ok(Arc::new(Self {
             syncer: Syncer::new(cache.clone(), fetcher),
             cache,
@@ -56,7 +56,7 @@ impl ModelCatalog {
     ///
     /// Returns an I/O error when the cache cannot be read.
     pub fn reload(&self) -> io::Result<()> {
-        let index = cache::load_index(&self.cache, &self.settings.overrides)?;
+        let index = cache::load_index(&self.cache, &self.settings)?;
         if let Ok(mut guard) = self.index.write() {
             *guard = index;
         }

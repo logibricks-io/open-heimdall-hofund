@@ -2,11 +2,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use hofund_config::{CatalogOverrides, CatalogSettings};
+use hofund_config::CatalogSettings;
 use hofund_model_catalog::{
     CacheFile, CatalogFetcher, DevCatalog, FetchResponse, FetchResult, ModelCatalog, Syncer,
     build_index, parse_catalog,
 };
+use std::time::Duration;
 
 struct MockFetcher {
     responses: Mutex<Vec<Result<FetchResponse, std::io::Error>>>,
@@ -60,7 +61,8 @@ fn temp_catalog(fetcher: Arc<dyn CatalogFetcher>) -> (tempfile::TempDir, Arc<Mod
 #[test]
 fn c1a_1_parse_fixture_shapes_limits_prices_and_modalities() {
     let catalog: DevCatalog = parse_catalog(FIXTURE.as_bytes()).expect("parse");
-    let index = build_index(&catalog, &CatalogOverrides::default());
+    let settings = CatalogSettings::default();
+    let index = build_index(&catalog, &settings);
     let entry = index.resolve("gpt-demo").expect("entry");
     assert_eq!(entry.spec.context_window, Some(128_000));
     assert_eq!(entry.spec.max_output, Some(4096));
@@ -145,7 +147,7 @@ reasoning_levels = ["max"]
 "#,
     )
     .expect("config");
-    let index = build_index(&catalog, &settings.catalog.overrides);
+    let index = build_index(&catalog, &settings.catalog);
     let entry = index.resolve("gpt-demo").expect("entry");
     assert_eq!(entry.spec.context_window, Some(2000));
     assert_eq!(entry.spec.max_output, Some(512));
@@ -158,4 +160,115 @@ fn c1a_6_spec_lookup_returns_none_without_cache() {
     let fetcher = Arc::new(MockFetcher::new(vec![]));
     let (_dir, catalog) = temp_catalog(fetcher);
     assert!(catalog.spec("missing").is_none());
+}
+
+const TOGGLE_FIXTURE: &str = r#"{
+  "toggle-vendor": {
+    "id": "toggle-vendor",
+    "models": {
+      "thinker": {
+        "id": "thinker",
+        "reasoning_options": [
+          {"type": "toggle"},
+          {"type": "effort", "values": ["low", "high"]}
+        ],
+        "limit": {"context": 8192, "output": 1024}
+      }
+    }
+  }
+}"#;
+
+#[test]
+fn c1a_9_reasoning_toggle_list_injects_none_when_provider_matches() {
+    let catalog: DevCatalog = parse_catalog(TOGGLE_FIXTURE.as_bytes()).expect("parse");
+    let without = CatalogSettings::default();
+    let index = build_index(&catalog, &without);
+    let entry = index.resolve("thinker").expect("entry");
+    assert_eq!(entry.spec.reasoning_levels, ["low", "high"]);
+
+    let with_toggle = CatalogSettings {
+        reasoning_toggle_providers: vec!["toggle-vendor".to_owned()],
+        ..CatalogSettings::default()
+    };
+    let index = build_index(&catalog, &with_toggle);
+    let entry = index.resolve("thinker").expect("entry");
+    assert_eq!(entry.spec.reasoning_levels, ["none", "low", "high"]);
+}
+
+const DUPLICATE_ID_FIXTURE: &str = r#"{
+  "alpha": {
+    "id": "alpha",
+    "models": {
+      "shared": {
+        "id": "shared",
+        "limit": {"context": 4096, "output": 100}
+      }
+    }
+  },
+  "beta": {
+    "id": "beta",
+    "models": {
+      "shared": {
+        "id": "shared",
+        "limit": {"context": 8192, "output": 200}
+      }
+    }
+  }
+}"#;
+
+#[test]
+fn c1a_10_bare_id_index_is_first_provider_and_override_wins() {
+    let catalog: DevCatalog = parse_catalog(DUPLICATE_ID_FIXTURE.as_bytes()).expect("parse");
+    let settings = CatalogSettings::default();
+    let index = build_index(&catalog, &settings);
+    let entry = index.resolve("shared").expect("entry");
+    assert_eq!(entry.provider_id, "alpha");
+    assert_eq!(entry.spec.context_window, Some(4096));
+
+    let settings = hofund_config::load(
+        r#"
+listen = "127.0.0.1:9"
+[[catalog.overrides]]
+model = "shared"
+context = 42
+"#,
+    )
+    .expect("config");
+    let index = build_index(&catalog, &settings.catalog);
+    let entry = index.resolve("shared").expect("entry");
+    assert_eq!(entry.spec.context_window, Some(42));
+}
+
+#[tokio::test]
+async fn c1a_11_refresh_off_means_no_background_poll() {
+    let fetcher = Arc::new(MockFetcher::new(vec![]));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = CatalogSettings {
+        refresh: Duration::MAX,
+        poll: Duration::MAX,
+        ..CatalogSettings::default()
+    };
+    let catalog = ModelCatalog::open(dir.path(), settings, fetcher).expect("open");
+    assert!(!catalog.stale());
+    let handle = catalog.spawn_background();
+    handle.await.expect("background task exits");
+}
+
+#[test]
+fn c1a_12_corrupt_cache_falls_back_to_fetch_without_panicking() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache_path = dir.path().join("catalog/models.dev.json");
+    std::fs::create_dir_all(cache_path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&cache_path, b"{not-json").expect("corrupt");
+    let body = FIXTURE.as_bytes().to_vec();
+    let fetcher = Arc::new(MockFetcher::new(vec![Ok(FetchResponse::Ok {
+        body,
+        etag: Some("fresh".to_owned()),
+    })]));
+    let settings = CatalogSettings::default();
+    let catalog = ModelCatalog::open(dir.path(), settings, fetcher).expect("open");
+    assert!(catalog.resolve("gpt-demo").is_none());
+    assert_eq!(catalog.refresh().expect("refresh"), FetchResult::Updated);
+    catalog.reload().expect("reload");
+    assert!(catalog.resolve("gpt-demo").is_some());
 }

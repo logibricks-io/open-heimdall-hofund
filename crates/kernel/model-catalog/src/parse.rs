@@ -9,10 +9,6 @@ use crate::spec::{LEAST_WINDOW, ModelSpec, Price};
 /// Default catalog URL when no mirror is configured.
 pub const DEFAULT_CATALOG_URL: &str = "https://models.dev/api.json";
 
-/// Providers whose APIs accept an explicit off level with a reasoning toggle.
-const REASONING_OFF_PROVIDERS: &[&str] =
-    &["deepseek", "kimi-code-plan-cn", "kimi-code-plan-global"];
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DevCatalog {
     #[serde(flatten)]
@@ -114,11 +110,13 @@ pub fn parse_catalog(bytes: &[u8]) -> Result<DevCatalog, serde_json::Error> {
     Ok(DevCatalog { providers })
 }
 
-/// Builds lookup indexes from a parsed catalog and config overrides.
+/// Builds lookup indexes from a parsed catalog and catalog settings.
 pub fn build_index(
     catalog: &DevCatalog,
-    overrides: &hofund_config::CatalogOverrides,
+    settings: &hofund_config::CatalogSettings,
 ) -> CatalogIndex {
+    let overrides = &settings.overrides;
+    let toggle_providers = &settings.reasoning_toggle_providers;
     let mut by_bare_id: BTreeMap<String, ResolvedEntry> = BTreeMap::new();
     let mut by_provider_model: BTreeMap<String, ResolvedEntry> = BTreeMap::new();
 
@@ -133,7 +131,13 @@ pub fn build_index(
                 provider_id: provider_id.clone(),
                 model_id: id.clone(),
                 display_name: display_name(model, &id),
-                spec: model_spec(provider_id, model, &model.limit, &catalog.providers),
+                spec: model_spec(
+                    provider_id,
+                    model,
+                    &model.limit,
+                    &catalog.providers,
+                    toggle_providers,
+                ),
                 price: model.cost.as_ref().map(dev_price),
                 release_date: non_empty(&model.release_date),
                 deprecated: is_deprecated(&model.status),
@@ -224,12 +228,13 @@ fn model_spec(
     model: &DevModel,
     limit: &DevLimit,
     providers: &BTreeMap<String, DevProvider>,
+    toggle_providers: &[String],
 ) -> ModelSpec {
     let window = effective_window(limit);
     let output = positive_limit(limit.output);
     let vision = modalities_include_image(&model.modalities.input);
-    let reasoning = model.reasoning || !efforts(provider_id, model).is_empty();
-    let levels = family_levels(provider_id, model, providers);
+    let reasoning = model.reasoning || !efforts(provider_id, model, toggle_providers).is_empty();
+    let levels = family_levels(provider_id, model, providers, toggle_providers);
     ModelSpec {
         context_window: window,
         max_output: output,
@@ -333,7 +338,7 @@ fn normalize_modalities(modalities: &[String]) -> Vec<String> {
     out.into_iter().collect()
 }
 
-fn efforts(provider_id: &str, model: &DevModel) -> Vec<String> {
+fn efforts(provider_id: &str, model: &DevModel, toggle_providers: &[String]) -> Vec<String> {
     let mut toggle = false;
     let mut out = Vec::new();
     for option in &model.reasoning_options {
@@ -343,8 +348,8 @@ fn efforts(provider_id: &str, model: &DevModel) -> Vec<String> {
             _ => {}
         }
     }
-    if REASONING_OFF_PROVIDERS.contains(&provider_id)
-        && toggle
+    if toggle
+        && toggle_providers.iter().any(|id| id == provider_id)
         && !out.is_empty()
         && !out.iter().any(|level| level == "none")
     {
@@ -357,8 +362,9 @@ fn family_levels(
     provider_id: &str,
     model: &DevModel,
     providers: &BTreeMap<String, DevProvider>,
+    toggle_providers: &[String],
 ) -> Vec<String> {
-    let direct = efforts(provider_id, model);
+    let direct = efforts(provider_id, model, toggle_providers);
     if !direct.is_empty() || !model.reasoning || model.family.is_empty() {
         return direct;
     }
@@ -375,7 +381,7 @@ fn family_levels(
         if !model.release_date.is_empty() && candidate.release_date > model.release_date {
             continue;
         }
-        let levels = efforts(provider_id, candidate);
+        let levels = efforts(provider_id, candidate, toggle_providers);
         if levels.is_empty() {
             continue;
         }

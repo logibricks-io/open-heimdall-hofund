@@ -79,6 +79,10 @@ pub struct CatalogSettings {
     pub poll: Duration,
     /// Per-model overrides that win over the fetched catalog.
     pub overrides: CatalogOverrides,
+    /// models.dev provider ids that accept an explicit `none` reasoning level with a toggle.
+    ///
+    /// Empty lets the daemon apply its built-in default from quirks data.
+    pub reasoning_toggle_providers: Vec<String>,
 }
 
 impl Default for CatalogSettings {
@@ -88,6 +92,7 @@ impl Default for CatalogSettings {
             refresh: Duration::from_secs(24 * 60 * 60),
             poll: Duration::from_secs(60 * 60),
             overrides: CatalogOverrides::default(),
+            reasoning_toggle_providers: Vec::new(),
         }
     }
 }
@@ -1617,6 +1622,8 @@ struct RawCatalog {
     poll: Option<String>,
     #[serde(default)]
     overrides: Vec<RawCatalogOverride>,
+    #[serde(default)]
+    reasoning_toggle_providers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1711,6 +1718,7 @@ fn catalog_settings(raw: RawCatalog) -> Result<CatalogSettings, ConfigError> {
         refresh,
         poll,
         overrides: CatalogOverrides { entries },
+        reasoning_toggle_providers: raw.reasoning_toggle_providers,
     })
 }
 

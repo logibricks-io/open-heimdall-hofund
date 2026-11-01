@@ -285,8 +285,6 @@ const VENDOR_SCAN_PENDING: &[&str] = &[
     "crates/kernel/config",
     // Daemon wiring for vendor plugins, sign-in, and model listing.
     "crates/kernel/daemon",
-    // models.dev provider keys and catalog-specific reasoning toggles.
-    "crates/kernel/model-catalog",
     // Protocol ids and the wire contract.
     "crates/kernel/plugin-api",
     "crates/kernel/plugin-host",

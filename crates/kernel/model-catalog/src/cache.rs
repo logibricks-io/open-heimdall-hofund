@@ -93,13 +93,16 @@ impl CacheFile {
 /// Returns an error when the cache exists but cannot be parsed.
 pub fn load_index(
     cache: &CacheFile,
-    overrides: &hofund_config::CatalogOverrides,
+    settings: &hofund_config::CatalogSettings,
 ) -> io::Result<Option<CatalogIndex>> {
-    let Some(envelope) = cache.read()? else {
+    let envelope = match cache.read() {
+        Ok(Some(envelope)) => envelope,
+        Ok(None) => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(catalog) = envelope.catalog() else {
         return Ok(None);
     };
-    let catalog = envelope
-        .catalog()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "catalog payload"))?;
-    Ok(Some(parse::build_index(&catalog, overrides)))
+    Ok(Some(parse::build_index(&catalog, settings)))
 }
