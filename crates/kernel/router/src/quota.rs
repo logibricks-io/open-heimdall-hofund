@@ -1448,6 +1448,61 @@ mod tests {
     }
 
     #[test]
+    fn p3w_different_move_sources_with_the_same_text_stay_unshared() {
+        let store = QuotaStore::in_memory();
+        let meta = wide_meta();
+        let seed = at(1_900_000_000);
+        let moved = seed + Duration::from_secs(45);
+        let mut first = balance_card("relay", "a");
+        first.balance = "$10.00".to_owned();
+        store.record_balance(first, Vec::new(), seed, meta.clone());
+        let mut first = balance_card("relay", "a");
+        first.balance = "$9.00".to_owned();
+        store.record_balance(first, Vec::new(), moved, meta.clone());
+        let mut second = balance_card("relay", "b");
+        second.balance = "$8.00".to_owned();
+        store.record_balance(
+            second,
+            Vec::new(),
+            seed + Duration::from_secs(5),
+            meta.clone(),
+        );
+        let mut second = balance_card("relay", "b");
+        second.balance = "$9.00".to_owned();
+        store.record_balance(second, Vec::new(), moved, meta);
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert!(report.iter().all(|card| card.shared_balance.is_empty()));
+    }
+
+    #[test]
+    fn p3x_balance_parts_never_share_even_with_matching_moves() {
+        let store = QuotaStore::in_memory();
+        let meta = BalanceRecordMeta {
+            account_wide: true,
+            balance_parts: true,
+            balance_unit: "USD".into(),
+        };
+        let seed = at(1_900_000_000);
+        for user in ["a", "b"] {
+            let mut card = balance_card("relay", user);
+            card.balance = "$10.00".to_owned();
+            store.record_balance(card, Vec::new(), seed, meta.clone());
+            let mut card = balance_card("relay", user);
+            card.balance = "$9.00".to_owned();
+            store.record_balance(
+                card,
+                Vec::new(),
+                seed + Duration::from_secs(30),
+                meta.clone(),
+            );
+        }
+        store.share_provider_balances("relay");
+        let report = store.report(&[]);
+        assert!(report.iter().all(|card| card.shared_balance.is_empty()));
+    }
+
+    #[test]
     fn p3u_ten_minute_gap_and_non_wide_cards_stay_unshared() {
         let store = QuotaStore::in_memory();
         let wide = wide_meta();

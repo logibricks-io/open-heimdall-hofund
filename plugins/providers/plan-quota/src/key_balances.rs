@@ -258,12 +258,7 @@ async fn parse(
     match source {
         Source::DeepSeek(_) => parse_deepseek(body),
         Source::Moonshot { sign, .. } => parse_moonshot(body, sign),
-        Source::OpenRouter(_) => {
-            let credits = required_number(&at(body, &["data", "total_credits"])?)?;
-            let used = optional_number(&at(body, &["data", "total_usage"])?).unwrap_or(0.0);
-            let amount = credits - used;
-            Ok(single_balance(money("$", amount), amount, "USD", true))
-        }
+        Source::OpenRouter(_) => parse_openrouter(body),
         Source::SiliconFlow { sign, .. } => parse_siliconflow(body, sign),
         Source::StepFun { sign, .. } => parse_stepfun(body, sign),
         Source::AiHubMix { key: true, .. } => parse_aihubmix_key(body),
@@ -290,6 +285,13 @@ fn single_balance(text: String, amount: f64, unit: &str, account_wide: bool) -> 
         String::new(),
         account_wide,
     )
+}
+
+fn parse_openrouter(body: &[u8]) -> Result<BalanceCard, PluginError> {
+    let credits = required_number(&at(body, &["data", "total_credits"])?)?;
+    let used = optional_number(&at(body, &["data", "total_usage"])?).unwrap_or(0.0);
+    let amount = credits - used;
+    Ok(single_balance(money("$", amount), amount, "USD", true))
 }
 
 fn parse_moonshot(body: &[u8], sign: &str) -> Result<BalanceCard, PluginError> {
@@ -889,13 +891,28 @@ mod balance_tests {
 
     #[test]
     fn p3c_openrouter_subtracts_usage_from_credits() {
-        let body = br#"{"data":{"total_credits":20,"total_usage":3.5}}"#;
-        let credits = required_number(&at(body, &["data", "total_credits"]).expect("credits"))
-            .expect("number");
-        let used =
-            optional_number(&at(body, &["data", "total_usage"]).expect("usage")).unwrap_or(0.0);
-        let card = single_balance(money("$", credits - used), credits - used, "USD", true);
+        let card = parse_openrouter(br#"{"data":{"total_credits":20,"total_usage":3.5}}"#)
+            .expect("balance");
         assert_eq!(card.text(), "$16.50");
+        assert_eq!(card.wallets()[0].amount(), 16.5);
+    }
+
+    #[test]
+    fn p3w_deepseek_zero_granted_balance_has_no_split() {
+        let card = parse_deepseek(
+            br#"{"balance_infos":[{"currency":"USD","total_balance":"5.00","granted_balance":"0.00","topped_up_balance":"5.00"}]}"#,
+        )
+        .expect("balance");
+        assert!(card.split().is_empty());
+    }
+
+    #[test]
+    fn p3x_aihubmix_key_remain_query_is_not_account_wide() {
+        let query = BalanceQuery::new(vec!["https://aihubmix.com/v1".to_owned()], "secret");
+        let source = source(&query).expect("aihubmix source");
+        assert!(matches!(source, Source::AiHubMix { key: true, .. }));
+        let (_, _, _, account_wide) = request_of(&query, &source).expect("request");
+        assert!(!account_wide);
     }
 
     #[test]
