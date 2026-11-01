@@ -164,13 +164,15 @@ mod tests {
     fn a1_19_codex_ignores_oversized_auth_json() {
         let dir = scratch("large");
         let home = dir.path().join("codex-home");
-        fs::create_dir_all(&home).expect("home");
-        let oversized = home.join("auth.json");
-        let mut data = vec![b' '];
-        data.resize((1024 * 1024 + 1) as usize, b'x');
-        fs::write(&oversized, data).expect("auth");
+        write_auth(&home);
+        assert_eq!(list(&home).expect("list").len(), 1, "valid file is listed");
+        let path = home.join("auth.json");
+        let mut data = fs::read(&path).expect("read");
+        let cap = usize::try_from(FILE_CAP).expect("cap");
+        data.resize(cap + 1, b' ');
+        fs::write(&path, data).expect("pad");
         let rows = list(&home).expect("list");
-        assert!(rows.is_empty());
+        assert!(rows.is_empty(), "valid JSON over the size cap is ignored");
     }
 
     #[test]
