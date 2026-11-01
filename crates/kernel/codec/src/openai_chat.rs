@@ -99,6 +99,10 @@ impl Codec for OpenAiChat {
     fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
         crate::sse::data_frame(&self.encode_error(status, message))
     }
+
+    fn severed_stream_end(&self) -> &'static [u8] {
+        b"data: [DONE]\n\n"
+    }
 }
 
 #[derive(Debug, Default)]
