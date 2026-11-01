@@ -290,7 +290,7 @@ async fn d3_rotate_group_does_not_reorder_by_sink() {
 }
 
 #[tokio::test]
-async fn d3_server_failure_does_not_sink() {
+async fn d3_auth_failure_does_not_sink() {
     let now = Arc::new(Mutex::new(Instant::now()));
     let clock = Arc::clone(&now);
     let cooldowns = Arc::new(Cooldowns::with_clock(
@@ -305,11 +305,16 @@ async fn d3_server_failure_does_not_sink() {
     .with_routing("order")
     .with_sink(true);
     let router = router(route).with_cooldowns(Arc::clone(&cooldowns));
-    cooldowns.record_failure_for_model(
+    cooldowns.record_failure(
         &member_id("a"),
-        "demo",
-        &PluginError::status_error(500, "down"),
+        &PluginError::status_error(401, "unauthorized"),
     );
+    assert!(
+        cooldowns
+            .cooling_for_model(&member_id("a"), "demo")
+            .is_some()
+    );
+    assert_eq!(cooldowns.sunk_at(&member_id("a"), "demo"), None);
     *now.lock().expect("clock") += Duration::from_secs(61);
 
     dispatch(&router).await;
