@@ -62,6 +62,24 @@ Doc URLs were checked on 2026-10-25 (HTTP 200 unless noted). "not found" means n
 - `keep_login` (default false). The agent returns to the first account as soon as that account has room, including under in-order routing. The automatic switch (every five minutes) uses the same rule.
 - `switch_only` (default false). Only the agent sign-in moves. Gateway routing stays on the account it already chose, and the sign-in does not follow a spent account back to the first one unless `keep_login` or in-order routing asks it to.
 
+Boolean `discover` (default false) under `[subscriptions.options]` on any subscription row opts the daemon into reading configured agents' own sign-in files and importing accounts that are not already stored. The same reads run on demand with `hofund accounts discover` (list) and `hofund accounts discover --add` (import). `HOFUND_NO_ACCOUNTS=1` disables every discovery read even when `discover = true`. Discovery never writes agent credential files and never prints tokens.
+
+Account discovery is implemented for subscriptions that declare an agent home and keep a readable sign-in on disk:
+
+| subscription | agent home | credential files read |
+|---|---|---|
+| claude | `CLAUDE_CONFIG_DIR` or `~/.claude` | `.credentials.json`, `.claude.json` |
+| codex | `CODEX_HOME` or `~/.codex` | `auth.json` (file mode) |
+
+Left out until a plugin declares agent home and readable credentials (not Keychain, encrypted stores, or CLI-only sign-in):
+
+| subscription | reason |
+|---|---|
+| gemini | no `AgentSignIn` declaration; Code Assist creds live under `~/.gemini` but are not wired yet |
+| copilot | editor OAuth is not exposed as a stable agent home file hofund reads |
+| antigravity, chatgpt-api | no agent sign-in seam |
+| plugin-served (cursor, kiro, grok, …) | no native plugin or opaque/encrypted agent stores |
+
 A subscription plugin may also declare that its own sign-in spends the account. That flag lives on the plugin spec, not in config.
 
 ## Priority suggestion

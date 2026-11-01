@@ -24,6 +24,7 @@ hofund-plugin-api = { workspace = true }
 hofund-plugin-host = { workspace = true }
 hofund-plugin-registry = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
+hofund-model-catalog = { workspace = true }
 hofund-provider = { workspace = true }
 hofund-quirks = { workspace = true }
 hofund-router = { workspace = true }

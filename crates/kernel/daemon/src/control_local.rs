@@ -154,6 +154,14 @@ impl ControlSession {
         config_lock_fallback(&self.identity, runtime)
     }
 
+    /// Writable state directory (primary beside the config or runtime fallback).
+    pub(crate) fn state_root(&self) -> PathBuf {
+        self.discovery_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".hofund"))
+    }
+
     #[cfg(unix)]
     pub(crate) fn socket_path(&self, runtime: &ControlRuntime) -> Result<PathBuf, String> {
         Ok(prepare_runtime_dir(runtime)?.join(format!("control-{}.sock", self.identity.id)))

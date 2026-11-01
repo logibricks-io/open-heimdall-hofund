@@ -51,8 +51,13 @@ pub struct Config {
     pub subscriptions: Vec<Subscription>,
     /// Per-agent model visibility settings.
     pub agents: AgentModels,
+    /// When true, the daemon may read agents' own sign-in files and import
+    /// accounts. Set with boolean `discover` under `[subscriptions.options]`.
+    pub discover_agent_accounts: bool,
     /// Deprecated keys that still loaded. The next release rejects them.
     pub warnings: Vec<String>,
+    /// models.dev catalog mirror, refresh, and per-model overrides.
+    pub catalog: CatalogSettings,
 }
 
 /// Failover thresholds.
@@ -74,6 +79,99 @@ impl Default for Failover {
                 .collect(),
         }
     }
+}
+
+/// models.dev catalog mirror URL, refresh cadence, and local overrides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogSettings {
+    /// Optional mirror base URL. Empty uses the default models.dev endpoint.
+    pub mirror: String,
+    /// Maximum cache age before a background refresh is attempted.
+    pub refresh: Duration,
+    /// How often the daemon checks whether the cache is stale.
+    pub poll: Duration,
+    /// Per-model overrides that win over the fetched catalog.
+    pub overrides: CatalogOverrides,
+    /// models.dev provider ids that accept an explicit `none` reasoning level with a toggle.
+    ///
+    /// Empty lets the daemon apply its built-in default from quirks data.
+    pub reasoning_toggle_providers: Vec<String>,
+}
+
+impl Default for CatalogSettings {
+    fn default() -> Self {
+        Self {
+            mirror: String::new(),
+            refresh: Duration::from_secs(24 * 60 * 60),
+            poll: Duration::from_secs(60 * 60),
+            overrides: CatalogOverrides::default(),
+            reasoning_toggle_providers: Vec::new(),
+        }
+    }
+}
+
+impl CatalogSettings {
+    /// Catalog URL to fetch: the configured mirror or the default models.dev URL.
+    #[must_use]
+    pub fn fetch_url(&self) -> &str {
+        let trimmed = self.mirror.trim();
+        if trimmed.is_empty() {
+            "https://models.dev/api.json"
+        } else {
+            trimmed
+        }
+    }
+}
+
+/// Local catalog overrides keyed by model id or `provider/model`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CatalogOverrides {
+    entries: BTreeMap<String, CatalogOverride>,
+}
+
+impl CatalogOverrides {
+    /// Looks up an override by its configured model key.
+    #[must_use]
+    pub fn lookup(&self, model: &str) -> Option<&CatalogOverride> {
+        self.entries.get(model)
+    }
+
+    /// Every configured override key.
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.entries.keys()
+    }
+}
+
+/// One local override that wins over the fetched catalog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogOverride {
+    /// Route or catalog model key (`provider/model` or bare id).
+    pub model: String,
+    /// Display name override.
+    pub name: Option<String>,
+    /// Context window in tokens.
+    pub context: Option<u32>,
+    /// Maximum output tokens.
+    pub output: Option<u32>,
+    /// Whether the model accepts image input.
+    pub vision: Option<bool>,
+    /// Supported reasoning effort names.
+    pub reasoning_levels: Option<Vec<String>>,
+    /// Optional list price override.
+    pub price: Option<CatalogPriceOverride>,
+}
+
+/// USD per million tokens for a local price override.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogPriceOverride {
+    /// USD per million input tokens, as millionths of a dollar.
+    pub input_micros: u64,
+    /// USD per million output tokens, as millionths of a dollar.
+    pub output_micros: u64,
+    /// USD per million cache-read tokens, as millionths of a dollar.
+    pub cache_read_micros: u64,
+    /// USD per million cache-write tokens, as millionths of a dollar.
+    pub cache_write_micros: u64,
 }
 
 /// How long a direct request to one provider, or a request to a route, waits
@@ -713,6 +811,8 @@ impl fmt::Debug for Config {
             .field("routes", &self.routes)
             .field("subscriptions", &self.subscriptions)
             .field("agents", &self.agents)
+            .field("catalog", &self.catalog)
+            .field("discover_agent_accounts", &self.discover_agent_accounts)
             .field("warnings", &self.warnings)
             .finish()
     }
@@ -1031,6 +1131,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     }
     let mut subscriptions = Vec::new();
     let mut subscription_ids = BTreeSet::new();
+    let mut discover_agent_accounts = false;
     for subscription in raw.subscriptions {
         if !kebab(&subscription.id) {
             return Err(ConfigError::Invalid(format!(
@@ -1055,7 +1156,14 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             }
         };
         let account_weights = normalized_account_weights(&subscription)?;
-        for key in subscription.options.keys() {
+        let mut options = subscription.options;
+        if options
+            .remove("discover")
+            .is_some_and(|value| matches!(value, Value::Boolean(true)))
+        {
+            discover_agent_accounts = true;
+        }
+        for key in options.keys() {
             if key.is_empty() {
                 return Err(ConfigError::Invalid(format!(
                     "subscription `{}` has an empty option key",
@@ -1072,7 +1180,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             routing: subscription.routing,
             at_once,
             stays: subscription.stays,
-            options: prune_table(subscription.options),
+            options: prune_table(options),
         });
     }
     let mut models = BTreeSet::new();
@@ -1138,6 +1246,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     validate_group_links(&routes)?;
     validate_fallbacks(&providers, &seen, &group_names)?;
     let agents = visible::agent_models_of(raw.agents)?;
+    let catalog = catalog_settings(raw.catalog)?;
     Ok(Config {
         listen,
         token_file: raw.token_file,
@@ -1152,6 +1261,8 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         routes,
         subscriptions,
         agents,
+        catalog,
+        discover_agent_accounts,
         warnings,
     })
 }
@@ -1535,6 +1646,117 @@ fn parse_fallback(provider: &str, entry: &str) -> Result<Fallback, ConfigError> 
     })
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCatalog {
+    #[serde(default)]
+    mirror: Option<String>,
+    #[serde(default)]
+    refresh: Option<String>,
+    #[serde(default)]
+    poll: Option<String>,
+    #[serde(default)]
+    overrides: Vec<RawCatalogOverride>,
+    #[serde(default)]
+    reasoning_toggle_providers: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCatalogOverride {
+    model: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    context: Option<u32>,
+    #[serde(default)]
+    output: Option<u32>,
+    #[serde(default)]
+    vision: Option<bool>,
+    #[serde(default)]
+    reasoning_levels: Option<Vec<String>>,
+    #[serde(default)]
+    price: Option<RawCatalogPriceOverride>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCatalogPriceOverride {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+}
+
+impl RawCatalogOverride {
+    fn into_override(self) -> Result<CatalogOverride, ConfigError> {
+        Ok(CatalogOverride {
+            model: self.model,
+            name: self.name,
+            context: self.context,
+            output: self.output,
+            vision: self.vision,
+            reasoning_levels: self.reasoning_levels,
+            price: self.price.map(|price| CatalogPriceOverride {
+                input_micros: price_micros(price.input),
+                output_micros: price_micros(price.output),
+                cache_read_micros: price_micros(price.cache_read),
+                cache_write_micros: price_micros(price.cache_write),
+            }),
+        })
+    }
+}
+
+fn price_micros(value: f64) -> u64 {
+    if value <= 0.0 {
+        0
+    } else {
+        (value * 1_000_000.0).round() as u64
+    }
+}
+
+fn catalog_settings(raw: RawCatalog) -> Result<CatalogSettings, ConfigError> {
+    let refresh = match raw.refresh.as_deref() {
+        None | Some("") => CatalogSettings::default().refresh,
+        Some(value) if refresh_off(value) => Duration::MAX,
+        Some(value) => parse_refresh(value).ok_or_else(|| {
+            ConfigError::Invalid(format!(
+                "catalog.refresh must be off, a day count, or a duration of at least 10m, not {value:?}"
+            ))
+        })?,
+    };
+    let poll = match raw.poll.as_deref() {
+        None | Some("") => CatalogSettings::default().poll,
+        Some(value) if refresh_off(value) => Duration::MAX,
+        Some(value) => parse_refresh(value).ok_or_else(|| {
+            ConfigError::Invalid(format!(
+                "catalog.poll must be off, a day count, or a duration of at least 10m, not {value:?}"
+            ))
+        })?,
+    };
+    let mut entries = BTreeMap::new();
+    for row in raw.overrides {
+        if row.model.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "catalog.overrides model is empty".to_owned(),
+            ));
+        }
+        let key = row.model.trim().to_owned();
+        if !entries.insert(key.clone(), row.into_override()?).is_none() {
+            return Err(ConfigError::Invalid(format!(
+                "catalog.overrides model `{key}` is repeated"
+            )));
+        }
+    }
+    Ok(CatalogSettings {
+        mirror: raw.mirror.unwrap_or_default(),
+        refresh,
+        poll,
+        overrides: CatalogOverrides { entries },
+        reasoning_toggle_providers: raw.reasoning_toggle_providers,
+    })
+}
+
 fn validate_fallbacks(
     providers: &[Provider],
     provider_ids: &BTreeSet<String>,
@@ -1835,6 +2057,7 @@ struct RawFile {
     subscriptions: Vec<RawSubscription>,
     #[serde(default)]
     agents: visible::RawAgentModels,
+    catalog: RawCatalog,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3021,6 +3244,52 @@ mod tests {
         )
         .expect_err("account");
         assert!(error.to_string().contains("account id"));
+    }
+
+    #[test]
+    fn a1_9_discover_option_enables_agent_account_discovery() {
+        let config = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [subscriptions.options]
+            discover = true
+            "#,
+        )
+        .expect("discover");
+        assert!(config.discover_agent_accounts);
+        assert!(
+            !config.subscriptions[0].options.contains_key("discover"),
+            "discover is a kernel flag, not a plugin option"
+        );
+    }
+
+    #[test]
+    fn a1_23_discover_false_and_non_boolean_do_not_enable_agent_discovery() {
+        let off = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [subscriptions.options]
+            discover = false
+            "#,
+        )
+        .expect("false");
+        assert!(!off.discover_agent_accounts);
+
+        let yes = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [subscriptions.options]
+            discover = "yes"
+            "#,
+        )
+        .expect("string");
+        assert!(!yes.discover_agent_accounts);
     }
 
     #[test]

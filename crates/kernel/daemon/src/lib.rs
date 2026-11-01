@@ -15,6 +15,7 @@ use hofund_config::{
     Config, ConfigError, Fallback, UpstreamTarget, Value, VisibleCatalog, load_path,
 };
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
+use hofund_model_catalog::{ModelCatalog, ReqwestFetcher};
 use hofund_plugin_api::{
     AgentDescription, BuildContext, DynUpstreamFactory, PluginId, ProtocolId, RawTable, RawValue,
     UpstreamProvider,
@@ -30,6 +31,7 @@ use hofund_router::{Cooldowns, FailoverPolicy, Snapshot, Unit};
 use hofund_secrets::{KeyStore, TokenFile};
 use hofund_usage::Ledger;
 
+mod account_discovery;
 mod adapt;
 mod agent_login;
 mod agent_visible;
@@ -59,6 +61,9 @@ mod subscriptions;
 mod terminate;
 mod watch;
 
+pub use account_discovery::{
+    DiscoverReport, accounts_discover_in, format_report, import_if_configured,
+};
 pub use agent_login::{accounts_import_in, accounts_switch_in};
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
@@ -435,10 +440,25 @@ async fn start_inner(
     key_store.list().map_err(show)?;
     let token = TokenFile::new(&token_path).load_or_create().map_err(show)?;
     let usage = Arc::new(Ledger::open(&beside(path, &config.usage_file)).map_err(show)?);
+    let data_root = catalog_data_root(path, control_session.as_ref());
+    let catalog_fetcher = Arc::new(ReqwestFetcher::new().map_err(|error| show(error.to_string()))?);
+    let catalog_settings = effective_catalog_settings(config.catalog.clone());
+    let model_catalog = ModelCatalog::open(&data_root, catalog_settings, catalog_fetcher)
+        .map_err(|error| show(error.to_string()))?;
+    if model_catalog.stale() {
+        let refresh = model_catalog.refresh_detached();
+        tokio::spawn(async move {
+            if let Ok(Err(error)) = refresh.await {
+                tracing::warn!(?error, "initial model catalog refresh failed");
+            }
+        });
+    }
+    let _catalog_refresh = model_catalog.spawn_background();
     let runtime = runtime::Runtime::new(Arc::clone(&registry), path, max_idle_per_host);
     let mut models_host = ModelsHost::new(config.connect_timeout, config.read_timeout)
         .with_state_root(beside(path, ".hofund"))
         .with_registry(Arc::clone(&registry));
+    account_discovery::import_if_configured(path, &config)?;
     let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
     // Subscription members join before the port opens.
     runtime.refresh_subscriptions().await;
@@ -488,6 +508,7 @@ async fn start_inner(
         Arc::clone(&usage),
     ));
     gateway = gateway.with_quotas(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
+    gateway = gateway.with_model_catalog(model_catalog);
     if let Some(bus) = &control_bus {
         gateway = gateway.with_request_events(
             Arc::new(events::RequestBridge::new(Arc::clone(bus))),
@@ -2064,6 +2085,30 @@ fn beside(config_path: &Path, value: &str) -> PathBuf {
     }
 }
 
+fn catalog_data_root(
+    config_path: &Path,
+    control_session: Option<&control_local::ControlSession>,
+) -> PathBuf {
+    control_session
+        .map(control_local::ControlSession::state_root)
+        .unwrap_or_else(|| beside(config_path, ".hofund"))
+}
+
+pub(crate) fn effective_catalog_settings(
+    settings: hofund_config::CatalogSettings,
+) -> hofund_config::CatalogSettings {
+    if !settings.reasoning_toggle_providers.is_empty() {
+        return settings;
+    }
+    hofund_config::CatalogSettings {
+        reasoning_toggle_providers: hofund_quirks::catalog_reasoning_toggle_providers()
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect(),
+        ..settings
+    }
+}
+
 fn show<E: std::fmt::Display>(error: E) -> DaemonError {
     DaemonError::new(error.to_string())
 }
@@ -2076,6 +2121,27 @@ mod tests {
 
     fn registry() -> std::sync::Arc<dyn super::DaemonRegistry> {
         std::sync::Arc::new(super::RegistryAdapter)
+    }
+
+    #[test]
+    fn c1a_daemon_catalog_reasoning_toggles_default_from_quirks() {
+        use hofund_config::CatalogSettings;
+
+        let effective = super::effective_catalog_settings(CatalogSettings::default());
+        let expected: Vec<String> = hofund_quirks::catalog_reasoning_toggle_providers()
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect();
+        assert_eq!(effective.reasoning_toggle_providers, expected);
+
+        let configured = CatalogSettings {
+            reasoning_toggle_providers: vec!["custom".to_owned()],
+            ..CatalogSettings::default()
+        };
+        assert_eq!(
+            super::effective_catalog_settings(configured.clone()),
+            configured
+        );
     }
 
     #[test]
