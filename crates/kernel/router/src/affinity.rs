@@ -139,6 +139,23 @@ impl Candidate {
     }
 }
 
+/// The used share of an allowance past which an account counts all but
+/// spent (`reference: internal/provider/codex_switch.go`, `SpentShare`).
+pub const SPENT_SHARE: f64 = 98.0;
+
+/// The used share past which `routing` counts an account spent: In order
+/// tries an account in its turn until a window is used up, so only 100%
+/// counts there (`reference: internal/provider/codex_switch.go`,
+/// `SpentShareOf`).
+#[must_use]
+pub fn spent_share_of(routing: &str) -> f64 {
+    if routing == "order" {
+        100.0
+    } else {
+        SPENT_SHARE
+    }
+}
+
 /// Why affinity kept or released a conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
@@ -800,6 +817,13 @@ mod tests {
                 .reason,
             Reason::Cold
         );
+    }
+
+    #[test]
+    fn c2d_spent_share_is_98_but_100_in_order() {
+        assert!((super::spent_share_of("smart") - 98.0).abs() < f64::EPSILON);
+        assert!((super::spent_share_of("rotate") - 98.0).abs() < f64::EPSILON);
+        assert!((super::spent_share_of("order") - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]

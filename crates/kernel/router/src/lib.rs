@@ -688,7 +688,9 @@ impl Router {
                             .iter()
                             .find(|allowance| allowance.member == member)
                             .and_then(|allowance| allowance.fullest(model, now))
-                            .is_some_and(|window| window.used >= 90.0);
+                            .is_some_and(|window| {
+                                window.used >= affinity::spent_share_of(&resolved.routing)
+                            });
                     affinity::Candidate {
                         member,
                         model: model.to_owned(),
