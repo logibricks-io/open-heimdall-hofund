@@ -409,7 +409,6 @@ impl QuotaStore {
                 let leader = left_record.quota.user.clone();
                 state.records[indices[left]].quota.shared_balance = leader.clone();
                 state.records[indices[right]].quota.shared_balance = leader;
-                break;
             }
         }
         if let Some(root) = &self.root {
@@ -1430,13 +1429,13 @@ mod tests {
         let store = QuotaStore::in_memory();
         let meta = wide_meta();
         let seed = at(1_900_000_000);
-        for user in ["a", "b"] {
+        for user in ["a", "b", "c"] {
             let mut card = balance_card("relay", user);
             card.balance = "$10.00".to_owned();
             store.record_balance(card, Vec::new(), seed, meta.clone());
         }
         let moved = seed + Duration::from_secs(60);
-        for user in ["a", "b"] {
+        for user in ["a", "b", "c"] {
             let mut card = balance_card("relay", user);
             card.balance = "$9.00".to_owned();
             store.record_balance(card, Vec::new(), moved, meta.clone());
@@ -1445,6 +1444,7 @@ mod tests {
         let report = store.report(&[]);
         assert_eq!(report[0].shared_balance, "a");
         assert_eq!(report[1].shared_balance, "a");
+        assert_eq!(report[2].shared_balance, "a");
     }
 
     #[test]
