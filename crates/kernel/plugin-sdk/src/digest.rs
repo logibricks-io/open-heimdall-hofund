@@ -27,7 +27,12 @@ mod tests {
     use super::{hmac_sha256, sha256};
 
     fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for byte in bytes {
+            write!(out, "{byte:02x}").expect("write to a string");
+        }
+        out
     }
 
     #[test]

@@ -500,7 +500,7 @@ PlanQuery::fn plan_url (& self) -> & str
 PlanQuery::fn project (& self) -> & str
 PlanQuery::fn secret_access_key (& self) -> & str
 PlanQuery::fn session_token (& self) -> & str
-PlanQuery::fn with_access_key (mut self , id : impl Into < String > , secret : impl Into < String > ,) -> Self
+PlanQuery::fn with_access_key (mut self , id : impl Into < String > , secret : impl Into < String >) -> Self
 PlanQuery::fn with_plan_url (mut self , url : impl Into < String >) -> Self
 PlanQuery::fn with_session_token (mut self , token : impl Into < String >) -> Self
 PlanQuery::fn with_team (mut self , organization : impl Into < String > , project : impl Into < String > ,) -> Self
@@ -528,7 +528,7 @@ PlanWindow::fn display (& self) -> & str
 PlanWindow::fn name (& self) -> & str
 PlanWindow::fn new (name : impl Into < String > , used : f64) -> Self
 PlanWindow::fn unit (& self) -> & str
-PlanWindow::fn with_count (mut self , amount : f64 , limit : f64 , unit : impl Into < String > ,) -> Self
+PlanWindow::fn with_count (mut self , amount : f64 , limit : f64 , unit : impl Into < String >) -> Self
 PlanWindow::fn with_display (mut self , display : impl Into < String >) -> Self
 PluginError
 PluginError #[non_exhaustive] derives(Debug, Error)

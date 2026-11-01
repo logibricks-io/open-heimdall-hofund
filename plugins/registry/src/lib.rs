@@ -77,16 +77,17 @@ pub use select::{
 };
 
 /// The linked vendor plan reader, when the plan-quota feature is enabled.
+#[cfg(feature = "plan-quota")]
 #[must_use]
 pub fn plan_quota() -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
-    #[cfg(feature = "plan-quota")]
-    {
-        return Some(hofund_plugin_plan_quota::reader());
-    }
-    #[cfg(not(feature = "plan-quota"))]
-    {
-        None
-    }
+    Some(hofund_plugin_plan_quota::reader())
+}
+
+/// The linked vendor plan reader, when the plan-quota feature is enabled.
+#[cfg(not(feature = "plan-quota"))]
+#[must_use]
+pub fn plan_quota() -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
+    None
 }
 
 /// Every linked plugin contribution, keyed by plugin kind and id, in `plugins.toml` order.
