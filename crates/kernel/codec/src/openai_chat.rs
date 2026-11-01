@@ -1372,6 +1372,8 @@ fn usage_from(
         total_tokens,
         cache_read_tokens,
         cache_write_tokens: None,
+        cache_write_5m_tokens: None,
+        cache_write_1h_tokens: None,
         reasoning_tokens,
         extensions: combine_extensions(details, object),
     })

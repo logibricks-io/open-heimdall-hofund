@@ -47,10 +47,27 @@ pub trait RawTap: Send {
     /// Input and output tokens seen so far.
     fn tokens(&self) -> (Option<i64>, Option<i64>);
 
-    /// Cache-read and cache-write tokens seen so far, when the tap decodes them.
-    fn cache_tokens(&self) -> (Option<i64>, Option<i64>) {
-        (None, None)
+    /// Cache, reasoning, and related counters seen so far.
+    fn supplemental_usage(&self) -> SupplementalUsage {
+        SupplementalUsage::default()
     }
+}
+
+/// Cache and reasoning counters a tap accumulated while relaying bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SupplementalUsage {
+    /// Prompt tokens read from a cache.
+    pub cache_read: Option<i64>,
+    /// Total cache-write tokens.
+    pub cache_write: Option<i64>,
+    /// Five-minute cache-write tokens.
+    pub cache_write_5m: Option<i64>,
+    /// One-hour cache-write tokens.
+    pub cache_write_1h: Option<i64>,
+    /// Reasoning tokens reported in usage.
+    pub reasoning: Option<i64>,
+    /// Whether a reasoning channel appeared without a usage count.
+    pub saw_reasoning: bool,
 }
 
 /// How a protocol's event stream says it reached its last event.
@@ -198,8 +215,7 @@ pub(crate) struct DecoderTap {
     events: EventBuf<'static>,
     input: Option<i64>,
     output: Option<i64>,
-    cache_read: Option<i64>,
-    cache_write: Option<i64>,
+    supplemental: SupplementalUsage,
 }
 
 impl DecoderTap {
@@ -226,13 +242,15 @@ impl DecoderTap {
             events: EventBuf::new(paths, client, upstream, cap),
             input: None,
             output: None,
-            cache_read: None,
-            cache_write: None,
+            supplemental: SupplementalUsage::default(),
         }
     }
 
     fn note(&mut self, events: &[StreamEvent]) {
         for event in events {
+            if matches!(event, StreamEvent::ThinkingDelta(_)) {
+                self.supplemental.saw_reasoning = true;
+            }
             let usage = match event {
                 StreamEvent::MessageStart(start) => start.usage.as_ref(),
                 StreamEvent::MessageDelta(delta) => delta.usage.as_ref(),
@@ -241,10 +259,18 @@ impl DecoderTap {
             note_usage(usage, &mut self.input, &mut self.output);
             if let Some(usage) = usage {
                 if let Some(value) = usage.cache_read_tokens {
-                    self.cache_read = i64::try_from(value).ok();
+                    self.supplemental.cache_read = i64::try_from(value).ok();
                 }
-                if let Some(value) = usage.cache_write_tokens {
-                    self.cache_write = i64::try_from(value).ok();
+                let (total, five, hour) = hofund_ir::normalize_cache_write(
+                    usage.cache_write_tokens,
+                    usage.cache_write_5m_tokens,
+                    usage.cache_write_1h_tokens,
+                );
+                self.supplemental.cache_write = total.and_then(|v| i64::try_from(v).ok());
+                self.supplemental.cache_write_5m = five.and_then(|v| i64::try_from(v).ok());
+                self.supplemental.cache_write_1h = hour.and_then(|v| i64::try_from(v).ok());
+                if let Some(value) = usage.reasoning_tokens {
+                    self.supplemental.reasoning = i64::try_from(value).ok();
                 }
             }
         }
@@ -286,8 +312,8 @@ impl RawTap for DecoderTap {
         (self.input, self.output)
     }
 
-    fn cache_tokens(&self) -> (Option<i64>, Option<i64>) {
-        (self.cache_read, self.cache_write)
+    fn supplemental_usage(&self) -> SupplementalUsage {
+        self.supplemental
     }
 }
 

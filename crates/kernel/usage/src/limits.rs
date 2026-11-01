@@ -4,15 +4,23 @@ use rusqlite::params;
 
 use super::{Ledger, Row, UsageError};
 
-/// Token details needed by gateway-key budgets but not by the ordinary table.
+/// Token details needed by gateway-key budgets and usage reporting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UsageDetails {
     /// Input tokens that were not served from a cache.
     pub uncached_input_tokens: Option<i64>,
     /// Prompt tokens served from a cache.
     pub cache_read_tokens: Option<i64>,
-    /// Prompt tokens written into a cache.
+    /// Total prompt tokens written into a cache (five-minute plus one-hour).
     pub cache_write_tokens: Option<i64>,
+    /// Prompt cache writes at the five-minute TTL.
+    pub cache_write_5m_tokens: Option<i64>,
+    /// Prompt cache writes at the one-hour TTL.
+    pub cache_write_1h_tokens: Option<i64>,
+    /// Output tokens the upstream counted as reasoning.
+    pub reasoning_tokens: Option<i64>,
+    /// The stream carried reasoning but the usage block did not count it.
+    pub reasoning_hidden: bool,
 }
 
 /// One key's forwarded calls and token sums at or after a window start.
@@ -26,7 +34,7 @@ pub struct KeyUsage {
     pub output_tokens: u64,
     /// Cache-read tokens.
     pub cache_read_tokens: u64,
-    /// Cache-write tokens.
+    /// Cache-write tokens (five-minute and one-hour combined).
     pub cache_write_tokens: u64,
 }
 
@@ -66,8 +74,9 @@ impl Ledger {
                 "INSERT INTO requests (
                     created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
                     caller_key_id, caller_key_name, caller_issuer_id, ttft_ms,
-                    uncached_input_tokens, cache_read_tokens, cache_write_tokens
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                    cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, reasoning_hidden
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     row.created_unix,
                     row.model,
@@ -83,6 +92,10 @@ impl Ledger {
                     details.uncached_input_tokens,
                     details.cache_read_tokens,
                     details.cache_write_tokens,
+                    details.cache_write_5m_tokens,
+                    details.cache_write_1h_tokens,
+                    details.reasoning_tokens,
+                    i64::from(details.reasoning_hidden),
                 ],
             )
             .map(|_| ())
@@ -147,7 +160,7 @@ mod tests {
             status: status.to_owned(),
             caller_key_id: "key".to_owned(),
             caller_key_name: "Key".to_owned(),
-            caller_issuer_id: String::new(),
+            ..Default::default()
         }
     }
 
@@ -164,6 +177,9 @@ mod tests {
                     uncached_input_tokens: Some(12),
                     cache_read_tokens: Some(8),
                     cache_write_tokens: Some(3),
+                    cache_write_5m_tokens: Some(3),
+                    cache_write_1h_tokens: Some(0),
+                    ..UsageDetails::default()
                 },
             )
             .expect("cached call");
