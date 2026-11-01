@@ -639,6 +639,41 @@ mod tests {
         let child = store.issue(under_parent).expect("child");
         assert!(store.set_issuer(&child.id, true).is_err());
         assert!(store.set_issuer(&child.id, false).is_ok());
+        // Defense in depth: even a restored issued key marked issues=true cannot issue.
+        let mut stored = store.export().expect("export");
+        stored
+            .iter_mut()
+            .find(|key| key.id == child.id)
+            .expect("child record")
+            .issues = true;
+        store.restore(&stored).expect("restore");
+        let mut grandchild = request(Duration::from_secs(3_600));
+        grandchild.issuer = child.id.clone();
+        assert!(store.issue(grandchild).is_err());
+    }
+
+    #[test]
+    fn s4_issuer_revokes_only_its_own_children() {
+        let (_dir, store) = scratch();
+        let alice = store.add("Alice", None).expect("alice");
+        let bob = store.add("Bob", None).expect("bob");
+        store.set_issuer(&alice.key.id, true).expect("alice issuer");
+        store.set_issuer(&bob.key.id, true).expect("bob issuer");
+        let child_a = store
+            .issue(IssueRequest {
+                issuer: alice.key.id.clone(),
+                ..request(Duration::from_secs(3_600))
+            })
+            .expect("alice child");
+        let child_b = store
+            .issue(IssueRequest {
+                issuer: bob.key.id.clone(),
+                ..request(Duration::from_secs(3_600))
+            })
+            .expect("bob child");
+        assert!(store.revoke_issued(&child_b.id, &alice.key.id).is_err());
+        assert!(store.revoke_issued(&child_a.id, &alice.key.id).is_ok());
+        assert!(store.revoke_issued(&child_b.id, "").is_ok());
     }
 
     #[test]
@@ -664,6 +699,9 @@ mod tests {
         assert!(store.issue(input.clone()).is_err());
         input.models = vec!["primary/model".to_owned()];
         input.accounts = vec!["primary/b".to_owned()];
+        assert!(store.issue(input.clone()).is_err());
+        // known includes primary/b so cleaning passes; allows_account must still refuse.
+        input.known_accounts = vec!["primary/a".to_owned(), "primary/b".to_owned()];
         assert!(store.issue(input.clone()).is_err());
         input.accounts = vec!["primary/Person".to_owned()];
         input.known_accounts = vec!["primary/a\tPerson".to_owned(), "primary/b".to_owned()];
