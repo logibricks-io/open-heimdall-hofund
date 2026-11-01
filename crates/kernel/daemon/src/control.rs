@@ -207,6 +207,7 @@ impl DaemonControl {
         request: GatewayKeyRequest,
     ) -> Result<GatewayKeyResponse, ControlFailure> {
         let mut secret = None;
+        let mut issued_id = None;
         match request.action {
             GatewayKeyAction::Add => {
                 let added = self
@@ -214,6 +215,33 @@ impl DaemonControl {
                     .add_with_access(&request.name, request.secret.as_deref(), request.read_only)
                     .map_err(key_failure)?;
                 secret = Some(added.secret);
+            }
+            GatewayKeyAction::Issue => {
+                let seconds = request.ttl_seconds.unwrap_or(0.0);
+                if !seconds.is_finite()
+                    || seconds <= 0.0
+                    || seconds > hofund_secrets::MAX_TTL.as_secs_f64()
+                {
+                    return Err(key_failure(hofund_secrets::SecretError::Key(
+                        "ttl is a duration such as 30m, 1h or 24h".to_owned(),
+                    )));
+                }
+                let issued = self
+                    .keys
+                    .issue(hofund_secrets::IssueRequest {
+                        name: request.name,
+                        ttl: std::time::Duration::from_secs_f64(seconds),
+                        models: request.models,
+                        accounts: request.accounts,
+                        known_accounts: self.known_accounts().await?,
+                        tokens: request.tokens,
+                        cost: request.cost,
+                        read_only: request.read_only,
+                        issuer: request.id,
+                    })
+                    .map_err(key_failure)?;
+                secret = Some(issued.key);
+                issued_id = Some(issued.id);
             }
             GatewayKeyAction::Rotate => {
                 secret = Some(self.keys.rotate(&request.id).map_err(key_failure)?.secret);
@@ -224,11 +252,11 @@ impl DaemonControl {
                 .map_err(key_failure)?,
             GatewayKeyAction::On => self
                 .keys
-                .set_enabled(&request.id, true)
+                .set_enabled_by_name(&request.id, true)
                 .map_err(key_failure)?,
             GatewayKeyAction::Off => self
                 .keys
-                .set_enabled(&request.id, false)
+                .set_enabled_by_name(&request.id, false)
                 .map_err(key_failure)?,
             GatewayKeyAction::Remove => self.keys.remove(&request.id).map_err(key_failure)?,
             GatewayKeyAction::Move => self
@@ -282,7 +310,9 @@ impl DaemonControl {
                 .into());
             }
         }
-        key_response(self.keys.list(), secret, false)
+        let mut response = key_response(self.keys.list(), secret, false)?;
+        response.issued_id = issued_id;
+        Ok(response)
     }
 
     async fn known_accounts(&self) -> Result<Vec<String>, ControlFailure> {
@@ -977,6 +1007,7 @@ fn usage_row(row: hofund_usage::Row) -> UsageRow {
     out.status = row.status;
     out.caller_key_id = row.caller_key_id;
     out.caller_key_name = row.caller_key_name;
+    out.caller_issuer_id = row.caller_issuer_id;
     out
 }
 

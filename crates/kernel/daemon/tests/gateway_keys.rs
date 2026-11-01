@@ -65,6 +65,23 @@ async fn k12_control_api_supports_every_action_and_backup() {
         configure(&mut request);
         request
     };
+    let issued = client
+        .change_gateway_key(request(GatewayKeyAction::Issue, |request| {
+            request.name = "Control issued".to_owned();
+            request.ttl_seconds = Some(3_600.0);
+            request.tokens = 500;
+        }))
+        .await
+        .expect("issue");
+    let issued_id = issued.issued_id.clone().expect("issued id");
+    assert!(issued.secret.is_some());
+    let issued_key = issued
+        .keys
+        .iter()
+        .find(|key| key.id == issued_id)
+        .expect("issued key");
+    assert!(issued_key.expires.is_some());
+    assert_eq!(issued_key.limits[0].tokens, 500);
     client
         .change_gateway_key(changed(GatewayKeyAction::Rename, &|request| {
             request.name = "Renamed".to_owned();
@@ -158,13 +175,13 @@ async fn k12_control_api_supports_every_action_and_backup() {
         1
     );
     client
-        .change_gateway_key(change(GatewayKeyAction::Off))
+        .change_gateway_key(GatewayKeyRequest::new(GatewayKeyAction::Off).for_id("Renamed"))
         .await
-        .expect("off");
+        .expect("off by name");
     client
-        .change_gateway_key(change(GatewayKeyAction::On))
+        .change_gateway_key(GatewayKeyRequest::new(GatewayKeyAction::On).for_id("Renamed"))
         .await
-        .expect("on");
+        .expect("on by name");
     let rotated = client
         .change_gateway_key(change(GatewayKeyAction::Rotate))
         .await

@@ -237,6 +237,7 @@ mod tests {
             status: "200".to_owned(),
             caller_key_id: String::new(),
             caller_key_name: String::new(),
+            caller_issuer_id: String::new(),
         }
     }
 

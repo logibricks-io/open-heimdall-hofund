@@ -25,7 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   member with reason `reserve`. Added reserve rows to `hofund routes` and
   `hofund provider at-once <id> [n|off|default]` for numeric, unlimited, and
   plugin-default settings. Per-member concurrency-lane guards remain for row
-  4.14. See `docs/provider-keys.md`.
+  4.14 (#551). See `docs/provider-keys.md`.
+- Short-lived gateway keys and issuers (P0-4d): issue keys for 1 minute to
+  30 days through `POST /v1/hofund/keys` or `gateway-key issue`, with model,
+  account, read-only, token, and cost constraints. Permitted issuer keys and
+  browser-free direct loopback clients can issue; issued keys are clamped to
+  their issuer's current scopes and expiry, record issuer attribution, and
+  reserve/count spend against both keys. Added masked listing, revocation,
+  expiry/issuer-refusal 401s on every route, hourly-grace pruning, control and
+  CLI issuance, issuer list status, and name-based key on/off.
 - Text-to-speech retrieval (P1-4): `POST /v1/audio/speech` and
   `POST /audio/speech` forward OpenAI-shaped JSON through the existing routed
   retrieval seam, changing only the member's model id. Audio, SSE, and vendor
