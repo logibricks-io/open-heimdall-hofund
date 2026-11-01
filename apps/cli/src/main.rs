@@ -247,6 +247,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut dry_run = false;
     let mut force = false;
     let mut requests = false;
+    let mut read_only = false;
     let mut help = false;
     let mut own_secret = None;
     let mut flags = SubscriptionFlags::default();
@@ -272,6 +273,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             "--dry-run" => dry_run = true,
             "--force" => force = true,
             "--requests" => requests = true,
+            "--read-only" => read_only = true,
             "--json" => flags.json = true,
             "--key" => {
                 let secret = iter
@@ -348,7 +350,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         },
         ["agent", "set", ..] => return Err(help_text(HelpTopic::AgentSet)),
         ["gateway-key", ..] => Command::GatewayKey(
-            gateway_key::parse(&words, own_secret.clone(), json)?
+            gateway_key::parse(&words, own_secret.clone(), json, read_only)?
                 .expect("gateway-key parser matched"),
         ),
         ["quota", rest @ ..] => match quota::parse(rest) {
@@ -444,6 +446,14 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     }
     if own_secret.is_some() && !matches!(command, Command::GatewayKey(_)) {
         return Err("--key is only valid with gateway-key add".to_owned());
+    }
+    if read_only
+        && !matches!(
+            command,
+            Command::GatewayKey(gateway_key::Command::Add { .. })
+        )
+    {
+        return Err("--read-only is only valid with gateway-key add".to_owned());
     }
     if dry_run && !matches!(command, Command::AgentConnect { .. }) {
         return Err("--dry-run is only valid with agent connect".to_owned());
@@ -1384,6 +1394,39 @@ mod tests {
                 id: "p".to_owned(),
                 rules: Vec::new(),
             })
+        );
+    }
+
+    #[test]
+    fn r6_read_only_flag_surrounds_the_add_name_and_key_option() {
+        for arguments in [
+            &["gateway-key", "--read-only", "add", "Display"][..],
+            &["gateway-key", "add", "--read-only", "Display"][..],
+            &["gateway-key", "add", "Display", "--read-only"][..],
+            &[
+                "gateway-key",
+                "add",
+                "--read-only",
+                "Display",
+                "--key",
+                "display-secret",
+            ][..],
+        ] {
+            assert_eq!(
+                command(arguments),
+                Ok(Command::GatewayKey(crate::gateway_key::Command::Add {
+                    name: "Display".to_owned(),
+                    secret: arguments
+                        .windows(2)
+                        .find(|pair| pair[0] == "--key")
+                        .map(|pair| pair[1].to_owned()),
+                    read_only: true,
+                }))
+            );
+        }
+        assert_eq!(
+            command(&["gateway-key", "list", "--read-only"]),
+            Err("--read-only is only valid with gateway-key add".to_owned())
         );
     }
 }

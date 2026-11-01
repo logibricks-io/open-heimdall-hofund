@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts, including in-flight first requests; subagents follow their leads,
   emergency fallbacks stay out of rotation while the provider is ready, and
   effort plus stand-in identity persist compatibly in `affinity.json`.
+- Codex compaction parity fixes (D-23): a summary stream that ends before its
+  terminal response, including the equivalent 502 error, now produces a
+  bounded local summary instead of returning partial text or failing the
+  compaction. Generated compaction asks normalize developer instructions to
+  system instructions for vendors without a developer role; ordinary turns
+  keep their original roles.
+- Read-only gateway keys and `/me` (P0-4c): read-only keys can read `/health`, quotas,
+  history, and their own key page, while every other HTTP route and Responses
+  WebSocket upgrade is refused with 403 `gateway_key_read_only` before an
+  upstream call. Route coverage is exhaustively tested. `gateway-key add
+  --read-only`, `gateway-key access`, and the `ACCESS` column manage the mode;
+  the default sharing key stays full. The static `/me` page provides
+  placeholder-by-default agent setup, and `/v1/hofund/me` reports only the
+  calling key's limits, usage, top models, and allowed models without secrets.
 - Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
   secret readable, as the reference does, so `gateway-key copy` shows a key
   again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,
@@ -1089,6 +1103,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before a short name is rewritten.
 
 ### Fixed
+
+- A relayed Messages, Responses, or Generative Language stream that ends
+  cleanly before its last event (`message_stop`, a `response.*` terminal, a
+  finish reason, or an error) is no longer passed off as a whole reply. The
+  unfinished last line is dropped, the protocol's failure event follows
+  ("<member>: the reply ended before it was complete"; `response.failed` with
+  `server_error` for Responses, `UNAVAILABLE` for Generative Language), and
+  the usage row records 502. A Responses socket turn cut this way ends on that
+  `response.failed` and the socket stays open. A severed stream now ends on the
+  same failure event, so a Chat Completions error says `api_error` (D-22).
+- A 400 or 422 that says a model has no provider behind a router, or that a
+  deployment is not found or does not exist, now fails over to the next member
+  and rests only that model on its key, like other unserved-model refusals
+  (D-24).
 
 - A shorter failure no longer shortens a longer rest: a 429's one-minute rate
   rest arriving beside a 402's half-hour credit rest leaves the credit rest in

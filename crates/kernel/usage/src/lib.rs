@@ -11,6 +11,9 @@ use chrono::{DateTime, Days, Local, NaiveTime, TimeZone};
 use rusqlite::{Connection, params};
 use thiserror::Error;
 
+mod key;
+pub use key::{CallerModel, CallerTotals, KeyLimitWindow, key_limit_window};
+
 /// A reporting window over the ledger.
 ///
 /// The presets match the reference `usage` command: `Today` starts at local
